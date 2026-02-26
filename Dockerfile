@@ -41,4 +41,4 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 EXPOSE 3000
 
 # Start Xvfb and the application
-CMD Xvfb :99 -screen 0 1024x768x16 & npm start
+CMD Xvfb :99 -screen 0 1024x768x16 & npm run premium

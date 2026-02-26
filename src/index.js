@@ -30,6 +30,7 @@ import { PremiumChannelListener } from './inputs/premium-channel-listener.js';
 import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterSwapExecutor } from './execution/jupiter-swap-executor.js';
 import { LivePriceMonitor } from './tracking/live-price-monitor.js';
+import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
 
 dotenv.config();
@@ -793,6 +794,9 @@ class PremiumChannelSystem {
 
     console.log('\n✅ Premium Channel System 运行中...');
     console.log('   等待频道信号...\n');
+
+    // 启动 Dashboard Server（Zeabur 健康检查 + /premium 页面）
+    startDashboardServer();
   }
 
   async stop() {
