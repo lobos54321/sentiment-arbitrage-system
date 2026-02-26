@@ -171,6 +171,39 @@ export class PremiumSignalEngine {
         created_at INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_ca TEXT NOT NULL,
+        chain TEXT NOT NULL,
+        entry_time INTEGER NOT NULL,
+        entry_price REAL NOT NULL,
+        position_size REAL NOT NULL,
+        position_unit TEXT NOT NULL,
+        position_tier TEXT,
+        score REAL,
+        rating TEXT,
+        action TEXT,
+        hard_status TEXT,
+        exit_status TEXT,
+        exit_times TEXT,
+        exit_prices TEXT,
+        exit_percentages TEXT,
+        realized_pnl REAL,
+        max_up_2h REAL,
+        max_dd_2h REAL,
+        hold_duration_minutes INTEGER,
+        execution_slippage REAL,
+        fail_count INTEGER DEFAULT 0,
+        rug_flag INTEGER DEFAULT 0,
+        cannot_exit_flag INTEGER DEFAULT 0,
+        exit_reason TEXT,
+        gmgn_tx_hash TEXT,
+        gmgn_order_id TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+      )
+    `);
   }
 
   /**
@@ -433,11 +466,16 @@ export class PremiumSignalEngine {
         }
 
         // AI 置信度太低也跳过
-        if (aiResult.confidence < 40) {
+        if (aiResult.confidence < 30) {
           this.stats.ai_skipped++;
-          console.log(`⏭️  [AI低信心] 置信度 ${aiResult.confidence} < 40 → SKIP`);
+          console.log(`⏭️  [AI低信心] 置信度 ${aiResult.confidence} < 30 → SKIP`);
           this.saveSignalRecord(signal, gateResult.status, aiResult);
           return { action: 'SKIP', reason: 'ai_low_confidence', details: aiResult };
+        }
+
+        // AI 返回 BUY_HALF 也允许，后面按半仓处理
+        if (aiResult.action === 'BUY_HALF') {
+          console.log(`📊 [AI] BUY_HALF → 半仓买入`);
         }
       } catch (e) {
         console.error(`❌ [AI] Claude 调用失败: ${e.message}，使用量化评分继续`);
