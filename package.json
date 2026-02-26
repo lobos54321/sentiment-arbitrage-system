@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node src/index.js --premium",
     "premium": "node src/index.js --premium",
     "premium:shadow": "SHADOW_MODE=true node src/index.js --premium",
     "shadow": "node src/index.js --shadow-mode",
