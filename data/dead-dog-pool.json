@@ -1,0 +1,379 @@
+{
+  "stats": {
+    "totalDeaths": 418,
+    "blockedCount": 3059,
+    "lastDeathTime": 1768444271502
+  },
+  "patterns": {
+    "keywords": [
+      [
+        "SOLDEED",
+        {
+          "failCount": 1,
+          "lastFail": 1768349171458,
+          "totalLoss": 10.153846153846159,
+          "firstSeen": 1768349171458
+        }
+      ],
+      [
+        "HOVER",
+        {
+          "failCount": 1,
+          "lastFail": 1768350494562,
+          "totalLoss": 61.44417475728156,
+          "firstSeen": 1768350494562
+        }
+      ],
+      [
+        "FUCKYOU",
+        {
+          "failCount": 1,
+          "lastFail": 1768350964123,
+          "totalLoss": 76.80505415162455,
+          "firstSeen": 1768350964123
+        }
+      ],
+      [
+        "COCKPIT",
+        {
+          "failCount": 1,
+          "lastFail": 1768362505770,
+          "totalLoss": 53.34717176959004,
+          "firstSeen": 1768362505770
+        }
+      ],
+      [
+        "FFORK",
+        {
+          "failCount": 1,
+          "lastFail": 1768363213744,
+          "totalLoss": 77.57470119521912,
+          "firstSeen": 1768363213744
+        }
+      ],
+      [
+        "ABTC",
+        {
+          "failCount": 1,
+          "lastFail": 1768366936483,
+          "totalLoss": 77.10322195704057,
+          "firstSeen": 1768366936483
+        }
+      ],
+      [
+        "AIKO",
+        {
+          "failCount": 1,
+          "lastFail": 1768395747537,
+          "totalLoss": 10.572821450335171,
+          "firstSeen": 1768395747537
+        }
+      ],
+      [
+        "祝﻿您﻿好﻿运",
+        {
+          "failCount": 1,
+          "lastFail": 1768397674297,
+          "totalLoss": 52.58887171561051,
+          "firstSeen": 1768397674297
+        }
+      ],
+      [
+        "WIN",
+        {
+          "failCount": 1,
+          "lastFail": 1768401268992,
+          "totalLoss": 11.973051010587112,
+          "firstSeen": 1768401268992
+        }
+      ],
+      [
+        "ENGINE",
+        {
+          "failCount": 1,
+          "lastFail": 1768401397196,
+          "totalLoss": 56.66516651665168,
+          "firstSeen": 1768401397196
+        }
+      ],
+      [
+        "MAX",
+        {
+          "failCount": 1,
+          "lastFail": 1768402294580,
+          "totalLoss": 13.417052214144087,
+          "firstSeen": 1768402294580
+        }
+      ],
+      [
+        "马卡巴卡",
+        {
+          "failCount": 1,
+          "lastFail": 1768402961534,
+          "totalLoss": 63.819555759102364,
+          "firstSeen": 1768402961534
+        }
+      ],
+      [
+        "牛逼",
+        {
+          "failCount": 1,
+          "lastFail": 1768403307973,
+          "totalLoss": 60.83011583011584,
+          "firstSeen": 1768403307973
+        }
+      ],
+      [
+        "MOBPSYCHO",
+        {
+          "failCount": 1,
+          "lastFail": 1768404996835,
+          "totalLoss": 64.76237138657521,
+          "firstSeen": 1768404996835
+        }
+      ],
+      [
+        "CENTAUR",
+        {
+          "failCount": 1,
+          "lastFail": 1768407036472,
+          "totalLoss": 55.18684603886397,
+          "firstSeen": 1768407036472
+        }
+      ],
+      [
+        "麦克斯",
+        {
+          "failCount": 1,
+          "lastFail": 1768408711630,
+          "totalLoss": 29.864498644986455,
+          "firstSeen": 1768408711630
+        }
+      ],
+      [
+        "KUSANAGI",
+        {
+          "failCount": 1,
+          "lastFail": 1768409071349,
+          "totalLoss": 10.322177040975912,
+          "firstSeen": 1768409071349
+        }
+      ],
+      [
+        "VSH",
+        {
+          "failCount": 1,
+          "lastFail": 1768411478050,
+          "totalLoss": 54.86847271299568,
+          "firstSeen": 1768411478050
+        }
+      ],
+      [
+        "USD1DOGE",
+        {
+          "failCount": 1,
+          "lastFail": 1768433815226,
+          "totalLoss": 44.46676970633693,
+          "firstSeen": 1768433815226
+        }
+      ],
+      [
+        "POWERFUL",
+        {
+          "failCount": 1,
+          "lastFail": 1768434668785,
+          "totalLoss": 62.42524916943522,
+          "firstSeen": 1768434668785
+        }
+      ],
+      [
+        "LOLCAT",
+        {
+          "failCount": 1,
+          "lastFail": 1768437430307,
+          "totalLoss": 63.91419335880105,
+          "firstSeen": 1768437430307
+        }
+      ],
+      [
+        "SILVER",
+        {
+          "failCount": 1,
+          "lastFail": 1768438138477,
+          "totalLoss": 76.07290803645401,
+          "firstSeen": 1768438138477
+        }
+      ],
+      [
+        "HERALD",
+        {
+          "failCount": 1,
+          "lastFail": 1768438390197,
+          "totalLoss": 73.34546281555605,
+          "firstSeen": 1768438390197
+        }
+      ],
+      [
+        "PEPECOIN",
+        {
+          "failCount": 1,
+          "lastFail": 1768438401185,
+          "totalLoss": 56.39244363193174,
+          "firstSeen": 1768438401185
+        }
+      ],
+      [
+        "PVE",
+        {
+          "failCount": 1,
+          "lastFail": 1768439111995,
+          "totalLoss": 68.02034428794992,
+          "firstSeen": 1768439111995
+        }
+      ],
+      [
+        "BEADS",
+        {
+          "failCount": 1,
+          "lastFail": 1768441811695,
+          "totalLoss": 65.20874751491054,
+          "firstSeen": 1768441811695
+        }
+      ],
+      [
+        "TSPMO",
+        {
+          "failCount": 1,
+          "lastFail": 1768444271502,
+          "totalLoss": 64.97141137526332,
+          "firstSeen": 1768444271502
+        }
+      ]
+    ],
+    "devs": [],
+    "narratives": [],
+    "timeSlots": [
+      [
+        "0",
+        {
+          "failCount": 9,
+          "lastFail": 1768397674297,
+          "totalLoss": 182.9732340806259,
+          "firstSeen": 1768224097832
+        }
+      ],
+      [
+        "4",
+        {
+          "failCount": 7,
+          "lastFail": 1768411478050,
+          "totalLoss": 364.68322880079955,
+          "firstSeen": 1768237674205
+        }
+      ],
+      [
+        "1",
+        {
+          "failCount": 6,
+          "lastFail": 1768402294580,
+          "totalLoss": 119.48507987722876,
+          "firstSeen": 1768313039295
+        }
+      ],
+      [
+        "2",
+        {
+          "failCount": 6,
+          "lastFail": 1768404996836,
+          "totalLoss": 267.7055412821153,
+          "firstSeen": 1768316456694
+        }
+      ],
+      [
+        "3",
+        {
+          "failCount": 4,
+          "lastFail": 1768409071349,
+          "totalLoss": 107.24576605217337,
+          "firstSeen": 1768320012698
+        }
+      ],
+      [
+        "11",
+        {
+          "failCount": 7,
+          "lastFail": 1768438401185,
+          "totalLoss": 418.12808290549515,
+          "firstSeen": 1768349171461
+        }
+      ],
+      [
+        "14",
+        {
+          "failCount": 1,
+          "lastFail": 1768362505770,
+          "totalLoss": 53.34717176959004,
+          "firstSeen": 1768362505770
+        }
+      ],
+      [
+        "15",
+        {
+          "failCount": 1,
+          "lastFail": 1768363213744,
+          "totalLoss": 77.57470119521912,
+          "firstSeen": 1768363213744
+        }
+      ],
+      [
+        "16",
+        {
+          "failCount": 1,
+          "lastFail": 1768366936483,
+          "totalLoss": 77.10322195704057,
+          "firstSeen": 1768366936483
+        }
+      ],
+      [
+        "10",
+        {
+          "failCount": 2,
+          "lastFail": 1768434668785,
+          "totalLoss": 106.89201887577215,
+          "firstSeen": 1768433815226
+        }
+      ],
+      [
+        "12",
+        {
+          "failCount": 2,
+          "lastFail": 1768441811695,
+          "totalLoss": 133.22909180286047,
+          "firstSeen": 1768439111995
+        }
+      ],
+      [
+        "13",
+        {
+          "failCount": 1,
+          "lastFail": 1768444271503,
+          "totalLoss": 64.97141137526332,
+          "firstSeen": 1768444271503
+        }
+      ]
+    ],
+    "mcapRanges": [
+      [
+        "TINY_20K-50K",
+        {
+          "failCount": 1,
+          "lastFail": 1768411478053,
+          "totalLoss": 54.86847271299568,
+          "firstSeen": 1768411478053
+        }
+      ]
+    ]
+  },
+  "blacklist": [],
+  "savedAt": "2026-01-15T02:31:11.503Z"
+}

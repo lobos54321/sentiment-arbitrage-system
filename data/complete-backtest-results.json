@@ -1,0 +1,127 @@
+{
+  "analyzed_at": "2026-01-13T00:38:18.522Z",
+  "goldDogs": 18,
+  "silverDogs": 24,
+  "goldBought": 0,
+  "goldFiltered": 14,
+  "goldUnknown": 4,
+  "silverBought": 1,
+  "silverFiltered": 8,
+  "silverUnknown": 11,
+  "noiseFiltered": 91,
+  "goodFiltered": 14,
+  "goldFilteredList": [
+    {
+      "address": "GJ9LEQZgoxW487LRaRnajr6DWzouswd29EruRqwZBAGS",
+      "level": "gold",
+      "gain": 33.7,
+      "emoji": "🥇",
+      "symbol": "WhiteOora",
+      "score": 23
+    },
+    {
+      "address": "0xbf30a9bb4dba9429b49d17deca2c179e94d24444",
+      "level": "silver",
+      "gain": 23.4,
+      "emoji": "🥈",
+      "symbol": "小股东",
+      "score": 23
+    },
+    {
+      "address": "5ohBqLgmccJstRhrFskitBYa7DtwQ13HZmFzH8Wepump",
+      "level": "silver",
+      "gain": 20.1,
+      "emoji": "🥈",
+      "symbol": "SCREENER",
+      "score": 23
+    },
+    {
+      "address": "3QrGcwFSKXiKetD5ixzZa7H4zHPuTg8grrH7s5Mzpump",
+      "level": "gold",
+      "gain": 19.1,
+      "emoji": "🥇",
+      "symbol": "LUMEN",
+      "score": 23
+    },
+    {
+      "address": "EaxDJbZ6L7FdgQMnHRwqTrasJXQRfuHY5oDtNG1vpump",
+      "level": "gold",
+      "gain": 16.7,
+      "emoji": "🥇",
+      "symbol": "FAP",
+      "score": 23
+    },
+    {
+      "address": "0xa917b52eea9e22d1cf49dbd01474760ca79e4444",
+      "level": "silver",
+      "gain": 14.9,
+      "emoji": "🥈",
+      "symbol": "bibi",
+      "score": 23
+    },
+    {
+      "address": "EKPWiLk5fwTNZVeL5PrKSFDjdJrvRkvoPafVT54ppump",
+      "level": "silver",
+      "gain": 14.5,
+      "emoji": "🥈",
+      "symbol": "WhaleQueen",
+      "score": 23
+    },
+    {
+      "address": "HNHNHcornzS5NsMegJA8wq2Ao68xVmKrHDRFif6pump",
+      "level": "gold",
+      "gain": 13,
+      "emoji": "🥇",
+      "symbol": "WhiteOora",
+      "score": 23
+    },
+    {
+      "address": "0x4dbc56a42524e553a069c7c955e32b6f089cc1e2",
+      "level": "gold",
+      "gain": 11.8,
+      "emoji": "🥇",
+      "symbol": "FAP",
+      "score": 23
+    },
+    {
+      "address": "7uqfEqdd9strJVYiju6kasjCj6AzjBF2S1GmWRhdpump",
+      "level": "silver",
+      "gain": 11,
+      "emoji": "🥈",
+      "symbol": "LUMEN",
+      "score": 23
+    },
+    {
+      "address": "9w5pPZ3Zv21TAuQ8iKUPimefBHTCHE7HZFoikhaMpump",
+      "level": "silver",
+      "gain": 10.8,
+      "emoji": "🥈",
+      "symbol": "Mobi",
+      "score": 20
+    },
+    {
+      "address": "0x95605f364d3d26974c38efd2657676cacf5a4444",
+      "level": "silver",
+      "gain": 10.4,
+      "emoji": "🥈",
+      "symbol": "PsyopAnime",
+      "score": 20
+    },
+    {
+      "address": "0x52b9ec7c3b8169c0685d5e3605f7ec0d829e4444",
+      "level": "silver",
+      "gain": 10.4,
+      "emoji": "🥈",
+      "symbol": "WhaleQueen",
+      "score": 23
+    },
+    {
+      "address": "0x3c8455f18ff03dd6e94b6cddeabc79ec75c34444",
+      "level": "silver",
+      "gain": 10,
+      "emoji": "🥈",
+      "symbol": "WhaleQueen",
+      "score": 23
+    }
+  ]
+}

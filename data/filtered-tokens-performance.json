@@ -1,0 +1,396 @@
+{
+  "alive": [
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0xff13322caaff267988cdb980fddf7fc0c8d04444",
+      "status": "ALIVE",
+      "priceChange24h": -69.44,
+      "priceChange6h": -20.28,
+      "liquidity": 19994.14,
+      "volume24h": 1813780.04,
+      "mcap": 24439
+    },
+    {
+      "symbol": "AISI",
+      "score": 23,
+      "address": "EeEU6Fud9DRt4v3LQWzw5Sc4hMd4pdiht34z7SCnpump",
+      "status": "ALIVE",
+      "priceChange24h": -74.88,
+      "priceChange6h": -31.26,
+      "liquidity": 6838.23,
+      "volume24h": 90927.4,
+      "mcap": 4455
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 20,
+      "address": "GJ9LEQZgoxW487LRaRnajr6DWzouswd29EruRqwZBAGS",
+      "status": "ALIVE",
+      "priceChange24h": 185,
+      "priceChange6h": 10.38,
+      "liquidity": 93579.46,
+      "volume24h": 3245486.03,
+      "mcap": 1047035
+    },
+    {
+      "symbol": "21",
+      "score": 20,
+      "address": "AGkMenq8o7WEx3nPcfAm7bGAKaRkdJ6tisXQ6JBEpump",
+      "status": "ALIVE",
+      "priceChange24h": -82.06,
+      "priceChange6h": -72.63,
+      "liquidity": 10478.39,
+      "volume24h": 768080.61,
+      "mcap": 10329
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 20,
+      "address": "0x428f76624049e6930cd853019d894d9a62314444",
+      "status": "ALIVE",
+      "priceChange24h": -63.47,
+      "priceChange6h": -39.68,
+      "liquidity": 22091.97,
+      "volume24h": 1857633.4,
+      "mcap": 29535
+    },
+    {
+      "symbol": "STARPAY",
+      "score": 20,
+      "address": "8S4uv6hcN8c17CyyBfceyGiyKPKtKvwrxPMptbiCpump",
+      "status": "ALIVE",
+      "priceChange24h": -56.13,
+      "priceChange6h": -20.14,
+      "liquidity": 15982.01,
+      "volume24h": 364092.07,
+      "mcap": 25266
+    },
+    {
+      "symbol": "至尊宝",
+      "score": 23,
+      "address": "EKPWiLk5fwTNZVeL5PrKSFDjdJrvRkvoPafVT54ppump",
+      "status": "ALIVE",
+      "priceChange24h": 1311,
+      "priceChange6h": 68.31,
+      "liquidity": 96638.97,
+      "volume24h": 2046027.25,
+      "mcap": 825322
+    },
+    {
+      "symbol": "DOGE.2.0",
+      "score": 23,
+      "address": "a3W4qutoEJA4232T2gwZUfgYJTetr96pU4SJMwppump",
+      "status": "ALIVE",
+      "priceChange24h": -24.13,
+      "priceChange6h": -17.66,
+      "liquidity": 1668790.39,
+      "volume24h": 4622019.72,
+      "mcap": 124250814
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x50db5f101f878d64297036f86ff130e757484444",
+      "status": "ALIVE",
+      "priceChange24h": 29.35,
+      "priceChange6h": -29.35,
+      "liquidity": 0,
+      "volume24h": 228355.79,
+      "mcap": 8077.19
+    },
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0x7810aa59e258e2b6c79a4aadf46f0bef20a24444",
+      "status": "ALIVE",
+      "priceChange24h": -87.46,
+      "priceChange6h": -21.1,
+      "liquidity": 11892.26,
+      "volume24h": 433254.13,
+      "mcap": 10016
+    },
+    {
+      "symbol": "VCASH",
+      "score": 23,
+      "address": "3QrGcwFSKXiKetD5ixzZa7H4zHPuTg8grrH7s5Mzpump",
+      "status": "ALIVE",
+      "priceChange24h": -72.46,
+      "priceChange6h": -43.62,
+      "liquidity": 141501.27,
+      "volume24h": 6776183.67,
+      "mcap": 1544045
+    },
+    {
+      "symbol": "腾小马",
+      "score": 23,
+      "address": "0x3e17ee3b1895dd1a7cf993a89769c5e029584444",
+      "status": "ALIVE",
+      "priceChange24h": 30.58,
+      "priceChange6h": -4.88,
+      "liquidity": 40593.63,
+      "volume24h": 125541.57,
+      "mcap": 85547
+    },
+    {
+      "symbol": "VCASH",
+      "score": 23,
+      "address": "5YQsa8Q1LXSvwhp58PBAgFBtYSGFEQgC8ARymMgMbonk",
+      "status": "ALIVE",
+      "priceChange24h": 216,
+      "priceChange6h": -19.76,
+      "liquidity": 14439.3,
+      "volume24h": 725259.05,
+      "mcap": 20084
+    },
+    {
+      "symbol": "WhiteOora",
+      "score": 20,
+      "address": "2tJU3pMh4HJjKa9HN6HngdopfNqqaeEytFqW98Kqpump",
+      "status": "ALIVE",
+      "priceChange24h": 1403,
+      "priceChange6h": 21.5,
+      "liquidity": 95898.62,
+      "volume24h": 2977782.1,
+      "mcap": 776197
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 23,
+      "address": "5tr6q9DqzhYse9FAzswmyfHVXA5SgAxNJtZ3Usqvpump",
+      "status": "ALIVE",
+      "priceChange24h": -90.57,
+      "priceChange6h": -98.88,
+      "liquidity": 9766.09,
+      "volume24h": 10021192.11,
+      "mcap": 5840
+    },
+    {
+      "symbol": "Peepo",
+      "score": 23,
+      "address": "6PMuLSPRz9ae2xPDn5Dc3zH3kDtmE7tTyL8XQKmEbonk",
+      "status": "ALIVE",
+      "priceChange24h": 2917,
+      "priceChange6h": 81.43,
+      "liquidity": 149396.05,
+      "volume24h": 4458971.76,
+      "mcap": 2265984
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x0f9ceb396857a20a8ba06db0cd57460fb2834444",
+      "status": "ALIVE",
+      "priceChange24h": 6741,
+      "priceChange6h": -8.56,
+      "liquidity": 76262.55,
+      "volume24h": 3434579.94,
+      "mcap": 410155
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 23,
+      "address": "3E7LWnvBjKiauBJfbSFe86A1i5Rnzzs853bbjTmApump",
+      "status": "ALIVE",
+      "priceChange24h": 55.08,
+      "priceChange6h": 59.02,
+      "liquidity": 93429.54,
+      "volume24h": 272964.4,
+      "mcap": 752483
+    },
+    {
+      "symbol": "WALL",
+      "score": 23,
+      "address": "7pzTpGwW3YgZdhaj28RTUBxkPWTBwcnnSJKcdpedory",
+      "status": "ALIVE",
+      "priceChange24h": 103,
+      "priceChange6h": 56.24,
+      "liquidity": 34192.31,
+      "volume24h": 426361.69,
+      "mcap": 106602
+    },
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0x6fafec4730e0102d8ac82b00de460b9f31f44444",
+      "status": "ALIVE",
+      "priceChange24h": -39.51,
+      "priceChange6h": 33.65,
+      "liquidity": 117017.75,
+      "volume24h": 1378052.54,
+      "mcap": 597698
+    },
+    {
+      "symbol": "STARPAY",
+      "score": 20,
+      "address": "5rqJa2TqsEeP5LbXHnsLREjWq2fvVTSmBhPJdPgFpump",
+      "status": "ALIVE",
+      "priceChange24h": -30.58,
+      "priceChange6h": -79.65,
+      "liquidity": 21566.98,
+      "volume24h": 2071354.94,
+      "mcap": 40825
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x5e06f0309971f9a6b094798573a18845a1bc7777",
+      "status": "ALIVE",
+      "priceChange24h": -48.9,
+      "priceChange6h": -43.44,
+      "liquidity": 22638.3,
+      "volume24h": 1430091.33,
+      "mcap": 36987
+    },
+    {
+      "symbol": "至尊宝",
+      "score": 23,
+      "address": "0x3c8455f18ff03dd6e94b6cddeabc79ec75c34444",
+      "status": "ALIVE",
+      "priceChange24h": -33.87,
+      "priceChange6h": -62.99,
+      "liquidity": 29971.08,
+      "volume24h": 4278793.51,
+      "mcap": 52684
+    },
+    {
+      "symbol": "Hacker",
+      "score": 20,
+      "address": "8TuHAfTBTMW1fJNq5bNoeX4zhk2492DNsCgVSYzApump",
+      "status": "ALIVE",
+      "priceChange24h": 251,
+      "priceChange6h": 247,
+      "liquidity": 82823.77,
+      "volume24h": 976545.45,
+      "mcap": 490176
+    }
+  ],
+  "dead": [],
+  "goldDogs": [
+    {
+      "symbol": "Kurumi",
+      "score": 20,
+      "address": "GJ9LEQZgoxW487LRaRnajr6DWzouswd29EruRqwZBAGS",
+      "status": "ALIVE",
+      "priceChange24h": 185,
+      "priceChange6h": 10.38,
+      "liquidity": 93579.46,
+      "volume24h": 3245486.03,
+      "mcap": 1047035
+    },
+    {
+      "symbol": "至尊宝",
+      "score": 23,
+      "address": "EKPWiLk5fwTNZVeL5PrKSFDjdJrvRkvoPafVT54ppump",
+      "status": "ALIVE",
+      "priceChange24h": 1311,
+      "priceChange6h": 68.31,
+      "liquidity": 96638.97,
+      "volume24h": 2046027.25,
+      "mcap": 825322
+    },
+    {
+      "symbol": "VCASH",
+      "score": 23,
+      "address": "5YQsa8Q1LXSvwhp58PBAgFBtYSGFEQgC8ARymMgMbonk",
+      "status": "ALIVE",
+      "priceChange24h": 216,
+      "priceChange6h": -19.76,
+      "liquidity": 14439.3,
+      "volume24h": 725259.05,
+      "mcap": 20084
+    },
+    {
+      "symbol": "WhiteOora",
+      "score": 20,
+      "address": "2tJU3pMh4HJjKa9HN6HngdopfNqqaeEytFqW98Kqpump",
+      "status": "ALIVE",
+      "priceChange24h": 1403,
+      "priceChange6h": 21.5,
+      "liquidity": 95898.62,
+      "volume24h": 2977782.1,
+      "mcap": 776197
+    },
+    {
+      "symbol": "Peepo",
+      "score": 23,
+      "address": "6PMuLSPRz9ae2xPDn5Dc3zH3kDtmE7tTyL8XQKmEbonk",
+      "status": "ALIVE",
+      "priceChange24h": 2917,
+      "priceChange6h": 81.43,
+      "liquidity": 149396.05,
+      "volume24h": 4458971.76,
+      "mcap": 2265984
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x0f9ceb396857a20a8ba06db0cd57460fb2834444",
+      "status": "ALIVE",
+      "priceChange24h": 6741,
+      "priceChange6h": -8.56,
+      "liquidity": 76262.55,
+      "volume24h": 3434579.94,
+      "mcap": 410155
+    },
+    {
+      "symbol": "WALL",
+      "score": 23,
+      "address": "7pzTpGwW3YgZdhaj28RTUBxkPWTBwcnnSJKcdpedory",
+      "status": "ALIVE",
+      "priceChange24h": 103,
+      "priceChange6h": 56.24,
+      "liquidity": 34192.31,
+      "volume24h": 426361.69,
+      "mcap": 106602
+    },
+    {
+      "symbol": "Hacker",
+      "score": 20,
+      "address": "8TuHAfTBTMW1fJNq5bNoeX4zhk2492DNsCgVSYzApump",
+      "status": "ALIVE",
+      "priceChange24h": 251,
+      "priceChange6h": 247,
+      "liquidity": 82823.77,
+      "volume24h": 976545.45,
+      "mcap": 490176
+    }
+  ],
+  "silverDogs": [
+    {
+      "symbol": "Kurumi",
+      "score": 23,
+      "address": "3E7LWnvBjKiauBJfbSFe86A1i5Rnzzs853bbjTmApump",
+      "status": "ALIVE",
+      "priceChange24h": 55.08,
+      "priceChange6h": 59.02,
+      "liquidity": 93429.54,
+      "volume24h": 272964.4,
+      "mcap": 752483
+    }
+  ],
+  "missed": [
+    {
+      "symbol": "腾小马",
+      "score": 23,
+      "address": "0x3e17ee3b1895dd1a7cf993a89769c5e029584444",
+      "status": "ALIVE",
+      "priceChange24h": 30.58,
+      "priceChange6h": -4.88,
+      "liquidity": 40593.63,
+      "volume24h": 125541.57,
+      "mcap": 85547
+    },
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0x6fafec4730e0102d8ac82b00de460b9f31f44444",
+      "status": "ALIVE",
+      "priceChange24h": -39.51,
+      "priceChange6h": 33.65,
+      "liquidity": 117017.75,
+      "volume24h": 1378052.54,
+      "mcap": 597698
+    }
+  ]
+}

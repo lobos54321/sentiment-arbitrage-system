@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-01-13T06:03:52.332Z",
+  "samples": {
+    "golds": 16,
+    "noises": 91
+  },
+  "improvements": {
+    "goldenComboStrict": "SM>=2 + ACCELERATING only",
+    "phoenixRequiresGoldenCombo": true,
+    "baseScoreThreshold": 55,
+    "reducedBoost": "50% -> 30%"
+  }
+}

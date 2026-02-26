@@ -1,0 +1,259 @@
+{
+  "hunters": [
+    {
+      "address": "7hiMAYXetnt3M8scZ7V56UWWME3WB3XeMzG3nb5MmqtM",
+      "name": "7hiMAYXe",
+      "type": "FOX",
+      "score": 80.87790630498172,
+      "metrics": {
+        "pnl1d": 525.55590608514,
+        "pnl7d": 5926.74749757704,
+        "winrate1d": 1,
+        "txs1d": 3,
+        "goldenDogs": 2,
+        "profitPerTrade": 175.18530202838,
+        "avgHoldTimeMinutes": 1146.5555555555554,
+        "followCount": 13
+      }
+    },
+    {
+      "address": "5vLce3Zb6popXYMBaJKY9TRffoeJYsKatihtUtsWNTME",
+      "name": "5vLce3Zb",
+      "type": "FOX",
+      "score": 73.07678389252806,
+      "metrics": {
+        "pnl1d": 2633.09587442148,
+        "pnl7d": 9785.754534337828,
+        "winrate1d": 0.6666666666666666,
+        "txs1d": 56,
+        "goldenDogs": 2,
+        "profitPerTrade": 47.019569186097854,
+        "avgHoldTimeMinutes": 36.077777777777776,
+        "followCount": 6
+      }
+    },
+    {
+      "address": "7Mwof5tBvNPC6e1zwtHRQynqXcuDpqqbeY9vSZLW2Bv8",
+      "name": "7Mwof5tB",
+      "type": "FOX",
+      "score": 72.90040424550891,
+      "metrics": {
+        "pnl1d": 15424.760250160236,
+        "pnl7d": 51966.77047191269,
+        "winrate1d": 0.5555555555555556,
+        "txs1d": 43,
+        "goldenDogs": 1,
+        "profitPerTrade": 358.7153546548892,
+        "avgHoldTimeMinutes": 18550.586805555555,
+        "followCount": 120
+      }
+    },
+    {
+      "address": "8ujWegzoFDyYuLBxLb5Rc39Ygt1zeAkSK6EMRraEwTMp",
+      "name": "8ujWegzo",
+      "type": "FOX",
+      "score": 72.06954410053045,
+      "metrics": {
+        "pnl1d": 645.2185730544862,
+        "pnl7d": 11778.902897052236,
+        "winrate1d": 0.6153846153846154,
+        "txs1d": 32,
+        "goldenDogs": 3,
+        "profitPerTrade": 20.163080407952695,
+        "avgHoldTimeMinutes": 829.7845238095238,
+        "followCount": 33
+      }
+    },
+    {
+      "address": "769ajtwU2ie81gTbHHpGTH253fRP6V23Spj6hCd3R8bM",
+      "name": "769ajtwU",
+      "type": "FOX",
+      "score": 70.91072581236014,
+      "metrics": {
+        "pnl1d": 6160.26701650292,
+        "pnl7d": 22305.62495862934,
+        "winrate1d": 0.5,
+        "txs1d": 13,
+        "goldenDogs": 1,
+        "profitPerTrade": 473.8666935771477,
+        "avgHoldTimeMinutes": 1369.38,
+        "followCount": 21
+      }
+    },
+    {
+      "address": "5fY2VPNQhFxKNbbSfZHZqHCW7CGBNim3PyVXyMXGqeSZ",
+      "name": "5fY2VPNQ",
+      "type": "FOX",
+      "score": 69.73604938834205,
+      "metrics": {
+        "pnl1d": 2750.1908748210835,
+        "pnl7d": 10848.472614539047,
+        "winrate1d": 0.6153846153846154,
+        "txs1d": 48,
+        "goldenDogs": 1,
+        "profitPerTrade": 57.29564322543924,
+        "avgHoldTimeMinutes": 1615.8882352941177,
+        "followCount": 334
+      }
+    },
+    {
+      "address": "A9GF8mUpnVSbWsFdGj5uxj91kz1BccfftDrHpMz6TcXo",
+      "name": "A9GF8mUp",
+      "type": "FOX",
+      "score": 69.07015012974445,
+      "metrics": {
+        "pnl1d": 4483.444392408531,
+        "pnl7d": 15679.968517899202,
+        "winrate1d": 0.68,
+        "txs1d": 91,
+        "goldenDogs": 1,
+        "profitPerTrade": 49.26861969679704,
+        "avgHoldTimeMinutes": 312.76089743589745,
+        "followCount": 42
+      }
+    },
+    {
+      "address": "6qudAN2kV8mtCcYJxb5QQ6Vr15itdHHdeVbYm99NKMhy",
+      "name": "6qudAN2k",
+      "type": "FOX",
+      "score": 66.62639536378012,
+      "metrics": {
+        "pnl1d": 1209.5444863454177,
+        "pnl7d": 20454.080916269177,
+        "winrate1d": 0.8214285714285714,
+        "txs1d": 67,
+        "goldenDogs": 1,
+        "profitPerTrade": 18.05290278127489,
+        "avgHoldTimeMinutes": 5932.8183908045985,
+        "followCount": 153
+      }
+    },
+    {
+      "address": "43sautaLiSs6ekDio577fRmcbfrhHzt4GSJd2pZD24Vh",
+      "name": "43sautaL",
+      "type": "FOX",
+      "score": 66.16748607537097,
+      "metrics": {
+        "pnl1d": 537.984540255303,
+        "pnl7d": 12624.461127376338,
+        "winrate1d": 0.875,
+        "txs1d": 15,
+        "goldenDogs": 2,
+        "profitPerTrade": 35.8656360170202,
+        "avgHoldTimeMinutes": 1917.8533333333332,
+        "followCount": 56
+      }
+    },
+    {
+      "address": "F3Gj2omCESByDkw93uWctHhVbhsg8nSNHsAPmJJbXr7n",
+      "name": "F3Gj2omC",
+      "type": "WOLF",
+      "score": 65.975,
+      "metrics": {
+        "pnl1d": 38097.93014821791,
+        "pnl7d": 48304.94242085632,
+        "winrate1d": 0.7777777777777778,
+        "txs1d": 43,
+        "goldenDogs": 0,
+        "profitPerTrade": 885.9983755399513,
+        "avgHoldTimeMinutes": 5226.9,
+        "followCount": 86
+      }
+    },
+    {
+      "address": "DqUJZJ6e3sBiMtUbgveCJzqh3JhiLhpuBYmncg1ivwcc",
+      "name": "DqUJZJ6e",
+      "type": "TURTLE",
+      "score": 61.814268668238896,
+      "metrics": {
+        "pnl1d": 1615.8312580463403,
+        "pnl7d": 24072.814884290485,
+        "winrate1d": 0.5555555555555556,
+        "txs1d": 32,
+        "goldenDogs": 0,
+        "profitPerTrade": 50.494726813948134,
+        "avgHoldTimeMinutes": 43704.49803921569,
+        "followCount": 85
+      }
+    },
+    {
+      "address": "BTZJRdccNMrF1tdwjSk9K369udDJpk8mxrZNP2U7vAxY",
+      "name": "BTZJRdcc",
+      "type": "WOLF",
+      "score": 61.48157713995587,
+      "metrics": {
+        "pnl1d": 1252.2943973382,
+        "pnl7d": 9033.83182030794,
+        "winrate1d": 0.6666666666666666,
+        "txs1d": 11,
+        "goldenDogs": 0,
+        "profitPerTrade": 113.84494521256364,
+        "avgHoldTimeMinutes": 27.455555555555556,
+        "followCount": 94
+      }
+    },
+    {
+      "address": "9kWfCLPJGTNzxyfnBGhYs47HWoS3NCehqEKDGke1UTRk",
+      "name": "9kWfCLPJ",
+      "type": "FOX",
+      "score": 58.684052645016905,
+      "metrics": {
+        "pnl1d": 13252.310965981203,
+        "pnl7d": 59687.44283003422,
+        "winrate1d": 0.8888888888888888,
+        "txs1d": 33,
+        "goldenDogs": 2,
+        "profitPerTrade": 401.5851807873092,
+        "avgHoldTimeMinutes": 8445.797222222222,
+        "followCount": 344
+      }
+    },
+    {
+      "address": "qP3Q8d4WWsGbqkTfyA9Dr6cAD7DQoBuxPJMFTK48rWU",
+      "name": "kitty",
+      "type": "TURTLE",
+      "score": 57.47561784550485,
+      "metrics": {
+        "pnl1d": 6950.826701079991,
+        "pnl7d": 13781.846611000079,
+        "winrate1d": 0.5,
+        "txs1d": 34,
+        "goldenDogs": 3,
+        "profitPerTrade": 204.43607944352914,
+        "avgHoldTimeMinutes": 816.9350877192982,
+        "followCount": 898
+      }
+    },
+    {
+      "address": "wNdEMuFn2FX398JayuxBb6JsGHwhs8vR3iCnjVtFbuK",
+      "name": "wNdEMuFn",
+      "type": "WOLF",
+      "score": 55.1741894191458,
+      "metrics": {
+        "pnl1d": 649.33490791256,
+        "pnl7d": 5743.764887631457,
+        "winrate1d": 0.7777777777777778,
+        "txs1d": 184,
+        "goldenDogs": 0,
+        "profitPerTrade": 3.528994064742174,
+        "avgHoldTimeMinutes": 18.59453125,
+        "followCount": 54
+      }
+    }
+  ],
+  "stats": {
+    "leaderboardUpdates": 19,
+    "walletsScanned": 100,
+    "huntersFound": {
+      "EAGLE": 0,
+      "FOX": 15,
+      "TURTLE": 3,
+      "WOLF": 20,
+      "BOT": 10,
+      "NORMAL": 52
+    },
+    "signalsEmitted": 0,
+    "signalsDelayed": 0
+  },
+  "savedAt": "2026-01-15T02:38:21.739Z"
+}

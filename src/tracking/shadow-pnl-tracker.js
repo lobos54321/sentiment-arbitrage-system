@@ -1,0 +1,295 @@
+/**
+ * Shadow PnL Tracker
+ *
+ * 追踪 shadow 买入的代币实时 PnL
+ * 每隔一段时间检查价格，记录最高/最低/当前 PnL
+ */
+
+import axios from 'axios';
+import Database from 'better-sqlite3';
+import path from 'path';
+
+export class ShadowPnlTracker {
+  constructor() {
+    this.positions = new Map();
+    this.interval = null;
+    this.checkIntervalMs = 10 * 1000; // 10 秒（更精准捕捉 peak）
+
+    // 持久化到 SQLite
+    const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
+    this.db = new Database(dbPath);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS shadow_pnl (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_ca TEXT NOT NULL,
+        symbol TEXT,
+        score INTEGER,
+        entry_mc REAL,
+        entry_time INTEGER,
+        exit_pnl REAL,
+        high_pnl REAL,
+        low_pnl REAL,
+        exit_reason TEXT,
+        closed INTEGER DEFAULT 0,
+        closed_at INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_pnl_closed ON shadow_pnl(closed)`);
+  }
+
+  /**
+   * 记录一个 shadow 买入
+   */
+  addPosition(tokenCA, symbol, entryMC, score) {
+    // 防止重复购买同一 token
+    if (this.hasOpenPosition(tokenCA)) {
+      console.log(`⏭️ [Shadow Tracker] $${symbol} 已有未平仓持仓，跳过`);
+      return false;
+    }
+
+    this.positions.set(tokenCA, {
+      symbol,
+      entryMC,
+      entryTime: Date.now(),
+      score,
+      highPnl: 0,
+      lowPnl: 0,
+      lastPnl: null,
+      currentMC: entryMC,
+      checks: 0,
+      closed: false,
+      exitReason: null
+    });
+
+    // 持久化
+    try {
+      this.db.prepare(`
+        INSERT INTO shadow_pnl (token_ca, symbol, score, entry_mc, entry_time, high_pnl, low_pnl, closed)
+        VALUES (?, ?, ?, ?, ?, 0, 0, 0)
+      `).run(tokenCA, symbol, score, entryMC, Date.now());
+    } catch (e) { /* ignore */ }
+
+    console.log(`📝 [Shadow Tracker] 记录: $${symbol} | 入场MC: $${(entryMC / 1000).toFixed(1)}K | 评分: ${score}`);
+    return true;
+  }
+
+  /**
+   * 检查是否有未平仓持仓
+   */
+  hasOpenPosition(tokenCA) {
+    const pos = this.positions.get(tokenCA);
+    return pos && !pos.closed;
+  }
+
+  /**
+   * 启动定时检查
+   */
+  start() {
+    if (this.interval) return;
+    this.interval = setInterval(() => this.checkAll(), this.checkIntervalMs);
+    console.log(`✅ [Shadow Tracker] 启动 | 检查间隔: ${this.checkIntervalMs / 1000}s`);
+  }
+
+  /**
+   * 检查所有持仓
+   */
+  async checkAll() {
+    const open = [...this.positions.entries()].filter(([, p]) => !p.closed);
+    if (open.length === 0) return;
+
+    console.log(`\n📊 [Shadow Tracker] 检查 ${open.length} 个持仓...`);
+
+    // 批量获取价格（DexScreener 支持逗号分隔，最多 30 个）
+    const mcMap = new Map();
+    const cas = open.map(([ca]) => ca);
+    const batchSize = 30;
+    for (let i = 0; i < cas.length; i += batchSize) {
+      const batch = cas.slice(i, i + batchSize);
+      try {
+        const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, { timeout: 10000 });
+        const pairs = res.data?.pairs || [];
+        for (const pair of pairs) {
+          if (pair.baseToken?.address && pair.marketCap) {
+            const addr = pair.baseToken.address;
+            // 取最高流动性的 pair
+            if (!mcMap.has(addr) || (pair.liquidity?.usd || 0) > (mcMap.get(addr).liq || 0)) {
+              mcMap.set(addr, { mc: pair.marketCap, liq: pair.liquidity?.usd || 0 });
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`  ⚠️ 批量查询失败: ${e.message}`);
+      }
+    }
+
+    let winners = 0, losers = 0, totalPnl = 0;
+
+    for (const [ca, pos] of open) {
+      const priceData = mcMap.get(ca);
+
+      if (!priceData) {
+        pos.lastPnl = -100;
+        pos.lowPnl = -100;
+        pos.closed = true;
+        pos.exitReason = 'DELISTED';
+        console.log(`  ⚫ $${pos.symbol} 已下架 → -100%`);
+        // 持久化
+        try {
+          this.db.prepare(`
+            UPDATE shadow_pnl SET exit_pnl=?, high_pnl=?, low_pnl=?, exit_reason=?, closed=1, closed_at=?
+            WHERE token_ca=? AND closed=0
+          `).run(pos.lastPnl, pos.highPnl, pos.lowPnl, pos.exitReason, Date.now(), ca);
+        } catch (e) { /* ignore */ }
+        totalPnl += pos.lastPnl;
+        losers++;
+        continue;
+      }
+
+      const currentMC = priceData.mc;
+      const pnl = pos.entryMC > 0 ? ((currentMC - pos.entryMC) / pos.entryMC) * 100 : 0;
+
+      pos.currentMC = currentMC;
+      pos.lastPnl = pnl;
+      pos.checks++;
+      if (pnl > pos.highPnl) pos.highPnl = pnl;
+      if (pnl < pos.lowPnl) pos.lowPnl = pnl;
+
+      // 模拟止损 -20%
+      if (pnl <= -20 && !pos.closed) {
+        pos.closed = true;
+        pos.exitReason = 'STOP_LOSS';
+        pos.lastPnl = -20;
+      }
+
+      // 快速止损：前 3 次检查（~90s），从未涨过且 < -5%，直接出
+      if (!pos.closed && pos.checks <= 3 && pos.highPnl <= 0 && pnl < -5) {
+        pos.closed = true;
+        pos.exitReason = 'FAST_STOP';
+        pos.lastPnl = pnl;
+      }
+
+      // 中速止损：任何时候单次 < -12% 且从未涨过 +10%，直接出
+      if (!pos.closed && pnl < -12 && pos.highPnl < 10) {
+        pos.closed = true;
+        pos.exitReason = 'MID_STOP';
+        pos.lastPnl = pnl;
+      }
+
+      // 分批止盈（微调：留小仓位追金狗）：
+      // +50%: 卖80%仓位（锁住大部分利润）
+      // 剩20%: 宽松移动止盈跑10x/100x（小仓位博大收益）
+      if (!pos.closed && pnl >= 50 && !pos.sold80) {
+        pos.sold80 = true;
+        pos.remainingPct = 20; // 还剩20%仓位
+        pos.lockedPnl = pnl * 0.80; // 已锁定的PnL（80%仓位 × 当前涨幅）
+        console.log(`  💰 $${pos.symbol} +${pnl.toFixed(0)}% → 卖80%锁利，留20%追金狗`);
+      }
+
+      // 移动止盈（根据剩余仓位调整）
+      if (!pos.closed && pos.highPnl >= 15) {
+        if (pos.sold80) {
+          // 已锁利80%，剩20%用宽松止盈追金狗
+          // 回撤到 peak 的 35% 才出（给足空间）
+          const moonExit = pos.highPnl * 0.35;
+          const minMoonExit = 25; // 至少保 +25%
+          const exitLine = Math.max(moonExit, minMoonExit);
+          if (pnl < exitLine) {
+            pos.closed = true;
+            const finalPnl = pos.lockedPnl + pnl * (pos.remainingPct / 100);
+            pos.exitReason = `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`;
+            pos.lastPnl = finalPnl;
+          }
+        } else {
+          // 未触发分批止盈，用原来的移动止盈
+          const keepRatio = pos.highPnl >= 50 ? 0.70 : 0.65;
+          const trailExit = pos.highPnl * keepRatio;
+          const minExit = 10;
+          const exitLine = Math.max(trailExit, minExit);
+          if (pnl < exitLine) {
+            pos.closed = true;
+            pos.exitReason = `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`;
+            pos.lastPnl = Math.max(pnl, minExit);
+          }
+        }
+      }
+
+      const icon = pnl > 0 ? '🟢' : pnl > -20 ? '🟡' : '🔴';
+      const exitTag = pos.closed ? ` [${pos.exitReason}]` : '';
+      console.log(`  ${icon} $${pos.symbol.padEnd(12)} PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}% | 最低: ${pos.lowPnl.toFixed(1)}% | MC: $${(currentMC / 1000).toFixed(1)}K${exitTag}`);
+
+      // 持久化
+      if (pos.closed) {
+        try {
+          this.db.prepare(`
+            UPDATE shadow_pnl SET exit_pnl=?, high_pnl=?, low_pnl=?, exit_reason=?, closed=1, closed_at=?
+            WHERE token_ca=? AND closed=0
+          `).run(pos.lastPnl, pos.highPnl, pos.lowPnl, pos.exitReason, Date.now(), ca);
+        } catch (e) { /* ignore */ }
+      } else {
+        try {
+          this.db.prepare(`
+            UPDATE shadow_pnl SET high_pnl=?, low_pnl=? WHERE token_ca=? AND closed=0
+          `).run(pos.highPnl, pos.lowPnl, ca);
+        } catch (e) { /* ignore */ }
+      }
+
+      totalPnl += pos.closed ? pos.lastPnl : pnl;
+      if (pnl > 0) winners++;
+      else losers++;
+    }
+
+    // 汇总
+    const allPositions = [...this.positions.values()];
+    const closedPositions = allPositions.filter(p => p.closed);
+    const openPositions = allPositions.filter(p => !p.closed);
+
+    console.log(`\n  ─── Shadow 汇总 ───`);
+    console.log(`  总持仓: ${allPositions.length} | 开放: ${openPositions.length} | 已关闭: ${closedPositions.length}`);
+    console.log(`  本轮: ${winners}W / ${losers}L | 胜率: ${open.length > 0 ? (winners / open.length * 100).toFixed(0) : 0}%`);
+
+    if (closedPositions.length > 0) {
+      const closedPnl = closedPositions.reduce((s, p) => s + p.lastPnl, 0);
+      const closedWinners = closedPositions.filter(p => p.lastPnl > 0);
+      const closedWinRate = (closedWinners.length / closedPositions.length * 100).toFixed(0);
+      console.log(`  已关闭胜率: ${closedWinRate}% (${closedWinners.length}W / ${closedPositions.length - closedWinners.length}L) | 总PnL: ${closedPnl >= 0 ? '+' : ''}${closedPnl.toFixed(1)}%`);
+    }
+  }
+
+  /**
+   * 停止
+   */
+  stop() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+    this.printFinalReport();
+  }
+
+  /**
+   * 最终报告
+   */
+  printFinalReport() {
+    const all = [...this.positions.values()];
+    if (all.length === 0) return;
+
+    console.log('\n' + '═'.repeat(60));
+    console.log('📊 [Shadow Tracker] 最终报告');
+    console.log('═'.repeat(60));
+
+    for (const p of all) {
+      const icon = (p.lastPnl || 0) > 0 ? '🟢' : '🔴';
+      const exit = p.exitReason ? ` [${p.exitReason}]` : ' [OPEN]';
+      console.log(`${icon} $${p.symbol.padEnd(12)} 评分:${String(p.score).padEnd(4)} PnL:${p.lastPnl !== null ? (p.lastPnl >= 0 ? '+' : '') + p.lastPnl.toFixed(1) + '%' : 'N/A'} 最高:+${p.highPnl.toFixed(1)}% 最低:${p.lowPnl.toFixed(1)}%${exit}`);
+    }
+
+    const withPnl = all.filter(p => p.lastPnl !== null);
+    const winners = withPnl.filter(p => p.lastPnl > 0);
+    const avgPnl = withPnl.length > 0 ? (withPnl.reduce((s, p) => s + p.lastPnl, 0) / withPnl.length).toFixed(1) : 0;
+    console.log(`\n胜率: ${withPnl.length > 0 ? (winners.length / withPnl.length * 100).toFixed(0) : 0}% | 平均PnL: ${avgPnl}% | 总交易: ${withPnl.length}`);
+    console.log('═'.repeat(60));
+  }
+}
+
+export default ShadowPnlTracker;

@@ -1,0 +1,1558 @@
+/**
+ * Web Dashboard Server
+ * 
+ * 提供系统状态、信号源排名、虚拟仓位表现的 Web 界面
+ */
+
+import http from 'http';
+import fs from 'fs';
+import { URL, fileURLToPath } from 'url';
+import { dirname, join, isAbsolute } from 'path';
+import Database from 'better-sqlite3';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const PORT = process.env.PORT || 3000;
+const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const projectRoot = join(__dirname, '../..');
+const resolvedDbPath = isAbsolute(dbPath) ? dbPath : join(projectRoot, dbPath);
+
+let db;
+try {
+  db = new Database(resolvedDbPath, { readonly: true });
+} catch (e) {
+  console.error('❌ Failed to open database:', e.message);
+}
+
+/**
+ * HTML 模板
+ */
+function renderDashboard(data) {
+  return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sentiment Arbitrage Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #e4e4e4;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1400px; margin: 0 auto; }
+    h1 { 
+      text-align: center; 
+      margin-bottom: 30px; 
+      color: #00d9ff;
+      font-size: 2.5em;
+      text-shadow: 0 0 20px rgba(0, 217, 255, 0.3);
+    }
+    .grid { 
+      display: grid; 
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+      gap: 20px; 
+      margin-bottom: 30px;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 15px;
+      padding: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+    }
+    .card h2 {
+      color: #00d9ff;
+      margin-bottom: 15px;
+      font-size: 1.2em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 15px;
+    }
+    .stat {
+      background: rgba(0, 0, 0, 0.2);
+      padding: 15px;
+      border-radius: 10px;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 2em;
+      font-weight: bold;
+      color: #00ff88;
+    }
+    .stat-value.negative { color: #ff4757; }
+    .stat-value.neutral { color: #ffa502; }
+    .stat-label { color: #888; font-size: 0.9em; margin-top: 5px; }
+    
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    th, td {
+      padding: 12px 8px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    th { color: #00d9ff; font-weight: 600; }
+    tr:hover { background: rgba(255, 255, 255, 0.05); }
+    
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 0.8em;
+      font-weight: 600;
+    }
+    .badge-green { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+    .badge-yellow { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
+    .badge-red { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
+    
+    .exit-strategy {
+      background: rgba(0, 217, 255, 0.1);
+      border-radius: 10px;
+      padding: 15px;
+      margin-top: 10px;
+    }
+    .exit-strategy h3 { color: #00d9ff; margin-bottom: 10px; }
+    .exit-rule {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .exit-rule:last-child { border-bottom: none; }
+    
+    .refresh-info {
+      text-align: center;
+      color: #666;
+      margin-top: 20px;
+      font-size: 0.9em;
+    }
+    
+    .pnl-positive { color: #00ff88; }
+    .pnl-negative { color: #ff4757; }
+    
+    .token-address {
+      font-family: monospace;
+      font-size: 0.85em;
+      color: #888;
+    }
+  </style>
+  <!-- 移除 meta refresh，改用 AJAX 轮询 -->
+  <script>
+    // 自动刷新页面 (保持表格数据最新)
+    document.addEventListener('DOMContentLoaded', () => {
+      // 每 60 秒刷新一次整页
+      setInterval(() => {
+        location.reload();
+      }, 60000);
+    });
+
+    // 立即手动刷新
+    function manualRefresh() {
+      location.reload();
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>🤖 Sentiment Arbitrage Dashboard <button onclick="manualRefresh()" style="font-size:0.5em;padding:5px 15px;cursor:pointer;background:#00d9ff;border:none;border-radius:5px;color:#000;">🔄 更新</button> <button onclick="location.reload()" style="font-size:0.5em;padding:5px 15px;cursor:pointer;background:#666;border:none;border-radius:5px;color:#fff;margin-left:5px;">↻ 整页刷新</button></h1>
+    
+    <!-- 系统概览 -->
+    <div class="grid">
+      <div class="card">
+        <h2>📊 系统状态</h2>
+        <div class="stat-grid">
+          <div class="stat">
+            <div class="stat-value" id="stat-mode">${data.overview.mode}</div>
+            <div class="stat-label">运行模式</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="stat-channels">${data.overview.channels}</div>
+            <div class="stat-label">监控频道</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="stat-signals">${data.overview.signals_today}</div>
+            <div class="stat-label">今日信号</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="stat-positions">${data.overview.positions_open}</div>
+            <div class="stat-label">持仓数量</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value ${(data.risk.daily_pnl_sol || 0) >= 0 ? '' : ((data.risk.daily_pnl_sol || 0) <= -0.5 ? 'negative' : 'neutral')}" id="stat-pnl">
+              ${(data.risk.daily_pnl_sol || 0) >= 0 ? '+' : ''}${(data.risk.daily_pnl_sol || 0).toFixed(2)}
+            </div>
+            <div class="stat-label">今日 SOL 盈亏</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value ${data.risk.is_paused ? 'negative' : ''}">
+              ${data.risk.is_paused ? '已暂停' : '正常'}
+            </div>
+            <div class="stat-label">风控状态</div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>💰 虚拟收益统计</h2>
+        <div class="stat-grid">
+          <div class="stat">
+            <div class="stat-value ${(data.performance.total_pnl || 0) >= 0 ? '' : 'negative'}">${(data.performance.total_pnl || 0) >= 0 ? '+' : ''}${(data.performance.total_pnl || 0).toFixed(1)}%</div>
+
+            <div class="stat-label">总收益率</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value ${data.performance.win_rate >= 50 ? '' : 'neutral'}">${data.performance.win_rate.toFixed(1)}%</div>
+            <div class="stat-label">胜率</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value">${data.performance.total_trades}</div>
+            <div class="stat-label">总交易数</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value">${data.performance.avg_pnl >= 0 ? '+' : ''}${data.performance.avg_pnl.toFixed(2)}%</div>
+            <div class="stat-label">平均收益</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 观察池概览 -->
+      <div class="card">
+        <h2>🔭 三级观察池 (Waiting Room)</h2>
+        <div class="stat-grid">
+          <div class="stat">
+            <div class="stat-value" style="color: #ffda44;">${data.observationPool.counts.gold}</div>
+            <div class="stat-label">🥇 金池 (待毕业)</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" style="color: #c0c0c0;">${data.observationPool.counts.silver}</div>
+            <div class="stat-label">🥈 银池 (观察中)</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" style="color: #cd7f32;">${data.observationPool.counts.bronze}</div>
+            <div class="stat-label">🥉 铜池 (海选)</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value">${data.observationPool.counts.total}</div>
+            <div class="stat-label">当前总数</div>
+          </div>
+        </div>
+        <div style="margin-top: 15px; font-size: 0.85em; color: #888; text-align: center;">
+          🥇金池：5min | 🥈银池：8min | 🥉铜池：10min
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== v7.4 新增模块状态卡片 ==================== -->
+    <div class="grid" style="margin-bottom: 20px;">
+      <!-- Hunter Performance -->
+      <div class="card">
+        <h2>🎯 猎人表现 (Hunter Performance)</h2>
+        <table style="font-size: 0.9em;">
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>交易数</th>
+              <th>胜率</th>
+              <th>平均收益</th>
+              <th>仓位倍数</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${Object.entries(data.hunterPerformance).filter(([type]) => type !== 'UNKNOWN' || data.hunterPerformance[type].trades > 0).map(([type, stats]) => {
+    const emoji = type === 'FOX' ? '🦊' : type === 'TURTLE' ? '🐢' : type === 'WOLF' ? '🐺' : '❓';
+    const winRate = stats.trades > 0 ? (stats.wins / stats.trades * 100) : 0;
+    return `
+                <tr>
+                  <td>${emoji} ${type}</td>
+                  <td>${stats.trades}</td>
+                  <td><span class="badge ${winRate >= 50 ? 'badge-green' : winRate >= 30 ? 'badge-yellow' : 'badge-red'}">${winRate.toFixed(1)}%</span></td>
+                  <td class="${stats.avgPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">${stats.avgPnl >= 0 ? '+' : ''}${stats.avgPnl.toFixed(2)}%</td>
+                  <td><strong>${stats.multiplier}x</strong></td>
+                </tr>
+              `;
+  }).join('')}
+            ${Object.values(data.hunterPerformance).every(s => s.trades === 0) ? '<tr><td colspan="5" style="text-align:center;color:#666;">等待猎人信号数据...</td></tr>' : ''}
+          </tbody>
+        </table>
+        <div style="margin-top: 10px; font-size: 0.8em; color: #888;">
+          FOX=金狗猎人 | TURTLE=波段玩家 | WOLF=稳定盈利
+        </div>
+      </div>
+
+      <!-- Signal Source Distribution -->
+      <div class="card">
+        <h2>📡 信号来源分布 (v7.4 Lineage)</h2>
+        <table style="font-size: 0.9em;">
+          <thead>
+            <tr>
+              <th>来源</th>
+              <th>信号数</th>
+              <th>胜率</th>
+              <th>平均收益</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${Object.entries(data.signalSources).filter(([_, stats]) => stats.count > 0).map(([source, stats]) => {
+    const emoji = source === 'ultra_sniper_v2' ? '🎯' : source === 'shadow_v2' ? '🥷' : source === 'flash_scout' ? '⚡' : '🔭';
+    const displayName = source === 'ultra_sniper_v2' ? 'Ultra Sniper V2' :
+      source === 'shadow_v2' ? 'Shadow Protocol V2' :
+        source === 'flash_scout' ? 'Flash Scout' : 'Tiered Observer';
+    return `
+                <tr>
+                  <td>${emoji} ${displayName}</td>
+                  <td>${stats.count}</td>
+                  <td><span class="badge ${stats.winRate >= 50 ? 'badge-green' : stats.winRate >= 30 ? 'badge-yellow' : 'badge-red'}">${stats.winRate.toFixed(1)}%</span></td>
+                  <td class="${stats.avgPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">${stats.avgPnl >= 0 ? '+' : ''}${stats.avgPnl.toFixed(2)}%</td>
+                </tr>
+              `;
+  }).join('')}
+            ${Object.values(data.signalSources).every(s => s.count === 0) ? '<tr><td colspan="4" style="text-align:center;color:#666;">等待信号来源数据...</td></tr>' : ''}
+          </tbody>
+        </table>
+        <div style="margin-top: 10px; font-size: 0.8em; color: #888;">
+          v7.4 信号血统追踪 | 数据随交易积累
+        </div>
+      </div>
+
+      <!-- API Gateway 健康状态 -->
+      <div class="card">
+        <h2>🛡️ API 网关健康 (v7.4.1)</h2>
+        <div class="stat-grid" style="grid-template-columns: repeat(3, 1fr);">
+          <div class="stat">
+            <div class="stat-value" style="font-size:1.5em;">${data.apiHealth.gmgn.circuitBreaker ? '🔴 熔断中' : '🟢 正常'}</div>
+            <div class="stat-label">GMGN Gateway</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" style="font-size:1.2em;">${data.apiHealth.gmgn.requestsToday || 0}</div>
+            <div class="stat-label">今日请求数</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" style="font-size:1.2em;">${data.apiHealth.gmgn.rateLimited || 0}</div>
+            <div class="stat-label">限流次数</div>
+          </div>
+        </div>
+        <div style="margin-top: 10px; font-size: 0.8em; color: #888;">
+          令牌桶: 10/s | 熔断阈值: 5次失败 | 冷却: 60秒
+        </div>
+      </div>
+    </div>
+
+    <!-- 观察池详情列表 -->
+    <div class="card" style="margin-bottom: 20px;">
+      <h2>🔬 实时观察队列 (实时动态更新)</h2>
+      <table style="font-size: 0.9em;">
+        <thead>
+          <tr>
+            <th>池级</th>
+            <th>代币</th>
+            <th>链</th>
+            <th>分数</th>
+            <th>观察时长</th>
+            <th>聪明钱 (初→现)</th>
+            <th>价格变化</th>
+            <th>特征标签</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.observationPool.tokens.map(t => `
+            <tr>
+              <td>
+                <span class="badge ${t.tier === 'GOLD' ? 'badge-green' : t.tier === 'SILVER' ? 'badge-yellow' : ''}" 
+                      style="${t.tier === 'BRONZE' ? 'background:rgba(205,127,50,0.2);color:#cd7f32;' : ''}">
+                  ${t.tier === 'GOLD' ? '🥇 GOLD' : t.tier === 'SILVER' ? '🥈 SILVER' : '🥉 BRONZE'}
+                </span>
+              </td>
+              <td><strong>${t.symbol}</strong></td>
+              <td><span class="badge ${t.chain === 'SOL' ? 'badge-green' : 'badge-yellow'}">${t.chain}</span></td>
+              <td><strong>${t.score}</strong></td>
+              <td>${t.observeMinutes} min</td>
+              <td>${t.smInitial} → ${t.smCurrent} (${(t.smCurrent - t.smInitial) >= 0 ? '+' : ''}${t.smCurrent - t.smInitial})</td>
+              <td class="${parseFloat(t.priceChange) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${parseFloat(t.priceChange) >= 0 ? '+' : ''}${t.priceChange}%</td>
+              <td><span class="badge ${t.tag === 'GOLDEN' ? 'badge-green' : 'badge-yellow'}">${t.tag}</span></td>
+            </tr>
+          `).join('')}
+          ${data.observationPool.tokens.length === 0 ? '<tr><td colspan="8" style="text-align:center;color:#666;">观察池当前为空，寻找信号中...</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+    
+    <!-- 信号源排名 -->
+    <div class="card" style="margin-bottom: 20px;">
+      <h2>🏆 信号源排名 (按胜率)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>排名</th>
+            <th>信号源</th>
+            <th>信号数</th>
+            <th>胜率</th>
+            <th>平均收益</th>
+            <th>最佳</th>
+            <th>最差</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.sources.map((s, i) => `
+            <tr>
+              <td>${i + 1}</td>
+              <td>${s.source_id || 'Unknown'}</td>
+              <td>${s.total_signals}</td>
+              <td><span class="badge ${(s.win_rate || 0) >= 50 ? 'badge-green' : (s.win_rate || 0) >= 30 ? 'badge-yellow' : 'badge-red'}">${(s.win_rate || 0).toFixed(1)}%</span></td>
+              <td class="${(s.avg_pnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${(s.avg_pnl || 0) >= 0 ? '+' : ''}${(s.avg_pnl || 0).toFixed(2)}%</td>
+              <td class="pnl-positive">+${(s.best_pnl || 0).toFixed(1)}%</td>
+              <td class="pnl-negative">${(s.worst_pnl || 0).toFixed(1)}%</td>
+            </tr>
+          `).join('')}
+          ${data.sources.length === 0 ? '<tr><td colspan="7" style="text-align:center;color:#666;">暂无数据，系统运行中...</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+    
+    <!-- 虚拟仓位 -->
+    <div class="card" style="margin-bottom: 20px;">
+      <h2>📈 虚拟仓位表现</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>代币</th>
+            <th>链</th>
+            <th>实时PnL</th>
+            <th>止盈策略</th>
+            <th>买入</th>
+            <th>已卖出</th>
+            <th>入场价</th>
+            <th>收益率</th>
+            <th>剩余</th>
+            <th>状态</th>
+            <th>入场时间</th>
+            <th>退出时间</th>
+            <th>持仓时长</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          ${data.positions.map(p => {
+    // v8.0 修复：对于 partial 状态，显示 last_partial_sell_price
+    const isPartial = p.status === 'partial';
+    const isBreakeven = isPartial && p.breakeven_done === 1;
+
+    // 卖出价格：partial 用 last_partial_sell_price，closed 用 exit_price
+    const sellPrice = isPartial ? p.last_partial_sell_price : (p.exit_price || null);
+    const exitPrice = sellPrice || p.breakeven_price || p.price_15m || p.price_5m || null;
+
+    // PnL 计算：使用卖出时的价格
+    let displayPnl = p.pnl_percent || 0;
+    if (isPartial && p.last_partial_sell_price && p.entry_price) {
+      // partial 状态：显示卖出时的收益率
+      displayPnl = ((p.last_partial_sell_price - p.entry_price) / p.entry_price * 100);
+    } else if (isBreakeven && p.breakeven_price && p.entry_price) {
+      displayPnl = ((p.breakeven_price - p.entry_price) / p.entry_price * 100);
+    }
+
+    const remainingPercent = p.remaining_percent != null ? p.remaining_percent : 100;
+    // 买入金额
+    const buyAmount = p.position_size_native ? p.position_size_native.toFixed(3) : '-';
+    const buyUnit = p.chain === 'SOL' ? 'SOL' : 'BNB';
+    const buyUsd = p.position_size_usd ? ('$' + p.position_size_usd.toFixed(0)) : '';
+
+    // v8.0 修复：已卖出金额 = 入场成本 * 卖出% * (1 + 收益率)
+    const soldPercent = 100 - remainingPercent;
+    const soldMultiplier = displayPnl > 0 ? (1 + displayPnl / 100) : 1;
+    const soldAmount = p.position_size_native && soldPercent > 0
+      ? (p.position_size_native * soldPercent / 100 * soldMultiplier).toFixed(3)
+      : '-';
+    const soldUsd = p.position_size_usd && soldPercent > 0
+      ? ('$' + (p.position_size_usd * soldPercent / 100 * soldMultiplier).toFixed(0))
+      : '';
+    // 数据库存的是 UTC 时间，需要加 'Z' 后缀才能正确转换为本地时间
+    const parseUTC = (t) => {
+      if (!t) return null;
+      if (typeof t === 'number') return new Date(t * 1000);
+      const str = String(t);
+      return new Date(str.includes('Z') || str.includes('+') ? str : str + 'Z');
+    };
+    const entryTime = p.entry_time ? parseUTC(p.entry_time).toLocaleString('zh-CN') : '-';
+    // v9.3: 退出时间和持仓时长
+    const exitTime = p.exit_time ? parseUTC(p.exit_time).toLocaleString('zh-CN') : '-';
+    const entryDate = p.entry_time ? parseUTC(p.entry_time) : null;
+    const exitDate = p.exit_time ? parseUTC(p.exit_time) : new Date();
+    let holdDuration = '-';
+    if (entryDate) {
+      const mins = Math.round((exitDate - entryDate) / 60000);
+      if (mins >= 60) {
+        holdDuration = Math.floor(mins / 60) + 'h' + (mins % 60) + 'm';
+      } else {
+        holdDuration = mins + 'min';
+      }
+    }
+    // 状态显示
+    let statusText = p.status || '-';
+    let statusClass = 'badge-yellow';
+    if (isBreakeven) {
+      // 已完成翻倍出本
+      statusText = '💰已出本';
+      statusClass = 'badge-green';
+    } else if (isPartial) {
+      // partial 但未完成翻倍出本（中途止盈）
+      statusText = 'partial';
+      statusClass = displayPnl >= 0 ? 'badge-green' : 'badge-yellow';
+    } else if (p.status === 'closed') {
+      statusClass = displayPnl >= 0 ? 'badge-green' : 'badge-red';
+    } else if (p.status === 'open') {
+      statusText = 'open';
+    }
+    // v7.4 猎人类型
+    const hunterType = p.signal_hunter_type || '-';
+    const hunterEmoji = hunterType === 'FOX' ? '🦊' : hunterType === 'TURTLE' ? '🐢' : hunterType === 'WOLF' ? '🐺' : '';
+    // v7.4 信号来源
+    const signalSource = p.signal_source || p.entry_source || '-';
+    const sourceShort = signalSource.replace('ultra_sniper_v2', 'Ultra').replace('shadow_v2', 'Shadow').replace('flash_scout', 'Flash').replace('tiered_observer', 'Observer');
+
+    // v8.0 实时 PnL 和止盈策略
+    const livePnl = p.current_pnl != null ? p.current_pnl : 0;
+    const tierStrategy = p.tier_strategy || '';
+    // 提取止盈策略的简短显示 (例如从 "等待止盈 (TIER_A: 当前 +10.7%, 目标 +150%, 持仓 26min)" 提取 "TIER_A +150%")
+    const tierMatch = tierStrategy.match(/\((TIER_[SsAaBbCc]|默认|DEFAULT)[^)]*目标 \+?(\d+)%/i);
+    const tierShort = tierMatch ? `${tierMatch[1].toUpperCase()} +${tierMatch[2]}%` : (p.status === 'open' ? '监控中' : '-');
+
+    return `
+            <tr>
+              <td>
+                <div><strong>${p.symbol || 'Unknown'}</strong></div>
+                <div class="token-address" style="font-size:0.7em;word-break:break-all;">${(p.token_ca || 'N/A').slice(0, 12)}...</div>
+              </td>
+              <td><span class="badge ${p.chain === 'SOL' ? 'badge-green' : 'badge-yellow'}">${p.chain || '-'}</span></td>
+              <td class="${livePnl >= 0 ? 'pnl-positive' : 'pnl-negative'}" style="font-weight:bold;">
+                ${p.status === 'open' ? ((livePnl >= 0 ? '+' : '') + livePnl.toFixed(1) + '%') : '-'}
+              </td>
+              <td style="font-size:0.8em;">
+                <span class="badge ${tierShort.includes('TIER_S') ? 'badge-green' : tierShort.includes('TIER_A') ? 'badge-green' : 'badge-yellow'}">${tierShort}</span>
+              </td>
+              <td style="white-space:nowrap;">
+                <div>${buyAmount} ${buyUnit}</div>
+                <div style="font-size:0.8em;color:#888;">${buyUsd}</div>
+              </td>
+              <td style="white-space:nowrap;">
+                ${soldPercent > 0 ? `<div class="pnl-positive">${soldAmount} ${buyUnit}</div><div style="font-size:0.8em;color:#888;">${soldUsd}</div>` : '-'}
+              </td>
+              <td>$${p.entry_price ? p.entry_price.toFixed(10) : 'N/A'}</td>
+              <td class="${displayPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">
+                ${displayPnl !== 0 ? ((displayPnl >= 0 ? '+' : '') + displayPnl.toFixed(1) + '%') : '-'}
+              </td>
+              <td>${remainingPercent < 100 ? (remainingPercent.toFixed(0) + '%') : '100%'}</td>
+              <td><span class="badge ${statusClass}">${statusText}</span></td>
+              <td style="font-size:0.85em;">${entryTime}</td>
+              <td style="font-size:0.85em;">${exitTime}</td>
+              <td style="font-size:0.85em;">${holdDuration}</td>
+            </tr>
+          `}).join('')}
+          ${data.positions.length === 0 ? '<tr><td colspan="13" style="text-align:center;color:#666;">暂无仓位数据，等待 DeBot 信号通过验证...</td></tr>' : ''}
+
+        </tbody>
+      </table>
+    </div>
+    
+    <!-- 信号热度与时效 -->
+    <div class="card" style="margin-bottom: 20px;">
+      <h2>🔥 最近信号热度与时效分布 (Entry Timing & Social Heat)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>代币</th>
+            <th>AI叙事</th>
+            <th>TG传播</th>
+            <th>时效加成</th>
+            <th>总评分</th>
+            <th>推荐级别</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.recent_scores.map(s => `
+            <tr>
+              <td>${s.symbol}</td>
+              <td><span class="badge ${s.narrative >= 20 ? 'badge-green' : 'badge-yellow'}">${s.narrative}</span></td>
+              <td><span class="badge ${s.tg_spread >= 20 ? 'badge-green' : 'badge-yellow'}">${s.tg_spread}</span></td>
+              <td><span class="pnl-positive">+${s.timing_bonus}</span></td>
+              <td><strong>${s.total_score}</strong></td>
+              <td><span class="badge ${s.rating === 'PREMIUM' ? 'badge-green' : s.rating === 'NORMAL' ? 'badge-yellow' : ''}">${s.rating}</span></td>
+            </tr>
+          `).join('')}
+          ${data.recent_scores.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#666;">等待新信号进行评估...</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 止盈止损策略 -->
+    <div class="card">
+      <h2>⚙️ 策略 v7.4：猎人追踪系统 + 哑铃型仓位</h2>
+      <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="exit-strategy">
+          <h3>🛑 止损（铁律）</h3>
+          <div class="exit-rule"><span>普通止损</span><span class="pnl-negative">-50%</span></div>
+          <div class="exit-rule"><span>FOX 猎人止损</span><span class="pnl-negative">-30%</span></div>
+          <div class="exit-rule"><span>时间止损(SOL)</span><span class="pnl-negative">60分钟</span></div>
+          <div class="exit-rule"><span>每日风控</span><span class="pnl-negative">-0.5 SOL</span></div>
+        </div>
+        <div class="exit-strategy">
+          <h3>💰 翻倍出本</h3>
+          <div class="exit-rule"><span>触发点</span><span class="pnl-positive">+100%</span></div>
+          <div class="exit-rule"><span>卖出比例</span><span>50%</span></div>
+          <div class="exit-rule"><span>TURTLE 延迟</span><span>30分钟验证</span></div>
+          <div class="exit-rule"><span>剩余利润仓</span><span>50% (Free)</span></div>
+        </div>
+        <div class="exit-strategy">
+          <h3>🎯 猎人类型 (v7.4)</h3>
+          <div class="exit-rule"><span>🦊 FOX</span><span>1.2x 仓位</span></div>
+          <div class="exit-rule"><span>🐢 TURTLE</span><span>1.5x 仓位</span></div>
+          <div class="exit-rule"><span>🐺 WOLF</span><span>1.0x 仓位</span></div>
+          <div class="exit-rule"><span>跟单策略</span><span>按类型分流</span></div>
+        </div>
+        <div class="exit-strategy">
+          <h3>🤖 利润仓 AI管理</h3>
+          <div class="exit-rule"><span>热度下降</span><span>卖1/3</span></div>
+          <div class="exit-rule"><span>聪明钱减持</span><span>卖1/3</span></div>
+          <div class="exit-rule"><span>横盘30分钟</span><span>卖1/3</span></div>
+          <div class="exit-rule"><span>回撤50%</span><span>卖1/3</span></div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 风险管理规则 - 动态显示 CrossValidator 配置 -->
+    <div class="card" style="margin-top: 20px;">
+      <h2>🛡️ 分级仓位管理 (CrossValidator v2.0)</h2>
+      <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="exit-strategy">
+          <h3>🐦 Scout级 (${data.config.thresholds.buyScout}-${data.config.thresholds.buyNormal - 1}分)</h3>
+          <div class="exit-rule"><span>单笔金额</span><span class="pnl-positive">${data.config.positions.scout} SOL</span></div>
+          <div class="exit-rule"><span>最大仓位</span><span>${data.config.maxPositions.scout} 个</span></div>
+          <div class="exit-rule"><span>最大敞口</span><span>${(data.config.positions.scout * data.config.maxPositions.scout).toFixed(2)} SOL</span></div>
+        </div>
+        <div class="exit-strategy">
+          <h3>✅ 普通级 (${data.config.thresholds.buyNormal}-${data.config.thresholds.buyPremium - 1}分)</h3>
+          <div class="exit-rule"><span>单笔金额</span><span class="pnl-positive">${data.config.positions.normal} SOL</span></div>
+          <div class="exit-rule"><span>最大仓位</span><span>${data.config.maxPositions.normal} 个</span></div>
+          <div class="exit-rule"><span>最大敞口</span><span>${(data.config.positions.normal * data.config.maxPositions.normal).toFixed(2)} SOL</span></div>
+        </div>
+        <div class="exit-strategy">
+          <h3>🚀 精选级 (${data.config.thresholds.buyPremium}+分)</h3>
+          <div class="exit-rule"><span>单笔金额</span><span class="pnl-positive">${data.config.positions.premium} SOL</span></div>
+          <div class="exit-rule"><span>最大仓位</span><span>${data.config.maxPositions.premium} 个</span></div>
+          <div class="exit-rule"><span>最大敞口</span><span>${(data.config.positions.premium * data.config.maxPositions.premium).toFixed(2)} SOL</span></div>
+        </div>
+        <div class="exit-strategy">
+          <h3>📊 总览</h3>
+          <div class="exit-rule"><span>总仓位数</span><span>${data.config.maxPositions.scout + data.config.maxPositions.normal + data.config.maxPositions.premium} 个</span></div>
+          <div class="exit-rule"><span>最大总敞口</span><span class="pnl-positive">${(data.config.positions.scout * data.config.maxPositions.scout + data.config.positions.normal * data.config.maxPositions.normal + data.config.positions.premium * data.config.maxPositions.premium).toFixed(2)} SOL</span></div>
+          <div class="exit-rule"><span>IGNORE阈值</span><span>&lt;${data.config.thresholds.ignore}分</span></div>
+          <div class="exit-rule"><span>WATCH阈值</span><span>${data.config.thresholds.ignore}-${data.config.thresholds.buyScout - 1}分</span></div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 评分权重 -->
+    <div class="card" style="margin-top: 20px;">
+      <h2>⚖️ 评分权重配置</h2>
+      <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
+        <div class="stat">
+          <div class="stat-value">${data.config.weights.smartMoney}%</div>
+          <div class="stat-label">🧠 聪明钱</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${data.config.weights.narrative}%</div>
+          <div class="stat-label">📖 AI叙事</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${data.config.weights.telegram}%</div>
+          <div class="stat-label">📱 TG共识</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${data.config.weights.signalMomentum}%</div>
+          <div class="stat-label">📈 动量</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${data.config.weights.safety}%</div>
+          <div class="stat-label">🛡️ 安全</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- AI 复盘与策略调整 -->
+    <div class="card" style="margin-top: 20px;">
+      <h2>🤖 AI 复盘与策略调整</h2>
+      <div class="grid" style="grid-template-columns: 1fr 2fr;">
+        <div class="stat" style="text-align: left; padding: 15px;">
+          <h3 style="color: #00d9ff; margin-bottom: 10px;">⚡ 当前状态</h3>
+          <div style="margin-bottom: 8px;">交易状态: <span class="badge ${data.risk.is_paused ? 'badge-red' : 'badge-green'}">${data.risk.is_paused ? '已暂停' : '运行中'}</span></div>
+          <div style="margin-bottom: 8px;">今日SOL盈亏: <span class="${data.risk.daily_pnl_sol >= 0 ? 'pnl-positive' : 'pnl-negative'}">${data.risk.daily_pnl_sol >= 0 ? '+' : ''}${(data.risk.daily_pnl_sol || 0).toFixed(4)} SOL</span></div>
+          <div>今日BNB盈亏: <span class="${data.risk.daily_pnl_bnb >= 0 ? 'pnl-positive' : 'pnl-negative'}">${data.risk.daily_pnl_bnb >= 0 ? '+' : ''}${(data.risk.daily_pnl_bnb || 0).toFixed(4)} BNB</span></div>
+        </div>
+        <div>
+          <h3 style="color: #00d9ff; margin-bottom: 10px;">📊 动态阈值 (AI 自动调整)</h3>
+          <table style="font-size: 0.9em;">
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>当前值</th>
+                <th>更新时间</th>
+                <th>更新者</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${data.thresholds.map(t => `
+                <tr>
+                  <td><code>${t.key}</code></td>
+                  <td><strong>${t.value}</strong></td>
+                  <td style="font-size:0.85em;">${t.updated_at || '-'}</td>
+                  <td><span class="badge ${t.updated_by === 'AI_AUTO_REVIEW' ? 'badge-green' : 'badge-yellow'}">${t.updated_by}</span></td>
+                </tr>
+              `).join('')}
+              ${data.thresholds.length === 0 ? '<tr><td colspan="4" style="text-align:center;color:#666;">暂无阈值数据</td></tr>' : ''}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      
+      <!-- AI 复盘历史记录 -->
+      <div style="margin-top: 20px;">
+        <h3 style="color: #00d9ff; margin-bottom: 10px;">📜 AI 复盘历史</h3>
+        <table style="font-size: 0.9em;">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>触发原因</th>
+              <th>交易数</th>
+              <th>胜率</th>
+              <th>关键洞察</th>
+              <th>优先行动</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.reviewHistory.map(r => `
+              <tr>
+                <td style="font-size:0.85em;">${r.review_time || '-'}</td>
+                <td><span class="badge ${r.trigger_reason === 'consecutive_losses' ? 'badge-red' : 'badge-yellow'}">${r.trigger_reason === 'consecutive_losses' ? '连续亏损' : r.trigger_reason}</span></td>
+                <td>${r.trade_count || 0}</td>
+                <td><span class="badge ${r.win_rate >= 50 ? 'badge-green' : 'badge-red'}">${(r.win_rate || 0).toFixed(1)}%</span></td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${r.ai_key_insight || ''}">${r.ai_key_insight || '-'}</td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${r.priority_action || ''}">${r.priority_action || '-'}</td>
+              </tr>
+            `).join('')}
+            ${data.reviewHistory.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#666;">尚未进行过 AI 复盘</td></tr>' : ''}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    
+    <div class="refresh-info">
+      数据每30秒自动更新 (不刷新页面) | 最后更新: <span id="last-refresh-time">${new Date().toLocaleString('zh-CN')}</span>
+    </div>
+  </div>
+</body>
+</html>
+`;
+}
+
+/**
+ * CrossValidator 分级仓位配置（与 cross-validator.js 保持同步）
+ */
+const CROSS_VALIDATOR_CONFIG = {
+  // 评分阈值
+  thresholds: {
+    ignore: 50,
+    watch: 60,
+    buyScout: 60,
+    buyNormal: 70,
+    buyPremium: 80
+  },
+  // 仓位配置 (SOL)
+  positions: {
+    scout: 0.10,
+    normal: 0.15,
+    premium: 0.25
+  },
+  // 各级别最大仓位数
+  maxPositions: {
+    scout: 2,
+    normal: 3,
+    premium: 3
+  },
+  // 权重
+  weights: {
+    smartMoney: 40,
+    narrative: 25,
+    telegram: 15,
+    signalMomentum: 10,
+    safety: 10
+  }
+};
+
+/**
+ * 获取仪表盘数据
+ */
+function getDashboardData() {
+  const data = {
+    overview: {
+      mode: 'SHADOW',
+      channels: 0,
+      signals_today: 0,
+      positions_open: 0
+    },
+    performance: {
+      total_pnl: 0,
+      win_rate: 0,
+      total_trades: 0,
+      avg_pnl: 0
+    },
+    sources: [],
+    positions: [],
+    recent_scores: [],
+    risk: {
+      daily_pnl_sol: 0,
+      daily_pnl_bnb: 0,
+      is_paused: false,
+      consecutive_losses: 0
+    },
+    thresholds: [],
+    reviewHistory: [],
+    observationPool: { tokens: [], counts: { total: 0, gold: 0, silver: 0, bronze: 0 } },
+    config: CROSS_VALIDATOR_CONFIG,
+    // v7.4 新增模块状态
+    hunterPerformance: {
+      FOX: { trades: 0, wins: 0, avgPnl: 0, multiplier: 1.2 },
+      TURTLE: { trades: 0, wins: 0, avgPnl: 0, multiplier: 1.5 },
+      WOLF: { trades: 0, wins: 0, avgPnl: 0, multiplier: 1.0 },
+      UNKNOWN: { trades: 0, wins: 0, avgPnl: 0, multiplier: 1.0 }
+    },
+    signalSources: {
+      ultra_sniper_v2: { count: 0, winRate: 0, avgPnl: 0 },
+      shadow_v2: { count: 0, winRate: 0, avgPnl: 0 },
+      flash_scout: { count: 0, winRate: 0, avgPnl: 0 },
+      tiered_observer: { count: 0, winRate: 0, avgPnl: 0 }
+    },
+    apiHealth: {
+      gmgn: { status: 'unknown', circuitBreaker: false, requestsToday: 0 },
+      debot: { status: 'unknown', lastSuccess: null }
+    }
+  };
+
+  if (!db) return data;
+
+  try {
+    // 系统概览
+    const channels = db.prepare(`SELECT COUNT(*) as c FROM telegram_channels WHERE active = 1`).get();
+    data.overview.channels = channels?.c || 0;
+
+    // 今日信号 = 今日买入的交易数（来自 DeBot/CrossValidator）
+    const signalsToday = db.prepare(`
+      SELECT COUNT(*) as c FROM positions 
+      WHERE DATE(entry_time) = DATE('now')
+    `).get();
+    data.overview.signals_today = signalsToday?.c || 0;
+
+    // v7.5 只统计 open 状态，partial 不占仓位（与 RiskManager 逻辑一致）
+    const openPositions = db.prepare(`SELECT COUNT(*) as c FROM positions WHERE status = 'open'`).get();
+    data.overview.positions_open = openPositions?.c || 0;
+
+    // 虚拟收益统计（只用 positions 表 - DeBot 验证通过的交易）
+    const perfStats = db.prepare(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END) as wins,
+        AVG(pnl_percent) as avg_pnl,
+        SUM(pnl_percent) as total_pnl
+      FROM positions 
+      WHERE status = 'closed'
+    `).get();
+
+    if (perfStats && perfStats.total > 0) {
+      data.performance.total_trades = perfStats.total;
+      data.performance.win_rate = (perfStats.wins / perfStats.total) * 100;
+      data.performance.avg_pnl = perfStats.avg_pnl || 0;
+      data.performance.total_pnl = perfStats.total_pnl || 0;
+    }
+
+    // 风险管理状态 (修复时区问题 + pnl_native 可能为空)
+    // 当 pnl_native 为空时，使用 pnl_percent * position_size_native / 100 估算
+    const dailyPnL = db.prepare(`
+      SELECT 
+        chain,
+        SUM(COALESCE(pnl_native, pnl_percent * position_size_native / 100)) as total_pnl
+      FROM positions 
+      WHERE status = 'closed'
+      AND exit_time >= datetime('now', '-11 hours', 'start of day', '+11 hours')
+      GROUP BY chain
+    `).all();
+    for (const row of dailyPnL) {
+      if (row.chain === 'SOL') data.risk.daily_pnl_sol = row.total_pnl;
+      if (row.chain === 'BSC') data.risk.daily_pnl_bnb = row.total_pnl;
+    }
+
+    const pauseState = db.prepare(`
+      SELECT value, expires_at FROM system_state WHERE key = 'trading_paused'
+    `).get();
+    if (pauseState && pauseState.expires_at > Date.now() / 1000) {
+      data.risk.is_paused = true;
+    }
+
+    // 获取动态阈值配置
+    try {
+      const thresholds = db.prepare(`
+        SELECT key, value, updated_at, updated_by 
+        FROM dynamic_thresholds 
+        ORDER BY updated_at DESC
+      `).all();
+      data.thresholds = thresholds || [];
+    } catch (e) {
+      console.log('Dashboard thresholds query error:', e.message);
+    }
+
+    // 获取 AI 复盘历史
+    try {
+      const reviews = db.prepare(`
+        SELECT review_time, trigger_reason, trade_count, win_rate, 
+               ai_key_insight, priority_action
+        FROM ai_review_history 
+        ORDER BY review_time DESC
+        LIMIT 10
+      `).all();
+      data.reviewHistory = reviews || [];
+    } catch (e) {
+      console.log('Dashboard review history query error:', e.message);
+    }
+
+    // 获取观察池状态 (从 JSON 文件)
+    try {
+      const poolPath = join(projectRoot, 'data', 'observation_pool.json');
+      if (fs.existsSync(poolPath)) {
+        const poolJson = fs.readFileSync(poolPath, 'utf8');
+        data.observationPool = JSON.parse(poolJson);
+      }
+    } catch (e) {
+      console.log('Dashboard pool query error:', e.message);
+    }
+
+    // 信号源排名（v7.4 使用 signal_source 字段）
+    try {
+      const sources = db.prepare(`
+        SELECT
+          COALESCE(signal_source, entry_source, 'unknown') as source_id,
+          COUNT(*) as total_signals,
+          ROUND(AVG(pnl_percent), 2) as avg_pnl,
+          ROUND(MAX(pnl_percent), 2) as best_pnl,
+          ROUND(MIN(CASE WHEN pnl_percent < 0 THEN pnl_percent END), 2) as worst_pnl,
+          ROUND(SUM(CASE WHEN pnl_percent > 0 THEN 1.0 ELSE 0 END) / COUNT(*) * 100, 1) as win_rate
+        FROM positions
+        WHERE status = 'closed'
+        GROUP BY source_id
+        ORDER BY win_rate DESC, total_signals DESC
+        LIMIT 20
+      `).all();
+      data.sources = sources || [];
+    } catch (e) {
+      console.log('Dashboard ranking query error:', e.message);
+    }
+
+    // 虚拟仓位：只显示 DeBot 验证通过的交易（positions 表）
+    const positions = db.prepare(`
+      SELECT 
+        p.*,
+        CASE 
+          WHEN p.status = 'open' THEN 
+            ROUND((julianday('now') - julianday(p.entry_time)) * 24 * 60) || ' min'
+          ELSE 
+            ROUND((julianday(p.exit_time) - julianday(p.entry_time)) * 24 * 60) || ' min'
+        END as hold_time
+      FROM positions p
+      ORDER BY 
+        CASE 
+          WHEN p.status = 'open' THEN 0 
+          WHEN p.status = 'partial' THEN 1 
+          ELSE 2 
+        END,
+        p.entry_time DESC
+      LIMIT 100
+    `).all();
+    data.positions = positions || [];
+
+    // 最近评分分布 (模拟从最近 positions 构建)
+    data.recent_scores = data.positions.slice(0, 10).map(p => ({
+      symbol: p.symbol || p.token_ca?.substring(0, 8),
+      narrative: Math.floor(p.alpha_score * 0.4),
+      tg_spread: Math.floor(p.alpha_score * 0.3),
+      timing_bonus: p.alpha_tier === 'tier1' ? 12 : p.alpha_tier === 'tier2' ? 8 : (p.alpha_tier === 'tier3' ? 5 : 0),
+      total_score: p.alpha_score,
+      rating: p.alpha_score >= 80 ? 'PREMIUM' : (p.alpha_score >= 70 ? 'NORMAL' : 'SCOUT')
+    }));
+
+    // ==================== v7.4 新增查询 ====================
+
+    // 1. Hunter Performance (按猎人类型统计)
+    try {
+      const hunterStats = db.prepare(`
+        SELECT
+          COALESCE(signal_hunter_type, 'UNKNOWN') as hunter_type,
+          COUNT(*) as trades,
+          SUM(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END) as wins,
+          AVG(pnl_percent) as avg_pnl
+        FROM positions
+        WHERE status = 'closed'
+        GROUP BY signal_hunter_type
+      `).all();
+
+      for (const row of hunterStats) {
+        const type = row.hunter_type || 'UNKNOWN';
+        if (data.hunterPerformance[type]) {
+          data.hunterPerformance[type].trades = row.trades;
+          data.hunterPerformance[type].wins = row.wins;
+          data.hunterPerformance[type].avgPnl = row.avg_pnl || 0;
+        }
+      }
+    } catch (e) {
+      console.log('Dashboard hunter performance query error:', e.message);
+    }
+
+    // 2. Signal Source Distribution (按信号来源统计)
+    try {
+      const sourceStats = db.prepare(`
+        SELECT
+          COALESCE(signal_source, 'tiered_observer') as source,
+          COUNT(*) as count,
+          SUM(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END) as wins,
+          AVG(pnl_percent) as avg_pnl
+        FROM positions
+        WHERE status = 'closed'
+        GROUP BY signal_source
+      `).all();
+
+      for (const row of sourceStats) {
+        const source = row.source || 'tiered_observer';
+        if (data.signalSources[source]) {
+          data.signalSources[source].count = row.count;
+          data.signalSources[source].winRate = row.count > 0 ? (row.wins / row.count * 100) : 0;
+          data.signalSources[source].avgPnl = row.avg_pnl || 0;
+        }
+      }
+    } catch (e) {
+      console.log('Dashboard signal source query error:', e.message);
+    }
+
+    // 3. API Gateway 健康状态 (从 v7.4.2 持久化文件读取)
+    try {
+      const gatewayStatsPath = join(projectRoot, 'data', 'gmgn_gateway_stats.json');
+      if (fs.existsSync(gatewayStatsPath)) {
+        const gatewayStats = JSON.parse(fs.readFileSync(gatewayStatsPath, 'utf8'));
+        data.apiHealth.gmgn = {
+          status: gatewayStats.circuitBreaker ? 'circuit_open' : 'ok',
+          circuitBreaker: gatewayStats.circuitBreaker || false,
+          requestsToday: gatewayStats.requestsToday || 0,
+          rateLimited: gatewayStats.rateLimited || 0,
+          lastUpdate: gatewayStats.timestamp
+        };
+      }
+    } catch (e) {
+      console.log('Dashboard gateway stats read error:', e.message);
+    }
+
+  } catch (error) {
+    console.error('❌ Get dashboard data error:', error.message);
+  }
+
+  return data;
+}
+
+// ==================== v7.3 API 数据函数 ====================
+
+/**
+ * v7.3 获取模块健康数据
+ */
+function getModuleHealthData(windowDays = 7) {
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const result = {
+    timestamp: new Date().toISOString(),
+    windowDays,
+    modules: [],
+    summary: {}
+  };
+
+  try {
+    // 从 module_performance 表获取数据
+    let modulePerf = [];
+    try {
+      modulePerf = db.prepare(`
+        SELECT * FROM module_performance
+        WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM module_performance)
+        AND window_days = ?
+      `).all(windowDays);
+    } catch (e) {
+      // 表可能不存在，尝试从 positions 表直接计算
+    }
+
+    // 如果没有 module_performance 数据，从 positions 表计算
+    if (modulePerf.length === 0) {
+      modulePerf = db.prepare(`
+        SELECT
+          entry_source as module_name,
+          COUNT(*) as total_trades,
+          SUM(CASE WHEN exit_pnl_percent >= 50 THEN 1 ELSE 0 END) as win_count,
+          SUM(CASE WHEN exit_pnl_percent >= 50 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate,
+          AVG(exit_pnl_percent) as avg_pnl,
+          SUM(exit_pnl_percent) as total_pnl,
+          MAX(exit_pnl_percent) as best_pnl,
+          MIN(exit_pnl_percent) as worst_pnl
+        FROM positions
+        WHERE status = 'closed'
+        AND exit_time >= ?
+        AND entry_source IS NOT NULL
+        GROUP BY entry_source
+      `).all(cutoff);
+    }
+
+    result.modules = modulePerf.map(m => ({
+      name: m.module_name,
+      trades: m.total_trades,
+      winRate: m.win_rate?.toFixed(1) || 0,
+      avgPnl: m.avg_pnl?.toFixed(1) || 0,
+      totalPnl: m.total_pnl?.toFixed(0) || 0,
+      status: (m.win_rate || 0) < 30 ? 'CRITICAL' :
+        (m.win_rate || 0) < 40 ? 'WARNING' :
+          (m.win_rate || 0) >= 50 ? 'EXCELLENT' : 'HEALTHY'
+    }));
+
+    // 计算总体统计
+    const totalTrades = modulePerf.reduce((sum, m) => sum + (m.total_trades || 0), 0);
+    const totalPnl = modulePerf.reduce((sum, m) => sum + (m.total_pnl || 0), 0);
+
+    result.summary = {
+      totalModules: modulePerf.length,
+      totalTrades,
+      avgPnl: totalTrades > 0 ? (totalPnl / totalTrades).toFixed(1) : 0,
+      healthyCount: result.modules.filter(m => m.status === 'HEALTHY' || m.status === 'EXCELLENT').length,
+      warningCount: result.modules.filter(m => m.status === 'WARNING').length,
+      criticalCount: result.modules.filter(m => m.status === 'CRITICAL').length
+    };
+
+  } catch (e) {
+    result.error = e.message;
+  }
+
+  return result;
+}
+
+/**
+ * v7.3 获取 AI 叙事有效性数据
+ */
+function getNarrativeEffectivenessData() {
+  const result = {
+    timestamp: new Date().toISOString(),
+    effective: null,
+    tiers: [],
+    correlation: null,
+    recommendation: null
+  };
+
+  try {
+    // 使用 intention_tier 字段（实际字段名）
+    const data = db.prepare(`
+      SELECT
+        intention_tier as ai_narrative_tier,
+        AVG(exit_pnl_percent) as avg_pnl,
+        COUNT(*) as trades,
+        SUM(CASE WHEN exit_pnl_percent >= 50 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
+      FROM positions
+      WHERE status = 'closed'
+      AND intention_tier IS NOT NULL
+      AND exit_time >= datetime('now', '-7 days')
+      GROUP BY intention_tier
+      HAVING COUNT(*) >= 3
+      ORDER BY
+        CASE intention_tier
+          WHEN 'TIER_S' THEN 1
+          WHEN 'TIER_A' THEN 2
+          WHEN 'TIER_B' THEN 3
+          WHEN 'TIER_C' THEN 4
+          ELSE 5
+        END
+    `).all();
+
+    result.tiers = data.map(d => ({
+      tier: d.ai_narrative_tier,
+      trades: d.trades,
+      avgPnl: d.avg_pnl?.toFixed(1) || 0,
+      winRate: d.win_rate?.toFixed(1) || 0
+    }));
+
+    if (data.length >= 2) {
+      // 检查单调性
+      const tierOrder = ['TIER_S', 'TIER_A', 'TIER_B', 'TIER_C'];
+      const orderedData = tierOrder
+        .map(t => data.find(d => d.ai_narrative_tier === t))
+        .filter(Boolean);
+
+      const orderedPnl = orderedData.map(d => d.avg_pnl || 0);
+
+      let monotonic = true;
+      for (let i = 1; i < orderedPnl.length; i++) {
+        if (orderedPnl[i] >= orderedPnl[i - 1]) {
+          monotonic = false;
+          break;
+        }
+      }
+
+      // 简化相关性计算
+      const tierScore = { 'TIER_S': 4, 'TIER_A': 3, 'TIER_B': 2, 'TIER_C': 1 };
+      const points = orderedData.map(d => ({
+        x: tierScore[d.ai_narrative_tier],
+        y: d.avg_pnl || 0
+      }));
+
+      const n = points.length;
+      if (n >= 2) {
+        const sumX = points.reduce((a, p) => a + p.x, 0);
+        const sumY = points.reduce((a, p) => a + p.y, 0);
+        const sumXY = points.reduce((a, p) => a + p.x * p.y, 0);
+        const sumX2 = points.reduce((a, p) => a + p.x * p.x, 0);
+        const sumY2 = points.reduce((a, p) => a + p.y * p.y, 0);
+
+        const numerator = n * sumXY - sumX * sumY;
+        const denominator = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+
+        result.correlation = denominator !== 0 ? (numerator / denominator).toFixed(2) : 0;
+      }
+
+      result.effective = monotonic && parseFloat(result.correlation) > 0.3;
+      result.recommendation = result.effective ?
+        '叙事评分有效，保持使用' :
+        '叙事评分效果不明显，考虑调整';
+    }
+
+  } catch (e) {
+    result.error = e.message;
+  }
+
+  return result;
+}
+
+/**
+ * v7.3 获取 A/B 测试数据
+ */
+function getABTestData(windowDays = 14) {
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const result = {
+    timestamp: new Date().toISOString(),
+    windowDays,
+    groups: [],
+    difference: null,
+    significant: null
+  };
+
+  try {
+    const groups = db.prepare(`
+      SELECT
+        experiment_group,
+        COUNT(*) as trades,
+        AVG(exit_pnl_percent) as avg_pnl,
+        SUM(CASE WHEN exit_pnl_percent >= 50 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate,
+        SUM(exit_pnl_percent) as total_pnl
+      FROM positions
+      WHERE status = 'closed'
+      AND exit_time >= ?
+      AND experiment_group IS NOT NULL
+      GROUP BY experiment_group
+    `).all(cutoff);
+
+    result.groups = groups.map(g => ({
+      name: g.experiment_group,
+      trades: g.trades,
+      avgPnl: g.avg_pnl?.toFixed(1) || 0,
+      winRate: g.win_rate?.toFixed(1) || 0,
+      totalPnl: g.total_pnl?.toFixed(0) || 0
+    }));
+
+    const control = groups.find(g => g.experiment_group === 'control');
+    const treatment = groups.find(g => g.experiment_group === 'treatment');
+
+    if (control && treatment) {
+      result.difference = {
+        avgPnl: ((treatment.avg_pnl || 0) - (control.avg_pnl || 0)).toFixed(1),
+        winRate: ((treatment.win_rate || 0) - (control.win_rate || 0)).toFixed(1)
+      };
+
+      // 简化显著性判断
+      result.significant = control.trades >= 20 && treatment.trades >= 20 &&
+        Math.abs(parseFloat(result.difference.avgPnl)) > 5;
+    }
+
+  } catch (e) {
+    result.error = e.message;
+  }
+
+  return result;
+}
+
+/**
+ * v7.3 获取拒绝信号数据
+ */
+function getRejectedSignalsData(windowDays = 7) {
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const result = {
+    timestamp: new Date().toISOString(),
+    windowDays,
+    stages: [],
+    summary: {}
+  };
+
+  try {
+    // 检查表是否存在
+    const tableExists = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='rejected_signals'
+    `).get();
+
+    if (!tableExists) {
+      result.error = 'rejected_signals 表不存在';
+      return result;
+    }
+
+    const stages = db.prepare(`
+      SELECT
+        rejection_stage,
+        COUNT(*) as total,
+        SUM(CASE WHEN tracking_completed = 1 THEN 1 ELSE 0 END) as tracked,
+        AVG(CASE WHEN tracking_completed = 1 THEN would_have_profit ELSE NULL END) as avg_avoided_pnl,
+        SUM(CASE WHEN would_have_profit < 0 THEN 1 ELSE 0 END) as correct_rejections,
+        SUM(CASE WHEN would_have_profit < -20 THEN 1 ELSE 0 END) as dodged_big_loss,
+        SUM(CASE WHEN would_have_profit > 50 THEN 1 ELSE 0 END) as missed_big_gain
+      FROM rejected_signals
+      WHERE created_at >= ?
+      GROUP BY rejection_stage
+    `).all(cutoff);
+
+    result.stages = stages.map(s => ({
+      stage: s.rejection_stage,
+      total: s.total,
+      tracked: s.tracked,
+      avgAvoidedPnl: s.avg_avoided_pnl?.toFixed(1) || 'N/A',
+      accuracy: s.tracked > 0 ? ((s.correct_rejections / s.tracked) * 100).toFixed(1) : 'N/A',
+      dodgedBigLoss: s.dodged_big_loss || 0,
+      missedBigGain: s.missed_big_gain || 0
+    }));
+
+    // 总体统计
+    const totalRejected = stages.reduce((sum, s) => sum + s.total, 0);
+    const totalTracked = stages.reduce((sum, s) => sum + (s.tracked || 0), 0);
+    const totalCorrect = stages.reduce((sum, s) => sum + (s.correct_rejections || 0), 0);
+
+    result.summary = {
+      totalRejected,
+      totalTracked,
+      overallAccuracy: totalTracked > 0 ? ((totalCorrect / totalTracked) * 100).toFixed(1) : 'N/A'
+    };
+
+  } catch (e) {
+    result.error = e.message;
+  }
+
+  return result;
+}
+
+/**
+ * HTTP 服务器
+ */
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === '/' || url.pathname === '/dashboard') {
+    const data = getDashboardData();
+    const html = renderDashboard(data);
+
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  } else if (url.pathname === '/api/status') {
+    const data = getDashboardData();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data, null, 2));
+  } else if (url.pathname === '/api/module-health') {
+    // v7.3 模块健康状态 API
+    const windowDays = parseInt(url.searchParams.get('window')) || 7;
+    const moduleHealth = getModuleHealthData(windowDays);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(moduleHealth, null, 2));
+  } else if (url.pathname === '/api/narrative-effectiveness') {
+    // v7.3 AI 叙事有效性 API
+    const narrativeData = getNarrativeEffectivenessData();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(narrativeData, null, 2));
+  } else if (url.pathname === '/api/ab-test') {
+    // v7.3 A/B 测试状态 API
+    const windowDays = parseInt(url.searchParams.get('window')) || 14;
+    const abTestData = getABTestData(windowDays);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(abTestData, null, 2));
+  } else if (url.pathname === '/api/rejected-signals') {
+    // v7.3 拒绝信号统计 API
+    const windowDays = parseInt(url.searchParams.get('window')) || 7;
+    const rejectedData = getRejectedSignalsData(windowDays);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(rejectedData, null, 2));
+  } else if (url.pathname === '/api/shadow-pnl') {
+    // Premium Channel Shadow PnL API
+    try {
+      const all = db.prepare(`
+        SELECT symbol, score, entry_mc, entry_time, exit_pnl, high_pnl, low_pnl, exit_reason, closed, closed_at
+        FROM shadow_pnl ORDER BY entry_time DESC LIMIT 200
+      `).all();
+      const closed = all.filter(r => r.closed === 1);
+      const open = all.filter(r => r.closed === 0);
+      const wins = closed.filter(r => r.exit_pnl > 0);
+      const losses = closed.filter(r => r.exit_pnl <= 0);
+      const totalPnl = closed.reduce((s, r) => s + (r.exit_pnl || 0), 0);
+      const avgPnl = closed.length > 0 ? totalPnl / closed.length : 0;
+      const winRate = closed.length > 0 ? (wins.length / closed.length * 100) : 0;
+
+      // 按 exit_reason 分组
+      const byReason = {};
+      for (const r of closed) {
+        const reason = (r.exit_reason || 'UNKNOWN').replace(/\(.*\)/, '');
+        if (!byReason[reason]) byReason[reason] = { count: 0, totalPnl: 0 };
+        byReason[reason].count++;
+        byReason[reason].totalPnl += r.exit_pnl || 0;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        summary: { total: closed.length, wins: wins.length, losses: losses.length, winRate: +winRate.toFixed(1), avgPnl: +avgPnl.toFixed(1), totalPnl: +totalPnl.toFixed(1) },
+        open: open.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
+        recent: closed.slice(0, 50).map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
+        byReason
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  } else if (url.pathname === '/premium') {
+    // Premium Channel Dashboard 页面
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(renderPremiumDashboard());
+  } else if (url.pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+});
+
+/**
+ * Premium Channel Dashboard 页面
+ */
+function renderPremiumDashboard() {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Premium Channel Dashboard</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e4e4e4;min-height:100vh;padding:20px}
+    .container{max-width:1400px;margin:0 auto}
+    h1{text-align:center;margin-bottom:20px;color:#00d9ff;font-size:2em;text-shadow:0 0 20px rgba(0,217,255,0.3)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:25px}
+    .card{background:rgba(255,255,255,0.05);border-radius:12px;padding:18px;border:1px solid rgba(255,255,255,0.1)}
+    .card h2{color:#00d9ff;margin-bottom:12px;font-size:1.1em}
+    .big-num{font-size:2.2em;font-weight:bold;text-align:center}
+    .green{color:#00ff88}.red{color:#ff4444}.yellow{color:#ffda44}.blue{color:#00d9ff}
+    .label{text-align:center;color:#888;font-size:0.85em;margin-top:4px}
+    table{width:100%;border-collapse:collapse;font-size:0.85em}
+    th{color:#00d9ff;text-align:left;padding:8px 6px;border-bottom:1px solid rgba(255,255,255,0.1)}
+    td{padding:6px;border-bottom:1px solid rgba(255,255,255,0.05)}
+    .pnl-pos{color:#00ff88}.pnl-neg{color:#ff4444}
+    .badge{padding:2px 8px;border-radius:10px;font-size:0.8em}
+    .badge-green{background:rgba(0,255,136,0.15);color:#00ff88}
+    .badge-red{background:rgba(255,68,68,0.15);color:#ff4444}
+    .badge-yellow{background:rgba(255,218,68,0.15);color:#ffda44}
+    .refresh-btn{position:fixed;top:15px;right:15px;background:#00d9ff;color:#1a1a2e;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:bold}
+    .open-tag{background:rgba(0,217,255,0.15);color:#00d9ff;padding:2px 6px;border-radius:4px;font-size:0.75em}
+  </style>
+</head>
+<body>
+  <button class="refresh-btn" onclick="loadData()">刷新</button>
+  <div class="container">
+    <h1>💎 Premium Channel Shadow Tracker</h1>
+    <div class="grid" id="summary"></div>
+    <div class="card" style="margin-bottom:20px"><h2>📊 止损/止盈分布</h2><div id="reasons"></div></div>
+    <div class="card" style="margin-bottom:20px"><h2>🟢 当前持仓</h2><table id="open-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>当前PnL</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
+    <div class="card"><h2>📋 最近交易</h2><table id="recent-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <script>
+    async function loadData(){
+      try{
+        const res=await fetch('/api/shadow-pnl');
+        const d=await res.json();
+        const s=d.summary;
+        document.getElementById('summary').innerHTML=
+          '<div class="card"><div class="big-num '+(s.winRate>=60?'green':s.winRate>=40?'yellow':'red')+'">'+s.winRate+'%</div><div class="label">胜率 ('+s.wins+'W/'+s.losses+'L)</div></div>'+
+          '<div class="card"><div class="big-num '+(s.totalPnl>=0?'green':'red')+'">'+(s.totalPnl>=0?'+':'')+s.totalPnl+'%</div><div class="label">总PnL ('+s.total+'笔)</div></div>'+
+          '<div class="card"><div class="big-num '+(s.avgPnl>=0?'green':'red')+'">'+(s.avgPnl>=0?'+':'')+s.avgPnl+'%</div><div class="label">平均PnL</div></div>'+
+          '<div class="card"><div class="big-num blue">'+d.open.length+'</div><div class="label">当前持仓</div></div>';
+
+        let rhtml='<table><thead><tr><th>类型</th><th>笔数</th><th>总PnL</th></tr></thead><tbody>';
+        for(const[k,v]of Object.entries(d.byReason).sort((a,b)=>b[1].totalPnl-a[1].totalPnl)){
+          rhtml+='<tr><td>'+k+'</td><td>'+v.count+'</td><td class="'+(v.totalPnl>=0?'pnl-pos':'pnl-neg')+'">'+(v.totalPnl>=0?'+':'')+v.totalPnl.toFixed(1)+'%</td></tr>';
+        }
+        rhtml+='</tbody></table>';
+        document.getElementById('reasons').innerHTML=rhtml;
+
+        const otb=document.querySelector('#open-table tbody');
+        otb.innerHTML=d.open.map(r=>'<tr><td>$'+r.symbol+' <span class="open-tag">OPEN</span></td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td>-</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td></tr>').join('');
+
+        const rtb=document.querySelector('#recent-table tbody');
+        rtb.innerHTML=d.recent.map(r=>{
+          const pnlCls=r.exit_pnl>0?'pnl-pos':'pnl-neg';
+          const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+          return '<tr><td>$'+r.symbol+'</td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+r.exit_pnl.toFixed(1)+'%</td><td class="pnl-pos">+'+r.high_pnl.toFixed(1)+'%</td><td class="pnl-neg">'+r.low_pnl.toFixed(1)+'%</td><td>'+r.exit_reason+'</td><td>'+t+'</td></tr>';
+        }).join('');
+      }catch(e){document.getElementById('summary').innerHTML='<div class="card"><div class="big-num red">加载失败</div></div>';}
+    }
+    loadData();
+    setInterval(loadData,15000);
+  </script>
+</body>
+</html>`;
+}
+
+/**
+ * 启动服务器
+ */
+export function startDashboardServer() {
+  server.listen(PORT, () => {
+    console.log(`🌐 Dashboard server running at http://localhost:${PORT}`);
+  });
+  return server;
+}
+
+// 直接运行时启动服务器
+// 兼容 PM2 启动方式 (process.env.name 在 ecosystem.config.cjs 中定义)
+if (import.meta.url === `file://${process.argv[1]}` || process.env.name === 'dashboard') {
+  startDashboardServer();
+}
+
+export default { startDashboardServer };

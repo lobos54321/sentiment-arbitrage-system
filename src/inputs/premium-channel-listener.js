@@ -1,0 +1,353 @@
+/**
+ * Premium Channel Listener (Egeye AI Gems 100X Vip)
+ *
+ * Uses Telegram User API (MTProto) to monitor a private paid signal channel.
+ * Parses "🔥 New Trending" messages for token signals, ignores ATH alerts.
+ * No database dependency - emits signals via callback.
+ */
+
+import { TelegramClient } from 'telegram';
+import { StringSession } from 'telegram/sessions/index.js';
+import { NewMessage } from 'telegram/events/index.js';
+import { Api } from 'telegram';
+
+const DEFAULT_CHANNEL_ID = 3636518327;
+const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+// Solana base58 address pattern
+const SOL_ADDRESS_RE = /\b([1-9A-HJ-NP-Za-km-z]{32,44})\b/g;
+
+// Known false-positive patterns (URLs, common words that match base58)
+const FALSE_POSITIVE_RE = /^(https?|discord|telegram|dexscreener|twitter|solscan)/i;
+
+export class PremiumChannelListener {
+  constructor(config = {}) {
+    this.config = config;
+    this.client = null;
+    this.isRunning = false;
+    this.channelEntity = null;
+    this.signalCallbacks = [];
+    this.recentTokens = new Map(); // token_ca -> timestamp for dedup
+  }
+
+  /**
+   * Register a signal callback
+   */
+  onSignal(callback) {
+    this.signalCallbacks.push(callback);
+  }
+
+  /**
+   * Start listener - connect, find channel, register handler
+   */
+  async start() {
+    try {
+      const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');
+      const apiHash = process.env.TELEGRAM_API_HASH || '';
+      const sessionString = process.env.TELEGRAM_SESSION || '';
+
+      if (!apiId || !apiHash || !sessionString) {
+        console.error('❌ Missing Telegram User API credentials');
+        console.error('   Please run: node scripts/authenticate-telegram.js');
+        return;
+      }
+
+      const channelId = parseInt(process.env.PREMIUM_CHANNEL_ID || String(DEFAULT_CHANNEL_ID));
+
+      const session = new StringSession(sessionString);
+      this.client = new TelegramClient(session, apiId, apiHash, {
+        connectionRetries: 5,
+      });
+
+      await this.client.connect();
+      console.log('✅ Connected to Telegram User API (Premium)');
+
+      // Find the private channel by numeric ID via dialogs
+      this.channelEntity = await this._findChannelById(channelId);
+      if (!this.channelEntity) {
+        console.error(`❌ Could not find premium channel with ID ${channelId}`);
+        console.error('   Make sure the account has joined the channel');
+        return;
+      }
+
+      console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
+
+      // Register message handler
+      this.client.addEventHandler(
+        (event) => this._handleMessage(event),
+        new NewMessage({})
+      );
+
+      this.isRunning = true;
+      console.log('✅ Premium channel listener started');
+
+    } catch (error) {
+      console.error('❌ Failed to start premium channel listener:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Find channel entity by numeric ID using getDialogs
+   */
+  async _findChannelById(channelId) {
+    try {
+      const dialogs = await this.client.getDialogs({ limit: 200 });
+
+      for (const dialog of dialogs) {
+        const entity = dialog.entity;
+        if (!entity) continue;
+
+        // Match by channel ID (could be stored as id or as -100 prefixed)
+        const entityId = entity.id?.value !== undefined
+          ? Number(entity.id.value)
+          : Number(entity.id);
+
+        if (entityId === channelId) {
+          return entity;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error('❌ Error finding channel:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Handle incoming messages
+   */
+  async _handleMessage(event) {
+    try {
+      const message = event.message;
+      if (!message || !message.peerId) return;
+
+      // Check if message is from our premium channel
+      const peerId = message.peerId;
+      const msgChannelId = peerId.channelId?.value !== undefined
+        ? Number(peerId.channelId.value)
+        : Number(peerId.channelId || 0);
+
+      const targetId = this.channelEntity.id?.value !== undefined
+        ? Number(this.channelEntity.id.value)
+        : Number(this.channelEntity.id);
+
+      if (msgChannelId !== targetId) return;
+
+      const text = message.text || message.message || '';
+      if (!text) return;
+
+      // Process 🔥 New Trending OR 📈 ATH messages
+      if (text.includes('🔥') && text.includes('New Trending')) {
+        const signal = this._parseSignal(text);
+        if (!signal) return;
+        if (this._isDuplicate(signal.token_ca)) return;
+        this._emitSignal(signal);
+      } else if (text.includes('📈') && text.includes('ATH')) {
+        console.log(`📈 [ATH原文] ${text.substring(0, 200)}`);
+        const signal = this._parseATHSignal(text);
+        if (!signal) {
+          console.log(`⚠️ [ATH] 解析失败: ${text.substring(0, 100)}`);
+          return;
+        }
+        console.log(`📈 [ATH解析] $${signal.symbol} gain=${signal.gain_pct}% MC=${signal.market_cap_from}→${signal.market_cap} is_ath=${signal.is_ath}`);
+        if (this._isDuplicate(signal.token_ca)) return;
+        this._emitSignal(signal);
+      }
+
+    } catch (error) {
+      console.error('❌ Premium message handler error:', error.message);
+    }
+  }
+
+  /**
+   * Parse a 🔥 New Trending message into a signal object
+   */
+  _parseSignal(text) {
+    // Extract symbol: 📍 SYMBOL：$xxx
+    const symbolMatch = text.match(/📍\s*SYMBOL[：:]\s*\$(\S+)/);
+    const symbol = symbolMatch ? symbolMatch[1] : null;
+
+    // Extract market cap: 🏦 MC: xxx
+    const mcMatch = text.match(/🏦\s*MC[：:]?\s*\$?([\d,.]+)\s*([KMBkmb])?/);
+    const market_cap = mcMatch ? this._parseNumber(mcMatch[1], mcMatch[2]) : 0;
+
+    // Extract holders: 👥 Holders: xxx
+    const holdersMatch = text.match(/👥\s*Holders[：:]\s*([\d,]+)/);
+    const holders = holdersMatch ? parseInt(holdersMatch[1].replace(/,/g, '')) : 0;
+
+    // Extract volume 24h: 💰 Vol24H: $xxx
+    const volMatch = text.match(/💰\s*Vol24H[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/);
+    const volume_24h = volMatch ? this._parseNumber(volMatch[1], volMatch[2]) : 0;
+
+    // Extract top10 percentage: 📊 Top10: xx.xx%
+    const top10Match = text.match(/📊\s*Top10[：:]\s*([\d.]+)%/);
+    const top10_pct = top10Match ? parseFloat(top10Match[1]) : 0;
+
+    // Extract freeze authority: ⚠freezeAuthority: ✅
+    const freeze_ok = /freezeAuthority[：:]\s*✅/.test(text);
+
+    // Extract mint authority disabled: mintAuthorityDisabled: ✅
+    const mint_ok = /mintAuthorityDisabled[：:]\s*✅/.test(text);
+
+    // Extract age: 🕒 Age: xxx
+    const ageMatch = text.match(/🕒\s*Age[：:]\s*(\S+)/);
+    const age = ageMatch ? ageMatch[1] : '';
+
+    // Extract Solana contract address
+    const token_ca = this._extractSolAddress(text);
+    if (!token_ca) return null;
+
+    return {
+      token_ca,
+      chain: 'SOL',
+      symbol: symbol || 'UNKNOWN',
+      market_cap,
+      holders,
+      volume_24h,
+      top10_pct,
+      freeze_ok,
+      mint_ok,
+      age,
+      description: text,
+      channel: 'Egeye AI Gems 100X Vip',
+      timestamp: Date.now(),
+      source: 'premium_channel',
+    };
+  }
+
+  /**
+   * Parse 📈 ATH message
+   * Format: "📈New ATH $KIRBY is up **51%** 📈" or "📈New ATH $PMPR is up **15.43X** 📈"
+   */
+  _parseATHSignal(text) {
+    // Extract symbol and gain: $SYMBOL is up **XX%** or **X.XXX**
+    const athMatch = text.match(/\$(\S+)\s+is\s+up\s+\*{0,2}([\d.]+)(%|X)\*{0,2}/i);
+    const symbol = athMatch ? athMatch[1] : null;
+    let gainPct = 0;
+    if (athMatch) {
+      if (athMatch[3].toUpperCase() === 'X') {
+        gainPct = (parseFloat(athMatch[2]) - 1) * 100; // 2.15X = +115%
+      } else {
+        gainPct = parseFloat(athMatch[2]); // 51% = +51%
+      }
+    }
+
+    // Extract MC range: $12.86K —> $23.62K
+    const mcMatch = text.match(/\$([\d,.]+)\s*([KMBkmb])?\s*[—\-]+>\s*\$([\d,.]+)\s*([KMBkmb])?/);
+    const mcFrom = mcMatch ? this._parseNumber(mcMatch[1], mcMatch[2]) : 0;
+    const mcTo = mcMatch ? this._parseNumber(mcMatch[3], mcMatch[4]) : 0;
+
+    // Extract CA
+    const token_ca = this._extractSolAddress(text);
+    if (!token_ca) return null;
+
+    return {
+      token_ca,
+      chain: 'SOL',
+      symbol: symbol || 'UNKNOWN',
+      market_cap: mcTo || mcFrom,
+      market_cap_from: mcFrom,
+      gain_pct: gainPct,
+      is_ath: true,
+      holders: 0,
+      volume_24h: 0,
+      top10_pct: 0,
+      freeze_ok: null,
+      mint_ok: null,
+      age: '',
+      description: text,
+      channel: 'Egeye AI Gems 100X Vip',
+      timestamp: Date.now(),
+      source: 'premium_channel_ath',
+    };
+  }
+
+  /**
+   * Extract a Solana base58 address from text, filtering false positives
+   */
+  _extractSolAddress(text) {
+    const matches = text.match(SOL_ADDRESS_RE);
+    if (!matches) return null;
+
+    for (const match of matches) {
+      // Skip short matches (likely not addresses)
+      if (match.length < 32) continue;
+      // Skip known false positives
+      if (FALSE_POSITIVE_RE.test(match)) continue;
+      // Skip if it looks like a URL fragment
+      if (match.includes('.')) continue;
+      return match;
+    }
+    return null;
+  }
+
+  /**
+   * Parse number with K/M/B suffix
+   */
+  _parseNumber(numStr, suffix) {
+    const num = parseFloat(numStr.replace(/,/g, ''));
+    if (!suffix) return num;
+    const multipliers = { k: 1e3, m: 1e6, b: 1e9 };
+    return num * (multipliers[suffix.toLowerCase()] || 1);
+  }
+
+  /**
+   * Check if token was seen within dedup window
+   */
+  _isDuplicate(tokenCa) {
+    const now = Date.now();
+
+    // Clean expired entries
+    for (const [ca, ts] of this.recentTokens) {
+      if (now - ts > DEDUP_WINDOW_MS) {
+        this.recentTokens.delete(ca);
+      }
+    }
+
+    if (this.recentTokens.has(tokenCa)) return true;
+
+    this.recentTokens.set(tokenCa, now);
+    return false;
+  }
+
+  /**
+   * Emit signal to all registered callbacks
+   */
+  _emitSignal(signal) {
+    console.log(`\n🔔 PREMIUM SIGNAL: $${signal.symbol} (${signal.token_ca.substring(0, 8)}...) MC: $${signal.market_cap}`);
+
+    for (const cb of this.signalCallbacks) {
+      try {
+        cb(signal);
+      } catch (error) {
+        console.error('❌ Signal callback error:', error.message);
+      }
+    }
+  }
+
+  /**
+   * Stop listener
+   */
+  async stop() {
+    if (this.client && this.isRunning) {
+      await this.client.disconnect();
+      this.isRunning = false;
+      console.log('⏹️  Premium channel listener stopped');
+    }
+  }
+
+  /**
+   * Get service status
+   */
+  getStatus() {
+    return {
+      is_running: this.isRunning,
+      channel: 'Egeye AI Gems 100X Vip',
+      channel_found: !!this.channelEntity,
+      dedup_cache_size: this.recentTokens.size,
+      callbacks_registered: this.signalCallbacks.length,
+    };
+  }
+}

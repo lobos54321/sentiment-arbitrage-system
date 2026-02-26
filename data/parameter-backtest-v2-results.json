@@ -1,0 +1,217 @@
+{
+  "goldDogSymbols": [
+    "BOAR",
+    "NIKITA",
+    "WhaleGuru",
+    "WTF",
+    "WHITEDOG",
+    "FAP",
+    "LUMEN",
+    "小股东",
+    "B",
+    "数字泔水",
+    "自下而上",
+    "Nice to meet U",
+    "WAGBI",
+    "柚子",
+    "UDOG",
+    "Donatello",
+    "WhiteOora",
+    "Mobi",
+    "WhaleQueen",
+    "WHALEFLOKI",
+    "PsyopAnime",
+    "NYC",
+    "GOBLIN",
+    "Aiden",
+    "WABI"
+  ],
+  "goldFiltered": 16,
+  "goldGraduated": 1,
+  "noiseFiltered": 87,
+  "goodFiltered": 18,
+  "goldScores": [
+    {
+      "symbol": "NIKITA",
+      "score": 23,
+      "gain": 37.6,
+      "status": "过滤"
+    },
+    {
+      "symbol": "WhaleGuru",
+      "score": 23,
+      "gain": 19.1,
+      "status": "过滤"
+    },
+    {
+      "symbol": "FAP",
+      "score": 23,
+      "gain": 18.3,
+      "status": "过滤"
+    },
+    {
+      "symbol": "LUMEN",
+      "score": 23,
+      "gain": 25.8,
+      "status": "过滤"
+    },
+    {
+      "symbol": "小股东",
+      "score": 23,
+      "gain": 31.1,
+      "status": "过滤"
+    },
+    {
+      "symbol": "B",
+      "score": 23,
+      "gain": 8.2,
+      "status": "过滤"
+    },
+    {
+      "symbol": "自下而上",
+      "score": 20,
+      "gain": 12.5,
+      "status": "过滤"
+    },
+    {
+      "symbol": "WAGBI",
+      "score": 20,
+      "gain": 14.9,
+      "status": "过滤"
+    },
+    {
+      "symbol": "Donatello",
+      "score": 20,
+      "gain": 23.9,
+      "status": "过滤"
+    },
+    {
+      "symbol": "WhiteOora",
+      "score": 23,
+      "gain": 21.9,
+      "status": "过滤"
+    },
+    {
+      "symbol": "Mobi",
+      "score": 20,
+      "gain": 10.3,
+      "status": "过滤"
+    },
+    {
+      "symbol": "WhaleQueen",
+      "score": 23,
+      "gain": 25,
+      "status": "过滤"
+    },
+    {
+      "symbol": "WHALEFLOKI",
+      "score": 23,
+      "gain": 11.4,
+      "status": "过滤"
+    },
+    {
+      "symbol": "PsyopAnime",
+      "score": 20,
+      "gain": 48.7,
+      "status": "过滤"
+    },
+    {
+      "symbol": "NYC",
+      "score": 20,
+      "gain": 30.6,
+      "status": "过滤"
+    },
+    {
+      "symbol": "Aiden",
+      "score": 23,
+      "gain": 21.4,
+      "status": "过滤"
+    }
+  ],
+  "thresholdResults": [
+    {
+      "threshold": 18,
+      "goldPassRate": 100,
+      "noiseFilterRate": 16.091954022988507,
+      "compositeScore": 66.4367816091954
+    },
+    {
+      "threshold": 20,
+      "goldPassRate": 100,
+      "noiseFilterRate": 16.091954022988507,
+      "compositeScore": 66.4367816091954
+    },
+    {
+      "threshold": 14,
+      "goldPassRate": 100,
+      "noiseFilterRate": 12.643678160919542,
+      "compositeScore": 65.05747126436782
+    },
+    {
+      "threshold": 16,
+      "goldPassRate": 100,
+      "noiseFilterRate": 12.643678160919542,
+      "compositeScore": 65.05747126436782
+    },
+    {
+      "threshold": 10,
+      "goldPassRate": 100,
+      "noiseFilterRate": 0,
+      "compositeScore": 60
+    },
+    {
+      "threshold": 12,
+      "goldPassRate": 100,
+      "noiseFilterRate": 0,
+      "compositeScore": 60
+    },
+    {
+      "threshold": 22,
+      "goldPassRate": 62.5,
+      "noiseFilterRate": 39.08045977011494,
+      "compositeScore": 53.132183908045974
+    },
+    {
+      "threshold": 24,
+      "goldPassRate": 0,
+      "noiseFilterRate": 100,
+      "compositeScore": 40
+    },
+    {
+      "threshold": 26,
+      "goldPassRate": 0,
+      "noiseFilterRate": 100,
+      "compositeScore": 40
+    },
+    {
+      "threshold": 28,
+      "goldPassRate": 0,
+      "noiseFilterRate": 100,
+      "compositeScore": 40
+    },
+    {
+      "threshold": 30,
+      "goldPassRate": 0,
+      "noiseFilterRate": 100,
+      "compositeScore": 40
+    },
+    {
+      "threshold": 32,
+      "goldPassRate": 0,
+      "noiseFilterRate": 100,
+      "compositeScore": 40
+    },
+    {
+      "threshold": 34,
+      "goldPassRate": 0,
+      "noiseFilterRate": 100,
+      "compositeScore": 40
+    }
+  ],
+  "bestThreshold": {
+    "threshold": 18,
+    "goldPassRate": 100,
+    "noiseFilterRate": 16.091954022988507,
+    "compositeScore": 66.4367816091954
+  }
+}

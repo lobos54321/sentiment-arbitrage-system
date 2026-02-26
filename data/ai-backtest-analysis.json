@@ -1,0 +1,375 @@
+{
+  "timestamp": "2026-01-13T02:08:40.983Z",
+  "summary": {
+    "totalAILogs": 311,
+    "totalDecisions": 102,
+    "buyDecisions": 96,
+    "watchDecisions": 3,
+    "discardDecisions": 3,
+    "goldDogCount": 77
+  },
+  "performance": {
+    "buyHitRate": 9.375,
+    "goldDogCoverage": 6.493506493506493,
+    "wrongDiscards": 0
+  },
+  "tierAnalysis": {
+    "UNKNOWN": {
+      "total": 1,
+      "hits": 0
+    },
+    "TIERB": {
+      "total": 32,
+      "hits": 1
+    },
+    "TIERA": {
+      "total": 58,
+      "hits": 8
+    },
+    "TIERS": {
+      "total": 1,
+      "hits": 0
+    },
+    "TIERC": {
+      "total": 4,
+      "hits": 0
+    }
+  },
+  "hitDetails": [
+    {
+      "symbol": "CUC",
+      "tier": "TIERB",
+      "gain": 42
+    },
+    {
+      "symbol": "BITLORD",
+      "tier": "TIERA",
+      "gain": 42
+    },
+    {
+      "symbol": "BITLORD",
+      "tier": "TIERA",
+      "gain": 42
+    },
+    {
+      "symbol": "MOOWAN",
+      "tier": "TIERA",
+      "gain": 33
+    },
+    {
+      "symbol": "MOOWAN",
+      "tier": "TIERA",
+      "gain": 33
+    },
+    {
+      "symbol": "BOAR",
+      "tier": "TIERA",
+      "gain": 20.1
+    },
+    {
+      "symbol": "BOAR",
+      "tier": "TIERA",
+      "gain": 20.1
+    },
+    {
+      "symbol": "BITLORD",
+      "tier": "TIERA",
+      "gain": 42
+    },
+    {
+      "symbol": "MORTICIA",
+      "tier": "TIERA",
+      "gain": 42
+    }
+  ],
+  "missedGoldDogs": [
+    {
+      "symbol": "PlastWhale",
+      "gain": 20.1
+    },
+    {
+      "symbol": "BSC之家",
+      "gain": 31.1
+    },
+    {
+      "symbol": "Crypto winter",
+      "gain": 24.2
+    },
+    {
+      "symbol": "NIKITA",
+      "gain": 20.1
+    },
+    {
+      "symbol": "Sperm",
+      "gain": 11
+    },
+    {
+      "symbol": "老子",
+      "gain": 31.1
+    },
+    {
+      "symbol": "crypto guy",
+      "gain": 23.4
+    },
+    {
+      "symbol": "gm",
+      "gain": 30.6
+    },
+    {
+      "symbol": "P",
+      "gain": 14.2
+    },
+    {
+      "symbol": "草根文化",
+      "gain": 38.9
+    },
+    {
+      "symbol": "WTF",
+      "gain": 20.1
+    },
+    {
+      "symbol": "paraballic",
+      "gain": 10.4
+    },
+    {
+      "symbol": "小股东",
+      "gain": 28.4
+    },
+    {
+      "symbol": "火箭狗",
+      "gain": 15.1
+    },
+    {
+      "symbol": "SEX",
+      "gain": 14.2
+    },
+    {
+      "symbol": "Remusofmars",
+      "gain": 30.6
+    },
+    {
+      "symbol": "水豚噜噜",
+      "gain": 176.7
+    },
+    {
+      "symbol": "MEME浪潮",
+      "gain": 14.9
+    },
+    {
+      "symbol": "哭哭马",
+      "gain": 15.1
+    },
+    {
+      "symbol": "超级周期",
+      "gain": 15.1
+    },
+    {
+      "symbol": "oora",
+      "gain": 30.6
+    },
+    {
+      "symbol": "人民文化",
+      "gain": 20.1
+    },
+    {
+      "symbol": "死了么",
+      "gain": 15.1
+    },
+    {
+      "symbol": "TWOBOOBS",
+      "gain": 20.1
+    },
+    {
+      "symbol": "哈基米",
+      "gain": 22.9
+    },
+    {
+      "symbol": "114514",
+      "gain": 20.1
+    },
+    {
+      "symbol": "TRUMPO",
+      "gain": 13
+    },
+    {
+      "symbol": "币安英雄",
+      "gain": 176.7
+    },
+    {
+      "symbol": "dApp",
+      "gain": 37.4
+    },
+    {
+      "symbol": "川普",
+      "gain": 22.9
+    },
+    {
+      "symbol": "TAP",
+      "gain": 20.1
+    },
+    {
+      "symbol": "牛马",
+      "gain": 176.7
+    },
+    {
+      "symbol": "人生K线",
+      "gain": 38.9
+    },
+    {
+      "symbol": "B",
+      "gain": 19.1
+    },
+    {
+      "symbol": "主理人",
+      "gain": 176.7
+    },
+    {
+      "symbol": "택배기사#한진",
+      "gain": 22.9
+    },
+    {
+      "symbol": "草根人生",
+      "gain": 33
+    },
+    {
+      "symbol": "HAPPY-SCI",
+      "gain": 82.5
+    },
+    {
+      "symbol": "主理小妮",
+      "gain": 22.9
+    },
+    {
+      "symbol": "fish",
+      "gain": 42
+    },
+    {
+      "symbol": "SOL",
+      "gain": 11.2
+    },
+    {
+      "symbol": "testicle2",
+      "gain": 16.2
+    },
+    {
+      "symbol": "testicle",
+      "gain": 42
+    },
+    {
+      "symbol": "Alone",
+      "gain": 30.6
+    },
+    {
+      "symbol": "汉",
+      "gain": 19.8
+    },
+    {
+      "symbol": "Orca",
+      "gain": 12.5
+    },
+    {
+      "symbol": "chicken",
+      "gain": 42
+    },
+    {
+      "symbol": "hippo",
+      "gain": 10.4
+    },
+    {
+      "symbol": "黑马",
+      "gain": 125.8
+    },
+    {
+      "symbol": "WhiteWhale",
+      "gain": 11.2
+    },
+    {
+      "symbol": "MEEP",
+      "gain": 12.8
+    },
+    {
+      "symbol": "Hacker",
+      "gain": 18.5
+    },
+    {
+      "symbol": "TestiWhale",
+      "gain": 18.7
+    },
+    {
+      "symbol": "WhiteShiba",
+      "gain": 18.5
+    },
+    {
+      "symbol": "LYNNCOIN",
+      "gain": 10.4
+    },
+    {
+      "symbol": "HYCZ",
+      "gain": 27.1
+    },
+    {
+      "symbol": "交易猫",
+      "gain": 22.3
+    },
+    {
+      "symbol": "赛博功德箱",
+      "gain": 10.6
+    },
+    {
+      "symbol": "AMELIA",
+      "gain": 18.5
+    },
+    {
+      "symbol": "Korokke",
+      "gain": 42
+    },
+    {
+      "symbol": "CalfWhale",
+      "gain": 42
+    },
+    {
+      "symbol": "一马当先",
+      "gain": 82.5
+    },
+    {
+      "symbol": "Fartcoin",
+      "gain": 42
+    },
+    {
+      "symbol": "vagina",
+      "gain": 18.5
+    },
+    {
+      "symbol": "大开门",
+      "gain": 125.8
+    },
+    {
+      "symbol": "Whalter",
+      "gain": 41
+    },
+    {
+      "symbol": "辣妹子",
+      "gain": 20.6
+    },
+    {
+      "symbol": "BILLIONS",
+      "gain": 57.5
+    },
+    {
+      "symbol": "SPSC",
+      "gain": 26.8
+    },
+    {
+      "symbol": "DUCK",
+      "gain": 57.5
+    },
+    {
+      "symbol": "Lobster",
+      "gain": 11.5
+    },
+    {
+      "symbol": "TAXSTRIKE",
+      "gain": 57.5
+    }
+  ]
+}

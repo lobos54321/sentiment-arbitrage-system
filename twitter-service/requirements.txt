@@ -1,0 +1,18 @@
+# Twitter Client
+twikit==2.1.0
+
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# HTTP Client
+httpx==0.25.1
+aiohttp==3.9.1
+
+# Cache
+redis==5.0.1
+diskcache==5.6.3
+
+# Utilities
+python-dotenv==1.0.0

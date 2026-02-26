@@ -1,0 +1,126 @@
+{
+  "analyzed_at": "2026-01-13T00:08:40.602Z",
+  "total_filtered": 24,
+  "tokens": [
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0xff13322caaff267988cdb980fddf7fc0c8d04444"
+    },
+    {
+      "symbol": "AISI",
+      "score": 23,
+      "address": "EeEU6Fud9DRt4v3LQWzw5Sc4hMd4pdiht34z7SCnpump"
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 20,
+      "address": "GJ9LEQZgoxW487LRaRnajr6DWzouswd29EruRqwZBAGS"
+    },
+    {
+      "symbol": "21",
+      "score": 20,
+      "address": "AGkMenq8o7WEx3nPcfAm7bGAKaRkdJ6tisXQ6JBEpump"
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 20,
+      "address": "0x428f76624049e6930cd853019d894d9a62314444"
+    },
+    {
+      "symbol": "STARPAY",
+      "score": 20,
+      "address": "8S4uv6hcN8c17CyyBfceyGiyKPKtKvwrxPMptbiCpump"
+    },
+    {
+      "symbol": "至尊宝",
+      "score": 23,
+      "address": "EKPWiLk5fwTNZVeL5PrKSFDjdJrvRkvoPafVT54ppump"
+    },
+    {
+      "symbol": "DOGE.2.0",
+      "score": 23,
+      "address": "a3W4qutoEJA4232T2gwZUfgYJTetr96pU4SJMwppump"
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x50db5f101f878d64297036f86ff130e757484444"
+    },
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0x7810aa59e258e2b6c79a4aadf46f0bef20a24444"
+    },
+    {
+      "symbol": "VCASH",
+      "score": 23,
+      "address": "3QrGcwFSKXiKetD5ixzZa7H4zHPuTg8grrH7s5Mzpump"
+    },
+    {
+      "symbol": "腾小马",
+      "score": 23,
+      "address": "0x3e17ee3b1895dd1a7cf993a89769c5e029584444"
+    },
+    {
+      "symbol": "VCASH",
+      "score": 23,
+      "address": "5YQsa8Q1LXSvwhp58PBAgFBtYSGFEQgC8ARymMgMbonk"
+    },
+    {
+      "symbol": "WhiteOora",
+      "score": 20,
+      "address": "2tJU3pMh4HJjKa9HN6HngdopfNqqaeEytFqW98Kqpump"
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 23,
+      "address": "5tr6q9DqzhYse9FAzswmyfHVXA5SgAxNJtZ3Usqvpump"
+    },
+    {
+      "symbol": "Peepo",
+      "score": 23,
+      "address": "6PMuLSPRz9ae2xPDn5Dc3zH3kDtmE7tTyL8XQKmEbonk"
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x0f9ceb396857a20a8ba06db0cd57460fb2834444"
+    },
+    {
+      "symbol": "Kurumi",
+      "score": 23,
+      "address": "3E7LWnvBjKiauBJfbSFe86A1i5Rnzzs853bbjTmApump"
+    },
+    {
+      "symbol": "WALL",
+      "score": 23,
+      "address": "7pzTpGwW3YgZdhaj28RTUBxkPWTBwcnnSJKcdpedory"
+    },
+    {
+      "symbol": "meme rush",
+      "score": 23,
+      "address": "0x6fafec4730e0102d8ac82b00de460b9f31f44444"
+    },
+    {
+      "symbol": "STARPAY",
+      "score": 20,
+      "address": "5rqJa2TqsEeP5LbXHnsLREjWq2fvVTSmBhPJdPgFpump"
+    },
+    {
+      "symbol": "牛马",
+      "score": 23,
+      "address": "0x5e06f0309971f9a6b094798573a18845a1bc7777"
+    },
+    {
+      "symbol": "至尊宝",
+      "score": 23,
+      "address": "0x3c8455f18ff03dd6e94b6cddeabc79ec75c34444"
+    },
+    {
+      "symbol": "Hacker",
+      "score": 20,
+      "address": "8TuHAfTBTMW1fJNq5bNoeX4zhk2492DNsCgVSYzApump"
+    }
+  ]
+}

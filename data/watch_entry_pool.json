@@ -1,0 +1,1538 @@
+[
+  {
+    "address": "7pskt3A1Zsjhngazam7vHWjWHnfgiRump916Xj7ABAGS",
+    "symbol": "GAS",
+    "chain": "SOL",
+    "targetPrice": 0.0005,
+    "entryTimestamp": 1768309187909,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "GAS",
+      "address": "7pskt3A1Zsjhngazam7vHWjWHnfgiRump916Xj7ABAGS",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 70,
+      "observeMinutes": 3,
+      "smInitial": 4,
+      "smCurrent": 4,
+      "priceChange": "-17.8",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0005,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "9RaBDMwL2hcmah5yzXjBLiiYxHiBbd2jSEH3q6KCpump",
+    "symbol": "gm",
+    "chain": "SOL",
+    "targetPrice": 0.000002,
+    "entryTimestamp": 1768318686824,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "gm",
+      "address": "9RaBDMwL2hcmah5yzXjBLiiYxHiBbd2jSEH3q6KCpump",
+      "chain": "SOL",
+      "tier": "GOLD",
+      "score": 76,
+      "observeMinutes": 46,
+      "smInitial": 3,
+      "smCurrent": 3,
+      "priceChange": "-8.7",
+      "tag": "NORMAL",
+      "poolType": "GOLD",
+      "targetEntryPrice": 0.000002,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "HCYpdfdDoeMzhhDRCHrqRKn7WyzyBBahR41q3VWysV7z",
+    "symbol": "SHDW",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768337477389,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "SHDW",
+      "address": "HCYpdfdDoeMzhhDRCHrqRKn7WyzyBBahR41q3VWysV7z",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 70,
+      "observeMinutes": 30,
+      "smInitial": 3,
+      "smCurrent": 3,
+      "priceChange": "14.1",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "Ew8KqgSitYucieR5KnSAL2SUFspcwA8AgSuZ5xWspump",
+    "symbol": "Kurumi",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768360279143,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "Kurumi",
+      "address": "Ew8KqgSitYucieR5KnSAL2SUFspcwA8AgSuZ5xWspump",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 71,
+      "observeMinutes": 103,
+      "smInitial": 1,
+      "smCurrent": 1,
+      "priceChange": "0.4",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "3vZY2MKBzRMoT4nGUCWYzXPTES2jLaLNMV8Fn5cKpump",
+    "symbol": "Token",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768364474800,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "Token",
+      "address": "3vZY2MKBzRMoT4nGUCWYzXPTES2jLaLNMV8Fn5cKpump",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 68,
+      "observeMinutes": 496,
+      "smInitial": 3,
+      "smCurrent": 3,
+      "priceChange": "5.0",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "0x4dbc56a42524e553a069c7c955e32b6f089cc1e2",
+    "symbol": "UDOG",
+    "chain": "BSC",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768364783083,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "UDOG",
+      "address": "0x4dbc56a42524e553a069c7c955e32b6f089cc1e2",
+      "chain": "BSC",
+      "tier": "SILVER",
+      "score": 66,
+      "observeMinutes": 480,
+      "smInitial": 1,
+      "smCurrent": 1,
+      "priceChange": "-13.1",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "8TuHAfTBTMW1fJNq5bNoeX4zhk2492DNsCgVSYzApump",
+    "symbol": "AMELIA",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768397745106,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "AMELIA",
+      "address": "8TuHAfTBTMW1fJNq5bNoeX4zhk2492DNsCgVSYzApump",
+      "chain": "SOL",
+      "tier": "GOLD",
+      "score": 79,
+      "observeMinutes": 33,
+      "smInitial": 1,
+      "smCurrent": 1,
+      "priceChange": "22.1",
+      "tag": "NORMAL",
+      "poolType": "GOLD",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+    "symbol": "DEGENERACY",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768398161226,
+    "intentionTier": null,
+    "initialPrice": 0.0003484145042,
+    "token": {
+      "signal": {
+        "token_ca": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+        "symbol": "DEGENERACY",
+        "chain": "SOL",
+        "smart_wallet_online": 2,
+        "price": 0.0003484145042,
+        "liquidity": 69292.15118622367,
+        "marketCap": 348408.89231249597,
+        "holders": 677,
+        "volume": 4637.694727413823,
+        "isMintAbandoned": true,
+        "klineData": [],
+        "score": 64,
+        "timing": "UNKNOWN"
+      },
+      "analysis": {
+        "token": {
+          "tokenAddress": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+          "chain": "SOL",
+          "symbol": "DEGENERACY",
+          "smartWalletOnline": 2,
+          "smartWalletTotal": 4,
+          "liquidity": 69292.15118622367,
+          "marketCap": 348408.89231249597,
+          "price": 0.0003484145042,
+          "holders": 677,
+          "volume": 4637.694727413823,
+          "signalCount": 1,
+          "maxPriceGain": 0.6757669446155613,
+          "tokenLevel": "bronze",
+          "isMintAbandoned": true,
+          "aiReport": {
+            "project_name": "DEGENERACY",
+            "contract_address": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+            "background": {
+              "origin": {
+                "text": "名称直接取自“degen”(投机型梗)文化；合约描述缺失，推文多以“pure degen culture on-chain”“Pump Fun Algo”等表述构建叙事，定位为以社区投机与短期波动为核心的 meme 币。",
+                "ref": ""
+              }
+            },
+            "narrative_type": "项目类",
+            "distribution": {
+              "celebrity_support": {
+                "text": "None",
+                "ref": ""
+              },
+              "max_views": {
+                "text": "12409（最高单帖浏览）",
+                "ref": ""
+              },
+              "max_likes": {
+                "text": "57（最高点赞）",
+                "ref": ""
+              },
+              "max_comments": {
+                "text": "7（最高评论）",
+                "ref": ""
+              },
+              "community_participation": {
+                "text": "以散户和小型推特账号为主，存在多条重复推广、短期接力式讨论",
+                "ref": ""
+              },
+              "negative_incidents": {
+                "text": "推文披露链上持仓集中（提及 insiders 3.6%，CEX/币安集群占比较高），提示集中化与潜在退出风险；无明确公开跑路证据",
+                "ref": ""
+              }
+            },
+            "developer_info": {
+              "identity": {
+                "text": "",
+                "ref": ""
+              },
+              "address_analysis": {
+                "text": "",
+                "ref": ""
+              }
+            },
+            "valuation": {
+              "current_marketcap": {
+                "text": "",
+                "ref": ""
+              },
+              "benchmark_project": {
+                "name": "",
+                "address": "",
+                "reason": "",
+                "ref": ""
+              }
+            },
+            "rating": {
+              "score": "3",
+              "reason": "叙事与 degen 文化高度契合，具备短期病毒性；推特互动量分散、KOL 明显支持不足，链上显示持仓集中，持续性和信任度受限。"
+            }
+          },
+          "market_cap": 348408.89231249597,
+          "freshnessScore": 0.52
+        },
+        "aiReport": {
+          "project_name": "DEGENERACY",
+          "contract_address": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+          "background": {
+            "origin": {
+              "text": "名称直接取自“degen”(投机型梗)文化；合约描述缺失，推文多以“pure degen culture on-chain”“Pump Fun Algo”等表述构建叙事，定位为以社区投机与短期波动为核心的 meme 币。",
+              "ref": ""
+            }
+          },
+          "narrative_type": "项目类",
+          "distribution": {
+            "celebrity_support": {
+              "text": "None",
+              "ref": ""
+            },
+            "max_views": {
+              "text": "12409（最高单帖浏览）",
+              "ref": ""
+            },
+            "max_likes": {
+              "text": "57（最高点赞）",
+              "ref": ""
+            },
+            "max_comments": {
+              "text": "7（最高评论）",
+              "ref": ""
+            },
+            "community_participation": {
+              "text": "以散户和小型推特账号为主，存在多条重复推广、短期接力式讨论",
+              "ref": ""
+            },
+            "negative_incidents": {
+              "text": "推文披露链上持仓集中（提及 insiders 3.6%，CEX/币安集群占比较高），提示集中化与潜在退出风险；无明确公开跑路证据",
+              "ref": ""
+            }
+          },
+          "developer_info": {
+            "identity": {
+              "text": "",
+              "ref": ""
+            },
+            "address_analysis": {
+              "text": "",
+              "ref": ""
+            }
+          },
+          "valuation": {
+            "current_marketcap": {
+              "text": "",
+              "ref": ""
+            },
+            "benchmark_project": {
+              "name": "",
+              "address": "",
+              "reason": "",
+              "ref": ""
+            }
+          },
+          "rating": {
+            "score": "3",
+            "reason": "叙事与 degen 文化高度契合，具备短期病毒性；推特互动量分散、KOL 明显支持不足，链上显示持仓集中，持续性和信任度受限。"
+          }
+        },
+        "score": {
+          "total": 64,
+          "breakdown": {
+            "smartMoneyCount": 20,
+            "smartMoneyTrend": 10,
+            "signalDensity": 5,
+            "signalTrend": 8,
+            "safety": 15,
+            "debotAI": 6,
+            "bonus": 0
+          },
+          "details": [
+            "聪明钱: 20/25 (2个, 早期发现更高分)",
+            "趋势: 10/20 (STABLE)",
+            "密度: 5/15",
+            "信号趋势: 8/15 (STABLE)",
+            "安全: 15/15 [Mint✓,Liq✓,Holders✓]",
+            "AI: 6/10 (DeBot=3)"
+          ],
+          "tier": "scout",
+          "allowTrial": false,
+          "trends": {
+            "smartMoney": "STABLE",
+            "signal": "STABLE"
+          }
+        },
+        "decision": {
+          "action": "BUY",
+          "tier": "scout",
+          "position": 0.1,
+          "reason": "评分64达到scout级阈值",
+          "stopLoss": -30,
+          "takeProfit": [
+            100,
+            300
+          ]
+        },
+        "tokenState": {
+          "address": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+          "history": [
+            {
+              "time": 1768398073086,
+              "smartMoney": 2,
+              "signals": 1
+            },
+            {
+              "time": 1768407941145,
+              "smartMoney": 1,
+              "signals": 25
+            }
+          ],
+          "firstSeen": 1768398073086,
+          "lastSeen": 1768407941145,
+          "buyExecuted": false,
+          "totalPosition": 0
+        }
+      },
+      "symbol": "DEGENERACY",
+      "address": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+      "chain": "SOL",
+      "tier": "GOLD",
+      "score": 74,
+      "tag": "NORMAL",
+      "tags": {},
+      "intentionTier": null,
+      "startTime": 1768398073098,
+      "lastUpdateTime": 1768398937474,
+      "initial": {
+        "price": 0.0003484145042,
+        "smartMoney": 2,
+        "liquidity": 69292.15118622367,
+        "holders": 677,
+        "marketCap": 348408.89231249597
+      },
+      "current": {
+        "price": 0.0004393,
+        "smartMoney": 2,
+        "liquidity": 77767.08,
+        "holders": 677,
+        "marketCap": 348408.89231249597
+      },
+      "priceSnapshots": [
+        {
+          "time": 1768398652351,
+          "price": 0.0005017,
+          "sm": 2
+        },
+        {
+          "time": 1768398667352,
+          "price": 0.0005017,
+          "sm": 2
+        },
+        {
+          "time": 1768398682352,
+          "price": 0.0004838,
+          "sm": 2
+        },
+        {
+          "time": 1768398697354,
+          "price": 0.0004838,
+          "sm": 2
+        },
+        {
+          "time": 1768398712353,
+          "price": 0.0004838,
+          "sm": 2
+        },
+        {
+          "time": 1768398727351,
+          "price": 0.0004838,
+          "sm": 2
+        },
+        {
+          "time": 1768398742353,
+          "price": 0.0004838,
+          "sm": 2
+        },
+        {
+          "time": 1768398757352,
+          "price": 0.0004838,
+          "sm": 2
+        },
+        {
+          "time": 1768398772353,
+          "price": 0.0004809,
+          "sm": 2
+        },
+        {
+          "time": 1768398787355,
+          "price": 0.0004809,
+          "sm": 2
+        },
+        {
+          "time": 1768398802354,
+          "price": 0.0004809,
+          "sm": 2
+        },
+        {
+          "time": 1768398817353,
+          "price": 0.000481,
+          "sm": 2
+        },
+        {
+          "time": 1768398832353,
+          "price": 0.000481,
+          "sm": 2
+        },
+        {
+          "time": 1768398847367,
+          "price": 0.0004767,
+          "sm": 2
+        },
+        {
+          "time": 1768398862387,
+          "price": 0.0004767,
+          "sm": 2
+        },
+        {
+          "time": 1768398877389,
+          "price": 0.0004767,
+          "sm": 2
+        },
+        {
+          "time": 1768398892389,
+          "price": 0.0004665,
+          "sm": 2
+        },
+        {
+          "time": 1768398907391,
+          "price": 0.0004665,
+          "sm": 2
+        },
+        {
+          "time": 1768398922397,
+          "price": 0.0004665,
+          "sm": 2
+        },
+        {
+          "time": 1768398937474,
+          "price": 0.0004393,
+          "sm": 2
+        }
+      ],
+      "klineData": [],
+      "aiReport": {
+        "project_name": "DEGENERACY",
+        "contract_address": "Hn4MTyN495EXwNauGnTNYVrXvJoQf2R2PRpr2qL8pump",
+        "background": {
+          "origin": {
+            "text": "名称直接取自“degen”(投机型梗)文化；合约描述缺失，推文多以“pure degen culture on-chain”“Pump Fun Algo”等表述构建叙事，定位为以社区投机与短期波动为核心的 meme 币。",
+            "ref": ""
+          }
+        },
+        "narrative_type": "项目类",
+        "distribution": {
+          "celebrity_support": {
+            "text": "None",
+            "ref": ""
+          },
+          "max_views": {
+            "text": "12409（最高单帖浏览）",
+            "ref": ""
+          },
+          "max_likes": {
+            "text": "57（最高点赞）",
+            "ref": ""
+          },
+          "max_comments": {
+            "text": "7（最高评论）",
+            "ref": ""
+          },
+          "community_participation": {
+            "text": "以散户和小型推特账号为主，存在多条重复推广、短期接力式讨论",
+            "ref": ""
+          },
+          "negative_incidents": {
+            "text": "推文披露链上持仓集中（提及 insiders 3.6%，CEX/币安集群占比较高），提示集中化与潜在退出风险；无明确公开跑路证据",
+            "ref": ""
+          }
+        },
+        "developer_info": {
+          "identity": {
+            "text": "",
+            "ref": ""
+          },
+          "address_analysis": {
+            "text": "",
+            "ref": ""
+          }
+        },
+        "valuation": {
+          "current_marketcap": {
+            "text": "",
+            "ref": ""
+          },
+          "benchmark_project": {
+            "name": "",
+            "address": "",
+            "reason": "",
+            "ref": ""
+          }
+        },
+        "rating": {
+          "score": "3",
+          "reason": "叙事与 degen 文化高度契合，具备短期病毒性；推特互动量分散、KOL 明显支持不足，链上显示持仓集中，持续性和信任度受限。"
+        }
+      },
+      "stableStartTime": null,
+      "highWaterMark": 0.0005091,
+      "wasInDeadDog": false,
+      "observeTimeMultiplier": 1,
+      "intersectionBoost": null,
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+    "symbol": "PsyopManga",
+    "chain": "SOL",
+    "targetPrice": 0.000002,
+    "entryTimestamp": 1768399125052,
+    "intentionTier": null,
+    "initialPrice": 0.0003440738282,
+    "token": {
+      "signal": {
+        "token_ca": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+        "symbol": "PsyopManga",
+        "chain": "SOL",
+        "smart_wallet_online": 1,
+        "price": 0.0003440738282,
+        "liquidity": 62923.80468373622,
+        "marketCap": 344073.79569188715,
+        "holders": 1963,
+        "volume": 17193.883332911115,
+        "isMintAbandoned": true,
+        "klineData": [],
+        "score": 65,
+        "timing": "UNKNOWN"
+      },
+      "analysis": {
+        "token": {
+          "tokenAddress": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+          "chain": "SOL",
+          "symbol": "PsyopManga",
+          "smartWalletOnline": 1,
+          "smartWalletTotal": 3,
+          "liquidity": 62923.80468373622,
+          "marketCap": 344073.79569188715,
+          "price": 0.0003440738282,
+          "holders": 1963,
+          "volume": 17193.883332911115,
+          "signalCount": 10,
+          "maxPriceGain": 4.913874185740118,
+          "tokenLevel": "silver",
+          "isMintAbandoned": true,
+          "aiReport": {
+            "project_name": "PsyopManga",
+            "contract_address": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+            "background": {
+              "origin": {
+                "text": "名称分析：PsyopManga 由 “Psyop”（心理作战、宣传操控）与 “Manga”（日本漫画）组合，合约描述将全球权力博弈、战争与宣传重绘为生动的漫画分镜，名称即指把信息战题材 meme 化。叙事背景与目的：项目以把现实政治、战争与宣传议题视觉化、叙事化为目标，定位为政治/宣传题材的文化艺术化表达，传播驱动来自题材的争议性与可视化二次创作潜力；未见与名人或官方实体直接关联。",
+                "ref": ""
+              }
+            },
+            "narrative_type": "事件类",
+            "distribution": {
+              "celebrity_support": {
+                "text": "None",
+                "ref": ""
+              },
+              "max_views": {
+                "text": "None",
+                "ref": ""
+              },
+              "max_likes": {
+                "text": "None",
+                "ref": ""
+              },
+              "max_comments": {
+                "text": "None",
+                "ref": ""
+              },
+              "community_participation": {
+                "text": "None",
+                "ref": ""
+              },
+              "negative_incidents": {
+                "text": "None",
+                "ref": ""
+              }
+            },
+            "developer_info": {
+              "identity": {
+                "text": "",
+                "ref": ""
+              },
+              "address_analysis": {
+                "text": "",
+                "ref": ""
+              }
+            },
+            "valuation": {
+              "current_marketcap": {
+                "text": "",
+                "ref": ""
+              },
+              "benchmark_project": {
+                "name": "",
+                "address": "",
+                "reason": "",
+                "ref": ""
+              }
+            },
+            "rating": {
+              "score": "2",
+              "reason": "叙事强度中等：题材具有争议性与可视化 meme 潜力，但偏政治/宣传，易受审查与分化；社区传播数据缺失，无法证实病毒性或 KOL 放大，持续性和社群粘性未知，整体可信度与可持续性偏低。"
+            }
+          },
+          "market_cap": 344073.79569188715,
+          "freshnessScore": 0.52
+        },
+        "aiReport": {
+          "project_name": "PsyopManga",
+          "contract_address": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+          "background": {
+            "origin": {
+              "text": "名称分析：PsyopManga 由 “Psyop”（心理作战、宣传操控）与 “Manga”（日本漫画）组合，合约描述将全球权力博弈、战争与宣传重绘为生动的漫画分镜，名称即指把信息战题材 meme 化。叙事背景与目的：项目以把现实政治、战争与宣传议题视觉化、叙事化为目标，定位为政治/宣传题材的文化艺术化表达，传播驱动来自题材的争议性与可视化二次创作潜力；未见与名人或官方实体直接关联。",
+              "ref": ""
+            }
+          },
+          "narrative_type": "事件类",
+          "distribution": {
+            "celebrity_support": {
+              "text": "None",
+              "ref": ""
+            },
+            "max_views": {
+              "text": "None",
+              "ref": ""
+            },
+            "max_likes": {
+              "text": "None",
+              "ref": ""
+            },
+            "max_comments": {
+              "text": "None",
+              "ref": ""
+            },
+            "community_participation": {
+              "text": "None",
+              "ref": ""
+            },
+            "negative_incidents": {
+              "text": "None",
+              "ref": ""
+            }
+          },
+          "developer_info": {
+            "identity": {
+              "text": "",
+              "ref": ""
+            },
+            "address_analysis": {
+              "text": "",
+              "ref": ""
+            }
+          },
+          "valuation": {
+            "current_marketcap": {
+              "text": "",
+              "ref": ""
+            },
+            "benchmark_project": {
+              "name": "",
+              "address": "",
+              "reason": "",
+              "ref": ""
+            }
+          },
+          "rating": {
+            "score": "2",
+            "reason": "叙事强度中等：题材具有争议性与可视化 meme 潜力，但偏政治/宣传，易受审查与分化；社区传播数据缺失，无法证实病毒性或 KOL 放大，持续性和社群粘性未知，整体可信度与可持续性偏低。"
+          }
+        },
+        "score": {
+          "total": 65,
+          "breakdown": {
+            "smartMoneyCount": 15,
+            "smartMoneyTrend": 10,
+            "signalDensity": 5,
+            "signalTrend": 20,
+            "safety": 15,
+            "debotAI": 0,
+            "bonus": 0
+          },
+          "details": [
+            "聪明钱: 15/25 (1个, 早期发现更高分)",
+            "趋势: 10/20 (STABLE)",
+            "密度: 5/15",
+            "信号趋势: 20/15 (ACCELERATING)",
+            "安全: 15/15 [Mint✓,Liq✓,Holders✓]",
+            "AI: 0/10 (DeBot=2)"
+          ],
+          "tier": "normal",
+          "allowTrial": false,
+          "trends": {
+            "smartMoney": "STABLE",
+            "signal": "ACCELERATING"
+          }
+        },
+        "decision": {
+          "action": "BUY",
+          "tier": "normal",
+          "position": 0.15,
+          "reason": "评分65达到normal级阈值",
+          "stopLoss": -30,
+          "takeProfit": [
+            100,
+            300
+          ]
+        },
+        "tokenState": {
+          "address": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+          "history": [
+            {
+              "time": 1768395785386,
+              "smartMoney": 1,
+              "signals": 1
+            },
+            {
+              "time": 1768399019910,
+              "smartMoney": 1,
+              "signals": 10
+            },
+            {
+              "time": 1768399921573,
+              "smartMoney": 1,
+              "signals": 18
+            },
+            {
+              "time": 1768403318037,
+              "smartMoney": 1,
+              "signals": 25
+            },
+            {
+              "time": 1768404285161,
+              "smartMoney": 1,
+              "signals": 28
+            },
+            {
+              "time": 1768409924432,
+              "smartMoney": 3,
+              "signals": 31
+            }
+          ],
+          "firstSeen": 1768395785386,
+          "lastSeen": 1768409924432,
+          "buyExecuted": false,
+          "totalPosition": 0
+        }
+      },
+      "symbol": "PsyopManga",
+      "address": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+      "chain": "SOL",
+      "tier": "GOLD",
+      "score": 75,
+      "tag": "NORMAL",
+      "tags": {},
+      "intentionTier": null,
+      "startTime": 1768399019926,
+      "lastUpdateTime": 1768399847131,
+      "initial": {
+        "price": 0.0003440738282,
+        "smartMoney": 1,
+        "liquidity": 62923.80468373622,
+        "holders": 1963,
+        "marketCap": 344073.79569188715
+      },
+      "current": {
+        "price": 0.0004183,
+        "smartMoney": 1,
+        "liquidity": 69616.05,
+        "holders": 1963,
+        "marketCap": 344073.79569188715
+      },
+      "priceSnapshots": [
+        {
+          "time": 1768399561595,
+          "price": 0.0003434,
+          "sm": 1
+        },
+        {
+          "time": 1768399576596,
+          "price": 0.0003434,
+          "sm": 1
+        },
+        {
+          "time": 1768399591597,
+          "price": 0.0003434,
+          "sm": 1
+        },
+        {
+          "time": 1768399606617,
+          "price": 0.0003497,
+          "sm": 1
+        },
+        {
+          "time": 1768399621618,
+          "price": 0.0003497,
+          "sm": 1
+        },
+        {
+          "time": 1768399636716,
+          "price": 0.0003497,
+          "sm": 1
+        },
+        {
+          "time": 1768399651717,
+          "price": 0.0003723,
+          "sm": 1
+        },
+        {
+          "time": 1768399666718,
+          "price": 0.0003723,
+          "sm": 1
+        },
+        {
+          "time": 1768399681719,
+          "price": 0.0004116,
+          "sm": 1
+        },
+        {
+          "time": 1768399696931,
+          "price": 0.0004116,
+          "sm": 1
+        },
+        {
+          "time": 1768399711944,
+          "price": 0.0004116,
+          "sm": 1
+        },
+        {
+          "time": 1768399726984,
+          "price": 0.0004021,
+          "sm": 1
+        },
+        {
+          "time": 1768399741990,
+          "price": 0.0004021,
+          "sm": 1
+        },
+        {
+          "time": 1768399756992,
+          "price": 0.0004021,
+          "sm": 1
+        },
+        {
+          "time": 1768399771993,
+          "price": 0.0004104,
+          "sm": 1
+        },
+        {
+          "time": 1768399787022,
+          "price": 0.0004104,
+          "sm": 1
+        },
+        {
+          "time": 1768399802024,
+          "price": 0.0004117,
+          "sm": 1
+        },
+        {
+          "time": 1768399817098,
+          "price": 0.0004117,
+          "sm": 1
+        },
+        {
+          "time": 1768399832110,
+          "price": 0.0004117,
+          "sm": 1
+        },
+        {
+          "time": 1768399847131,
+          "price": 0.0004183,
+          "sm": 1
+        }
+      ],
+      "klineData": [],
+      "aiReport": {
+        "project_name": "PsyopManga",
+        "contract_address": "FRmgvbbwQWbAYJxmSmokS6yfVwk7H6Uj1WcqdvMFpump",
+        "background": {
+          "origin": {
+            "text": "名称分析：PsyopManga 由 “Psyop”（心理作战、宣传操控）与 “Manga”（日本漫画）组合，合约描述将全球权力博弈、战争与宣传重绘为生动的漫画分镜，名称即指把信息战题材 meme 化。叙事背景与目的：项目以把现实政治、战争与宣传议题视觉化、叙事化为目标，定位为政治/宣传题材的文化艺术化表达，传播驱动来自题材的争议性与可视化二次创作潜力；未见与名人或官方实体直接关联。",
+            "ref": ""
+          }
+        },
+        "narrative_type": "事件类",
+        "distribution": {
+          "celebrity_support": {
+            "text": "None",
+            "ref": ""
+          },
+          "max_views": {
+            "text": "None",
+            "ref": ""
+          },
+          "max_likes": {
+            "text": "None",
+            "ref": ""
+          },
+          "max_comments": {
+            "text": "None",
+            "ref": ""
+          },
+          "community_participation": {
+            "text": "None",
+            "ref": ""
+          },
+          "negative_incidents": {
+            "text": "None",
+            "ref": ""
+          }
+        },
+        "developer_info": {
+          "identity": {
+            "text": "",
+            "ref": ""
+          },
+          "address_analysis": {
+            "text": "",
+            "ref": ""
+          }
+        },
+        "valuation": {
+          "current_marketcap": {
+            "text": "",
+            "ref": ""
+          },
+          "benchmark_project": {
+            "name": "",
+            "address": "",
+            "reason": "",
+            "ref": ""
+          }
+        },
+        "rating": {
+          "score": "2",
+          "reason": "叙事强度中等：题材具有争议性与可视化 meme 潜力，但偏政治/宣传，易受审查与分化；社区传播数据缺失，无法证实病毒性或 KOL 放大，持续性和社群粘性未知，整体可信度与可持续性偏低。"
+        }
+      },
+      "stableStartTime": null,
+      "highWaterMark": 0.0005183,
+      "wasInDeadDog": false,
+      "observeTimeMultiplier": 1,
+      "intersectionBoost": null,
+      "targetEntryPrice": 0.000002,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "59nzDoRyJ1QcLcFYFs4GVdeZ4qUEb16T2KNuHPWMpump",
+    "symbol": "UNTIL",
+    "chain": "SOL",
+    "targetPrice": 0.0005,
+    "entryTimestamp": 1768404347837,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "UNTIL",
+      "address": "59nzDoRyJ1QcLcFYFs4GVdeZ4qUEb16T2KNuHPWMpump",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 70,
+      "observeMinutes": 2,
+      "smInitial": 3,
+      "smCurrent": 3,
+      "priceChange": "1.3",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0005,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "H7uU8TKmz3om6cepKJvdEckB79dg4zFMU2p5v1kcbonk",
+    "symbol": "bonkers",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768409448969,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "bonkers",
+      "address": "H7uU8TKmz3om6cepKJvdEckB79dg4zFMU2p5v1kcbonk",
+      "chain": "SOL",
+      "tier": "GOLD",
+      "score": 78,
+      "observeMinutes": 34,
+      "smInitial": 4,
+      "smCurrent": 4,
+      "priceChange": "84.3",
+      "tag": "NORMAL",
+      "poolType": "GOLD",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+    "symbol": "WIN",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768436944929,
+    "intentionTier": null,
+    "initialPrice": 0.0001754361564,
+    "token": {
+      "signal": {
+        "token_ca": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+        "symbol": "WIN",
+        "chain": "SOL",
+        "smart_wallet_online": 2,
+        "price": 0.0001754361564,
+        "liquidity": 45119.21806375997,
+        "marketCap": 175428.8881894646,
+        "holders": 569,
+        "volume": 17999.43039883736,
+        "isMintAbandoned": true,
+        "klineData": [],
+        "score": 62,
+        "timing": "UNKNOWN"
+      },
+      "analysis": {
+        "token": {
+          "tokenAddress": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+          "chain": "SOL",
+          "symbol": "WIN",
+          "smartWalletOnline": 2,
+          "smartWalletTotal": 8,
+          "liquidity": 45119.21806375997,
+          "marketCap": 175428.8881894646,
+          "price": 0.0001754361564,
+          "holders": 569,
+          "volume": 17999.43039883736,
+          "signalCount": 1,
+          "maxPriceGain": 2.614519860900504,
+          "tokenLevel": "bronze",
+          "isMintAbandoned": true,
+          "aiReport": {
+            "project_name": "WIN",
+            "contract_address": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+            "background": {
+              "origin": {
+                "text": "代币叙事宣称将 2010 年比特币时代的“WIN”原始 meme 上链，合约说明写明 99% 费用重定向给创作者，推特样本也多次提到已将原作者 VoodooVelvet 纳入社区；叙事核心是“历史性 meme + 创作者分成”。",
+                "ref": "https://explorer.solana.com/address/CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump?cluster=mainnet"
+              }
+            },
+            "narrative_type": "项目类 / 人物类",
+            "distribution": {
+              "celebrity_support": {
+                "text": "多条推文提及原作者 VoodooVelvet 被 onboarded，但样本中未见其本人经验证账号的直接声明。",
+                "ref": "https://twitter.com/i/web/status/2011511026961760656"
+              },
+              "max_views": {
+                "text": "样本内最高浏览量 8257 次",
+                "ref": "https://twitter.com/i/web/status/2011409767684866395"
+              },
+              "max_likes": {
+                "text": "样本内最高点赞 28 次",
+                "ref": "https://twitter.com/i/web/status/2011409767684866395"
+              },
+              "max_comments": {
+                "text": "样本内最高评论 3 条",
+                "ref": "https://twitter.com/i/web/status/2010757766726431153"
+              },
+              "community_participation": {
+                "text": "样本约 20 条推文，讨论集中在 2026-01-12 至 01-14，社区传播以短期话题驱动为主",
+                "ref": "https://twitter.com/i/web/status/2011282811437891897"
+              },
+              "negative_incidents": {
+                "text": "存在少量风险提示与对特定发行/平台（如 pumpfun）怀疑，但未见明确安全漏洞或 rug 报告",
+                "ref": "https://twitter.com/i/web/status/2010611191308259761"
+              }
+            },
+            "developer_info": {
+              "identity": {
+                "text": "",
+                "ref": ""
+              },
+              "address_analysis": {
+                "text": "",
+                "ref": ""
+              }
+            },
+            "valuation": {
+              "current_marketcap": {
+                "text": "",
+                "ref": ""
+              },
+              "benchmark_project": {
+                "name": "",
+                "address": "",
+                "reason": "",
+                "ref": ""
+              }
+            },
+            "rating": {
+              "score": "3",
+              "reason": "叙事强（把“历史性 meme”与原作者分成绑定），具话题性与二次传播潜力；但推特样本互动中等且集中在短时间内，未见持续 KOL 驱动或明确安全审计证据，持续性与社区深度不足。"
+            }
+          },
+          "market_cap": 175428.8881894646,
+          "freshnessScore": 0.52
+        },
+        "aiReport": {
+          "project_name": "WIN",
+          "contract_address": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+          "background": {
+            "origin": {
+              "text": "代币叙事宣称将 2010 年比特币时代的“WIN”原始 meme 上链，合约说明写明 99% 费用重定向给创作者，推特样本也多次提到已将原作者 VoodooVelvet 纳入社区；叙事核心是“历史性 meme + 创作者分成”。",
+              "ref": "https://explorer.solana.com/address/CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump?cluster=mainnet"
+            }
+          },
+          "narrative_type": "项目类 / 人物类",
+          "distribution": {
+            "celebrity_support": {
+              "text": "多条推文提及原作者 VoodooVelvet 被 onboarded，但样本中未见其本人经验证账号的直接声明。",
+              "ref": "https://twitter.com/i/web/status/2011511026961760656"
+            },
+            "max_views": {
+              "text": "样本内最高浏览量 8257 次",
+              "ref": "https://twitter.com/i/web/status/2011409767684866395"
+            },
+            "max_likes": {
+              "text": "样本内最高点赞 28 次",
+              "ref": "https://twitter.com/i/web/status/2011409767684866395"
+            },
+            "max_comments": {
+              "text": "样本内最高评论 3 条",
+              "ref": "https://twitter.com/i/web/status/2010757766726431153"
+            },
+            "community_participation": {
+              "text": "样本约 20 条推文，讨论集中在 2026-01-12 至 01-14，社区传播以短期话题驱动为主",
+              "ref": "https://twitter.com/i/web/status/2011282811437891897"
+            },
+            "negative_incidents": {
+              "text": "存在少量风险提示与对特定发行/平台（如 pumpfun）怀疑，但未见明确安全漏洞或 rug 报告",
+              "ref": "https://twitter.com/i/web/status/2010611191308259761"
+            }
+          },
+          "developer_info": {
+            "identity": {
+              "text": "",
+              "ref": ""
+            },
+            "address_analysis": {
+              "text": "",
+              "ref": ""
+            }
+          },
+          "valuation": {
+            "current_marketcap": {
+              "text": "",
+              "ref": ""
+            },
+            "benchmark_project": {
+              "name": "",
+              "address": "",
+              "reason": "",
+              "ref": ""
+            }
+          },
+          "rating": {
+            "score": "3",
+            "reason": "叙事强（把“历史性 meme”与原作者分成绑定），具话题性与二次传播潜力；但推特样本互动中等且集中在短时间内，未见持续 KOL 驱动或明确安全审计证据，持续性与社区深度不足。"
+          }
+        },
+        "score": {
+          "total": 62,
+          "breakdown": {
+            "smartMoneyCount": 20,
+            "smartMoneyTrend": 10,
+            "signalDensity": 5,
+            "signalTrend": 8,
+            "safety": 13,
+            "debotAI": 6,
+            "bonus": 0
+          },
+          "details": [
+            "聪明钱: 20/25 (2个, 早期发现更高分)",
+            "趋势: 10/20 (STABLE)",
+            "密度: 5/15",
+            "信号趋势: 8/15 (STABLE)",
+            "安全: 13/15 [Mint✓,Liq~,Holders✓]",
+            "AI: 6/10 (DeBot=3)"
+          ],
+          "tier": "scout",
+          "allowTrial": false,
+          "trends": {
+            "smartMoney": "STABLE",
+            "signal": "STABLE"
+          }
+        },
+        "decision": {
+          "action": "BUY",
+          "tier": "scout",
+          "position": 0.1,
+          "reason": "评分62达到scout级阈值",
+          "stopLoss": -30,
+          "takeProfit": [
+            100,
+            300
+          ]
+        },
+        "tokenState": {
+          "address": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+          "history": [
+            {
+              "time": 1768436689813,
+              "smartMoney": 2,
+              "signals": 1
+            },
+            {
+              "time": 1768437801617,
+              "smartMoney": 5,
+              "signals": 5
+            },
+            {
+              "time": 1768438725988,
+              "smartMoney": 5,
+              "signals": 5
+            },
+            {
+              "time": 1768439650530,
+              "smartMoney": 5,
+              "signals": 5
+            },
+            {
+              "time": 1768440550564,
+              "smartMoney": 5,
+              "signals": 5
+            },
+            {
+              "time": 1768441549686,
+              "smartMoney": 5,
+              "signals": 5
+            }
+          ],
+          "firstSeen": 1768436689813,
+          "lastSeen": 1768441549686,
+          "buyExecuted": false,
+          "totalPosition": 0
+        }
+      },
+      "symbol": "WIN",
+      "address": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+      "chain": "SOL",
+      "tier": "GOLD",
+      "score": 72,
+      "tag": "NORMAL",
+      "tags": {},
+      "intentionTier": null,
+      "startTime": 1768436689825,
+      "lastUpdateTime": 1768436828820,
+      "initial": {
+        "price": 0.0001754361564,
+        "smartMoney": 2,
+        "liquidity": 45119.21806375997,
+        "holders": 569,
+        "marketCap": 175428.8881894646
+      },
+      "current": {
+        "price": 0.0002615,
+        "smartMoney": 2,
+        "liquidity": 54895.6,
+        "holders": 569,
+        "marketCap": 175428.8881894646
+      },
+      "priceSnapshots": [
+        {
+          "time": 1768436708543,
+          "price": 0.0002376,
+          "sm": 2
+        },
+        {
+          "time": 1768436723728,
+          "price": 0.0002376,
+          "sm": 2
+        },
+        {
+          "time": 1768436738728,
+          "price": 0.0002364,
+          "sm": 2
+        },
+        {
+          "time": 1768436753727,
+          "price": 0.0002364,
+          "sm": 2
+        },
+        {
+          "time": 1768436768744,
+          "price": 0.0002437,
+          "sm": 2
+        },
+        {
+          "time": 1768436783820,
+          "price": 0.0002437,
+          "sm": 2
+        },
+        {
+          "time": 1768436798820,
+          "price": 0.0002615,
+          "sm": 2
+        },
+        {
+          "time": 1768436813820,
+          "price": 0.0002615,
+          "sm": 2
+        },
+        {
+          "time": 1768436828820,
+          "price": 0.0002615,
+          "sm": 2
+        }
+      ],
+      "klineData": [],
+      "aiReport": {
+        "project_name": "WIN",
+        "contract_address": "CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump",
+        "background": {
+          "origin": {
+            "text": "代币叙事宣称将 2010 年比特币时代的“WIN”原始 meme 上链，合约说明写明 99% 费用重定向给创作者，推特样本也多次提到已将原作者 VoodooVelvet 纳入社区；叙事核心是“历史性 meme + 创作者分成”。",
+            "ref": "https://explorer.solana.com/address/CrjxyExMCQKhJhhA1YBVGQtLCFy5DBbs3KLndzRgpump?cluster=mainnet"
+          }
+        },
+        "narrative_type": "项目类 / 人物类",
+        "distribution": {
+          "celebrity_support": {
+            "text": "多条推文提及原作者 VoodooVelvet 被 onboarded，但样本中未见其本人经验证账号的直接声明。",
+            "ref": "https://twitter.com/i/web/status/2011511026961760656"
+          },
+          "max_views": {
+            "text": "样本内最高浏览量 8257 次",
+            "ref": "https://twitter.com/i/web/status/2011409767684866395"
+          },
+          "max_likes": {
+            "text": "样本内最高点赞 28 次",
+            "ref": "https://twitter.com/i/web/status/2011409767684866395"
+          },
+          "max_comments": {
+            "text": "样本内最高评论 3 条",
+            "ref": "https://twitter.com/i/web/status/2010757766726431153"
+          },
+          "community_participation": {
+            "text": "样本约 20 条推文，讨论集中在 2026-01-12 至 01-14，社区传播以短期话题驱动为主",
+            "ref": "https://twitter.com/i/web/status/2011282811437891897"
+          },
+          "negative_incidents": {
+            "text": "存在少量风险提示与对特定发行/平台（如 pumpfun）怀疑，但未见明确安全漏洞或 rug 报告",
+            "ref": "https://twitter.com/i/web/status/2010611191308259761"
+          }
+        },
+        "developer_info": {
+          "identity": {
+            "text": "",
+            "ref": ""
+          },
+          "address_analysis": {
+            "text": "",
+            "ref": ""
+          }
+        },
+        "valuation": {
+          "current_marketcap": {
+            "text": "",
+            "ref": ""
+          },
+          "benchmark_project": {
+            "name": "",
+            "address": "",
+            "reason": "",
+            "ref": ""
+          }
+        },
+        "rating": {
+          "score": "3",
+          "reason": "叙事强（把“历史性 meme”与原作者分成绑定），具话题性与二次传播潜力；但推特样本互动中等且集中在短时间内，未见持续 KOL 驱动或明确安全审计证据，持续性与社区深度不足。"
+        }
+      },
+      "stableStartTime": null,
+      "highWaterMark": 0.0002615,
+      "wasInDeadDog": false,
+      "observeTimeMultiplier": 1,
+      "intersectionBoost": null,
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "J3mTHLJ3GMcz9ycfvUji5HzeuTvmUQjQSdzChsS5pump",
+    "symbol": "SOLBISCUIT",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768438031775,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "SOLBISCUIT",
+      "address": "J3mTHLJ3GMcz9ycfvUji5HzeuTvmUQjQSdzChsS5pump",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 73,
+      "observeMinutes": 14,
+      "smInitial": 1,
+      "smCurrent": 1,
+      "priceChange": "-16.9",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "Bw4hEZZSz2uff9wZLdpDikgbaWSd5fTEozQkV7KApump",
+    "symbol": "RAAAAAH",
+    "chain": "SOL",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768439528849,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "RAAAAAH",
+      "address": "Bw4hEZZSz2uff9wZLdpDikgbaWSd5fTEozQkV7KApump",
+      "chain": "SOL",
+      "tier": "SILVER",
+      "score": 66,
+      "observeMinutes": 45,
+      "smInitial": 3,
+      "smCurrent": 3,
+      "priceChange": "10.0",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  },
+  {
+    "address": "0x386b656500a3c9019992f0fd9f24725fca5e4444",
+    "symbol": "NATIVE",
+    "chain": "BSC",
+    "targetPrice": 0.0001,
+    "entryTimestamp": 1768441333468,
+    "initialPrice": 0,
+    "token": {
+      "symbol": "NATIVE",
+      "address": "0x386b656500a3c9019992f0fd9f24725fca5e4444",
+      "chain": "BSC",
+      "tier": "SILVER",
+      "score": 71,
+      "observeMinutes": 38,
+      "smInitial": 4,
+      "smCurrent": 4,
+      "priceChange": "-0.7",
+      "tag": "NORMAL",
+      "poolType": "SILVER",
+      "targetEntryPrice": 0.0001,
+      "isWatchEntry": true
+    }
+  }
+]

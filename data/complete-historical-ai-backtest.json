@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-01-13T03:24:44.382Z",
+  "dataSource": "logs/ai/batch_*.log",
+  "logFiles": 311,
+  "stats": {
+    "goldDogCount": 77,
+    "uniqueBuyDecisions": 4,
+    "uniqueWatchDecisions": 8,
+    "uniqueGraduateDecisions": 2,
+    "uniqueDiscardDecisions": 178,
+    "buyHits": 2,
+    "graduateHits": 2,
+    "buyPrecision": 50,
+    "graduatePrecision": 100,
+    "recall": 2.6
+  },
+  "goldHits": {
+    "buy": [
+      "Bsn8DvTH...",
+      "老子蜀道山"
+    ],
+    "graduate": [
+      "Bsn8DvTH...",
+      "老子蜀道山"
+    ],
+    "discardMissed": [
+      "BP6Lc7ap",
+      "BLIND",
+      "BlueWhale",
+      "meme",
+      "Crypto",
+      "死了么",
+      "BNsUsA8i",
+      "Pz7zD359",
+      "HYCZ",
+      "人生K线基金",
+      "汉",
+      "交易猫",
+      "Sperm",
+      "B7ToiJNk",
+      "WhiteWhale",
+      "BIERISH",
+      "pepe8BiZ",
+      "Buttcoin",
+      "水豚噜噜",
+      "Testiwhale",
+      "BLACKSHIBA",
+      "CalfWhale",
+      "oora",
+      "牛马",
+      "SOLBISCUIT",
+      "testicle2",
+      "hippo",
+      "BC",
+      "badger",
+      "P",
+      "Pilotoor"
+    ]
+  }
+}

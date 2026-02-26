@@ -1,0 +1,851 @@
+/**
+ * 风险管理系统
+ *
+ * 核心职责：
+ * 1. 入场标准控制（Score ≥ 70）
+ * 2. 时间衰减因子
+ * 3. 危险信号检测
+ * 4. 资金管理（2% 上限，最多 3 仓，连亏暂停）
+ * 5. 负反馈机制
+ * 6. 🛑 v6.7 物理熔断 - 连亏3笔强制休息4小时
+ */
+
+import notifier from '../utils/notifier.js';
+import { RISK } from '../config/strategy.js';
+
+export class RiskManager {
+  constructor(config, db) {
+    this.config = config;
+    this.db = db;
+
+    // 风险参数 - 从 strategy.js 统一配置读取
+    this.params = RISK;
+
+    // 状态追踪
+    this.state = {
+      consecutiveLosses: 0,
+      pausedUntil: null,
+      todayTrades: 0,
+      todayLosses: 0,
+    };
+
+    this.initializeState();
+    console.log('🛡️  Risk Manager initialized');
+    console.log(`   最低入场分数: ${this.params.MIN_SCORE_TO_TRADE}`);
+    console.log(`   单笔上限: ${this.params.MAX_POSITION_PERCENT * 100}%`);
+    console.log(`   最大持仓: ${this.params.MAX_CONCURRENT_POSITIONS}`);
+    console.log(`   连亏暂停: ${this.params.CIRCUIT_BREAKER.CONSECUTIVE_LOSS_PAUSE} 笔`);
+  }
+
+  /**
+   * 初始化状态（从数据库恢复）
+   * v9.4: 支持交易周期重置，只统计重置时间点之后的记录
+   */
+  initializeState() {
+    try {
+      // v9.4: 获取交易周期重置时间戳
+      let resetTs = 0;
+      try {
+        const resetState = this.db.prepare(`
+          SELECT value FROM system_state WHERE key = 'trading_cycle_reset_ts'
+        `).get();
+        if (resetState && resetState.value) {
+          resetTs = parseInt(resetState.value, 10);
+          console.log(`   🔄 交易周期重置时间: ${new Date(resetTs * 1000).toLocaleString()}`);
+        }
+      } catch (e) { /* ignore */ }
+
+      // 获取连续亏损次数（只统计重置时间点之后的记录）
+      const recentTrades = this.db.prepare(`
+        SELECT pnl_percent
+        FROM positions
+        WHERE status = 'closed'
+        AND exit_time > datetime(?, 'unixepoch')
+        AND signal_source NOT LIKE '%CYCLE_RESET%'
+        ORDER BY exit_time DESC
+        LIMIT 10
+      `).all(resetTs);
+
+      let consecutiveLosses = 0;
+      for (const trade of recentTrades) {
+        if (trade.pnl_percent < 0) {
+          consecutiveLosses++;
+        } else {
+          break;
+        }
+      }
+      this.state.consecutiveLosses = consecutiveLosses;
+
+      // 检查是否在暂停期
+      const pauseState = this.db.prepare(`
+        SELECT value, expires_at FROM system_state WHERE key = 'trading_paused'
+      `).get();
+
+      if (pauseState && pauseState.expires_at > Date.now() / 1000) {
+        this.state.pausedUntil = new Date(pauseState.expires_at * 1000);
+      }
+
+      console.log(`   当前连续亏损: ${this.state.consecutiveLosses}`);
+      if (this.state.pausedUntil) {
+        console.log(`   ⚠️ 交易暂停至: ${this.state.pausedUntil.toLocaleString()}`);
+      }
+
+      // v9.4: 从数据库恢复最近的熔断时间（用于恢复期仓位减半）
+      try {
+        const lastBreaker = this.db.prepare(`
+          SELECT key FROM system_state
+          WHERE key LIKE 'circuit_breaker_%'
+          ORDER BY key DESC LIMIT 1
+        `).get();
+
+        if (lastBreaker) {
+          // key格式: circuit_breaker_1768310917482.0
+          const ts = parseFloat(lastBreaker.key.replace('circuit_breaker_', ''));
+          const recoveryHours = this.params.CIRCUIT_BREAKER.RECOVERY_PERIOD_HOURS || 4;
+          const recoveryPeriodMs = recoveryHours * 60 * 60 * 1000;
+
+          if (Date.now() - ts < recoveryPeriodMs) {
+            this._lastCircuitBreakerTime = ts;
+            const remaining = Math.ceil((recoveryPeriodMs - (Date.now() - ts)) / 60000);
+            console.log(`   🔥 熔断恢复期: 还剩 ${remaining} 分钟，仓位减半`);
+          }
+        }
+      } catch (e) { /* ignore */ }
+
+    } catch (error) {
+      // 忽略初始化错误
+    }
+  }
+
+  /**
+   * 检查是否可以交易
+   * @returns {{ allowed: boolean, reason: string }}
+   */
+  canTrade() {
+    // 1. 检查是否在暂停期
+    if (this.state.pausedUntil && new Date() < this.state.pausedUntil) {
+      const remaining = Math.ceil((this.state.pausedUntil - new Date()) / 1000 / 60);
+      return {
+        allowed: false,
+        reason: `交易暂停中，还剩 ${remaining} 分钟`
+      };
+    }
+
+    // 2. 🛑 v6.8 静默熔断模式 (Stress Test) - 记录但不停机
+    if (this.state.consecutiveLosses >= this.params.CIRCUIT_BREAKER.CONSECUTIVE_LOSS_PAUSE) {
+      // 模拟盘阶段：只记录，不真的停机，用于采集数据
+      if (!this._circuitBreakerLogged) {
+        this._circuitBreakerLogged = true;
+        this._circuitBreakerCount = (this._circuitBreakerCount || 0) + 1;
+
+        console.log(`
+╔══════════════════════════════════════════════════════════════╗
+║  🚨 [静默熔断 #${this._circuitBreakerCount}] 连亏 ${this.state.consecutiveLosses} 笔！                        ║
+║  📝 实盘模式下此刻会暂停 ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时                          ║
+║  🧪 模拟盘继续运行，采集极端数据...                          ║
+╚══════════════════════════════════════════════════════════════╝
+`);
+
+        // 记录到数据库用于后续分析
+        try {
+          this.db.prepare(`
+            INSERT INTO system_state (key, value, expires_at)
+            VALUES ('circuit_breaker_' || ?, ?, ?)
+          `).run(Date.now(), this.state.consecutiveLosses, Math.floor(Date.now() / 1000));
+        } catch (e) { /* ignore */ }
+
+        // 发送通知但不停机
+        notifier.systemStatus('静默熔断触发', `
+连续亏损 ${this.state.consecutiveLosses} 笔，已触发第 ${this._circuitBreakerCount} 次熔断记录。
+
+📝 **模拟盘模式：继续运行采集数据**
+🔬 实盘模式下会暂停 ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时
+
+*后续复盘将分析：熔断后继续交易的胜负情况*
+        `).catch(() => { });
+      }
+
+      // 🧪 模拟盘：返回 allowed: true，继续交易
+      // return { allowed: false, reason: '...' };  // 实盘时启用这行
+
+      // v9.4: 记录熔断触发时间，用于恢复期仓位减半
+      if (!this._lastCircuitBreakerTime) {
+        this._lastCircuitBreakerTime = Date.now();
+      }
+    }
+
+    // 3. 检查当前持仓数 (v6.3 升级: 支持金狗额外槽和 Swap)
+    const openPositions = this.getOpenPositionsCount();
+    const baseLimit = this.params.MAX_CONCURRENT_POSITIONS;
+    const totalLimit = this.params.MAX_TOTAL_POSITIONS;
+
+    if (openPositions >= totalLimit) {
+      // 完全满仓，即使是金狗也进不来
+      return {
+        allowed: false,
+        reason: `已有 ${openPositions} 个持仓，达到绝对上限 ${totalLimit}`
+      };
+    }
+
+    if (openPositions >= baseLimit) {
+      // 超过基础持仓，需要检查是否可以使用金狗预留槽
+      return {
+        allowed: false,
+        reason: `已有 ${openPositions} 个持仓，达到基础上限 ${baseLimit}`,
+        needGoldenSlot: true,  // 标记需要金狗权限才能进入
+        maxPositions: totalLimit
+      };
+    }
+
+    // 4. 🛡️ v9.4 胜率过低时启用防御模式
+    // 修复: 之前只允许TIER_S，但数据显示TIER_S表现最差
+    // 新策略: 禁止TIER_S(大热避险)，只允许TIER_A/B
+    const stats = this.getRecentStats();
+    if (stats.totalTrades >= this.params.CIRCUIT_BREAKER.MIN_TRADES_FOR_STATS) {
+      if (stats.winRate < this.params.CIRCUIT_BREAKER.WIN_RATE_THRESHOLD) {
+        // 🛑 不再触发 AI 复盘（AI 会建议降低阈值，这是错误的方向！）
+        // 改为：启用防御模式，提高门槛而不是降低
+        if (!this._defensiveModeActive) {
+          this._defensiveModeActive = true;
+          console.log(`\n🛡️ [RISK] 胜率过低 (${(stats.winRate * 100).toFixed(1)}%)，已启用防御模式`);
+          console.log(`   📈 最低分数: ${this.params.MIN_SCORE_TO_TRADE} → ${this.params.MIN_SCORE_TO_TRADE + this.params.DEFENSIVE_MODE.MIN_SCORE_BOOST}`);
+          console.log(`   💰 仓位倍数: ${this.params.DEFENSIVE_MODE.POSITION_MULTIPLIER}x`);
+          console.log(`   🚫 禁止叙事: ${this.params.DEFENSIVE_MODE.FORBIDDEN_TIERS?.join(', ') || 'TIER_S'} (大热避险)`);
+
+          // 发送通知
+          notifier.systemStatus('防御模式启用', `
+胜率过低 (${(stats.winRate * 100).toFixed(1)}%)，系统已自动启用防御模式：
+- 最低分数提高 ${this.params.DEFENSIVE_MODE.MIN_SCORE_BOOST} 分
+- 仓位减半
+- 禁止 ${this.params.DEFENSIVE_MODE.FORBIDDEN_TIERS?.join('/') || 'TIER_S'} (大热避险)
+- 只允许 ${this.params.DEFENSIVE_MODE.ALLOWED_TIERS?.join('/') || 'TIER_A/B'}
+
+*逆风时避开大热点，选择稳健标的*
+          `).catch(() => { });
+        }
+        // 继续交易，但使用更严格的标准（在 evaluateSignal 中检查）
+      } else if (stats.winRate >= 0.4 && this._defensiveModeActive) {
+        // 胜率恢复到 40%，退出防御模式
+        this._defensiveModeActive = false;
+        console.log(`\n✅ [RISK] 胜率恢复 (${(stats.winRate * 100).toFixed(1)}%)，已退出防御模式`);
+        notifier.systemStatus('防御模式解除', `胜率恢复到 ${(stats.winRate * 100).toFixed(1)}%`).catch(() => { });
+      }
+    }
+
+    // 5. 检查每日亏损上限
+    const dailyPnL = this.getTodayPnL();
+    if (dailyPnL.sol <= -this.params.DAILY_LOSS_LIMIT_SOL) {
+      return {
+        allowed: false,
+        reason: `今日 SOL 亏损 ${Math.abs(dailyPnL.sol).toFixed(2)} 已达上限 ${this.params.DAILY_LOSS_LIMIT_SOL}`
+      };
+    }
+    if (dailyPnL.bnb <= -this.params.DAILY_LOSS_LIMIT_BNB) {
+      return {
+        allowed: false,
+        reason: `今日 BNB 亏损 ${Math.abs(dailyPnL.bnb).toFixed(2)} 已达上限 ${this.params.DAILY_LOSS_LIMIT_BNB}`
+      };
+    }
+
+    return { allowed: true, reason: 'OK' };
+  }
+
+  /**
+   * 获取今日盈亏统计
+   */
+  getTodayPnL() {
+    try {
+      const stats = this.db.prepare(`
+        SELECT 
+          chain,
+          SUM(pnl_native) as total_pnl
+        FROM positions 
+        WHERE status = 'closed'
+        AND exit_time >= date('now', 'start of day')
+        GROUP BY chain
+      `).all();
+
+      const result = { sol: 0, bnb: 0 };
+      for (const row of stats) {
+        if (row.chain === 'SOL') result.sol = row.total_pnl;
+        if (row.chain === 'BSC') result.bnb = row.total_pnl;
+      }
+      return result;
+    } catch (error) {
+      return { sol: 0, bnb: 0 };
+    }
+  }
+
+  /**
+   * 评估信号是否值得交易
+   * @param {object} signal - 信号对象
+   * @param {number} score - AI 评分
+   * @param {object} snapshot - 链上快照
+   * @param {object} options - 额外选项 { narrativeTier, smartMoneyCount }
+   * @returns {{ allowed: boolean, adjustedScore: number, reason: string, defensiveMode: boolean }}
+   */
+  evaluateSignal(signal, score, snapshot, options = {}) {
+    let adjustedScore = score;
+    const warnings = [];
+    const { narrativeTier, smartMoneyCount } = options;
+
+    // 🛡️ v6.7 防御模式检查
+    const isDefensive = this._defensiveModeActive && this.params.DEFENSIVE_MODE.ENABLED;
+    const minScore = isDefensive
+      ? this.params.MIN_SCORE_TO_TRADE + this.params.DEFENSIVE_MODE.MIN_SCORE_BOOST
+      : this.params.MIN_SCORE_TO_TRADE;
+
+    // 1. 基础分数检查（防御模式时门槛更高）
+    if (score < minScore) {
+      return {
+        allowed: false,
+        adjustedScore: score,
+        reason: isDefensive
+          ? `🛡️ 防御模式: 分数 ${score} < ${minScore}（需要 ${this.params.MIN_SCORE_TO_TRADE}+${this.params.DEFENSIVE_MODE.MIN_SCORE_BOOST}）`
+          : `分数 ${score} < ${minScore}（最低标准）`,
+        defensiveMode: isDefensive
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🚫 v9.5 全局禁用叙事等级检查 (独立于防御模式，始终生效)
+    // 数据支撑: TIER_B 52笔交易，19.2%胜率，-$83.99总亏损
+    // ═══════════════════════════════════════════════════════════════
+    if (narrativeTier && this.params.HARD_GATES?.FORBIDDEN_TIERS) {
+      const globalForbidden = this.params.HARD_GATES.FORBIDDEN_TIERS;
+      if (globalForbidden.includes(narrativeTier)) {
+        return {
+          allowed: false,
+          adjustedScore: score,
+          reason: `🚫 全局禁用: ${narrativeTier} 在禁止列表中 (历史胜率过低)`,
+          defensiveMode: isDefensive
+        };
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🛡️ v9.4 防御模式：禁止TIER_S (大热避险)，只允许TIER_A/B
+    // 修复: 之前"只允许TIER_S"，但TIER_S表现最差(-28.5%)
+    // 新策略: 逆风局避开大热点，选择稳健标的
+    // ═══════════════════════════════════════════════════════════════
+    if (isDefensive) {
+      const forbiddenTiers = this.params.DEFENSIVE_MODE.FORBIDDEN_TIERS || ['TIER_S'];
+      const allowedTiers = this.params.DEFENSIVE_MODE.ALLOWED_TIERS || ['TIER_A', 'TIER_B'];
+
+      if (narrativeTier) {
+        // 检查是否在禁止列表中
+        if (forbiddenTiers.includes(narrativeTier)) {
+          return {
+            allowed: false,
+            adjustedScore: score,
+            reason: `🛡️ 防御模式: 禁止 ${narrativeTier} (大热避险)，只允许 ${allowedTiers.join('/')}`,
+            defensiveMode: true
+          };
+        }
+        // 检查是否在允许列表中 (如果有明确限制)
+        if (allowedTiers.length > 0 && !allowedTiers.includes(narrativeTier) && narrativeTier !== 'TIER_C') {
+          // TIER_C 不做限制，因为很多信号没有叙事评级
+          return {
+            allowed: false,
+            adjustedScore: score,
+            reason: `🛡️ 防御模式: ${narrativeTier} 不在允许列表 ${allowedTiers.join('/')}`,
+            defensiveMode: true
+          };
+        }
+      }
+    }
+
+    // 🛡️ v6.7 防御模式：聪明钱门槛提高
+    if (isDefensive && this.params.DEFENSIVE_MODE.SM_THRESHOLD_BOOST) {
+      const smRequired = 1 + this.params.DEFENSIVE_MODE.SM_THRESHOLD_BOOST; // 默认1 + 提升3 = 4
+      if (smartMoneyCount !== undefined && smartMoneyCount < smRequired) {
+        return {
+          allowed: false,
+          adjustedScore: score,
+          reason: `🛡️ 防御模式: 需要 ${smRequired}+ 聪明钱，当前 ${smartMoneyCount}`,
+          defensiveMode: true
+        };
+      }
+    }
+
+    if (isDefensive) {
+      warnings.push('🛡️ 防御模式');
+    }
+
+    // 2. 时间衰减
+    const signalAge = this.getSignalAgeMinutes(signal);
+    if (signalAge > this.params.TIME_DECAY.EXPIRED_MINUTES) {
+      return {
+        allowed: false,
+        adjustedScore: 0,
+        reason: `信号已过期（${signalAge.toFixed(0)} 分钟前）`
+      };
+    } else if (signalAge > this.params.TIME_DECAY.STALE_MINUTES) {
+      adjustedScore *= this.params.TIME_DECAY.STALE_MULTIPLIER;
+      warnings.push(`时间衰减 -20%（${signalAge.toFixed(0)} 分钟）`);
+    }
+
+    // 3. 危险信号检测
+    const dangerScore = this.calculateDangerScore(snapshot);
+    if (dangerScore > this.params.MAX_DANGER_SCORE) {
+      return {
+        allowed: false,
+        adjustedScore: adjustedScore,
+        reason: `危险分数 ${dangerScore} > ${this.params.MAX_DANGER_SCORE}`
+      };
+    }
+    if (dangerScore > 0) {
+      warnings.push(`危险分数: ${dangerScore}`);
+    }
+
+    // 4. 调整后分数再次检查
+    if (adjustedScore < this.params.MIN_SCORE_TO_TRADE) {
+      return {
+        allowed: false,
+        adjustedScore: adjustedScore,
+        reason: `调整后分数 ${adjustedScore.toFixed(0)} < ${this.params.MIN_SCORE_TO_TRADE}`
+      };
+    }
+
+    return {
+      allowed: true,
+      adjustedScore: adjustedScore,
+      reason: warnings.length > 0 ? `通过（${warnings.join(', ')}）` : '通过'
+    };
+  }
+
+  /**
+   * 计算信号年龄（分钟）
+   */
+  getSignalAgeMinutes(signal) {
+    const signalTime = new Date(signal.timestamp).getTime();
+    return (Date.now() - signalTime) / 1000 / 60;
+  }
+
+  /**
+   * 计算危险分数
+   */
+  calculateDangerScore(snapshot) {
+    let dangerScore = 0;
+
+    if (!snapshot) return 0;
+
+    // LP 未锁定或即将解锁
+    if (snapshot.lp_locked === false || snapshot.lp_unlock_days < 7) {
+      dangerScore += this.params.DANGER_SIGNALS.LP_UNLOCK_SOON;
+    }
+
+    // 合约未放弃
+    if (snapshot.owner_type && !['Renounced', 'Burned'].includes(snapshot.owner_type)) {
+      dangerScore += this.params.DANGER_SIGNALS.OWNER_NOT_RENOUNCED;
+    }
+
+    // 高税率
+    const totalTax = (snapshot.tax_buy || 0) + (snapshot.tax_sell || 0);
+    if (totalTax > 10) {
+      dangerScore += this.params.DANGER_SIGNALS.HIGH_TAX;
+    }
+
+    // 蜜罐检测
+    if (snapshot.honeypot === true || snapshot.is_honeypot === true) {
+      dangerScore += this.params.DANGER_SIGNALS.HONEYPOT_RISK;
+    }
+
+    // 开发者持仓高
+    if (snapshot.dev_holdings_percent > 10) {
+      dangerScore += this.params.DANGER_SIGNALS.DEV_HOLDING_HIGH;
+    }
+
+    // Top10 持仓过高（可能是聪明钱准备出货）
+    if (snapshot.top10_percent > 50) {
+      dangerScore += this.params.DANGER_SIGNALS.SMART_MONEY_EXITING;
+    }
+
+    return dangerScore;
+  }
+
+  /**
+   * 计算仓位大小
+   * @param {string} chain - SOL/BSC
+   * @param {number} score - 评分
+   * @returns {{ size: number, unit: string, defensiveMode: boolean }}
+   */
+  calculatePositionSize(chain, score) {
+    const totalCapital = chain === 'SOL'
+      ? this.config.TOTAL_CAPITAL_SOL
+      : this.config.TOTAL_CAPITAL_BNB;
+
+    // 最大单笔 = 总资金 * 2%
+    let maxSize = totalCapital * this.params.MAX_POSITION_PERCENT;
+
+    // 根据分数调整
+    // 70-80分：50% 仓位
+    // 80-90分：75% 仓位
+    // 90-100分：100% 仓位
+    let sizeMultiplier = 0.5;
+    if (score >= 90) {
+      sizeMultiplier = 1.0;
+    } else if (score >= 80) {
+      sizeMultiplier = 0.75;
+    }
+
+    // 🛡️ v6.7 防御模式：仓位减半
+    const isDefensive = this._defensiveModeActive && this.params.DEFENSIVE_MODE.ENABLED;
+    if (isDefensive) {
+      sizeMultiplier *= this.params.DEFENSIVE_MODE.POSITION_MULTIPLIER;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔥 v9.4 熔断恢复期：仓位再减半
+    // 熔断触发后4小时内，即使继续交易也要降低仓位
+    // 与防御模式叠加：防御0.5 x 恢复期0.5 = 0.25仓位
+    // ═══════════════════════════════════════════════════════════════
+    const isInRecovery = this._isInCircuitBreakerRecovery();
+    if (isInRecovery) {
+      const recoveryMultiplier = this.params.CIRCUIT_BREAKER.RECOVERY_POSITION_MULTIPLIER || 0.5;
+      sizeMultiplier *= recoveryMultiplier;
+      console.log(`   🔥 [RISK] 熔断恢复期：仓位 x${recoveryMultiplier}`);
+    }
+
+    const finalSize = maxSize * sizeMultiplier;
+
+    return {
+      size: finalSize,
+      unit: chain,
+      maxSize: maxSize,
+      multiplier: sizeMultiplier,
+      defensiveMode: isDefensive,
+      inRecovery: isInRecovery  // v9.4: 熔断恢复期标记
+    };
+  }
+
+  /**
+   * 记录交易结果
+   */
+  recordTradeResult(isWin) {
+    if (isWin) {
+      this.state.consecutiveLosses = 0;
+      // 盈利时重置熔断记录标志，允许下次连亏时再次记录
+      this._circuitBreakerLogged = false;
+    } else {
+      this.state.consecutiveLosses++;
+    }
+
+    // 🧪 v6.8 模拟盘模式：不真的暂停，只在 canTrade() 中记录
+    // 实盘时取消注释下面的代码：
+    // if (this.state.consecutiveLosses >= this.params.CONSECUTIVE_LOSS_PAUSE) {
+    //   this.pauseTrading();
+    // }
+  }
+
+  /**
+   * 暂停交易
+   */
+  pauseTrading() {
+    const pauseUntil = new Date();
+    pauseUntil.setHours(pauseUntil.getHours() + this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS);
+    this.state.pausedUntil = pauseUntil;
+
+    try {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO system_state (key, value, expires_at)
+        VALUES ('trading_paused', 'true', ?)
+      `).run(Math.floor(pauseUntil.getTime() / 1000));
+    } catch (error) {
+      // 忽略
+    }
+
+    console.log(`\n⚠️  交易已暂停至 ${pauseUntil.toLocaleString()}`);
+    console.log(`   原因：连续亏损 ${this.state.consecutiveLosses} 笔\n`);
+  }
+
+  /**
+   * 🛑 v6.7 物理熔断机制
+   * 连续亏损达到阈值时，强制停止交易并发送微信通知
+   */
+  triggerCircuitBreaker() {
+    // 防止重复触发
+    if (this._circuitBreakerTriggered) {
+      return;
+    }
+    this._circuitBreakerTriggered = true;
+
+    // 立即暂停交易
+    this.pauseTrading();
+
+    // 获取最近亏损的交易
+    let recentLosses = [];
+    try {
+      recentLosses = this.db.prepare(`
+        SELECT symbol, pnl_percent, exit_time
+        FROM positions
+        WHERE status = 'closed' AND pnl_percent < 0
+        ORDER BY exit_time DESC
+        LIMIT ?
+      `).all(this.state.consecutiveLosses);
+    } catch (e) {
+      // ignore
+    }
+
+    const lossDetails = recentLosses
+      .map((t, i) => `${i + 1}. ${t.symbol}: ${t.pnl_percent?.toFixed(1)}%`)
+      .join('\n');
+
+    const resumeTime = this.state.pausedUntil?.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) || '未知';
+
+    // 发送微信通知
+    const content = `
+## 🛑 物理熔断触发！
+
+**连续亏损**: ${this.state.consecutiveLosses} 笔
+**暂停时长**: ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时
+**恢复时间**: ${resumeTime}
+
+### 最近亏损交易:
+${lossDetails || '(无记录)'}
+
+---
+
+⚠️ **系统已强制停止交易**
+
+这是好事！连续亏损说明当前市场状态不适合交易。
+休息一下，等市场冷静后再战。
+
+*记住：不亏就是赚！*
+`;
+
+    notifier.critical('物理熔断触发', content).catch(e => {
+      console.error('[RISK] 熔断通知发送失败:', e.message);
+    });
+
+    console.log(`
+╔══════════════════════════════════════════════════════════════╗
+║  🛑  物理熔断触发！连续亏损 ${this.state.consecutiveLosses} 笔                       ║
+║  ⏸️   交易暂停至 ${resumeTime}           ║
+║  💡  这是保护机制，不是故障！                                ║
+╚══════════════════════════════════════════════════════════════╝
+`);
+
+    // 设置定时器，熔断结束后重置标志
+    setTimeout(() => {
+      this._circuitBreakerTriggered = false;
+      console.log('[RISK] 🔓 熔断期结束，交易已恢复');
+      notifier.systemStatus('熔断期结束', '交易已恢复，请关注接下来的交易表现。').catch(() => { });
+    }, this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS * 60 * 60 * 1000);
+  }
+
+  /**
+   * 获取当前持仓数
+   */
+  getOpenPositionsCount() {
+    try {
+      const result = this.db.prepare(`
+        SELECT COUNT(*) as count FROM positions WHERE status = 'open'
+      `).get();
+      return result?.count || 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  /**
+   * 获取近期统计
+   */
+  getRecentStats() {
+    try {
+      const stats = this.db.prepare(`
+        SELECT 
+          COUNT(*) as total,
+          SUM(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END) as wins
+        FROM positions
+        WHERE status = 'closed'
+        AND created_at > strftime('%s', 'now', '-7 days')
+      `).get();
+
+      return {
+        totalTrades: stats?.total || 0,
+        wins: stats?.wins || 0,
+        winRate: stats?.total > 0 ? stats.wins / stats.total : 0
+      };
+    } catch (error) {
+      return { totalTrades: 0, wins: 0, winRate: 0 };
+    }
+  }
+
+  /**
+   * 检查是否处于防御模式
+   */
+  isDefensiveModeActive() {
+    return this._defensiveModeActive && this.params.DEFENSIVE_MODE.ENABLED;
+  }
+
+  /**
+   * 🔥 v9.4 检查是否在熔断恢复期
+   * 熔断触发后的指定时间内（默认4小时），系统处于恢复期
+   * 恢复期内仓位减半，降低连续亏损的风险
+   * @returns {boolean}
+   */
+  _isInCircuitBreakerRecovery() {
+    if (!this._lastCircuitBreakerTime) {
+      return false;
+    }
+
+    const recoveryHours = this.params.CIRCUIT_BREAKER.RECOVERY_PERIOD_HOURS || 4;
+    const recoveryPeriodMs = recoveryHours * 60 * 60 * 1000;
+    const elapsed = Date.now() - this._lastCircuitBreakerTime;
+
+    // 如果恢复期结束，清除记录
+    if (elapsed >= recoveryPeriodMs) {
+      this._lastCircuitBreakerTime = null;
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * 获取状态
+   */
+  getStatus() {
+    const stats = this.getRecentStats();
+    const isDefensive = this.isDefensiveModeActive();
+    const isInRecovery = this._isInCircuitBreakerRecovery();
+
+    return {
+      canTrade: this.canTrade(),
+      consecutiveLosses: this.state.consecutiveLosses,
+      pausedUntil: this.state.pausedUntil,
+      openPositions: this.getOpenPositionsCount(),
+      maxPositions: this.params.MAX_TOTAL_POSITIONS,
+      basePositions: this.params.MAX_CONCURRENT_POSITIONS,
+      goldenSlots: this.params.GOLDEN_EXTRA_SLOTS,
+      recentStats: stats,
+      minScore: isDefensive
+        ? this.params.MIN_SCORE_TO_TRADE + this.params.DEFENSIVE_MODE.MIN_SCORE_BOOST
+        : this.params.MIN_SCORE_TO_TRADE,
+      defensiveMode: isDefensive,
+      circuitBreakerActive: this._circuitBreakerTriggered || false,
+      // v9.4: 熔断恢复期状态
+      inRecoveryPeriod: isInRecovery,
+      recoveryTimeRemaining: isInRecovery
+        ? Math.ceil((this.params.CIRCUIT_BREAKER.RECOVERY_PERIOD_HOURS * 60 * 60 * 1000 - (Date.now() - this._lastCircuitBreakerTime)) / 60000)
+        : 0
+    };
+  }
+
+  /**
+   * 🔄 获取可替换的持仓 (v6.3 Swap 机制)
+   * 找到表现最差的持仓，用于腾笼换鸟
+   * @returns {{ position: object, canSwap: boolean, reason: string }}
+   */
+  getSwapCandidate() {
+    const config = this.params.SWAP_CONFIG;
+
+    if (!config.ENABLED) {
+      return { canSwap: false, reason: 'Swap 机制未启用' };
+    }
+
+    try {
+      // 获取所有开放持仓，按盈亏排序（亏损最多的在前）
+      const positions = this.db.prepare(`
+        SELECT 
+          id, symbol, token_ca, chain, entry_price, current_price,
+          entry_time, position_size_usd, pnl_percent, sm_entry, sm_current
+        FROM positions
+        WHERE status = 'open'
+        ORDER BY pnl_percent ASC
+      `).all();
+
+      if (positions.length === 0) {
+        return { canSwap: false, reason: '无持仓可替换' };
+      }
+
+      const now = Date.now();
+      const minHoldTime = config.MIN_HOLD_TIME_MINUTES * 60 * 1000;
+
+      // 找到符合替换条件的最差持仓
+      for (const pos of positions) {
+        const holdTime = now - new Date(pos.entry_time).getTime();
+        const pnl = pos.pnl_percent || 0;
+        const smDelta = (pos.sm_current || 0) - (pos.sm_entry || 0);
+
+        // 检查所有条件
+        const isLoss = pnl < 0;
+        const isOldEnough = holdTime >= minHoldTime;
+        const smExited = smDelta < 0;
+
+        if (config.REQUIRE_LOSS && !isLoss) continue;
+        if (!isOldEnough) continue;
+        if (config.REQUIRE_SM_EXIT && !smExited) continue;
+
+        // 找到了可替换的持仓
+        return {
+          canSwap: true,
+          position: pos,
+          reason: `可替换 ${pos.symbol} (PnL: ${pnl.toFixed(1)}%, 持有${(holdTime / 60000).toFixed(0)}min, SM: ${smDelta})`
+        };
+      }
+
+      return {
+        canSwap: false,
+        reason: '无符合条件的持仓可替换（需要亏损+持有30min+SM流出）'
+      };
+
+    } catch (error) {
+      return { canSwap: false, reason: `查询失败: ${error.message}` };
+    }
+  }
+
+  /**
+   * 🔄 检查是否可以使用金狗预留槽或 Swap
+   * @param {object} signal - 新信号
+   * @param {number} score - 评分
+   * @param {string} tag - 标签 (GOLDEN/SILVER/etc)
+   * @returns {{ allowed: boolean, reason: string, swapPosition?: object }}
+   */
+  canUseGoldenSlotOrSwap(signal, score, tag) {
+    const openPositions = this.getOpenPositionsCount();
+    const baseLimit = this.params.MAX_CONCURRENT_POSITIONS;
+    const totalLimit = this.params.MAX_TOTAL_POSITIONS;
+    const config = this.params.SWAP_CONFIG;
+
+    // 1. 还没满基础持仓，直接通过
+    if (openPositions < baseLimit) {
+      return { allowed: true, reason: '基础槽位可用' };
+    }
+
+    // 2. 检查是否是金狗
+    const isGolden = tag === 'GOLDEN' && score >= config.MIN_SCORE_TO_SWAP;
+
+    if (!isGolden) {
+      return {
+        allowed: false,
+        reason: `非金狗信号 (${tag}/${score}分) 不能使用预留槽`
+      };
+    }
+
+    // 3. 金狗信号，检查预留槽
+    if (openPositions < totalLimit) {
+      console.log(`   🥇 [RISK] 金狗信号使用预留槽 (${openPositions + 1}/${totalLimit})`);
+      return { allowed: true, reason: '使用金狗预留槽', isGoldenSlot: true };
+    }
+
+    // 4. 完全满仓，尝试 Swap
+    if (config.ENABLED) {
+      const swapResult = this.getSwapCandidate();
+      if (swapResult.canSwap) {
+        console.log(`   🔄 [RISK] 腾笼换鸟: ${swapResult.reason}`);
+        return {
+          allowed: true,
+          reason: '触发腾笼换鸟',
+          swapPosition: swapResult.position
+        };
+      }
+      return { allowed: false, reason: swapResult.reason };
+    }
+
+    return { allowed: false, reason: '持仓已满且 Swap 未启用' };
+  }
+}
+
+export default RiskManager;

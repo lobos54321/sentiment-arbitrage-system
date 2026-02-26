@@ -1,0 +1,112 @@
+{
+  "timestamp": "2026-01-13T05:58:57.530Z",
+  "summary": {
+    "uniqueGolds": 16,
+    "noiseTestSize": 100,
+    "signalTypeDistribution": {
+      "ACCELERATING": 14,
+      "STABLE": 2,
+      "DECAYING": 0
+    },
+    "smCountDistribution": {
+      "1": 2,
+      "2": 2,
+      "3": 2,
+      "4": 4,
+      "5+": 6
+    },
+    "tierDistribution": {
+      "TIER_A": 10,
+      "TIER_B": 4,
+      "TIER_C": 2
+    },
+    "phoenixCandidates": 14
+  },
+  "scenarioResults": [
+    {
+      "scenario": "正常涨幅",
+      "priceChange": 25,
+      "goldOldPass": 16,
+      "goldV92Pass": 16,
+      "goldTotal": 16,
+      "noiseOldPass": 100,
+      "noiseV92Pass": 100,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "中等涨幅",
+      "priceChange": 75,
+      "goldOldPass": 16,
+      "goldV92Pass": 16,
+      "goldTotal": 16,
+      "noiseOldPass": 100,
+      "noiseV92Pass": 100,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "高涨幅",
+      "priceChange": 200,
+      "goldOldPass": 0,
+      "goldV92Pass": 16,
+      "goldTotal": 16,
+      "noiseOldPass": 0,
+      "noiseV92Pass": 99,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "爆发涨幅",
+      "priceChange": 650,
+      "goldOldPass": 0,
+      "goldV92Pass": 15,
+      "goldTotal": 16,
+      "noiseOldPass": 0,
+      "noiseV92Pass": 85,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "轻微跌幅",
+      "priceChange": -10,
+      "goldOldPass": 16,
+      "goldV92Pass": 16,
+      "goldTotal": 16,
+      "noiseOldPass": 100,
+      "noiseV92Pass": 100,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "中等跌幅",
+      "priceChange": -30,
+      "goldOldPass": 16,
+      "goldV92Pass": 16,
+      "goldTotal": 16,
+      "noiseOldPass": 100,
+      "noiseV92Pass": 100,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "大跌幅",
+      "priceChange": -50,
+      "goldOldPass": 0,
+      "goldV92Pass": 15,
+      "goldTotal": 16,
+      "noiseOldPass": 0,
+      "noiseV92Pass": 92,
+      "noiseTotal": 100
+    },
+    {
+      "scenario": "Phoenix跌幅",
+      "priceChange": -70,
+      "goldOldPass": 0,
+      "goldV92Pass": 13,
+      "goldTotal": 16,
+      "noiseOldPass": 0,
+      "noiseV92Pass": 52,
+      "noiseTotal": 100
+    }
+  ],
+  "recommendations": [
+    "v9.2 在高涨幅场景下保护更多金狗",
+    "Phoenix 检测可拯救 ACCELERATING + 深跌的金狗",
+    "需要实时 priceChange 日志来进行精确回测"
+  ]
+}

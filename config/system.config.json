@@ -1,0 +1,212 @@
+{
+  "system_name": "Sentiment Arbitrage System MVP 2.0",
+  "version": "2.0.0",
+  "target_window_minutes": {
+    "min": 30,
+    "max": 120
+  },
+  "supported_chains": ["SOL", "BSC"],
+
+  "unknown_handling": {
+    "hard_gate_unknown": "GREYLIST",
+    "exit_gate_unknown": "GREYLIST",
+    "soft_score_unknown": "CAP_50_PERCENT"
+  },
+
+  "cooldown_and_limits": {
+    "same_token_cooldown_minutes": 30,
+    "same_narrative_max_concurrent": 3,
+    "same_source_24h_reject_threshold": 0.5,
+    "chase_high_reject_pct": 50,
+    "chase_high_window_minutes": 5
+  },
+
+  "position_templates": {
+    "SOL": {
+      "Small": 0.08,
+      "Normal": 0.15,
+      "Max": 0.5
+    },
+    "BSC": {
+      "Small": 0.008,
+      "Normal": 0.015,
+      "Max": 0.05
+    }
+  },
+
+  "exit_gate_slippage": {
+    "test_sell_percentage": 20,
+    "sol_reject_threshold_pct": 5,
+    "sol_pass_threshold_pct": 2,
+    "bsc_reject_threshold_pct": 8,
+    "bsc_pass_threshold_pct": 3
+  },
+
+  "hard_gate_thresholds": {
+    "SOL": {
+      "freeze_authority": "DISABLED",
+      "mint_authority": "DISABLED",
+      "lp_required": "BURNED_OR_LOCKED",
+      "lp_lock_min_days": 30
+    },
+    "BSC": {
+      "honeypot": "PASS",
+      "max_tax_percent": 5,
+      "tax_mutable": false,
+      "owner_safe_types": ["RENOUNCED", "MULTISIG", "TIMELOCK"],
+      "lp_lock_min_days": 30,
+      "dangerous_functions_allowed": []
+    }
+  },
+
+  "exit_gate_thresholds": {
+    "SOL": {
+      "min_liquidity_sol": 50,
+      "max_top10_percent": 30,
+      "max_wash_with_risk": "MEDIUM"
+    },
+    "BSC": {
+      "min_liquidity_bnb": 100,
+      "min_volume_24h_usd": 500000,
+      "max_top10_percent": 40
+    }
+  },
+
+  "soft_score_weights": {
+    "Narrative": 0.25,
+    "Influence": 0.25,
+    "TG_Spread": 0.30,
+    "Graph": 0.10,
+    "Source": 0.10
+  },
+
+  "soft_score_thresholds": {
+    "tg_spread": {
+      "ch_15m_high": 8,
+      "ch_15m_med": 4,
+      "min_clusters": 3,
+      "matrix_penalty_threshold": 2
+    },
+    "source": {
+      "time_lag_excellent_min": 5,
+      "time_lag_good_min": 15,
+      "time_lag_poor_min": 20
+    },
+    "x_validation": {
+      "min_unique_authors": 2,
+      "score_multiplier_if_low": 0.8
+    }
+  },
+
+  "decision_matrix": [
+    {
+      "gate_status": "PASS_PASS",
+      "min_score": 80,
+      "rating": "S",
+      "action": "AUTO_BUY",
+      "position": "Max"
+    },
+    {
+      "gate_status": "PASS_PASS",
+      "min_score": 60,
+      "max_score": 79,
+      "rating": "A",
+      "action": "BUY_WITH_CONFIRM",
+      "position": "Normal",
+      "position_multiplier": 0.7
+    },
+    {
+      "gate_status": "PASS_OR_GREYLIST",
+      "min_score": 40,
+      "max_score": 59,
+      "rating": "B",
+      "action": "WATCH",
+      "position": "Small"
+    },
+    {
+      "gate_status": "ANY_GREYLIST",
+      "rating": "GREYLIST",
+      "action": "WATCH_ONLY",
+      "position": "Small",
+      "auto_buy_disabled": true
+    },
+    {
+      "gate_status": "ANY_REJECT_OR_SCORE_LOW",
+      "max_score": 39,
+      "rating": "REJECT",
+      "action": "IGNORE",
+      "position": 0
+    }
+  ],
+
+  "exit_strategy": {
+    "risk_exit": {
+      "key_wallet_dump_threshold_pct": 10,
+      "slippage_deterioration_threshold_pct": 5,
+      "exit_percentage": 100,
+      "priority": 1
+    },
+    "sentiment_decay_exit": {
+      "tg_accel_negative": true,
+      "tg_ch_decline_periods": 2,
+      "no_new_mention_minutes": 15,
+      "partial_exit_percentage": 50,
+      "priority": 2
+    },
+    "standard_sop": {
+      "profit_50_exit_pct": 30,
+      "profit_100_exit_pct": 50,
+      "hold_max_minutes": 120,
+      "min_profit_threshold_pct": 20,
+      "priority": 3
+    }
+  },
+
+  "execution": {
+    "platform": "GMGN",
+    "sol_anti_mev": true,
+    "sol_smart_priority_fee": true,
+    "bsc_slippage_tolerance_pct": 15,
+    "monitoring_interval_seconds": 120
+  },
+
+  "database": {
+    "type": "sqlite",
+    "path": "./data/sentiment_arb.db",
+    "tables": ["tokens", "gates", "social_snapshots", "trades"]
+  },
+
+  "optimization": {
+    "weekly_rebalance": true,
+    "channel_tier_update": true,
+    "threshold_calibration": true,
+    "min_sample_size": 50
+  },
+
+  "shadow_mode": {
+    "enabled": false,
+    "duration_hours": 24,
+    "record_only": true
+  },
+
+  "premium_channel": {
+    "enabled": false,
+    "channel_id": 3636518327,
+    "channel_name": "Egeye AI Gems 100X Vip",
+    "position_sol": 0.1,
+    "max_positions": 5,
+    "dedup_window_minutes": 5,
+    "shadow_mode_default": true,
+    "scoring": {
+      "buy_full_threshold": 50,
+      "buy_half_threshold": 30,
+      "greylist_min_confidence": 60,
+      "stop_loss_percent": 20
+    },
+    "message_filter": {
+      "require_fire_emoji": true,
+      "require_new_trending": true,
+      "ignore_ath_alerts": true
+    }
+  }
+}

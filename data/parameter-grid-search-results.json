@@ -1,0 +1,997 @@
+{
+  "totalCombinations": 6400,
+  "top20": [
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 15,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 58.223684210526315,
+      "compositeScore": 69.78947368421052,
+      "precision": 19.62025316455696,
+      "goldPass": 31,
+      "noisePass": 127
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 15,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 58.223684210526315,
+      "compositeScore": 69.78947368421052,
+      "precision": 19.62025316455696,
+      "goldPass": 31,
+      "noisePass": 127
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 16,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 58.223684210526315,
+      "compositeScore": 69.78947368421052,
+      "precision": 19.62025316455696,
+      "goldPass": 31,
+      "noisePass": 127
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 16,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 58.223684210526315,
+      "compositeScore": 69.78947368421052,
+      "precision": 19.62025316455696,
+      "goldPass": 31,
+      "noisePass": 127
+    }
+  ],
+  "paretoFront": [
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 1,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": false,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": null
+      },
+      "goldPassRate": 95,
+      "noiseFilterRate": 14.802631578947366,
+      "compositeScore": 62.921052631578945,
+      "precision": 12.794612794612794,
+      "goldPass": 38,
+      "noisePass": 259
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 1,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": false,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 92.5,
+      "noiseFilterRate": 23.684210526315788,
+      "compositeScore": 64.97368421052632,
+      "precision": 13.754646840148698,
+      "goldPass": 37,
+      "noisePass": 232
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 1,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": null
+      },
+      "goldPassRate": 90,
+      "noiseFilterRate": 34.21052631578947,
+      "compositeScore": 67.6842105263158,
+      "precision": 15.254237288135593,
+      "goldPass": 36,
+      "noisePass": 200
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": null
+      },
+      "goldPassRate": 87.5,
+      "noiseFilterRate": 42.76315789473684,
+      "compositeScore": 69.60526315789474,
+      "precision": 16.74641148325359,
+      "goldPass": 35,
+      "noisePass": 174
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 2000000
+      },
+      "goldPassRate": 85,
+      "noiseFilterRate": 48.026315789473685,
+      "compositeScore": 70.21052631578948,
+      "precision": 17.708333333333336,
+      "goldPass": 34,
+      "noisePass": 158
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 1,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 80,
+      "noiseFilterRate": 51.31578947368421,
+      "compositeScore": 68.52631578947368,
+      "precision": 17.77777777777778,
+      "goldPass": 32,
+      "noisePass": 148
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 60,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 70,
+      "noiseFilterRate": 60.526315789473685,
+      "compositeScore": 66.21052631578948,
+      "precision": 18.91891891891892,
+      "goldPass": 28,
+      "noisePass": 120
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 3,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 65,
+      "noiseFilterRate": 66.11842105263158,
+      "compositeScore": 65.44736842105263,
+      "precision": 20.155038759689923,
+      "goldPass": 26,
+      "noisePass": 103
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 21,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 60,
+      "noiseFilterRate": 68.0921052631579,
+      "compositeScore": 63.236842105263165,
+      "precision": 19.834710743801654,
+      "goldPass": 24,
+      "noisePass": 97
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 60,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 42.5,
+      "noiseFilterRate": 76.31578947368422,
+      "compositeScore": 56.026315789473685,
+      "precision": 19.101123595505616,
+      "goldPass": 17,
+      "noisePass": 72
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1000000
+      },
+      "goldPassRate": 40,
+      "noiseFilterRate": 79.60526315789474,
+      "compositeScore": 55.8421052631579,
+      "precision": 20.51282051282051,
+      "goldPass": 16,
+      "noisePass": 62
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 3,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 500000
+      },
+      "goldPassRate": 37.5,
+      "noiseFilterRate": 82.23684210526315,
+      "compositeScore": 55.39473684210526,
+      "precision": 21.73913043478261,
+      "goldPass": 15,
+      "noisePass": 54
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 21,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 32.5,
+      "noiseFilterRate": 83.88157894736842,
+      "compositeScore": 53.05263157894737,
+      "precision": 20.967741935483872,
+      "goldPass": 13,
+      "noisePass": 49
+    }
+  ],
+  "balancedStrategies": [
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 60,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 70,
+      "noiseFilterRate": 60.526315789473685,
+      "compositeScore": 66.21052631578948,
+      "precision": 18.91891891891892,
+      "goldPass": 28,
+      "noisePass": 120
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 60,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 70,
+      "noiseFilterRate": 60.526315789473685,
+      "compositeScore": 66.21052631578948,
+      "precision": 18.91891891891892,
+      "goldPass": 28,
+      "noisePass": 120
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 60,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 70,
+      "noiseFilterRate": 60.526315789473685,
+      "compositeScore": 66.21052631578948,
+      "precision": 18.91891891891892,
+      "goldPass": 28,
+      "noisePass": 120
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 60,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 70,
+      "noiseFilterRate": 60.526315789473685,
+      "compositeScore": 66.21052631578948,
+      "precision": 18.91891891891892,
+      "goldPass": 28,
+      "noisePass": 120
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    }
+  ],
+  "precisionStrategies": [
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 18,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 19,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 20,
+        "smCountThreshold": 4,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 50,
+      "noiseFilterRate": 75.6578947368421,
+      "compositeScore": 60.263157894736835,
+      "precision": 21.27659574468085,
+      "goldPass": 20,
+      "noisePass": 74
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 50,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    },
+    {
+      "params": {
+        "sevenDimThreshold": 17,
+        "smCountThreshold": 2,
+        "requireTrendIncreasing": false,
+        "requireSignalAccelerating": true,
+        "allowLateFollower": true,
+        "baseScoreThreshold": 55,
+        "maxMcap": 1500000
+      },
+      "goldPassRate": 77.5,
+      "noiseFilterRate": 59.86842105263158,
+      "compositeScore": 70.44736842105263,
+      "precision": 20.26143790849673,
+      "goldPass": 31,
+      "noisePass": 122
+    }
+  ],
+  "bestOverall": {
+    "params": {
+      "sevenDimThreshold": 17,
+      "smCountThreshold": 2,
+      "requireTrendIncreasing": false,
+      "requireSignalAccelerating": true,
+      "allowLateFollower": true,
+      "baseScoreThreshold": 50,
+      "maxMcap": 1500000
+    },
+    "goldPassRate": 77.5,
+    "noiseFilterRate": 59.86842105263158,
+    "compositeScore": 70.44736842105263,
+    "precision": 20.26143790849673,
+    "goldPass": 31,
+    "noisePass": 122
+  },
+  "bestBalanced": {
+    "params": {
+      "sevenDimThreshold": 17,
+      "smCountThreshold": 2,
+      "requireTrendIncreasing": false,
+      "requireSignalAccelerating": true,
+      "allowLateFollower": true,
+      "baseScoreThreshold": 60,
+      "maxMcap": 1500000
+    },
+    "goldPassRate": 70,
+    "noiseFilterRate": 60.526315789473685,
+    "compositeScore": 66.21052631578948,
+    "precision": 18.91891891891892,
+    "goldPass": 28,
+    "noisePass": 120
+  },
+  "bestPrecision": {
+    "params": {
+      "sevenDimThreshold": 17,
+      "smCountThreshold": 4,
+      "requireTrendIncreasing": false,
+      "requireSignalAccelerating": true,
+      "allowLateFollower": true,
+      "baseScoreThreshold": 50,
+      "maxMcap": 1500000
+    },
+    "goldPassRate": 50,
+    "noiseFilterRate": 75.6578947368421,
+    "compositeScore": 60.263157894736835,
+    "precision": 21.27659574468085,
+    "goldPass": 20,
+    "noisePass": 74
+  }
+}

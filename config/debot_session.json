@@ -1,0 +1,187 @@
+{
+  "cookies": [
+    {
+      "name": "theme",
+      "value": "dark",
+      "domain": "debot.ai",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "beegosessionID",
+      "value": "7fdfd4ee11ec99a45377ec158bb79478",
+      "domain": "debot.ai",
+      "path": "/",
+      "expires": 1770814710.620995,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "__cf_bm",
+      "value": "IIhAFkCuW.tH232fFCtOJRzVXIvlnHqLUSR8NU0IR.c-1768222710-1.0.1.1-6U78u8gmB.Yyl4TylwoGM8ds.LT48Ljr87mwmUjsUw2TYQBBQp2OL26WCvY3veNR7lUkA4jr47.VqGPWAEctJ0N06HG2Fk4wdoviaIwOloc",
+      "domain": ".debot.ai",
+      "path": "/",
+      "expires": 1768224510.621489,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_ga_7QSW3N3LVZ",
+      "value": "GS2.1.s1768222716$o1$g0$t1768222716$j60$l0$h0",
+      "domain": ".debot.ai",
+      "path": "/",
+      "expires": 1802782716.693289,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga",
+      "value": "GA1.1.1436634634.1768222717",
+      "domain": ".debot.ai",
+      "path": "/",
+      "expires": 1802782716.694012,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_bl_uid",
+      "value": "3RmUFkaqbeg68s5XtgL3a6h5Fv7C",
+      "domain": "debot.ai",
+      "path": "/",
+      "expires": 1783774716.845622,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "MEIQIA_TRACK_ID",
+      "value": "389riVZzeAWNH0o8bc2E68IUbQW",
+      "domain": ".debot.ai",
+      "path": "/",
+      "expires": 1802782755.156802,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "MEIQIA_VISIT_ID",
+      "value": "389riWWyxQQJv0SvRedZF5tXT2X",
+      "domain": ".debot.ai",
+      "path": "/",
+      "expires": 1802782755.160176,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sid",
+      "value": "sid_xGEWi49AQOx_gsbt-9ptszIlfvjynOOSpDWEImugQ1o",
+      "domain": "labs.debot.ai",
+      "path": "/",
+      "expires": 1768827654.279994,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "third-party-auth-token",
+      "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVSUQiOiIxNzI5MDAiLCJzb3VyY2UiOiJkZWJvdCIsImV4cCI6MTc2ODgyNzY1NCwiaWF0IjoxNzY4MjIyODU0fQ.LPRSUzLow8iVfJyZ7oW26K_MKUPImWZBk11H5hfq1n8",
+      "domain": "sleep.debot.ai",
+      "path": "/",
+      "expires": 1768309254.661931,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://debot.ai",
+      "localStorage": [
+        {
+          "name": "DeviceTokenResponse",
+          "value": "{\"username\":\"lobos54321@gmail.com\",\"name\":\"lobos54321@gmail.com\",\"inviteCode\":182900,\"customInviteCode\":\"\",\"vip\":\"free\",\"vipEndTimestamp\":-62135596800,\"wallet\":\"\",\"walletMonitorQuota\":35,\"tokenMonitorQuota\":46,\"twitterUserMonitorQuota\":0,\"timesPerHour\":2000,\"token\":\"172900-5e0956907e3c331f1d9e32141386c70c\",\"bindedWallets\":null,\"quote\":{\"walletCnt\":50,\"tokenCnt\":50,\"timesPerHour\":2000,\"twitterUserCnt\":2},\"device\":{\"deviceToken\":\"0258dde60a1c774ee0968d88de46daba60ae\",\"platform\":\"ios\",\"versionNumber\":\"com.debot-1.native\"},\"sub_token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVSUQiOjE3MjkwMH0.JMcQwvBXiC_FAUUFXmB-KsQ8DjFkptFrVxNsXer6pbc\",\"third_token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVSUQiOjE3MjkwMH0.Kac9fUdehwZTNWNr87j4azgNjginT-jYfmBAc8e2qso\",\"telegram_bot_id\":\"debot_watcher_1_bot\",\"is_channel_owner\":false,\"is_totp_open\":true}"
+        },
+        {
+          "name": "DeviceTokenRequest",
+          "value": "请求用户信息成功"
+        },
+        {
+          "name": "subToken",
+          "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVSUQiOjE3MjkwMH0.JMcQwvBXiC_FAUUFXmB-KsQ8DjFkptFrVxNsXer6pbc"
+        },
+        {
+          "name": "dt-theme",
+          "value": "dark"
+        },
+        {
+          "name": "fast_buy_pay_wallet_bsc_global",
+          "value": "0x09C4Aa43D01436BA5E7459C67FF07845a8731A19"
+        },
+        {
+          "name": "showTopBar",
+          "value": "true"
+        },
+        {
+          "name": "DeviceTokenResponseStart",
+          "value": "开始请求用户信息"
+        },
+        {
+          "name": "fast_buy_pay_wallets_bsc_global",
+          "value": "[\"0x09C4Aa43D01436BA5E7459C67FF07845a8731A19\"]"
+        },
+        {
+          "name": "history_bar",
+          "value": "[]"
+        },
+        {
+          "name": "soundsMap",
+          "value": "{\"signal\":\"Coin.mp3\",\"message\":\"DingDong.mp3\",\"buy\":\"Bell.mp3\",\"sell\":\"Bell.mp3\",\"limitBuy\":\"Bell.mp3\",\"limitSell\":\"Bell.mp3\",\"stopLossSell\":\"Bell.mp3\",\"takeProfitSell\":\"Bell.mp3\",\"signalCopyBuy\":\"Bell.mp3\",\"memeNew\":\"\",\"memeCompleting\":\"\",\"memeCompleted\":\"\",\"twitter\":\"Sonumi.mp3\",\"track\":\"DingDong.mp3\"}"
+        },
+        {
+          "name": "token_remarks",
+          "value": "{}"
+        },
+        {
+          "name": "_MEIQIA_LANGUAGE",
+          "value": "cn"
+        },
+        {
+          "name": "twitter_remarks",
+          "value": "{}"
+        },
+        {
+          "name": "clipboardPermissionAttempted",
+          "value": "true"
+        },
+        {
+          "name": "fast_buy_pay_type_bsc_global",
+          "value": "telegram"
+        },
+        {
+          "name": "MEIQIA_VISIT_ID",
+          "value": "389riWWyxQQJv0SvRedZF5tXT2X"
+        },
+        {
+          "name": "new_function_modal_open_32",
+          "value": "1768222746"
+        },
+        {
+          "name": "wallet_remarks",
+          "value": "{\"0x3047ba591932010a83302cdc39d24716ade39a35\":\"安全钱包\",\"HLozNxezoXXRsGB4E1iZtNzwczSNv5NVoi2MToRSsb74\":\"安全钱包\"}"
+        },
+        {
+          "name": "MEIQIA_TRACK_ID",
+          "value": "389riVZzeAWNH0o8bc2E68IUbQW"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "timestamp": "2026-01-13T02:53:00.008Z",
+  "config": {
+    "sampleSize": 10,
+    "dryRun": true
+  },
+  "summary": {
+    "totalSamples": 20,
+    "goldSamples": 10,
+    "noiseSamples": 10,
+    "positives": 3,
+    "truePositives": 3,
+    "falsePositives": 0,
+    "precision": 100,
+    "recall": 30
+  },
+  "results": [
+    {
+      "symbol": "hippo",
+      "isGold": true,
+      "chainScore": 30,
+      "aiScore": 59,
+      "finalScore": 47,
+      "prediction": "BRONZE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "BSC之家",
+      "isGold": true,
+      "chainScore": 30,
+      "aiScore": 51,
+      "finalScore": 42,
+      "prediction": "BRONZE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "SEX",
+      "isGold": true,
+      "chainScore": 52,
+      "aiScore": 79,
+      "finalScore": 68,
+      "prediction": "SILVER",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "114514",
+      "isGold": true,
+      "chainScore": 63,
+      "aiScore": 63,
+      "finalScore": 63,
+      "prediction": "SILVER",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "paraballic",
+      "isGold": true,
+      "chainScore": 35,
+      "aiScore": 47,
+      "finalScore": 42,
+      "prediction": "BRONZE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "WTF",
+      "isGold": true,
+      "chainScore": 40,
+      "aiScore": 56,
+      "finalScore": 50,
+      "prediction": "BRONZE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "HYCZ",
+      "isGold": true,
+      "chainScore": 63,
+      "aiScore": 33,
+      "finalScore": 45,
+      "prediction": "BRONZE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "Remusofmars",
+      "isGold": true,
+      "chainScore": 37,
+      "aiScore": 30,
+      "finalScore": 33,
+      "prediction": "NOISE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "水豚噜噜",
+      "isGold": true,
+      "chainScore": 28,
+      "aiScore": 40,
+      "finalScore": 35,
+      "prediction": "NOISE",
+      "isCorrect": false,
+      "xData": null
+    },
+    {
+      "symbol": "火箭狗",
+      "isGold": true,
+      "chainScore": 40,
+      "aiScore": 69,
+      "finalScore": 57,
+      "prediction": "SILVER",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "TICK",
+      "isGold": false,
+      "chainScore": 28,
+      "aiScore": 34,
+      "finalScore": 32,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "rocky",
+      "isGold": false,
+      "chainScore": 28,
+      "aiScore": 36,
+      "finalScore": 33,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "MAGIKARP",
+      "isGold": false,
+      "chainScore": 28,
+      "aiScore": 29,
+      "finalScore": 29,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "BOW",
+      "isGold": false,
+      "chainScore": 28,
+      "aiScore": 46,
+      "finalScore": 39,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "FeruCWtT...",
+      "isGold": false,
+      "chainScore": 28,
+      "aiScore": 25,
+      "finalScore": 26,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "enabler",
+      "isGold": false,
+      "chainScore": 28,
+      "aiScore": 32,
+      "finalScore": 31,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "0xcddfa2...",
+      "isGold": false,
+      "chainScore": 27,
+      "aiScore": 44,
+      "finalScore": 37,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "4q8v8kPn...",
+      "isGold": false,
+      "chainScore": 35,
+      "aiScore": 36,
+      "finalScore": 36,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "ASCEND",
+      "isGold": false,
+      "chainScore": 32,
+      "aiScore": 10,
+      "finalScore": 19,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    },
+    {
+      "symbol": "milkers",
+      "isGold": false,
+      "chainScore": 27,
+      "aiScore": 38,
+      "finalScore": 34,
+      "prediction": "NOISE",
+      "isCorrect": true,
+      "xData": null
+    }
+  ]
+}

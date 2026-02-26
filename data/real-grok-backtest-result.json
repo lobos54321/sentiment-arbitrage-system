@@ -1,0 +1,167 @@
+{
+  "timestamp": "2026-01-13T03:12:04.259Z",
+  "testSize": 5,
+  "results": [
+    {
+      "symbol": "HAPPY-SCI",
+      "isGold": true,
+      "chainScore": 60,
+      "aiScore": 0,
+      "prediction": "BRONZE",
+      "isBuy": false,
+      "isCorrect": false,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "114514",
+      "isGold": true,
+      "chainScore": 70,
+      "aiScore": 5,
+      "prediction": "BRONZE_HIGH",
+      "isBuy": true,
+      "isCorrect": true,
+      "xData": {
+        "mentions": 0,
+        "kols": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "人生K线",
+      "isGold": true,
+      "chainScore": 45,
+      "aiScore": 0,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": false,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "Hacker",
+      "isGold": true,
+      "chainScore": 35,
+      "aiScore": 0,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": false,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "paraballic",
+      "isGold": true,
+      "chainScore": 40,
+      "aiScore": 0,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": false,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "PsyopPepe",
+      "isGold": false,
+      "chainScore": 35,
+      "aiScore": 0,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": true,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "8XabbXK6...",
+      "isGold": false,
+      "chainScore": 30,
+      "aiScore": 5,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": true,
+      "xData": {
+        "mentions": 0,
+        "kols": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "0x1c46bc...",
+      "isGold": false,
+      "chainScore": 35,
+      "aiScore": 0,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": true,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "SSIGO",
+      "isGold": false,
+      "chainScore": 35,
+      "aiScore": 5,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": true,
+      "xData": {
+        "mentions": 0,
+        "kols": 0
+      },
+      "error": null
+    },
+    {
+      "symbol": "tAjP8Nfs...",
+      "isGold": false,
+      "chainScore": 35,
+      "aiScore": 0,
+      "prediction": "NOISE",
+      "isBuy": false,
+      "isCorrect": true,
+      "xData": {
+        "mentions": 0,
+        "kols": 0,
+        "sentiment": "neutral",
+        "narrativeScore": 0
+      },
+      "error": null
+    }
+  ],
+  "summary": {
+    "precision": 100,
+    "recall": 20,
+    "buyDecisions": 1,
+    "truePositives": 1,
+    "falsePositives": 0
+  }
+}

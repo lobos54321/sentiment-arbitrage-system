@@ -1,0 +1,9 @@
+channel_name,tme_link,tier,status,historical_30_120_ev,reject_ratio_24h,notes
+MomentumTrackerCN,t.me/momentumtrackercn,A,ACTIVE,2.5,0.15,Primary aggregator
+AlphaCallsCN,t.me/alphacallscn,A,ACTIVE,2.2,0.18,High quality signals
+GemFinderPro,t.me/gemfinderpro,B,ACTIVE,1.8,0.22,Mixed quality
+MemeRushCN,t.me/memerushcn,B,ACTIVE,1.6,0.25,Volume oriented
+QuickPumpAlerts,t.me/quickpumpalerts,C,WATCH,1.2,0.35,High risk signals
+CryptoSignalsVIP,t.me/cryptosignalsvip,C,WATCH,0.8,0.45,Frequently fails
+ScamAlertBot,t.me/scamalertbot,BLACKLIST,BLOCKED,−0.5,0.85,Known scam promoter
+PumpAndDumpKing,t.me/pumpanddumpking,BLACKLIST,BLOCKED,−1.2,0.92,Verified matrix operator

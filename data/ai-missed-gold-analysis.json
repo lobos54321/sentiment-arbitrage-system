@@ -1,0 +1,241 @@
+{
+  "timestamp": "2026-01-13T03:26:01.828Z",
+  "discardMissedCount": 31,
+  "foundFeaturesCount": 29,
+  "stats": {
+    "signalTrend": {
+      "STABLE": 23,
+      "ACCELERATING": 4,
+      "DECAYING": 2
+    },
+    "smCount": {
+      "1": 12,
+      "2": 3,
+      "3": 8,
+      "4": 2,
+      "5": 1,
+      "6": 1,
+      "9": 1,
+      "12": 1
+    },
+    "baseScore": {
+      "low": 1,
+      "medium": 3,
+      "high": 25
+    }
+  },
+  "successFeatures": [
+    {
+      "symbol": "B",
+      "baseScore": 59,
+      "smScore": 15,
+      "smCount": 1,
+      "trendScore": 10,
+      "trendType": "STABLE",
+      "densityScore": 5,
+      "signalTrendScore": 8,
+      "signalTrendType": "STABLE",
+      "safetyScore": 15,
+      "aiScore": 6,
+      "mcap": null,
+      "isFiltered": true,
+      "filterReason": null,
+      "source": "restart_v75_20260113_002033.log",
+      "isGold": true
+    },
+    {
+      "symbol": "老子",
+      "baseScore": 46,
+      "smScore": 5,
+      "smCount": 9,
+      "trendScore": 10,
+      "trendType": "STABLE",
+      "densityScore": 5,
+      "signalTrendScore": 8,
+      "signalTrendType": "STABLE",
+      "safetyScore": 3,
+      "aiScore": 0,
+      "mcap": null,
+      "isFiltered": false,
+      "filterReason": null,
+      "source": "system.log",
+      "isGold": true
+    }
+  ],
+  "missedFeatures": [
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "MEME浪潮",
+      "signalTrendType": "ACCELERATING",
+      "smCount": 4,
+      "baseScore": 61
+    },
+    {
+      "symbol": "P",
+      "signalTrendType": "STABLE",
+      "smCount": 3,
+      "baseScore": 68
+    },
+    {
+      "symbol": "死了么",
+      "signalTrendType": "STABLE",
+      "smCount": 2,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "P",
+      "signalTrendType": "STABLE",
+      "smCount": 3,
+      "baseScore": 68
+    },
+    {
+      "symbol": "HYCZ",
+      "signalTrendType": "ACCELERATING",
+      "smCount": 2,
+      "baseScore": 61
+    },
+    {
+      "symbol": "人生K线",
+      "signalTrendType": "STABLE",
+      "smCount": 2,
+      "baseScore": 64
+    },
+    {
+      "symbol": "汉",
+      "signalTrendType": "DECAYING",
+      "smCount": 5,
+      "baseScore": 64
+    },
+    {
+      "symbol": "交易猫",
+      "signalTrendType": "ACCELERATING",
+      "smCount": 6,
+      "baseScore": 53
+    },
+    {
+      "symbol": "Sperm",
+      "signalTrendType": "DECAYING",
+      "smCount": 3,
+      "baseScore": 49
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "WhiteWhale",
+      "signalTrendType": "STABLE",
+      "smCount": 3,
+      "baseScore": 56
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "水豚噜噜",
+      "signalTrendType": "STABLE",
+      "smCount": 3,
+      "baseScore": 63
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "oora",
+      "signalTrendType": "ACCELERATING",
+      "smCount": 3,
+      "baseScore": 66
+    },
+    {
+      "symbol": "牛马",
+      "signalTrendType": "STABLE",
+      "smCount": 4,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "testicle2",
+      "signalTrendType": "STABLE",
+      "smCount": 12,
+      "baseScore": 53
+    },
+    {
+      "symbol": "hippo",
+      "signalTrendType": "STABLE",
+      "smCount": 9,
+      "baseScore": 53
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "B",
+      "signalTrendType": "STABLE",
+      "smCount": 1,
+      "baseScore": 59
+    },
+    {
+      "symbol": "P",
+      "signalTrendType": "STABLE",
+      "smCount": 3,
+      "baseScore": 68
+    },
+    {
+      "symbol": "P",
+      "signalTrendType": "STABLE",
+      "smCount": 3,
+      "baseScore": 68
+    }
+  ]
+}

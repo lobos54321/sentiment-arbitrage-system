@@ -1,0 +1,57 @@
+{
+  "timestamp": "2026-01-13T03:23:33.509Z",
+  "dataSource": "ai_analysis_log.json",
+  "stats": {
+    "totalAILogs": 50,
+    "goldDogCount": 77,
+    "totalDecisions": 48,
+    "buyDecisions": 26,
+    "watchDecisions": 2,
+    "discardDecisions": 20,
+    "buyHits": 5,
+    "watchHits": 0,
+    "discardHits": 3,
+    "buyPrecision": 19.2,
+    "recall": 6.5,
+    "discardMissRate": 15
+  },
+  "goldHits": {
+    "buy": [
+      {
+        "symbol": "berbie",
+        "timestamp": "2026-01-12T15:25:53.795Z"
+      },
+      {
+        "symbol": "PokerFace",
+        "timestamp": "2026-01-12T17:25:50.670Z"
+      },
+      {
+        "symbol": "PRIVNET",
+        "timestamp": "2026-01-12T20:51:03.461Z"
+      },
+      {
+        "symbol": "PSYOPANIME",
+        "timestamp": "2026-01-12T23:15:58.385Z"
+      },
+      {
+        "symbol": "berbie",
+        "timestamp": "2026-01-12T23:41:06.960Z"
+      }
+    ],
+    "watch": [],
+    "discard": [
+      {
+        "symbol": "P",
+        "timestamp": "2026-01-12T19:45:58.668Z"
+      },
+      {
+        "symbol": "P",
+        "timestamp": "2026-01-12T19:50:55.977Z"
+      },
+      {
+        "symbol": "Pilotoor",
+        "timestamp": "2026-01-12T22:45:54.663Z"
+      }
+    ]
+  }
+}

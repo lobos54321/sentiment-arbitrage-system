@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-02-24T18:38:12.683Z",
+  "circuitBreaker": false,
+  "requestsToday": 1,
+  "successfulRequests": 1,
+  "failedRequests": 0,
+  "rateLimited": 0,
+  "circuitBreakerTrips": 0,
+  "queueLength": 0,
+  "availableTokens": 10
+}

@@ -1,0 +1,444 @@
+{
+  "analyzed_at": "2026-01-13T00:21:09.377Z",
+  "goldDogs": [
+    {
+      "address": "6PMuLSPRz9ae2xPDn5Dc3zH3kDtmE7tTyL8XQKmEbonk",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 68
+    },
+    {
+      "address": "GJ9LEQZgoxW487LRaRnajr6DWzouswd29EruRqwZBAGS",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 33.7
+    },
+    {
+      "address": "0x72d404ababfadf995519dda27ae9cdf3e5774444",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 33
+    },
+    {
+      "address": "0x51d5b1377b4d429283e8156540855ece77ad4444",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 31.1
+    },
+    {
+      "address": "Uo5sNH4eMCD3kr4THkZgqGLi2rMd6w8yMdHEayTaNYC",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 30.6
+    },
+    {
+      "address": "387y7v7vPvCguwmsuN56QuxankZdES97ExqSp9CNpump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 30.6
+    },
+    {
+      "address": "0xb1232ca8dfed148ea358c0effc8b785280734444",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 28.4
+    },
+    {
+      "address": "0xe5004e785f6ddf594184b2e182f5ecdedfaa4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 27.1
+    },
+    {
+      "address": "0x0f9ceb396857a20a8ba06db0cd57460fb2834444",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 24.2
+    },
+    {
+      "address": "0xbf30a9bb4dba9429b49d17deca2c179e94d24444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 23.4
+    },
+    {
+      "address": "5ohBqLgmccJstRhrFskitBYa7DtwQ13HZmFzH8Wepump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 20.1
+    },
+    {
+      "address": "3QrGcwFSKXiKetD5ixzZa7H4zHPuTg8grrH7s5Mzpump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 19.1
+    },
+    {
+      "address": "2nP9yKQNSGQy851iyawDvBkzkK2R2aqKArQCKc2gpump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 18.8
+    },
+    {
+      "address": "EaxDJbZ6L7FdgQMnHRwqTrasJXQRfuHY5oDtNG1vpump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 16.7
+    },
+    {
+      "address": "0x9d07e8a189354e9737fb52dc6499553c5d8e4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 15.1
+    },
+    {
+      "address": "0xa917b52eea9e22d1cf49dbd01474760ca79e4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 14.9
+    },
+    {
+      "address": "5tr6q9DqzhYse9FAzswmyfHVXA5SgAxNJtZ3Usqvpump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 14.8
+    },
+    {
+      "address": "EKPWiLk5fwTNZVeL5PrKSFDjdJrvRkvoPafVT54ppump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 14.5
+    },
+    {
+      "address": "AD8ra3bPosVujHQDofATvPciT1Q9xY4DLEgXbGzopump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 14.4
+    },
+    {
+      "address": "E67rDG9U9rbB8QKZPhuZLNQVNknHxFYBoM1vEHVPpump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 14.2
+    },
+    {
+      "address": "HNHNHcornzS5NsMegJA8wq2Ao68xVmKrHDRFif6pump",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 13
+    },
+    {
+      "address": "0x4dbc56a42524e553a069c7c955e32b6f089cc1e2",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 11.8
+    },
+    {
+      "address": "2tJU3pMh4HJjKa9HN6HngdopfNqqaeEytFqW98Kqpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 11.7
+    },
+    {
+      "address": "0xb43879c6a1d60be04b882b976543cd50c5084444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 11.6
+    },
+    {
+      "address": "0x71b702a3dd8e42a280656e2aaed2c26c7d2c4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 11.5
+    },
+    {
+      "address": "7uqfEqdd9strJVYiju6kasjCj6AzjBF2S1GmWRhdpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 11
+    },
+    {
+      "address": "E2itWssNNRVYSTd7U6Q7y5XVRVJM4eAxG7TGSv5epump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 11
+    },
+    {
+      "address": "3u6u769qdeXf9jk7mw1HQDD7miLxRTCa22S6Y3iJpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.9
+    },
+    {
+      "address": "9w5pPZ3Zv21TAuQ8iKUPimefBHTCHE7HZFoikhaMpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.8
+    },
+    {
+      "address": "0x95605f364d3d26974c38efd2657676cacf5a4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.4
+    },
+    {
+      "address": "0x52b9ec7c3b8169c0685d5e3605f7ec0d829e4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.4
+    },
+    {
+      "address": "A1UYYhFrYr4bL1LCU2nMD6qgNtfVrJet4MJ5c74Qpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.4
+    },
+    {
+      "address": "5rqJa2TqsEeP5LbXHnsLREjWq2fvVTSmBhPJdPgFpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.3
+    },
+    {
+      "address": "3MKZDaqgMgZJmetXStD47W6FqrcAsK9UaYgNWK2apump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10.1
+    },
+    {
+      "address": "0x3c8455f18ff03dd6e94b6cddeabc79ec75c34444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 10
+    },
+    {
+      "address": "0xe1def164017771b0bcd63f288f691cbc28c14444",
+      "emoji": "🥇",
+      "level": "gold",
+      "maxGain": 6.8
+    }
+  ],
+  "silverDogs": [
+    {
+      "address": "2oA1mzm571ZUq2ne17wEQsBhD17VdmL192BB2Hu5UuR2",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 9.9
+    },
+    {
+      "address": "4byYKuECPzdWw2dWoH4LBab6t8AnFZKBFdNkH2hWpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 9.5
+    },
+    {
+      "address": "EaxDJbZ6L7FdgQMnHRwqTrasJXQRfuHY5oDtNG1vpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 9.5
+    },
+    {
+      "address": "0x439b28249acd9e16bcb58bc33bca551ede714444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 9.4
+    },
+    {
+      "address": "5ohBqLgmccJstRhrFskitBYa7DtwQ13HZmFzH8Wepump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 8.9
+    },
+    {
+      "address": "AD8ra3bPosVujHQDofATvPciT1Q9xY4DLEgXbGzopump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 8.7
+    },
+    {
+      "address": "5tr6q9DqzhYse9FAzswmyfHVXA5SgAxNJtZ3Usqvpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 8.4
+    },
+    {
+      "address": "3RDAjRAC1NkTXHG8H9XApKxWTqfqtGj2oyPWQf9zpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 8.4
+    },
+    {
+      "address": "0xaed762745cf6b2e2f894b2aa15d9eeef59754444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 8
+    },
+    {
+      "address": "0x5530da6352961911a52295743cca96a3c25b4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 7.9
+    },
+    {
+      "address": "5rqJa2TqsEeP5LbXHnsLREjWq2fvVTSmBhPJdPgFpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 7.6
+    },
+    {
+      "address": "0xc469280dcd3b977a56e0403afe012427e7c14444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 6.8
+    },
+    {
+      "address": "3MKZDaqgMgZJmetXStD47W6FqrcAsK9UaYgNWK2apump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 6.8
+    },
+    {
+      "address": "2tJU3pMh4HJjKa9HN6HngdopfNqqaeEytFqW98Kqpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 6.7
+    },
+    {
+      "address": "0x52b9ec7c3b8169c0685d5e3605f7ec0d829e4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 6.7
+    },
+    {
+      "address": "3u6u769qdeXf9jk7mw1HQDD7miLxRTCa22S6Y3iJpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 6.4
+    },
+    {
+      "address": "6PMuLSPRz9ae2xPDn5Dc3zH3kDtmE7tTyL8XQKmEbonk",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 6.2
+    },
+    {
+      "address": "C1i3S3y29YEZi8CfTDDstdSM5ZLdk1nSfGJsQLf8pump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 5.5
+    },
+    {
+      "address": "0xbb58c8f8444cc5095e4bfd17d282a751c3b77240",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 5.4
+    },
+    {
+      "address": "2nP9yKQNSGQy851iyawDvBkzkK2R2aqKArQCKc2gpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 5.2
+    },
+    {
+      "address": "0xdb5bc108d3fd352a3a6f21f8a2d617c7a2fa4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 5
+    },
+    {
+      "address": "GJ9LEQZgoxW487LRaRnajr6DWzouswd29EruRqwZBAGS",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.9
+    },
+    {
+      "address": "0x72d404ababfadf995519dda27ae9cdf3e5774444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.5
+    },
+    {
+      "address": "Ho5fkxk9uqUuVN5kt7TUFacduWCpKPAuYkM9HD3KAXA2",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.4
+    },
+    {
+      "address": "0xff13322caaff267988cdb980fddf7fc0c8d04444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.3
+    },
+    {
+      "address": "3QrGcwFSKXiKetD5ixzZa7H4zHPuTg8grrH7s5Mzpump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.3
+    },
+    {
+      "address": "0xb1232ca8dfed148ea358c0effc8b785280734444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.3
+    },
+    {
+      "address": "Uo5sNH4eMCD3kr4THkZgqGLi2rMd6w8yMdHEayTaNYC",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.2
+    },
+    {
+      "address": "BKCLf568iKAUndXnmpdSqKdRmPB6RMFqGqH3VQhopump",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.2
+    },
+    {
+      "address": "0x51d5b1377b4d429283e8156540855ece77ad4444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 4.1
+    },
+    {
+      "address": "0xe1def164017771b0bcd63f288f691cbc28c14444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 3.6
+    },
+    {
+      "address": "0x6009c35defc5d9d0f3888fc14beee4c696954444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 3
+    },
+    {
+      "address": "0x519ff18de0aeea79f8c8dc9aab41dc792f52efdd",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 2.8
+    },
+    {
+      "address": "0x497f0be668a75771fa4a6bf807cc7b37b0674444",
+      "emoji": "🥈",
+      "level": "silver",
+      "maxGain": 2.1
+    }
+  ],
+  "stats": {
+    "gold": {
+      "total": 36,
+      "bought": 0,
+      "filtered": 3,
+      "unknown": 33
+    },
+    "silver": {
+      "total": 34,
+      "bought": 0,
+      "filtered": 0,
+      "unknown": 34
+    },
+    "noise": {
+      "total": -18
+    }
+  }
+}

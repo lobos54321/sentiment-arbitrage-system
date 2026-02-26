@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-01-13T02:17:09.088Z",
+  "balancedStats": {
+    "gold": 53,
+    "noise": 842,
+    "precision": 5.921787709497207
+  },
+  "highPrecisionCombos": [],
+  "batchAnalysis": {
+    "batchesWithGold": 16,
+    "goldIsTopScore": 0,
+    "goldIsTpoSm": 6.25
+  }
+}

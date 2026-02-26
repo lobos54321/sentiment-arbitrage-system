@@ -1,0 +1,24 @@
+[
+  [
+    "0x3e69663b02a928b272f0bf5f159f425b3ebd4444",
+    {
+      "timestamp": 1768443127359,
+      "reason": "硬门槛拒绝: 跌幅过大 -61%",
+      "cooldown": 1200000,
+      "symbol": "天马",
+      "isGoldenCombo": false,
+      "isHighValue": false
+    }
+  ],
+  [
+    "BsmJTZeMpvJk9RXKeyPfFUejVixe9nW2ZxVtozuupump",
+    {
+      "timestamp": 1768444333194,
+      "reason": "硬门槛拒绝: 跌幅过大 -68%",
+      "cooldown": 1200000,
+      "symbol": "BsmJTZeM...",
+      "isGoldenCombo": false,
+      "isHighValue": false
+    }
+  ]
+]
