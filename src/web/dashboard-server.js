@@ -1380,11 +1380,8 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (url.pathname === '/' || url.pathname === '/dashboard') {
-    const data = getDashboardData();
-    const html = renderDashboard(data);
-
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(html);
+    res.writeHead(302, { 'Location': '/premium' });
+    res.end();
   } else if (url.pathname === '/api/status') {
     const data = getDashboardData();
     res.writeHead(200, { 'Content-Type': 'application/json' });
