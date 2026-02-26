@@ -22,10 +22,15 @@ const projectRoot = join(__dirname, '../..');
 const resolvedDbPath = isAbsolute(dbPath) ? dbPath : join(projectRoot, dbPath);
 
 let db;
-try {
-  db = new Database(resolvedDbPath, { readonly: true });
-} catch (e) {
-  console.error('❌ Failed to open database:', e.message);
+function getDb() {
+  if (!db) {
+    try {
+      db = new Database(resolvedDbPath);
+    } catch (e) {
+      console.error('❌ Failed to open database:', e.message);
+    }
+  }
+  return db;
 }
 
 /**
@@ -1412,7 +1417,9 @@ const server = http.createServer((req, res) => {
   } else if (url.pathname === '/api/shadow-pnl') {
     // Premium Channel Shadow PnL API
     try {
-      const all = db.prepare(`
+      const d = getDb();
+      if (!d) throw new Error('Database not ready');
+      const all = d.prepare(`
         SELECT symbol, score, entry_mc, entry_time, exit_pnl, high_pnl, low_pnl, exit_reason, closed, closed_at
         FROM shadow_pnl ORDER BY entry_time DESC LIMIT 200
       `).all();
