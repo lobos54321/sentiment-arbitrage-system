@@ -13,7 +13,7 @@ export class ShadowPnlTracker {
   constructor() {
     this.positions = new Map();
     this.interval = null;
-    this.checkIntervalMs = 10 * 1000; // 10 秒（更精准捕捉 peak）
+    this.checkIntervalMs = 5 * 1000; // 5 秒（更精准捕捉 peak）
 
     // 持久化到 SQLite
     const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
@@ -178,20 +178,26 @@ export class ShadowPnlTracker {
 
       // 分批止盈（微调：留小仓位追金狗）：
       // +50%: 卖80%仓位（锁住大部分利润）
-      // 剩20%: 宽松移动止盈跑10x/100x（小仓位博大收益）
+      // 剩20%: 移动止盈跑金狗
       if (!pos.closed && pnl >= 50 && !pos.sold80) {
         pos.sold80 = true;
         pos.remainingPct = 20; // 还剩20%仓位
         pos.lockedPnl = pnl * 0.80; // 已锁定的PnL（80%仓位 × 当前涨幅）
+        pos.moonHighPnl = pnl; // 重置20%仓位的峰值追踪
         console.log(`  💰 $${pos.symbol} +${pnl.toFixed(0)}% → 卖80%锁利，留20%追金狗`);
+      }
+
+      // 更新20%仓位的独立峰值
+      if (pos.sold80 && !pos.closed && pnl > pos.moonHighPnl) {
+        pos.moonHighPnl = pnl;
       }
 
       // 移动止盈（根据剩余仓位调整）
       if (!pos.closed && pos.highPnl >= 15) {
         if (pos.sold80) {
-          // 已锁利80%，剩20%用宽松止盈追金狗
-          // 回撤到 peak 的 35% 才出（给足空间）
-          const moonExit = pos.highPnl * 0.35;
+          // 已锁利80%，剩20%用移动止盈
+          // 回撤到20%仓位峰值的 55% 才出（从35%收紧到55%）
+          const moonExit = pos.moonHighPnl * 0.55;
           const minMoonExit = 25; // 至少保 +25%
           const exitLine = Math.max(moonExit, minMoonExit);
           if (pnl < exitLine) {

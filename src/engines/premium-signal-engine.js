@@ -153,6 +153,24 @@ export class PremiumSignalEngine {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS tokens (
+        token_ca TEXT PRIMARY KEY,
+        chain TEXT NOT NULL DEFAULT 'SOL',
+        symbol TEXT,
+        name TEXT,
+        first_seen_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        mc_at_signal REAL,
+        rating TEXT,
+        action TEXT,
+        position_tier TEXT,
+        position_size REAL,
+        auto_buy_enabled INTEGER,
+        decision_reasons TEXT,
+        decision_timestamp INTEGER,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+      )
+    `);
   }
 
   /**
@@ -390,20 +408,47 @@ export class PremiumSignalEngine {
 
       console.log(`📈 [评分] ${score}分 [${scoreDetails.join(' | ')}] → ${scoreAction}`);
 
-      const aiResult = {
-        action: scoreAction,
-        confidence: score,
-        narrative_tier: score >= 50 ? 'A' : score >= 30 ? 'B' : 'D',
-        narrative_reason: scoreDetails.join(', '),
-        entry_timing: dexData?.price_change_5m > 5 ? 'OPTIMAL' : 'EARLY',
-        stop_loss_percent: 20
-      };
-
       if (scoreAction === 'SKIP') {
         this.stats.ai_skipped++;
         console.log(`⏭️  [评分] SKIP: 评分${score}分不足`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult);
-        return { action: 'SKIP', reason: 'score_too_low', details: aiResult };
+        const skipResult = { action: 'SKIP', confidence: score, narrative_tier: 'D', narrative_reason: scoreDetails.join(', '), entry_timing: 'LATE', stop_loss_percent: 20 };
+        this.saveSignalRecord(signal, gateResult.status, skipResult);
+        return { action: 'SKIP', reason: 'score_too_low', details: skipResult };
+      }
+
+      // Step 5b: AI 二次过滤（量化评分通过后，Claude 做叙事和风险判断）
+      let aiResult;
+      try {
+        const prompt = generatePremiumBuyPrompt(signal, snapshot, { gmgnData: dexData });
+        console.log(`🤖 [AI] 调用 Claude 分析 $${signal.symbol}...`);
+        aiResult = await ClaudeAnalyst.analyze(prompt);
+        console.log(`🤖 [AI] 返回: ${aiResult.action} | 叙事: ${aiResult.narrative_tier} | 置信度: ${aiResult.confidence}`);
+
+        // AI 否决：如果 AI 返回 SKIP，尊重 AI 判断
+        if (aiResult.action === 'SKIP') {
+          this.stats.ai_skipped++;
+          console.log(`⏭️  [AI否决] Claude 判定 SKIP: ${aiResult.narrative_reason}`);
+          this.saveSignalRecord(signal, gateResult.status, aiResult);
+          return { action: 'SKIP', reason: 'ai_rejected', details: aiResult };
+        }
+
+        // AI 置信度太低也跳过
+        if (aiResult.confidence < 40) {
+          this.stats.ai_skipped++;
+          console.log(`⏭️  [AI低信心] 置信度 ${aiResult.confidence} < 40 → SKIP`);
+          this.saveSignalRecord(signal, gateResult.status, aiResult);
+          return { action: 'SKIP', reason: 'ai_low_confidence', details: aiResult };
+        }
+      } catch (e) {
+        console.error(`❌ [AI] Claude 调用失败: ${e.message}，使用量化评分继续`);
+        aiResult = {
+          action: scoreAction,
+          confidence: score,
+          narrative_tier: score >= 50 ? 'A' : score >= 30 ? 'B' : 'D',
+          narrative_reason: scoreDetails.join(', '),
+          entry_timing: dexData?.price_change_5m > 5 ? 'OPTIMAL' : 'EARLY',
+          stop_loss_percent: 20
+        };
       }
 
       console.log(`✅ [AI] ${aiResult.action} | 叙事: ${aiResult.narrative_tier} | 置信度: ${aiResult.confidence} | 时机: ${aiResult.entry_timing}`);
