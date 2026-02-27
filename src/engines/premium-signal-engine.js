@@ -211,6 +211,16 @@ export class PremiumSignalEngine {
         updated_at INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+
+    // 兼容旧数据库：补缺失列
+    const addCol = (table, col, type) => {
+      try { this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`); } catch (e) { /* 已存在 */ }
+    };
+    addCol('trades', 'timestamp', 'INTEGER');
+    addCol('trades', 'symbol', 'TEXT');
+    addCol('trades', 'narrative', 'TEXT');
+    addCol('trades', 'status', 'TEXT');
+    addCol('trades', 'is_simulation', 'INTEGER DEFAULT 1');
   }
 
   /**
