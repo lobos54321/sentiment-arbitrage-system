@@ -473,6 +473,19 @@ export class PremiumSignalEngine {
         aiResult = await ClaudeAnalyst.analyze(prompt);
         console.log(`🤖 [AI] 返回: ${aiResult.action} | 叙事: ${aiResult.narrative_tier} | 置信度: ${aiResult.confidence}`);
 
+        // AI 调用失败（超时/限流等）→ fallback 到量化评分
+        if (aiResult.error) {
+          console.log(`⚠️  [AI] 调用失败: ${aiResult.error_reason}，使用量化评分继续`);
+          aiResult = {
+            action: scoreAction,
+            confidence: score,
+            narrative_tier: score >= 50 ? 'A' : score >= 30 ? 'B' : 'D',
+            narrative_reason: scoreDetails.join(', ') + ' (AI fallback)',
+            entry_timing: dexData?.price_change_5m > 5 ? 'OPTIMAL' : 'EARLY',
+            stop_loss_percent: 20
+          };
+        }
+
         // AI 否决：如果 AI 返回 SKIP，尊重 AI 判断
         if (aiResult.action === 'SKIP') {
           this.stats.ai_skipped++;
