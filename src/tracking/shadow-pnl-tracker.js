@@ -220,9 +220,11 @@ export class ShadowPnlTracker {
         }
       }
 
-      const icon = pnl > 0 ? '🟢' : pnl > -20 ? '🟡' : '🔴';
+      const displayPnl = pos.closed ? pos.lastPnl : pnl;
+      const icon = displayPnl > 0 ? '🟢' : displayPnl > -20 ? '🟡' : '🔴';
       const exitTag = pos.closed ? ` [${pos.exitReason}]` : '';
-      console.log(`  ${icon} $${pos.symbol.padEnd(12)} PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}% | 最低: ${pos.lowPnl.toFixed(1)}% | MC: $${(currentMC / 1000).toFixed(1)}K${exitTag}`);
+      const soldTag = pos.sold80 && !pos.closed ? ' (20%仓)' : '';
+      console.log(`  ${icon} $${pos.symbol.padEnd(12)} PnL: ${displayPnl >= 0 ? '+' : ''}${displayPnl.toFixed(1)}%${soldTag} | 最高: +${pos.highPnl.toFixed(1)}% | 最低: ${pos.lowPnl.toFixed(1)}% | MC: $${(currentMC / 1000).toFixed(1)}K${exitTag}`);
 
       // 持久化
       if (pos.closed) {
