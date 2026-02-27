@@ -188,30 +188,32 @@ export class ShadowPnlTracker {
       }
 
       const rawPnl = pos.entryMC > 0 ? ((currentMC - pos.entryMC) / pos.entryMC) * 100 : 0;
-      const pnl = rawPnl - this.tradingCostPct; // 扣除交易损耗（滑点+手续费）
+      const pnl = rawPnl - this.tradingCostPct; // 含交易损耗，用于显示和最终收益
 
       pos.currentMC = currentMC;
       pos.lastPnl = pnl;
       pos.checks++;
-      if (pnl > pos.highPnl) pos.highPnl = pnl;
+      if (rawPnl > pos.highPnl) pos.highPnl = rawPnl; // 用原始PnL追踪峰值
       if (pnl < pos.lowPnl) pos.lowPnl = pnl;
 
-      // 模拟止损 -20%
-      if (pnl <= -20 && !pos.closed) {
+      // 止损判断全部用 rawPnl（不含交易损耗），避免入场就触发止损
+
+      // 模拟止损 -20%（原始跌20%，含损耗实际-27%）
+      if (rawPnl <= -20 && !pos.closed) {
         pos.closed = true;
         pos.exitReason = 'STOP_LOSS';
-        pos.lastPnl = -20;
+        pos.lastPnl = pnl;
       }
 
-      // 快速止损：前 3 次检查（~90s），从未涨过且 < -5%，直接出
-      if (!pos.closed && pos.checks <= 3 && pos.highPnl <= 0 && pnl < -5) {
+      // 快速止损：前 3 次检查（~15s），从未涨过且原始 < -5%，直接出
+      if (!pos.closed && pos.checks <= 3 && pos.highPnl <= 0 && rawPnl < -5) {
         pos.closed = true;
         pos.exitReason = 'FAST_STOP';
         pos.lastPnl = pnl;
       }
 
-      // 中速止损：任何时候单次 < -12% 且从未涨过 +10%，直接出
-      if (!pos.closed && pnl < -12 && pos.highPnl < 10) {
+      // 中速止损：任何时候原始 < -12% 且从未涨过 +10%，直接出
+      if (!pos.closed && rawPnl < -12 && pos.highPnl < 10) {
         pos.closed = true;
         pos.exitReason = 'MID_STOP';
         pos.lastPnl = pnl;
@@ -220,37 +222,38 @@ export class ShadowPnlTracker {
       // 渐进式分批止盈（策略C）：
       // +50%: 卖30% | +100%: 卖20% | +200%: 卖20% | 剩30% trailing
       // 回测76笔: 总PnL +968% vs 当前+753%, 胜率57.9%
+      // 用 rawPnl 判断触发，锁定利润用 pnl（含损耗）
       if (!pos.closed) {
-        if (!pos.tp1 && pnl >= 50) {
+        if (!pos.tp1 && rawPnl >= 50) {
           pos.tp1 = true;
           pos.soldPct = 30;
           pos.remainingPct = 70;
           pos.lockedPnl = pnl * 0.30;
-          pos.moonHighPnl = pnl;
-          console.log(`  💰 $${pos.symbol} +${pnl.toFixed(0)}% → TP1卖30%锁利，留70%`);
+          pos.moonHighPnl = rawPnl;
+          console.log(`  💰 $${pos.symbol} +${rawPnl.toFixed(0)}% → TP1卖30%锁利，留70%`);
         }
-        if (!pos.tp2 && pos.tp1 && pnl >= 100) {
+        if (!pos.tp2 && pos.tp1 && rawPnl >= 100) {
           pos.tp2 = true;
           pos.soldPct = 50;
           pos.remainingPct = 50;
           pos.lockedPnl += pnl * 0.20;
-          console.log(`  💰 $${pos.symbol} +${pnl.toFixed(0)}% → TP2卖20%锁利，留50%`);
+          console.log(`  💰 $${pos.symbol} +${rawPnl.toFixed(0)}% → TP2卖20%锁利，留50%`);
         }
-        if (!pos.tp3 && pos.tp2 && pnl >= 200) {
+        if (!pos.tp3 && pos.tp2 && rawPnl >= 200) {
           pos.tp3 = true;
           pos.soldPct = 70;
           pos.remainingPct = 30;
           pos.lockedPnl += pnl * 0.20;
-          console.log(`  💰 $${pos.symbol} +${pnl.toFixed(0)}% → TP3卖20%锁利，留30%`);
+          console.log(`  💰 $${pos.symbol} +${rawPnl.toFixed(0)}% → TP3卖20%锁利，留30%`);
         }
       }
 
-      // 更新剩余仓位的独立峰值
-      if (pos.tp1 && !pos.closed && pnl > (pos.moonHighPnl || 0)) {
-        pos.moonHighPnl = pnl;
+      // 更新剩余仓位的独立峰值（用rawPnl）
+      if (pos.tp1 && !pos.closed && rawPnl > (pos.moonHighPnl || 0)) {
+        pos.moonHighPnl = rawPnl;
       }
 
-      // 移动止盈（根据剩余仓位调整）
+      // 移动止盈（用rawPnl判断）
       if (!pos.closed && pos.highPnl >= 15) {
         if (pos.tp1) {
           // 已分批止盈，剩余仓位用移动止盈
@@ -258,7 +261,7 @@ export class ShadowPnlTracker {
           const moonExit = pos.moonHighPnl * 0.55;
           const minMoonExit = 25;
           const exitLine = Math.max(moonExit, minMoonExit);
-          if (pnl < exitLine) {
+          if (rawPnl < exitLine) {
             pos.closed = true;
             const finalPnl = pos.lockedPnl + pnl * (pos.remainingPct / 100);
             pos.exitReason = `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`;
@@ -270,10 +273,10 @@ export class ShadowPnlTracker {
           const trailExit = pos.highPnl * keepRatio;
           const minExit = 10;
           const exitLine = Math.max(trailExit, minExit);
-          if (pnl < exitLine) {
+          if (rawPnl < exitLine) {
             pos.closed = true;
             pos.exitReason = `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`;
-            pos.lastPnl = Math.max(pnl, minExit);
+            pos.lastPnl = Math.max(pnl, minExit - this.tradingCostPct);
           }
         }
       }
