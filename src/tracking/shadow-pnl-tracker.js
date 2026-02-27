@@ -16,6 +16,9 @@ export class ShadowPnlTracker {
     this.checkIntervalMs = 5 * 1000; // 5 秒（更精准捕捉 peak）
     this.livePriceMonitor = null; // 注入 LivePriceMonitor
 
+    // Shadow模式固定交易损耗（滑点+手续费，买卖合计约7%）
+    this.tradingCostPct = 7;
+
     // 持久化到 SQLite
     const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
     this.db = new Database(dbPath);
@@ -184,7 +187,8 @@ export class ShadowPnlTracker {
         }
       }
 
-      const pnl = pos.entryMC > 0 ? ((currentMC - pos.entryMC) / pos.entryMC) * 100 : 0;
+      const rawPnl = pos.entryMC > 0 ? ((currentMC - pos.entryMC) / pos.entryMC) * 100 : 0;
+      const pnl = rawPnl - this.tradingCostPct; // 扣除交易损耗（滑点+手续费）
 
       pos.currentMC = currentMC;
       pos.lastPnl = pnl;
