@@ -24,6 +24,12 @@ class ClaudeAnalyst {
     this.maxRetries = 2;
     this.minInterval = 1000; // 1s 限速
 
+    // 熔断器：连续失败后暂停调用，避免每个信号都等超时
+    this.consecutiveFailures = 0;
+    this.circuitBrokenUntil = 0;
+    this.circuitBreakThreshold = 3;  // 连续失败3次触发熔断
+    this.circuitBreakDurationMs = 5 * 60 * 1000; // 熔断5分钟
+
     this.systemPrompt = `你是一个专业的加密货币交易分析师，专注于 Solana 链上的 meme coin 交易。
 你的任务是根据提供的代币数据和信号信息，做出买入决策。
 
@@ -66,6 +72,13 @@ class ClaudeAnalyst {
   async analyze(prompt) {
     if (!this.initialized) this.init();
 
+    // 熔断器检查
+    if (this.consecutiveFailures >= this.circuitBreakThreshold && Date.now() < this.circuitBrokenUntil) {
+      const remainMin = ((this.circuitBrokenUntil - Date.now()) / 60000).toFixed(1);
+      console.log(`🔌 [Claude] 熔断中，${remainMin}分钟后恢复`);
+      return this.getDefaultResponse(`Circuit breaker: ${remainMin}min remaining`);
+    }
+
     // 限速控制
     await this.rateLimit();
 
@@ -106,6 +119,7 @@ class ClaudeAnalyst {
         }
 
         console.log(`✅ [Claude Analyst] 分析完成: ${parsed.action} | 信心: ${parsed.confidence}`);
+        this.consecutiveFailures = 0; // 成功，重置熔断计数
         return {
           action: parsed.action || 'SKIP',
           position_percent: parsed.position_percent || 0,
@@ -123,6 +137,11 @@ class ClaudeAnalyst {
         console.error(`❌ [Claude Analyst] 第 ${attempt + 1} 次失败:`, error.message);
 
         if (attempt === this.maxRetries) {
+          this.consecutiveFailures++;
+          if (this.consecutiveFailures >= this.circuitBreakThreshold) {
+            this.circuitBrokenUntil = Date.now() + this.circuitBreakDurationMs;
+            console.log(`🔌 [Claude] 连续失败${this.consecutiveFailures}次，熔断5分钟`);
+          }
           return this.getDefaultResponse(`All ${this.maxRetries + 1} attempts failed: ${error.message}`);
         }
 
