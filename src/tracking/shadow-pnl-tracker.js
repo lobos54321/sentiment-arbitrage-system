@@ -14,6 +14,7 @@ export class ShadowPnlTracker {
     this.positions = new Map();
     this.interval = null;
     this.checkIntervalMs = 5 * 1000; // 5 秒（更精准捕捉 peak）
+    this.livePriceMonitor = null; // 注入 LivePriceMonitor
 
     // 持久化到 SQLite
     const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
@@ -92,6 +93,14 @@ export class ShadowPnlTracker {
   }
 
   /**
+   * 设置 LivePriceMonitor
+   */
+  setLivePriceMonitor(monitor) {
+    this.livePriceMonitor = monitor;
+    console.log('✅ [Shadow Tracker] LivePriceMonitor 已注入');
+  }
+
+  /**
    * 检查所有持仓
    */
   async checkAll() {
@@ -100,26 +109,40 @@ export class ShadowPnlTracker {
 
     console.log(`\n📊 [Shadow Tracker] 检查 ${open.length} 个持仓...`);
 
-    // 批量获取价格（DexScreener 支持逗号分隔，最多 30 个）
+    // 优先用 LivePriceMonitor（Jupiter 实时价格），fallback 到 DexScreener
     const mcMap = new Map();
     const cas = open.map(([ca]) => ca);
-    const batchSize = 30;
-    for (let i = 0; i < cas.length; i += batchSize) {
-      const batch = cas.slice(i, i + batchSize);
-      try {
-        const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, { timeout: 10000 });
-        const pairs = res.data?.pairs || [];
-        for (const pair of pairs) {
-          if (pair.baseToken?.address && pair.marketCap) {
-            const addr = pair.baseToken.address;
-            // 取最高流动性的 pair
-            if (!mcMap.has(addr) || (pair.liquidity?.usd || 0) > (mcMap.get(addr).liq || 0)) {
-              mcMap.set(addr, { mc: pair.marketCap, liq: pair.liquidity?.usd || 0 });
+
+    if (this.livePriceMonitor) {
+      // 从 LivePriceMonitor 缓存获取价格
+      for (const ca of cas) {
+        const cached = this.livePriceMonitor.priceCache.get(ca);
+        if (cached && cached.mc && (Date.now() - cached.timestamp) < 15000) {
+          mcMap.set(ca, { mc: cached.mc, liq: cached.liquidity || 0, source: cached.source });
+        }
+      }
+    }
+
+    // 没有从 LivePriceMonitor 拿到的，fallback 到 DexScreener
+    const missing = cas.filter(ca => !mcMap.has(ca));
+    if (missing.length > 0) {
+      const batchSize = 30;
+      for (let i = 0; i < missing.length; i += batchSize) {
+        const batch = missing.slice(i, i + batchSize);
+        try {
+          const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, { timeout: 10000 });
+          const pairs = res.data?.pairs || [];
+          for (const pair of pairs) {
+            if (pair.baseToken?.address && pair.marketCap) {
+              const addr = pair.baseToken.address;
+              if (!mcMap.has(addr) || (pair.liquidity?.usd || 0) > (mcMap.get(addr).liq || 0)) {
+                mcMap.set(addr, { mc: pair.marketCap, liq: pair.liquidity?.usd || 0, source: 'dexscreener' });
+              }
             }
           }
+        } catch (e) {
+          console.log(`  ⚠️ DexScreener fallback 查询失败: ${e.message}`);
         }
-      } catch (e) {
-        console.log(`  ⚠️ 批量查询失败: ${e.message}`);
       }
     }
 
@@ -147,6 +170,20 @@ export class ShadowPnlTracker {
       }
 
       const currentMC = priceData.mc;
+
+      // 第一次检查：用实时价格修正入场 MC（DexScreener 数据有延迟）
+      if (pos.checks === 0 && currentMC > 0) {
+        const drift = pos.entryMC > 0 ? Math.abs((currentMC - pos.entryMC) / pos.entryMC * 100) : 0;
+        if (drift > 20) {
+          console.log(`  🔄 $${pos.symbol} 入场MC修正: $${(pos.entryMC/1000).toFixed(1)}K → $${(currentMC/1000).toFixed(1)}K (偏差${drift.toFixed(0)}%)`);
+          pos.entryMC = currentMC;
+          // 更新数据库
+          try {
+            this.db.prepare(`UPDATE shadow_pnl SET entry_mc=? WHERE token_ca=? AND closed=0`).run(currentMC, ca);
+          } catch (e) { /* ignore */ }
+        }
+      }
+
       const pnl = pos.entryMC > 0 ? ((currentMC - pos.entryMC) / pos.entryMC) * 100 : 0;
 
       pos.currentMC = currentMC;

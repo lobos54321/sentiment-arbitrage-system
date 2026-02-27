@@ -83,6 +83,8 @@ export class PremiumSignalEngine {
    */
   setLivePriceMonitor(priceMonitor) {
     this.livePriceMonitor = priceMonitor;
+    // 同时注入到 Shadow Tracker
+    this.shadowTracker.setLivePriceMonitor(priceMonitor);
     console.log('✅ [Premium Engine] LivePriceMonitor 已注入');
   }
 
@@ -552,8 +554,15 @@ export class PremiumSignalEngine {
         this.saveSignalRecord(signal, gateResult.status, aiResult, true);
         this.saveShadowTrade(signal, aiResult, finalSize);
 
-        // 用 DexScreener MC 作为入场价
-        const entryMC = dexData?.market_cap || signal.market_cap || 0;
+        // 优先用 LivePriceMonitor（Jupiter 实时价格）作为入场 MC
+        let entryMC = dexData?.market_cap || signal.market_cap || 0;
+        if (this.livePriceMonitor) {
+          const livePrice = this.livePriceMonitor.priceCache.get(ca);
+          if (livePrice && livePrice.mc && (Date.now() - livePrice.timestamp) < 10000) {
+            console.log(`📡 [入场MC] Jupiter实时: $${(livePrice.mc/1000).toFixed(1)}K (DexScreener: $${(entryMC/1000).toFixed(1)}K)`);
+            entryMC = livePrice.mc;
+          }
+        }
         this.shadowTracker.addPosition(ca, signal.symbol || 'UNKNOWN', entryMC, aiResult.confidence);
 
         // Shadow 模式也注册到 LivePriceMonitor（验证价格追踪）
