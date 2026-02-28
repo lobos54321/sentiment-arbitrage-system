@@ -158,21 +158,22 @@ export class LivePositionMonitor {
     const holdTimeSec = holdTimeMs / 1000;
 
     // ==================== 退出条件评估 ====================
+    // 注意：已分批止盈的仓位(tp1=true)不用普通止损，用 MOON_STOP
 
-    // 1. STOP_LOSS: -20% 全卖
-    if (pnl <= -20) {
+    // 1. STOP_LOSS: -20% 全卖（仅未分批的仓位）
+    if (pnl <= -20 && !pos.tp1) {
       await this._triggerExit(pos, 'STOP_LOSS', 100);
       return;
     }
 
-    // 2. FAST_STOP: 买入后 45 秒内，从未涨过(highPnl<=0) 且当前 < -5%
-    if (holdTimeSec <= 45 && pos.highPnl <= 0 && pnl < -5) {
+    // 2. FAST_STOP: 买入后 45 秒内，从未涨过(highPnl<=0) 且当前 < -5%（仅未分批的仓位）
+    if (!pos.tp1 && holdTimeSec <= 45 && pos.highPnl <= 0 && pnl < -5) {
       await this._triggerExit(pos, 'FAST_STOP', 100);
       return;
     }
 
-    // 3. MID_STOP: PnL < -12% & 从未涨过 +10%
-    if (pnl < -12 && pos.highPnl < 10) {
+    // 3. MID_STOP: PnL < -12% & 从未涨过 +10%（仅未分批的仓位）
+    if (!pos.tp1 && pnl < -12 && pos.highPnl < 10) {
       await this._triggerExit(pos, 'MID_STOP', 100);
       return;
     }

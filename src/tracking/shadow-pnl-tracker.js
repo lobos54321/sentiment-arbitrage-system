@@ -197,23 +197,25 @@ export class ShadowPnlTracker {
       if (pnl < pos.lowPnl) pos.lowPnl = pnl;
 
       // 止损判断全部用 rawPnl（不含交易损耗），避免入场就触发止损
+      // 注意：已分批止盈的仓位不用普通止损，用 MOON_STOP
 
       // 模拟止损 -20%（原始跌20%，含损耗实际-27%）
-      if (rawPnl <= -20 && !pos.closed) {
+      if (rawPnl <= -20 && !pos.closed && !pos.tp1) {
         pos.closed = true;
         pos.exitReason = 'STOP_LOSS';
         pos.lastPnl = pnl;
       }
 
       // 快速止损：前 3 次检查（~15s），从未涨过且原始 < -5%，直接出
-      if (!pos.closed && pos.checks <= 3 && pos.highPnl <= 0 && rawPnl < -5) {
+      if (!pos.closed && !pos.tp1 && pos.checks <= 3 && pos.highPnl <= 0 && rawPnl < -5) {
         pos.closed = true;
         pos.exitReason = 'FAST_STOP';
         pos.lastPnl = pnl;
       }
 
       // 中速止损：任何时候原始 < -12% 且从未涨过 +10%，直接出
-      if (!pos.closed && rawPnl < -12 && pos.highPnl < 10) {
+      // 已分批止盈的仓位不用这个，用 MOON_STOP
+      if (!pos.closed && !pos.tp1 && rawPnl < -12 && pos.highPnl < 10) {
         pos.closed = true;
         pos.exitReason = 'MID_STOP';
         pos.lastPnl = pnl;
