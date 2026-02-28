@@ -362,10 +362,11 @@ export class PremiumSignalEngine {
       }
 
       // MC 评分（优先用 DexScreener 数据）
+      // 实测304笔: 0-10K +50.5% | 10-20K +17.8% | 20-30K +10.3% | 30-40K +31.8% | 40K+ 打平或亏
       const mc = dexData?.market_cap || signal.market_cap || 0;
       if (mc > 0) {
-        if (mc >= 5000 && mc <= 30000) { score += 15; scoreDetails.push(`MC甜蜜区(+15)`); }
-        else if (mc > 30000) { score -= 25; scoreDetails.push(`MC过高${(mc/1000).toFixed(0)}K(-25)`); }
+        if (mc >= 5000 && mc <= 40000) { score += 15; scoreDetails.push(`MC甜蜜区(+15)`); }
+        else if (mc > 40000) { score -= 25; scoreDetails.push(`MC过高${(mc/1000).toFixed(0)}K(-25)`); }
       }
 
       if (snapshot) {
@@ -424,30 +425,33 @@ export class PremiumSignalEngine {
       }
 
       // 评分决策（数据驱动 MC 分层）：
-      // 实测数据（76笔）：
-      // MC 0-10K: 76.5%胜率 +165% | 10-20K: 52%胜率 +12.3% | 20-30K: 61%胜率 +4.3%
-      // MC 30-50K: 50%胜率 -4.5% | 50K+: 50%胜率 -1.0%
-      // 结论：30K 以上亏钱，砍掉
+      // 实测数据（304笔）：
+      // MC 0-10K: +50.5%平均 | 10-20K: +17.8% | 20-30K: +10.3% | 30-40K: +31.8% | 40K+: 打平或亏
+      // 结论：40K 以上不买，30-40K 是隐藏金矿
       let scoreAction = 'SKIP';
 
-      if (mc > 30000) {
-        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 30K → 不买`);
-      } else if (isATHDoubled && mc <= 30000) {
+      if (mc > 40000) {
+        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 40K → 不买`);
+      } else if (isATHDoubled && mc <= 40000) {
         scoreAction = 'BUY_FULL';
         score = Math.max(score, 80);
         console.log(`🔥 [ATH翻倍] $${signal.symbol} 涨了${athGain.toFixed(0)}% | MC: $${signal.market_cap_from ? (signal.market_cap_from/1000).toFixed(1)+'K→' : ''}$${(signal.market_cap/1000).toFixed(1)}K`);
       } else if (mc < 10000 && score >= 60) {
-        // MC<10K: 76.5%胜率，全买
+        // MC<10K: +50.5%平均，全买
         scoreAction = 'BUY_FULL';
         console.log(`💎 [低MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 买`);
       } else if (mc >= 10000 && mc <= 20000 && score >= 85) {
-        // MC 10-20K: 52%胜率，85分以上买
+        // MC 10-20K: +17.8%平均，85分以上买
         scoreAction = 'BUY_FULL';
       } else if (mc > 20000 && mc <= 30000 && score >= 95) {
-        // MC 20-30K: 61%胜率但平均只赚4.3%，需要高分（95+）
+        // MC 20-30K: +10.3%平均，需要高分（95+）
         scoreAction = 'BUY_FULL';
         console.log(`📊 [中MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 高分买入`);
-      } else if (isDoubled && mc <= 30000 && score >= 60) {
+      } else if (mc > 30000 && mc <= 40000 && score >= 95) {
+        // MC 30-40K: +31.8%平均（隐藏金矿！），需要高分（95+）+ AI二次确认
+        scoreAction = 'BUY_FULL';
+        console.log(`🔶 [高MC金矿] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 高分买入`);
+      } else if (isDoubled && mc <= 40000 && score >= 60) {
         // 翻倍重复信号，MC 合理
         scoreAction = 'BUY_FULL';
         console.log(`🔥 [翻倍信号] $${signal.symbol} 重复${sigHistory.count}次 | MC${mcMultiple.toFixed(1)}x`);
@@ -508,6 +512,14 @@ export class PremiumSignalEngine {
           console.log(`⏭️  [中MC+低信心] MC=$${(mc/1000).toFixed(1)}K 置信度${aiResult.confidence} < 55 → SKIP`);
           this.saveSignalRecord(signal, gateResult.status, aiResult);
           return { action: 'SKIP', reason: 'mid_mc_low_confidence', details: aiResult };
+        }
+
+        // MC 30-40K 需要 AI 置信度 >= 55（这个区间+31.8%平均，值得冒险）
+        if (mc > 30000 && mc <= 40000 && aiResult.confidence < 55) {
+          this.stats.ai_skipped++;
+          console.log(`⏭️  [高MC+低信心] MC=$${(mc/1000).toFixed(1)}K 置信度${aiResult.confidence} < 55 → SKIP`);
+          this.saveSignalRecord(signal, gateResult.status, aiResult);
+          return { action: 'SKIP', reason: 'high_mc_low_confidence', details: aiResult };
         }
 
         // AI 返回 BUY_HALF 也允许，后面按半仓处理
