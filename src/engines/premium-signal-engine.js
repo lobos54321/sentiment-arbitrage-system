@@ -221,6 +221,8 @@ export class PremiumSignalEngine {
     addCol('trades', 'narrative', 'TEXT');
     addCol('trades', 'status', 'TEXT');
     addCol('trades', 'is_simulation', 'INTEGER DEFAULT 1');
+    addCol('trades', 'entry_time', 'INTEGER');
+    addCol('trades', 'entry_price', 'REAL');
   }
 
   /**
