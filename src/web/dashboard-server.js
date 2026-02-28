@@ -1456,8 +1456,48 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(renderPremiumDashboard());
   } else if (url.pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+    // 健康检查 + 数据库状态
+    try {
+      const d = getDb();
+      let dbStatus = { connected: false };
+
+      if (d) {
+        const shadowCount = d.prepare('SELECT COUNT(*) as cnt FROM shadow_pnl').get();
+        const latestShadow = d.prepare('SELECT MAX(entry_time) as latest FROM shadow_pnl').get();
+        const tradesCount = d.prepare('SELECT COUNT(*) as cnt FROM trades').get();
+        const closedCount = d.prepare('SELECT COUNT(*) as cnt FROM shadow_pnl WHERE closed=1').get();
+        const openCount = d.prepare('SELECT COUNT(*) as cnt FROM shadow_pnl WHERE closed=0').get();
+
+        const latestTime = latestShadow?.latest ? new Date(latestShadow.latest).toISOString() : null;
+
+        dbStatus = {
+          connected: true,
+          shadow_pnl: {
+            total: shadowCount?.cnt || 0,
+            closed: closedCount?.cnt || 0,
+            open: openCount?.cnt || 0,
+            latest_entry: latestTime
+          },
+          trades: tradesCount?.cnt || 0
+        };
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        db: dbStatus,
+        uptime_seconds: Math.floor(process.uptime())
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        db: { connected: false, error: e.message },
+        uptime_seconds: Math.floor(process.uptime())
+      }, null, 2));
+    }
   } else {
     res.writeHead(404);
     res.end('Not Found');
