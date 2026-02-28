@@ -4,12 +4,12 @@
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~1.5 秒响应）
  *
- * 退出逻辑（基于时间，适配 1.5 秒轮询）：
+ * 退出逻辑（策略C - 渐进式分批止盈）：
  * - STOP_LOSS(-20%)：全卖
  * - FAST_STOP（45 秒内，从未涨过 & < -5%）：全卖
  * - MID_STOP（< -12% & 从未涨过 +10%）：全卖
- * - +50% 分批止盈：卖 80% token，留 20%
- * - MOON_STOP（剩余 20% 回撤到 peak*35%，最低保 +25%）：全卖剩余
+ * - TP1: +50% 卖30% | TP2: +100% 卖20% | TP3: +200% 卖20% | 剩30% trailing
+ * - MOON_STOP（剩余仓位回撤到 moonHighPnl*55%，最低保 +25%）：全卖剩余
  * - TRAIL_STOP（未触发分批，peak >= 15%，回撤到 peak*65-70%）：全卖
  */
 
@@ -98,9 +98,14 @@ export class LivePositionMonitor {
       entrySol,
       tokenAmount,        // raw amount（含 decimals）
       tokenDecimals,
-      sold80: false,
+      // 策略C: 渐进式分批止盈
+      tp1: false,           // +50% 卖30%
+      tp2: false,           // +100% 卖20%
+      tp3: false,           // +200% 卖20%
+      soldPct: 0,           // 已卖出百分比
       remainingPct: 100,
       lockedPnl: 0,
+      moonHighPnl: 0,       // 分批后剩余仓位的独立峰值
       highPnl: 0,
       lowPnl: 0,
       lastPnl: 0,
@@ -172,15 +177,39 @@ export class LivePositionMonitor {
       return;
     }
 
-    // 4. 分批止盈: +50% 卖 80%，留 20%
-    if (!pos.sold80 && pnl >= 50) {
-      await this._triggerPartialSell(pos, 80);
+    // ==================== 策略C: 渐进式分批止盈 ====================
+    // +50%: 卖30% | +100%: 卖20% | +200%: 卖20% | 剩30% trailing
+
+    // TP1: +50% 卖30%
+    if (!pos.tp1 && pnl >= 50) {
+      await this._triggerPartialSell(pos, 30, 'TP1');
+      pos.tp1 = true;
+      pos.moonHighPnl = pnl;
       return;
     }
 
-    // 5. MOON_STOP: 已卖 80%，剩余 20% 回撤到 peak*35%，最低保 +25%
-    if (pos.sold80 && pos.highPnl >= 15) {
-      const moonExit = pos.highPnl * 0.35;
+    // TP2: +100% 卖20%（需要先触发TP1）
+    if (pos.tp1 && !pos.tp2 && pnl >= 100) {
+      await this._triggerPartialSell(pos, 20, 'TP2');
+      pos.tp2 = true;
+      return;
+    }
+
+    // TP3: +200% 卖20%（需要先触发TP2）
+    if (pos.tp2 && !pos.tp3 && pnl >= 200) {
+      await this._triggerPartialSell(pos, 20, 'TP3');
+      pos.tp3 = true;
+      return;
+    }
+
+    // 更新剩余仓位的独立峰值
+    if (pos.tp1 && pnl > pos.moonHighPnl) {
+      pos.moonHighPnl = pnl;
+    }
+
+    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*55%，最低保 +25%
+    if (pos.tp1 && pos.highPnl >= 15) {
+      const moonExit = pos.moonHighPnl * 0.55;
       const exitLine = Math.max(moonExit, 25);
       if (pnl < exitLine) {
         await this._triggerExit(pos, `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
@@ -189,7 +218,7 @@ export class LivePositionMonitor {
     }
 
     // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*65-70%
-    if (!pos.sold80 && pos.highPnl >= 15) {
+    if (!pos.tp1 && pos.highPnl >= 15) {
       const keepRatio = pos.highPnl >= 50 ? 0.70 : 0.65;
       const trailExit = pos.highPnl * keepRatio;
       const exitLine = Math.max(trailExit, 10);
@@ -212,9 +241,9 @@ export class LivePositionMonitor {
     pos.closed = true;
     pos.exitReason = reason;
 
-    // 计算最终 PnL
+    // 计算最终 PnL（策略C：已锁定 + 剩余仓位当前PnL）
     let finalPnl = pos.lastPnl;
-    if (pos.sold80) {
+    if (pos.tp1) {
       finalPnl = pos.lockedPnl + pos.lastPnl * (pos.remainingPct / 100);
     }
 
@@ -223,7 +252,7 @@ export class LivePositionMonitor {
 
     // 执行卖出
     try {
-      const sellAmount = pos.sold80
+      const sellAmount = pos.tp1
         ? Math.floor(pos.tokenAmount * (pos.remainingPct / 100))
         : pos.tokenAmount;
 
@@ -249,33 +278,34 @@ export class LivePositionMonitor {
   }
 
   /**
-   * 分批卖出（卖 80%，留 20%）
+   * 分批卖出（策略C: TP1卖30%, TP2卖20%, TP3卖20%）
    */
-  async _triggerPartialSell(pos, sellPct) {
+  async _triggerPartialSell(pos, sellPct, label) {
     // 防抖
     const lastSell = this.sellDebounce.get(pos.tokenCA);
     if (lastSell && (Date.now() - lastSell) < this.debouncMs) return;
     this.sellDebounce.set(pos.tokenCA, Date.now());
 
+    // 计算卖出数量
     const sellAmount = Math.floor(pos.tokenAmount * (sellPct / 100));
-    const remainPct = 100 - sellPct;
+    const newRemaining = pos.remainingPct - sellPct;
 
-    console.log(`\n💰 [分批止盈] $${pos.symbol} +${pos.lastPnl.toFixed(0)}% → 卖${sellPct}%，留${remainPct}%追金狗`);
+    console.log(`\n💰 [${label}] $${pos.symbol} +${pos.lastPnl.toFixed(0)}% → 卖${sellPct}%，留${newRemaining}%`);
 
     try {
       const result = await this.executor.sell(pos.tokenCA, sellAmount);
       console.log(`   TX: ${result.txHash} | 收到: ${result.amountOut.toFixed(6)} SOL`);
 
-      pos.sold80 = true;
-      pos.remainingPct = remainPct;
-      pos.lockedPnl = pos.lastPnl * (sellPct / 100);
+      pos.soldPct += sellPct;
+      pos.remainingPct = newRemaining;
+      pos.lockedPnl += pos.lastPnl * (sellPct / 100);
 
       // 更新 DB
       try {
         this.db.prepare(`
           UPDATE live_positions SET sold_80_pct=1, remaining_pct=?, locked_pnl=?
           WHERE token_ca=? AND status='open'
-        `).run(remainPct, pos.lockedPnl, pos.tokenCA);
+        `).run(newRemaining, pos.lockedPnl, pos.tokenCA);
       } catch (e) { /* ignore */ }
     } catch (error) {
       console.error(`   ❌ 分批卖出失败: ${error.message}`);
@@ -312,9 +342,14 @@ export class LivePositionMonitor {
           entrySol: row.entry_sol,
           tokenAmount: row.token_amount,
           tokenDecimals: row.token_decimals,
-          sold80: !!row.sold_80_pct,
+          // 策略C: 兼容恢复（从旧的sold80字段推断tp1状态）
+          tp1: !!row.sold_80_pct,
+          tp2: row.remaining_pct <= 50,
+          tp3: row.remaining_pct <= 30,
+          soldPct: 100 - (row.remaining_pct || 100),
           remainingPct: row.remaining_pct || 100,
           lockedPnl: row.locked_pnl || 0,
+          moonHighPnl: row.high_pnl || 0,
           highPnl: row.high_pnl || 0,
           lowPnl: row.low_pnl || 0,
           lastPnl: 0,

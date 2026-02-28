@@ -22,8 +22,8 @@ RUN npm ci --only=production
 # Copy application code
 COPY . .
 
-# Create data directory for SQLite
-RUN mkdir -p /app/data
+# NOTE: /app/data directory created by Zeabur persistent volume
+# Do NOT use mkdir here - it interferes with volume mount
 
 # Expose port (if needed for health checks)
 EXPOSE 3000

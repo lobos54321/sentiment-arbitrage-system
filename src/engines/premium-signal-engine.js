@@ -717,15 +717,17 @@ export class PremiumSignalEngine {
         INSERT OR IGNORE INTO tokens (token_ca, chain, symbol, first_seen_at, mc_at_signal) VALUES (?, 'SOL', ?, ?, ?)
       `).run(signal.token_ca, signal.symbol || null, Math.floor(Date.now() / 1000), signal.market_cap || null);
 
+      const now = Date.now();
       this.db.prepare(`
         INSERT INTO trades (
-          token_ca, chain, action, position_size, timestamp,
+          token_ca, chain, action, position_size, entry_time, timestamp,
           symbol, narrative, rating, status, is_simulation
-        ) VALUES (?, 'SOL', 'BUY', ?, ?, ?, ?, ?, 'OPEN', 1)
+        ) VALUES (?, 'SOL', 'BUY', ?, ?, ?, ?, ?, ?, 'OPEN', 1)
       `).run(
         signal.token_ca,
         positionSize,
-        Date.now(),
+        Math.floor(now / 1000),  // entry_time (seconds)
+        now,                      // timestamp (milliseconds)
         signal.symbol || null,
         aiResult.narrative_reason || null,
         aiResult.narrative_tier || null
