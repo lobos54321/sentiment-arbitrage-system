@@ -732,9 +732,9 @@ export class PremiumSignalEngine {
       const now = Date.now();
       this.db.prepare(`
         INSERT INTO trades (
-          token_ca, chain, action, position_size, entry_time, timestamp,
+          token_ca, chain, action, position_size, entry_time, entry_price, timestamp,
           symbol, narrative, rating, status, is_simulation
-        ) VALUES (?, 'SOL', 'BUY', ?, ?, ?, ?, ?, ?, 'OPEN', 1)
+        ) VALUES (?, 'SOL', 'BUY', ?, ?, 0, ?, ?, ?, ?, 'OPEN', 1)
       `).run(
         signal.token_ca,
         positionSize,
