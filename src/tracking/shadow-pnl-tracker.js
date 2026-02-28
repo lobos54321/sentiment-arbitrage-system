@@ -13,7 +13,7 @@ export class ShadowPnlTracker {
   constructor() {
     this.positions = new Map();
     this.interval = null;
-    this.checkIntervalMs = 5 * 1000; // 5 秒（更精准捕捉 peak）
+    this.checkIntervalMs = 1.5 * 1000; // 1.5 秒（与实盘一致）
     this.livePriceMonitor = null; // 注入 LivePriceMonitor
 
     // Shadow模式固定交易损耗（滑点+手续费，买卖合计约7%）
