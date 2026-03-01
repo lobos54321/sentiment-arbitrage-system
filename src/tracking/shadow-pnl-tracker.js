@@ -19,6 +19,10 @@ export class ShadowPnlTracker {
     // Shadow模式固定交易损耗（滑点+手续费，买卖合计约7%）
     this.tradingCostPct = 7;
 
+    // 止损冷却：止损后 30 分钟内不再买入同一 token
+    this.stopLossCooldownMs = 30 * 60 * 1000; // 30 分钟
+    this.stopLossHistory = new Map(); // tokenCA → closedAt timestamp
+
     // 持久化到 SQLite
     const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
     this.db = new Database(dbPath);
@@ -79,11 +83,29 @@ export class ShadowPnlTracker {
   }
 
   /**
-   * 检查是否有未平仓持仓
+   * 检查是否有未平仓持仓（或在止损冷却期内）
    */
   hasOpenPosition(tokenCA) {
     const pos = this.positions.get(tokenCA);
-    return pos && !pos.closed;
+
+    // 有未平仓持仓
+    if (pos && !pos.closed) return true;
+
+    // 检查止损冷却期
+    const stopLossTime = this.stopLossHistory.get(tokenCA);
+    if (stopLossTime) {
+      const elapsed = Date.now() - stopLossTime;
+      if (elapsed < this.stopLossCooldownMs) {
+        const remaining = Math.ceil((this.stopLossCooldownMs - elapsed) / 60000);
+        console.log(`⏳ [冷却期] ${tokenCA.substring(0, 8)}... 止损后冷却中，剩余 ${remaining} 分钟`);
+        return true;
+      } else {
+        // 冷却期结束，清理
+        this.stopLossHistory.delete(tokenCA);
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -204,6 +226,7 @@ export class ShadowPnlTracker {
         pos.closed = true;
         pos.exitReason = 'STOP_LOSS';
         pos.lastPnl = pnl;
+        this.stopLossHistory.set(ca, Date.now()); // 记录止损时间
       }
 
       // 快速止损：前 3 次检查（~15s），从未涨过且原始 < -5%，直接出
@@ -211,6 +234,7 @@ export class ShadowPnlTracker {
         pos.closed = true;
         pos.exitReason = 'FAST_STOP';
         pos.lastPnl = pnl;
+        this.stopLossHistory.set(ca, Date.now()); // 记录止损时间
       }
 
       // 中速止损：任何时候原始 < -12% 且从未涨过 +10%，直接出
@@ -219,6 +243,7 @@ export class ShadowPnlTracker {
         pos.closed = true;
         pos.exitReason = 'MID_STOP';
         pos.lastPnl = pnl;
+        this.stopLossHistory.set(ca, Date.now()); // 记录止损时间
       }
 
       // 渐进式分批止盈（策略C）：

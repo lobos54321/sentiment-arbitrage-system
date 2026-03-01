@@ -363,9 +363,26 @@ export class PremiumSignalEngine {
         if (dexData.buy_count_1h > 50) { score += 10; scoreDetails.push(`1h买${dexData.buy_count_1h}(+10)`); }
       }
 
-      // MC 评分（优先用 DexScreener 数据）
+      // MC 评分（优先用 DexScreener 数据，fallback 到 Jupiter）
       // 实测304笔: 0-10K +50.5% | 10-20K +17.8% | 20-30K +10.3% | 30-40K +31.8% | 40K+ 打平或亏
-      const mc = dexData?.market_cap || signal.market_cap || 0;
+      let mc = dexData?.market_cap || signal.market_cap || 0;
+
+      // 如果 MC=0，尝试从 Jupiter Price API 获取
+      if (mc === 0 && this.livePriceMonitor) {
+        const jupiterPrice = this.livePriceMonitor.priceCache.get(ca);
+        if (jupiterPrice && jupiterPrice.mc && (Date.now() - jupiterPrice.timestamp) < 30000) {
+          mc = jupiterPrice.mc;
+          console.log(`  📡 [Jupiter补充] MC: $${(mc/1000).toFixed(1)}K`);
+        }
+      }
+
+      // MC 仍然为 0，跳过（无法评估）
+      if (mc === 0) {
+        console.log(`⏭️ [无MC] $${signal.symbol} DexScreener + Jupiter 都没有 MC 数据，跳过`);
+        this.saveSignalRecord(signal, 'NO_MC_DATA', null);
+        return { action: 'SKIP', reason: 'no_mc_data' };
+      }
+
       if (mc > 0) {
         if (mc >= 5000 && mc <= 40000) { score += 15; scoreDetails.push(`MC甜蜜区(+15)`); }
         else if (mc > 40000) { score -= 25; scoreDetails.push(`MC过高${(mc/1000).toFixed(0)}K(-25)`); }
