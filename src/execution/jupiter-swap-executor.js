@@ -237,9 +237,9 @@ export class JupiterSwapExecutor {
           inputMint,
           outputMint,
           amount: amount.toString(),
-          slippageBps: 1500,             // 15% 默认滑点（meme币波动大）
+          slippageBps: 1000,             // 10% 默认滑点
           dynamicSlippage: true,         // 动态滑点 anti-MEV
-          maxAutoSlippageBps: 2500,      // 最大 25% 自动滑点
+          maxAutoSlippageBps: 1500,      // 最大 15% 自动滑点
           onlyDirectRoutes: false,
           asLegacyTransaction: false
         },
