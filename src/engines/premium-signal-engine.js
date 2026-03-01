@@ -653,16 +653,19 @@ export class PremiumSignalEngine {
           if (tradeResult.success && this.livePositionMonitor) {
             const entryPrice = dexData?.price_usd || 0;
             const entryMC = dexData?.market_cap || signal.market_cap || 0;
-            // 查询实际获得的 token 数量和 decimals
-            const balance = await this.jupiterExecutor.getTokenBalance(ca);
+            // 直接使用交易返回的 amountOut，不再查询余额（避免 RPC 同步延迟导致返回 0）
+            // pump.fun tokens 的 decimals 固定为 6
+            const tokenAmount = tradeResult.amountOut || 0;
+            const tokenDecimals = 6;
+            console.log(`📦 [Token] 获得 ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
             this.livePositionMonitor.addPosition(
               ca,
               signal.symbol,
               entryPrice,
               entryMC,
               finalSize,
-              balance.amount,
-              balance.decimals
+              tokenAmount,
+              tokenDecimals
             );
           }
         } else {
