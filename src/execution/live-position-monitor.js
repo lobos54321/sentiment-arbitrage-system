@@ -147,6 +147,14 @@ export class LivePositionMonitor {
     const pos = this.positions.get(tokenCA);
     if (!pos || pos.closed) return;
 
+    // 如果有待卖出的仓位，尝试重新卖出
+    if (pos.pendingSell) {
+      console.log(`🔄 [重试卖出] $${pos.symbol} | 原因: ${pos.pendingSellReason}`);
+      pos.pendingSell = false;
+      await this._triggerExit(pos, pos.pendingSellReason || 'PENDING_SELL', 100);
+      return;
+    }
+
     // 计算 PnL
     let pnl;
     if (pos.entryPrice > 0 && price > 0) {
@@ -246,7 +254,6 @@ export class LivePositionMonitor {
     if (lastSell && (Date.now() - lastSell) < this.debouncMs) return;
     this.sellDebounce.set(pos.tokenCA, Date.now());
 
-    pos.closed = true;
     pos.exitReason = reason;
 
     // 计算最终 PnL（策略C：已锁定 + 剩余仓位当前PnL）
@@ -260,6 +267,7 @@ export class LivePositionMonitor {
 
     // 执行卖出
     let solReceived = 0;
+    let sellSuccess = false;
     try {
       const sellAmount = pos.tp1
         ? Math.floor(pos.tokenAmount * (pos.remainingPct / 100))
@@ -268,6 +276,7 @@ export class LivePositionMonitor {
       if (sellAmount > 0) {
         const result = await this.executor.sell(pos.tokenCA, sellAmount);
         solReceived = result.amountOut || 0;
+        sellSuccess = true;
         console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
 
         // 累加实际收到的 SOL
@@ -281,7 +290,17 @@ export class LivePositionMonitor {
       }
     } catch (error) {
       console.error(`   ❌ 卖出失败: ${error.message}`);
+      // 卖出失败，保持仓位 open，下次价格更新时重试
+      console.log(`   ⚠️  保持仓位 open，等待下次重试...`);
+      pos.closed = false;
+      pos.exitReason = null;
+      pos.pendingSell = true;  // 标记待卖出
+      pos.pendingSellReason = reason;
+      return;  // 不关闭仓位
     }
+
+    // 卖出成功，关闭仓位
+    pos.closed = true;
 
     // 计算真实 PnL（基于实际 SOL 进出）
     const realPnl = pos.entrySol > 0 ? ((pos.totalSolReceived - pos.entrySol) / pos.entrySol) * 100 : finalPnl;
