@@ -16,6 +16,37 @@ dotenv.config();
 const PORT = process.env.PORT || 3000;
 const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 
+// 内存日志缓冲（保留最近 1000 条）
+const MAX_LOG_LINES = 1000;
+const logBuffer = [];
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+const originalConsoleWarn = console.warn;
+
+function captureLog(level, args) {
+  const timestamp = new Date().toISOString();
+  const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  logBuffer.push({ timestamp, level, message });
+  if (logBuffer.length > MAX_LOG_LINES) {
+    logBuffer.shift();
+  }
+}
+
+console.log = (...args) => {
+  captureLog('INFO', args);
+  originalConsoleLog.apply(console, args);
+};
+
+console.error = (...args) => {
+  captureLog('ERROR', args);
+  originalConsoleError.apply(console, args);
+};
+
+console.warn = (...args) => {
+  captureLog('WARN', args);
+  originalConsoleWarn.apply(console, args);
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = join(__dirname, '../..');
@@ -1554,6 +1585,70 @@ const server = http.createServer((req, res) => {
     });
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
+    return;
+  } else if (url.pathname === '/api/logs') {
+    // 最近日志 API（JSON格式）
+    const limit = parseInt(url.searchParams?.get('limit') || '100');
+    const level = url.searchParams?.get('level'); // 可选过滤: INFO, ERROR, WARN
+    let logs = logBuffer.slice(-limit);
+    if (level) {
+      logs = logs.filter(l => l.level === level.toUpperCase());
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ count: logs.length, logs }, null, 2));
+    return;
+  } else if (url.pathname === '/api/logs/download') {
+    // 日志下载端点（文本格式）
+    const content = logBuffer.map(l => `[${l.timestamp}] [${l.level}] ${l.message}`).join('\n');
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Disposition': `attachment; filename="runtime-logs-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt"`
+    });
+    res.end(content);
+    return;
+  } else if (url.pathname === '/logs') {
+    // 日志查看页面（HTML）
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html>
+<html><head><title>Runtime Logs</title>
+<style>
+body{font-family:monospace;background:#1a1a2e;color:#e4e4e4;padding:20px;margin:0}
+h1{color:#00d9ff}pre{background:#111;padding:15px;border-radius:8px;overflow-x:auto;max-height:80vh;overflow-y:auto}
+.INFO{color:#00ff88}.ERROR{color:#ff4444}.WARN{color:#ffda44}
+.controls{margin-bottom:15px}
+.controls button,.controls select{padding:8px 16px;margin-right:10px;border-radius:4px;border:none;cursor:pointer}
+.controls button{background:#00d9ff;color:#1a1a2e;font-weight:bold}
+</style></head><body>
+<h1>📋 Runtime Logs</h1>
+<div class="controls">
+  <button onclick="refresh()">🔄 刷新</button>
+  <button onclick="download()">📥 下载</button>
+  <select id="level" onchange="refresh()">
+    <option value="">全部级别</option>
+    <option value="INFO">INFO</option>
+    <option value="WARN">WARN</option>
+    <option value="ERROR">ERROR</option>
+  </select>
+  <select id="limit" onchange="refresh()">
+    <option value="100">最近100条</option>
+    <option value="500">最近500条</option>
+    <option value="1000">全部(1000)</option>
+  </select>
+</div>
+<pre id="logs">加载中...</pre>
+<script>
+async function refresh(){
+  const level=document.getElementById('level').value;
+  const limit=document.getElementById('limit').value;
+  const res=await fetch('/api/logs?limit='+limit+(level?&'level='+level:''));
+  const data=await res.json();
+  document.getElementById('logs').innerHTML=data.logs.map(l=>
+    '<span class="'+l.level+'">['+l.timestamp.slice(11,19)+'] ['+l.level+'] '+l.message.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</span>'
+  ).join('\\n');
+}
+function download(){window.location='/api/logs/download';}
+refresh();setInterval(refresh,10000);
+</script></body></html>`);
     return;
   } else if (url.pathname === '/health') {
     // 健康检查 + 数据库状态
