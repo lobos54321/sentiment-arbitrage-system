@@ -1455,6 +1455,23 @@ const server = http.createServer((req, res) => {
     // Premium Channel Dashboard 页面
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(renderPremiumDashboard());
+  } else if (url.pathname === '/api/download/database') {
+    // 数据库下载端点
+    const filePath = resolvedDbPath;
+    if (!fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database file not found' }));
+      return;
+    }
+    const stats = fs.statSync(filePath);
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': 'attachment; filename="sentiment_arb.db"',
+      'Content-Length': stats.size
+    });
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+    return;
   } else if (url.pathname === '/health') {
     // 健康检查 + 数据库状态
     try {
