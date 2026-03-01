@@ -16,8 +16,8 @@ dotenv.config();
 const PORT = process.env.PORT || 3000;
 const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 
-// 内存日志缓冲（保留最近 1000 条）
-const MAX_LOG_LINES = 1000;
+// 内存日志缓冲（保留最近 10000 条）
+const MAX_LOG_LINES = 10000;
 const logBuffer = [];
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
