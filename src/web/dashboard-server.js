@@ -1476,6 +1476,61 @@ const server = http.createServer((req, res) => {
     // Premium Channel Dashboard 页面
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(renderPremiumDashboard());
+  } else if (url.pathname === '/api/live-positions') {
+    // 实盘交易记录 API
+    try {
+      const d = getDb();
+      if (!d) throw new Error('Database not ready');
+
+      // 检查 live_positions 表是否存在
+      const tableExists = d.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='live_positions'`).get();
+      if (!tableExists) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ summary: { total: 0, wins: 0, losses: 0, winRate: 0, totalPnl: 0, totalSolSpent: 0, totalSolReceived: 0 }, open: [], recent: [] }));
+        return;
+      }
+
+      const open = d.prepare(`
+        SELECT token_ca, symbol, entry_mc, entry_sol, token_amount, high_pnl, low_pnl, status, entry_time
+        FROM live_positions WHERE status = 'open' ORDER BY entry_time DESC
+      `).all();
+
+      const closed = d.prepare(`
+        SELECT token_ca, symbol, entry_mc, entry_sol, exit_pnl, high_pnl, low_pnl, exit_reason, status, entry_time, closed_at
+        FROM live_positions WHERE status = 'closed' ORDER BY entry_time DESC LIMIT 50
+      `).all();
+
+      const allStats = d.prepare(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN exit_pnl > 0 THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN exit_pnl <= 0 THEN 1 ELSE 0 END) as losses,
+          AVG(exit_pnl) as avgPnl,
+          SUM(exit_pnl) as totalPnl,
+          SUM(entry_sol) as totalSolSpent
+        FROM live_positions WHERE status = 'closed'
+      `).get();
+
+      const winRate = allStats.total > 0 ? (allStats.wins / allStats.total * 100) : 0;
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        summary: {
+          total: allStats.total || 0,
+          wins: allStats.wins || 0,
+          losses: allStats.losses || 0,
+          winRate: +winRate.toFixed(1),
+          avgPnl: +(allStats.avgPnl || 0).toFixed(1),
+          totalPnl: +(allStats.totalPnl || 0).toFixed(1),
+          totalSolSpent: +(allStats.totalSolSpent || 0).toFixed(4)
+        },
+        open: open.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
+        recent: closed.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) }))
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (url.pathname === '/api/download/database') {
     // 数据库下载端点
     const filePath = resolvedDbPath;
@@ -1557,11 +1612,16 @@ function renderPremiumDashboard() {
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e4e4e4;min-height:100vh;padding:20px}
     .container{max-width:1400px;margin:0 auto}
     h1{text-align:center;margin-bottom:20px;color:#00d9ff;font-size:2em;text-shadow:0 0 20px rgba(0,217,255,0.3)}
+    .tabs{display:flex;gap:10px;margin-bottom:20px;justify-content:center}
+    .tab{padding:10px 20px;border-radius:8px;cursor:pointer;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#888}
+    .tab.active{background:#00d9ff;color:#1a1a2e;font-weight:bold}
+    .tab-content{display:none}
+    .tab-content.active{display:block}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:25px}
     .card{background:rgba(255,255,255,0.05);border-radius:12px;padding:18px;border:1px solid rgba(255,255,255,0.1)}
     .card h2{color:#00d9ff;margin-bottom:12px;font-size:1.1em}
     .big-num{font-size:2.2em;font-weight:bold;text-align:center}
-    .green{color:#00ff88}.red{color:#ff4444}.yellow{color:#ffda44}.blue{color:#00d9ff}
+    .green{color:#00ff88}.red{color:#ff4444}.yellow{color:#ffda44}.blue{color:#00d9ff}.orange{color:#ff9944}
     .label{text-align:center;color:#888;font-size:0.85em;margin-top:4px}
     table{width:100%;border-collapse:collapse;font-size:0.85em}
     th{color:#00d9ff;text-align:left;padding:8px 6px;border-bottom:1px solid rgba(255,255,255,0.1)}
@@ -1573,20 +1633,49 @@ function renderPremiumDashboard() {
     .badge-yellow{background:rgba(255,218,68,0.15);color:#ffda44}
     .refresh-btn{position:fixed;top:15px;right:15px;background:#00d9ff;color:#1a1a2e;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:bold}
     .open-tag{background:rgba(0,217,255,0.15);color:#00d9ff;padding:2px 6px;border-radius:4px;font-size:0.75em}
+    .live-tag{background:rgba(255,153,68,0.2);color:#ff9944;padding:2px 6px;border-radius:4px;font-size:0.75em}
   </style>
 </head>
 <body>
   <button class="refresh-btn" onclick="loadData()">刷新</button>
   <div class="container">
-    <h1>💎 Premium Channel Shadow Tracker</h1>
-    <div class="grid" id="summary"></div>
-    <div class="card" style="margin-bottom:20px"><h2>📊 止损/止盈分布</h2><div id="reasons"></div></div>
-    <div class="card" style="margin-bottom:20px"><h2>🟢 当前持仓</h2><table id="open-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>当前PnL</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
-    <div class="card"><h2>📋 最近交易</h2><table id="recent-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+    <h1>💎 Premium Channel Dashboard</h1>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('shadow')">🎭 Shadow 模式</div>
+      <div class="tab" onclick="switchTab('live')">💰 实盘交易</div>
+    </div>
+
+    <!-- Shadow 模式 -->
+    <div id="shadow-content" class="tab-content active">
+      <div class="grid" id="summary"></div>
+      <div class="card" style="margin-bottom:20px"><h2>📊 止损/止盈分布</h2><div id="reasons"></div></div>
+      <div class="card" style="margin-bottom:20px"><h2>🟢 当前持仓</h2><table id="open-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>当前PnL</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
+      <div class="card"><h2>📋 最近交易</h2><table id="recent-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <!-- 实盘交易 -->
+    <div id="live-content" class="tab-content">
+      <div class="grid" id="live-summary"></div>
+      <div class="card" style="margin-bottom:20px"><h2>🟢 实盘持仓</h2><table id="live-open-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
+      <div class="card"><h2>📋 实盘交易记录</h2><table id="live-recent-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+    </div>
   </div>
   <script>
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      if (tab === 'shadow') {
+        document.querySelector('.tab:first-child').classList.add('active');
+        document.getElementById('shadow-content').classList.add('active');
+      } else {
+        document.querySelector('.tab:last-child').classList.add('active');
+        document.getElementById('live-content').classList.add('active');
+      }
+    }
+
     async function loadData(){
       try{
+        // Shadow 数据
         const res=await fetch('/api/shadow-pnl');
         const d=await res.json();
         const s=d.summary;
@@ -1597,7 +1686,7 @@ function renderPremiumDashboard() {
           '<div class="card"><div class="big-num blue">'+d.open.length+'</div><div class="label">当前持仓</div></div>';
 
         let rhtml='<table><thead><tr><th>类型</th><th>笔数</th><th>总PnL</th></tr></thead><tbody>';
-        for(const[k,v]of Object.entries(d.byReason).sort((a,b)=>b[1].totalPnl-a[1].totalPnl)){
+        for(const[k,v]of Object.entries(d.byReason||{}).sort((a,b)=>b[1].totalPnl-a[1].totalPnl)){
           rhtml+='<tr><td>'+k+'</td><td>'+v.count+'</td><td class="'+(v.totalPnl>=0?'pnl-pos':'pnl-neg')+'">'+(v.totalPnl>=0?'+':'')+v.totalPnl.toFixed(1)+'%</td></tr>';
         }
         rhtml+='</tbody></table>';
@@ -1611,6 +1700,26 @@ function renderPremiumDashboard() {
           const pnlCls=r.exit_pnl>0?'pnl-pos':'pnl-neg';
           const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
           return '<tr><td>$'+r.symbol+'</td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+r.exit_pnl.toFixed(1)+'%</td><td class="pnl-pos">+'+r.high_pnl.toFixed(1)+'%</td><td class="pnl-neg">'+r.low_pnl.toFixed(1)+'%</td><td>'+r.exit_reason+'</td><td>'+t+'</td></tr>';
+        }).join('');
+
+        // 实盘数据
+        const liveRes=await fetch('/api/live-positions');
+        const live=await liveRes.json();
+        const ls=live.summary;
+        document.getElementById('live-summary').innerHTML=
+          '<div class="card"><div class="big-num '+(ls.winRate>=60?'green':ls.winRate>=40?'yellow':'red')+'">'+ls.winRate+'%</div><div class="label">胜率 ('+ls.wins+'W/'+ls.losses+'L)</div></div>'+
+          '<div class="card"><div class="big-num '+(ls.totalPnl>=0?'green':'red')+'">'+(ls.totalPnl>=0?'+':'')+ls.totalPnl+'%</div><div class="label">总PnL ('+ls.total+'笔)</div></div>'+
+          '<div class="card"><div class="big-num orange">'+ls.totalSolSpent+'</div><div class="label">总投入 SOL</div></div>'+
+          '<div class="card"><div class="big-num blue">'+live.open.length+'</div><div class="label">当前持仓</div></div>';
+
+        const lotb=document.querySelector('#live-open-table tbody');
+        lotb.innerHTML=live.open.map(r=>'<tr><td>$'+r.symbol+' <span class="live-tag">LIVE</span></td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td></tr>').join('');
+
+        const lrtb=document.querySelector('#live-recent-table tbody');
+        lrtb.innerHTML=live.recent.map(r=>{
+          const pnlCls=(r.exit_pnl||0)>0?'pnl-pos':'pnl-neg';
+          const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+          return '<tr><td>$'+r.symbol+'</td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+(r.exit_pnl||0).toFixed(1)+'%</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td><td>'+(r.exit_reason||'-')+'</td><td>'+t+'</td></tr>';
         }).join('');
       }catch(e){document.getElementById('summary').innerHTML='<div class="card"><div class="big-num red">加载失败</div></div>';}
     }
