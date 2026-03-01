@@ -1419,17 +1419,31 @@ const server = http.createServer((req, res) => {
     try {
       const d = getDb();
       if (!d) throw new Error('Database not ready');
-      const all = d.prepare(`
+
+      // 单独查询所有未关闭仓位（不受 LIMIT 限制）
+      const open = d.prepare(`
         SELECT symbol, score, entry_mc, entry_time, exit_pnl, high_pnl, low_pnl, exit_reason, closed, closed_at
-        FROM shadow_pnl ORDER BY entry_time DESC LIMIT 200
+        FROM shadow_pnl WHERE closed = 0 ORDER BY entry_time DESC
       `).all();
-      const closed = all.filter(r => r.closed === 1);
-      const open = all.filter(r => r.closed === 0);
-      const wins = closed.filter(r => r.exit_pnl > 0);
-      const losses = closed.filter(r => r.exit_pnl <= 0);
-      const totalPnl = closed.reduce((s, r) => s + (r.exit_pnl || 0), 0);
-      const avgPnl = closed.length > 0 ? totalPnl / closed.length : 0;
-      const winRate = closed.length > 0 ? (wins.length / closed.length * 100) : 0;
+
+      // 查询最近已关闭的交易
+      const closed = d.prepare(`
+        SELECT symbol, score, entry_mc, entry_time, exit_pnl, high_pnl, low_pnl, exit_reason, closed, closed_at
+        FROM shadow_pnl WHERE closed = 1 ORDER BY entry_time DESC LIMIT 200
+      `).all();
+
+      // 统计所有已关闭交易（不受 LIMIT 限制）
+      const allStats = d.prepare(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN exit_pnl > 0 THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN exit_pnl <= 0 THEN 1 ELSE 0 END) as losses,
+          AVG(exit_pnl) as avgPnl,
+          SUM(exit_pnl) as totalPnl
+        FROM shadow_pnl WHERE closed = 1
+      `).get();
+
+      const winRate = allStats.total > 0 ? (allStats.wins / allStats.total * 100) : 0;
 
       // 按 exit_reason 分组
       const byReason = {};
@@ -1442,7 +1456,14 @@ const server = http.createServer((req, res) => {
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        summary: { total: closed.length, wins: wins.length, losses: losses.length, winRate: +winRate.toFixed(1), avgPnl: +avgPnl.toFixed(1), totalPnl: +totalPnl.toFixed(1) },
+        summary: {
+          total: allStats.total || 0,
+          wins: allStats.wins || 0,
+          losses: allStats.losses || 0,
+          winRate: +winRate.toFixed(1),
+          avgPnl: +(allStats.avgPnl || 0).toFixed(1),
+          totalPnl: +(allStats.totalPnl || 0).toFixed(1)
+        },
         open: open.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
         recent: closed.slice(0, 50).map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
         byReason
