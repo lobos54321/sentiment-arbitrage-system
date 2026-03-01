@@ -113,8 +113,54 @@ export class ShadowPnlTracker {
    */
   start() {
     if (this.interval) return;
+
+    // 从数据库恢复未关闭的仓位
+    this._restorePositions();
+
     this.interval = setInterval(() => this.checkAll(), this.checkIntervalMs);
     console.log(`✅ [Shadow Tracker] 启动 | 检查间隔: ${this.checkIntervalMs / 1000}s`);
+  }
+
+  /**
+   * 从数据库恢复未关闭的仓位
+   */
+  _restorePositions() {
+    try {
+      const rows = this.db.prepare(`
+        SELECT token_ca, symbol, score, entry_mc, entry_time, high_pnl, low_pnl
+        FROM shadow_pnl WHERE closed = 0
+      `).all();
+
+      for (const row of rows) {
+        // 跳过已在内存中的
+        if (this.positions.has(row.token_ca)) continue;
+
+        this.positions.set(row.token_ca, {
+          symbol: row.symbol || 'UNKNOWN',
+          entryMC: row.entry_mc || 0,
+          entryTime: row.entry_time || Date.now(),
+          score: row.score || 0,
+          highPnl: row.high_pnl || 0,
+          lowPnl: row.low_pnl || 0,
+          lastPnl: null,
+          currentMC: row.entry_mc || 0,
+          checks: 0,
+          closed: false,
+          exitReason: null
+        });
+
+        // 注册到 LivePriceMonitor
+        if (this.livePriceMonitor) {
+          this.livePriceMonitor.addToken(row.token_ca);
+        }
+      }
+
+      if (rows.length > 0) {
+        console.log(`🔄 [Shadow Tracker] 恢复 ${rows.length} 个未关闭仓位`);
+      }
+    } catch (e) {
+      console.error(`⚠️ [Shadow Tracker] 恢复仓位失败: ${e.message}`);
+    }
   }
 
   /**
