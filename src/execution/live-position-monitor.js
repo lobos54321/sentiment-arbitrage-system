@@ -54,6 +54,7 @@ export class LivePositionMonitor {
         locked_pnl REAL DEFAULT 0,
         high_pnl REAL DEFAULT 0,
         low_pnl REAL DEFAULT 0,
+        total_sol_received REAL DEFAULT 0,
         exit_pnl REAL,
         exit_reason TEXT,
         status TEXT DEFAULT 'open',
@@ -63,6 +64,11 @@ export class LivePositionMonitor {
       )
     `);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_live_pos_status ON live_positions(status)`);
+
+    // 迁移：给旧表添加 total_sol_received 字段
+    try {
+      this.db.exec(`ALTER TABLE live_positions ADD COLUMN total_sol_received REAL DEFAULT 0`);
+    } catch (e) { /* 字段已存在 */ }
   }
 
   /**
@@ -109,6 +115,7 @@ export class LivePositionMonitor {
       highPnl: 0,
       lowPnl: 0,
       lastPnl: 0,
+      totalSolReceived: 0,  // 累计收到的 SOL（用于计算真实 PnL）
       entryTime: Date.now(),
       closed: false,
       exitReason: null
@@ -252,6 +259,7 @@ export class LivePositionMonitor {
     console.log(`\n${icon} [EXIT] $${pos.symbol} | ${reason} | PnL: ${finalPnl >= 0 ? '+' : ''}${finalPnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}%`);
 
     // 执行卖出
+    let solReceived = 0;
     try {
       const sellAmount = pos.tp1
         ? Math.floor(pos.tokenAmount * (pos.remainingPct / 100))
@@ -259,7 +267,11 @@ export class LivePositionMonitor {
 
       if (sellAmount > 0) {
         const result = await this.executor.sell(pos.tokenCA, sellAmount);
-        console.log(`   TX: ${result.txHash} | 收到: ${result.amountOut.toFixed(6)} SOL`);
+        solReceived = result.amountOut || 0;
+        console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
+
+        // 累加实际收到的 SOL
+        pos.totalSolReceived += solReceived;
 
         // 记录亏损
         if (result.amountOut < pos.entrySol * (pos.remainingPct / 100)) {
@@ -271,8 +283,12 @@ export class LivePositionMonitor {
       console.error(`   ❌ 卖出失败: ${error.message}`);
     }
 
-    // 持久化
-    this._closePosition(pos, finalPnl);
+    // 计算真实 PnL（基于实际 SOL 进出）
+    const realPnl = pos.entrySol > 0 ? ((pos.totalSolReceived - pos.entrySol) / pos.entrySol) * 100 : finalPnl;
+    console.log(`   💰 真实PnL: ${realPnl >= 0 ? '+' : ''}${realPnl.toFixed(1)}% (投入: ${pos.entrySol} SOL, 收回: ${pos.totalSolReceived.toFixed(4)} SOL)`);
+
+    // 持久化（使用真实 PnL）
+    this._closePosition(pos, realPnl);
 
     // 从价格监控移除
     this.priceMonitor.removeToken(pos.tokenCA);
@@ -295,18 +311,22 @@ export class LivePositionMonitor {
 
     try {
       const result = await this.executor.sell(pos.tokenCA, sellAmount);
-      console.log(`   TX: ${result.txHash} | 收到: ${result.amountOut.toFixed(6)} SOL`);
+      const solReceived = result.amountOut || 0;
+      console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
+
+      // 累加实际收到的 SOL
+      pos.totalSolReceived += solReceived;
 
       pos.soldPct += sellPct;
       pos.remainingPct = newRemaining;
       pos.lockedPnl += pos.lastPnl * (sellPct / 100);
 
-      // 更新 DB
+      // 更新 DB（包含累计收到的 SOL）
       try {
         this.db.prepare(`
-          UPDATE live_positions SET sold_80_pct=1, remaining_pct=?, locked_pnl=?
+          UPDATE live_positions SET sold_80_pct=1, remaining_pct=?, locked_pnl=?, total_sol_received=?
           WHERE token_ca=? AND status='open'
-        `).run(newRemaining, pos.lockedPnl, pos.tokenCA);
+        `).run(newRemaining, pos.lockedPnl, pos.totalSolReceived, pos.tokenCA);
       } catch (e) { /* ignore */ }
     } catch (error) {
       console.error(`   ❌ 分批卖出失败: ${error.message}`);
@@ -320,9 +340,9 @@ export class LivePositionMonitor {
     try {
       this.db.prepare(`
         UPDATE live_positions
-        SET exit_pnl=?, exit_reason=?, high_pnl=?, low_pnl=?, status='closed', closed_at=?
+        SET exit_pnl=?, exit_reason=?, high_pnl=?, low_pnl=?, total_sol_received=?, status='closed', closed_at=?
         WHERE token_ca=? AND status='open'
-      `).run(finalPnl, pos.exitReason, pos.highPnl, pos.lowPnl, Date.now(), pos.tokenCA);
+      `).run(finalPnl, pos.exitReason, pos.highPnl, pos.lowPnl, pos.totalSolReceived || 0, Date.now(), pos.tokenCA);
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] DB 更新失败: ${e.message}`);
     }

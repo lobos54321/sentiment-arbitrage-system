@@ -1496,7 +1496,7 @@ const server = http.createServer((req, res) => {
       `).all();
 
       const closed = d.prepare(`
-        SELECT token_ca, symbol, entry_mc, entry_sol, exit_pnl, high_pnl, low_pnl, exit_reason, status, entry_time, closed_at
+        SELECT token_ca, symbol, entry_mc, entry_sol, exit_pnl, high_pnl, low_pnl, exit_reason, status, entry_time, closed_at, total_sol_received
         FROM live_positions WHERE status = 'closed' ORDER BY entry_time DESC LIMIT 50
       `).all();
 
@@ -1507,11 +1507,16 @@ const server = http.createServer((req, res) => {
           SUM(CASE WHEN exit_pnl <= 0 THEN 1 ELSE 0 END) as losses,
           AVG(exit_pnl) as avgPnl,
           SUM(exit_pnl) as totalPnl,
-          SUM(entry_sol) as totalSolSpent
+          SUM(entry_sol) as totalSolSpent,
+          SUM(total_sol_received) as totalSolReceived
         FROM live_positions WHERE status = 'closed'
       `).get();
 
       const winRate = allStats.total > 0 ? (allStats.wins / allStats.total * 100) : 0;
+      // 计算真实总 PnL（基于实际 SOL 进出）
+      const realTotalPnl = allStats.totalSolSpent > 0
+        ? ((allStats.totalSolReceived - allStats.totalSolSpent) / allStats.totalSolSpent) * 100
+        : 0;
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -1522,7 +1527,9 @@ const server = http.createServer((req, res) => {
           winRate: +winRate.toFixed(1),
           avgPnl: +(allStats.avgPnl || 0).toFixed(1),
           totalPnl: +(allStats.totalPnl || 0).toFixed(1),
-          totalSolSpent: +(allStats.totalSolSpent || 0).toFixed(4)
+          realTotalPnl: +realTotalPnl.toFixed(1),
+          totalSolSpent: +(allStats.totalSolSpent || 0).toFixed(4),
+          totalSolReceived: +(allStats.totalSolReceived || 0).toFixed(4)
         },
         open: open.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
         recent: closed.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) }))
@@ -1708,8 +1715,9 @@ function renderPremiumDashboard() {
         const ls=live.summary;
         document.getElementById('live-summary').innerHTML=
           '<div class="card"><div class="big-num '+(ls.winRate>=60?'green':ls.winRate>=40?'yellow':'red')+'">'+ls.winRate+'%</div><div class="label">胜率 ('+ls.wins+'W/'+ls.losses+'L)</div></div>'+
-          '<div class="card"><div class="big-num '+(ls.totalPnl>=0?'green':'red')+'">'+(ls.totalPnl>=0?'+':'')+ls.totalPnl+'%</div><div class="label">总PnL ('+ls.total+'笔)</div></div>'+
+          '<div class="card"><div class="big-num '+(ls.realTotalPnl>=0?'green':'red')+'">'+(ls.realTotalPnl>=0?'+':'')+ls.realTotalPnl+'%</div><div class="label">真实PnL (含滑点+手续费)</div></div>'+
           '<div class="card"><div class="big-num orange">'+ls.totalSolSpent+'</div><div class="label">总投入 SOL</div></div>'+
+          '<div class="card"><div class="big-num '+(ls.totalSolReceived>=ls.totalSolSpent?'green':'red')+'">'+(ls.totalSolReceived||0)+'</div><div class="label">总收回 SOL</div></div>'+
           '<div class="card"><div class="big-num blue">'+live.open.length+'</div><div class="label">当前持仓</div></div>';
 
         const lotb=document.querySelector('#live-open-table tbody');
