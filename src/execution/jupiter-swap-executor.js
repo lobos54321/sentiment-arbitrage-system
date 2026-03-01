@@ -87,44 +87,52 @@ export class JupiterSwapExecutor {
     this._checkSafety(amountSol);
 
     const amountLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+    const maxRetries = 3;
 
     console.log(`🪐 [JupiterSwap] 买入 ${amountSol} SOL → ${tokenCA.substring(0, 8)}...`);
 
-    try {
-      // 1. 获取报价
-      const quote = await this._getQuote(SOL_MINT, tokenCA, amountLamports);
-      if (!quote) {
-        throw new Error('获取报价失败');
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // 1. 获取报价
+        const quote = await this._getQuote(SOL_MINT, tokenCA, amountLamports);
+        if (!quote) {
+          throw new Error('获取报价失败');
+        }
+
+        const outAmount = parseInt(quote.outAmount);
+        console.log(`   报价: ${amountSol} SOL → ${outAmount} tokens`);
+
+        // 2. 获取 swap 交易
+        const swapTx = await this._getSwapTransaction(quote);
+        if (!swapTx) {
+          throw new Error('获取 swap 交易失败');
+        }
+
+        // 3. 签名并发送
+        const txHash = await this._signAndSend(swapTx);
+
+        this.stats.buys++;
+        this.stats.total_sol_spent += amountSol;
+
+        console.log(`✅ [JupiterSwap] 买入成功: ${txHash}`);
+
+        return {
+          success: true,
+          txHash,
+          amountIn: amountSol,
+          amountOut: outAmount,
+          tokenCA
+        };
+      } catch (error) {
+        console.error(`❌ [JupiterSwap] 买入失败 (${attempt}/${maxRetries}): ${error.message}`);
+        if (attempt < maxRetries) {
+          console.log(`   🔄 重试中...`);
+          await new Promise(r => setTimeout(r, 1000)); // 等1秒后重试
+        } else {
+          this.stats.buy_failures++;
+          throw error;
+        }
       }
-
-      const outAmount = parseInt(quote.outAmount);
-      console.log(`   报价: ${amountSol} SOL → ${outAmount} tokens`);
-
-      // 2. 获取 swap 交易
-      const swapTx = await this._getSwapTransaction(quote);
-      if (!swapTx) {
-        throw new Error('获取 swap 交易失败');
-      }
-
-      // 3. 签名并发送
-      const txHash = await this._signAndSend(swapTx);
-
-      this.stats.buys++;
-      this.stats.total_sol_spent += amountSol;
-
-      console.log(`✅ [JupiterSwap] 买入成功: ${txHash}`);
-
-      return {
-        success: true,
-        txHash,
-        amountIn: amountSol,
-        amountOut: outAmount,
-        tokenCA
-      };
-    } catch (error) {
-      this.stats.buy_failures++;
-      console.error(`❌ [JupiterSwap] 买入失败: ${error.message}`);
-      throw error;
     }
   }
 
@@ -140,44 +148,52 @@ export class JupiterSwapExecutor {
       throw new Error('交易已暂停（每日亏损限制）');
     }
 
+    const maxRetries = 3;
     console.log(`🪐 [JupiterSwap] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...`);
 
-    try {
-      // 1. 获取报价
-      const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
-      if (!quote) {
-        throw new Error('获取卖出报价失败');
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // 1. 获取报价
+        const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
+        if (!quote) {
+          throw new Error('获取卖出报价失败');
+        }
+
+        const outLamports = parseInt(quote.outAmount);
+        const outSol = outLamports / LAMPORTS_PER_SOL;
+        console.log(`   报价: ${tokenAmount} tokens → ${outSol.toFixed(6)} SOL`);
+
+        // 2. 获取 swap 交易
+        const swapTx = await this._getSwapTransaction(quote);
+        if (!swapTx) {
+          throw new Error('获取 swap 交易失败');
+        }
+
+        // 3. 签名并发送
+        const txHash = await this._signAndSend(swapTx);
+
+        this.stats.sells++;
+        this.stats.total_sol_received += outSol;
+
+        console.log(`✅ [JupiterSwap] 卖出成功: ${txHash} | 收到 ${outSol.toFixed(6)} SOL`);
+
+        return {
+          success: true,
+          txHash,
+          amountIn: tokenAmount,
+          amountOut: outSol,
+          tokenCA
+        };
+      } catch (error) {
+        console.error(`❌ [JupiterSwap] 卖出失败 (${attempt}/${maxRetries}): ${error.message}`);
+        if (attempt < maxRetries) {
+          console.log(`   🔄 重试中...`);
+          await new Promise(r => setTimeout(r, 1000)); // 等1秒后重试
+        } else {
+          this.stats.sell_failures++;
+          throw error;
+        }
       }
-
-      const outLamports = parseInt(quote.outAmount);
-      const outSol = outLamports / LAMPORTS_PER_SOL;
-      console.log(`   报价: ${tokenAmount} tokens → ${outSol.toFixed(6)} SOL`);
-
-      // 2. 获取 swap 交易
-      const swapTx = await this._getSwapTransaction(quote);
-      if (!swapTx) {
-        throw new Error('获取 swap 交易失败');
-      }
-
-      // 3. 签名并发送
-      const txHash = await this._signAndSend(swapTx);
-
-      this.stats.sells++;
-      this.stats.total_sol_received += outSol;
-
-      console.log(`✅ [JupiterSwap] 卖出成功: ${txHash} | 收到 ${outSol.toFixed(6)} SOL`);
-
-      return {
-        success: true,
-        txHash,
-        amountIn: tokenAmount,
-        amountOut: outSol,
-        tokenCA
-      };
-    } catch (error) {
-      this.stats.sell_failures++;
-      console.error(`❌ [JupiterSwap] 卖出失败: ${error.message}`);
-      throw error;
     }
   }
 
@@ -237,9 +253,9 @@ export class JupiterSwapExecutor {
           inputMint,
           outputMint,
           amount: amount.toString(),
-          slippageBps: 1000,             // 10% 默认滑点
+          slippageBps: 1000,             // 10% 滑点
           dynamicSlippage: true,         // 动态滑点 anti-MEV
-          maxAutoSlippageBps: 1500,      // 最大 15% 自动滑点
+          maxAutoSlippageBps: 1000,      // 最大 10% 自动滑点
           onlyDirectRoutes: false,
           asLegacyTransaction: false
         },
