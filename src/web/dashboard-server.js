@@ -23,13 +23,32 @@ const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 const originalConsoleWarn = console.warn;
 
+// 日志文件路径
+const logsDir = join(projectRoot, 'logs');
+const runtimeLogPath = join(logsDir, 'runtime.log');
+
+// 确保日志目录存在
+try {
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+} catch (e) { /* ignore */ }
+
 function captureLog(level, args) {
   const timestamp = new Date().toISOString();
   const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-  logBuffer.push({ timestamp, level, message });
+  const logLine = { timestamp, level, message };
+
+  // 内存缓冲
+  logBuffer.push(logLine);
   if (logBuffer.length > MAX_LOG_LINES) {
     logBuffer.shift();
   }
+
+  // 写入文件（追加模式）
+  try {
+    fs.appendFileSync(runtimeLogPath, `[${timestamp}] [${level}] ${message}\n`);
+  } catch (e) { /* ignore */ }
 }
 
 console.log = (...args) => {
@@ -1598,13 +1617,25 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ count: logs.length, logs }, null, 2));
     return;
   } else if (url.pathname === '/api/logs/download') {
-    // 日志下载端点（文本格式）
-    const content = logBuffer.map(l => `[${l.timestamp}] [${l.level}] ${l.message}`).join('\n');
-    res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Disposition': `attachment; filename="runtime-logs-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt"`
-    });
-    res.end(content);
+    // 日志下载端点（完整日志文件）
+    if (fs.existsSync(runtimeLogPath)) {
+      const stats = fs.statSync(runtimeLogPath);
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': `attachment; filename="runtime-logs-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt"`,
+        'Content-Length': stats.size
+      });
+      const fileStream = fs.createReadStream(runtimeLogPath);
+      fileStream.pipe(res);
+    } else {
+      // fallback 到内存缓冲
+      const content = logBuffer.map(l => `[${l.timestamp}] [${l.level}] ${l.message}`).join('\n');
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': `attachment; filename="runtime-logs-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt"`
+      });
+      res.end(content);
+    }
     return;
   } else if (url.pathname === '/logs') {
     // 日志查看页面（HTML）
