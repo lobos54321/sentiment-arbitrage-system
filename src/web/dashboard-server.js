@@ -16,6 +16,11 @@ dotenv.config();
 const PORT = process.env.PORT || 3000;
 const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const projectRoot = join(__dirname, '../..');
+const resolvedDbPath = isAbsolute(dbPath) ? dbPath : join(projectRoot, dbPath);
+
 // 内存日志缓冲（保留最近 10000 条）
 const MAX_LOG_LINES = 10000;
 const logBuffer = [];
@@ -65,11 +70,6 @@ console.warn = (...args) => {
   captureLog('WARN', args);
   originalConsoleWarn.apply(console, args);
 };
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const projectRoot = join(__dirname, '../..');
-const resolvedDbPath = isAbsolute(dbPath) ? dbPath : join(projectRoot, dbPath);
 
 let db;
 function getDb() {
