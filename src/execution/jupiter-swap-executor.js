@@ -405,7 +405,7 @@ export class JupiterSwapExecutor {
 
     // 🔧 BUG FIX: 检查 SOL 余额是否足够支付手续费
     const solBalance = await this.getSolBalance();
-    const estimatedFee = 0.006; // 预估手续费 0.005 + buffer
+    const estimatedFee = 0.003; // 实际手续费约 0.002-0.003 SOL (base + priority)
     if (solBalance < this.minSolReserve + estimatedFee) {
       throw new Error(`SOL 余额不足: ${solBalance.toFixed(4)} SOL，需要至少 ${(this.minSolReserve + estimatedFee).toFixed(4)} SOL`);
     }
