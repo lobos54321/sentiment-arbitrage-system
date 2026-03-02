@@ -4,13 +4,18 @@
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~1.5 秒响应）
  *
- * 退出逻辑（策略C - 渐进式分批止盈）：
+ * 退出逻辑（策略C - 渐进式分批止盈，实盘优化版）：
  * - STOP_LOSS(-20%)：全卖
  * - FAST_STOP（45 秒内，从未涨过 & < -5%）：全卖
  * - MID_STOP（< -12% & 从未涨过 +10%）：全卖
  * - TP1: +50% 卖30% | TP2: +100% 卖20% | TP3: +200% 卖20% | 剩30% trailing
- * - MOON_STOP（剩余仓位回撤到 moonHighPnl*55%，最低保 +25%）：全卖剩余
- * - TRAIL_STOP（未触发分批，peak >= 15%，回撤到 peak*65-70%）：全卖
+ * - MOON_STOP（剩余仓位回撤到 moonHighPnl*70%，最低保 +40%）：全卖剩余
+ * - TRAIL_STOP（未触发分批，peak >= 15%，回撤到 peak*75-80%）：全卖
+ *
+ * 实盘优化（2026-03-02）：
+ * - MOON_STOP: 55%→70%，最低保25%→40%（实盘跌速太快）
+ * - TRAIL_STOP: 65-70%→75-80%，最低保10%→12%
+ * - 新增钱包扫描器，每60秒检查滞留token并重试卖出
  */
 
 import Database from 'better-sqlite3';
@@ -296,21 +301,24 @@ export class LivePositionMonitor {
       pos.moonHighPnl = pnl;
     }
 
-    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*55%，最低保 +25%
+    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*70%，最低保 +40%
+    // 实盘数据：peak×55% 太晚，很多币跌穿这条线后继续暴跌
+    // 调整为 peak×70%，更早锁定利润
     if (pos.tp1 && pos.highPnl >= 15) {
-      const moonExit = pos.moonHighPnl * 0.55;
-      const exitLine = Math.max(moonExit, 25);
+      const moonExit = pos.moonHighPnl * 0.70;  // 从55%提高到70%
+      const exitLine = Math.max(moonExit, 40);   // 最低保从25%提高到40%
       if (pnl < exitLine) {
         await this._triggerExit(pos, `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
       }
     }
 
-    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*65-70%
+    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*75-80%
+    // 实盘数据：peak×65% 太晚，调整为 peak×75-80%
     if (!pos.tp1 && pos.highPnl >= 15) {
-      const keepRatio = pos.highPnl >= 50 ? 0.70 : 0.65;
+      const keepRatio = pos.highPnl >= 50 ? 0.80 : 0.75;  // 从65-70%提高到75-80%
       const trailExit = pos.highPnl * keepRatio;
-      const exitLine = Math.max(trailExit, 10);
+      const exitLine = Math.max(trailExit, 12);  // 最低保从10%提高到12%
       if (pnl < exitLine) {
         await this._triggerExit(pos, `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
