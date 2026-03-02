@@ -341,7 +341,7 @@ export class JupiterSwapExecutor {
           inputMint,
           outputMint,
           amount: amount.toString(),
-          slippageBps: 1500,             // 15% 滑点（低MC token需要更高）
+          slippageBps: 1000,             // 10% 滑点（Jito保护后可降低）
           dynamicSlippage: true,         // 动态滑点 anti-MEV
           maxAutoSlippageBps: 2500,      // 最大 25% 自动滑点（实盘验证需要）
           onlyDirectRoutes: false,
