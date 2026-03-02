@@ -910,8 +910,14 @@ function getDashboardData() {
 
   try {
     // 系统概览
-    const channels = db.prepare(`SELECT COUNT(*) as c FROM telegram_channels WHERE active = 1`).get();
-    data.overview.channels = channels?.c || 0;
+    // 检查 telegram_channels 表是否存在
+    const tcExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_channels'`).get();
+    if (tcExists) {
+      const channels = db.prepare(`SELECT COUNT(*) as c FROM telegram_channels WHERE active = 1`).get();
+      data.overview.channels = channels?.c || 0;
+    } else {
+      data.overview.channels = 0;
+    }
 
     // 今日信号 = 今日买入的交易数（来自 DeBot/CrossValidator）
     const signalsToday = db.prepare(`
