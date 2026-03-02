@@ -293,16 +293,20 @@ export class LivePositionMonitor {
 
     // TP1: +50% 卖50%
     if (!pos.tp1 && pnl >= 50) {
-      await this._triggerPartialSell(pos, 50, 'TP1');
-      pos.tp1 = true;
-      pos.moonHighPnl = pnl;
+      const success = await this._triggerPartialSell(pos, 50, 'TP1');
+      if (success) {
+        pos.tp1 = true;
+        pos.moonHighPnl = pnl;
+      }
       return;
     }
 
     // TP2: +100% 卖30%（需要先触发TP1）
     if (pos.tp1 && !pos.tp2 && pnl >= 100) {
-      await this._triggerPartialSell(pos, 30, 'TP2');
-      pos.tp2 = true;
+      const success = await this._triggerPartialSell(pos, 30, 'TP2');
+      if (success) {
+        pos.tp2 = true;
+      }
       // TP2后剩余20%，不再有TP3
       return;
     }
@@ -404,12 +408,13 @@ export class LivePositionMonitor {
   }
 
   /**
-   * 分批卖出（策略C: TP1卖30%, TP2卖20%, TP3卖20%）
+   * 分批卖出（策略D: TP1卖50%, TP2卖30%）
+   * @returns {boolean} 是否卖出成功
    */
   async _triggerPartialSell(pos, sellPct, label) {
     // 防抖
     const lastSell = this.sellDebounce.get(pos.tokenCA);
-    if (lastSell && (Date.now() - lastSell) < this.debouncMs) return;
+    if (lastSell && (Date.now() - lastSell) < this.debouncMs) return false;
     this.sellDebounce.set(pos.tokenCA, Date.now());
 
     // 计算卖出数量
@@ -420,6 +425,12 @@ export class LivePositionMonitor {
 
     try {
       const result = await this.executor.sell(pos.tokenCA, sellAmount);
+
+      if (!result.success) {
+        console.error(`   ❌ 分批卖出失败: ${result.error || 'Unknown error'}`);
+        return false;
+      }
+
       const solReceived = result.amountOut || 0;
       console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
 
@@ -437,8 +448,11 @@ export class LivePositionMonitor {
           WHERE token_ca=? AND status='open'
         `).run(newRemaining, pos.lockedPnl, pos.totalSolReceived, pos.tokenCA);
       } catch (e) { /* ignore */ }
+
+      return true;
     } catch (error) {
-      console.error(`   ❌ 分批卖出失败: ${error.message}`);
+      console.error(`   ❌ 分批卖出异常: ${error.message}`);
+      return false;
     }
   }
 
@@ -472,7 +486,7 @@ export class LivePositionMonitor {
           entrySol: row.entry_sol,
           tokenAmount: row.token_amount,
           tokenDecimals: row.token_decimals,
-          // 策略C: 兼容恢复（从旧的sold80字段推断tp1状态）
+          // 策略D: 兼容恢复（从旧的sold80字段推断tp1状态）
           tp1: !!row.sold_80_pct,
           tp2: row.remaining_pct <= 50,
           tp3: row.remaining_pct <= 30,
@@ -483,6 +497,7 @@ export class LivePositionMonitor {
           highPnl: row.high_pnl || 0,
           lowPnl: row.low_pnl || 0,
           lastPnl: 0,
+          totalSolReceived: row.total_sol_received || 0,  // 恢复累计收到的 SOL
           entryTime: row.entry_time,
           closed: false,
           exitReason: null
