@@ -647,11 +647,22 @@ export class PremiumSignalEngine {
           if (tradeResult.success && this.livePositionMonitor) {
             const entryPrice = dexData?.price_usd || 0;
             const entryMC = dexData?.market_cap || signal.market_cap || 0;
-            // 直接使用交易返回的 amountOut，不再查询余额（避免 RPC 同步延迟导致返回 0）
-            // pump.fun tokens 的 decimals 固定为 6
-            const tokenAmount = tradeResult.amountOut || 0;
-            const tokenDecimals = 6;
-            console.log(`📦 [Token] 获得 ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
+
+            // 🔧 BUG FIX: 等待2秒后验证余额，确保真的买到了
+            await new Promise(r => setTimeout(r, 2000));
+            const balance = await this.jupiterExecutor.getTokenBalance(ca);
+
+            if (balance.amount <= 0) {
+              console.error(`❌ [验证失败] 买入交易发送但余额为0，交易可能失败`);
+              this.stats.errors++;
+              return { action: 'EXEC_FAILED', reason: '买入后余额为0，交易可能失败' };
+            }
+
+            // 使用实际余额，而不是报价
+            const tokenAmount = balance.amount;
+            const tokenDecimals = balance.decimals || 6;
+            console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
+
             this.livePositionMonitor.addPosition(
               ca,
               signal.symbol,

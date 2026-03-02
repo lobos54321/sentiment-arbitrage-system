@@ -17,6 +17,7 @@ import {
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 import axios from 'axios';
+import { JitoBundleSender } from './jito-bundle-sender.js';
 
 // SOL mint address
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -49,6 +50,10 @@ export class JupiterSwapExecutor {
     this.jupiterApiBase = 'https://api.jup.ag';
     this.jupiterApiKey = process.env.JUPITER_API_KEY || '';
 
+    // Jito Bundle Sender (MEV保护 + 更快确认)
+    this.jitoSender = null;
+    this.useJito = process.env.USE_JITO !== 'false'; // 默认启用
+
     // 统计
     this.stats = {
       buys: 0,
@@ -78,6 +83,12 @@ export class JupiterSwapExecutor {
       console.log(`✅ [JupiterSwap] 钱包: ${this.walletAddress.substring(0, 8)}...${this.walletAddress.slice(-4)}`);
     } catch (error) {
       throw new Error(`钱包私钥解析失败: ${error.message}`);
+    }
+
+    // 初始化 Jito Sender
+    if (this.useJito) {
+      this.jitoSender = new JitoBundleSender(this.connection, this.wallet);
+      console.log('⚡ [JupiterSwap] Jito Bundle 已启用');
     }
 
     this._resetDailyLoss();
@@ -406,11 +417,26 @@ export class JupiterSwapExecutor {
     // 签名
     tx.sign([this.wallet]);
 
-    // 发送
-    const txHash = await this.connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: true,
-      maxRetries: 3  // 🔧 BUG FIX: 减少到3次，避免过多重试
-    });
+    // 发送 (优先使用 Jito)
+    let txHash;
+    if (this.useJito && this.jitoSender) {
+      // 通过 Jito 发送 (MEV保护 + 更快确认)
+      const jitoResult = await this.jitoSender.sendTransactionSimple(tx, { urgent: !waitConfirm });
+      if (jitoResult.success) {
+        txHash = jitoResult.txHash;
+        if (!jitoResult.fallback) {
+          console.log(`⚡ [Jito] 交易已发送: ${txHash}`);
+        }
+      } else {
+        throw new Error(`Jito 发送失败: ${jitoResult.error}`);
+      }
+    } else {
+      // 回退到普通 RPC
+      txHash = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: true,
+        maxRetries: 3
+      });
+    }
 
     // 🔧 BUG FIX: 记录手续费花费
     this.dailyFeeSpent += estimatedFee;
