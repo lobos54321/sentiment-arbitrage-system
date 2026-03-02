@@ -38,6 +38,13 @@ export class JupiterSwapExecutor {
     this.dailyLossResetTime = 0;
     this.tradingPaused = false;
 
+    // 🔧 BUG FIX: 手续费保护
+    this.dailyFeeSpent = 0;           // 每日已花费手续费
+    this.maxDailyFee = 0.1;           // 每日最大手续费 0.1 SOL
+    this.minSolReserve = 0.01;        // 最少保留 0.01 SOL
+    this.feeResetTime = 0;
+    this.feePaused = false;
+
     // Jupiter API
     this.jupiterApiBase = 'https://api.jup.ag';
     this.jupiterApiKey = process.env.JUPITER_API_KEY || '';
@@ -214,10 +221,17 @@ export class JupiterSwapExecutor {
 
   /**
    * 紧急卖出（Fire-and-Forget 模式）
-   * 快速发送多笔交易，不等待确认，至少有一笔成功即可
+   * 🔧 BUG FIX: 减少并行交易数量，只发1笔避免浪费手续费
    */
   async emergencySell(tokenCA, tokenAmount) {
     console.log(`🚨 [JupiterSwap] 紧急卖出模式: ${tokenCA.substring(0, 8)}...`);
+
+    // 🔧 BUG FIX: 检查余额是否足够支付手续费
+    const solBalance = await this.getSolBalance();
+    if (solBalance < this.minSolReserve + 0.003) {
+      console.log(`   ❌ SOL 余额不足 (${solBalance.toFixed(4)} SOL)，跳过紧急卖出`);
+      return { success: false, reason: 'insufficient_sol' };
+    }
 
     const balanceBefore = await this.getTokenBalance(tokenCA);
     if (balanceBefore.amount <= 0) {
@@ -225,22 +239,25 @@ export class JupiterSwapExecutor {
       return { success: true, reason: 'already_sold' };
     }
 
-    // 快速发送3笔交易，不等待确认
+    // 🔧 BUG FIX: 只发送1笔交易，使用紧急模式优先费
     const txHashes = [];
-    for (let i = 0; i < 3; i++) {
-      try {
-        const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
-        if (!quote) continue;
-
-        const swapTx = await this._getSwapTransaction(quote);
-        if (!swapTx) continue;
-
-        const txHash = await this._signAndSend(swapTx, false);  // 不等待确认
-        txHashes.push(txHash);
-        console.log(`   📤 TX ${i + 1}: ${txHash}`);
-      } catch (e) {
-        console.log(`   ⚠️ TX ${i + 1} 发送失败: ${e.message}`);
+    try {
+      const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
+      if (!quote) {
+        return { success: false, reason: 'quote_failed' };
       }
+
+      const swapTx = await this._getSwapTransaction(quote, true);  // urgent=true
+      if (!swapTx) {
+        return { success: false, reason: 'swap_tx_failed' };
+      }
+
+      const txHash = await this._signAndSend(swapTx, false);  // 不等待确认
+      txHashes.push(txHash);
+      console.log(`   📤 TX: ${txHash}`);
+    } catch (e) {
+      console.log(`   ⚠️ 紧急卖出发送失败: ${e.message}`);
+      return { success: false, reason: e.message };
     }
 
     // 等待3秒后检查余额
@@ -252,7 +269,7 @@ export class JupiterSwapExecutor {
       console.log(`✅ [紧急卖出] 成功卖出 ${soldAmount} tokens`);
       return { success: true, txHashes, soldAmount };
     } else {
-      console.log(`❌ [紧急卖出] 余额未变化，所有交易可能都失败了`);
+      console.log(`❌ [紧急卖出] 余额未变化，交易可能失败`);
       return { success: false, txHashes };
     }
   }
@@ -331,11 +348,15 @@ export class JupiterSwapExecutor {
 
   /**
    * 获取 swap 交易数据
+   * @param {boolean} urgent - 紧急模式使用更高优先费
    */
-  async _getSwapTransaction(quote) {
+  async _getSwapTransaction(quote, urgent = false) {
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
+
+      // 🔧 BUG FIX: 降低优先费，紧急模式才用高费用
+      const priorityFee = urgent ? 2000000 : 500000;  // 紧急0.002 SOL，普通0.0005 SOL
 
       const res = await axios.post(`${this.jupiterApiBase}/swap/v1/swap`, {
         quoteResponse: quote,
@@ -345,13 +366,13 @@ export class JupiterSwapExecutor {
         dynamicSlippage: true,
         prioritizationFeeLamports: {
           priorityLevelWithMaxLamports: {
-            maxLamports: 5000000,        // 提高到 0.005 SOL priority fee（减少超时）
-            priorityLevel: 'veryHigh'    // 最高优先级
+            maxLamports: priorityFee,
+            priorityLevel: urgent ? 'veryHigh' : 'high'
           }
         }
       }, {
         headers,
-        timeout: 15000  // 增加超时到15秒
+        timeout: 15000
       });
       return res.data?.swapTransaction;
     } catch (error) {
@@ -365,6 +386,19 @@ export class JupiterSwapExecutor {
    * @param {boolean} waitConfirm - 是否等待确认（紧急卖出时可设为false）
    */
   async _signAndSend(swapTransaction, waitConfirm = true) {
+    // 🔧 BUG FIX: 检查每日手续费限制
+    this._resetDailyFee();
+    if (this.feePaused) {
+      throw new Error(`手续费保护：每日手续费已达 ${this.dailyFeeSpent.toFixed(4)} SOL（限制 ${this.maxDailyFee} SOL）`);
+    }
+
+    // 🔧 BUG FIX: 检查 SOL 余额是否足够支付手续费
+    const solBalance = await this.getSolBalance();
+    const estimatedFee = 0.006; // 预估手续费 0.005 + buffer
+    if (solBalance < this.minSolReserve + estimatedFee) {
+      throw new Error(`SOL 余额不足: ${solBalance.toFixed(4)} SOL，需要至少 ${(this.minSolReserve + estimatedFee).toFixed(4)} SOL`);
+    }
+
     // 反序列化交易
     const txBuf = Buffer.from(swapTransaction, 'base64');
     const tx = VersionedTransaction.deserialize(txBuf);
@@ -375,8 +409,15 @@ export class JupiterSwapExecutor {
     // 发送
     const txHash = await this.connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: true,
-      maxRetries: 5  // 增加到5次
+      maxRetries: 3  // 🔧 BUG FIX: 减少到3次，避免过多重试
     });
+
+    // 🔧 BUG FIX: 记录手续费花费
+    this.dailyFeeSpent += estimatedFee;
+    if (this.dailyFeeSpent >= this.maxDailyFee) {
+      this.feePaused = true;
+      console.error(`🚨 [JupiterSwap] 每日手续费达 ${this.dailyFeeSpent.toFixed(4)} SOL，暂停所有交易！`);
+    }
 
     if (waitConfirm) {
       // 确认（最多等 20 秒，从30秒减少）
@@ -444,6 +485,20 @@ export class JupiterSwapExecutor {
       this.dailyLoss = 0;
       this.dailyLossResetTime = todayStart.getTime();
       this.tradingPaused = false;
+    }
+  }
+
+  /**
+   * 🔧 BUG FIX: 每日手续费重置（UTC 0 点）
+   */
+  _resetDailyFee() {
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    if (this.feeResetTime < todayStart.getTime()) {
+      this.dailyFeeSpent = 0;
+      this.feeResetTime = todayStart.getTime();
+      this.feePaused = false;
+      console.log('🔄 [JupiterSwap] 每日手续费计数已重置');
     }
   }
 

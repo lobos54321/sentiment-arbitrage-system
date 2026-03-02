@@ -33,6 +33,12 @@ export class LivePositionMonitor {
     this.sellDebounce = new Map();
     this.debouncMs = 3000;
 
+    // 🔧 BUG FIX: 重试计数器 Map<tokenCA, { count, pauseUntil }>
+    this.retryCounter = new Map();
+    this.maxRetries = 5;              // 最大重试 5 次
+    this.retryPauseMs = 60000;        // 滑点错误后暂停 1 分钟
+    this.maxWalletScanRetries = 3;    // 钱包扫描最大重试次数
+
     // 持久化
     const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
     this.db = new Database(dbPath);
@@ -74,6 +80,11 @@ export class LivePositionMonitor {
     // 迁移：给旧表添加 total_sol_received 字段
     try {
       this.db.exec(`ALTER TABLE live_positions ADD COLUMN total_sol_received REAL DEFAULT 0`);
+    } catch (e) { /* 字段已存在 */ }
+
+    // 🔧 BUG FIX: 添加 scan_retry_count 字段
+    try {
+      this.db.exec(`ALTER TABLE live_positions ADD COLUMN scan_retry_count INTEGER DEFAULT 0`);
     } catch (e) { /* 字段已存在 */ }
   }
 
@@ -119,24 +130,40 @@ export class LivePositionMonitor {
 
   /**
    * 扫描钱包中的滞留 token 并尝试卖出
+   * 🔧 BUG FIX: 添加重试次数限制
    */
   async _scanAndRetrySell() {
     try {
       // 查找状态为 closed 但 total_sol_received = 0 的记录（卖出失败）
+      // 🔧 BUG FIX: 添加 scan_retry_count 过滤，避免无限重试
       const failedSells = this.db.prepare(`
         SELECT * FROM live_positions
         WHERE status = 'closed' AND (total_sol_received = 0 OR total_sol_received IS NULL)
         AND closed_at > ?
+        AND (scan_retry_count IS NULL OR scan_retry_count < ?)
         ORDER BY closed_at DESC
-        LIMIT 10
-      `).all(Date.now() - 24 * 60 * 60 * 1000); // 最近24小时
+        LIMIT 5
+      `).all(Date.now() - 24 * 60 * 60 * 1000, this.maxWalletScanRetries);
 
       if (failedSells.length === 0) return;
+
+      // 🔧 BUG FIX: 检查 SOL 余额是否足够
+      const solBalance = await this.executor.getSolBalance();
+      if (solBalance < 0.02) {
+        console.log(`\n🔍 [钱包扫描] SOL 余额不足 (${solBalance.toFixed(4)})，跳过扫描`);
+        return;
+      }
 
       console.log(`\n🔍 [钱包扫描] 发现 ${failedSells.length} 笔卖出失败的交易，尝试重新卖出...`);
 
       for (const row of failedSells) {
         try {
+          // 🔧 BUG FIX: 更新扫描重试次数
+          const currentRetry = (row.scan_retry_count || 0) + 1;
+          this.db.prepare(`
+            UPDATE live_positions SET scan_retry_count = ? WHERE id = ?
+          `).run(currentRetry, row.id);
+
           // 查询实际钱包余额
           const balance = await this.executor.getTokenBalance(row.token_ca);
           if (balance.amount <= 0) {
@@ -149,7 +176,7 @@ export class LivePositionMonitor {
             continue;
           }
 
-          console.log(`   🚨 紧急卖出 $${row.symbol} | ${balance.uiAmount} tokens`);
+          console.log(`   🚨 紧急卖出 $${row.symbol} | ${balance.uiAmount} tokens | 重试: ${currentRetry}/${this.maxWalletScanRetries}`);
 
           // 使用紧急卖出模式
           const result = await this.executor.emergencySell(row.token_ca, balance.amount);
@@ -173,14 +200,21 @@ export class LivePositionMonitor {
               console.log(`   ✅ 紧急卖出成功: $${row.symbol}`);
             }
           } else {
-            console.log(`   ❌ 紧急卖出失败: $${row.symbol}`);
+            console.log(`   ❌ 紧急卖出失败: $${row.symbol} | ${result.reason || 'unknown'}`);
+            // 🔧 BUG FIX: 如果达到最大重试，标记为放弃
+            if (currentRetry >= this.maxWalletScanRetries) {
+              console.log(`   🚫 达到最大扫描重试次数，放弃 $${row.symbol}`);
+              this.db.prepare(`
+                UPDATE live_positions SET total_sol_received = -2, exit_reason = ? WHERE id = ?
+              `).run(`${row.exit_reason}(RETRY_LIMIT)`, row.id);
+            }
           }
         } catch (error) {
           console.log(`   ❌ 重试失败: $${row.symbol} | ${error.message}`);
         }
 
-        // 每笔之间等待1秒
-        await new Promise(r => setTimeout(r, 1000));
+        // 每笔之间等待2秒（增加间隔）
+        await new Promise(r => setTimeout(r, 2000));
       }
     } catch (error) {
       console.error(`⚠️  [钱包扫描] 异常: ${error.message}`);
@@ -247,9 +281,25 @@ export class LivePositionMonitor {
     // 如果正在退出中，跳过评估
     if (pos.exitInProgress || pos.partialSellInProgress) return;
 
+    // 🔧 BUG FIX: 检查是否在暂停期内
+    const retryInfo = this.retryCounter.get(tokenCA) || { count: 0, pauseUntil: 0 };
+    if (retryInfo.pauseUntil > Date.now()) {
+      return;  // 仍在暂停期，跳过
+    }
+
+    // 🔧 BUG FIX: 检查是否超过最大重试次数
+    if (retryInfo.count >= this.maxRetries) {
+      if (!pos.retryLimitReached) {
+        console.log(`🚫 [重试上限] $${pos.symbol} 已达最大重试次数 ${this.maxRetries}，停止重试`);
+        pos.retryLimitReached = true;
+      }
+      pos.pendingSell = false;
+      return;
+    }
+
     // 如果有待卖出的仓位，尝试重新卖出
     if (pos.pendingSell) {
-      console.log(`🔄 [重试卖出] $${pos.symbol} | 原因: ${pos.pendingSellReason}`);
+      console.log(`🔄 [重试卖出] $${pos.symbol} | 原因: ${pos.pendingSellReason} | 重试: ${retryInfo.count + 1}/${this.maxRetries}`);
       pos.pendingSell = false;
       await this._triggerExit(pos, pos.pendingSellReason || 'PENDING_SELL', 100);
       return;
@@ -416,8 +466,36 @@ export class LivePositionMonitor {
       }
     } catch (error) {
       console.error(`   ❌ 卖出失败: ${error.message}`);
+
+      // 🔧 BUG FIX: 更新重试计数器
+      const retryInfo = this.retryCounter.get(pos.tokenCA) || { count: 0, pauseUntil: 0 };
+      retryInfo.count += 1;
+
+      // 🔧 BUG FIX: 检测滑点错误，暂停更长时间
+      const isSlippageError = error.message.includes('6025') ||
+                              error.message.includes('6024') ||
+                              error.message.includes('Slippage') ||
+                              error.message.includes('滑点');
+
+      if (isSlippageError) {
+        console.log(`   ⚠️  滑点错误，暂停 ${this.retryPauseMs / 1000} 秒后重试`);
+        retryInfo.pauseUntil = Date.now() + this.retryPauseMs;
+      }
+
+      // 🔧 BUG FIX: 检查是否达到最大重试次数
+      if (retryInfo.count >= this.maxRetries) {
+        console.log(`   🚫 达到最大重试次数 ${this.maxRetries}，停止重试 $${pos.symbol}`);
+        pos.pendingSell = false;
+        pos.retryLimitReached = true;
+        this.retryCounter.set(pos.tokenCA, retryInfo);
+        pos.exitInProgress = false;
+        return;
+      }
+
+      this.retryCounter.set(pos.tokenCA, retryInfo);
+
       // 卖出失败，保持仓位 open，下次价格更新时重试
-      console.log(`   ⚠️  保持仓位 open，等待下次重试...`);
+      console.log(`   ⚠️  保持仓位 open，等待重试 (${retryInfo.count}/${this.maxRetries})...`);
       pos.closed = false;
       pos.exitReason = null;
       pos.exitInProgress = false;  // 重置标记，允许重试
