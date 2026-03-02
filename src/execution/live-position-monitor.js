@@ -547,13 +547,9 @@ export class LivePositionMonitor {
     console.log(`\n💰 [${label}] $${pos.symbol} +${pos.lastPnl.toFixed(0)}% → 卖${sellPct}%，留${newRemaining}%`);
 
     try {
-      // 先检查余额
-      const balance = await this.executor.getTokenBalance(pos.tokenCA);
-      if (balance.amount <= 0) {
-        console.log(`   ⚠️  余额为0，跳过分批卖出`);
-        pos.partialSellInProgress = false;
-        return false;
-      }
+      // 🔧 BUG FIX: 不再预检查余额，直接尝试卖出
+      // 之前的问题：getTokenBalance 有时返回0（RPC问题），导致分批止盈被跳过
+      // 现在：直接用 pos.tokenAmount 计算卖出数量，让 Jupiter 处理余额不足的情况
 
       const result = await this.executor.sell(pos.tokenCA, sellAmount);
 
