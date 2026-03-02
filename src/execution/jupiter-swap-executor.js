@@ -343,7 +343,7 @@ export class JupiterSwapExecutor {
           amount: amount.toString(),
           slippageBps: 1000,             // 10% 滑点（Jito保护后可降低）
           dynamicSlippage: true,         // 动态滑点 anti-MEV
-          maxAutoSlippageBps: 2500,      // 最大 25% 自动滑点（实盘验证需要）
+          maxAutoSlippageBps: 1500,      // 最大 15% 自动滑点（Jito保护后可降低）
           onlyDirectRoutes: false,
           asLegacyTransaction: false
         },
