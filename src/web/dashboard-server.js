@@ -1588,6 +1588,53 @@ const server = http.createServer((req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (url.pathname === '/api/close-position') {
+    // 手动关闭持仓 API
+    try {
+      const d = getDb();
+      if (!d) throw new Error('Database not ready');
+
+      const ca = url.searchParams.get('ca');
+      const reason = url.searchParams.get('reason') || 'MANUAL_CLOSE';
+
+      if (!ca) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing ca parameter' }));
+        return;
+      }
+
+      // 检查是否存在
+      const pos = d.prepare(`SELECT * FROM live_positions WHERE token_ca = ? AND status = 'open'`).get(ca);
+      if (!pos) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Position not found or already closed' }));
+        return;
+      }
+
+      // 关闭持仓
+      d.prepare(`
+        UPDATE live_positions
+        SET status = 'closed',
+            exit_reason = ?,
+            exit_pnl = -100,
+            closed_at = ?,
+            total_sol_received = 0
+        WHERE token_ca = ? AND status = 'open'
+      `).run(reason, Date.now(), ca);
+
+      console.log(`🔧 [手动关闭] ${pos.symbol} (${ca.substring(0, 8)}...) - ${reason}`);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        message: `Position ${pos.symbol} closed`,
+        ca: ca,
+        reason: reason
+      }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (url.pathname === '/api/download/database') {
     // 数据库下载端点
     const filePath = resolvedDbPath;
