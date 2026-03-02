@@ -199,10 +199,10 @@ export class LivePositionMonitor {
       entrySol,
       tokenAmount,        // raw amount（含 decimals）
       tokenDecimals,
-      // 策略C: 渐进式分批止盈
-      tp1: false,           // +50% 卖30%
-      tp2: false,           // +100% 卖20%
-      tp3: false,           // +200% 卖20%
+      // 策略D: 渐进式分批止盈
+      tp1: false,           // +50% 卖50%
+      tp2: false,           // +100% 卖30%
+      tp3: false,           // 保留字段
       soldPct: 0,           // 已卖出百分比
       remainingPct: 100,
       lockedPnl: 0,
@@ -213,6 +213,8 @@ export class LivePositionMonitor {
       totalSolReceived: 0,  // 累计收到的 SOL（用于计算真实 PnL）
       entryTime: Date.now(),
       closed: false,
+      exitInProgress: false,  // 防止并发卖出
+      partialSellInProgress: false,  // 防止并发分批卖出
       exitReason: null
     };
 
@@ -241,6 +243,9 @@ export class LivePositionMonitor {
     const { tokenCA, price, mc } = event;
     const pos = this.positions.get(tokenCA);
     if (!pos || pos.closed) return;
+
+    // 如果正在退出中，跳过评估
+    if (pos.exitInProgress || pos.partialSellInProgress) return;
 
     // 如果有待卖出的仓位，尝试重新卖出
     if (pos.pendingSell) {
@@ -343,14 +348,25 @@ export class LivePositionMonitor {
    * 触发全部卖出
    */
   async _triggerExit(pos, reason, sellPct) {
-    // 防抖
+    // 1. 检查是否已在退出中（防止并发）
+    if (pos.exitInProgress || pos.closed) {
+      return;
+    }
+
+    // 2. 立即标记退出中（在任何异步操作之前）
+    pos.exitInProgress = true;
+
+    // 3. 防抖（额外保护，增加到 10 秒）
     const lastSell = this.sellDebounce.get(pos.tokenCA);
-    if (lastSell && (Date.now() - lastSell) < this.debouncMs) return;
+    if (lastSell && (Date.now() - lastSell) < 10000) {
+      pos.exitInProgress = false;
+      return;
+    }
     this.sellDebounce.set(pos.tokenCA, Date.now());
 
     pos.exitReason = reason;
 
-    // 计算最终 PnL（策略C：已锁定 + 剩余仓位当前PnL）
+    // 计算最终 PnL（策略D：已锁定 + 剩余仓位当前PnL）
     let finalPnl = pos.lastPnl;
     if (pos.tp1) {
       finalPnl = pos.lockedPnl + pos.lastPnl * (pos.remainingPct / 100);
@@ -363,12 +379,28 @@ export class LivePositionMonitor {
     let solReceived = 0;
     let sellSuccess = false;
     try {
+      // 先检查余额，避免无效卖出
+      const balance = await this.executor.getTokenBalance(pos.tokenCA);
+      if (balance.amount <= 0) {
+        console.log(`   ⚠️  余额为0，可能已被卖出`);
+        pos.closed = true;
+        pos.exitInProgress = false;
+        this._closePosition(pos, finalPnl);
+        this.priceMonitor.removeToken(pos.tokenCA);
+        return;
+      }
+
       const sellAmount = pos.tp1
         ? Math.floor(pos.tokenAmount * (pos.remainingPct / 100))
         : pos.tokenAmount;
 
       if (sellAmount > 0) {
         const result = await this.executor.sell(pos.tokenCA, sellAmount);
+
+        if (!result.success) {
+          throw new Error(result.error || 'Sell failed');
+        }
+
         solReceived = result.amountOut || 0;
         sellSuccess = true;
         console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
@@ -388,6 +420,7 @@ export class LivePositionMonitor {
       console.log(`   ⚠️  保持仓位 open，等待下次重试...`);
       pos.closed = false;
       pos.exitReason = null;
+      pos.exitInProgress = false;  // 重置标记，允许重试
       pos.pendingSell = true;  // 标记待卖出
       pos.pendingSellReason = reason;
       return;  // 不关闭仓位
@@ -395,6 +428,7 @@ export class LivePositionMonitor {
 
     // 卖出成功，关闭仓位
     pos.closed = true;
+    pos.exitInProgress = false;
 
     // 计算真实 PnL（基于实际 SOL 进出）
     const realPnl = pos.entrySol > 0 ? ((pos.totalSolReceived - pos.entrySol) / pos.entrySol) * 100 : finalPnl;
@@ -412,9 +446,20 @@ export class LivePositionMonitor {
    * @returns {boolean} 是否卖出成功
    */
   async _triggerPartialSell(pos, sellPct, label) {
-    // 防抖
+    // 1. 检查是否已在卖出中（防止并发）
+    if (pos.partialSellInProgress || pos.exitInProgress || pos.closed) {
+      return false;
+    }
+
+    // 2. 立即标记卖出中
+    pos.partialSellInProgress = true;
+
+    // 3. 防抖（增加到 10 秒）
     const lastSell = this.sellDebounce.get(pos.tokenCA);
-    if (lastSell && (Date.now() - lastSell) < this.debouncMs) return false;
+    if (lastSell && (Date.now() - lastSell) < 10000) {
+      pos.partialSellInProgress = false;
+      return false;
+    }
     this.sellDebounce.set(pos.tokenCA, Date.now());
 
     // 计算卖出数量
@@ -424,10 +469,19 @@ export class LivePositionMonitor {
     console.log(`\n💰 [${label}] $${pos.symbol} +${pos.lastPnl.toFixed(0)}% → 卖${sellPct}%，留${newRemaining}%`);
 
     try {
+      // 先检查余额
+      const balance = await this.executor.getTokenBalance(pos.tokenCA);
+      if (balance.amount <= 0) {
+        console.log(`   ⚠️  余额为0，跳过分批卖出`);
+        pos.partialSellInProgress = false;
+        return false;
+      }
+
       const result = await this.executor.sell(pos.tokenCA, sellAmount);
 
       if (!result.success) {
         console.error(`   ❌ 分批卖出失败: ${result.error || 'Unknown error'}`);
+        pos.partialSellInProgress = false;
         return false;
       }
 
@@ -449,9 +503,11 @@ export class LivePositionMonitor {
         `).run(newRemaining, pos.lockedPnl, pos.totalSolReceived, pos.tokenCA);
       } catch (e) { /* ignore */ }
 
+      pos.partialSellInProgress = false;
       return true;
     } catch (error) {
       console.error(`   ❌ 分批卖出异常: ${error.message}`);
+      pos.partialSellInProgress = false;
       return false;
     }
   }
@@ -497,9 +553,11 @@ export class LivePositionMonitor {
           highPnl: row.high_pnl || 0,
           lowPnl: row.low_pnl || 0,
           lastPnl: 0,
-          totalSolReceived: row.total_sol_received || 0,  // 恢复累计收到的 SOL
+          totalSolReceived: row.total_sol_received || 0,
           entryTime: row.entry_time,
           closed: false,
+          exitInProgress: false,
+          partialSellInProgress: false,
           exitReason: null
         });
         this.priceMonitor.addToken(row.token_ca);
