@@ -141,15 +141,20 @@ export class JupiterSwapExecutor {
    * 支持部分卖出，用于分批止盈
    * @param {string} tokenCA - Token 合约地址
    * @param {number} tokenAmount - 卖出的 token 数量（raw amount，含 decimals）
+   * @param {object} options - { urgent: boolean } 紧急模式不等待确认
    * @returns {object} { success, txHash, amountIn, amountOut }
    */
-  async sell(tokenCA, tokenAmount) {
+  async sell(tokenCA, tokenAmount, options = {}) {
     if (this.tradingPaused) {
       throw new Error('交易已暂停（每日亏损限制）');
     }
 
-    const maxRetries = 3;
-    console.log(`🪐 [JupiterSwap] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...`);
+    const maxRetries = options.urgent ? 5 : 3;  // 紧急模式重试5次
+    const waitConfirm = !options.urgent;  // 紧急模式不等待确认
+    console.log(`🪐 [JupiterSwap] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...${options.urgent ? ' [紧急模式]' : ''}`);
+
+    // 记录卖出前的余额
+    const balanceBefore = await this.getTokenBalance(tokenCA);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -170,30 +175,85 @@ export class JupiterSwapExecutor {
         }
 
         // 3. 签名并发送
-        const txHash = await this._signAndSend(swapTx);
+        const txHash = await this._signAndSend(swapTx, waitConfirm);
 
-        this.stats.sells++;
-        this.stats.total_sol_received += outSol;
+        // 4. 检查余额变化（确认交易真的成功了）
+        await new Promise(r => setTimeout(r, 2000));  // 等2秒
+        const balanceAfter = await this.getTokenBalance(tokenCA);
 
-        console.log(`✅ [JupiterSwap] 卖出成功: ${txHash} | 收到 ${outSol.toFixed(6)} SOL`);
+        if (balanceAfter.amount < balanceBefore.amount) {
+          // 余额减少了，说明卖出成功
+          this.stats.sells++;
+          this.stats.total_sol_received += outSol;
+          console.log(`✅ [JupiterSwap] 卖出成功: ${txHash} | 收到 ${outSol.toFixed(6)} SOL`);
 
-        return {
-          success: true,
-          txHash,
-          amountIn: tokenAmount,
-          amountOut: outSol,
-          tokenCA
-        };
+          return {
+            success: true,
+            txHash,
+            amountIn: tokenAmount,
+            amountOut: outSol,
+            tokenCA
+          };
+        } else {
+          // 余额没变，交易可能还没确认或失败了
+          console.warn(`⚠️  [JupiterSwap] 余额未变化，交易可能未成功`);
+          throw new Error('交易发送但余额未变化');
+        }
       } catch (error) {
         console.error(`❌ [JupiterSwap] 卖出失败 (${attempt}/${maxRetries}): ${error.message}`);
         if (attempt < maxRetries) {
           console.log(`   🔄 重试中...`);
-          await new Promise(r => setTimeout(r, 1000)); // 等1秒后重试
+          await new Promise(r => setTimeout(r, 500));  // 缩短重试间隔到500ms
         } else {
           this.stats.sell_failures++;
           throw error;
         }
       }
+    }
+  }
+
+  /**
+   * 紧急卖出（Fire-and-Forget 模式）
+   * 快速发送多笔交易，不等待确认，至少有一笔成功即可
+   */
+  async emergencySell(tokenCA, tokenAmount) {
+    console.log(`🚨 [JupiterSwap] 紧急卖出模式: ${tokenCA.substring(0, 8)}...`);
+
+    const balanceBefore = await this.getTokenBalance(tokenCA);
+    if (balanceBefore.amount <= 0) {
+      console.log(`   ✓ Token 已不在钱包中`);
+      return { success: true, reason: 'already_sold' };
+    }
+
+    // 快速发送3笔交易，不等待确认
+    const txHashes = [];
+    for (let i = 0; i < 3; i++) {
+      try {
+        const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
+        if (!quote) continue;
+
+        const swapTx = await this._getSwapTransaction(quote);
+        if (!swapTx) continue;
+
+        const txHash = await this._signAndSend(swapTx, false);  // 不等待确认
+        txHashes.push(txHash);
+        console.log(`   📤 TX ${i + 1}: ${txHash}`);
+      } catch (e) {
+        console.log(`   ⚠️ TX ${i + 1} 发送失败: ${e.message}`);
+      }
+    }
+
+    // 等待3秒后检查余额
+    await new Promise(r => setTimeout(r, 3000));
+    const balanceAfter = await this.getTokenBalance(tokenCA);
+
+    if (balanceAfter.amount < balanceBefore.amount) {
+      const soldAmount = balanceBefore.amount - balanceAfter.amount;
+      console.log(`✅ [紧急卖出] 成功卖出 ${soldAmount} tokens`);
+      return { success: true, txHashes, soldAmount };
+    } else {
+      console.log(`❌ [紧急卖出] 余额未变化，所有交易可能都失败了`);
+      return { success: false, txHashes };
     }
   }
 
@@ -302,8 +362,9 @@ export class JupiterSwapExecutor {
 
   /**
    * 本地签名并发送交易
+   * @param {boolean} waitConfirm - 是否等待确认（紧急卖出时可设为false）
    */
-  async _signAndSend(swapTransaction) {
+  async _signAndSend(swapTransaction, waitConfirm = true) {
     // 反序列化交易
     const txBuf = Buffer.from(swapTransaction, 'base64');
     const tx = VersionedTransaction.deserialize(txBuf);
@@ -314,13 +375,27 @@ export class JupiterSwapExecutor {
     // 发送
     const txHash = await this.connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: true,
-      maxRetries: 3
+      maxRetries: 5  // 增加到5次
     });
 
-    // 确认（最多等 30 秒）
-    const confirmation = await this.connection.confirmTransaction(txHash, 'confirmed');
-    if (confirmation.value.err) {
-      throw new Error(`交易确认失败: ${JSON.stringify(confirmation.value.err)}`);
+    if (waitConfirm) {
+      // 确认（最多等 20 秒，从30秒减少）
+      try {
+        const confirmation = await this.connection.confirmTransaction({
+          signature: txHash,
+          blockhash: tx.message.recentBlockhash,
+          lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight
+        }, 'confirmed');
+
+        if (confirmation.value.err) {
+          throw new Error(`交易确认失败: ${JSON.stringify(confirmation.value.err)}`);
+        }
+      } catch (error) {
+        // 超时不一定失败，返回txHash让调用方检查余额
+        console.warn(`⚠️  [JupiterSwap] 确认超时，交易可能已成功: ${txHash}`);
+      }
+    } else {
+      console.log(`📤 [JupiterSwap] 交易已发送(不等待确认): ${txHash}`);
     }
 
     return txHash;

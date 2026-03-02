@@ -110,7 +110,7 @@ export class LivePositionMonitor {
   _startWalletScanner() {
     this.walletScanInterval = setInterval(async () => {
       await this._scanAndRetrySell();
-    }, 60000); // 每60秒扫描一次
+    }, 30000); // 每30秒扫描一次（从60秒缩短）
 
     // 首次启动时立即扫描一次
     setTimeout(() => this._scanAndRetrySell(), 5000);
@@ -141,29 +141,45 @@ export class LivePositionMonitor {
           if (balance.amount <= 0) {
             // token 已经不在钱包里了（可能手动卖了或转走了）
             console.log(`   ✓ $${row.symbol} 已不在钱包中，跳过`);
+            // 更新数据库状态，避免重复检查
+            this.db.prepare(`
+              UPDATE live_positions SET exit_reason = ? WHERE id = ?
+            `).run(`${row.exit_reason}(MANUAL_SOLD)`, row.id);
             continue;
           }
 
-          console.log(`   🔄 重试卖出 $${row.symbol} | ${balance.uiAmount} tokens`);
+          console.log(`   🚨 紧急卖出 $${row.symbol} | ${balance.uiAmount} tokens`);
 
-          // 尝试卖出
-          const result = await this.executor.sell(row.token_ca, balance.amount);
-          const solReceived = result.amountOut || 0;
+          // 使用紧急卖出模式
+          const result = await this.executor.emergencySell(row.token_ca, balance.amount);
 
-          // 更新数据库
-          this.db.prepare(`
-            UPDATE live_positions
-            SET total_sol_received = ?, exit_reason = ?
-            WHERE id = ?
-          `).run(solReceived, `${row.exit_reason}(RETRY_SUCCESS)`, row.id);
+          if (result.success) {
+            // 再次检查余额确认卖出成功
+            await new Promise(r => setTimeout(r, 2000));
+            const balanceAfter = await this.executor.getTokenBalance(row.token_ca);
 
-          console.log(`   ✅ 重试成功: $${row.symbol} | 收到 ${solReceived.toFixed(4)} SOL`);
+            if (balanceAfter.amount <= 0) {
+              // 获取实际收到的 SOL（通过查询 SOL 余额变化估算）
+              const solReceived = result.soldAmount ? result.soldAmount * (row.entry_sol / row.token_amount) : 0.001;  // 估算值
+
+              // 更新数据库
+              this.db.prepare(`
+                UPDATE live_positions
+                SET total_sol_received = ?, exit_reason = ?
+                WHERE id = ?
+              `).run(solReceived, `${row.exit_reason}(EMERGENCY_SOLD)`, row.id);
+
+              console.log(`   ✅ 紧急卖出成功: $${row.symbol}`);
+            }
+          } else {
+            console.log(`   ❌ 紧急卖出失败: $${row.symbol}`);
+          }
         } catch (error) {
           console.log(`   ❌ 重试失败: $${row.symbol} | ${error.message}`);
         }
 
-        // 每笔之间等待2秒，避免频繁请求
-        await new Promise(r => setTimeout(r, 2000));
+        // 每笔之间等待1秒
+        await new Promise(r => setTimeout(r, 1000));
       }
     } catch (error) {
       console.error(`⚠️  [钱包扫描] 异常: ${error.message}`);
