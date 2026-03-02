@@ -41,7 +41,7 @@ export class JupiterSwapExecutor {
 
     // 🔧 BUG FIX: 手续费保护
     this.dailyFeeSpent = 0;           // 每日已花费手续费
-    this.maxDailyFee = 0.5;           // 每日最大手续费 0.5 SOL (提高以允许更多交易)
+    this.maxDailyFee = 0.2;           // 每日最大手续费 0.2 SOL (约67笔/天)
     this.minSolReserve = 0.01;        // 最少保留 0.01 SOL
     this.feeResetTime = 0;
     this.feePaused = false;
