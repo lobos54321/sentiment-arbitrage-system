@@ -444,36 +444,30 @@ export class PremiumSignalEngine {
       }
 
       // 评分决策（数据驱动 MC 分层）：
-      // 实测数据（304笔）：
-      // MC 0-10K: +50.5%平均 | 10-20K: +17.8% | 20-30K: +10.3% | 30-40K: +31.8% | 40K+: 打平或亏
-      // 结论：40K 以上不买，30-40K 是隐藏金矿
+      // 实盘回测结果（36笔）：
+      // MC < 10K: 实盘胜率31%，但卖出成功的预期收益 +3.1%
+      // MC 10-20K: 实盘胜率20%，卖出失败率20%，亏损严重
+      // MC 20-30K: 实盘胜率25%，卖出失败率25%
+      // MC > 30K: 实盘胜率0%，卖出失败率50%
+      // 结论：只买 MC < 10K，执行可靠性最高
       let scoreAction = 'SKIP';
 
-      if (mc > 40000) {
-        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 40K → 不买`);
-      } else if (isATHDoubled && mc <= 40000) {
+      if (mc > 10000) {
+        // 实盘数据：MC > 10K 的卖出失败率高、胜率低
+        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 10K → 不买（实盘策略）`);
+      } else if (mc < 10000 && score >= 60) {
+        // MC < 10K: 模拟盘 +50.5%，实盘扣损耗后 +24.6%，卖出成功率 87.5%
+        scoreAction = 'BUY_FULL';
+        console.log(`💎 [低MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 买（实盘最优区间）`);
+      } else if (isATHDoubled && mc <= 10000) {
+        // ATH 翻倍信号，但也要 MC < 10K
         scoreAction = 'BUY_FULL';
         score = Math.max(score, 80);
-        console.log(`🔥 [ATH翻倍] $${signal.symbol} 涨了${athGain.toFixed(0)}% | MC: $${signal.market_cap_from ? (signal.market_cap_from/1000).toFixed(1)+'K→' : ''}$${(signal.market_cap/1000).toFixed(1)}K`);
-      } else if (mc < 10000 && score >= 60) {
-        // MC<10K: +50.5%平均，全买
+        console.log(`🔥 [ATH翻倍+低MC] $${signal.symbol} 涨了${athGain.toFixed(0)}% | MC: $${(mc/1000).toFixed(1)}K`);
+      } else if (isDoubled && mc <= 10000 && score >= 60) {
+        // 翻倍重复信号，但也要 MC < 10K
         scoreAction = 'BUY_FULL';
-        console.log(`💎 [低MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 买`);
-      } else if (mc >= 10000 && mc <= 20000 && score >= 85) {
-        // MC 10-20K: +17.8%平均，85分以上买
-        scoreAction = 'BUY_FULL';
-      } else if (mc > 20000 && mc <= 30000 && score >= 95) {
-        // MC 20-30K: +10.3%平均，需要高分（95+）
-        scoreAction = 'BUY_FULL';
-        console.log(`📊 [中MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 高分买入`);
-      } else if (mc > 30000 && mc <= 40000 && score >= 95) {
-        // MC 30-40K: +31.8%平均（隐藏金矿！），需要高分（95+）+ AI二次确认
-        scoreAction = 'BUY_FULL';
-        console.log(`🔶 [高MC金矿] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 高分买入`);
-      } else if (isDoubled && mc <= 40000 && score >= 60) {
-        // 翻倍重复信号，MC 合理
-        scoreAction = 'BUY_FULL';
-        console.log(`🔥 [翻倍信号] $${signal.symbol} 重复${sigHistory.count}次 | MC${mcMultiple.toFixed(1)}x`);
+        console.log(`🔥 [翻倍+低MC] $${signal.symbol} 重复${sigHistory.count}次 | MC: $${(mc/1000).toFixed(1)}K`);
       } else if (isATH && athGain > 300) {
         console.log(`⚠️ [ATH] $${signal.symbol} 涨了${athGain.toFixed(0)}%，涨太多不追`);
       }

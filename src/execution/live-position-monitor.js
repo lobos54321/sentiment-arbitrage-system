@@ -80,6 +80,9 @@ export class LivePositionMonitor {
     // 恢复未关闭的持仓
     this._restorePositions();
 
+    // 启动钱包扫描（每60秒检查滞留token）
+    this._startWalletScanner();
+
     console.log(`✅ [LivePositionMonitor] 启动 | 持仓: ${this.positions.size}`);
   }
 
@@ -88,8 +91,78 @@ export class LivePositionMonitor {
    */
   stop() {
     this.priceMonitor.removeListener('price-update', this._onPriceUpdate);
+    if (this.walletScanInterval) {
+      clearInterval(this.walletScanInterval);
+      this.walletScanInterval = null;
+    }
     this._printReport();
     console.log('⏹️  [LivePositionMonitor] 已停止');
+  }
+
+  /**
+   * 启动钱包扫描器 — 定期检查滞留 token 并重试卖出
+   */
+  _startWalletScanner() {
+    this.walletScanInterval = setInterval(async () => {
+      await this._scanAndRetrySell();
+    }, 60000); // 每60秒扫描一次
+
+    // 首次启动时立即扫描一次
+    setTimeout(() => this._scanAndRetrySell(), 5000);
+  }
+
+  /**
+   * 扫描钱包中的滞留 token 并尝试卖出
+   */
+  async _scanAndRetrySell() {
+    try {
+      // 查找状态为 closed 但 total_sol_received = 0 的记录（卖出失败）
+      const failedSells = this.db.prepare(`
+        SELECT * FROM live_positions
+        WHERE status = 'closed' AND (total_sol_received = 0 OR total_sol_received IS NULL)
+        AND closed_at > ?
+        ORDER BY closed_at DESC
+        LIMIT 10
+      `).all(Date.now() - 24 * 60 * 60 * 1000); // 最近24小时
+
+      if (failedSells.length === 0) return;
+
+      console.log(`\n🔍 [钱包扫描] 发现 ${failedSells.length} 笔卖出失败的交易，尝试重新卖出...`);
+
+      for (const row of failedSells) {
+        try {
+          // 查询实际钱包余额
+          const balance = await this.executor.getTokenBalance(row.token_ca);
+          if (balance.amount <= 0) {
+            // token 已经不在钱包里了（可能手动卖了或转走了）
+            console.log(`   ✓ $${row.symbol} 已不在钱包中，跳过`);
+            continue;
+          }
+
+          console.log(`   🔄 重试卖出 $${row.symbol} | ${balance.uiAmount} tokens`);
+
+          // 尝试卖出
+          const result = await this.executor.sell(row.token_ca, balance.amount);
+          const solReceived = result.amountOut || 0;
+
+          // 更新数据库
+          this.db.prepare(`
+            UPDATE live_positions
+            SET total_sol_received = ?, exit_reason = ?
+            WHERE id = ?
+          `).run(solReceived, `${row.exit_reason}(RETRY_SUCCESS)`, row.id);
+
+          console.log(`   ✅ 重试成功: $${row.symbol} | 收到 ${solReceived.toFixed(4)} SOL`);
+        } catch (error) {
+          console.log(`   ❌ 重试失败: $${row.symbol} | ${error.message}`);
+        }
+
+        // 每笔之间等待2秒，避免频繁请求
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    } catch (error) {
+      console.error(`⚠️  [钱包扫描] 异常: ${error.message}`);
+    }
   }
 
   /**

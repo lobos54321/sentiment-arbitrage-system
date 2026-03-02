@@ -253,9 +253,9 @@ export class JupiterSwapExecutor {
           inputMint,
           outputMint,
           amount: amount.toString(),
-          slippageBps: 1000,             // 10% 滑点
+          slippageBps: 1500,             // 15% 滑点（低MC token需要更高）
           dynamicSlippage: true,         // 动态滑点 anti-MEV
-          maxAutoSlippageBps: 1000,      // 最大 10% 自动滑点
+          maxAutoSlippageBps: 2500,      // 最大 25% 自动滑点（实盘验证需要）
           onlyDirectRoutes: false,
           asLegacyTransaction: false
         },
@@ -285,13 +285,13 @@ export class JupiterSwapExecutor {
         dynamicSlippage: true,
         prioritizationFeeLamports: {
           priorityLevelWithMaxLamports: {
-            maxLamports: 1000000,        // 最大 0.001 SOL priority fee
-            priorityLevel: 'high'
+            maxLamports: 5000000,        // 提高到 0.005 SOL priority fee（减少超时）
+            priorityLevel: 'veryHigh'    // 最高优先级
           }
         }
       }, {
         headers,
-        timeout: 10000
+        timeout: 15000  // 增加超时到15秒
       });
       return res.data?.swapTransaction;
     } catch (error) {
