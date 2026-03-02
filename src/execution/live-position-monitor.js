@@ -4,18 +4,19 @@
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~1.5 秒响应）
  *
- * 退出逻辑（策略C - 渐进式分批止盈，实盘优化版）：
+ * 退出逻辑（策略D - 激进锁定利润版）：
  * - STOP_LOSS(-20%)：全卖
  * - FAST_STOP（45 秒内，从未涨过 & < -5%）：全卖
  * - MID_STOP（< -12% & 从未涨过 +10%）：全卖
- * - TP1: +50% 卖30% | TP2: +100% 卖20% | TP3: +200% 卖20% | 剩30% trailing
- * - MOON_STOP（剩余仓位回撤到 moonHighPnl*70%，最低保 +40%）：全卖剩余
- * - TRAIL_STOP（未触发分批，peak >= 15%，回撤到 peak*75-80%）：全卖
+ * - TP1: +50% 卖50% | TP2: +100% 卖30% | 剩20% trailing
+ * - MOON_STOP（剩余仓位回撤到 moonHighPnl*80%，最低保 +50%）：全卖剩余
+ * - TRAIL_STOP（未触发分批，peak >= 15%，回撤到 peak*80%）：全卖
  *
- * 实盘优化（2026-03-02）：
- * - MOON_STOP: 55%→70%，最低保25%→40%（实盘跌速太快）
- * - TRAIL_STOP: 65-70%→75-80%，最低保10%→12%
- * - 新增钱包扫描器，每60秒检查滞留token并重试卖出
+ * 实盘优化（2026-03-02 v2）：
+ * - 分批止盈: 30%/20%/20%/30% → 50%/30%/20%（更早锁定更多利润）
+ * - MOON_STOP: 70%→80%，最低保40%→50%（流动性窗口短）
+ * - TRAIL_STOP: 75-80%→80%，最低保12%→15%
+ * - 紧急卖出模式，每30秒钱包扫描
  */
 
 import Database from 'better-sqlite3';
@@ -287,28 +288,22 @@ export class LivePositionMonitor {
       return;
     }
 
-    // ==================== 策略C: 渐进式分批止盈 ====================
-    // +50%: 卖30% | +100%: 卖20% | +200%: 卖20% | 剩30% trailing
+    // ==================== 策略D: 激进锁定利润版 ====================
+    // +50%: 卖50% | +100%: 卖30% | 剩20% trailing
 
-    // TP1: +50% 卖30%
+    // TP1: +50% 卖50%
     if (!pos.tp1 && pnl >= 50) {
-      await this._triggerPartialSell(pos, 30, 'TP1');
+      await this._triggerPartialSell(pos, 50, 'TP1');
       pos.tp1 = true;
       pos.moonHighPnl = pnl;
       return;
     }
 
-    // TP2: +100% 卖20%（需要先触发TP1）
+    // TP2: +100% 卖30%（需要先触发TP1）
     if (pos.tp1 && !pos.tp2 && pnl >= 100) {
-      await this._triggerPartialSell(pos, 20, 'TP2');
+      await this._triggerPartialSell(pos, 30, 'TP2');
       pos.tp2 = true;
-      return;
-    }
-
-    // TP3: +200% 卖20%（需要先触发TP2）
-    if (pos.tp2 && !pos.tp3 && pnl >= 200) {
-      await this._triggerPartialSell(pos, 20, 'TP3');
-      pos.tp3 = true;
+      // TP2后剩余20%，不再有TP3
       return;
     }
 
@@ -317,24 +312,22 @@ export class LivePositionMonitor {
       pos.moonHighPnl = pnl;
     }
 
-    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*70%，最低保 +40%
-    // 实盘数据：peak×55% 太晚，很多币跌穿这条线后继续暴跌
-    // 调整为 peak×70%，更早锁定利润
+    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*80%，最低保 +50%
+    // 实盘数据：流动性窗口极短，必须更早出场
     if (pos.tp1 && pos.highPnl >= 15) {
-      const moonExit = pos.moonHighPnl * 0.70;  // 从55%提高到70%
-      const exitLine = Math.max(moonExit, 40);   // 最低保从25%提高到40%
+      const moonExit = pos.moonHighPnl * 0.80;  // 从70%提高到80%
+      const exitLine = Math.max(moonExit, 50);   // 最低保从40%提高到50%
       if (pnl < exitLine) {
         await this._triggerExit(pos, `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
       }
     }
 
-    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*75-80%
-    // 实盘数据：peak×65% 太晚，调整为 peak×75-80%
+    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*80%
+    // 实盘数据：流动性窗口极短，必须更早出场
     if (!pos.tp1 && pos.highPnl >= 15) {
-      const keepRatio = pos.highPnl >= 50 ? 0.80 : 0.75;  // 从65-70%提高到75-80%
-      const trailExit = pos.highPnl * keepRatio;
-      const exitLine = Math.max(trailExit, 12);  // 最低保从10%提高到12%
+      const trailExit = pos.highPnl * 0.80;  // 统一用80%
+      const exitLine = Math.max(trailExit, 15);  // 最低保从12%提高到15%
       if (pnl < exitLine) {
         await this._triggerExit(pos, `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
