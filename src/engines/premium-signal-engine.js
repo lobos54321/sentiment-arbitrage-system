@@ -634,60 +634,80 @@ export class PremiumSignalEngine {
         return { action: 'NOTIFY', size: finalSize, ai: aiResult };
       }
 
-      // 实盘执行
-      console.log(`💰 [执行] 买入 $${signal.symbol} | ${finalSize} SOL...`);
-      try {
-        let tradeResult;
+      // 实盘执行 (最多重试3轮)
+      const maxBuyAttempts = 3;
+      let lastError = null;
 
-        if (this.jupiterExecutor) {
-          // Jupiter Swap 买入
-          tradeResult = await this.jupiterExecutor.buy(ca, finalSize);
+      for (let buyAttempt = 1; buyAttempt <= maxBuyAttempts; buyAttempt++) {
+        console.log(`💰 [执行] 买入 $${signal.symbol} | ${finalSize} SOL... ${buyAttempt > 1 ? `(重试 ${buyAttempt}/${maxBuyAttempts})` : ''}`);
 
-          // 注册到 LivePositionMonitor
-          if (tradeResult.success && this.livePositionMonitor) {
-            const entryPrice = dexData?.price_usd || 0;
-            const entryMC = dexData?.market_cap || signal.market_cap || 0;
+        try {
+          let tradeResult;
 
-            // 🔧 BUG FIX: 等待2秒后验证余额，确保真的买到了
-            await new Promise(r => setTimeout(r, 2000));
-            const balance = await this.jupiterExecutor.getTokenBalance(ca);
+          if (this.jupiterExecutor) {
+            // Jupiter Swap 买入
+            tradeResult = await this.jupiterExecutor.buy(ca, finalSize);
 
-            if (balance.amount <= 0) {
-              console.error(`❌ [验证失败] 买入交易发送但余额为0，交易可能失败`);
-              this.stats.errors++;
-              return { action: 'EXEC_FAILED', reason: '买入后余额为0，交易可能失败' };
+            // 注册到 LivePositionMonitor
+            if (tradeResult.success && this.livePositionMonitor) {
+              const entryPrice = dexData?.price_usd || 0;
+              const entryMC = dexData?.market_cap || signal.market_cap || 0;
+
+              // 🔧 BUG FIX: 等待2秒后验证余额，确保真的买到了
+              await new Promise(r => setTimeout(r, 2000));
+              const balance = await this.jupiterExecutor.getTokenBalance(ca);
+
+              if (balance.amount <= 0) {
+                console.error(`❌ [验证失败] 买入交易发送但余额为0，交易可能失败`);
+                lastError = '买入后余额为0，交易可能失败';
+                if (buyAttempt < maxBuyAttempts) {
+                  console.log(`   🔄 等待3秒后重试...`);
+                  await new Promise(r => setTimeout(r, 3000));
+                  continue;  // 重试
+                }
+                this.stats.errors++;
+                return { action: 'EXEC_FAILED', reason: lastError };
+              }
+
+              // 使用实际余额，而不是报价
+              const tokenAmount = balance.amount;
+              const tokenDecimals = balance.decimals || 6;
+              console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
+
+              this.livePositionMonitor.addPosition(
+                ca,
+                signal.symbol,
+                entryPrice,
+                entryMC,
+                finalSize,
+                tokenAmount,
+                tokenDecimals
+              );
             }
-
-            // 使用实际余额，而不是报价
-            const tokenAmount = balance.amount;
-            const tokenDecimals = balance.decimals || 6;
-            console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
-
-            this.livePositionMonitor.addPosition(
-              ca,
-              signal.symbol,
-              entryPrice,
-              entryMC,
-              finalSize,
-              tokenAmount,
-              tokenDecimals
-            );
+          } else {
+            // Fallback: GMGN Telegram 执行
+            tradeResult = await this.executor.executeBuy(ca, 'SOL', finalSize);
           }
-        } else {
-          // Fallback: GMGN Telegram 执行
-          tradeResult = await this.executor.executeBuy(ca, 'SOL', finalSize);
-        }
 
-        this.stats.executed++;
-        console.log(`✅ [执行] 交易成功: ${JSON.stringify(tradeResult)}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult, true);
-        return { action: 'EXECUTED', size: finalSize, ai: aiResult, trade: tradeResult };
-      } catch (execError) {
-        this.stats.errors++;
-        console.error(`❌ [执行] 交易失败: ${execError.message}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult, false);
-        return { action: 'EXEC_FAILED', reason: execError.message };
+          this.stats.executed++;
+          console.log(`✅ [执行] 交易成功: ${JSON.stringify(tradeResult)}`);
+          this.saveSignalRecord(signal, gateResult.status, aiResult, true);
+          return { action: 'EXECUTED', size: finalSize, ai: aiResult, trade: tradeResult };
+        } catch (execError) {
+          lastError = execError.message;
+          console.error(`❌ [执行] 交易失败 (${buyAttempt}/${maxBuyAttempts}): ${execError.message}`);
+
+          if (buyAttempt < maxBuyAttempts) {
+            console.log(`   🔄 等待3秒后重试...`);
+            await new Promise(r => setTimeout(r, 3000));
+          }
+        }
       }
+
+      // 所有重试都失败
+      this.stats.errors++;
+      this.saveSignalRecord(signal, gateResult.status, aiResult, false);
+      return { action: 'EXEC_FAILED', reason: lastError || '买入失败' };
 
     } catch (error) {
       this.stats.errors++;
