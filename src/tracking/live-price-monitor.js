@@ -25,8 +25,8 @@ export class LivePriceMonitor extends EventEmitter {
     this.dexInterval = null;
 
     // 配置
-    this.jupiterIntervalMs = 1500;  // 1.5 秒
-    this.dexIntervalMs = 10000;     // 10 秒备用
+    this.jupiterIntervalMs = 500;   // 0.5 秒 (从1.5秒优化)
+    this.dexIntervalMs = 5000;      // 5 秒备用 (从10秒优化)
     this.jupiterApiKey = process.env.JUPITER_API_KEY || '';
     this.isRunning = false;
 

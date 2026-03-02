@@ -371,22 +371,22 @@ export class LivePositionMonitor {
       pos.moonHighPnl = pnl;
     }
 
-    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*80%，最低保 +50%
+    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*90%，最低保 +50%
     // 实盘数据：流动性窗口极短，必须更早出场
     if (pos.tp1 && pos.highPnl >= 15) {
-      const moonExit = pos.moonHighPnl * 0.80;  // 从70%提高到80%
-      const exitLine = Math.max(moonExit, 50);   // 最低保从40%提高到50%
+      const moonExit = pos.moonHighPnl * 0.90;  // 从80%提高到90%，更早止盈
+      const exitLine = Math.max(moonExit, 50);   // 最低保50%
       if (pnl < exitLine) {
         await this._triggerExit(pos, `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
       }
     }
 
-    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*80%
+    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*90%
     // 实盘数据：流动性窗口极短，必须更早出场
     if (!pos.tp1 && pos.highPnl >= 15) {
-      const trailExit = pos.highPnl * 0.80;  // 统一用80%
-      const exitLine = Math.max(trailExit, 15);  // 最低保从12%提高到15%
+      const trailExit = pos.highPnl * 0.90;  // 从80%提高到90%，更早止盈
+      const exitLine = Math.max(trailExit, 15);  // 最低保15%
       if (pnl < exitLine) {
         await this._triggerExit(pos, `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;

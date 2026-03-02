@@ -145,7 +145,7 @@ export class JupiterSwapExecutor {
         console.error(`❌ [JupiterSwap] 买入失败 (${attempt}/${maxRetries}): ${error.message}`);
         if (attempt < maxRetries) {
           console.log(`   🔄 重试中...`);
-          await new Promise(r => setTimeout(r, 1000)); // 等1秒后重试
+          await new Promise(r => setTimeout(r, 500)); // 等0.5秒后重试 (从1秒优化)
         } else {
           this.stats.buy_failures++;
           throw error;
