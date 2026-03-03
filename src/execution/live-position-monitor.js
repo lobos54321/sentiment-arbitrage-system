@@ -352,11 +352,38 @@ export class LivePositionMonitor {
     }
 
     pos.lastPnl = pnl;
+    const prevHigh = pos.highPnl;
     if (pnl > pos.highPnl) pos.highPnl = pnl;
     if (pnl < pos.lowPnl) pos.lowPnl = pnl;
 
     const holdTimeMs = Date.now() - pos.entryTime;
     const holdTimeSec = holdTimeMs / 1000;
+
+    // 📊 关键调试日志：价格更新计数 + highPnl 变化 + 接近退出线
+    if (!pos._updateCount) pos._updateCount = 0;
+    pos._updateCount++;
+
+    // 前 10 次价格更新每次都打，之后每 20 次打一次
+    const shouldLog = pos._updateCount <= 10 || pos._updateCount % 20 === 0;
+    // highPnl 创新高时打
+    const isNewHigh = pos.highPnl > prevHigh && pos.highPnl > 0;
+
+    if (shouldLog || isNewHigh) {
+      const tag = isNewHigh ? '🔺新高' : '';
+      console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
+    }
+
+    // 接近 PEAK_EXIT 退出线时打警告
+    if (pos.highPnl >= 30) {
+      let exitLine;
+      if (pos.highPnl >= 100) exitLine = Math.max(pos.highPnl * 0.80, 50);
+      else if (pos.highPnl >= 50) exitLine = Math.max(pos.highPnl * 0.85, 30);
+      else exitLine = Math.max(pos.highPnl * 0.90, 20);
+
+      if (pnl < exitLine + 5 && pnl >= exitLine) {
+        console.log(`⚠️  [接近退出] $${pos.symbol} PnL:+${pnl.toFixed(1)}% 退出线:+${exitLine.toFixed(1)}% 差:${(pnl - exitLine).toFixed(1)}%`);
+      }
+    }
 
     // ==================== 退出条件评估 ====================
     // 注意：已分批止盈的仓位(tp1=true)不用普通止损，用 MOON_STOP
