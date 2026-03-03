@@ -605,7 +605,7 @@ export class LivePositionMonitor {
             const balance = await this.executor.getTokenBalance(row.token_ca);
             if (balance.amount <= 0) {
               console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭`);
-              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason='MANUAL_SELL', exit_time=? WHERE token_ca=? AND status='open'`)
+              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason='MANUAL_SELL', closed_at=? WHERE token_ca=? AND status='open'`)
                 .run(Date.now(), row.token_ca);
               cleaned++;
               continue;
