@@ -91,11 +91,11 @@ export class LivePositionMonitor {
   /**
    * 启动监控 — 监听价格事件
    */
-  start() {
+  async start() {
     this.priceMonitor.on('price-update', this._onPriceUpdate);
 
-    // 恢复未关闭的持仓
-    this._restorePositions();
+    // 恢复未关闭的持仓（检查链上余额清理已卖出的）
+    await this._restorePositions();
 
     // 启动钱包扫描（每60秒检查滞留token）
     this._startWalletScanner();
@@ -589,10 +589,32 @@ export class LivePositionMonitor {
   /**
    * 从 DB 恢复未关闭的持仓
    */
-  _restorePositions() {
+  async _restorePositions() {
     try {
       const rows = this.db.prepare(`SELECT * FROM live_positions WHERE status='open'`).all();
+      if (rows.length === 0) return;
+
+      console.log(`🔄 [LivePositionMonitor] 发现 ${rows.length} 个未关闭持仓，验证链上余额...`);
+      let restored = 0;
+      let cleaned = 0;
+
       for (const row of rows) {
+        // 先检查链上余额，如果为 0 说明已手动卖出
+        if (this.executor) {
+          try {
+            const balance = await this.executor.getTokenBalance(row.token_ca);
+            if (balance.amount <= 0) {
+              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭`);
+              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason='MANUAL_SELL', exit_time=? WHERE token_ca=? AND status='open'`)
+                .run(Date.now(), row.token_ca);
+              cleaned++;
+              continue;
+            }
+          } catch (e) {
+            console.warn(`⚠️ [恢复] $${row.symbol} 余额查询失败: ${e.message}，仍然恢复`);
+          }
+        }
+
         this.positions.set(row.token_ca, {
           tokenCA: row.token_ca,
           symbol: row.symbol,
@@ -601,7 +623,6 @@ export class LivePositionMonitor {
           entrySol: row.entry_sol,
           tokenAmount: row.token_amount,
           tokenDecimals: row.token_decimals,
-          // 策略D: 兼容恢复（从旧的sold80字段推断tp1状态）
           tp1: !!row.sold_80_pct,
           tp2: row.remaining_pct <= 50,
           tp3: row.remaining_pct <= 30,
@@ -630,10 +651,9 @@ export class LivePositionMonitor {
         } else {
           this.priceMonitor.addToken(row.token_ca);
         }
+        restored++;
       }
-      if (rows.length > 0) {
-        console.log(`🔄 [LivePositionMonitor] 恢复 ${rows.length} 个持仓`);
-      }
+      console.log(`🔄 [LivePositionMonitor] 恢复 ${restored} 个持仓，清理 ${cleaned} 个已卖出`);
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] 恢复持仓失败: ${e.message}`);
     }

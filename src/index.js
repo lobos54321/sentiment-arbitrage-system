@@ -766,7 +766,7 @@ class PremiumChannelSystem {
         }
 
         this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor);
-        this.livePositionMonitor.start();
+        await this.livePositionMonitor.start();
 
         // 注入到 engine
         this.engine.setLiveComponents(this.jupiterExecutor, this.livePositionMonitor);
