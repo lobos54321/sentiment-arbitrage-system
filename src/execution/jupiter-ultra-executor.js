@@ -87,99 +87,125 @@ export class JupiterUltraExecutor {
 
   /**
    * 买入 Token（SOL → Token）
+   * Ultra 自动滑点(RTSE)对高波动 meme coin 可能偏保守，需要重试
    */
   async buy(tokenCA, amountSol, opts = {}) {
     this._checkSafety(amountSol);
 
     const amountLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+    const maxRetries = 3;  // Ultra 滑点失败时重试（每次重新获取 order = 新报价 + 新滑点）
     console.log(`🪐 [JupiterUltra] 买入 ${amountSol} SOL → ${tokenCA.substring(0, 8)}...`);
 
-    try {
-      // 1. 获取 Ultra Order
-      const order = await this._getOrder(SOL_MINT, tokenCA, amountLamports);
-      if (!order || !order.transaction) {
-        throw new Error('获取 Ultra Order 失败');
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // 1. 获取 Ultra Order（每次重新获取 = 最新价格 + 最新 RTSE 滑点）
+        const order = await this._getOrder(SOL_MINT, tokenCA, amountLamports);
+        if (!order || !order.transaction) {
+          throw new Error('获取 Ultra Order 失败');
+        }
+
+        console.log(`   报价: ${amountSol} SOL → ${order.outAmount || '?'} tokens | slippage: ${order.slippageBps || '?'}bps | requestId: ${order.requestId?.substring(0, 8)}...`);
+
+        // 2. 签名
+        const signedTx = this._signTransaction(order.transaction);
+
+        // 3. 执行
+        const result = await this._executeOrder(signedTx, order.requestId);
+
+        if (result.status === 'Success') {
+          this.stats.buys++;
+          this.stats.total_sol_spent += amountSol;
+          console.log(`✅ [JupiterUltra] 买入成功: ${result.signature}`);
+
+          return {
+            success: true,
+            txHash: result.signature,
+            amountIn: amountSol,
+            amountOut: parseInt(order.outAmount || 0),
+            tokenCA
+          };
+        } else {
+          throw new Error(`Ultra 执行失败: ${result.status || 'Unknown'} ${result.error || ''}`);
+        }
+      } catch (error) {
+        const isSlippage = error.message.includes('Slippage') || error.message.includes('slippage');
+        console.error(`❌ [JupiterUltra] 买入失败 (${attempt}/${maxRetries}): ${error.message}`);
+
+        if (isSlippage && attempt < maxRetries) {
+          // 滑点失败：等 1 秒后重试（重新获取 order = 新的价格和滑点计算）
+          console.log(`   🔄 滑点失败，${1}秒后重新获取报价重试...`);
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+
+        if (attempt >= maxRetries) {
+          this.stats.buy_failures++;
+          throw error;
+        }
       }
-
-      console.log(`   报价: ${amountSol} SOL → ${order.outAmount || '?'} tokens | requestId: ${order.requestId?.substring(0, 8)}...`);
-
-      // 2. 签名
-      const signedTx = this._signTransaction(order.transaction);
-
-      // 3. 执行
-      const result = await this._executeOrder(signedTx, order.requestId);
-
-      if (result.status === 'Success') {
-        this.stats.buys++;
-        this.stats.total_sol_spent += amountSol;
-        console.log(`✅ [JupiterUltra] 买入成功: ${result.signature}`);
-
-        return {
-          success: true,
-          txHash: result.signature,
-          amountIn: amountSol,
-          amountOut: parseInt(order.outAmount || 0),
-          tokenCA
-        };
-      } else {
-        throw new Error(`Ultra 执行失败: ${result.status || 'Unknown'} ${result.error || ''}`);
-      }
-    } catch (error) {
-      console.error(`❌ [JupiterUltra] 买入失败: ${error.message}`);
-      this.stats.buy_failures++;
-      throw error;
     }
   }
 
   /**
    * 卖出 Token（Token → SOL）
+   * 滑点失败自动重试，每次重新获取 order
    */
   async sell(tokenCA, tokenAmount, options = {}) {
     if (this.tradingPaused) {
       throw new Error('交易已暂停（每日亏损限制）');
     }
 
+    const maxRetries = options.urgent ? 3 : 2;
     console.log(`🪐 [JupiterUltra] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...`);
 
-    // 记录卖出前的余额
-    const balanceBefore = await this.getTokenBalance(tokenCA);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // 1. 获取 Ultra Order（Token → SOL）
+        const order = await this._getOrder(tokenCA, SOL_MINT, tokenAmount);
+        if (!order || !order.transaction) {
+          throw new Error('获取卖出 Ultra Order 失败');
+        }
 
-    try {
-      // 1. 获取 Ultra Order（Token → SOL）
-      const order = await this._getOrder(tokenCA, SOL_MINT, tokenAmount);
-      if (!order || !order.transaction) {
-        throw new Error('获取卖出 Ultra Order 失败');
+        const outLamports = parseInt(order.outAmount || 0);
+        const outSol = outLamports / LAMPORTS_PER_SOL;
+        console.log(`   报价: ${tokenAmount} tokens → ${outSol.toFixed(6)} SOL | slippage: ${order.slippageBps || '?'}bps`);
+
+        // 2. 签名
+        const signedTx = this._signTransaction(order.transaction);
+
+        // 3. 执行（Ultra 内置确认，无需手动 confirm）
+        const result = await this._executeOrder(signedTx, order.requestId);
+
+        if (result.status === 'Success') {
+          this.stats.sells++;
+          this.stats.total_sol_received += outSol;
+          console.log(`✅ [JupiterUltra] 卖出成功: ${result.signature} | 收到 ${outSol.toFixed(6)} SOL`);
+
+          return {
+            success: true,
+            txHash: result.signature,
+            amountIn: tokenAmount,
+            amountOut: outSol,
+            tokenCA
+          };
+        } else {
+          throw new Error(`Ultra 卖出执行失败: ${result.status || 'Unknown'} ${result.error || ''}`);
+        }
+      } catch (error) {
+        const isSlippage = error.message.includes('Slippage') || error.message.includes('slippage');
+        console.error(`❌ [JupiterUltra] 卖出失败 (${attempt}/${maxRetries}): ${error.message}`);
+
+        if (isSlippage && attempt < maxRetries) {
+          console.log(`   🔄 滑点失败，1秒后重新获取报价重试...`);
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+
+        if (attempt >= maxRetries) {
+          this.stats.sell_failures++;
+          throw error;
+        }
       }
-
-      const outLamports = parseInt(order.outAmount || 0);
-      const outSol = outLamports / LAMPORTS_PER_SOL;
-      console.log(`   报价: ${tokenAmount} tokens → ${outSol.toFixed(6)} SOL`);
-
-      // 2. 签名
-      const signedTx = this._signTransaction(order.transaction);
-
-      // 3. 执行（Ultra 内置确认，无需手动 confirm）
-      const result = await this._executeOrder(signedTx, order.requestId);
-
-      if (result.status === 'Success') {
-        this.stats.sells++;
-        this.stats.total_sol_received += outSol;
-        console.log(`✅ [JupiterUltra] 卖出成功: ${result.signature} | 收到 ${outSol.toFixed(6)} SOL`);
-
-        return {
-          success: true,
-          txHash: result.signature,
-          amountIn: tokenAmount,
-          amountOut: outSol,
-          tokenCA
-        };
-      } else {
-        throw new Error(`Ultra 卖出执行失败: ${result.status || 'Unknown'} ${result.error || ''}`);
-      }
-    } catch (error) {
-      console.error(`❌ [JupiterUltra] 卖出失败: ${error.message}`);
-      this.stats.sell_failures++;
-      throw error;
     }
   }
 
