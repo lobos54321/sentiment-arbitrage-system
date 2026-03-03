@@ -619,7 +619,12 @@ export class LivePositionMonitor {
           partialSellInProgress: false,
           exitReason: null
         });
-        this.priceMonitor.addToken(row.token_ca);
+        // 注册到价格监控（V2 需要 tokenAmount 和 decimals）
+        if (this.priceMonitor.addToken.length === 3) {
+          this.priceMonitor.addToken(row.token_ca, row.token_amount, row.token_decimals || 6);
+        } else {
+          this.priceMonitor.addToken(row.token_ca);
+        }
       }
       if (rows.length > 0) {
         console.log(`🔄 [LivePositionMonitor] 恢复 ${rows.length} 个持仓`);

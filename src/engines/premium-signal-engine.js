@@ -634,6 +634,22 @@ export class PremiumSignalEngine {
         return { action: 'NOTIFY', size: finalSize, ai: aiResult };
       }
 
+      // 🔧 实盘买入前：检查链上 SOL 余额
+      if (this.jupiterExecutor) {
+        try {
+          const solBalance = await this.jupiterExecutor.getSolBalance();
+          const minRequired = finalSize + 0.01; // 买入金额 + gas/tip 预留
+          if (solBalance < minRequired) {
+            console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过买入 $${signal.symbol}`);
+            this.saveSignalRecord(signal, gateResult.status, aiResult, false);
+            return { action: 'SKIP_INSUFFICIENT_BALANCE', balance: solBalance, required: minRequired };
+          }
+          console.log(`💰 [余额检查] SOL余额: ${solBalance.toFixed(4)} ≥ 需要: ${minRequired.toFixed(4)} → 可以买入`);
+        } catch (e) {
+          console.warn(`⚠️ [余额检查] 查询失败: ${e.message}，继续买入`);
+        }
+      }
+
       // 实盘执行 (不重试，避免重复花 SOL)
       const maxBuyAttempts = 1;
       let lastError = null;
