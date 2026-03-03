@@ -1552,7 +1552,8 @@ const server = http.createServer((req, res) => {
       `).all();
 
       const closed = d.prepare(`
-        SELECT token_ca, symbol, entry_mc, entry_sol, exit_pnl, high_pnl, low_pnl, exit_reason, status, entry_time, closed_at, total_sol_received
+        SELECT token_ca, symbol, entry_mc, entry_sol, exit_pnl, high_pnl, low_pnl, exit_reason, status, entry_time, closed_at, total_sol_received,
+               entry_price, token_amount, token_decimals
         FROM live_positions WHERE status = 'closed' ORDER BY entry_time DESC LIMIT 50
       `).all();
 
@@ -1588,7 +1589,22 @@ const server = http.createServer((req, res) => {
           totalSolReceived: +(allStats.totalSolReceived || 0).toFixed(4)
         },
         open: open.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) })),
-        recent: closed.map(r => ({ ...r, entry_mc_k: +(r.entry_mc / 1000).toFixed(1) }))
+        recent: closed.map(r => {
+          // 计算实际 SOL 收益
+          const realPnl = r.entry_sol > 0 ? ((r.total_sol_received - r.entry_sol) / r.entry_sol * 100) : (r.exit_pnl || 0);
+          // 计算峰值捕获率
+          const captureRate = r.high_pnl > 0 ? (r.exit_pnl / r.high_pnl * 100) : 0;
+          // 计算损失
+          const loss = r.high_pnl - r.exit_pnl;
+
+          return {
+            ...r,
+            entry_mc_k: +(r.entry_mc / 1000).toFixed(1),
+            real_pnl: +realPnl.toFixed(1),
+            capture_rate: +captureRate.toFixed(1),
+            loss: +loss.toFixed(1)
+          };
+        })
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1843,7 +1859,7 @@ function renderPremiumDashboard() {
     <div id="live-content" class="tab-content">
       <div class="grid" id="live-summary"></div>
       <div class="card" style="margin-bottom:20px"><h2>🟢 实盘持仓</h2><table id="live-open-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
-      <div class="card"><h2>📋 实盘交易记录</h2><table id="live-recent-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+      <div class="card"><h2>📋 实盘交易记录</h2><table id="live-recent-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位</th><th>实际PnL</th><th>峰值</th><th>损失</th><th>捕获率</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
   <script>
@@ -1904,9 +1920,10 @@ function renderPremiumDashboard() {
 
         const lrtb=document.querySelector('#live-recent-table tbody');
         lrtb.innerHTML=live.recent.map(r=>{
-          const pnlCls=(r.exit_pnl||0)>0?'pnl-pos':'pnl-neg';
+          const realPnlCls=(r.real_pnl||0)>0?'pnl-pos':'pnl-neg';
+          const captureCls=(r.capture_rate||0)>70?'pnl-pos':(r.capture_rate||0)>40?'':'pnl-neg';
           const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
-          return '<tr><td>$'+r.symbol+'</td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+(r.exit_pnl||0).toFixed(1)+'%</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td><td>'+(r.exit_reason||'-')+'</td><td>'+t+'</td></tr>';
+          return '<tr><td>$'+r.symbol+'</td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="'+realPnlCls+'">'+(r.real_pnl>=0?'+':'')+(r.real_pnl||0).toFixed(1)+'%</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">-'+(r.loss||0).toFixed(1)+'%</td><td class="'+captureCls+'">'+(r.capture_rate||0).toFixed(0)+'%</td><td>'+(r.exit_reason||'-')+'</td><td>'+t+'</td></tr>';
         }).join('');
       }catch(e){document.getElementById('summary').innerHTML='<div class="card"><div class="big-num red">加载失败</div></div>';}
     }
