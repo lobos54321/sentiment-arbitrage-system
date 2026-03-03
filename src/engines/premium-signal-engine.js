@@ -650,7 +650,6 @@ export class PremiumSignalEngine {
 
             // 注册到 LivePositionMonitor
             if (tradeResult.success && this.livePositionMonitor) {
-              const entryPrice = dexData?.price_usd || 0;
               const entryMC = dexData?.market_cap || signal.market_cap || 0;
 
               // 🔧 BUG FIX: 等待2秒后验证余额，确保真的买到了
@@ -673,6 +672,12 @@ export class PremiumSignalEngine {
               const tokenAmount = balance.amount;
               const tokenDecimals = balance.decimals || 6;
               console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
+
+              // 🔧 关键修复：使用实际交易价格计算 entryPrice (SOL 单位)
+              // entryPrice = SOL 花费 / token 数量 (考虑 decimals)
+              const actualTokenAmount = tokenAmount / Math.pow(10, tokenDecimals);
+              const entryPrice = finalSize / actualTokenAmount;  // SOL per token
+              console.log(`💰 [Entry] 入场价格: ${entryPrice.toFixed(10)} SOL/token | ${finalSize} SOL → ${actualTokenAmount.toFixed(2)} tokens`);
 
               this.livePositionMonitor.addPosition(
                 ca,
