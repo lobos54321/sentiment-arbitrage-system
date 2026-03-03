@@ -547,16 +547,6 @@ export class PremiumSignalEngine {
         if (aiResult.action === 'BUY_HALF') {
           console.log(`📊 [AI] BUY_HALF → 半仓买入`);
         }
-      } catch (e) {
-        console.error(`❌ [AI] Claude 调用失败: ${e.message}，使用量化评分继续`);
-        aiResult = {
-          action: scoreAction,
-          confidence: score,
-          narrative_tier: score >= 50 ? 'A' : score >= 30 ? 'B' : 'D',
-          narrative_reason: scoreDetails.join(', '),
-          entry_timing: dexData?.price_change_5m > 5 ? 'OPTIMAL' : 'EARLY',
-          stop_loss_percent: 20
-        };
       }
 
       console.log(`✅ [AI] ${aiResult.action} | 叙事: ${aiResult.narrative_tier} | 置信度: ${aiResult.confidence} | 时机: ${aiResult.entry_timing}`);
