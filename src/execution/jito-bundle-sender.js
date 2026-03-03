@@ -37,9 +37,9 @@ export class JitoBundleSender {
     this.wallet = wallet;
     this.currentEndpoint = 0;
 
-    // 默认 tip: 0.001 SOL (足够快，不会太贵)
-    this.defaultTipLamports = 1_000_000; // 0.001 SOL
-    this.urgentTipLamports = 3_000_000;  // 0.003 SOL (紧急模式)
+    // 🔧 优化 tip: 降低成本
+    this.defaultTipLamports = 500_000;   // 0.0005 SOL (从 0.001 降低)
+    this.urgentTipLamports = 1_000_000;  // 0.001 SOL (从 0.003 降低)
 
     console.log('⚡ [JitoBundleSender] 初始化');
   }

@@ -23,12 +23,17 @@ export class LivePriceMonitor extends EventEmitter {
     // 轮询定时器
     this.jupiterInterval = null;
     this.dexInterval = null;
+    this.solPriceInterval = null;
 
     // 配置
     this.jupiterIntervalMs = 500;   // 0.5 秒 (从1.5秒优化)
     this.dexIntervalMs = 5000;      // 5 秒备用 (从10秒优化)
     this.jupiterApiKey = process.env.JUPITER_API_KEY || '';
     this.isRunning = false;
+
+    // SOL/USD 汇率缓存
+    this.solUsdPrice = null;
+    this.solPriceTimestamp = 0;
 
     // 统计
     this.stats = {
@@ -66,6 +71,12 @@ export class LivePriceMonitor extends EventEmitter {
     if (this.isRunning) return;
     this.isRunning = true;
 
+    // 立即获取 SOL 价格
+    this._updateSolPrice();
+
+    // SOL/USD 汇率更新（每 10 秒）
+    this.solPriceInterval = setInterval(() => this._updateSolPrice(), 10000);
+
     // Jupiter 主轮询 1.5s
     this.jupiterInterval = setInterval(() => this._queryJupiter(), this.jupiterIntervalMs);
 
@@ -88,6 +99,10 @@ export class LivePriceMonitor extends EventEmitter {
       clearInterval(this.dexInterval);
       this.dexInterval = null;
     }
+    if (this.solPriceInterval) {
+      clearInterval(this.solPriceInterval);
+      this.solPriceInterval = null;
+    }
     console.log(`⏹️  [LivePriceMonitor] 已停止 | 统计: ${JSON.stringify(this.stats)}`);
   }
 
@@ -99,12 +114,35 @@ export class LivePriceMonitor extends EventEmitter {
   }
 
   /**
+   * 更新 SOL/USD 汇率
+   */
+  async _updateSolPrice() {
+    try {
+      const SOL_MINT = 'So11111111111111111111111111111111111111112';
+      const res = await axios.get('https://api.jup.ag/price/v3', {
+        params: { ids: SOL_MINT },
+        headers: this.jupiterApiKey ? { 'x-api-key': this.jupiterApiKey } : {},
+        timeout: 3000
+      });
+
+      if (res.data && res.data[SOL_MINT] && res.data[SOL_MINT].usdPrice) {
+        this.solUsdPrice = parseFloat(res.data[SOL_MINT].usdPrice);
+        this.solPriceTimestamp = Date.now();
+        console.log(`💵 [SOL Price] $${this.solUsdPrice.toFixed(2)}`);
+      }
+    } catch (error) {
+      console.warn(`⚠️  [SOL Price] 获取失败: ${error.message}`);
+    }
+  }
+
+  /**
    * Jupiter Price API v3 批量查询
    * https://dev.jup.ag/docs/price-api
    */
   async _queryJupiter() {
     if (this.watchList.size === 0) return;
     if (!this.jupiterApiKey) return; // v3 必须有 API key
+    if (!this.solUsdPrice) return; // 需要 SOL 价格才能转换
 
     const tokens = [...this.watchList];
     this.stats.jupiter_queries++;
@@ -124,11 +162,14 @@ export class LivePriceMonitor extends EventEmitter {
       for (const tokenCA of tokens) {
         const priceData = data[tokenCA];
         if (priceData && priceData.usdPrice) {
-          const price = parseFloat(priceData.usdPrice);
+          const usdPrice = parseFloat(priceData.usdPrice);
+          // 🔧 关键修复：将 USD 价格转换为 SOL 价格
+          const solPrice = usdPrice / this.solUsdPrice;
           const cached = this.priceCache.get(tokenCA);
 
           this.priceCache.set(tokenCA, {
-            price,
+            price: solPrice,  // 现在是 SOL 价格
+            usdPrice,         // 保留 USD 价格用于显示
             mc: cached?.mc || null, // MC 由 DexScreener 补充
             liquidity: priceData.liquidity || null,
             timestamp: Date.now(),
@@ -140,7 +181,8 @@ export class LivePriceMonitor extends EventEmitter {
           // Emit 价格更新事件
           this.emit('price-update', {
             tokenCA,
-            price,
+            price: solPrice,  // 发送 SOL 价格
+            usdPrice,
             mc: this.priceCache.get(tokenCA).mc,
             timestamp: Date.now(),
             source: 'jupiter'
