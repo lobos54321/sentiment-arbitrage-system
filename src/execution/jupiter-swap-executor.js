@@ -100,24 +100,59 @@ export class JupiterSwapExecutor {
   }
 
   /**
+   * 自适应滑点计算
+   * 根据仓位大小、流动性、MC 动态计算滑点 (bps)
+   * 范围: 300 (3%) ~ 1500 (15%)
+   */
+  _calcSlippageBps(amountSol, { liquidity = 0, mc = 0, urgent = false } = {}) {
+    // 紧急卖出：固定 15%
+    if (urgent) return 1500;
+
+    let bps = 500; // 基础 5%
+
+    // 流动性越低 → 滑点越高
+    if (liquidity > 0) {
+      const ratio = amountSol / (liquidity / 170); // 粗算流动性 SOL 部分 (假设 SOL~$170)
+      if (ratio > 0.05) bps += 500;       // 仓位 > 5% 池子 → +5%
+      else if (ratio > 0.02) bps += 300;  // 仓位 > 2% 池子 → +3%
+      else if (ratio > 0.01) bps += 100;  // 仓位 > 1% 池子 → +1%
+    } else {
+      // 没有流动性数据，按 MC 估算
+      if (mc < 5000) bps += 500;          // MC < 5K → 很小的池子
+      else if (mc < 10000) bps += 300;
+      else if (mc < 20000) bps += 200;
+      else bps += 100;
+    }
+
+    // 仓位越大 → 滑点加一点
+    if (amountSol >= 0.1) bps += 100;
+
+    // 限制范围 3% ~ 15%
+    bps = Math.max(300, Math.min(1500, bps));
+    return bps;
+  }
+
+  /**
    * 买入 Token（SOL → Token）
    * @param {string} tokenCA - Token 合约地址
    * @param {number} amountSol - 买入金额（SOL）
+   * @param {object} opts - { liquidity, mc } 用于自适应滑点
    * @returns {object} { success, txHash, amountIn, amountOut, price }
    */
-  async buy(tokenCA, amountSol) {
+  async buy(tokenCA, amountSol, opts = {}) {
     // 安全检查
     this._checkSafety(amountSol);
 
     const amountLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     const maxRetries = 1;  // 🔧 买入不重试，外层 premium-signal-engine 已有重试逻辑
 
-    console.log(`🪐 [JupiterSwap] 买入 ${amountSol} SOL → ${tokenCA.substring(0, 8)}...`);
+    const slippageBps = this._calcSlippageBps(amountSol, opts);
+    console.log(`🪐 [JupiterSwap] 买入 ${amountSol} SOL → ${tokenCA.substring(0, 8)}... | 滑点: ${(slippageBps/100).toFixed(1)}%`);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         // 1. 获取报价
-        const quote = await this._getQuote(SOL_MINT, tokenCA, amountLamports);
+        const quote = await this._getQuote(SOL_MINT, tokenCA, amountLamports, slippageBps);
         if (!quote) {
           throw new Error('获取报价失败');
         }
@@ -126,7 +161,7 @@ export class JupiterSwapExecutor {
         console.log(`   报价: ${amountSol} SOL → ${outAmount} tokens`);
 
         // 2. 获取 swap 交易
-        const swapTx = await this._getSwapTransaction(quote);
+        const swapTx = await this._getSwapTransaction(quote, false, slippageBps);
         if (!swapTx) {
           throw new Error('获取 swap 交易失败');
         }
@@ -172,9 +207,10 @@ export class JupiterSwapExecutor {
       throw new Error('交易已暂停（每日亏损限制）');
     }
 
-    const maxRetries = options.urgent ? 2 : 1;  // 🔧 减少重试次数：紧急2次，普通1次（不重试）
-    const waitConfirm = !options.urgent;  // 紧急模式不等待确认
-    console.log(`🪐 [JupiterSwap] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...${options.urgent ? ' [紧急模式]' : ''}`);
+    const maxRetries = options.urgent ? 2 : 1;
+    const waitConfirm = !options.urgent;
+    const slippageBps = this._calcSlippageBps(options.amountSol || 0.1, { ...options, urgent: options.urgent });
+    console.log(`🪐 [JupiterSwap] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...${options.urgent ? ' [紧急模式]' : ''} | 滑点: ${(slippageBps/100).toFixed(1)}%`);
 
     // 记录卖出前的余额和初始报价
     const balanceBefore = await this.getTokenBalance(tokenCA);
@@ -183,7 +219,7 @@ export class JupiterSwapExecutor {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         // 1. 获取报价
-        const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
+        const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount, slippageBps);
         if (!quote) {
           throw new Error('获取卖出报价失败');
         }
@@ -206,7 +242,7 @@ export class JupiterSwapExecutor {
         }
 
         // 2. 获取 swap 交易
-        const swapTx = await this._getSwapTransaction(quote);
+        const swapTx = await this._getSwapTransaction(quote, options.urgent, slippageBps);
         if (!swapTx) {
           throw new Error('获取 swap 交易失败');
         }
@@ -292,12 +328,13 @@ export class JupiterSwapExecutor {
     // 🔧 BUG FIX: 只发送1笔交易，使用紧急模式优先费
     const txHashes = [];
     try {
-      const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount);
+      const urgentSlippage = 1500; // 紧急卖出固定 15%
+      const quote = await this._getQuote(tokenCA, SOL_MINT, tokenAmount, urgentSlippage);
       if (!quote) {
         return { success: false, reason: 'quote_failed' };
       }
 
-      const swapTx = await this._getSwapTransaction(quote, true);  // urgent=true
+      const swapTx = await this._getSwapTransaction(quote, true, urgentSlippage);
       if (!swapTx) {
         return { success: false, reason: 'swap_tx_failed' };
       }
@@ -369,8 +406,9 @@ export class JupiterSwapExecutor {
 
   /**
    * 获取 Jupiter 报价
+   * @param {number} slippageBps - 自适应滑点 (bps)
    */
-  async _getQuote(inputMint, outputMint, amount) {
+  async _getQuote(inputMint, outputMint, amount, slippageBps = 800) {
     try {
       const headers = {};
       if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
@@ -380,9 +418,9 @@ export class JupiterSwapExecutor {
           inputMint,
           outputMint,
           amount: amount.toString(),
-          slippageBps: 1000,             // 10% 滑点（Jito保护后可降低）
-          dynamicSlippage: true,         // 动态滑点 anti-MEV
-          maxAutoSlippageBps: 1500,      // 最大 15% 自动滑点（Jito保护后可降低）
+          slippageBps: Math.min(slippageBps, 1000),  // quote 阶段用较保守值
+          dynamicSlippage: true,
+          maxAutoSlippageBps: slippageBps,            // 动态滑点上限 = 自适应值
           onlyDirectRoutes: false,
           asLegacyTransaction: false
         },
@@ -399,14 +437,14 @@ export class JupiterSwapExecutor {
   /**
    * 获取 swap 交易数据
    * @param {boolean} urgent - 紧急模式使用更高优先费
+   * @param {number} slippageBps - 自适应滑点 (bps)
    */
-  async _getSwapTransaction(quote, urgent = false) {
+  async _getSwapTransaction(quote, urgent = false, slippageBps = 800) {
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
 
-      // 🔧 BUG FIX: 降低优先费，紧急模式才用高费用
-      const priorityFee = urgent ? 2000000 : 500000;  // 紧急0.002 SOL，普通0.0005 SOL
+      const priorityFee = urgent ? 2000000 : 500000;
 
       const res = await axios.post(`${this.jupiterApiBase}/swap/v1/swap`, {
         quoteResponse: quote,
@@ -414,9 +452,9 @@ export class JupiterSwapExecutor {
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
 
-        // 🔧 关键修复：禁用动态滑点，使用固定 15% 滑点
-        dynamicSlippage: false,
-        slippageBps: 1500,  // 15% 滑点（meme coin 特性）
+        // 自适应滑点：用动态滑点 + 计算出的上限
+        dynamicSlippage: true,
+        maxAutoSlippageBps: slippageBps,
 
         prioritizationFeeLamports: {
           priorityLevelWithMaxLamports: {

@@ -659,8 +659,11 @@ export class PremiumSignalEngine {
           let tradeResult;
 
           if (this.jupiterExecutor) {
-            // Jupiter Swap 买入
-            tradeResult = await this.jupiterExecutor.buy(ca, finalSize);
+            // Jupiter Swap 买入（传流动性+MC用于自适应滑点）
+            tradeResult = await this.jupiterExecutor.buy(ca, finalSize, {
+              liquidity: dexData?.liquidity_usd || 0,
+              mc: mc || 0
+            });
 
             // 注册到 LivePositionMonitor
             if (tradeResult.success && this.livePositionMonitor) {
