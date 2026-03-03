@@ -392,7 +392,7 @@ export class SolanaSnapshotService {
       const tokenAmount = Math.floor((sellTestAmount / price) * 1e9); // Convert to lamports
 
       // Get Jupiter quote for selling
-      const url = `https://quote-api.jup.ag/v6/quote?inputMint=${tokenCA}&outputMint=So11111111111111111111111111111111111111112&amount=${tokenAmount}&slippageBps=100`;
+      const url = `https://api.jup.ag/swap/v1/quote?inputMint=${tokenCA}&outputMint=So11111111111111111111111111111111111111112&amount=${tokenAmount}&slippageBps=100`;
 
       const response = await axios.get(url, { timeout: 10000 });
 

@@ -10,7 +10,7 @@ import { HardGateFilter } from '../gates/hard-gates.js';
 import { ExitGateFilter } from '../gates/exit-gates.js';
 import { PositionSizer } from '../decision/position-sizer.js';
 import { GMGNTelegramExecutor } from '../execution/gmgn-telegram-executor.js';
-import { JupiterSwapExecutor } from '../execution/jupiter-swap-executor.js';
+import { JupiterUltraExecutor } from '../execution/jupiter-ultra-executor.js';
 import ClaudeAnalyst from '../utils/claude-analyst.js';
 import { generatePremiumBuyPrompt } from '../prompts/premium-signal-prompts.js';
 import { TelegramBuzzScanner } from '../social/telegram-buzz.js';

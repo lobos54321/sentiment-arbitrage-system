@@ -296,14 +296,41 @@ export class LivePositionMonitor {
       return;  // 仍在暂停期，跳过
     }
 
-    // 🔧 BUG FIX: 检查是否超过最大重试次数
+    // 🔧 BUG FIX: 检查是否超过最大重试次数（每 5 分钟重置一次）
     if (retryInfo.count >= this.maxRetries) {
-      if (!pos.retryLimitReached) {
-        console.log(`🚫 [重试上限] $${pos.symbol} 已达最大重试次数 ${this.maxRetries}，停止重试`);
-        pos.retryLimitReached = true;
+      const timeSinceLastRetry = Date.now() - (retryInfo.lastRetryTime || 0);
+      if (timeSinceLastRetry > 5 * 60 * 1000) {
+        // 5 分钟后重置重试计数器，允许再次尝试
+        console.log(`🔄 [重试重置] $${pos.symbol} 5 分钟已过，重置重试计数器`);
+        retryInfo.count = 0;
+        retryInfo.pauseUntil = 0;
+        pos.retryLimitReached = false;
+        pos.pendingSell = true;
+        pos.pendingSellReason = pos.exitReason || 'RETRY_RESET';
+        this.retryCounter.set(tokenCA, retryInfo);
+      } else {
+        if (!pos.retryLimitReached) {
+          console.log(`🚫 [重试上限] $${pos.symbol} 已达最大重试次数 ${this.maxRetries}，等待 5 分钟后重置`);
+          pos.retryLimitReached = true;
+          retryInfo.lastRetryTime = Date.now();
+          this.retryCounter.set(tokenCA, retryInfo);
+        }
+        pos.pendingSell = false;
+
+        // 60 分钟强制清理：超过 60 分钟仍卖不掉的持仓，强制关闭
+        const holdTimeMin = (Date.now() - pos.entryTime) / 60000;
+        if (holdTimeMin > 60 && !pos._forceCleanupDone) {
+          console.log(`🧹 [强制清理] $${pos.symbol} 持仓 ${holdTimeMin.toFixed(0)} 分钟仍无法卖出，尝试紧急清理`);
+          pos._forceCleanupDone = true;
+          // 触发一次紧急卖出
+          pos.retryLimitReached = false;
+          retryInfo.count = 0;
+          this.retryCounter.set(tokenCA, retryInfo);
+          pos.pendingSell = true;
+          pos.pendingSellReason = 'FORCE_CLEANUP';
+        }
+        return;
       }
-      pos.pendingSell = false;
-      return;
     }
 
     // 如果有待卖出的仓位，尝试重新卖出
@@ -340,16 +367,25 @@ export class LivePositionMonitor {
       return;
     }
 
-    // 2. FAST_STOP: 买入后 45 秒内，从未涨过(highPnl<=0) 且当前 < -5%（仅未分批的仓位）
-    if (!pos.tp1 && holdTimeSec <= 45 && pos.highPnl <= 0 && pnl < -5) {
+    // 2. FAST_STOP: 买入后 60-120 秒窗口，从未涨过(highPnl<=0) 且当前 < -10%
+    //    前 60 秒是 grace period（bid-ask spread 可能导致虚假 -5%）
+    if (!pos.tp1 && holdTimeSec >= 60 && holdTimeSec <= 120 && pos.highPnl <= 0 && pnl < -10) {
       await this._triggerExit(pos, 'FAST_STOP', 100);
       return;
     }
 
-    // 3. MID_STOP: PnL < -12% & 从未涨过 +10%（仅未分批的仓位）
+    // 3. MID_STOP: PnL < -12% & 从未涨过 +10%（需要连续 2 次确认）
     if (!pos.tp1 && pnl < -12 && pos.highPnl < 10) {
-      await this._triggerExit(pos, 'MID_STOP', 100);
-      return;
+      if (!pos._midStopPending) {
+        pos._midStopPending = true;
+        pos._midStopFirstTime = Date.now();
+      } else if (Date.now() - pos._midStopFirstTime >= 3000) {
+        // 3 秒后仍满足条件 → 确认触发
+        await this._triggerExit(pos, 'MID_STOP', 100);
+        return;
+      }
+    } else {
+      pos._midStopPending = false;
     }
 
     // ==================== 策略E: 一次性全卖版 ====================
@@ -456,8 +492,9 @@ export class LivePositionMonitor {
       console.error(`   ❌ 卖出失败: ${error.message}`);
 
       // 🔧 BUG FIX: 更新重试计数器
-      const retryInfo = this.retryCounter.get(pos.tokenCA) || { count: 0, pauseUntil: 0 };
+      const retryInfo = this.retryCounter.get(pos.tokenCA) || { count: 0, pauseUntil: 0, lastRetryTime: 0 };
       retryInfo.count += 1;
+      retryInfo.lastRetryTime = Date.now();
 
       // 🔧 BUG FIX: 检测滑点错误，暂停更长时间
       const isSlippageError = error.message.includes('6025') ||

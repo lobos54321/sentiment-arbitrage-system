@@ -28,7 +28,7 @@ import GrokTwitterClient from './social/grok-twitter-client.js';
 import { PermanentBlacklistService } from './database/permanent-blacklist.js';
 import { PremiumChannelListener } from './inputs/premium-channel-listener.js';
 import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
-import { JupiterSwapExecutor } from './execution/jupiter-swap-executor.js';
+import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
 import { LivePriceMonitor } from './tracking/live-price-monitor.js';
 import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { startDashboardServer } from './web/dashboard-server.js';
@@ -748,7 +748,7 @@ class PremiumChannelSystem {
     // 实盘模式：额外初始化 Jupiter Executor + LivePositionMonitor
     if (isLive) {
       try {
-        this.jupiterExecutor = new JupiterSwapExecutor();
+        this.jupiterExecutor = new JupiterUltraExecutor();
         this.jupiterExecutor.initialize();
 
         // 选择价格监控器版本

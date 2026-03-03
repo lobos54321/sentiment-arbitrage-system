@@ -170,26 +170,25 @@ export class LivePriceMonitorV2 extends EventEmitter {
   }
 
   /**
-   * 获取 Jupiter Swap Quote
+   * 获取 Jupiter Ultra Order（仅用于报价，不传 taker 则不生成交易）
+   * 使用 Ultra /order 端点，与实际交易执行一致
    * @param {string} inputMint - Token 地址
    * @param {number} amount - Token 数量（raw amount）
    */
   async _getSwapQuote(inputMint, amount) {
     try {
-      const params = {
-        inputMint,
-        outputMint: SOL_MINT,
-        amount: amount.toString(),
-        slippageBps: 1500,  // 15% 滑点（与实际卖出一致）
-        onlyDirectRoutes: false,
-        asLegacyTransaction: false
-      };
-
       const headers = {};
       if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
 
-      const res = await axios.get('https://api.jup.ag/swap/v1/quote', {
-        params,
+      // 使用 Ultra /order 端点（与交易执行一致的价格源）
+      // 不传 taker → 只返回报价，不生成交易
+      const params = new URLSearchParams({
+        inputMint,
+        outputMint: SOL_MINT,
+        amount: amount.toString()
+      });
+
+      const res = await axios.get(`https://api.jup.ag/ultra/v1/order?${params.toString()}`, {
         headers,
         timeout: 5000
       });
