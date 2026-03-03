@@ -30,6 +30,7 @@ import { PremiumChannelListener } from './inputs/premium-channel-listener.js';
 import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterSwapExecutor } from './execution/jupiter-swap-executor.js';
 import { LivePriceMonitor } from './tracking/live-price-monitor.js';
+import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
 
@@ -742,19 +743,27 @@ class PremiumChannelSystem {
 
   async start() {
     const isLive = process.env.SHADOW_MODE === 'false';
-
-    // LivePriceMonitor 两种模式都启动（shadow 用于对比验证）
-    if (process.env.JUPITER_API_KEY) {
-      this.livePriceMonitor = new LivePriceMonitor();
-      this.livePriceMonitor.start();
-      this.engine.setLivePriceMonitor(this.livePriceMonitor);
-    }
+    const usePriceV2 = process.env.USE_PRICE_MONITOR_V2 === 'true';  // 新增配置开关
 
     // 实盘模式：额外初始化 Jupiter Executor + LivePositionMonitor
     if (isLive) {
       try {
         this.jupiterExecutor = new JupiterSwapExecutor();
         this.jupiterExecutor.initialize();
+
+        // 选择价格监控器版本
+        if (usePriceV2 && process.env.JUPITER_API_KEY) {
+          console.log('📡 [价格监控] 使用 V2 版本 (Jupiter Swap Quote)');
+          this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor);
+        } else if (process.env.JUPITER_API_KEY) {
+          console.log('📡 [价格监控] 使用 V1 版本 (Jupiter Price API)');
+          this.livePriceMonitor = new LivePriceMonitor();
+        }
+
+        if (this.livePriceMonitor) {
+          this.livePriceMonitor.start();
+          this.engine.setLivePriceMonitor(this.livePriceMonitor);
+        }
 
         this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor);
         this.livePositionMonitor.start();

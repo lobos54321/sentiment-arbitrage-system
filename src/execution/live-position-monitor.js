@@ -254,8 +254,14 @@ export class LivePositionMonitor {
 
     this.positions.set(tokenCA, position);
 
-    // 注册到价格监控
-    this.priceMonitor.addToken(tokenCA);
+    // 注册到价格监控（传递 token 数量和 decimals 用于 Quote 查询）
+    if (this.priceMonitor.addToken.length === 3) {
+      // V2 版本：需要 tokenAmount 和 decimals
+      this.priceMonitor.addToken(tokenCA, tokenAmount, tokenDecimals);
+    } else {
+      // V1 版本：只需要 tokenCA
+      this.priceMonitor.addToken(tokenCA);
+    }
 
     // 持久化
     try {
