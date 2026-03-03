@@ -634,8 +634,8 @@ export class PremiumSignalEngine {
         return { action: 'NOTIFY', size: finalSize, ai: aiResult };
       }
 
-      // 实盘执行 (最多重试3轮)
-      const maxBuyAttempts = 3;
+      // 实盘执行 (不重试，避免重复花 SOL)
+      const maxBuyAttempts = 1;
       let lastError = null;
 
       for (let buyAttempt = 1; buyAttempt <= maxBuyAttempts; buyAttempt++) {
@@ -652,8 +652,8 @@ export class PremiumSignalEngine {
             if (tradeResult.success && this.livePositionMonitor) {
               const entryMC = dexData?.market_cap || signal.market_cap || 0;
 
-              // 🔧 BUG FIX: 等待2秒后验证余额，确保真的买到了
-              await new Promise(r => setTimeout(r, 2000));
+              // 🔧 BUG FIX: 等待8秒后验证余额（Solana 确认需要时间）
+              await new Promise(r => setTimeout(r, 8000));
               const balance = await this.jupiterExecutor.getTokenBalance(ca);
 
               if (balance.amount <= 0) {

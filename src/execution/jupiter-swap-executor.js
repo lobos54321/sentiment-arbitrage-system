@@ -110,7 +110,7 @@ export class JupiterSwapExecutor {
     this._checkSafety(amountSol);
 
     const amountLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
-    const maxRetries = 3;
+    const maxRetries = 1;  // 🔧 买入不重试，外层 premium-signal-engine 已有重试逻辑
 
     console.log(`🪐 [JupiterSwap] 买入 ${amountSol} SOL → ${tokenCA.substring(0, 8)}...`);
 
