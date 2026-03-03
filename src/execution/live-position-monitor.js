@@ -100,6 +100,9 @@ export class LivePositionMonitor {
     // 启动钱包扫描（每60秒检查滞留token）
     this._startWalletScanner();
 
+    // 每30秒打印持仓状态（调试用）
+    this._statusInterval = setInterval(() => this._printLiveStatus(), 30000);
+
     console.log(`✅ [LivePositionMonitor] 启动 | 持仓: ${this.positions.size}`);
   }
 
@@ -657,6 +660,23 @@ export class LivePositionMonitor {
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] 恢复持仓失败: ${e.message}`);
     }
+  }
+
+  /**
+   * 每30秒打印持仓实时状态（调试）
+   */
+  _printLiveStatus() {
+    const open = [...this.positions.values()].filter(p => !p.closed);
+    if (open.length === 0) return;
+
+    const lines = open.map(p => {
+      const age = ((Date.now() - p.entryTime) / 60000).toFixed(0);
+      const priceData = this.priceMonitor.priceCache?.get(p.tokenCA);
+      const hasPrice = priceData && (Date.now() - priceData.timestamp) < 30000;
+      const priceAge = hasPrice ? ((Date.now() - priceData.timestamp) / 1000).toFixed(0) + 's' : 'N/A';
+      return `  $${p.symbol.padEnd(10)} PnL:${p.lastPnl !== null ? (p.lastPnl >= 0 ? '+' : '') + p.lastPnl.toFixed(1) + '%' : 'N/A'} 峰:+${p.highPnl.toFixed(1)}% 价格:${hasPrice ? 'OK(' + priceAge + ')' : '❌无'} ${age}min`;
+    });
+    console.log(`📊 [持仓状态] ${open.length} 个活跃:\n${lines.join('\n')}`);
   }
 
   /**

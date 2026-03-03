@@ -158,9 +158,9 @@ export class LivePriceMonitorV2 extends EventEmitter {
         }
       } catch (error) {
         this.stats.errors++;
-        // 静默处理，避免日志刷屏
-        if (this.stats.errors % 50 === 1) {
-          console.warn(`⚠️  [LivePriceMonitorV2] Quote 查询失败: ${error.message}`);
+        // 前10次每次打，之后每50次打一次
+        if (this.stats.errors <= 10 || this.stats.errors % 50 === 0) {
+          console.warn(`⚠️  [LivePriceMonitorV2] Quote 查询失败 (${this.stats.errors}): ${error.message}`);
         }
       }
 
@@ -185,9 +185,12 @@ export class LivePriceMonitorV2 extends EventEmitter {
         asLegacyTransaction: false
       };
 
-      const res = await axios.get('https://quote-api.jup.ag/v6/quote', {
+      const headers = {};
+      if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
+
+      const res = await axios.get('https://api.jup.ag/swap/v1/quote', {
         params,
-        headers: this.jupiterApiKey ? { 'x-api-key': this.jupiterApiKey } : {},
+        headers,
         timeout: 5000
       });
 
