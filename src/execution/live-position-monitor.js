@@ -4,19 +4,19 @@
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~1.5 秒响应）
  *
- * 退出逻辑（策略D - 激进锁定利润版）：
+ * 退出逻辑（策略E - 一次性全卖版）：
  * - STOP_LOSS(-20%)：全卖
  * - FAST_STOP（45 秒内，从未涨过 & < -5%）：全卖
  * - MID_STOP（< -12% & 从未涨过 +10%）：全卖
- * - TP1: +50% 卖50% | TP2: +100% 卖30% | 剩20% trailing
- * - MOON_STOP（剩余仓位回撤到 moonHighPnl*80%，最低保 +50%）：全卖剩余
- * - TRAIL_STOP（未触发分批，peak >= 15%，回撤到 peak*80%）：全卖
+ * - PEAK_EXIT: 一次性全卖，避免分批滑点叠加
+ *   - 涨幅 30-50%:  回撤 10% 全卖（最低保 +20%）
+ *   - 涨幅 50-100%: 回撤 15% 全卖（最低保 +30%）
+ *   - 涨幅 >100%:   回撤 20% 全卖（最低保 +50%）
  *
- * 实盘优化（2026-03-02 v2）：
- * - 分批止盈: 30%/20%/20%/30% → 50%/30%/20%（更早锁定更多利润）
- * - MOON_STOP: 70%→80%，最低保40%→50%（流动性窗口短）
- * - TRAIL_STOP: 75-80%→80%，最低保12%→15%
- * - 紧急卖出模式，每30秒钱包扫描
+ * 实盘优化（2026-03-03 v3）：
+ * - 废弃分批止盈：TP1/TP2/MOON_STOP → 单一 PEAK_EXIT
+ * - 原因：meme coin 流动性极低，分批卖出 = 自己砸盘，滑点叠加严重
+ * - 新策略：峰值回撤触发一次性全卖，减少交易次数
  */
 
 import Database from 'better-sqlite3';
@@ -343,52 +343,31 @@ export class LivePositionMonitor {
       return;
     }
 
-    // ==================== 策略D: 激进锁定利润版 ====================
-    // +50%: 卖50% | +100%: 卖30% | 剩20% trailing
+    // ==================== 策略E: 一次性全卖版 ====================
+    // 核心原则：不分批，避免滑点叠加
+    // 涨幅 30-50%:  回撤 10% → 全卖
+    // 涨幅 50-100%: 回撤 15% → 全卖
+    // 涨幅 >100%:   回撤 20% → 全卖
 
-    // TP1: +50% 卖50%
-    if (!pos.tp1 && pnl >= 50) {
-      const success = await this._triggerPartialSell(pos, 50, 'TP1');
-      if (success) {
-        pos.tp1 = true;
-        pos.moonHighPnl = pnl;
+    if (pos.highPnl >= 30) {
+      let retainRatio;
+      let minPnl;
+
+      if (pos.highPnl >= 100) {
+        retainRatio = 0.80;  // 20% 回撤
+        minPnl = 50;         // 最低保 +50%
+      } else if (pos.highPnl >= 50) {
+        retainRatio = 0.85;  // 15% 回撤
+        minPnl = 30;         // 最低保 +30%
+      } else {
+        retainRatio = 0.90;  // 10% 回撤
+        minPnl = 20;         // 最低保 +20%
       }
-      return;
-    }
 
-    // TP2: +100% 卖30%（需要先触发TP1）
-    if (pos.tp1 && !pos.tp2 && pnl >= 100) {
-      const success = await this._triggerPartialSell(pos, 30, 'TP2');
-      if (success) {
-        pos.tp2 = true;
-      }
-      // TP2后剩余20%，不再有TP3
-      return;
-    }
+      const exitLine = Math.max(pos.highPnl * retainRatio, minPnl);
 
-    // 更新剩余仓位的独立峰值
-    if (pos.tp1 && pnl > pos.moonHighPnl) {
-      pos.moonHighPnl = pnl;
-    }
-
-    // 5. MOON_STOP: 已分批止盈，剩余仓位回撤到 moonHighPnl*90%，最低保 +50%
-    // 实盘数据：流动性窗口极短，必须更早出场
-    if (pos.tp1 && pos.highPnl >= 15) {
-      const moonExit = pos.moonHighPnl * 0.90;  // 从80%提高到90%，更早止盈
-      const exitLine = Math.max(moonExit, 50);   // 最低保50%
       if (pnl < exitLine) {
-        await this._triggerExit(pos, `MOON_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
-        return;
-      }
-    }
-
-    // 6. TRAIL_STOP: 未触发分批止盈，peak >= 15%，回撤到 peak*90%
-    // 实盘数据：流动性窗口极短，必须更早出场
-    if (!pos.tp1 && pos.highPnl >= 15) {
-      const trailExit = pos.highPnl * 0.90;  // 从80%提高到90%，更早止盈
-      const exitLine = Math.max(trailExit, 15);  // 最低保15%
-      if (pnl < exitLine) {
-        await this._triggerExit(pos, `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`, 100);
+        await this._triggerExit(pos, `PEAK_EXIT(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
       }
     }
