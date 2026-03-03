@@ -4,8 +4,13 @@
  * 通过 Jupiter API 执行 Solana 链上交易
  * - 买入：SOL → Token（通过 Jupiter Quote + Swap）
  * - 卖出：Token → SOL（支持部分卖出，用于分批止盈）
- * - Anti-MEV：dynamicSlippage + priority fee
+ * - Anti-MEV：Jito Bundle + priority fee
  * - 本地签名，不依赖第三方托管
+ *
+ * 🔧 2026-03-03 优化：
+ * - 禁用 dynamicSlippage，使用固定 15% 滑点
+ * - 降低 Jito tip 到 0.0005 SOL
+ * - 原因：meme coin 低流动性，动态滑点导致 30-40% 损失
  */
 
 import {
@@ -167,12 +172,13 @@ export class JupiterSwapExecutor {
       throw new Error('交易已暂停（每日亏损限制）');
     }
 
-    const maxRetries = options.urgent ? 5 : 3;  // 紧急模式重试5次
+    const maxRetries = options.urgent ? 2 : 1;  // 🔧 减少重试次数：紧急2次，普通1次（不重试）
     const waitConfirm = !options.urgent;  // 紧急模式不等待确认
     console.log(`🪐 [JupiterSwap] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...${options.urgent ? ' [紧急模式]' : ''}`);
 
-    // 记录卖出前的余额
+    // 记录卖出前的余额和初始报价
     const balanceBefore = await this.getTokenBalance(tokenCA);
+    let initialExpectedPrice = null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -186,6 +192,19 @@ export class JupiterSwapExecutor {
         const outSol = outLamports / LAMPORTS_PER_SOL;
         console.log(`   报价: ${tokenAmount} tokens → ${outSol.toFixed(6)} SOL`);
 
+        // 🔧 记录第一次报价，用于价格保护
+        if (attempt === 1) {
+          initialExpectedPrice = outSol;
+        } else {
+          // 🔧 价格保护：重试时检查价格变化
+          const priceChange = (outSol - initialExpectedPrice) / initialExpectedPrice;
+          if (priceChange < -0.10) {
+            console.log(`⚠️  [价格保护] 价格下跌 ${(priceChange * 100).toFixed(1)}%，放弃重试`);
+            throw new Error(`价格下跌 ${(priceChange * 100).toFixed(1)}%，放弃重试`);
+          }
+          console.log(`🔄 [重试] 价格变化 ${(priceChange * 100).toFixed(1)}%，继续`);
+        }
+
         // 2. 获取 swap 交易
         const swapTx = await this._getSwapTransaction(quote);
         if (!swapTx) {
@@ -195,8 +214,8 @@ export class JupiterSwapExecutor {
         // 3. 签名并发送
         const txHash = await this._signAndSend(swapTx, waitConfirm);
 
-        // 4. 检查余额变化（确认交易真的成功了）
-        await new Promise(r => setTimeout(r, 2000));  // 等2秒
+        // 🔧 修复：增加等待时间到 8 秒
+        await new Promise(r => setTimeout(r, 8000));  // 从 2000 改为 8000
         const balanceAfter = await this.getTokenBalance(tokenCA);
 
         if (balanceAfter.amount < balanceBefore.amount) {
@@ -213,9 +232,29 @@ export class JupiterSwapExecutor {
             tokenCA
           };
         } else {
-          // 余额没变，交易可能还没确认或失败了
-          console.warn(`⚠️  [JupiterSwap] 余额未变化，交易可能未成功`);
-          throw new Error('交易发送但余额未变化');
+          // 🔧 修复：余额没变，再等 5 秒二次确认
+          console.warn(`⚠️  [JupiterSwap] 余额未变化，等待 5 秒二次确认...`);
+          await new Promise(r => setTimeout(r, 5000));
+          const balanceAfter2 = await this.getTokenBalance(tokenCA);
+
+          if (balanceAfter2.amount < balanceBefore.amount) {
+            // 延迟成功
+            this.stats.sells++;
+            this.stats.total_sol_received += outSol;
+            console.log(`✅ [JupiterSwap] 卖出成功（延迟确认）: ${txHash} | 收到 ${outSol.toFixed(6)} SOL`);
+
+            return {
+              success: true,
+              txHash,
+              amountIn: tokenAmount,
+              amountOut: outSol,
+              tokenCA
+            };
+          } else {
+            // 真的失败了
+            console.warn(`⚠️  [JupiterSwap] 二次确认仍未成功，交易可能失败`);
+            throw new Error('交易发送但余额未变化');
+          }
         }
       } catch (error) {
         console.error(`❌ [JupiterSwap] 卖出失败 (${attempt}/${maxRetries}): ${error.message}`);
@@ -374,7 +413,11 @@ export class JupiterSwapExecutor {
         userPublicKey: this.walletAddress,
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
-        dynamicSlippage: true,
+
+        // 🔧 关键修复：禁用动态滑点，使用固定 15% 滑点
+        dynamicSlippage: false,
+        slippageBps: 1500,  // 15% 滑点（meme coin 特性）
+
         prioritizationFeeLamports: {
           priorityLevelWithMaxLamports: {
             maxLamports: priorityFee,
