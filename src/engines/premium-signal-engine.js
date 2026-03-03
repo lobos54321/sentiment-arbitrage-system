@@ -638,7 +638,7 @@ export class PremiumSignalEngine {
       if (this.jupiterExecutor) {
         try {
           const solBalance = await this.jupiterExecutor.getSolBalance();
-          const minRequired = finalSize + 0.01; // 买入金额 + gas/tip 预留
+          const minRequired = finalSize + 0.025; // 买入金额 + gas(~0.005) + Jito tip(~0.005) + priority fee + rent 预留
           if (solBalance < minRequired) {
             console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过买入 $${signal.symbol}`);
             this.saveSignalRecord(signal, gateResult.status, aiResult, false);

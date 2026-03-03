@@ -620,8 +620,13 @@ export class LivePositionMonitor {
           exitReason: null
         });
         // 注册到价格监控（V2 需要 tokenAmount 和 decimals）
+        const tokenAmount = row.token_amount || row.tokenAmount;
         if (this.priceMonitor.addToken.length === 3) {
-          this.priceMonitor.addToken(row.token_ca, row.token_amount, row.token_decimals || 6);
+          if (!tokenAmount) {
+            console.warn(`⚠️ [恢复] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 缺少 tokenAmount，跳过价格监控`);
+            continue;
+          }
+          this.priceMonitor.addToken(row.token_ca, tokenAmount, row.token_decimals || 6);
         } else {
           this.priceMonitor.addToken(row.token_ca);
         }
