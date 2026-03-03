@@ -251,7 +251,8 @@ export class PremiumSignalEngine {
           lastSeen: Date.now(),
           symbol: signal.symbol,
           firstMC: signal.market_cap || 0,
-          latestMC: signal.market_cap || 0
+          latestMC: signal.market_cap || 0,
+          lastScore: 0  // 用于重复信号评分比较
         });
       }
 
@@ -443,33 +444,55 @@ export class PremiumSignalEngine {
         console.log(`📈 [ATH信号] $${signal.symbol} 涨了${athGain}% | source=${signal.source} | is_ath=${signal.is_ath}`);
       }
 
-      // 评分决策（数据驱动 MC 分层）：
-      // 实盘回测结果（36笔）：
-      // MC < 10K: 实盘胜率31%，但卖出成功的预期收益 +3.1%
-      // MC 10-20K: 实盘胜率20%，卖出失败率20%，亏损严重
-      // MC 20-30K: 实盘胜率25%，卖出失败率25%
-      // MC > 30K: 实盘胜率0%，卖出失败率50%
-      // 结论：只买 MC < 10K，执行可靠性最高
+      // 评分决策（MC 梯度 + 评分联动）：
+      // MC 越高要求评分越高，AI 关闭时门槛更高
+      // MC < 10K:  >= 80 分 → 0.10 SOL
+      // MC 10-20K: >= 85 分 → 0.08 SOL
+      // MC 20-30K: >= 90 分 → 0.06 SOL
+      // MC > 30K:  不买
       let scoreAction = 'SKIP';
+      let tieredPositionSize = this.positionSol; // 默认仓位
 
-      if (mc > 10000) {
-        // 实盘数据：MC > 10K 的卖出失败率高、胜率低
-        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 10K → 不买（实盘策略）`);
-      } else if (mc < 10000 && score >= 60) {
-        // MC < 10K: 模拟盘 +50.5%，实盘扣损耗后 +24.6%，卖出成功率 87.5%
-        scoreAction = 'BUY_FULL';
-        console.log(`💎 [低MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score} → 买（实盘最优区间）`);
-      } else if (isATHDoubled && mc <= 10000) {
-        // ATH 翻倍信号，但也要 MC < 10K
-        scoreAction = 'BUY_FULL';
-        score = Math.max(score, 80);
-        console.log(`🔥 [ATH翻倍+低MC] $${signal.symbol} 涨了${athGain.toFixed(0)}% | MC: $${(mc/1000).toFixed(1)}K`);
-      } else if (isDoubled && mc <= 10000 && score >= 60) {
-        // 翻倍重复信号，但也要 MC < 10K
-        scoreAction = 'BUY_FULL';
-        console.log(`🔥 [翻倍+低MC] $${signal.symbol} 重复${sigHistory.count}次 | MC: $${(mc/1000).toFixed(1)}K`);
-      } else if (isATH && athGain > 300) {
-        console.log(`⚠️ [ATH] $${signal.symbol} 涨了${athGain.toFixed(0)}%，涨太多不追`);
+      // 重复信号特殊处理：评分>=85 或比上次提高>=15 分 → 允许重新评估
+      const prevScore = sigHistory?.lastScore || 0;
+      const scoreImproved = sigHistory && (score >= 85 || score - prevScore >= 15);
+      // 更新历史评分
+      if (sigHistory) sigHistory.lastScore = score;
+      else if (this.signalHistory.has(ca)) this.signalHistory.get(ca).lastScore = score;
+
+      // 检查是否已持仓（不加仓）
+      const alreadyHolding = this.livePositionMonitor?.positions?.has(ca);
+      if (alreadyHolding) {
+        console.log(`⏭️ [已持仓] $${signal.symbol} 已有仓位，不加仓`);
+      } else if (mc > 30000) {
+        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 30K → 不买`);
+      } else if (mc >= 20000 && mc <= 30000) {
+        // MC 20-30K: 要求 90 分以上
+        if (score >= 90) {
+          scoreAction = 'BUY_FULL';
+          tieredPositionSize = 0.06;
+          console.log(`💎 [高MC高分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=90 → 买 0.06 SOL`);
+        } else {
+          console.log(`⏭️ [MC 20-30K] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<90 → 不够`);
+        }
+      } else if (mc >= 10000 && mc < 20000) {
+        // MC 10-20K: 要求 85 分以上
+        if (score >= 85) {
+          scoreAction = 'BUY_FULL';
+          tieredPositionSize = 0.08;
+          console.log(`💎 [中MC高分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=85 → 买 0.08 SOL`);
+        } else {
+          console.log(`⏭️ [MC 10-20K] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<85 → 不够`);
+        }
+      } else if (mc < 10000) {
+        // MC < 10K: 要求 80 分以上（AI 关闭时提高门槛）
+        if (score >= 80) {
+          scoreAction = 'BUY_FULL';
+          tieredPositionSize = 0.10;
+          console.log(`💎 [低MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=80 → 买 0.10 SOL`);
+        } else {
+          console.log(`⏭️ [低MC低分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<80 → 不够`);
+        }
       }
 
       console.log(`📈 [评分] ${score}分 [${scoreDetails.join(' | ')}] → ${scoreAction}`);
@@ -546,8 +569,8 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'greylist_low_confidence' };
       }
 
-      // Step 6: 仓位检查
-      const positionSize = aiResult.action === 'BUY_FULL' ? this.positionSol : this.positionSol / 2;
+      // Step 6: 仓位检查（使用 MC 梯度仓位）
+      const positionSize = tieredPositionSize;
       const decision = {
         action: 'AUTO_BUY',
         chain: 'SOL',
