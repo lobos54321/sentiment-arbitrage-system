@@ -158,6 +158,9 @@ export class JupiterUltraExecutor {
     const maxRetries = options.urgent ? 3 : 2;
     console.log(`🪐 [JupiterUltra] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...`);
 
+    // 记录卖出前 SOL 余额，用于计算实际到账
+    const solBefore = await this.getSolBalance();
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         // 1. 获取 Ultra Order（Token → SOL）
@@ -167,8 +170,8 @@ export class JupiterUltraExecutor {
         }
 
         const outLamports = parseInt(order.outAmount || 0);
-        const outSol = outLamports / LAMPORTS_PER_SOL;
-        console.log(`   报价: ${tokenAmount} tokens → ${outSol.toFixed(6)} SOL | slippage: ${order.slippageBps || '?'}bps`);
+        const quotedSol = outLamports / LAMPORTS_PER_SOL;
+        console.log(`   报价: ${tokenAmount} tokens → ${quotedSol.toFixed(6)} SOL | slippage: ${order.slippageBps || '?'}bps`);
 
         // 2. 签名
         const signedTx = this._signTransaction(order.transaction);
@@ -177,9 +180,16 @@ export class JupiterUltraExecutor {
         const result = await this._executeOrder(signedTx, order.requestId);
 
         if (result.status === 'Success') {
+          // 查询实际 SOL 到账（链上真实值，而非报价）
+          await new Promise(r => setTimeout(r, 2000));  // 等待余额更新
+          const solAfter = await this.getSolBalance();
+          const actualSolReceived = solAfter - solBefore;
+          // 如果查询失败或异常，fallback 到报价值
+          const outSol = actualSolReceived > 0 ? actualSolReceived : quotedSol;
+
           this.stats.sells++;
           this.stats.total_sol_received += outSol;
-          console.log(`✅ [JupiterUltra] 卖出成功: ${result.signature} | 收到 ${outSol.toFixed(6)} SOL`);
+          console.log(`✅ [JupiterUltra] 卖出成功: ${result.signature} | 实际到账: ${outSol.toFixed(6)} SOL (报价: ${quotedSol.toFixed(6)})`);
 
           return {
             success: true,
