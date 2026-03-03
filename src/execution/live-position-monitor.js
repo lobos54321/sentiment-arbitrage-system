@@ -370,7 +370,7 @@ export class LivePositionMonitor {
 
     if (shouldLog || isNewHigh) {
       const tag = isNewHigh ? '🔺新高' : '';
-      console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
+      console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} 入:${pos.entryPrice.toExponential(3)} 现:${price.toExponential(3)} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
     }
 
     // 接近 PEAK_EXIT 退出线时打警告
