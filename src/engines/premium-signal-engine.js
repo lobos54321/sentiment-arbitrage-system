@@ -355,8 +355,9 @@ export class PremiumSignalEngine {
         else if (liqUsd > 3000) { score += 5; scoreDetails.push(`流动性$${(liqUsd/1000).toFixed(0)}K(+5)`); }
         else if (liqUsd < 1000 && dexData.volume_24h < 10000) { score -= 15; scoreDetails.push(`流动性不足(-15)`); }
 
-        // 实盘模式：5分钟动量
-        if (dexData.price_change_5m > 10) { score += 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(+15)`); }
+        // 实盘模式：5分钟动量（数据验证：赢家5m平均+254%，输家+116%）
+        if (dexData.price_change_5m > 100) { score += 25; scoreDetails.push(`5m+${dexData.price_change_5m}%(+25)`); }
+        else if (dexData.price_change_5m > 10) { score += 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(+15)`); }
         else if (dexData.price_change_5m > 5) { score += 10; scoreDetails.push(`5m+${dexData.price_change_5m}%(+10)`); }
         else if (dexData.price_change_5m < -20) { score -= 15; scoreDetails.push(`5m${dexData.price_change_5m}%(-15)`); }
 
@@ -409,13 +410,18 @@ export class PremiumSignalEngine {
 
       if (signal.freeze_ok && signal.mint_ok) { score += 10; scoreDetails.push(`安全✅(+10)`); }
 
-      // Telegram 传播度
+      // Telegram 传播度（数据验证：$PUMP 14群50条 → 赢了，TG>10群是强信号）
       if (this.buzzScanner && signal.symbol) {
         try {
           const buzz = await this.buzzScanner.scan(signal.symbol, ca);
           if (buzz.score > 0) {
             score += buzz.score;
             scoreDetails.push(`TG热度${buzz.uniqueGroups}群${buzz.mentions}条(+${buzz.score})`);
+            // TG > 10 群额外加分（强传播信号）
+            if (buzz.uniqueGroups >= 10) {
+              score += 10;
+              scoreDetails.push(`TG超热${buzz.uniqueGroups}群(+10)`);
+            }
           }
         } catch (e) {
           // 非关键，忽略
@@ -445,10 +451,10 @@ export class PremiumSignalEngine {
       }
 
       // 评分决策（MC 梯度 + 评分联动）：
-      // MC 越高要求评分越高，AI 关闭时门槛更高
-      // MC < 10K:  >= 80 分 → 0.10 SOL
-      // MC 10-20K: >= 85 分 → 0.08 SOL
-      // MC 20-30K: >= 90 分 → 0.06 SOL
+      // MC 越高要求评分越高，高MC胜率0%需更严格
+      // MC < 10K:  >= 80 分 → 0.10 SOL（胜率67%）
+      // MC 10-20K: >= 85 分 → 0.08 SOL（胜率40%）
+      // MC 20-30K: >= 95 分 → 0.04 SOL（胜率0%，提高门槛+减仓）
       // MC > 30K:  不买
       let scoreAction = 'SKIP';
       let tieredPositionSize = this.positionSol; // 默认仓位
@@ -467,13 +473,13 @@ export class PremiumSignalEngine {
       } else if (mc > 30000) {
         console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 30K → 不买`);
       } else if (mc >= 20000 && mc <= 30000) {
-        // MC 20-30K: 要求 90 分以上
-        if (score >= 90) {
+        // MC 20-30K: 要求 95 分以上（数据验证：0/2 胜率，提高门槛+减仓）
+        if (score >= 95) {
           scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.06;
-          console.log(`💎 [高MC高分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=90 → 买 0.06 SOL`);
+          tieredPositionSize = 0.04;
+          console.log(`💎 [高MC高分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=95 → 买 0.04 SOL`);
         } else {
-          console.log(`⏭️ [MC 20-30K] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<90 → 不够`);
+          console.log(`⏭️ [MC 20-30K] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<95 → 不够`);
         }
       } else if (mc >= 10000 && mc < 20000) {
         // MC 10-20K: 要求 85 分以上

@@ -6,12 +6,13 @@
  *
  * 退出逻辑（策略E - 一次性全卖版）：
  * - STOP_LOSS(-20%)：全卖
- * - FAST_STOP（45 秒内，从未涨过 & < -5%）：全卖
- * - MID_STOP（< -12% & 从未涨过 +10%）：全卖
+ * - FAST_STOP（60-120 秒窗口，从未涨过 & < -15%）：全卖
+ * - MID_STOP（>60s & < -15% & 从未涨过 +10%，连续3s确认）：全卖
  * - PEAK_EXIT: 一次性全卖，避免分批滑点叠加
- *   - 涨幅 30-50%:  回撤 10% 全卖（最低保 +20%）
- *   - 涨幅 50-100%: 回撤 15% 全卖（最低保 +30%）
- *   - 涨幅 >100%:   回撤 20% 全卖（最低保 +50%）
+ *   - 涨幅 30-50%:  回撤 15% 全卖（最低保 +15%）
+ *   - 涨幅 50-100%: 回撤 20% 全卖（最低保 +25%）
+ *   - 涨幅 100-300%: 回撤 25% 全卖（最低保 +50%）
+ *   - 涨幅 >300%:   回撤 30% 全卖（最低保 +100%）
  *
  * 实盘优化（2026-03-03 v3）：
  * - 废弃分批止盈：TP1/TP2/MOON_STOP → 单一 PEAK_EXIT
@@ -376,9 +377,10 @@ export class LivePositionMonitor {
     // 接近 PEAK_EXIT 退出线时打警告
     if (pos.highPnl >= 30) {
       let exitLine;
-      if (pos.highPnl >= 100) exitLine = Math.max(pos.highPnl * 0.80, 50);
-      else if (pos.highPnl >= 50) exitLine = Math.max(pos.highPnl * 0.85, 30);
-      else exitLine = Math.max(pos.highPnl * 0.90, 20);
+      if (pos.highPnl >= 300) exitLine = Math.max(pos.highPnl * 0.70, 100);
+      else if (pos.highPnl >= 100) exitLine = Math.max(pos.highPnl * 0.75, 50);
+      else if (pos.highPnl >= 50) exitLine = Math.max(pos.highPnl * 0.80, 25);
+      else exitLine = Math.max(pos.highPnl * 0.85, 15);
 
       if (pnl < exitLine + 5 && pnl >= exitLine) {
         console.log(`⚠️  [接近退出] $${pos.symbol} PnL:+${pnl.toFixed(1)}% 退出线:+${exitLine.toFixed(1)}% 差:${(pnl - exitLine).toFixed(1)}%`);
@@ -394,15 +396,16 @@ export class LivePositionMonitor {
       return;
     }
 
-    // 2. FAST_STOP: 买入后 60-120 秒窗口，从未涨过(highPnl<=0) 且当前 < -10%
-    //    前 60 秒是 grace period（bid-ask spread 可能导致虚假 -5%）
-    if (!pos.tp1 && holdTimeSec >= 60 && holdTimeSec <= 120 && pos.highPnl <= 0 && pnl < -10) {
+    // 2. FAST_STOP: 买入后 60-120 秒窗口，从未涨过(highPnl<=0) 且当前 < -15%
+    //    前 60 秒是 grace period（bid-ask spread 可能导致虚假亏损）
+    if (!pos.tp1 && holdTimeSec >= 60 && holdTimeSec <= 120 && pos.highPnl <= 0 && pnl < -15) {
       await this._triggerExit(pos, 'FAST_STOP', 100);
       return;
     }
 
-    // 3. MID_STOP: PnL < -12% & 从未涨过 +10%（需要连续 2 次确认）
-    if (!pos.tp1 && pnl < -12 && pos.highPnl < 10) {
+    // 3. MID_STOP: 持仓>60s & PnL < -15% & 从未涨过 +10%（需要连续 3s 确认）
+    //    前 60 秒 grace period：meme coin 买入后 spread 可能导致虚假 -10~-15%
+    if (!pos.tp1 && holdTimeSec >= 60 && pnl < -15 && pos.highPnl < 10) {
       if (!pos._midStopPending) {
         pos._midStopPending = true;
         pos._midStopFirstTime = Date.now();
@@ -415,25 +418,30 @@ export class LivePositionMonitor {
       pos._midStopPending = false;
     }
 
-    // ==================== 策略E: 一次性全卖版 ====================
+    // ==================== 策略E: 一次性全卖版（宽松 trailing stop）====================
     // 核心原则：不分批，避免滑点叠加
-    // 涨幅 30-50%:  回撤 10% → 全卖
-    // 涨幅 50-100%: 回撤 15% → 全卖
-    // 涨幅 >100%:   回撤 20% → 全卖
+    // 数据验证：$4 卖+28%后续+308%，$PARADISE 卖+64%后续+341%，回撤阈值太紧
+    // 涨幅 30-50%:   回撤 15% → 全卖
+    // 涨幅 50-100%:  回撤 20% → 全卖
+    // 涨幅 100-300%: 回撤 25% → 全卖
+    // 涨幅 >300%:    回撤 30% → 全卖
 
     if (pos.highPnl >= 30) {
       let retainRatio;
       let minPnl;
 
-      if (pos.highPnl >= 100) {
-        retainRatio = 0.80;  // 20% 回撤
+      if (pos.highPnl >= 300) {
+        retainRatio = 0.70;  // 30% 回撤（超强势币给更多空间）
+        minPnl = 100;        // 最低保 +100%
+      } else if (pos.highPnl >= 100) {
+        retainRatio = 0.75;  // 25% 回撤
         minPnl = 50;         // 最低保 +50%
       } else if (pos.highPnl >= 50) {
-        retainRatio = 0.85;  // 15% 回撤
-        minPnl = 30;         // 最低保 +30%
+        retainRatio = 0.80;  // 20% 回撤
+        minPnl = 25;         // 最低保 +25%
       } else {
-        retainRatio = 0.90;  // 10% 回撤
-        minPnl = 20;         // 最低保 +20%
+        retainRatio = 0.85;  // 15% 回撤
+        minPnl = 15;         // 最低保 +15%
       }
 
       const exitLine = Math.max(pos.highPnl * retainRatio, minPnl);
