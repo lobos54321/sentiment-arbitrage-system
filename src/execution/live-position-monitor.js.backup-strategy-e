@@ -4,29 +4,20 @@
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~1.5 秒响应）
  *
- * 退出逻辑（新策略 - 目标70%胜率）：
+ * 退出逻辑（策略E - 一次性全卖版）：
+ * - STOP_LOSS(-20%)：全卖
+ * - FAST_STOP（60-120 秒窗口，从未涨过 & < -15%）：全卖
+ * - MID_STOP（>60s & < -15% & 从未涨过 +10%，连续3s确认）：全卖
+ * - PEAK_EXIT: 一次性全卖，避免分批滑点叠加
+ *   - 涨幅 30-50%:  回撤 15% 全卖（最低保 +15%）
+ *   - 涨幅 50-100%: 回撤 20% 全卖（最低保 +25%）
+ *   - 涨幅 100-300%: 回撤 25% 全卖（最低保 +50%）
+ *   - 涨幅 >300%:   回撤 30% 全卖（最低保 +100%）
  *
- * 第一层：Grace Period（60秒保护期）
- * - 前60秒只触发FAST_STOP（-15%），防止价差误杀
- *
- * 第二层：动态保底机制
- * - 峰值≥50% → 保底+15%
- * - 峰值≥30% → 保底+8%
- * - 峰值≥15% → 保底+5%
- * - 峰值≥5%  → 保底+3%
- * - 从未盈利 → 容忍-10%
- *
- * 第三层：分批止盈 + MOON_STOP
- * - TP1: +35%卖20%
- * - TP2: +70%卖20%
- * - TP3: +130%卖20%
- * - TP4: +260%卖20%
- * - MOON_STOP: 涨幅≥200%后保留60%峰值
- *
- * 实盘优化（2026-03-04 v4）：
- * - 基于4.75h实盘数据（40%胜率）和策略C回测（100%胜率）设计
- * - 核心改进：Grace period防误杀 + 动态保底限亏损 + 分批止盈锁利
- * - 目标：胜率40% → 70%，平均PnL +7.1% → +50-80%
+ * 实盘优化（2026-03-03 v3）：
+ * - 废弃分批止盈：TP1/TP2/MOON_STOP → 单一 PEAK_EXIT
+ * - 原因：meme coin 流动性极低，分批卖出 = 自己砸盘，滑点叠加严重
+ * - 新策略：峰值回撤触发一次性全卖，减少交易次数
  */
 
 import Database from 'better-sqlite3';
@@ -253,18 +244,7 @@ export class LivePositionMonitor {
       entryTime: Date.now(),
       closed: false,
       exitInProgress: false,  // 防止并发卖出
-      exitReason: null,
-
-      // 新策略字段
-      tp1: false,           // TP1是否已触发
-      tp2: false,           // TP2是否已触发
-      tp3: false,           // TP3是否已触发
-      tp4: false,           // TP4是否已触发
-      soldPct: 0,           // 已卖出百分比
-      lockedPnl: 0,         // 已锁定的利润
-      moonMode: false,      // 是否进入月球模式
-      moonHighPnl: 0,       // 月球模式的最高PnL
-      partialSellInProgress: false  // 是否正在分批卖出
+      exitReason: null
     };
 
     this.positions.set(tokenCA, position);
@@ -398,138 +378,74 @@ export class LivePositionMonitor {
       }
     }
 
-    // ==================== 新策略退出条件评估 ====================
+    // ==================== 退出条件评估 ====================
 
-    // ========== 第一层：Grace Period（60秒保护期）==========
-    // 前60秒只触发FAST_STOP（-15%），防止价差误杀
-    // 实盘数据：$ANTS 6秒被MID_STOP杀掉（-11%），后续+1341%
-    if (holdTimeSec < 60) {
-      if (pnl <= -15) {
-        await this._triggerExit(pos, 'FAST_STOP', 100);
+    // 1. STOP_LOSS: -20% 全卖（30s grace period 防止 spread 误杀）
+    //    meme coin 低流动性 bid-ask spread 可达 20%，$ANTS 第1秒就 -18.3%
+    if (pnl <= -20 && holdTimeSec >= 30) {
+      await this._triggerExit(pos, 'STOP_LOSS', 100);
+      return;
+    }
+
+    // 2. FAST_STOP: 买入后 60-120 秒窗口，从未涨过(highPnl<=0) 且当前 < -15%
+    //    前 60 秒是 grace period（bid-ask spread 可能导致虚假亏损）
+    if (holdTimeSec >= 60 && holdTimeSec <= 120 && pos.highPnl <= 0 && pnl < -15) {
+      await this._triggerExit(pos, 'FAST_STOP', 100);
+      return;
+    }
+
+    // 3. MID_STOP: 持仓>60s & PnL < -15% & 从未涨过 +10%（需要连续 3s 确认）
+    //    前 60 秒 grace period：meme coin 买入后 spread 可能导致虚假 -10~-15%
+    if (holdTimeSec >= 60 && pnl < -15 && pos.highPnl < 10) {
+      if (!pos._midStopPending) {
+        pos._midStopPending = true;
+        pos._midStopFirstTime = Date.now();
+      } else if (Date.now() - pos._midStopFirstTime >= 3000) {
+        // 3 秒后仍满足条件 → 确认触发
+        await this._triggerExit(pos, 'MID_STOP', 100);
         return;
       }
-      // Grace period内其他情况都HOLD
-      return;
-    }
-
-    // ========== 第二层：分批止盈（锁定利润）==========
-    // TP1: +35%卖20%（策略C的+50%太高，只有6.7%触发）
-    // TP2: +70%卖20%
-    // TP3: +130%卖20%
-    // TP4: +260%卖20%
-    if (!pos.tp1 && pnl >= 35) {
-      await this._triggerPartialSell(pos, 'TP1', 20, pnl);
-      return;
-    }
-    if (!pos.tp2 && pnl >= 70) {
-      await this._triggerPartialSell(pos, 'TP2', 20, pnl);
-      return;
-    }
-    if (!pos.tp3 && pnl >= 130) {
-      await this._triggerPartialSell(pos, 'TP3', 20, pnl);
-      return;
-    }
-    if (!pos.tp4 && pnl >= 260) {
-      await this._triggerPartialSell(pos, 'TP4', 20, pnl);
-      return;
-    }
-
-    // ========== 第三层：MOON_STOP（捕获超级大涨）==========
-    // 涨幅≥200%进入月球模式，保留60%峰值（允许40%回撤）
-    if (pnl >= 200 && !pos.moonMode) {
-      pos.moonMode = true;
-      pos.moonHighPnl = pnl;
-      console.log(`🌙 [MOON_MODE] $${pos.symbol} 进入月球模式 @ +${pnl.toFixed(0)}%`);
-    }
-
-    if (pos.moonMode) {
-      pos.moonHighPnl = Math.max(pos.moonHighPnl, pnl);
-      const retainRatio = 0.60;  // 保留60%峰值（策略C是55%，我们更保守）
-      const minPnl = pos.moonHighPnl * retainRatio;
-
-      if (pnl < minPnl) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `MOON_STOP(peak+${pos.moonHighPnl.toFixed(0)}%)`, remainingPct);
-        return;
-      }
-    }
-
-    // ========== 第四层：动态保底机制（限制亏损）==========
-    // 根据峰值动态调整保底线
-    let minPnl;
-    if (pos.highPnl >= 50) {
-      minPnl = Math.max(15, pos.highPnl * 0.30);  // 峰值≥50%，保底30%（最低+15%）
-    } else if (pos.highPnl >= 30) {
-      minPnl = Math.max(8, pos.highPnl * 0.25);   // 峰值≥30%，保底25%（最低+8%）
-    } else if (pos.highPnl >= 15) {
-      minPnl = Math.max(5, pos.highPnl * 0.20);   // 峰值≥15%，保底20%（最低+5%）
-    } else if (pos.highPnl >= 5) {
-      minPnl = 3;                                  // 峰值≥5%，保底+3%
     } else {
-      minPnl = -10;                                // 从未盈利，容忍-10%
+      pos._midStopPending = false;
     }
 
-    if (pnl < minPnl) {
-      const remainingPct = 100 - pos.soldPct;
-      const reason = pos.highPnl > 0
-        ? `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`
-        : 'STOP_LOSS';
-      await this._triggerExit(pos, reason, remainingPct);
-      return;
-    }
-  }
+    // ==================== 策略E: 一次性全卖版（宽松 trailing stop）====================
+    // 核心原则：不分批，避免滑点叠加
+    // 数据验证：$4 卖+28%后续+308%，$PARADISE 卖+64%后续+341%，回撤阈值太紧
+    // 涨幅 30-50%:   回撤 15% → 全卖
+    // 涨幅 50-100%:  回撤 20% → 全卖
+    // 涨幅 100-300%: 回撤 25% → 全卖
+    // 涨幅 >300%:    回撤 30% → 全卖
 
-  /**
-   * 触发分批卖出
-   */
-  async _triggerPartialSell(pos, tpName, sellPct, currentPnl) {
-    // 防止并发
-    if (pos.partialSellInProgress || pos.exitInProgress || pos.closed) {
-      return;
-    }
+    if (pos.highPnl >= 30) {
+      let retainRatio;
+      let minPnl;
 
-    pos.partialSellInProgress = true;
+      if (pos.highPnl >= 300) {
+        retainRatio = 0.70;  // 30% 回撤（超强势币给更多空间）
+        minPnl = 100;        // 最低保 +100%
+      } else if (pos.highPnl >= 100) {
+        retainRatio = 0.75;  // 25% 回撤
+        minPnl = 50;         // 最低保 +50%
+      } else if (pos.highPnl >= 50) {
+        retainRatio = 0.80;  // 20% 回撤
+        minPnl = 25;         // 最低保 +25%
+      } else {
+        retainRatio = 0.85;  // 15% 回撤
+        minPnl = 15;         // 最低保 +15%
+      }
 
-    console.log(`\n🎯 [${tpName}] $${pos.symbol} | PnL: +${currentPnl.toFixed(1)}% | 卖出 ${sellPct}%`);
+      const exitLine = Math.max(pos.highPnl * retainRatio, minPnl);
 
-    try {
-      // 计算卖出数量
-      const sellAmount = Math.floor(pos.tokenAmount * (sellPct / 100));
-
-      if (sellAmount <= 0) {
-        console.log(`   ⚠️  卖出数量为0，跳过`);
-        pos.partialSellInProgress = false;
+      if (pnl < exitLine) {
+        await this._triggerExit(pos, `PEAK_EXIT(peak+${pos.highPnl.toFixed(0)}%)`, 100);
         return;
       }
-
-      // 执行卖出
-      const result = await this.executor.sell(pos.tokenCA, sellAmount);
-
-      if (!result.success) {
-        throw new Error(result.error || 'Partial sell failed');
-      }
-
-      const solReceived = result.amountOut || 0;
-      console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
-
-      // 更新持仓状态
-      pos.tokenAmount -= sellAmount;
-      pos.totalSolReceived += solReceived;
-      pos.soldPct += sellPct;
-      pos.lockedPnl += currentPnl * (sellPct / 100);
-      pos[tpName.toLowerCase()] = true;
-
-      console.log(`   ✅ 已卖出 ${pos.soldPct}% | 剩余 ${100 - pos.soldPct}% | 锁定利润: +${pos.lockedPnl.toFixed(1)}%`);
-
-    } catch (error) {
-      console.error(`   ❌ 分批卖出失败: ${error.message}`);
-    } finally {
-      pos.partialSellInProgress = false;
     }
   }
 
   /**
-   * 触发全部卖出（或剩余部分）
+   * 触发全部卖出
    */
   async _triggerExit(pos, reason, sellPct) {
     // 1. 检查是否已在退出中（防止并发）
@@ -553,8 +469,7 @@ export class LivePositionMonitor {
     const finalPnl = pos.lastPnl;
 
     const icon = finalPnl > 0 ? '🟢' : '🔴';
-    const sellPctStr = sellPct < 100 ? ` | 卖出剩余${sellPct}%` : '';
-    console.log(`\n${icon} [EXIT] $${pos.symbol} | ${reason} | PnL: ${finalPnl >= 0 ? '+' : ''}${finalPnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}%${sellPctStr}`);
+    console.log(`\n${icon} [EXIT] $${pos.symbol} | ${reason} | PnL: ${finalPnl >= 0 ? '+' : ''}${finalPnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}%`);
 
     // 执行卖出
     let solReceived = 0;
@@ -571,8 +486,7 @@ export class LivePositionMonitor {
         return;
       }
 
-      // 计算实际卖出数量（如果是部分卖出，使用剩余数量）
-      const sellAmount = sellPct >= 100 ? pos.tokenAmount : Math.floor(pos.tokenAmount * (sellPct / 100));
+      const sellAmount = pos.tokenAmount;
 
       if (sellAmount > 0) {
         const result = await this.executor.sell(pos.tokenCA, sellAmount);
@@ -588,15 +502,9 @@ export class LivePositionMonitor {
         // 累加实际收到的 SOL
         pos.totalSolReceived += solReceived;
 
-        // 如果有锁定利润，显示总收益
-        if (pos.lockedPnl > 0) {
-          const totalPnl = ((pos.totalSolReceived - pos.entrySol) / pos.entrySol * 100);
-          console.log(`   💰 总收益: ${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(1)}% | 锁定利润: +${pos.lockedPnl.toFixed(1)}%`);
-        }
-
         // 记录亏损
-        if (pos.totalSolReceived < pos.entrySol) {
-          const loss = pos.entrySol - pos.totalSolReceived;
+        if (result.amountOut < pos.entrySol) {
+          const loss = pos.entrySol - result.amountOut;
           this.executor.recordLoss(loss);
         }
       }
