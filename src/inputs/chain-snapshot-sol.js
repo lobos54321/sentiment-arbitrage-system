@@ -391,27 +391,30 @@ export class SolanaSnapshotService {
 
       const tokenAmount = Math.floor((sellTestAmount / price) * 1e9); // Convert to lamports
 
-      // Get Jupiter quote for selling
-      const url = `https://api.jup.ag/swap/v1/quote?inputMint=${tokenCA}&outputMint=So11111111111111111111111111111111111111112&amount=${tokenAmount}&slippageBps=100`;
+      // Get Jupiter Ultra order for selling (与实际交易一致的价格源)
+      const params = new URLSearchParams({
+        inputMint: tokenCA,
+        outputMint: 'So11111111111111111111111111111111111111112',
+        amount: tokenAmount.toString()
+      });
+      const url = `https://api.jup.ag/ultra/v1/order?${params.toString()}`;
 
       const response = await axios.get(url, { timeout: 10000 });
 
-      if (!response.data || !response.data.routePlan) {
+      if (!response.data || !response.data.outAmount) {
         return { slippage: null };
       }
 
       const quote = response.data;
 
-      // Calculate slippage from quote
-      const expectedOut = quote.outAmount;
-      const minOut = quote.otherAmountThreshold;
-      const slippagePct = ((expectedOut - minOut) / expectedOut) * 100;
+      // Ultra 使用 RTSE 自动滑点，slippageBps 就是实际滑点
+      const slippagePct = (quote.slippageBps || 0) / 100;
 
       return {
         slippage: slippagePct,
-        expected_out_lamports: expectedOut,
-        min_out_lamports: minOut,
-        price_impact: quote.priceImpactPct
+        expected_out_lamports: quote.outAmount,
+        min_out_lamports: null,  // Ultra 不返回 minOut，由 RTSE 内部管理
+        price_impact: null  // Ultra 不单独返回 price impact
       };
     } catch (error) {
       console.error('Error testing slippage:', error.message);

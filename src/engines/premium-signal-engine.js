@@ -675,8 +675,8 @@ export class PremiumSignalEngine {
             if (tradeResult.success && this.livePositionMonitor) {
               const entryMC = dexData?.market_cap || signal.market_cap || 0;
 
-              // 🔧 BUG FIX: 等待8秒后验证余额（Solana 确认需要时间）
-              await new Promise(r => setTimeout(r, 8000));
+              // Ultra V3 /execute 同步确认，3秒足够余额更新
+              await new Promise(r => setTimeout(r, 3000));
               const balance = await this.jupiterExecutor.getTokenBalance(ca);
 
               if (balance.amount <= 0) {

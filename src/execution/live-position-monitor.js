@@ -237,14 +237,6 @@ export class LivePositionMonitor {
       entrySol,
       tokenAmount,        // raw amount（含 decimals）
       tokenDecimals,
-      // 策略D: 渐进式分批止盈
-      tp1: false,           // +50% 卖50%
-      tp2: false,           // +100% 卖30%
-      tp3: false,           // 保留字段
-      soldPct: 0,           // 已卖出百分比
-      remainingPct: 100,
-      lockedPnl: 0,
-      moonHighPnl: 0,       // 分批后剩余仓位的独立峰值
       highPnl: 0,
       lowPnl: 0,
       lastPnl: 0,
@@ -252,7 +244,6 @@ export class LivePositionMonitor {
       entryTime: Date.now(),
       closed: false,
       exitInProgress: false,  // 防止并发卖出
-      partialSellInProgress: false,  // 防止并发分批卖出
       exitReason: null
     };
 
@@ -388,24 +379,24 @@ export class LivePositionMonitor {
     }
 
     // ==================== 退出条件评估 ====================
-    // 注意：已分批止盈的仓位(tp1=true)不用普通止损，用 MOON_STOP
 
-    // 1. STOP_LOSS: -20% 全卖（仅未分批的仓位）
-    if (pnl <= -20 && !pos.tp1) {
+    // 1. STOP_LOSS: -20% 全卖（30s grace period 防止 spread 误杀）
+    //    meme coin 低流动性 bid-ask spread 可达 20%，$ANTS 第1秒就 -18.3%
+    if (pnl <= -20 && holdTimeSec >= 30) {
       await this._triggerExit(pos, 'STOP_LOSS', 100);
       return;
     }
 
     // 2. FAST_STOP: 买入后 60-120 秒窗口，从未涨过(highPnl<=0) 且当前 < -15%
     //    前 60 秒是 grace period（bid-ask spread 可能导致虚假亏损）
-    if (!pos.tp1 && holdTimeSec >= 60 && holdTimeSec <= 120 && pos.highPnl <= 0 && pnl < -15) {
+    if (holdTimeSec >= 60 && holdTimeSec <= 120 && pos.highPnl <= 0 && pnl < -15) {
       await this._triggerExit(pos, 'FAST_STOP', 100);
       return;
     }
 
     // 3. MID_STOP: 持仓>60s & PnL < -15% & 从未涨过 +10%（需要连续 3s 确认）
     //    前 60 秒 grace period：meme coin 买入后 spread 可能导致虚假 -10~-15%
-    if (!pos.tp1 && holdTimeSec >= 60 && pnl < -15 && pos.highPnl < 10) {
+    if (holdTimeSec >= 60 && pnl < -15 && pos.highPnl < 10) {
       if (!pos._midStopPending) {
         pos._midStopPending = true;
         pos._midStopFirstTime = Date.now();
@@ -475,11 +466,7 @@ export class LivePositionMonitor {
 
     pos.exitReason = reason;
 
-    // 计算最终 PnL（策略D：已锁定 + 剩余仓位当前PnL）
-    let finalPnl = pos.lastPnl;
-    if (pos.tp1) {
-      finalPnl = pos.lockedPnl + pos.lastPnl * (pos.remainingPct / 100);
-    }
+    const finalPnl = pos.lastPnl;
 
     const icon = finalPnl > 0 ? '🟢' : '🔴';
     console.log(`\n${icon} [EXIT] $${pos.symbol} | ${reason} | PnL: ${finalPnl >= 0 ? '+' : ''}${finalPnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}%`);
@@ -499,9 +486,7 @@ export class LivePositionMonitor {
         return;
       }
 
-      const sellAmount = pos.tp1
-        ? Math.floor(pos.tokenAmount * (pos.remainingPct / 100))
-        : pos.tokenAmount;
+      const sellAmount = pos.tokenAmount;
 
       if (sellAmount > 0) {
         const result = await this.executor.sell(pos.tokenCA, sellAmount);
@@ -518,8 +503,8 @@ export class LivePositionMonitor {
         pos.totalSolReceived += solReceived;
 
         // 记录亏损
-        if (result.amountOut < pos.entrySol * (pos.remainingPct / 100)) {
-          const loss = pos.entrySol * (pos.remainingPct / 100) - result.amountOut;
+        if (result.amountOut < pos.entrySol) {
+          const loss = pos.entrySol - result.amountOut;
           this.executor.recordLoss(loss);
         }
       }
@@ -580,73 +565,6 @@ export class LivePositionMonitor {
   }
 
   /**
-   * 分批卖出（策略D: TP1卖50%, TP2卖30%）
-   * @returns {boolean} 是否卖出成功
-   */
-  async _triggerPartialSell(pos, sellPct, label) {
-    // 1. 检查是否已在卖出中（防止并发）
-    if (pos.partialSellInProgress || pos.exitInProgress || pos.closed) {
-      return false;
-    }
-
-    // 2. 立即标记卖出中
-    pos.partialSellInProgress = true;
-
-    // 3. 防抖（增加到 10 秒）
-    const lastSell = this.sellDebounce.get(pos.tokenCA);
-    if (lastSell && (Date.now() - lastSell) < 10000) {
-      pos.partialSellInProgress = false;
-      return false;
-    }
-    this.sellDebounce.set(pos.tokenCA, Date.now());
-
-    // 计算卖出数量
-    const sellAmount = Math.floor(pos.tokenAmount * (sellPct / 100));
-    const newRemaining = pos.remainingPct - sellPct;
-
-    console.log(`\n💰 [${label}] $${pos.symbol} +${pos.lastPnl.toFixed(0)}% → 卖${sellPct}%，留${newRemaining}%`);
-
-    try {
-      // 🔧 BUG FIX: 不再预检查余额，直接尝试卖出
-      // 之前的问题：getTokenBalance 有时返回0（RPC问题），导致分批止盈被跳过
-      // 现在：直接用 pos.tokenAmount 计算卖出数量，让 Jupiter 处理余额不足的情况
-
-      const result = await this.executor.sell(pos.tokenCA, sellAmount);
-
-      if (!result.success) {
-        console.error(`   ❌ 分批卖出失败: ${result.error || 'Unknown error'}`);
-        pos.partialSellInProgress = false;
-        return false;
-      }
-
-      const solReceived = result.amountOut || 0;
-      console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
-
-      // 累加实际收到的 SOL
-      pos.totalSolReceived += solReceived;
-
-      pos.soldPct += sellPct;
-      pos.remainingPct = newRemaining;
-      pos.lockedPnl += pos.lastPnl * (sellPct / 100);
-
-      // 更新 DB（包含累计收到的 SOL）
-      try {
-        this.db.prepare(`
-          UPDATE live_positions SET sold_80_pct=1, remaining_pct=?, locked_pnl=?, total_sol_received=?
-          WHERE token_ca=? AND status='open'
-        `).run(newRemaining, pos.lockedPnl, pos.totalSolReceived, pos.tokenCA);
-      } catch (e) { /* ignore */ }
-
-      pos.partialSellInProgress = false;
-      return true;
-    } catch (error) {
-      console.error(`   ❌ 分批卖出异常: ${error.message}`);
-      pos.partialSellInProgress = false;
-      return false;
-    }
-  }
-
-  /**
    * 关闭持仓（DB 更新）
    */
   _closePosition(pos, finalPnl) {
@@ -698,13 +616,6 @@ export class LivePositionMonitor {
           entrySol: row.entry_sol,
           tokenAmount: row.token_amount,
           tokenDecimals: row.token_decimals,
-          tp1: !!row.sold_80_pct,
-          tp2: row.remaining_pct <= 50,
-          tp3: row.remaining_pct <= 30,
-          soldPct: 100 - (row.remaining_pct || 100),
-          remainingPct: row.remaining_pct || 100,
-          lockedPnl: row.locked_pnl || 0,
-          moonHighPnl: row.high_pnl || 0,
           highPnl: row.high_pnl || 0,
           lowPnl: row.low_pnl || 0,
           lastPnl: 0,
@@ -712,7 +623,6 @@ export class LivePositionMonitor {
           entryTime: row.entry_time,
           closed: false,
           exitInProgress: false,
-          partialSellInProgress: false,
           exitReason: null
         });
         // 注册到价格监控（V2 需要 tokenAmount 和 decimals）
