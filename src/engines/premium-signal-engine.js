@@ -386,8 +386,8 @@ export class PremiumSignalEngine {
       }
 
       if (mc > 0) {
-        if (mc >= 5000 && mc <= 40000) { score += 15; scoreDetails.push(`MC甜蜜区(+15)`); }
-        else if (mc > 40000) { score -= 25; scoreDetails.push(`MC过高${(mc/1000).toFixed(0)}K(-25)`); }
+        if (mc >= 5000 && mc < 20000) { score += 15; scoreDetails.push(`MC甜蜜区(+15)`); }
+        else if (mc >= 20000) { score -= 25; scoreDetails.push(`MC过高${(mc/1000).toFixed(0)}K(-25)`); }
       }
 
       if (snapshot) {
@@ -450,14 +450,19 @@ export class PremiumSignalEngine {
         console.log(`📈 [ATH信号] $${signal.symbol} 涨了${athGain}% | source=${signal.source} | is_ath=${signal.is_ath}`);
       }
 
-      // 评分决策（MC 梯度 + 评分联动）：
-      // MC 越高要求评分越高，高MC胜率0%需更严格
-      // MC < 10K:  >= 80 分 → 0.10 SOL（胜率67%）
-      // MC 10-20K: >= 85 分 → 0.08 SOL（胜率40%）
-      // MC 20-30K: >= 95 分 → 0.04 SOL（胜率0%，提高门槛+减仓）
-      // MC > 30K:  不买
+      // FINAL 策略入场规则（第一性原理）：
+      // MC $5-10K:  Score ≥ 60 → CORE, 0.08 SOL（低MC高潜力，最大仓位）
+      // MC $10-15K: Score ≥ 60 → AUX, 0.06 SOL（中MC辅助仓位）
+      // MC $15-20K: Score ≥ 60 且 BSR ≥ 1.5 → PROBE, 0.04 SOL（高MC探测仓位）
+      // MC > $20K 或 Score < 60 → SKIP
       let scoreAction = 'SKIP';
       let tieredPositionSize = this.positionSol; // 默认仓位
+      let entryTier = 'NONE'; // CORE / AUX / PROBE
+
+      // BSR（买卖比）用于 PROBE 层判断
+      const bsr = dexData && dexData.sell_count_24h > 0
+        ? dexData.buy_count_24h / dexData.sell_count_24h
+        : 0;
 
       // 重复信号特殊处理：评分>=85 或比上次提高>=15 分 → 允许重新评估
       const prevScore = sigHistory?.lastScore || 0;
@@ -466,39 +471,38 @@ export class PremiumSignalEngine {
       if (sigHistory) sigHistory.lastScore = score;
       else if (this.signalHistory.has(ca)) this.signalHistory.get(ca).lastScore = score;
 
-      // 检查是否已持仓（不加仓）
+      // 检查是否已持仓（ATH重复信号不卖出，但暂不加仓）
       const alreadyHolding = this.livePositionMonitor?.positions?.has(ca);
       if (alreadyHolding) {
         console.log(`⏭️ [已持仓] $${signal.symbol} 已有仓位，不加仓`);
-      } else if (mc > 30000) {
-        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K > 30K → 不买`);
-      } else if (mc >= 20000 && mc <= 30000) {
-        // MC 20-30K: 要求 95 分以上（数据验证：0/2 胜率，提高门槛+减仓）
-        if (score >= 95) {
+      } else if (mc >= 20000) {
+        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K >= 20K → 不买`);
+      } else if (score < 60) {
+        console.log(`⏭️ [评分不足] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<60 → 不够`);
+      } else if (mc >= 5000 && mc < 10000) {
+        // CORE: MC $5-10K, Score ≥ 60
+        scoreAction = 'BUY_FULL';
+        tieredPositionSize = 0.08;
+        entryTier = 'CORE';
+        console.log(`💎 [CORE] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=60 → 买 0.08 SOL`);
+      } else if (mc >= 10000 && mc < 15000) {
+        // AUX: MC $10-15K, Score ≥ 60
+        scoreAction = 'BUY_FULL';
+        tieredPositionSize = 0.06;
+        entryTier = 'AUX';
+        console.log(`💎 [AUX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=60 → 买 0.06 SOL`);
+      } else if (mc >= 15000 && mc < 20000) {
+        // PROBE: MC $15-20K, Score ≥ 60, BSR ≥ 1.5
+        if (bsr >= 1.5) {
           scoreAction = 'BUY_FULL';
           tieredPositionSize = 0.04;
-          console.log(`💎 [高MC高分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=95 → 买 0.04 SOL`);
+          entryTier = 'PROBE';
+          console.log(`💎 [PROBE] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=60 BSR=${bsr.toFixed(2)}>=1.5 → 买 0.04 SOL`);
         } else {
-          console.log(`⏭️ [MC 20-30K] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<95 → 不够`);
+          console.log(`⏭️ [PROBE-BSR低] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K BSR=${bsr.toFixed(2)}<1.5 → 不够`);
         }
-      } else if (mc >= 10000 && mc < 20000) {
-        // MC 10-20K: 要求 85 分以上
-        if (score >= 85) {
-          scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.08;
-          console.log(`💎 [中MC高分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=85 → 买 0.08 SOL`);
-        } else {
-          console.log(`⏭️ [MC 10-20K] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<85 → 不够`);
-        }
-      } else if (mc < 10000) {
-        // MC < 10K: 要求 80 分以上（AI 关闭时提高门槛）
-        if (score >= 80) {
-          scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.10;
-          console.log(`💎 [低MC] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=80 → 买 0.10 SOL`);
-        } else {
-          console.log(`⏭️ [低MC低分] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<80 → 不够`);
-        }
+      } else if (mc < 5000) {
+        console.log(`⏭️ [MC过低] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K < 5K → 不买`);
       }
 
       console.log(`📈 [评分] ${score}分 [${scoreDetails.join(' | ')}] → ${scoreAction}`);
@@ -533,21 +537,7 @@ export class PremiumSignalEngine {
           return { action: 'SKIP', reason: 'ai_low_confidence', details: aiResult };
         }
 
-        // MC 20-30K 需要 AI 置信度 >= 55
-        if (mc > 20000 && mc <= 30000 && aiResult.confidence < 55) {
-          this.stats.ai_skipped++;
-          console.log(`⏭️  [中MC+低信心] MC=$${(mc/1000).toFixed(1)}K 置信度${aiResult.confidence} < 55 → SKIP`);
-          this.saveSignalRecord(signal, gateResult.status, aiResult);
-          return { action: 'SKIP', reason: 'mid_mc_low_confidence', details: aiResult };
-        }
-
-        // MC 30-40K 需要 AI 置信度 >= 55（这个区间+31.8%平均，值得冒险）
-        if (mc > 30000 && mc <= 40000 && aiResult.confidence < 55) {
-          this.stats.ai_skipped++;
-          console.log(`⏭️  [高MC+低信心] MC=$${(mc/1000).toFixed(1)}K 置信度${aiResult.confidence} < 55 → SKIP`);
-          this.saveSignalRecord(signal, gateResult.status, aiResult);
-          return { action: 'SKIP', reason: 'high_mc_low_confidence', details: aiResult };
-        }
+        // FINAL策略: MC > 20K 已在入场规则中过滤, 无需额外AI置信度检查
 
         // AI 返回 BUY_HALF 也允许，后面按半仓处理
         if (aiResult.action === 'BUY_HALF') {

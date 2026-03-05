@@ -4,29 +4,26 @@
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~1.5 秒响应）
  *
- * 退出逻辑（新策略 - 目标70%胜率）：
+ * FINAL 退出策略（第一性原理）：
  *
- * 第一层：Grace Period（60秒保护期）
- * - 前60秒只触发FAST_STOP（-15%），防止价差误杀
+ * Phase 1（≤5 分钟）：
+ * - FAST_STOP: ≤30s, highPnl≤0, PnL<-10% → 全卖
+ * - STOP_LOSS: PnL≤-20% → 全卖
+ * - Dynamic Floor:
+ *   - highPnl≥50% → 保底+15%
+ *   - highPnl≥30% → 保底+8%
+ *   - highPnl≥15% → 保底+5%
+ * - MINI_TS: highPnl 15-35%, PnL跌幅>35% from peak → 卖
+ * - MID_STOP: ≥30s, highPnl<10%, PnL<-12% → 全卖
+ * - TIMEOUT: >300s, highPnl<5%, PnL<0% → 全卖
  *
- * 第二层：动态保底机制
- * - 峰值≥50% → 保底+15%
- * - 峰值≥30% → 保底+8%
- * - 峰值≥15% → 保底+5%
- * - 峰值≥5%  → 保底+3%
- * - 从未盈利 → 容忍-10%
+ * Phase 2（>5 分钟，仅 highPnl≥5%）：
+ * - TP1: PnL≥50% → 卖30%
+ * - MOON_STOP: TP1后保留50%峰值
+ * - PEAK_EXIT: PnL从峰值回撤>40% → 卖剩余
+ * - Dynamic Floor 继续生效
  *
- * 第三层：分批止盈 + MOON_STOP
- * - TP1: +35%卖20%
- * - TP2: +70%卖20%
- * - TP3: +130%卖20%
- * - TP4: +260%卖20%
- * - MOON_STOP: 涨幅≥200%后保留60%峰值
- *
- * 实盘优化（2026-03-04 v4）：
- * - 基于4.75h实盘数据（40%胜率）和策略C回测（100%胜率）设计
- * - 核心改进：Grace period防误杀 + 动态保底限亏损 + 分批止盈锁利
- * - 目标：胜率40% → 70%，平均PnL +7.1% → +50-80%
+ * ATH重复信号：不卖出，考虑加仓
  */
 
 import Database from 'better-sqlite3';
@@ -385,97 +382,153 @@ export class LivePositionMonitor {
       console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} 入:${pos.entryPrice.toExponential(3)} 现:${price.toExponential(3)} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
     }
 
-    // 接近 PEAK_EXIT 退出线时打警告
+    // 接近退出线时打警告（FINAL策略: PEAK_EXIT 回撤>40%）
     if (pos.highPnl >= 30) {
-      let exitLine;
-      if (pos.highPnl >= 300) exitLine = Math.max(pos.highPnl * 0.70, 100);
-      else if (pos.highPnl >= 100) exitLine = Math.max(pos.highPnl * 0.75, 50);
-      else if (pos.highPnl >= 50) exitLine = Math.max(pos.highPnl * 0.80, 25);
-      else exitLine = Math.max(pos.highPnl * 0.85, 15);
-
-      if (pnl < exitLine + 5 && pnl >= exitLine) {
-        console.log(`⚠️  [接近退出] $${pos.symbol} PnL:+${pnl.toFixed(1)}% 退出线:+${exitLine.toFixed(1)}% 差:${(pnl - exitLine).toFixed(1)}%`);
+      const dropPct = pos.highPnl > 0 ? ((pos.highPnl - pnl) / pos.highPnl) * 100 : 0;
+      if (dropPct > 30 && dropPct <= 40) {
+        console.log(`⚠️  [接近PEAK_EXIT] $${pos.symbol} PnL:+${pnl.toFixed(1)}% peak:+${pos.highPnl.toFixed(1)}% 回撤:${dropPct.toFixed(0)}% (>40%触发)`);
       }
     }
 
-    // ==================== 新策略退出条件评估 ====================
+    // ==================== FINAL 策略退出条件评估 ====================
+    const holdTimeMin = holdTimeSec / 60;
+    const isPhase1 = holdTimeMin <= 5;  // Phase 1: ≤5 分钟
+    const isPhase2 = holdTimeMin > 5;   // Phase 2: >5 分钟
 
-    // ========== 第一层：Grace Period（60秒保护期）==========
-    // 前60秒只触发FAST_STOP（-15%），防止价差误杀
-    // 实盘数据：$ANTS 6秒被MID_STOP杀掉（-11%），后续+1341%
-    if (holdTimeSec < 60) {
-      if (pnl <= -15) {
+    // ========== Phase 1: ≤5 分钟 ==========
+    if (isPhase1) {
+
+      // FAST_STOP: ≤30s, highPnl≤0, PnL<-10% → 全卖
+      if (holdTimeSec <= 30 && pos.highPnl <= 0 && pnl < -10) {
         await this._triggerExit(pos, 'FAST_STOP', 100);
         return;
       }
-      // Grace period内其他情况都HOLD
-      return;
-    }
 
-    // ========== 第二层：分批止盈（锁定利润）==========
-    // TP1: +35%卖20%（策略C的+50%太高，只有6.7%触发）
-    // TP2: +70%卖20%
-    // TP3: +130%卖20%
-    // TP4: +260%卖20%
-    if (!pos.tp1 && pnl >= 35) {
-      await this._triggerPartialSell(pos, 'TP1', 20, pnl);
-      return;
-    }
-    if (!pos.tp2 && pnl >= 70) {
-      await this._triggerPartialSell(pos, 'TP2', 20, pnl);
-      return;
-    }
-    if (!pos.tp3 && pnl >= 130) {
-      await this._triggerPartialSell(pos, 'TP3', 20, pnl);
-      return;
-    }
-    if (!pos.tp4 && pnl >= 260) {
-      await this._triggerPartialSell(pos, 'TP4', 20, pnl);
-      return;
-    }
-
-    // ========== 第三层：MOON_STOP（捕获超级大涨）==========
-    // 涨幅≥200%进入月球模式，保留60%峰值（允许40%回撤）
-    if (pnl >= 200 && !pos.moonMode) {
-      pos.moonMode = true;
-      pos.moonHighPnl = pnl;
-      console.log(`🌙 [MOON_MODE] $${pos.symbol} 进入月球模式 @ +${pnl.toFixed(0)}%`);
-    }
-
-    if (pos.moonMode) {
-      pos.moonHighPnl = Math.max(pos.moonHighPnl, pnl);
-      const retainRatio = 0.60;  // 保留60%峰值（策略C是55%，我们更保守）
-      const minPnl = pos.moonHighPnl * retainRatio;
-
-      if (pnl < minPnl) {
+      // STOP_LOSS: PnL ≤ -20% → 全卖（任何时间）
+      if (pnl <= -20) {
         const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `MOON_STOP(peak+${pos.moonHighPnl.toFixed(0)}%)`, remainingPct);
+        await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
         return;
       }
-    }
 
-    // ========== 第四层：动态保底机制（限制亏损）==========
-    // 根据峰值动态调整保底线
-    let minPnl;
-    if (pos.highPnl >= 50) {
-      minPnl = Math.max(15, pos.highPnl * 0.30);  // 峰值≥50%，保底30%（最低+15%）
-    } else if (pos.highPnl >= 30) {
-      minPnl = Math.max(8, pos.highPnl * 0.25);   // 峰值≥30%，保底25%（最低+8%）
-    } else if (pos.highPnl >= 15) {
-      minPnl = Math.max(5, pos.highPnl * 0.20);   // 峰值≥15%，保底20%（最低+5%）
-    } else if (pos.highPnl >= 5) {
-      minPnl = 3;                                  // 峰值≥5%，保底+3%
-    } else {
-      minPnl = -10;                                // 从未盈利，容忍-10%
-    }
+      // Dynamic Floor（保底机制）
+      if (pos.highPnl >= 50 && pnl < 15) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+15%)`, remainingPct);
+        return;
+      }
+      if (pos.highPnl >= 30 && pnl < 8) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+8%)`, remainingPct);
+        return;
+      }
+      if (pos.highPnl >= 15 && pnl < 5) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+5%)`, remainingPct);
+        return;
+      }
 
-    if (pnl < minPnl) {
-      const remainingPct = 100 - pos.soldPct;
-      const reason = pos.highPnl > 0
-        ? `TRAIL_STOP(peak+${pos.highPnl.toFixed(0)}%)`
-        : 'STOP_LOSS';
-      await this._triggerExit(pos, reason, remainingPct);
+      // MINI_TS: highPnl 15-35%, PnL从峰值回撤超过35% → 卖
+      if (pos.highPnl >= 15 && pos.highPnl <= 35) {
+        const dropFromPeak = pos.highPnl - pnl;
+        const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
+        if (dropPct > 35) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `MINI_TS(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      }
+
+      // MID_STOP: ≥30s, highPnl<10%, PnL<-12% → 全卖
+      if (holdTimeSec >= 30 && pos.highPnl < 10 && pnl < -12) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, 'MID_STOP', remainingPct);
+        return;
+      }
+
+      // TIMEOUT: >300s (5min), highPnl<5%, PnL<0% → 全卖
+      if (holdTimeSec > 300 && pos.highPnl < 5 && pnl < 0) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, 'TIMEOUT', remainingPct);
+        return;
+      }
+
+      // Phase 1 内其他情况 HOLD
       return;
+    }
+
+    // ========== Phase 2: >5 分钟（仅 highPnl ≥ 5% 才进入） ==========
+    if (isPhase2) {
+      // highPnl < 5% 的持仓在 Phase 1 TIMEOUT 中已处理
+      // 如果到了 Phase 2 但 highPnl < 5%，也触发超时退出
+      if (pos.highPnl < 5) {
+        if (pnl < 0) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, 'TIMEOUT_P2', remainingPct);
+          return;
+        }
+        // highPnl < 5% 但当前盈利，继续观察
+        return;
+      }
+
+      // STOP_LOSS 在 Phase 2 仍然有效
+      if (pnl <= -20) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
+        return;
+      }
+
+      // TP1: PnL ≥ 50% → 卖30%（只触发一次）
+      if (!pos.tp1 && pnl >= 50) {
+        await this._triggerPartialSell(pos, 'TP1', 30, pnl);
+        return;
+      }
+
+      // MOON_STOP: TP1 已触发后，保留50%峰值
+      if (pos.tp1 && !pos.moonMode && pnl >= 100) {
+        pos.moonMode = true;
+        pos.moonHighPnl = pnl;
+        console.log(`🌙 [MOON_MODE] $${pos.symbol} 进入月球模式 @ +${pnl.toFixed(0)}%`);
+      }
+
+      if (pos.moonMode) {
+        pos.moonHighPnl = Math.max(pos.moonHighPnl, pnl);
+        const retainRatio = 0.50;  // 保留50%峰值
+        const moonFloor = pos.moonHighPnl * retainRatio;
+        if (pnl < moonFloor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `MOON_STOP(peak+${pos.moonHighPnl.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      }
+
+      // PEAK_EXIT: PnL从峰值回撤>40% → 卖剩余
+      if (pos.highPnl >= 30) {
+        const dropFromPeak = pos.highPnl - pnl;
+        const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
+        if (dropPct > 40) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `PEAK_EXIT(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      }
+
+      // Dynamic Floor（Phase 2 中继续生效）
+      if (pos.highPnl >= 50 && pnl < 15) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+15%)`, remainingPct);
+        return;
+      }
+      if (pos.highPnl >= 30 && pnl < 8) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+8%)`, remainingPct);
+        return;
+      }
+      if (pos.highPnl >= 15 && pnl < 5) {
+        const remainingPct = 100 - pos.soldPct;
+        await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+5%)`, remainingPct);
+        return;
+      }
     }
   }
 
