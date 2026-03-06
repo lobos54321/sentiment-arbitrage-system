@@ -462,10 +462,10 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'market_paused' };
       }
 
-      // ===== 并发仓位检查 (最多3个) =====
+      // ===== 并发仓位检查 (最多2个，资本保守策略) =====
       const currentPositionCount = this.livePositionMonitor?.positions?.size || 0;
-      if (currentPositionCount >= 3) {
-        console.log(`⏭️ [v13] 当前${currentPositionCount}个持仓 >= 3 → 不开新仓`);
+      if (currentPositionCount >= 2) {
+        console.log(`⏭️ [v13] 当前${currentPositionCount}个持仓 >= 2 → 不开新仓`);
         return { action: 'SKIP', reason: 'max_positions_v13' };
       }
 
@@ -487,18 +487,19 @@ export class PremiumSignalEngine {
       }
 
       // 确定信号级别和仓位
+      // 实盘数据验证: 0.04-0.06 SOL交易gas成本<5%, 0.02太小gas占15%+
       let entryTier, tieredPositionSize, tradeConviction;
       if (tierBoost >= 2) {
         entryTier = 'S';
-        tieredPositionSize = 0.04;
+        tieredPositionSize = 0.10;
         tradeConviction = 'HIGH';
       } else if (tierBoost >= 1) {
         entryTier = 'A';
-        tieredPositionSize = 0.03;
+        tieredPositionSize = 0.07;
         tradeConviction = 'HIGH';
       } else {
         entryTier = 'B';
-        tieredPositionSize = 0.02;
+        tieredPositionSize = 0.05;
         tradeConviction = 'NORMAL';
       }
 
