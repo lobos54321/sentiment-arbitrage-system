@@ -1877,15 +1877,15 @@ function renderPremiumDashboard() {
     <div id="shadow-content" class="tab-content active">
       <div class="grid" id="summary"></div>
       <div class="card" style="margin-bottom:20px"><h2>📊 止损/止盈分布</h2><div id="reasons"></div></div>
-      <div class="card" style="margin-bottom:20px"><h2>🟢 当前持仓</h2><table id="open-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>当前PnL</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
-      <div class="card"><h2>📋 最近交易</h2><table id="recent-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+      <div class="card" style="margin-bottom:20px"><h2>🟢 当前持仓</h2><table id="open-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>当前PnL</th><th>最高</th><th>最低</th><th>⏱️持有</th></tr></thead><tbody></tbody></table></div>
+      <div class="card"><h2>📋 最近交易</h2><table id="recent-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>⏱️持仓</th><th>时间</th></tr></thead><tbody></tbody></table></div>
     </div>
 
     <!-- 实盘交易 -->
     <div id="live-content" class="tab-content">
       <div class="grid" id="live-summary"></div>
-      <div class="card" style="margin-bottom:20px"><h2>🟢 实盘持仓</h2><table id="live-open-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>最高</th><th>最低</th></tr></thead><tbody></tbody></table></div>
-      <div class="card"><h2>📋 实盘交易记录</h2><table id="live-recent-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位</th><th>实际PnL</th><th>峰值</th><th>损失</th><th>捕获率</th><th>出场原因</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+      <div class="card" style="margin-bottom:20px"><h2>🟢 实盘持仓</h2><table id="live-open-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>最高</th><th>最低</th><th>⏱️持有时间</th></tr></thead><tbody></tbody></table></div>
+      <div class="card"><h2>📋 实盘交易记录</h2><table id="live-recent-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位</th><th>实际PnL</th><th>峰值</th><th>损失</th><th>捕获率</th><th>出场原因</th><th>⏱️持仓</th><th>时间</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
   <script>
@@ -1921,13 +1921,19 @@ function renderPremiumDashboard() {
         document.getElementById('reasons').innerHTML=rhtml;
 
         const otb=document.querySelector('#open-table tbody');
-        otb.innerHTML=d.open.map(r=>'<tr><td>$'+r.symbol+' <span class="open-tag">OPEN</span></td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td>-</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td></tr>').join('');
+        otb.innerHTML=d.open.map(r=>{
+          const holdSec=r.entry_time?Math.floor((Date.now()-new Date(r.entry_time).getTime())/1000):0;
+          const holdStr=holdSec>=3600?Math.floor(holdSec/3600)+'h'+Math.floor((holdSec%3600)/60)+'m':(holdSec>=60?Math.floor(holdSec/60)+'m'+(holdSec%60)+'s':holdSec+'s');
+          return '<tr><td>$'+r.symbol+' <span class="open-tag">OPEN</span></td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td>-</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td><td style="color:#00d9ff;font-weight:bold">'+holdStr+'</td></tr>';
+        }).join('');
 
         const rtb=document.querySelector('#recent-table tbody');
         rtb.innerHTML=d.recent.map(r=>{
           const pnlCls=r.exit_pnl>0?'pnl-pos':'pnl-neg';
           const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
-          return '<tr><td>$'+r.symbol+'</td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+r.exit_pnl.toFixed(1)+'%</td><td class="pnl-pos">+'+r.high_pnl.toFixed(1)+'%</td><td class="pnl-neg">'+r.low_pnl.toFixed(1)+'%</td><td>'+r.exit_reason+'</td><td>'+t+'</td></tr>';
+          let holdStr='-';
+          if(r.entry_time&&r.closed_at){const hs=Math.floor((new Date(r.closed_at).getTime()-new Date(r.entry_time).getTime())/1000);holdStr=hs>=3600?Math.floor(hs/3600)+'h'+Math.floor((hs%3600)/60)+'m':(hs>=60?Math.floor(hs/60)+'m'+(hs%60)+'s':hs+'s');}
+          return '<tr><td>$'+r.symbol+'</td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+r.exit_pnl.toFixed(1)+'%</td><td class="pnl-pos">+'+r.high_pnl.toFixed(1)+'%</td><td class="pnl-neg">'+r.low_pnl.toFixed(1)+'%</td><td>'+r.exit_reason+'</td><td>'+holdStr+'</td><td>'+t+'</td></tr>';
         }).join('');
 
         // 实盘数据
@@ -1942,14 +1948,20 @@ function renderPremiumDashboard() {
           '<div class="card"><div class="big-num blue">'+live.open.length+'</div><div class="label">当前持仓</div></div>';
 
         const lotb=document.querySelector('#live-open-table tbody');
-        lotb.innerHTML=live.open.map(r=>'<tr><td>$'+r.symbol+' <span class="live-tag">LIVE</span></td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td></tr>').join('');
+        lotb.innerHTML=live.open.map(r=>{
+          const holdSec=r.entry_time?Math.floor((Date.now()-new Date(r.entry_time).getTime())/1000):0;
+          const holdStr=holdSec>=3600?Math.floor(holdSec/3600)+'h'+Math.floor((holdSec%3600)/60)+'m':(holdSec>=60?Math.floor(holdSec/60)+'m'+holdSec%60+'s':holdSec+'s');
+          return '<tr><td>$'+r.symbol+' <span class="live-tag">LIVE</span></td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td><td style="color:#00d9ff;font-weight:bold">'+holdStr+'</td></tr>';
+        }).join('');
 
         const lrtb=document.querySelector('#live-recent-table tbody');
         lrtb.innerHTML=live.recent.map(r=>{
           const realPnlCls=(r.real_pnl||0)>0?'pnl-pos':'pnl-neg';
           const captureCls=(r.capture_rate||0)>70?'pnl-pos':(r.capture_rate||0)>40?'':'pnl-neg';
           const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
-          return '<tr><td>$'+r.symbol+'</td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="'+realPnlCls+'">'+(r.real_pnl>=0?'+':'')+(r.real_pnl||0).toFixed(1)+'%</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">-'+(r.loss||0).toFixed(1)+'%</td><td class="'+captureCls+'">'+(r.capture_rate||0).toFixed(0)+'%</td><td>'+(r.exit_reason||'-')+'</td><td>'+t+'</td></tr>';
+          let holdStr='-';
+          if(r.entry_time&&r.closed_at){const hs=Math.floor((new Date(r.closed_at).getTime()-new Date(r.entry_time).getTime())/1000);holdStr=hs>=3600?Math.floor(hs/3600)+'h'+Math.floor((hs%3600)/60)+'m':(hs>=60?Math.floor(hs/60)+'m'+(hs%60)+'s':hs+'s');}
+          return '<tr><td>$'+r.symbol+'</td><td>$'+r.entry_mc_k+'K</td><td>'+r.entry_sol+'</td><td class="'+realPnlCls+'">'+(r.real_pnl>=0?'+':'')+(r.real_pnl||0).toFixed(1)+'%</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">-'+(r.loss||0).toFixed(1)+'%</td><td class="'+captureCls+'">'+(r.capture_rate||0).toFixed(0)+'%</td><td>'+(r.exit_reason||'-')+'</td><td>'+holdStr+'</td><td>'+t+'</td></tr>';
         }).join('');
       }catch(e){document.getElementById('summary').innerHTML='<div class="card"><div class="big-num red">加载失败</div></div>';}
     }
