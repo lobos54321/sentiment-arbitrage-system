@@ -452,7 +452,7 @@ export class PremiumSignalEngine {
 
       // FINAL 策略入场规则（第一性原理）：
       // MC $5-10K:  Score ≥ 60 → CORE, 0.08 SOL（低MC高潜力，最大仓位）
-      // MC $10-15K: Score ≥ 60 → AUX, 0.06 SOL（中MC辅助仓位）
+      // MC $10-15K: Score ≥ 60 且 BSR ≥ 1.2 → AUX, 0.06 SOL（中MC辅助仓位，需买卖比支撑）
       // MC $15-20K: Score ≥ 60 且 BSR ≥ 1.5 → PROBE, 0.04 SOL（高MC探测仓位）
       // MC > $20K 或 Score < 60 → SKIP
       let scoreAction = 'SKIP';
@@ -486,11 +486,15 @@ export class PremiumSignalEngine {
         entryTier = 'CORE';
         console.log(`💎 [CORE] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=60 → 买 0.08 SOL`);
       } else if (mc >= 10000 && mc < 15000) {
-        // AUX: MC $10-15K, Score ≥ 60
-        scoreAction = 'BUY_FULL';
-        tieredPositionSize = 0.06;
-        entryTier = 'AUX';
-        console.log(`💎 [AUX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=60 → 买 0.06 SOL`);
+        // AUX: MC $10-15K, Score ≥ 60, BSR ≥ 1.2
+        if (bsr >= 1.2) {
+          scoreAction = 'BUY_FULL';
+          tieredPositionSize = 0.06;
+          entryTier = 'AUX';
+          console.log(`💎 [AUX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=60 BSR=${bsr.toFixed(2)}>=1.2 → 买 0.06 SOL`);
+        } else {
+          console.log(`⏭️ [AUX-BSR低] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K BSR=${bsr.toFixed(2)}<1.2 → 不够`);
+        }
       } else if (mc >= 15000 && mc < 20000) {
         // PROBE: MC $15-20K, Score ≥ 60, BSR ≥ 1.5
         if (bsr >= 1.5) {

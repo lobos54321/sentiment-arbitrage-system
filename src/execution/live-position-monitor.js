@@ -7,12 +7,12 @@
  * FINAL 退出策略（第一性原理）：
  *
  * Phase 1（≤5 分钟）：
- * - FAST_STOP: ≤30s, highPnl≤0, PnL<-10% → 全卖
+ * - FAST_STOP: ≤60s, highPnl≤0, PnL<-15% → 全卖
  * - STOP_LOSS: PnL≤-20% → 全卖
- * - Dynamic Floor:
- *   - highPnl≥50% → 保底+15%
- *   - highPnl≥30% → 保底+8%
- *   - highPnl≥15% → 保底+5%
+ * - Dynamic Floor (渐进式):
+ *   - highPnl≥50% → 保底 peak*40%
+ *   - highPnl≥30% → 保底 peak*35%
+ *   - highPnl≥15% → 保底 peak*30%
  * - MINI_TS: highPnl 15-35%, PnL跌幅>35% from peak → 卖
  * - MID_STOP: ≥30s, highPnl<10%, PnL<-12% → 全卖
  * - TIMEOUT: >300s, highPnl<5%, PnL<0% → 全卖
@@ -361,16 +361,28 @@ export class LivePositionMonitor {
     }
 
     pos.lastPnl = pnl;
+
+    // 🔧 价格有效性检查：首次更新±20%标记为可疑，等第2次确认
+    if (!pos._updateCount) pos._updateCount = 0;
+    pos._updateCount++;
+
+    if (pos._updateCount === 1 && Math.abs(pnl) > 20) {
+      pos._suspiciousFirstPrice = true;
+      console.log(`⚠️  [价格可疑] $${pos.symbol} 首次PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 偏差>20%，等待第2次确认`);
+      return;  // 跳过此次，不更新 highPnl，等下次确认
+    }
+    // 第2次更新时清除可疑标记，用新价格覆盖
+    if (pos._suspiciousFirstPrice && pos._updateCount === 2) {
+      pos._suspiciousFirstPrice = false;
+      console.log(`✅ [价格确认] $${pos.symbol} 第2次PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%，以此为准`);
+    }
+
     const prevHigh = pos.highPnl;
     if (pnl > pos.highPnl) pos.highPnl = pnl;
     if (pnl < pos.lowPnl) pos.lowPnl = pnl;
 
     const holdTimeMs = Date.now() - pos.entryTime;
     const holdTimeSec = holdTimeMs / 1000;
-
-    // 📊 关键调试日志：价格更新计数 + highPnl 变化 + 接近退出线
-    if (!pos._updateCount) pos._updateCount = 0;
-    pos._updateCount++;
 
     // 前 10 次价格更新每次都打，之后每 20 次打一次
     const shouldLog = pos._updateCount <= 10 || pos._updateCount % 20 === 0;
@@ -398,8 +410,8 @@ export class LivePositionMonitor {
     // ========== Phase 1: ≤5 分钟 ==========
     if (isPhase1) {
 
-      // FAST_STOP: ≤30s, highPnl≤0, PnL<-10% → 全卖
-      if (holdTimeSec <= 30 && pos.highPnl <= 0 && pnl < -10) {
+      // FAST_STOP: ≤60s, highPnl≤0, PnL<-15% → 全卖（放宽：给币更多反弹时间）
+      if (holdTimeSec <= 60 && pos.highPnl <= 0 && pnl < -15) {
         await this._triggerExit(pos, 'FAST_STOP', 100);
         return;
       }
@@ -411,21 +423,28 @@ export class LivePositionMonitor {
         return;
       }
 
-      // Dynamic Floor（保底机制）
-      if (pos.highPnl >= 50 && pnl < 15) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+15%)`, remainingPct);
-        return;
-      }
-      if (pos.highPnl >= 30 && pnl < 8) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+8%)`, remainingPct);
-        return;
-      }
-      if (pos.highPnl >= 15 && pnl < 5) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+5%)`, remainingPct);
-        return;
+      // Dynamic Floor（渐进式保底：floor = peak * ratio）
+      if (pos.highPnl >= 50) {
+        const floor = pos.highPnl * 0.40;  // 保留40%峰值
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      } else if (pos.highPnl >= 30) {
+        const floor = pos.highPnl * 0.35;  // 保留35%峰值
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      } else if (pos.highPnl >= 15) {
+        const floor = pos.highPnl * 0.30;  // 保留30%峰值
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
       }
 
       // MINI_TS: highPnl 15-35%, PnL从峰值回撤超过35% → 卖
@@ -513,21 +532,28 @@ export class LivePositionMonitor {
         }
       }
 
-      // Dynamic Floor（Phase 2 中继续生效）
-      if (pos.highPnl >= 50 && pnl < 15) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+15%)`, remainingPct);
-        return;
-      }
-      if (pos.highPnl >= 30 && pnl < 8) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+8%)`, remainingPct);
-        return;
-      }
-      if (pos.highPnl >= 15 && pnl < 5) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+5%)`, remainingPct);
-        return;
+      // Dynamic Floor（Phase 2 渐进式保底）
+      if (pos.highPnl >= 50) {
+        const floor = pos.highPnl * 0.40;
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      } else if (pos.highPnl >= 30) {
+        const floor = pos.highPnl * 0.35;
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      } else if (pos.highPnl >= 15) {
+        const floor = pos.highPnl * 0.30;
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
       }
     }
   }
