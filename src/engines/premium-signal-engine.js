@@ -471,11 +471,10 @@ export class PremiumSignalEngine {
         console.log(`📈 [ATH信号] $${signal.symbol} 涨了${athGain}% | source=${signal.source} | is_ath=${signal.is_ath}`);
       }
 
-      // FINAL v2 策略入场规则（数据驱动优化）：
-      // MC $5-10K:  Score ≥ 70 → CORE, 0.08 SOL（71.4%WR, +50.2%avg）
-      // MC $10-15K: Score ≥ 70 且 BSR ≥ 1.2 → AUX, 0.06 SOL（75.0%WR, +56.2%avg）
-      // MC $15-20K: SKIP（14.3%WR, -20.7%avg → 数据证明此区间亏损严重）
-      // MC > $15K 或 Score < 70 → SKIP
+      // FINAL v3 策略入场规则（实盘6笔交易数据驱动优化）：
+      // MC $5-10K:  Score ≥ 75, 1h买入≥100 → CORE, 0.08 SOL
+      // MC $10-15K: Score ≥ 75, BSR ≥ 1.2, 1h买入≥100 → AUX, 0.06 SOL
+      // MC > $15K 或 Score < 75 或 1h买<100 → SKIP
       let scoreAction = 'SKIP';
       let tieredPositionSize = this.positionSol; // 默认仓位
       let entryTier = 'NONE'; // CORE / AUX / PROBE
@@ -498,8 +497,8 @@ export class PremiumSignalEngine {
         console.log(`⏭️ [已持仓] $${signal.symbol} 已有仓位，不加仓`);
       } else if (mc >= 15000) {
         console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K >= 15K → 不买（PROBE区间14.3%WR已移除）`);
-      } else if (score < 70) {
-        console.log(`⏭️ [评分不足] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<70 → 不够`);
+      } else if (score < 75) {
+        console.log(`⏭️ [评分不足] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<75 → 不够`);
       } else if (dexData && dexData.buy_count_1h < 100) {
         // v5: 最低交易活跃度门槛（$bob仅83笔1h买，BSR 2.86虚高→-23.6%亏损）
         console.log(`⏭️ [活跃度低] $${signal.symbol} 1h买入仅${dexData.buy_count_1h}<100 → 流动性不足`);
@@ -508,14 +507,14 @@ export class PremiumSignalEngine {
         scoreAction = 'BUY_FULL';
         tieredPositionSize = 0.08;
         entryTier = 'CORE';
-        console.log(`💎 [CORE] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=70 → 买 0.08 SOL`);
+        console.log(`💎 [CORE] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=75 → 买 0.08 SOL`);
       } else if (mc >= 10000 && mc < 15000) {
         // AUX: MC $10-15K, Score ≥ 70, BSR ≥ 1.2
         if (bsr >= 1.2) {
           scoreAction = 'BUY_FULL';
           tieredPositionSize = 0.06;
           entryTier = 'AUX';
-          console.log(`💎 [AUX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=70 BSR=${bsr.toFixed(2)}>=1.2 → 买 0.06 SOL`);
+          console.log(`💎 [AUX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=75 BSR=${bsr.toFixed(2)}>=1.2 → 买 0.06 SOL`);
         } else {
           console.log(`⏭️ [AUX-BSR低] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K BSR=${bsr.toFixed(2)}<1.2 → 不够`);
         }
