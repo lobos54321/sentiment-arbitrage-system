@@ -100,6 +100,13 @@ export class LivePositionMonitor {
     try {
       this.db.exec(`ALTER TABLE live_positions ADD COLUMN scan_retry_count INTEGER DEFAULT 0`);
     } catch (e) { /* 字段已存在 */ }
+
+    // v12: 添加部署恢复关键字段（conviction/tp1/sold_pct/entry_tier）
+    // 解决: server重启后conviction丢失→HC变NM, high_pnl=0→退出逻辑错误
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN conviction TEXT DEFAULT 'NORMAL'`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN tp1_triggered INTEGER DEFAULT 0`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN sold_pct REAL DEFAULT 0`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN entry_tier TEXT DEFAULT ''`); } catch (e) { /* 已存在 */ }
   }
 
   /**
@@ -291,12 +298,12 @@ export class LivePositionMonitor {
       this.priceMonitor.addToken(tokenCA);
     }
 
-    // 持久化
+    // 持久化（v12: 包含conviction用于重启恢复）
     try {
       this.db.prepare(`
-        INSERT INTO live_positions (token_ca, symbol, entry_price, entry_mc, entry_sol, token_amount, token_decimals, entry_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(tokenCA, position.symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, position.entryTime);
+        INSERT INTO live_positions (token_ca, symbol, entry_price, entry_mc, entry_sol, token_amount, token_decimals, entry_time, conviction)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(tokenCA, position.symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, position.entryTime, conviction);
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] DB 写入失败: ${e.message}`);
     }
@@ -414,6 +421,17 @@ export class LivePositionMonitor {
     const prevHigh = pos.highPnl;
     if (pnl > pos.highPnl) pos.highPnl = pnl;
     if (pnl < pos.lowPnl) pos.lowPnl = pnl;
+
+    // v12: 每60次价格更新(~30s)持久化high_pnl/low_pnl/tp1/sold_pct到DB
+    // 解决: server重启时high_pnl=0导致退出逻辑错误
+    if (pos._updateCount % 60 === 0) {
+      try {
+        this.db.prepare(`
+          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, sold_pct=?, token_amount=?
+          WHERE token_ca=? AND status='open'
+        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
+      } catch (e) { /* ignore */ }
+    }
 
     const holdTimeMs = Date.now() - pos.entryTime;
     const holdTimeSec = holdTimeMs / 1000;
@@ -957,7 +975,14 @@ export class LivePositionMonitor {
           entryTime: row.entry_time,
           closed: false,
           exitInProgress: false,
-          exitReason: null
+          exitReason: null,
+          // v12: 恢复关键交易状态（解决server重启后conviction/tp1丢失问题）
+          conviction: row.conviction || 'NORMAL',
+          tp1: row.tp1_triggered === 1,
+          soldPct: row.sold_pct || 0,
+          dynFloorBelowCount: 0,
+          lockedPnl: 0,
+          partialSellInProgress: false
         });
         // 注册到价格监控（V2 需要 tokenAmount 和 decimals）
         const tokenAmount = row.token_amount || row.tokenAmount;
@@ -971,6 +996,8 @@ export class LivePositionMonitor {
           this.priceMonitor.addToken(row.token_ca);
         }
         restored++;
+        const convLabel = (row.conviction || 'NORMAL') === 'HIGH' ? '🔥HC' : 'NM';
+        console.log(`  ✅ $${row.symbol} | peak:+${(row.high_pnl||0).toFixed(1)}% | ${convLabel}${row.tp1_triggered ? ' | TP1已触发' : ''}`);
       }
       console.log(`🔄 [LivePositionMonitor] 恢复 ${restored} 个持仓，清理 ${cleaned} 个已卖出`);
     } catch (e) {
