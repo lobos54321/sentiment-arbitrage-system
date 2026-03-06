@@ -199,6 +199,9 @@ export class PremiumChannelListener {
     const token_ca = this._extractSolAddress(text);
     if (!token_ca) return null;
 
+    // Extract Egeye AI Index data (7 indices)
+    const indices = this._parseIndices(text);
+
     return {
       token_ca,
       chain: 'SOL',
@@ -210,6 +213,7 @@ export class PremiumChannelListener {
       freeze_ok,
       mint_ok,
       age,
+      indices,  // { super_index, ai_index, trade_index, security_index, address_index, viral_index, media_index }
       description: text,
       channel: 'Egeye AI Gems 100X Vip',
       timestamp: Date.now(),
@@ -243,6 +247,9 @@ export class PremiumChannelListener {
     const token_ca = this._extractSolAddress(text);
     if (!token_ca) return null;
 
+    // Extract Egeye AI Index data
+    const indices = this._parseIndices(text);
+
     return {
       token_ca,
       chain: 'SOL',
@@ -257,11 +264,49 @@ export class PremiumChannelListener {
       freeze_ok: null,
       mint_ok: null,
       age: '',
+      indices,
       description: text,
       channel: 'Egeye AI Gems 100X Vip',
       timestamp: Date.now(),
       source: 'premium_channel_ath',
     };
+  }
+
+  /**
+   * Parse Egeye AI Index data from signal text
+   * Format: ✡Super Index：(signal)116🔮 --> (current)124🔮 🔺6%
+   * Returns: { super_index: {signal, current, change_pct}, ai_index: {...}, ... }
+   */
+  _parseIndices(text) {
+    const indices = {};
+    const indexNames = [
+      ['super_index', 'Super Index'],
+      ['ai_index', 'AI Index'],
+      ['trade_index', 'Trade Index'],
+      ['security_index', 'Security Index'],
+      ['address_index', 'Address Index'],
+      ['viral_index', 'Viral Index'],
+      ['media_index', 'Media Index'],
+    ];
+
+    for (const [key, label] of indexNames) {
+      // Match patterns like: Super Index：(signal)116🔮 --> (current)124🔮 🔺6%
+      // Or: Super Index：(signal)116🔮 --> (current)x124🔮
+      const escaped = label.replace(/\s+/g, '\\s*');
+      const re = new RegExp(escaped + '[：:]\\s*\\(signal\\)\\s*x?(\\d+).*?\\(current\\)\\s*x?(\\d+)', 'i');
+      const match = text.match(re);
+      if (match) {
+        const signalVal = parseInt(match[1]);
+        const currentVal = parseInt(match[2]);
+        indices[key] = {
+          signal: signalVal,
+          current: currentVal,
+          growth: signalVal > 0 ? ((currentVal - signalVal) / signalVal * 100) : (currentVal > 0 ? 999 : 0),
+        };
+      }
+    }
+
+    return Object.keys(indices).length > 0 ? indices : null;
   }
 
   /**
