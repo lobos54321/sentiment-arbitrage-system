@@ -1,11 +1,18 @@
 /**
- * Premium Signal Engine — v11
+ * Premium Signal Engine — v13
  *
  * 独立的信号处理引擎，专门处理付费频道信号
- * Pipeline: 信号 → 预检 → 链上快照 → Hard Gates → AI分析 → 仓位 → Exit Gates → 执行
- * v11: ATH 5m过热保护 (>400% penalty -15, >600% SKIP)
+ * Pipeline: 信号 → 预检 → 链上快照 → Hard Gates → v13条件过滤 → 执行
+ * 
+ * v13: 黄金策略 — 基于24h/997信号回测的数据驱动入场
+ * - 只交易ATH信号（删除CORE/AUX通道）
+ * - 7个硬性条件: ATH>=3, Super>=150, Trade<15, AI增长>=30%, Security>=30, LP>=$10K
+ * - 3级信号: S级(0.04 SOL) / A级(0.03) / B级(0.02)
+ * - 提升条件: GainX<3 (+1级), AI增长>=100% (+1级)
  */
 
+import fs from 'fs';
+import path from 'path';
 import { SolanaSnapshotService } from '../inputs/chain-snapshot-sol.js';
 import { HardGateFilter } from '../gates/hard-gates.js';
 import { ExitGateFilter } from '../gates/exit-gates.js';
@@ -49,6 +56,13 @@ export class PremiumSignalEngine {
     this.exitCooldown = new Map(); // symbol → timestamp
     // 信号历史（长期追踪重复信号）
     this.signalHistory = new Map(); // token_ca → { count, firstSeen, lastSeen, symbol }
+
+    // v13: SOL市场环境暂停标志
+    this._solMarketPaused = false;
+    this._solMarketCheckInterval = null;
+
+    // ATH计数持久化路径
+    this._athCountsPath = path.join(process.cwd(), 'data', 'ath_counts.json');
 
     // 统计
     this.stats = {
@@ -114,6 +128,12 @@ export class PremiumSignalEngine {
 
       // 初始化数据库表
       this.initDB();
+
+      // v13: 加载持久化的ATH计数
+      this._loadAthCounts();
+
+      // v13: 启动SOL市场环境检查（每5分钟）
+      this._startSolMarketCheck();
 
       console.log('✅ [Premium Engine] 所有服务初始化完成');
 
@@ -357,341 +377,146 @@ export class PremiumSignalEngine {
         console.log(`  ⚠️ DexScreener 失败: ${e.message}`);
       }
 
-      // 量化评分
-      let score = 0;
-      const scoreDetails = [];
-
-      if (dexData) {
-        const buyRatio = dexData.sell_count_24h > 0 ? dexData.buy_count_24h / dexData.sell_count_24h : 0;
-        if (buyRatio > 1.5) { score += 25; scoreDetails.push(`买卖比${buyRatio.toFixed(2)}(+25)`); }
-        else if (buyRatio > 1.2) { score += 15; scoreDetails.push(`买卖比${buyRatio.toFixed(2)}(+15)`); }
-        else if (buyRatio < 0.7) { score -= 20; scoreDetails.push(`买卖比${buyRatio.toFixed(2)}(-20)`); }
-        else if (buyRatio < 1.0) { score -= 10; scoreDetails.push(`买卖比${buyRatio.toFixed(2)}(-10)`); }
-
-        if (dexData.volume_24h > 50000) { score += 20; scoreDetails.push(`量$${(dexData.volume_24h/1000).toFixed(0)}K(+20)`); }
-        else if (dexData.volume_24h > 20000) { score += 10; scoreDetails.push(`量$${(dexData.volume_24h/1000).toFixed(0)}K(+10)`); }
-        else if (dexData.volume_24h < 5000) { score -= 10; scoreDetails.push(`量低(-10)`); }
-
-        const liqUsd = dexData.liquidity_usd > 0 ? dexData.liquidity_usd : (snapshot?.liquidity ? snapshot.liquidity * 150 : 0);
-        if (liqUsd > 10000) { score += 15; scoreDetails.push(`流动性$${(liqUsd/1000).toFixed(0)}K(+15)`); }
-        else if (liqUsd > 3000) { score += 5; scoreDetails.push(`流动性$${(liqUsd/1000).toFixed(0)}K(+5)`); }
-        else if (liqUsd < 1000 && dexData.volume_24h < 10000) { score -= 15; scoreDetails.push(`流动性不足(-15)`); }
-
-        // v9: 5m动量评分（区分ATH和New Trending信号）
-        // 数据教训: 噜噜(5m+172%→-24.8%), Hamburg(5m+256%→-27.0%) — 买在wick顶
-        // ATH信号的5m动量=突破动量(正面), New Trending的5m过高=pump已结束(负面)
-        const isATHSignal = signal.is_ath === true;
-        // v11: ATH信号也需要5m过热保护 ($中文人生: ATH+5m+401%→-4.8%)
-        if (isATHSignal && dexData.price_change_5m > 600) {
-          console.log(`⛔ [v11:ATH过热] $${signal.symbol} 5m+${dexData.price_change_5m.toFixed(0)}% > 600% → ATH也太过热`);
-          this.saveSignalRecord(signal, 'ATH_5M_OVERHEAT', null);
-          return { action: 'SKIP', reason: 'ath_5m_overheat' };
-        } else if (isATHSignal && dexData.price_change_5m > 400) {
-          score -= 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(ATH过热-15)`);
-        } else if (!isATHSignal && dexData.price_change_5m > 200) {
-          // v9: New Trending + 5m>200% → 直接跳过（pump已经结束，买入就是接盘）
-          console.log(`⛔ [v9:5m过热] $${signal.symbol} 5m+${dexData.price_change_5m.toFixed(0)}% > 200% → 非ATH信号，pump已过`);
-          this.saveSignalRecord(signal, '5M_OVERHEAT', null);
-          return { action: 'SKIP', reason: '5m_overheat' };
-        } else if (!isATHSignal && dexData.price_change_5m > 150) {
-          // 5m 150-200%: 不加分不减分（风险中性区）
-          scoreDetails.push(`5m+${dexData.price_change_5m}%(0⚠️)`);
-        } else if (dexData.price_change_5m > 100) { score += 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(+15)`); }
-        else if (dexData.price_change_5m > 50) { score += 20; scoreDetails.push(`5m+${dexData.price_change_5m}%(+20)`); }
-        else if (dexData.price_change_5m > 10) { score += 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(+15)`); }
-        else if (dexData.price_change_5m > 5) { score += 10; scoreDetails.push(`5m+${dexData.price_change_5m}%(+10)`); }
-        else if (dexData.price_change_5m < -20) { score -= 15; scoreDetails.push(`5m${dexData.price_change_5m}%(-15)`); }
-
-        // 1小时买入活跃度
-        if (dexData.buy_count_1h > 50) { score += 10; scoreDetails.push(`1h买${dexData.buy_count_1h}(+10)`); }
-      }
-
-      // MC 评分（优先用 DexScreener 数据，fallback 到 Jupiter）
-      // 实测304笔: 0-10K +50.5% | 10-20K +17.8% | 20-30K +10.3% | 30-40K +31.8% | 40K+ 打平或亏
+      // ===== v13: 条件制入场逻辑（替代v12.2评分系统）=====
+      // 核心依据: 24h/997条信号回测，ATH 3+次+Super>=150 = 73% WR
+      const isATH = signal.is_ath === true;
+      const idx = signal.indices;
       let mc = dexData?.market_cap || signal.market_cap || 0;
 
-      // 如果 MC=0，尝试从 Jupiter Price API 获取
+      // MC 补充（Jupiter fallback）
       if (mc === 0 && this.livePriceMonitor) {
         const jupiterPrice = this.livePriceMonitor.priceCache.get(ca);
         if (jupiterPrice && jupiterPrice.mc && (Date.now() - jupiterPrice.timestamp) < 30000) {
           mc = jupiterPrice.mc;
-          console.log(`  📡 [Jupiter补充] MC: $${(mc/1000).toFixed(1)}K`);
         }
       }
 
-      // MC 仍然为 0，跳过（无法评估）
-      if (mc === 0) {
-        console.log(`⏭️ [无MC] $${signal.symbol} DexScreener + Jupiter 都没有 MC 数据，跳过`);
-        this.saveSignalRecord(signal, 'NO_MC_DATA', null);
-        return { action: 'SKIP', reason: 'no_mc_data' };
+      const liqUsd = dexData?.liquidity_usd || 0;
+
+      // v13条件1: 只交易ATH信号
+      if (!isATH) {
+        console.log(`⏭️ [v13] $${signal.symbol} 非ATH信号 → 不交易`);
+        this.saveSignalRecord(signal, 'NOT_ATH_V13', null);
+        return { action: 'SKIP', reason: 'not_ath_v13' };
       }
 
-      if (mc > 0) {
-        if (mc >= 5000 && mc < 15000) { score += 15; scoreDetails.push(`MC甜蜜区(+15)`); }
-        else if (mc >= 15000) { score -= 25; scoreDetails.push(`MC过高${(mc/1000).toFixed(0)}K(-25)`); }
-      }
-
-      if (snapshot) {
-        if (snapshot.wash_flag === 'HIGH') {
-          console.log(`⛔ [评分] 洗盘HIGH → 直接SKIP`);
-          this.saveSignalRecord(signal, 'WASH_HIGH', null);
-          return { action: 'SKIP', reason: 'wash_high' };
-        }
-        if (snapshot.wash_flag === 'MEDIUM') { score -= 5; scoreDetails.push(`洗盘MED(-5)`); }
-        if (snapshot.top10_percent > 50) { score -= 20; scoreDetails.push(`Top10>${snapshot.top10_percent}%(-20)`); }
-        if (snapshot.key_risk_wallets?.length >= 3) { score -= 15; scoreDetails.push(`风险钱包(-15)`); }
-      }
-
-      // 5m 下跌超过 -10% 不追跌
-      if (dexData && dexData.price_change_5m < -10) {
-        console.log(`⛔ [评分] 5m下跌${dexData.price_change_5m.toFixed(1)}% → 直接SKIP`);
-        this.saveSignalRecord(signal, '5M_DUMP', null);
-        return { action: 'SKIP', reason: '5m_dump' };
-      }
-
-      if (signal.freeze_ok && signal.mint_ok) { score += 10; scoreDetails.push(`安全✅(+10)`); }
-
-      // Telegram 传播度（数据验证：$PUMP 14群50条 → 赢了，TG>10群是强信号）
-      if (this.buzzScanner && signal.symbol) {
-        try {
-          const buzz = await this.buzzScanner.scan(signal.symbol, ca);
-          if (buzz.score > 0) {
-            score += buzz.score;
-            scoreDetails.push(`TG热度${buzz.uniqueGroups}群${buzz.mentions}条(+${buzz.score})`);
-            // TG > 10 群额外加分（强传播信号）
-            if (buzz.uniqueGroups >= 10) {
-              score += 10;
-              scoreDetails.push(`TG超热${buzz.uniqueGroups}群(+10)`);
-            }
-          }
-        } catch (e) {
-          // 非关键，忽略
-        }
-      }
-
-      // ===== v8: Egeye AI Index 评分（漏斗第一层：信号源质量）=====
-      // 7个指标: Super Index(综合), AI Index(AI预测), Trade Index(交易活跃),
-      //          Security Index(安全), Address Index(地址增长), Viral Index(病毒传播), Media Index(媒体)
-      const idx = signal.indices;
-      let superIndexVal = 0;  // 用于决策信念等级
-      let isHighConviction = false;
-      if (idx) {
-        console.log(`  🔮 [Egeye指数]${idx.super_index ? ` Super=${idx.super_index.current}(${idx.super_index.growth > 0 ? '+' : ''}${idx.super_index.growth.toFixed(0)}%)` : ''}${idx.security_index ? ` Security=${idx.security_index.current}` : ''}${idx.viral_index ? ` Viral=${idx.viral_index.current}` : ''}${idx.trade_index ? ` Trade=${idx.trade_index.current}` : ''}${idx.ai_index ? ` AI=${idx.ai_index.current}` : ''}`);
-
-        // Super Index — 信号源综合评分，权重最大
-        // CAINE Super=115→2283(9.72x价格), BRUH Super=85→186(7.06x价格)
-        if (idx.super_index) {
-          superIndexVal = idx.super_index.current;
-          if (superIndexVal >= 120) { score += 30; scoreDetails.push(`Super指数${superIndexVal}(+30)`); }
-          else if (superIndexVal >= 100) { score += 20; scoreDetails.push(`Super指数${superIndexVal}(+20)`); }
-          else if (superIndexVal >= 80) { score += 10; scoreDetails.push(`Super指数${superIndexVal}(+10)`); }
-          else if (superIndexVal < 50) { score -= 10; scoreDetails.push(`Super指数低${superIndexVal}(-10)`); }
-          // Super Index 增长速度 — 增长快意味着信号源认为币在加速上涨
-          if (idx.super_index.growth > 50) { score += 10; scoreDetails.push(`Super增长${idx.super_index.growth.toFixed(0)}%(+10)`); }
-        }
-
-        // Security Index — 安全性，低=高风险
-        if (idx.security_index) {
-          if (idx.security_index.current < 20) { score -= 15; scoreDetails.push(`安全指数低${idx.security_index.current}(-15)`); }
-          else if (idx.security_index.current >= 40) { score += 5; scoreDetails.push(`安全OK${idx.security_index.current}(+5)`); }
-        }
-
-        // Viral Index — 病毒传播度，从0增长说明正在扩散
-        if (idx.viral_index && idx.viral_index.current > 0) {
-          score += 10; scoreDetails.push(`Viral${idx.viral_index.current}(+10)`);
-          // Viral从0暴涨 = 正在爆发
-          if (idx.viral_index.signal === 0 && idx.viral_index.current >= 5) {
-            score += 10; scoreDetails.push(`Viral爆发0→${idx.viral_index.current}(+10)`);
-          }
-        }
-
-        // Trade Index — 交易活跃度
-        if (idx.trade_index && idx.trade_index.current >= 3) {
-          score += 5; scoreDetails.push(`Trade活跃${idx.trade_index.current}(+5)`);
-        }
-
-        // Address Index — 地址增长
-        if (idx.address_index && idx.address_index.current >= 10) {
-          score += 5; scoreDetails.push(`地址增长${idx.address_index.current}(+5)`);
-        }
-
-        // 高信念判定: Super Index >= 100 + Security >= 30
-        isHighConviction = superIndexVal >= 100 &&
-          (!idx.security_index || idx.security_index.current >= 30);
-      }
-
-      // 重复信号追踪
+      // ATH计数器（在signalHistory中维护，持久化到JSON）
       const sigHistory = this.signalHistory.get(ca);
-      const isRepeat = sigHistory && sigHistory.count >= 2;
-      const mcMultiple = (sigHistory && sigHistory.firstMC > 0 && dexData?.market_cap > 0)
-        ? dexData.market_cap / sigHistory.firstMC
-        : 0;
-      const isDoubled = isRepeat && mcMultiple >= 1.8 && mcMultiple <= 3.0;
-
-      if (isRepeat) {
-        scoreDetails.push(`重复${sigHistory.count}次|MC${mcMultiple.toFixed(1)}x`);
-      }
-
-      // ATH 翻倍信号检测
-      const isATH = signal.is_ath === true;
-      const athGain = signal.gain_pct || 0;
-      const isATHDoubled = isATH && athGain >= 80 && athGain <= 300; // 涨了 80-300%
-
-      if (isATH) {
-        scoreDetails.push(`ATH+${athGain.toFixed(0)}%`);
-        console.log(`📈 [ATH信号] $${signal.symbol} 涨了${athGain}% | source=${signal.source} | is_ath=${signal.is_ath}`);
-      }
-
-      // v8 漏斗策略入场规则（信号源Index + 链上数据 + TG传播度多维筛选）
-      // 关键发现: Score=75的交易2W/5L=29%WR, Score≥80的4W/1L=80%WR
-      // 但纯分数不够 — BRUH(Score=40)涨了7x, CAINE(Super=115)涨了9.72x
-      // v8: 结合Egeye Signal Index + DexScreener链上数据 → 漏斗式筛选
-      let scoreAction = 'SKIP';
-      let tieredPositionSize = this.positionSol;
-      let entryTier = 'NONE'; // CORE / AUX / ATH_RE
-      let tradeConviction = 'NORMAL'; // NORMAL / HIGH → 传递给退出策略
-
-      const bsr = dexData && dexData.sell_count_24h > 0
-        ? dexData.buy_count_24h / dexData.sell_count_24h
-        : 0;
-
-      // 重复信号处理
-      const prevScore = sigHistory?.lastScore || 0;
-      const scoreImproved = sigHistory && (score >= 85 || score - prevScore >= 15);
-      if (sigHistory) sigHistory.lastScore = score;
-      else if (this.signalHistory.has(ca)) this.signalHistory.get(ca).lastScore = score;
-
-      // === ATH重复信号专用通道（v8新增：67%WR历史验证）===
-      // ATH 2次+ = 信号源为我们二次确认了金狗
-      const athCount = sigHistory ? sigHistory.athCount || 0 : 0;
-      if (isATH && sigHistory) {
-        sigHistory.athCount = (sigHistory.athCount || 0) + 1;
-        // 记录ATH时的Super Index（观察增长趋势）
+      const prevAthCount = sigHistory ? (sigHistory.athCount || 0) : 0;
+      if (sigHistory) {
+        sigHistory.athCount = prevAthCount + 1;
         if (idx?.super_index) {
           sigHistory.lastSuperIndex = idx.super_index.current;
           if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = idx.super_index.signal;
         }
       }
+      const currentAthNum = prevAthCount + 1;
+      this._saveAthCounts(); // 持久化
 
+      // 已持仓检查
       const alreadyHolding = this.livePositionMonitor?.positions?.has(ca);
-
       if (alreadyHolding) {
-        console.log(`⏭️ [已持仓] $${signal.symbol} 已有仓位，不加仓`);
-      } else if (isATH && athCount >= 1 && mc <= 50000) {
-        // ATH Re-Entry: 2次ATH信号（重复ATH = 金狗确认，历史67%WR）
-        // MC上限放宽到50K（ATH信号的币已经涨了，但仍有上升空间）
-        const superGrowth = sigHistory?.firstSuperIndex && idx?.super_index
-          ? ((idx.super_index.current / sigHistory.firstSuperIndex - 1) * 100).toFixed(0)
-          : '?';
-        scoreAction = 'BUY_FULL';
+        console.log(`⏭️ [已持仓] $${signal.symbol} ATH#${currentAthNum} 已有仓位，不加仓`);
+        return { action: 'SKIP', reason: 'already_holding' };
+      }
+
+      // ===== 7个硬性条件检查 =====
+      const filterReasons = [];
+
+      // 条件2: ATH次数 >= 3
+      if (currentAthNum < 3) {
+        console.log(`📝 [v13] $${signal.symbol} ATH#${currentAthNum}/3 记录中... Super=${idx?.super_index?.current || '?'} AI=${idx?.ai_index?.current || '?'} Trade=${idx?.trade_index?.current || '?'}`);
+        this.saveSignalRecord(signal, 'ATH_ACCUMULATING', null);
+        return { action: 'SKIP', reason: 'ath_count_below_3', ath_num: currentAthNum };
+      }
+
+      // 条件3: Super Index (current) >= 150
+      const superCurrent = idx?.super_index?.current || 0;
+      if (superCurrent < 150) filterReasons.push(`Super=${superCurrent}<150`);
+
+      // 条件4: Trade Index (current) < 15
+      const tradeCurrent = idx?.trade_index?.current || 0;
+      if (tradeCurrent >= 15) filterReasons.push(`Trade=${tradeCurrent}>=15(过热)`);
+
+      // 条件5: AI Index增长率 >= 30%
+      const aiGrowth = idx?.ai_index ? idx.ai_index.growth : 0;
+      if (aiGrowth < 30) filterReasons.push(`AI增长=${aiGrowth.toFixed(0)}%<30%`);
+
+      // 条件6: Security Index (current) >= 30
+      const securityCurrent = idx?.security_index?.current || 0;
+      if (securityCurrent < 30) filterReasons.push(`Security=${securityCurrent}<30`);
+
+      // 条件7: LP流动性 >= $10K
+      if (liqUsd < 10000) filterReasons.push(`LP=$${(liqUsd/1000).toFixed(1)}K<$10K`);
+
+      // 硬性条件不通过
+      if (filterReasons.length > 0) {
+        console.log(`⏭️ [v13] $${signal.symbol} ATH#${currentAthNum} 硬性条件不通过: ${filterReasons.join(' | ')}`);
+        this.saveSignalRecord(signal, 'V13_HARD_FILTER', null);
+        return { action: 'SKIP', reason: 'v13_hard_filter', details: filterReasons };
+      }
+
+      // ===== 全局开关: SOL市场环境 =====
+      if (this._solMarketPaused) {
+        console.log(`⏸️ [v13] SOL 24h跌>10%，市场暂停中，不开新仓`);
+        return { action: 'SKIP', reason: 'market_paused' };
+      }
+
+      // ===== 并发仓位检查 (最多3个) =====
+      const currentPositionCount = this.livePositionMonitor?.positions?.size || 0;
+      if (currentPositionCount >= 3) {
+        console.log(`⏭️ [v13] 当前${currentPositionCount}个持仓 >= 3 → 不开新仓`);
+        return { action: 'SKIP', reason: 'max_positions_v13' };
+      }
+
+      // ===== 提升条件（升级信号等级）=====
+      let tierBoost = 0;
+      const boostDetails = [];
+
+      // 提升1: GainX < 3（价格还未暴涨，早期入场）
+      const gainX = signal.gain_pct ? (signal.gain_pct / 100 + 1) : 0;
+      if (gainX > 0 && gainX < 3) {
+        tierBoost++;
+        boostDetails.push(`GainX=${gainX.toFixed(1)}<3`);
+      }
+
+      // 提升2: AI Index增长率 >= 100%（AI认知爆发）
+      if (aiGrowth >= 100) {
+        tierBoost++;
+        boostDetails.push(`AI增长=${aiGrowth.toFixed(0)}%>=100%`);
+      }
+
+      // 确定信号级别和仓位
+      let entryTier, tieredPositionSize, tradeConviction;
+      if (tierBoost >= 2) {
+        entryTier = 'S';
         tieredPositionSize = 0.04;
-        entryTier = 'ATH_RE';
         tradeConviction = 'HIGH';
-        console.log(`🔥 [ATH_RE] $${signal.symbol} 第${athCount+1}次ATH | MC=$${(mc/1000).toFixed(1)}K | gain+${athGain.toFixed(0)}% | Super增长${superGrowth}% → 买 0.04 SOL`);
-      } else if (mc >= 50000) {
-        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K >= 50K → 不买`);
-      } else if (mc >= 15000 && !isATH) {
-        console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K >= 15K → 不买（非ATH信号）`);
-      } else if (score < 75) {
-        // v8: 回调到75（因为有了Index数据后筛选更精准, 且BRUH Score=40但Super=85涨了7x）
-        // 如果没有Index数据则仍需75分；有高Super Index时可以放宽
-        const hasStrongIndex = superIndexVal >= 80;
-        if (!hasStrongIndex) {
-          console.log(`⏭️ [评分不足] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<75 无强Index → 不够`);
-        } else {
-          // Super Index >= 80 但分数不到75 → 仍然可以考虑（BRUH案例）
-          console.log(`🔮 [Index补救] $${signal.symbol} 评分${score}<75 但Super=${superIndexVal}>=80 → 继续评估`);
-          // 不设scoreAction，继续往下走MC判断
-        }
+      } else if (tierBoost >= 1) {
+        entryTier = 'A';
+        tieredPositionSize = 0.03;
+        tradeConviction = 'HIGH';
+      } else {
+        entryTier = 'B';
+        tieredPositionSize = 0.02;
+        tradeConviction = 'NORMAL';
       }
 
-      // 如果还没SKIP也没BUY，根据MC区间决策
-      if (scoreAction === 'SKIP' && !alreadyHolding) {
-        // 活跃度检查（所有非ATH_RE通道都需要）
-        if (dexData && dexData.buy_count_1h < 100) {
-          console.log(`⏭️ [活跃度低] $${signal.symbol} 1h买入仅${dexData.buy_count_1h}<100 → 流动性不足`);
-        } else if (mc >= 5000 && mc < 10000 && score >= 75) {
-          // CORE: MC $5-10K, Score≥75
-          scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.05;
-          entryTier = 'CORE';
-          if (isHighConviction) tradeConviction = 'HIGH';
-          console.log(`💎 [CORE] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=75${isHighConviction ? ' 🔥高信念' : ''} → 买 0.05 SOL`);
-        } else if (mc >= 5000 && mc < 10000 && superIndexVal >= 80) {
-          // CORE via Index: MC $5-10K, Score<75但Super>=80（BRUH案例修复）
-          scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.04; // 稍小仓位
-          entryTier = 'CORE';
-          tradeConviction = 'HIGH';
-          console.log(`🔮 [CORE-IDX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K Super=${superIndexVal}>=80 → 买 0.04 SOL`);
-        } else if (mc >= 10000 && mc < 15000 && score >= 75 && bsr >= 1.2) {
-          // AUX: MC $10-15K, Score≥75, BSR≥1.2
-          scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.04;
-          entryTier = 'AUX';
-          if (isHighConviction) tradeConviction = 'HIGH';
-          console.log(`💎 [AUX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}>=75 BSR=${bsr.toFixed(2)}>=1.2${isHighConviction ? ' 🔥高信念' : ''} → 买 0.04 SOL`);
-        } else if (mc >= 10000 && mc < 15000 && superIndexVal >= 80) {
-          // AUX via Index: MC $10-15K, Super>=80
-          scoreAction = 'BUY_FULL';
-          tieredPositionSize = 0.03; // 小仓位
-          entryTier = 'AUX';
-          tradeConviction = 'HIGH';
-          console.log(`🔮 [AUX-IDX] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K Super=${superIndexVal}>=80 → 买 0.03 SOL`);
-        } else if (mc < 5000) {
-          console.log(`⏭️ [MC过低] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K < 5K → 不买`);
-        }
-      }
+      const scoreAction = 'BUY_FULL';
+      const superGrowth = idx?.super_index ? idx.super_index.growth.toFixed(0) : '?';
+      console.log(`🎯 [v13] $${signal.symbol} ATH#${currentAthNum} ✅ 全部通过!`);
+      console.log(`  Super=${superCurrent}(+${superGrowth}%) AI增长=${aiGrowth.toFixed(0)}% Trade=${tradeCurrent} Security=${securityCurrent} LP=$${(liqUsd/1000).toFixed(1)}K MC=$${(mc/1000).toFixed(1)}K`);
+      console.log(`  → ${entryTier}级信号 ${boostDetails.length > 0 ? '[' + boostDetails.join(', ') + ']' : '(无加分)'} → 买 ${tieredPositionSize} SOL`);
 
-      console.log(`📈 [评分] ${score}分 [${scoreDetails.join(' | ')}] → ${scoreAction}${tradeConviction === 'HIGH' ? ' 🔥高信念' : ''}`);
-
-      if (scoreAction === 'SKIP') {
-        this.stats.ai_skipped++;
-        console.log(`⏭️  [评分] SKIP: 评分${score}分不足`);
-        const skipResult = { action: 'SKIP', confidence: score, narrative_tier: 'D', narrative_reason: scoreDetails.join(', '), entry_timing: 'LATE', stop_loss_percent: 20 };
-        this.saveSignalRecord(signal, gateResult.status, skipResult);
-        return { action: 'SKIP', reason: 'score_too_low', details: skipResult };
-      }
-
-      // Step 5b: AI 二次过滤（暂停 — 直接使用量化评分）
-      let aiResult;
-      {
-        // 🔧 AI 暂停：跳过 Claude 分析，直接用量化评分结果
-        console.log(`⏸️  [AI] 已暂停，使用量化评分继续`);
-        aiResult = {
-          action: scoreAction,
-          confidence: score,
-          narrative_tier: score >= 50 ? 'A' : score >= 30 ? 'B' : 'D',
-          narrative_reason: scoreDetails.join(', ') + ' (AI disabled)',
-          entry_timing: dexData?.price_change_5m > 5 ? 'OPTIMAL' : 'EARLY',
-          stop_loss_percent: 20
-        };
-
-        // AI 置信度太低也跳过
-        if (aiResult.confidence < 30) {
-          this.stats.ai_skipped++;
-          console.log(`⏭️  [AI低信心] 置信度 ${aiResult.confidence} < 30 → SKIP`);
-          this.saveSignalRecord(signal, gateResult.status, aiResult);
-          return { action: 'SKIP', reason: 'ai_low_confidence', details: aiResult };
-        }
-
-        // FINAL策略: MC > 20K 已在入场规则中过滤, 无需额外AI置信度检查
-
-        // AI 返回 BUY_HALF 也允许，后面按半仓处理
-        if (aiResult.action === 'BUY_HALF') {
-          console.log(`📊 [AI] BUY_HALF → 半仓买入`);
-        }
-      }
-
-      console.log(`✅ [AI] ${aiResult.action} | 叙事: ${aiResult.narrative_tier} | 置信度: ${aiResult.confidence} | 时机: ${aiResult.entry_timing}`);
-
-      // 灰名单 + AI 置信度低 → 跳过
-      if (isGreylist && aiResult.confidence < 60) {
-        this.stats.ai_skipped++;
-        console.log(`⏭️  [决策] 灰名单 + 低置信度(${aiResult.confidence}) → 跳过`);
-        this.saveSignalRecord(signal, 'GREYLIST_LOW_CONF', aiResult);
-        return { action: 'SKIP', reason: 'greylist_low_confidence' };
-      }
+      // 构造兼容的AI结果（v13不使用AI，但执行流需要此格式）
+      const aiResult = {
+        action: scoreAction,
+        confidence: tierBoost >= 2 ? 95 : tierBoost >= 1 ? 85 : 75,
+        narrative_tier: entryTier,
+        narrative_reason: `v13: ATH#${currentAthNum} Super=${superCurrent} AI增长=${aiGrowth.toFixed(0)}% Trade=${tradeCurrent} Security=${securityCurrent} ${boostDetails.join(' ')}`,
+        entry_timing: 'OPTIMAL',
+        stop_loss_percent: 25
+      };
 
       // Step 6: 仓位检查（使用 MC 梯度仓位）
       const positionSize = tieredPositionSize;
@@ -972,10 +797,115 @@ export class PremiumSignalEngine {
     }
   }
 
+  // ===== v13: ATH计数持久化 =====
+
+  /**
+   * 保存ATH计数到JSON文件（容器重启后恢复）
+   */
+  _saveAthCounts() {
+    try {
+      const data = {};
+      for (const [ca, history] of this.signalHistory) {
+        if (history.athCount && history.athCount > 0) {
+          data[ca] = {
+            athCount: history.athCount,
+            symbol: history.symbol,
+            firstSeen: history.firstSeen,
+            lastSeen: history.lastSeen,
+            firstSuperIndex: history.firstSuperIndex || null,
+            lastSuperIndex: history.lastSuperIndex || null
+          };
+        }
+      }
+      const dir = path.dirname(this._athCountsPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(this._athCountsPath, JSON.stringify(data, null, 2));
+    } catch (e) {
+      console.warn(`⚠️ [ATH] 保存ATH计数失败: ${e.message}`);
+    }
+  }
+
+  /**
+   * 从JSON文件加载ATH计数（启动时调用）
+   */
+  _loadAthCounts() {
+    try {
+      if (!fs.existsSync(this._athCountsPath)) {
+        console.log('📝 [ATH] 无历史ATH文件，从零开始');
+        return;
+      }
+      const raw = fs.readFileSync(this._athCountsPath, 'utf-8');
+      const data = JSON.parse(raw);
+      let loaded = 0;
+      for (const [ca, info] of Object.entries(data)) {
+        const existing = this.signalHistory.get(ca);
+        if (existing) {
+          existing.athCount = Math.max(existing.athCount || 0, info.athCount);
+        } else {
+          this.signalHistory.set(ca, {
+            count: info.athCount,
+            firstSeen: info.firstSeen || Date.now(),
+            lastSeen: info.lastSeen || Date.now(),
+            symbol: info.symbol || 'UNKNOWN',
+            firstMC: 0,
+            latestMC: 0,
+            lastScore: 0,
+            athCount: info.athCount,
+            firstSuperIndex: info.firstSuperIndex || null,
+            lastSuperIndex: info.lastSuperIndex || null
+          });
+        }
+        loaded++;
+      }
+      console.log(`✅ [ATH] 已加载${loaded}个代币的ATH计数`);
+    } catch (e) {
+      console.warn(`⚠️ [ATH] 加载ATH计数失败: ${e.message}`);
+    }
+  }
+
+  // ===== v13: SOL市场环境检查 =====
+
+  /**
+   * 启动定期SOL市场检查（每5分钟）
+   */
+  _startSolMarketCheck() {
+    // 立即检查一次
+    this._checkSolMarket();
+    // 每5分钟检查
+    this._solMarketCheckInterval = setInterval(() => this._checkSolMarket(), 5 * 60 * 1000);
+    console.log('✅ [SOL市场] 市场环境检查已启动（每5分钟）');
+  }
+
+  /**
+   * 检查SOL 24h价格变化，跌>10%则暂停开仓
+   */
+  async _checkSolMarket() {
+    try {
+      const res = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_24hr_change=true', { timeout: 10000 });
+      const change24h = res.data?.solana?.usd_24h_change || 0;
+      const wasPaused = this._solMarketPaused;
+      this._solMarketPaused = change24h < -10;
+      if (this._solMarketPaused && !wasPaused) {
+        console.log(`⚠️ [SOL市场] SOL 24h变化: ${change24h.toFixed(1)}% → 暂停开仓`);
+      } else if (!this._solMarketPaused && wasPaused) {
+        console.log(`✅ [SOL市场] SOL 24h变化: ${change24h.toFixed(1)}% → 恢复开仓`);
+      }
+    } catch (e) {
+      // CoinGecko限流时不改变状态
+      console.log(`⚠️ [SOL市场] 价格查询失败: ${e.message}，保持当前状态`);
+    }
+  }
+
   /**
    * 停止引擎
    */
   async stop() {
+    if (this._solMarketCheckInterval) {
+      clearInterval(this._solMarketCheckInterval);
+      this._solMarketCheckInterval = null;
+    }
+    // 停止前保存ATH计数
+    this._saveAthCounts();
     if (this.shadowTracker) {
       this.shadowTracker.stop();
     }

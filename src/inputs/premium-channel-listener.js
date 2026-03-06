@@ -292,8 +292,9 @@ export class PremiumChannelListener {
     for (const [key, label] of indexNames) {
       // Match patterns like: Super Index：(signal)116🔮 --> (current)124🔮 🔺6%
       // Or: Super Index：(signal)116🔮 --> (current)x124🔮
+      // Also handles full-width parentheses: （current) or （signal)
       const escaped = label.replace(/\s+/g, '\\s*');
-      const re = new RegExp(escaped + '[：:]\\s*\\(signal\\)\\s*x?(\\d+).*?\\(current\\)\\s*x?(\\d+)', 'i');
+      const re = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
       const match = text.match(re);
       if (match) {
         const signalVal = parseInt(match[1]);

@@ -1,33 +1,16 @@
 /**
- * Live Position Monitor — v12.2
+ * Live Position Monitor — v13
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v12.2: 撤回v12止损收紧（meme币高波动特性不适合过紧止损）
- * - 恢复FAST_STOP: -20%（v12曾收紧到-15%）
- * - 恢复STOP_LOSS: -20%（v12曾收紧到-18%）
- * - 恢复MID_STOP: 60s/-15%（v12曾收紧到45s/-12%）
- * - 移除ULTRA_FAST_STOP（v12新增，过紧导致正常波动被止损）
- * - 保留v12.1的DB持久化修复
- *
- * Phase 1（≤10 分钟）：
- * - FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
- * - STOP_LOSS: PnL≤-20% → 全卖
- * - TP1 锁利: PnL≥50% → 卖40%，剩余60%进入超宽模式
- * - 超宽模式(TP1后): 只用WIDE_TRAIL(-40%from peak) + ABSOLUTE_FLOOR(+10%)
- * - Dynamic Floor (未TP1时): 渐进式保底
- * - MINI_TS: highPnl 15-35%, PnL跌幅>阈值 from peak → 卖
- * - MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖
- * (v12.2恢复v11原始值)
- * - TIMEOUT: HC:20min, NM:10min
- *
- * Phase 2（>10 分钟，仅 highPnl≥5%）：
- * - MOON_STOP: TP1后保留比率的峰值
- * - PEAK_EXIT: PnL从峰值回撤>40% → 卖剩余
- * - Dynamic Floor 继续生效
- *
- * ATH重复信号：不卖出，考虑加仓
+ * v13 退出策略（简化为4+2条规则）:
+ * - SL: PnL ≤ -25% → 全卖
+ * - TP1: PnL ≥ +100% → 卖40%
+ * - TP2: PnL ≥ +250% → 卖30% (TP1后)
+ * - Trailing: TP2后，从峰值回撤25% → 卖剩余30%
+ * - TP1保底: TP1后未达TP2，PnL跌至+10%以下 → 卖剩余
+ * - TimeStop: 持仓24h → 全卖
  */
 
 import Database from 'better-sqlite3';
@@ -446,280 +429,60 @@ export class LivePositionMonitor {
       console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} 入:${pos.entryPrice.toExponential(3)} 现:${price.toExponential(3)} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
     }
 
-    // 接近退出线时打警告（FINAL策略: PEAK_EXIT 回撤>40%）
-    if (pos.highPnl >= 30) {
-      const dropPct = pos.highPnl > 0 ? ((pos.highPnl - pnl) / pos.highPnl) * 100 : 0;
-      if (dropPct > 30 && dropPct <= 40) {
-        console.log(`⚠️  [接近PEAK_EXIT] $${pos.symbol} PnL:+${pnl.toFixed(1)}% peak:+${pos.highPnl.toFixed(1)}% 回撤:${dropPct.toFixed(0)}% (>40%触发)`);
-      }
-    }
-
-    // ==================== v10 策略退出条件评估 ====================
+    // ==================== v13 退出条件评估 ====================
+    // v13简化: SL(-25%) → TP1(+100%卖40%) → TP2(+250%卖30%) → Trailing(-25%from peak) → TimeStop(24h)
     const holdTimeMin = holdTimeSec / 60;
-    const isPhase1 = holdTimeMin <= 10;  // v10: Phase 1 延长到10分钟（OHLCV验证：meme coin主升浪5-30分钟）
-    const isPhase2 = holdTimeMin > 10;   // Phase 2: >10 分钟
 
-    // ========== Phase 1: ≤5 分钟 ==========
-    if (isPhase1) {
-
-      // FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
-      // v12.2: 恢复-20% (meme币高波动，过紧止损会误杀正常回调)
-      if (holdTimeSec <= 90 && pos.highPnl <= 0 && pnl < -20) {
-        await this._triggerExit(pos, 'FAST_STOP', 100);
-        return;
-      }
-
-      // STOP_LOSS: PnL ≤ -20% → 全卖（任何时间）
-      // v12.2: 恢复-20% (meme币波动大，-18%可能是正常回调)
-      if (pnl <= -20) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
-        return;
-      }
-
-      // v10: Phase1 TP锁利 — PnL≥50%时卖出40%，剩余60%进入超宽模式
-      // 数据驱动: hamster +10.4%退出但2.22x, 汉堡 -0.5%退出但5.53x
-      // OHLCV验证: +50%锁利后,剩余60%用超宽trailing可以捕获更多涨幅
-      if (!pos.tp1 && pnl >= 50) {
-        console.log(`🎯 [v10:TP1锁利] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 50% → 卖出40%锁利`);
-        await this._triggerPartialSell(pos, 'TP1', 40, pnl);
-        return;
-      }
-
-      // v10: TP1已触发 → 剩余60%使用超宽模式（跳过DYN_FLOOR/MINI_TS）
-      if (pos.tp1) {
-        // 绝对保底: 剩余仓位PnL低于+10%时全部卖出（确保剩余部分至少赚10%）
-        if (pnl < 10) {
-          const remainingPct = 100 - pos.soldPct;
-          console.log(`🛡️ [v10:保底] $${pos.symbol} PnL:+${pnl.toFixed(1)}% < +10% → 保底卖出剩余${remainingPct}%`);
-          await this._triggerExit(pos, `TP1_FLOOR(PnL+${pnl.toFixed(0)}%<10%)`, remainingPct);
-          return;
-        }
-
-        // 超宽trailing: 随峰值收紧（峰值越高,保留比率越大）
-        if (pos.highPnl >= 50) {
-          let retainRatio;
-          if (pos.highPnl >= 500) retainRatio = 0.75;       // 峰值500%+: 保留75%
-          else if (pos.highPnl >= 200) retainRatio = 0.70;  // 峰值200%+: 保留70%
-          else if (pos.highPnl >= 100) retainRatio = 0.65;  // 峰值100%+: 保留65%
-          else retainRatio = 0.60;                          // 峰值50-100%: 保留60%
-
-          const trailFloor = pos.highPnl * retainRatio;
-          if (pnl < trailFloor) {
-            // 需要连续2次确认（防止单次价格波动触发）
-            pos._wideTrailBelowCount = (pos._wideTrailBelowCount || 0) + 1;
-            if (pos._wideTrailBelowCount >= 2) {
-              const remainingPct = 100 - pos.soldPct;
-              await this._triggerExit(pos, `WIDE_TRAIL(peak+${pos.highPnl.toFixed(0)}%,floor+${trailFloor.toFixed(0)}%,retain${(retainRatio*100).toFixed(0)}%)`, remainingPct);
-              return;
-            }
-          } else {
-            pos._wideTrailBelowCount = 0;
-          }
-        }
-
-        // TP1后继续持有（超宽模式，等待更高收益或TIMEOUT）
-        return;
-      }
-
-      // === 以下为未触发TP1时的正常退出逻辑 ===
-
-      // Dynamic Floor（渐进式保底：floor = peak * ratio）
-      // v9: HIGH conviction使用更宽松的ratio + 需要连续2次确认才触发
-      // v10: 保持v9的DYN_FLOOR逻辑（对未达+50%的仓位仍然有效）
-      const isHigh = pos.conviction === 'HIGH';
-      const minHoldForFloor = isHigh ? 30 : 0;  // v11: HC最小持有30s(was 45s), $中文人生教训:45s延迟导致-12.7%→-4.8%
-
-      if (holdTimeSec < minHoldForFloor) {
-        // HC最小持有期内：只做FAST_STOP/STOP_LOSS保护，不做DYN_FLOOR/MINI_TS
-        // (FAST_STOP和STOP_LOSS已在上面处理)
-        return;
-      }
-
-      if (pos.highPnl >= 50) {
-        const floor = pos.highPnl * (isHigh ? 0.25 : 0.45);  // v9: HC 25%(was 30%), NORMAL 45%(was 50%)
-        if (pnl < floor) {
-          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
-          if (pos.dynFloorBelowCount >= 2) {  // v9: 需要连续2次确认
-            const remainingPct = 100 - pos.soldPct;
-            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-            return;
-          }
-        } else {
-          pos.dynFloorBelowCount = 0;  // 回到floor以上,重置计数
-        }
-      } else if (pos.highPnl >= 30) {
-        const floor = pos.highPnl * (isHigh ? 0.20 : 0.40);  // v9: HC 20%(was 25%), NORMAL 40%(was 45%)
-        if (pnl < floor) {
-          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
-          if (pos.dynFloorBelowCount >= 2) {
-            const remainingPct = 100 - pos.soldPct;
-            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-            return;
-          }
-        } else {
-          pos.dynFloorBelowCount = 0;
-        }
-      } else if (pos.highPnl >= 15) {
-        const floor = pos.highPnl * (isHigh ? 0.20 : 0.35);  // v11: HC 20%(was 10%), NORMAL 35%
-        if (pnl < floor) {
-          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
-          if (pos.dynFloorBelowCount >= 2) {
-            const remainingPct = 100 - pos.soldPct;
-            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-            return;
-          }
-        } else {
-          pos.dynFloorBelowCount = 0;
-        }
-      } else if (pos.highPnl >= 10) {
-        const floor = pos.highPnl * (isHigh ? 0.30 : 0.45);  // v11: HC 30%(was 10%), $中文人生peak+11%仅floor+1%→now+3.3%
-        if (pnl < floor) {
-          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
-          if (pos.dynFloorBelowCount >= 2) {
-            const remainingPct = 100 - pos.soldPct;
-            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-            return;
-          }
-        } else {
-          pos.dynFloorBelowCount = 0;
-        }
-      }
-
-      // MINI_TS: highPnl 15-35%, PnL从峰值回撤超过阈值 → 卖
-      // v9: 放宽阈值让赢家跑得更远（hamster +10.4%退出但涨了2.22x）
-      // v9: HIGH 70%(was 55%), NORMAL 50%(was 35%)
-      if (pos.highPnl >= 15 && pos.highPnl <= 35) {
-        const dropFromPeak = pos.highPnl - pnl;
-        const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
-        const dropThreshold = pos.conviction === 'HIGH' ? 70 : 50;
-        if (dropPct > dropThreshold) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `MINI_TS(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%${pos.conviction === 'HIGH' ? ',HC' : ''})`, remainingPct);
-          return;
-        }
-      }
-
-      // MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖
-      // v12.2: 恢复60s/-15% (meme币需要更多时间观察)
-      if (holdTimeSec >= 60 && pos.highPnl < 10 && pnl < -15) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, 'MID_STOP', remainingPct);
-        return;
-      }
-
-      // TIMEOUT: v10: HC延长到20min, NORMAL延长到10min
-      // OHLCV验证: meme coin主升浪5-30分钟, TOP10涨幅币持续1-8小时
-      // v10: TP1已触发的不走这个TIMEOUT（在上面tp1逻辑中已处理）
-      const timeoutSec = pos.conviction === 'HIGH' ? 1200 : 600;
-      if (holdTimeSec > timeoutSec && pos.highPnl < 5 && pnl < 0) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, 'TIMEOUT', remainingPct);
-        return;
-      }
-
-      // Phase 1 内其他情况 HOLD
+    // 1. SL (Stop Loss): PnL ≤ -25% → 全卖
+    if (pnl <= -25) {
+      const remainingPct = 100 - pos.soldPct;
+      await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
       return;
     }
 
-    // ========== Phase 2: >5 分钟（仅 highPnl ≥ 5% 才进入） ==========
-    if (isPhase2) {
-      // highPnl < 5% 的持仓在 Phase 1 TIMEOUT 中已处理
-      // 如果到了 Phase 2 但 highPnl < 5%，也触发超时退出
-      if (pos.highPnl < 5) {
-        if (pnl < 0) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, 'TIMEOUT_P2', remainingPct);
-          return;
-        }
-        // highPnl < 5% 但当前盈利，继续观察
-        return;
-      }
+    // 2. TP1: PnL ≥ +100% → 卖40%
+    if (!pos.tp1 && pnl >= 100) {
+      console.log(`🎯 [v13:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 100% → 卖出40%锁利`);
+      await this._triggerPartialSell(pos, 'TP1', 40, pnl);
+      return;
+    }
 
-      // STOP_LOSS 在 Phase 2 仍然有效
-      if (pnl <= -20) {
+    // 3. TP2: PnL ≥ +250% → 卖30% (TP1后才可触发)
+    if (pos.tp1 && !pos.tp2 && pnl >= 250) {
+      console.log(`🚀 [v13:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 250% → 卖出30%`);
+      await this._triggerPartialSell(pos, 'TP2', 30, pnl);
+      return;
+    }
+
+    // 4. Trailing Stop: TP2触发后，从峰值回撤25% → 卖剩余30%
+    if (pos.tp2) {
+      const dropFromPeak = pos.highPnl - pnl;
+      const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
+      // 接近触发时打警告
+      if (dropPct >= 20 && dropPct < 25) {
+        console.log(`⚠️  [接近TRAILING] $${pos.symbol} PnL:+${pnl.toFixed(1)}% peak:+${pos.highPnl.toFixed(1)}% 回撤:${dropPct.toFixed(0)}% (≥25%触发)`);
+      }
+      if (dropPct >= 25) {
         const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
+        await this._triggerExit(pos, `TRAILING(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%)`, remainingPct);
         return;
       }
+    }
 
-      // v10: Phase2 TP1 — 如果Phase1没有触发过TP1（币涨得慢，Phase2才到+50%）
-      if (!pos.tp1 && pnl >= 50) {
-        console.log(`🎯 [v10:TP1-P2] $${pos.symbol} Phase2 PnL:+${pnl.toFixed(1)}% ≥ 50% → 卖出40%锁利`);
-        await this._triggerPartialSell(pos, 'TP1', 40, pnl);
-        return;
-      }
+    // 5. TP1保底: TP1已触发但未到TP2，跌回+10%以下 → 卖剩余
+    if (pos.tp1 && !pos.tp2 && pnl < 10) {
+      const remainingPct = 100 - pos.soldPct;
+      console.log(`🛡️ [v13:TP1保底] $${pos.symbol} PnL:+${pnl.toFixed(1)}% < +10% → 卖剩余${remainingPct}%`);
+      await this._triggerExit(pos, `TP1_FLOOR(PnL+${pnl.toFixed(0)}%<10%)`, remainingPct);
+      return;
+    }
 
-      // MOON_STOP: TP1 已触发后，进入月球模式
-      if (pos.tp1 && !pos.moonMode && pnl >= 100) {
-        pos.moonMode = true;
-        pos.moonHighPnl = pnl;
-        console.log(`🌙 [MOON_MODE] $${pos.symbol} 进入月球模式 @ +${pnl.toFixed(0)}%`);
-      }
-
-      if (pos.moonMode) {
-        pos.moonHighPnl = Math.max(pos.moonHighPnl, pnl);
-        // v10: 月球模式保留比率随峰值增加（峰值越高保留越多）
-        let retainRatio;
-        if (pos.moonHighPnl >= 500) retainRatio = 0.75;
-        else if (pos.moonHighPnl >= 200) retainRatio = 0.70;
-        else retainRatio = 0.60;
-        const moonFloor = pos.moonHighPnl * retainRatio;
-        if (pnl < moonFloor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `MOON_STOP(peak+${pos.moonHighPnl.toFixed(0)}%,retain${(retainRatio*100).toFixed(0)}%)`, remainingPct);
-          return;
-        }
-      }
-
-      // v10: TP1后Phase2的绝对保底（同Phase1）
-      if (pos.tp1 && pnl < 10) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `TP1_FLOOR_P2(PnL+${pnl.toFixed(0)}%<10%)`, remainingPct);
-        return;
-      }
-
-      // PEAK_EXIT: PnL从峰值回撤>40% → 卖剩余
-      if (pos.highPnl >= 30) {
-        const dropFromPeak = pos.highPnl - pnl;
-        const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
-        if (dropPct > 40) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `PEAK_EXIT(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%)`, remainingPct);
-          return;
-        }
-      }
-
-      // Dynamic Floor（Phase 2 渐进式保底，v4提升比率）
-      if (pos.highPnl >= 50) {
-        const floor = pos.highPnl * 0.50;
-        if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
-          return;
-        }
-      } else if (pos.highPnl >= 30) {
-        const floor = pos.highPnl * 0.45;
-        if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
-          return;
-        }
-      } else if (pos.highPnl >= 15) {
-        const floor = pos.highPnl * 0.40;
-        if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
-          return;
-        }
-      } else if (pos.highPnl >= 10) {
-        const floor = pos.highPnl * 0.50;
-        if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
-          return;
-        }
-      }
+    // 6. 时间停损: 24小时 → 全卖剩余
+    if (holdTimeMin >= 1440) {
+      const remainingPct = 100 - pos.soldPct;
+      console.log(`⏰ [v13:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
+      await this._triggerExit(pos, 'TIMEOUT_24H', remainingPct);
+      return;
     }
   }
 
