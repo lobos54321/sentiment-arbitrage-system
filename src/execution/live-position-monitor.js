@@ -9,10 +9,11 @@
  * Phase 1（≤5 分钟）：
  * - FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
  * - STOP_LOSS: PnL≤-20% → 全卖
- * - Dynamic Floor (渐进式):
- *   - highPnl≥50% → 保底 peak*40%
- *   - highPnl≥30% → 保底 peak*35%
- *   - highPnl≥15% → 保底 peak*30%
+ * - Dynamic Floor (渐进式, v4提升比率):
+ *   - highPnl≥50% → 保底 peak*50%
+ *   - highPnl≥30% → 保底 peak*45%
+ *   - highPnl≥15% → 保底 peak*40%
+ *   - highPnl≥10% → 保底 peak*50% (v4新增)
  * - MINI_TS: highPnl 15-35%, PnL跌幅>35% from peak → 卖
  * - MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖
  * - TIMEOUT: >480s, highPnl<5%, PnL<0% → 全卖
@@ -318,6 +319,18 @@ export class LivePositionMonitor {
     // 🔧 BUG FIX: 检查是否超过最大重试次数（每 5 分钟重置一次）
     if (retryInfo.count >= this.maxRetries) {
       const timeSinceLastRetry = Date.now() - (retryInfo.lastRetryTime || 0);
+
+      // v4: 追踪累计重试，防止无限循环 (RUN=47x, IRAN=14x 问题)
+      const totalRetries = pos._totalExitRetries || 0;
+      if (totalRetries >= 15) {
+        // 累计15次+重试，放弃主动卖出，交给钱包扫描器处理
+        if (!pos._abandonedSell) {
+          console.log(`🚫 [放弃卖出] $${pos.symbol} 累计重试 ${totalRetries} 次，交给钱包扫描器`);
+          pos._abandonedSell = true;
+        }
+        return;
+      }
+
       if (timeSinceLastRetry > 5 * 60 * 1000) {
         // 5 分钟后重置重试计数器，允许再次尝试
         console.log(`🔄 [重试重置] $${pos.symbol} 5 分钟已过，重置重试计数器`);
@@ -439,23 +452,30 @@ export class LivePositionMonitor {
         return;
       }
 
-      // Dynamic Floor（渐进式保底：floor = peak * ratio）
+      // Dynamic Floor（渐进式保底：floor = peak * ratio，v4提升比率以更好捕获利润）
       if (pos.highPnl >= 50) {
-        const floor = pos.highPnl * 0.40;  // 保留40%峰值
+        const floor = pos.highPnl * 0.50;  // 保留50%峰值（v4: was 40%）
         if (pnl < floor) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
           return;
         }
       } else if (pos.highPnl >= 30) {
-        const floor = pos.highPnl * 0.35;  // 保留35%峰值
+        const floor = pos.highPnl * 0.45;  // 保留45%峰值（v4: was 35%）
         if (pnl < floor) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
           return;
         }
       } else if (pos.highPnl >= 15) {
-        const floor = pos.highPnl * 0.30;  // 保留30%峰值
+        const floor = pos.highPnl * 0.40;  // 保留40%峰值（v4: was 30%）
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      } else if (pos.highPnl >= 10) {
+        const floor = pos.highPnl * 0.50;  // 保留50%峰值（v4新增：小涨幅更积极保护）
         if (pnl < floor) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
@@ -548,23 +568,30 @@ export class LivePositionMonitor {
         }
       }
 
-      // Dynamic Floor（Phase 2 渐进式保底）
+      // Dynamic Floor（Phase 2 渐进式保底，v4提升比率）
       if (pos.highPnl >= 50) {
-        const floor = pos.highPnl * 0.40;
+        const floor = pos.highPnl * 0.50;
         if (pnl < floor) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
           return;
         }
       } else if (pos.highPnl >= 30) {
-        const floor = pos.highPnl * 0.35;
+        const floor = pos.highPnl * 0.45;
         if (pnl < floor) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
           return;
         }
       } else if (pos.highPnl >= 15) {
-        const floor = pos.highPnl * 0.30;
+        const floor = pos.highPnl * 0.40;
+        if (pnl < floor) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      } else if (pos.highPnl >= 10) {
+        const floor = pos.highPnl * 0.50;
         if (pnl < floor) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `DYN_FLOOR_P2(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%)`, remainingPct);
@@ -697,6 +724,9 @@ export class LivePositionMonitor {
       }
     } catch (error) {
       console.error(`   ❌ 卖出失败: ${error.message}`);
+
+      // v4: 追踪累计总重试次数（跨cycle）
+      pos._totalExitRetries = (pos._totalExitRetries || 0) + 1;
 
       // 🔧 BUG FIX: 更新重试计数器
       const retryInfo = this.retryCounter.get(pos.tokenCA) || { count: 0, pauseUntil: 0, lastRetryTime: 0 };
