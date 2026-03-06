@@ -376,8 +376,20 @@ export class PremiumSignalEngine {
         else if (liqUsd > 3000) { score += 5; scoreDetails.push(`流动性$${(liqUsd/1000).toFixed(0)}K(+5)`); }
         else if (liqUsd < 1000 && dexData.volume_24h < 10000) { score -= 15; scoreDetails.push(`流动性不足(-15)`); }
 
-        // 实盘模式：5分钟动量（数据验证：赢家5m平均+254%，输家+116%）
-        if (dexData.price_change_5m > 100) { score += 25; scoreDetails.push(`5m+${dexData.price_change_5m}%(+25)`); }
+        // v9: 5m动量评分（区分ATH和New Trending信号）
+        // 数据教训: 噜噜(5m+172%→-24.8%), Hamburg(5m+256%→-27.0%) — 买在wick顶
+        // ATH信号的5m动量=突破动量(正面), New Trending的5m过高=pump已结束(负面)
+        const isATHSignal = signal.is_ath === true;
+        if (!isATHSignal && dexData.price_change_5m > 200) {
+          // v9: New Trending + 5m>200% → 直接跳过（pump已经结束，买入就是接盘）
+          console.log(`⛔ [v9:5m过热] $${signal.symbol} 5m+${dexData.price_change_5m.toFixed(0)}% > 200% → 非ATH信号，pump已过`);
+          this.saveSignalRecord(signal, '5M_OVERHEAT', null);
+          return { action: 'SKIP', reason: '5m_overheat' };
+        } else if (!isATHSignal && dexData.price_change_5m > 150) {
+          // 5m 150-200%: 不加分不减分（风险中性区）
+          scoreDetails.push(`5m+${dexData.price_change_5m}%(0⚠️)`);
+        } else if (dexData.price_change_5m > 100) { score += 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(+15)`); }
+        else if (dexData.price_change_5m > 50) { score += 20; scoreDetails.push(`5m+${dexData.price_change_5m}%(+20)`); }
         else if (dexData.price_change_5m > 10) { score += 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(+15)`); }
         else if (dexData.price_change_5m > 5) { score += 10; scoreDetails.push(`5m+${dexData.price_change_5m}%(+10)`); }
         else if (dexData.price_change_5m < -20) { score -= 15; scoreDetails.push(`5m${dexData.price_change_5m}%(-15)`); }

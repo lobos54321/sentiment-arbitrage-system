@@ -263,6 +263,7 @@ export class LivePositionMonitor {
       exitInProgress: false,  // 防止并发卖出
       exitReason: null,
       conviction,             // v8: 'NORMAL' or 'HIGH' — 高信念模式
+      dynFloorBelowCount: 0,  // v9: DYN_FLOOR确认计数（需连续2次才触发）
 
       // 新策略字段
       tp1: false,           // TP1是否已触发
@@ -454,46 +455,76 @@ export class LivePositionMonitor {
       }
 
       // Dynamic Floor（渐进式保底：floor = peak * ratio）
-      // v8: HIGH conviction使用更宽松的ratio，让赢家跑得更远
-      // 数据: CAINE DYN_FLOOR退出+25.7%但实际涨了9.72x, SvE peak+96.5%但只拿到+27.4%
-      // HIGH conviction: 降低floor ratio → 允许更大回撤 → 拿住更大涨幅
+      // v9: HIGH conviction使用更宽松的ratio + 需要连续2次确认才触发
+      // 数据教训: 汉堡 ATH_RE HC peak+14.8%, DYN_FLOOR exit -0.5%, then 5.53x!
+      //          hamster peak+17.1%, MINI_TS exit +10.4%, then 2.22x!
+      // v9: HIGH conviction在持仓<45s时不触发DYN_FLOOR/MINI_TS（给ATH突破时间发展）
       const isHigh = pos.conviction === 'HIGH';
+      const minHoldForFloor = isHigh ? 45 : 0;  // HC需要至少45秒才开始DYN_FLOOR评估
+
+      if (holdTimeSec < minHoldForFloor) {
+        // HC最小持有期内：只做FAST_STOP/STOP_LOSS保护，不做DYN_FLOOR/MINI_TS
+        // (FAST_STOP和STOP_LOSS已在上面处理)
+        return;
+      }
+
       if (pos.highPnl >= 50) {
-        const floor = pos.highPnl * (isHigh ? 0.30 : 0.50);  // HIGH: 保留30%(vs 50%)
+        const floor = pos.highPnl * (isHigh ? 0.25 : 0.45);  // v9: HC 25%(was 30%), NORMAL 45%(was 50%)
         if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-          return;
+          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
+          if (pos.dynFloorBelowCount >= 2) {  // v9: 需要连续2次确认
+            const remainingPct = 100 - pos.soldPct;
+            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
+            return;
+          }
+        } else {
+          pos.dynFloorBelowCount = 0;  // 回到floor以上,重置计数
         }
       } else if (pos.highPnl >= 30) {
-        const floor = pos.highPnl * (isHigh ? 0.25 : 0.45);  // HIGH: 保留25%(vs 45%)
+        const floor = pos.highPnl * (isHigh ? 0.20 : 0.40);  // v9: HC 20%(was 25%), NORMAL 40%(was 45%)
         if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-          return;
+          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
+          if (pos.dynFloorBelowCount >= 2) {
+            const remainingPct = 100 - pos.soldPct;
+            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
+            return;
+          }
+        } else {
+          pos.dynFloorBelowCount = 0;
         }
       } else if (pos.highPnl >= 15) {
-        const floor = pos.highPnl * (isHigh ? 0.20 : 0.40);  // HIGH: 保留20%(vs 40%) — 允许从15%回到几乎0才止盈
+        const floor = pos.highPnl * (isHigh ? 0.10 : 0.35);  // v9: HC 10%(was 20%), NORMAL 35%(was 40%)
         if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-          return;
+          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
+          if (pos.dynFloorBelowCount >= 2) {
+            const remainingPct = 100 - pos.soldPct;
+            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
+            return;
+          }
+        } else {
+          pos.dynFloorBelowCount = 0;
         }
       } else if (pos.highPnl >= 10) {
-        const floor = pos.highPnl * (isHigh ? 0.20 : 0.50);  // HIGH: 保留20%(vs 50%)
+        const floor = pos.highPnl * (isHigh ? 0.10 : 0.45);  // v9: HC 10%(was 20%), NORMAL 45%(was 50%)
         if (pnl < floor) {
-          const remainingPct = 100 - pos.soldPct;
-          await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
-          return;
+          pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
+          if (pos.dynFloorBelowCount >= 2) {
+            const remainingPct = 100 - pos.soldPct;
+            await this._triggerExit(pos, `DYN_FLOOR(peak+${pos.highPnl.toFixed(0)}%,floor+${floor.toFixed(0)}%${isHigh ? ',HC' : ''})`, remainingPct);
+            return;
+          }
+        } else {
+          pos.dynFloorBelowCount = 0;
         }
       }
 
       // MINI_TS: highPnl 15-35%, PnL从峰值回撤超过阈值 → 卖
-      // v8: HIGH conviction 允许更大回撤（50% vs 35%）
+      // v9: 放宽阈值让赢家跑得更远（hamster +10.4%退出但涨了2.22x）
+      // v9: HIGH 70%(was 55%), NORMAL 50%(was 35%)
       if (pos.highPnl >= 15 && pos.highPnl <= 35) {
         const dropFromPeak = pos.highPnl - pnl;
         const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
-        const dropThreshold = pos.conviction === 'HIGH' ? 55 : 35;
+        const dropThreshold = pos.conviction === 'HIGH' ? 70 : 50;
         if (dropPct > dropThreshold) {
           const remainingPct = 100 - pos.soldPct;
           await this._triggerExit(pos, `MINI_TS(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%${pos.conviction === 'HIGH' ? ',HC' : ''})`, remainingPct);
