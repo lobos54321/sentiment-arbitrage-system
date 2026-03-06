@@ -500,6 +500,9 @@ export class PremiumSignalEngine {
         console.log(`⏭️ [MC过高] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K >= 15K → 不买（PROBE区间14.3%WR已移除）`);
       } else if (score < 70) {
         console.log(`⏭️ [评分不足] $${signal.symbol} MC=$${(mc/1000).toFixed(1)}K 评分${score}<70 → 不够`);
+      } else if (dexData && dexData.buy_count_1h < 100) {
+        // v5: 最低交易活跃度门槛（$bob仅83笔1h买，BSR 2.86虚高→-23.6%亏损）
+        console.log(`⏭️ [活跃度低] $${signal.symbol} 1h买入仅${dexData.buy_count_1h}<100 → 流动性不足`);
       } else if (mc >= 5000 && mc < 10000) {
         // CORE: MC $5-10K, Score ≥ 60
         scoreAction = 'BUY_FULL';
