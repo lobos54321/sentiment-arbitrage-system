@@ -1674,6 +1674,32 @@ const server = http.createServer((req, res) => {
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
     return;
+  } else if (url.pathname === '/api/export') {
+    // v10: 导出所有DB数据为JSON（用于回测分析）
+    try {
+      const database = getDb();
+      if (!database) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Database not available' }));
+        return;
+      }
+      const tables = ['premium_signals', 'tokens', 'trades', 'live_positions', 'rejected_signals', 'passed_signals', 'hunter_signals', 'signal_source_performance'];
+      const exportData = { exported_at: new Date().toISOString(), tables: {} };
+      for (const table of tables) {
+        try {
+          const rows = database.prepare(`SELECT * FROM ${table} ORDER BY rowid DESC LIMIT 1000`).all();
+          exportData.tables[table] = { count: rows.length, rows };
+        } catch (e) {
+          exportData.tables[table] = { count: 0, rows: [], error: e.message };
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(exportData, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
   } else if (url.pathname === '/api/logs') {
     // 最近日志 API（JSON格式）
     const limit = parseInt(url.searchParams?.get('limit') || '100');
