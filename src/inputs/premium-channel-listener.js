@@ -384,6 +384,75 @@ export class PremiumChannelListener {
   }
 
   /**
+   * Fetch channel message history for backtest analysis
+   */
+  async getChannelHistory(limit = 500) {
+    if (!this.client || !this.isRunning || !this.channelEntity) {
+      return { error: 'Premium channel listener not connected' };
+    }
+
+    try {
+      const messages = await this.client.getMessages(this.channelEntity, { limit });
+      const results = [];
+
+      for (const msg of messages) {
+        const text = msg.text || msg.message || '';
+        if (!text) continue;
+
+        const token_ca = this._extractSolAddress(text);
+        let signal = null;
+        
+        // Parse New Trending signals
+        if (text.includes('🔥') && text.includes('New Trending')) {
+          signal = this._parseSignal(text);
+          if (signal) signal.type = 'NEW_TRENDING';
+        }
+        // Parse ATH signals
+        else if (text.includes('📈') && text.includes('ATH')) {
+          signal = this._parseATHSignal(text);
+          if (signal) signal.type = 'ATH';
+        }
+        // Other messages with token addresses
+        else if (token_ca) {
+          signal = {
+            token_ca,
+            chain: 'SOL',
+            symbol: 'UNKNOWN',
+            type: 'OTHER',
+          };
+        }
+
+        if (!signal) continue;
+
+        results.push({
+          timestamp: new Date(msg.date * 1000).toISOString(),
+          type: signal.type || 'UNKNOWN',
+          symbol: signal.symbol || 'UNKNOWN',
+          token_ca: signal.token_ca,
+          market_cap: signal.market_cap || 0,
+          market_cap_from: signal.market_cap_from || 0,
+          gain_pct: signal.gain_pct || 0,
+          is_ath: signal.is_ath || false,
+          indices: signal.indices || null,
+          text_preview: text.substring(0, 300),
+        });
+      }
+
+      console.log(`📜 Fetched ${messages.length} messages, ${results.length} with tokens`);
+      
+      return {
+        count: results.length,
+        total_messages: messages.length,
+        channel: 'Egeye AI Gems 100X Vip',
+        signals: results,
+      };
+    } catch (error) {
+      console.error(`❌ Failed to fetch channel history: ${error.message}`);
+      return { error: error.message };
+    }
+  }
+
+  /**
    * Get service status
    */
   getStatus() {

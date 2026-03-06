@@ -1470,6 +1470,23 @@ const server = http.createServer((req, res) => {
     const rejectedData = getRejectedSignalsData(windowDays);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(rejectedData, null, 2));
+  } else if (url.pathname === '/api/channel-history') {
+    // Fetch Telegram channel message history for backtest
+    try {
+      const tg = global.__telegramService;
+      if (!tg || !tg.client) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Telegram service not available' }));
+        return;
+      }
+      const limit = Math.min(parseInt(url.searchParams.get('limit')) || 200, 1000);
+      const history = await tg.getChannelHistory(limit);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(history, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (url.pathname === '/api/shadow-pnl') {
     // Premium Channel Shadow PnL API
     try {

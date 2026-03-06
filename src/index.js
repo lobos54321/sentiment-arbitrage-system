@@ -213,6 +213,8 @@ class SentimentArbitrageSystem {
       // 1. Start Telegram listener
       console.log('📱 Starting Telegram signal listener...');
       await this.telegramService.start();
+      // Expose telegram service globally for API access
+      global.__telegramService = this.telegramService;
       console.log('   ✅ Telegram listener active\n');
 
       // 2. Start position monitor
@@ -802,6 +804,9 @@ class PremiumChannelSystem {
 
     // 启动监听
     await this.listener.start();
+
+    // Expose listener globally for API access (channel history)
+    global.__telegramService = this.listener;
 
     // 把 Telegram client 传给 engine 用于 Buzz 搜索
     if (this.listener.client) {

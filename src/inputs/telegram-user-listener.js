@@ -283,6 +283,50 @@ export class TelegramUserListener {
   }
 
   /**
+   * Fetch channel message history (for backtest analysis)
+   * @param {number} limit - Number of messages to fetch (default 200)
+   * @returns {Array} Array of {timestamp, text, tokens[]}
+   */
+  async getChannelHistory(limit = 200) {
+    if (!this.client || !this.isRunning) {
+      return { error: 'Telegram client not connected' };
+    }
+
+    const results = [];
+    
+    for (const channel of this.monitoredChannels) {
+      try {
+        const entity = await this.client.getEntity(channel.username);
+        const messages = await this.client.getMessages(entity, { limit });
+        
+        for (const msg of messages) {
+          if (!msg.text) continue;
+          
+          const tokens = this.extractTokenAddresses(msg.text);
+          if (tokens.length === 0) continue;
+          
+          results.push({
+            channel: channel.name || channel.username,
+            timestamp: new Date(msg.date * 1000).toISOString(),
+            text: msg.text.substring(0, 500),
+            tokens: tokens.map(t => ({ address: t.address, chain: t.chain }))
+          });
+        }
+        
+        console.log(`📜 Fetched ${messages.length} messages from ${channel.username}, ${results.length} with tokens`);
+      } catch (error) {
+        console.error(`❌ Failed to fetch history from ${channel.username}: ${error.message}`);
+      }
+    }
+    
+    return { 
+      count: results.length,
+      channels: this.monitoredChannels.map(ch => ch.username),
+      messages: results 
+    };
+  }
+
+  /**
    * Get service status
    */
   getStatus() {
