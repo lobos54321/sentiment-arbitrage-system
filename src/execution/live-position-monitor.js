@@ -1,25 +1,25 @@
 /**
- * Live Position Monitor — v12
+ * Live Position Monitor — v12.2
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v12 退出策略（基于20笔实盘数据全面分析）：
- * - 新增 ULTRA_FAST_STOP: ≤15s, highPnl≤0, PnL<-8% → 入场即崩立即止损
- * - FAST_STOP收紧: -20%→-15% (修复0-60s -15%~-20%无退出缺口)
- * - STOP_LOSS收紧: -20%→-18% (历史无交易从-18%恢复到盈利)
- * - MID_STOP收紧: 60s→45s, -15%→-12% (更早检测慢性死亡)
- * - 数据: FAST_STOP 6笔avg-23.1%=-0.08SOL, 优化后预计每笔省5-9%
+ * v12.2: 撤回v12止损收紧（meme币高波动特性不适合过紧止损）
+ * - 恢复FAST_STOP: -20%（v12曾收紧到-15%）
+ * - 恢复STOP_LOSS: -20%（v12曾收紧到-18%）
+ * - 恢复MID_STOP: 60s/-15%（v12曾收紧到45s/-12%）
+ * - 移除ULTRA_FAST_STOP（v12新增，过紧导致正常波动被止损）
+ * - 保留v12.1的DB持久化修复
  *
  * Phase 1（≤10 分钟）：
- * - ULTRA_FAST: ≤15s, highPnl≤0, PnL<-8% → 全卖
- * - FAST_STOP: ≤90s, highPnl≤0, PnL<-15% → 全卖
- * - STOP_LOSS: PnL≤-18% → 全卖
+ * - FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
+ * - STOP_LOSS: PnL≤-20% → 全卖
  * - TP1 锁利: PnL≥50% → 卖40%，剩余60%进入超宽模式
  * - 超宽模式(TP1后): 只用WIDE_TRAIL(-40%from peak) + ABSOLUTE_FLOOR(+10%)
  * - Dynamic Floor (未TP1时): 渐进式保底
  * - MINI_TS: highPnl 15-35%, PnL跌幅>阈值 from peak → 卖
  * - MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖
+ * (v12.2恢复v11原始值)
  * - TIMEOUT: HC:20min, NM:10min
  *
  * Phase 2（>10 分钟，仅 highPnl≥5%）：
@@ -462,24 +462,16 @@ export class LivePositionMonitor {
     // ========== Phase 1: ≤5 分钟 ==========
     if (isPhase1) {
 
-      // v12: ULTRA_FAST_STOP: ≤15s, highPnl≤0, PnL<-8% → 入场即崩，立即止损
-      // 数据驱动: 7笔peak=0交易全亏(avg-23%), 15s内-8%且无正向=100%死亡率
-      if (holdTimeSec <= 15 && pos.highPnl <= 0 && pnl < -8) {
-        await this._triggerExit(pos, 'ULTRA_FAST', 100);
-        return;
-      }
-
-      // FAST_STOP: ≤90s, highPnl≤0, PnL<-15% → 全卖
-      // v12: -20%→-15% 数据驱动: 6笔FAST_STOP avg-23.1%,提前5%止损=每笔省0.003SOL
-      // 修复: 0-60s pnl在-15%~-20%之间无退出触发的缺口
-      if (holdTimeSec <= 90 && pos.highPnl <= 0 && pnl < -15) {
+      // FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
+      // v12.2: 恢复-20% (meme币高波动，过紧止损会误杀正常回调)
+      if (holdTimeSec <= 90 && pos.highPnl <= 0 && pnl < -20) {
         await this._triggerExit(pos, 'FAST_STOP', 100);
         return;
       }
 
-      // STOP_LOSS: PnL ≤ -18% → 全卖（任何时间）
-      // v12: -20%→-18% 数据驱动: 无交易从-18%恢复到盈利
-      if (pnl <= -18) {
+      // STOP_LOSS: PnL ≤ -20% → 全卖（任何时间）
+      // v12.2: 恢复-20% (meme币波动大，-18%可能是正常回调)
+      if (pnl <= -20) {
         const remainingPct = 100 - pos.soldPct;
         await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
         return;
@@ -608,9 +600,9 @@ export class LivePositionMonitor {
         }
       }
 
-      // MID_STOP: ≥45s, highPnl<10%, PnL<-12% → 全卖
-      // v12: 60s→45s, -15%→-12% 数据驱动: MIGA(-16%)在60s才触发，更早检测可省4%
-      if (holdTimeSec >= 45 && pos.highPnl < 10 && pnl < -12) {
+      // MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖
+      // v12.2: 恢复60s/-15% (meme币需要更多时间观察)
+      if (holdTimeSec >= 60 && pos.highPnl < 10 && pnl < -15) {
         const remainingPct = 100 - pos.soldPct;
         await this._triggerExit(pos, 'MID_STOP', remainingPct);
         return;
@@ -644,8 +636,8 @@ export class LivePositionMonitor {
         return;
       }
 
-      // STOP_LOSS 在 Phase 2 仍然有效 (v12: -20%→-18%)
-      if (pnl <= -18) {
+      // STOP_LOSS 在 Phase 2 仍然有效
+      if (pnl <= -20) {
         const remainingPct = 100 - pos.soldPct;
         await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
         return;
