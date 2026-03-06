@@ -7,15 +7,15 @@
  * FINAL 退出策略（第一性原理）：
  *
  * Phase 1（≤5 分钟）：
- * - FAST_STOP: ≤60s, highPnl≤0, PnL<-15% → 全卖
+ * - FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
  * - STOP_LOSS: PnL≤-20% → 全卖
  * - Dynamic Floor (渐进式):
  *   - highPnl≥50% → 保底 peak*40%
  *   - highPnl≥30% → 保底 peak*35%
  *   - highPnl≥15% → 保底 peak*30%
  * - MINI_TS: highPnl 15-35%, PnL跌幅>35% from peak → 卖
- * - MID_STOP: ≥30s, highPnl<10%, PnL<-12% → 全卖
- * - TIMEOUT: >300s, highPnl<5%, PnL<0% → 全卖
+ * - MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖
+ * - TIMEOUT: >480s, highPnl<5%, PnL<0% → 全卖
  *
  * Phase 2（>5 分钟，仅 highPnl≥5%）：
  * - TP1: PnL≥50% → 卖30%
@@ -420,14 +420,14 @@ export class LivePositionMonitor {
 
     // ==================== FINAL 策略退出条件评估 ====================
     const holdTimeMin = holdTimeSec / 60;
-    const isPhase1 = holdTimeMin <= 5;  // Phase 1: ≤5 分钟
-    const isPhase2 = holdTimeMin > 5;   // Phase 2: >5 分钟
+    const isPhase1 = holdTimeMin <= 8;  // Phase 1: ≤8 分钟（数据驱动：>5min有100%WR）
+    const isPhase2 = holdTimeMin > 8;   // Phase 2: >8 分钟
 
     // ========== Phase 1: ≤5 分钟 ==========
     if (isPhase1) {
 
-      // FAST_STOP: ≤60s, highPnl≤0, PnL<-15% → 全卖（放宽：给币更多反弹时间）
-      if (holdTimeSec <= 60 && pos.highPnl <= 0 && pnl < -15) {
+      // FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖（数据驱动：持仓<10s全亏，需给更多反弹时间）
+      if (holdTimeSec <= 90 && pos.highPnl <= 0 && pnl < -20) {
         await this._triggerExit(pos, 'FAST_STOP', 100);
         return;
       }
@@ -474,15 +474,15 @@ export class LivePositionMonitor {
         }
       }
 
-      // MID_STOP: ≥30s, highPnl<10%, PnL<-12% → 全卖
-      if (holdTimeSec >= 30 && pos.highPnl < 10 && pnl < -12) {
+      // MID_STOP: ≥60s, highPnl<10%, PnL<-15% → 全卖（数据驱动：30s-1min有83%WR，给更多时间）
+      if (holdTimeSec >= 60 && pos.highPnl < 10 && pnl < -15) {
         const remainingPct = 100 - pos.soldPct;
         await this._triggerExit(pos, 'MID_STOP', remainingPct);
         return;
       }
 
-      // TIMEOUT: >300s (5min), highPnl<5%, PnL<0% → 全卖
-      if (holdTimeSec > 300 && pos.highPnl < 5 && pnl < 0) {
+      // TIMEOUT: >480s (8min), highPnl<5%, PnL<0% → 全卖（数据驱动：>5min有100%WR,+102%avg，延长持仓时间）
+      if (holdTimeSec > 480 && pos.highPnl < 5 && pnl < 0) {
         const remainingPct = 100 - pos.soldPct;
         await this._triggerExit(pos, 'TIMEOUT', remainingPct);
         return;
