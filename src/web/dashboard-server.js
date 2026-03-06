@@ -1437,7 +1437,7 @@ function getRejectedSignalsData(windowDays = 7) {
 /**
  * HTTP 服务器
  */
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (url.pathname === '/' || url.pathname === '/dashboard') {
