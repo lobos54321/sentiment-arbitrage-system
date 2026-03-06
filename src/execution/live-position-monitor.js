@@ -36,6 +36,9 @@ export class LivePositionMonitor {
     // 持仓 Map<tokenCA, position>
     this.positions = new Map();
 
+    // 🔧 退出回调（通知信号引擎设置冷却）
+    this.onExitCallbacks = [];
+
     // 防抖 Map<tokenCA, timestamp> — 3 秒内不重复触发
     this.sellDebounce = new Map();
     this.debouncMs = 3000;
@@ -124,6 +127,13 @@ export class LivePositionMonitor {
     }
     this._printReport();
     console.log('⏹️  [LivePositionMonitor] 已停止');
+  }
+
+  /**
+   * 🔧 注册退出回调（用于通知信号引擎设置冷却）
+   */
+  onExit(callback) {
+    this.onExitCallbacks.push(callback);
   }
 
   /**
@@ -362,16 +372,22 @@ export class LivePositionMonitor {
 
     pos.lastPnl = pnl;
 
-    // 🔧 价格有效性检查：首次更新±20%标记为可疑，等第2次确认
+    // 🔧 首价保护：始终跳过第1次价格更新的EXIT评估
+    // 首次价格常受AMM滑点/报价延迟影响，不可靠
     if (!pos._updateCount) pos._updateCount = 0;
     pos._updateCount++;
 
-    if (pos._updateCount === 1 && Math.abs(pnl) > 20) {
-      pos._suspiciousFirstPrice = true;
-      console.log(`⚠️  [价格可疑] $${pos.symbol} 首次PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 偏差>20%，等待第2次确认`);
-      return;  // 跳过此次，不更新 highPnl，等下次确认
+    if (pos._updateCount === 1) {
+      // 第1次价格更新：只记录，不更新highPnl，不做EXIT评估
+      if (Math.abs(pnl) > 20) {
+        pos._suspiciousFirstPrice = true;
+        console.log(`⚠️  [首价跳过] $${pos.symbol} 首次PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 偏差大，跳过EXIT`);
+      } else {
+        console.log(`⏸️  [首价等待] $${pos.symbol} 首次PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%，等第2次确认后开始EXIT评估`);
+      }
+      return;  // 始终跳过第1次
     }
-    // 第2次更新时清除可疑标记，用新价格覆盖
+    // 第2次更新时，如果首价可疑(>20%)，也以第2次为基准
     if (pos._suspiciousFirstPrice && pos._updateCount === 2) {
       pos._suspiciousFirstPrice = false;
       console.log(`✅ [价格确认] $${pos.symbol} 第2次PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%，以此为准`);
@@ -747,6 +763,11 @@ export class LivePositionMonitor {
       `).run(finalPnl, pos.exitReason, pos.highPnl, pos.lowPnl, pos.totalSolReceived || 0, Date.now(), pos.tokenCA);
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] DB 更新失败: ${e.message}`);
+    }
+
+    // 🔧 通知退出回调（触发信号引擎冷却）
+    for (const cb of this.onExitCallbacks) {
+      try { cb(pos.symbol, pos.tokenCA, finalPnl); } catch (_) {}
     }
   }
 

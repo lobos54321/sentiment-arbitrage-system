@@ -771,6 +771,13 @@ class PremiumChannelSystem {
         // 注入到 engine
         this.engine.setLiveComponents(this.jupiterExecutor, this.livePositionMonitor);
 
+        // 🔧 注册退出回调：退出后触发信号引擎冷却
+        this.livePositionMonitor.onExit((symbol, tokenCA, pnl) => {
+          if (this.engine && this.engine.markExitCooldown) {
+            this.engine.markExitCooldown(symbol);
+          }
+        });
+
         const solBalance = await this.jupiterExecutor.getSolBalance();
         console.log(`💰 [实盘] 钱包余额: ${solBalance.toFixed(4)} SOL`);
       } catch (error) {

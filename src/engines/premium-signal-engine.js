@@ -42,6 +42,10 @@ export class PremiumSignalEngine {
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
+    // 🔧 Symbol级去重（15分钟窗口）— 防止同名不同CA的仿盘
+    this.recentSymbols = new Map(); // symbol → timestamp
+    // 🔧 退出后冷却（10分钟）— 防止退出后立即再买同名代币
+    this.exitCooldown = new Map(); // symbol → timestamp
     // 信号历史（长期追踪重复信号）
     this.signalHistory = new Map(); // token_ca → { count, firstSeen, lastSeen, symbol }
 
@@ -262,6 +266,23 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'duplicate' };
       }
       this.markProcessed(ca);
+
+      // 🔧 Symbol级去重（15分钟窗口）— 防止同名不同CA的仿盘
+      const symbol = signal.symbol;
+      const lastSymbolSeen = this.recentSymbols.get(symbol);
+      if (lastSymbolSeen && (Date.now() - lastSymbolSeen) < 15 * 60 * 1000) {
+        this.stats.duplicates_skipped++;
+        console.log(`⏭️  [Symbol去重] $${symbol} 15分钟内已处理过同名代币，跳过 (CA: ${shortCA}...)`);
+        return { action: 'SKIP', reason: 'symbol_duplicate' };
+      }
+
+      // 🔧 退出冷却检查（10分钟）— 防止退出后立即重买同名代币
+      const cooldownUntil = this.exitCooldown.get(symbol);
+      if (cooldownUntil && Date.now() < cooldownUntil) {
+        const remainSec = Math.round((cooldownUntil - Date.now()) / 1000);
+        console.log(`⏭️  [冷却中] $${symbol} 退出后冷却期，剩余${remainSec}s，跳过 (CA: ${shortCA}...)`);
+        return { action: 'SKIP', reason: 'exit_cooldown' };
+      }
 
       // Step 2: 预检 - 频道自带的 freeze/mint 数据
       // 只有明确标记为 false（❌）才拦截，未知的放过让链上快照验证
@@ -705,6 +726,9 @@ export class PremiumSignalEngine {
                 tokenAmount,
                 tokenDecimals
               );
+
+              // 🔧 标记Symbol已处理（15分钟窗口）
+              this.recentSymbols.set(signal.symbol, Date.now());
             }
           } else {
             // Fallback: GMGN Telegram 执行
@@ -753,6 +777,22 @@ export class PremiumSignalEngine {
     const cutoff = Date.now() - 10 * 60 * 1000;
     for (const [ca, ts] of this.recentSignals) {
       if (ts < cutoff) this.recentSignals.delete(ca);
+    }
+  }
+
+  /**
+   * 🔧 标记退出冷却（10分钟内同symbol不再买入）
+   */
+  markExitCooldown(symbol) {
+    this.exitCooldown.set(symbol, Date.now() + 10 * 60 * 1000);
+    // 清理过期冷却记录
+    for (const [sym, until] of this.exitCooldown) {
+      if (until < Date.now()) this.exitCooldown.delete(sym);
+    }
+    // 同时清理过期symbol记录
+    const symCutoff = Date.now() - 15 * 60 * 1000;
+    for (const [sym, ts] of this.recentSymbols) {
+      if (ts < symCutoff) this.recentSymbols.delete(sym);
     }
   }
 
