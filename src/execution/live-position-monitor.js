@@ -1,10 +1,13 @@
 /**
- * Live Position Monitor — v10
+ * Live Position Monitor — v11
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v10 退出策略（基于OHLCV生命周期分析）：
+ * v11 退出策略（基于v10实盘$中文人生教训）：
+ * - HC DYN_FLOOR比率修复: peak10-15%→30%(was10%), peak15-30%→20%(was10%)
+ * - HC minHold缩短: 45s→30s (避免延迟止损)
+ * - 配合signal-engine v11: ATH 5m>400%扣分, >600% SKIP
  *
  * Phase 1（≤10 分钟）：
  * - FAST_STOP: ≤90s, highPnl≤0, PnL<-20% → 全卖
@@ -502,7 +505,7 @@ export class LivePositionMonitor {
       // v9: HIGH conviction使用更宽松的ratio + 需要连续2次确认才触发
       // v10: 保持v9的DYN_FLOOR逻辑（对未达+50%的仓位仍然有效）
       const isHigh = pos.conviction === 'HIGH';
-      const minHoldForFloor = isHigh ? 45 : 0;  // HC需要至少45秒才开始DYN_FLOOR评估
+      const minHoldForFloor = isHigh ? 30 : 0;  // v11: HC最小持有30s(was 45s), $中文人生教训:45s延迟导致-12.7%→-4.8%
 
       if (holdTimeSec < minHoldForFloor) {
         // HC最小持有期内：只做FAST_STOP/STOP_LOSS保护，不做DYN_FLOOR/MINI_TS
@@ -535,7 +538,7 @@ export class LivePositionMonitor {
           pos.dynFloorBelowCount = 0;
         }
       } else if (pos.highPnl >= 15) {
-        const floor = pos.highPnl * (isHigh ? 0.10 : 0.35);  // v9: HC 10%(was 20%), NORMAL 35%(was 40%)
+        const floor = pos.highPnl * (isHigh ? 0.20 : 0.35);  // v11: HC 20%(was 10%), NORMAL 35%
         if (pnl < floor) {
           pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
           if (pos.dynFloorBelowCount >= 2) {
@@ -547,7 +550,7 @@ export class LivePositionMonitor {
           pos.dynFloorBelowCount = 0;
         }
       } else if (pos.highPnl >= 10) {
-        const floor = pos.highPnl * (isHigh ? 0.10 : 0.45);  // v9: HC 10%(was 20%), NORMAL 45%(was 50%)
+        const floor = pos.highPnl * (isHigh ? 0.30 : 0.45);  // v11: HC 30%(was 10%), $中文人生peak+11%仅floor+1%→now+3.3%
         if (pnl < floor) {
           pos.dynFloorBelowCount = (pos.dynFloorBelowCount || 0) + 1;
           if (pos.dynFloorBelowCount >= 2) {

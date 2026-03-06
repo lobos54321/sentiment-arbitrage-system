@@ -1,8 +1,9 @@
 /**
- * Premium Signal Engine
+ * Premium Signal Engine — v11
  *
  * 独立的信号处理引擎，专门处理付费频道信号
  * Pipeline: 信号 → 预检 → 链上快照 → Hard Gates → AI分析 → 仓位 → Exit Gates → 执行
+ * v11: ATH 5m过热保护 (>400% penalty -15, >600% SKIP)
  */
 
 import { SolanaSnapshotService } from '../inputs/chain-snapshot-sol.js';
@@ -380,7 +381,14 @@ export class PremiumSignalEngine {
         // 数据教训: 噜噜(5m+172%→-24.8%), Hamburg(5m+256%→-27.0%) — 买在wick顶
         // ATH信号的5m动量=突破动量(正面), New Trending的5m过高=pump已结束(负面)
         const isATHSignal = signal.is_ath === true;
-        if (!isATHSignal && dexData.price_change_5m > 200) {
+        // v11: ATH信号也需要5m过热保护 ($中文人生: ATH+5m+401%→-4.8%)
+        if (isATHSignal && dexData.price_change_5m > 600) {
+          console.log(`⛔ [v11:ATH过热] $${signal.symbol} 5m+${dexData.price_change_5m.toFixed(0)}% > 600% → ATH也太过热`);
+          this.saveSignalRecord(signal, 'ATH_5M_OVERHEAT', null);
+          return { action: 'SKIP', reason: 'ath_5m_overheat' };
+        } else if (isATHSignal && dexData.price_change_5m > 400) {
+          score -= 15; scoreDetails.push(`5m+${dexData.price_change_5m}%(ATH过热-15)`);
+        } else if (!isATHSignal && dexData.price_change_5m > 200) {
           // v9: New Trending + 5m>200% → 直接跳过（pump已经结束，买入就是接盘）
           console.log(`⛔ [v9:5m过热] $${signal.symbol} 5m+${dexData.price_change_5m.toFixed(0)}% > 200% → 非ATH信号，pump已过`);
           this.saveSignalRecord(signal, '5M_OVERHEAT', null);
