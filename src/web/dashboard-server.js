@@ -1479,7 +1479,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'Telegram service not available' }));
         return;
       }
-      const limit = Math.min(parseInt(url.searchParams.get('limit')) || 200, 1000);
+      const limit = Math.min(parseInt(url.searchParams.get('limit')) || 200, 3000);
       const history = await tg.getChannelHistory(limit);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(history, null, 2));
