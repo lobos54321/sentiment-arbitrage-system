@@ -64,6 +64,10 @@ export class PremiumSignalEngine {
     // ATH计数持久化路径
     this._athCountsPath = path.join(process.cwd(), 'data', 'ath_counts.json');
 
+    // v14: 观察列表 (ATH#1已买入小仓, 等待ATH#2确认加仓)
+    // tokenCA → { signal, mc1, idx1, entryTime, positionSol: 0.02, txHash }
+    this._watchlist = new Map();
+
     // 统计
     this.stats = {
       signals_received: 0,
@@ -134,6 +138,18 @@ export class PremiumSignalEngine {
 
       // v13: 启动SOL市场环境检查（每5分钟）
       this._startSolMarketCheck();
+
+      // v14: 观察列表清理（每10分钟清理超时条目，2小时无ATH#2则移除）
+      this._watchlistCleanupInterval = setInterval(() => {
+        const now = Date.now();
+        const timeout = 2 * 60 * 60 * 1000; // 2小时
+        for (const [ca, item] of this._watchlist) {
+          if (now - item.entryTime > timeout) {
+            console.log(`🧹 [v14] 观察列表清理: $${item.signal?.symbol || ca.slice(0,8)} 超过2小时无ATH#2，移除`);
+            this._watchlist.delete(ca);
+          }
+        }
+      }, 10 * 60 * 1000);
 
       console.log('✅ [Premium Engine] 所有服务初始化完成');
 
@@ -377,8 +393,10 @@ export class PremiumSignalEngine {
         console.log(`  ⚠️ DexScreener 失败: ${e.message}`);
       }
 
-      // ===== v13: 条件制入场逻辑（替代v12.2评分系统）=====
-      // 核心依据: 24h/997条信号回测，ATH 3+次+Super>=150 = 73% WR
+      // ===== v14: DCA两阶段入场逻辑 =====
+      // 核心依据: 48h/1992条信号回测，ATH#1小仓+ATH#2 DCA加仓 = 50.8% WR, +1076% 总回报
+      // ATH#1: Trade≤5, MC≤$75K → 买0.02 SOL (探索仓)
+      // ATH#2: MC增长≥1.5x, Security≤25 → 加仓0.05 SOL (确认仓)
       const isATH = signal.is_ath === true;
       const idx = signal.indices;
       let mc = dexData?.market_cap || signal.market_cap || 0;
@@ -393,11 +411,11 @@ export class PremiumSignalEngine {
 
       const liqUsd = dexData?.liquidity_usd || 0;
 
-      // v13条件1: 只交易ATH信号
+      // v14条件1: 只交易ATH信号
       if (!isATH) {
-        console.log(`⏭️ [v13] $${signal.symbol} 非ATH信号 → 不交易`);
-        this.saveSignalRecord(signal, 'NOT_ATH_V13', null);
-        return { action: 'SKIP', reason: 'not_ath_v13' };
+        console.log(`⏭️ [v14] $${signal.symbol} 非ATH信号 → 不交易`);
+        this.saveSignalRecord(signal, 'NOT_ATH_V14', null);
+        return { action: 'SKIP', reason: 'not_ath_v14' };
       }
 
       // ATH计数器（在signalHistory中维护，持久化到JSON）
@@ -413,119 +431,104 @@ export class PremiumSignalEngine {
       const currentAthNum = prevAthCount + 1;
       this._saveAthCounts(); // 持久化
 
-      // 已持仓检查
-      const alreadyHolding = this.livePositionMonitor?.positions?.has(ca);
-      if (alreadyHolding) {
-        console.log(`⏭️ [已持仓] $${signal.symbol} ATH#${currentAthNum} 已有仓位，不加仓`);
-        return { action: 'SKIP', reason: 'already_holding' };
-      }
-
-      // ===== 7个硬性条件检查 =====
-      const filterReasons = [];
-
-      // 条件2: ATH次数 >= 3
-      if (currentAthNum < 3) {
-        console.log(`📝 [v13] $${signal.symbol} ATH#${currentAthNum}/3 记录中... Super=${idx?.super_index?.current || '?'} AI=${idx?.ai_index?.current || '?'} Trade=${idx?.trade_index?.current || '?'}`);
-        this.saveSignalRecord(signal, 'ATH_ACCUMULATING', null);
-        return { action: 'SKIP', reason: 'ath_count_below_3', ath_num: currentAthNum };
-      }
-
-      // 条件3: Super Index (current) >= 150
-      const superCurrent = idx?.super_index?.current || 0;
-      if (superCurrent < 150) filterReasons.push(`Super=${superCurrent}<150`);
-
-      // 条件4: Trade Index (current) < 15
+      // 读取常用指标
       const tradeCurrent = idx?.trade_index?.current || 0;
-      if (tradeCurrent >= 15) filterReasons.push(`Trade=${tradeCurrent}>=15(过热)`);
-
-      // 条件5: AI Index增长率 >= 30%
-      const aiGrowth = idx?.ai_index ? idx.ai_index.growth : 0;
-      if (aiGrowth < 30) filterReasons.push(`AI增长=${aiGrowth.toFixed(0)}%<30%`);
-
-      // 条件6: Security Index (current) >= 30
       const securityCurrent = idx?.security_index?.current || 0;
-      if (securityCurrent < 30) filterReasons.push(`Security=${securityCurrent}<30`);
-
-      // 条件7: LP流动性 >= $10K
-      if (liqUsd < 10000) filterReasons.push(`LP=$${(liqUsd/1000).toFixed(1)}K<$10K`);
-
-      // 硬性条件不通过
-      if (filterReasons.length > 0) {
-        console.log(`⏭️ [v13] $${signal.symbol} ATH#${currentAthNum} 硬性条件不通过: ${filterReasons.join(' | ')}`);
-        this.saveSignalRecord(signal, 'V13_HARD_FILTER', null);
-        return { action: 'SKIP', reason: 'v13_hard_filter', details: filterReasons };
-      }
+      const superCurrent = idx?.super_index?.current || 0;
 
       // ===== 全局开关: SOL市场环境 =====
       if (this._solMarketPaused) {
-        console.log(`⏸️ [v13] SOL 24h跌>10%，市场暂停中，不开新仓`);
+        console.log(`⏸️ [v14] SOL 24h跌>10%，市场暂停中，不开新仓`);
         return { action: 'SKIP', reason: 'market_paused' };
       }
 
-      // ===== 并发仓位检查 (最多2个，资本保守策略) =====
-      const currentPositionCount = this.livePositionMonitor?.positions?.size || 0;
-      if (currentPositionCount >= 2) {
-        console.log(`⏭️ [v13] 当前${currentPositionCount}个持仓 >= 2 → 不开新仓`);
-        return { action: 'SKIP', reason: 'max_positions_v13' };
-      }
+      // ===== v14 两阶段入场分支 =====
+      let finalSize, tradeConviction, isDCAAdd = false;
 
-      // ===== 提升条件（升级信号等级）=====
-      let tierBoost = 0;
-      const boostDetails = [];
+      if (currentAthNum === 1) {
+        // ====== ATH#1: 探索仓 (0.02 SOL) ======
+        const ath1Reasons = [];
+        if (tradeCurrent > 5) ath1Reasons.push(`Trade=${tradeCurrent}>5`);
+        if (mc > 75000) ath1Reasons.push(`MC=$${(mc/1000).toFixed(1)}K>$75K`);
 
-      // 提升1: GainX < 3（价格还未暴涨，早期入场）
-      const gainX = signal.gain_pct ? (signal.gain_pct / 100 + 1) : 0;
-      if (gainX > 0 && gainX < 3) {
-        tierBoost++;
-        boostDetails.push(`GainX=${gainX.toFixed(1)}<3`);
-      }
+        if (ath1Reasons.length > 0) {
+          console.log(`⏭️ [v14] $${signal.symbol} ATH#1 过滤不通过: ${ath1Reasons.join(' | ')}`);
+          this.saveSignalRecord(signal, 'V14_ATH1_FILTER', null);
+          return { action: 'SKIP', reason: 'v14_ath1_filter', details: ath1Reasons };
+        }
 
-      // 提升2: AI Index增长率 >= 100%（AI认知爆发）
-      if (aiGrowth >= 100) {
-        tierBoost++;
-        boostDetails.push(`AI增长=${aiGrowth.toFixed(0)}%>=100%`);
-      }
+        // 并发仓位检查 (最多2个)
+        const currentPositionCount = this.livePositionMonitor?.positions?.size || 0;
+        if (currentPositionCount >= 2) {
+          console.log(`⏭️ [v14] 当前${currentPositionCount}个持仓 >= 2 → 不开新仓`);
+          return { action: 'SKIP', reason: 'max_positions_v14' };
+        }
 
-      // 确定信号级别和仓位
-      // 实盘数据验证: 0.04-0.06 SOL交易gas成本<5%, 0.02太小gas占15%+
-      let entryTier, tieredPositionSize, tradeConviction;
-      if (tierBoost >= 2) {
-        entryTier = 'S';
-        tieredPositionSize = 0.10;
-        tradeConviction = 'HIGH';
-      } else if (tierBoost >= 1) {
-        entryTier = 'A';
-        tieredPositionSize = 0.07;
-        tradeConviction = 'HIGH';
-      } else {
-        entryTier = 'B';
-        tieredPositionSize = 0.05;
+        finalSize = 0.02;
         tradeConviction = 'NORMAL';
+        console.log(`🔍 [v14] $${signal.symbol} ATH#1 ✅ 探索仓! Trade=${tradeCurrent} MC=$${(mc/1000).toFixed(1)}K → 买 ${finalSize} SOL`);
+
+      } else if (currentAthNum === 2) {
+        // ====== ATH#2: DCA加仓 (0.05 SOL) ======
+        const watchItem = this._watchlist.get(ca);
+
+        if (!watchItem) {
+          console.log(`⏭️ [v14] $${signal.symbol} ATH#2 但不在观察列表中（ATH#1被过滤或超时），跳过`);
+          this.saveSignalRecord(signal, 'V14_ATH2_NOT_WATCHED', null);
+          return { action: 'SKIP', reason: 'v14_ath2_not_watched' };
+        }
+
+        // ATH#2 DCA筛选条件
+        const mcGrowth = watchItem.mc1 > 0 ? mc / watchItem.mc1 : 0;
+        const ath2Reasons = [];
+        if (mcGrowth < 1.5) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.5x`);
+        if (securityCurrent > 25) ath2Reasons.push(`Security=${securityCurrent}>25`);
+
+        if (ath2Reasons.length > 0) {
+          console.log(`⏭️ [v14] $${signal.symbol} ATH#2 DCA过滤不通过: ${ath2Reasons.join(' | ')} (MC1=$${(watchItem.mc1/1000).toFixed(1)}K→MC2=$${(mc/1000).toFixed(1)}K)`);
+          // 从观察列表移除（不再等待）
+          this._watchlist.delete(ca);
+          this.saveSignalRecord(signal, 'V14_ATH2_FILTER', null);
+          return { action: 'SKIP', reason: 'v14_ath2_filter', details: ath2Reasons };
+        }
+
+        // 检查ATH#1持仓是否还在
+        const ath1Holding = this.livePositionMonitor?.positions?.has(ca);
+        if (!ath1Holding) {
+          console.log(`⏭️ [v14] $${signal.symbol} ATH#2 但ATH#1持仓已退出（止损/止盈），跳过DCA`);
+          this._watchlist.delete(ca);
+          return { action: 'SKIP', reason: 'v14_ath1_position_closed' };
+        }
+
+        finalSize = 0.05;
+        tradeConviction = 'HIGH';
+        isDCAAdd = true;
+        console.log(`📈 [v14] $${signal.symbol} ATH#2 ✅ DCA加仓! MC增长=${mcGrowth.toFixed(2)}x Security=${securityCurrent} → 加仓 ${finalSize} SOL`);
+        console.log(`  MC1=$${(watchItem.mc1/1000).toFixed(1)}K → MC2=$${(mc/1000).toFixed(1)}K | 间隔=${((Date.now() - watchItem.entryTime)/60000).toFixed(1)}min`);
+
+      } else {
+        // ATH#3+: 不再入场
+        console.log(`⏭️ [v14] $${signal.symbol} ATH#${currentAthNum} ≥3 → 不再入场`);
+        this.saveSignalRecord(signal, 'V14_ATH3_PLUS', null);
+        return { action: 'SKIP', reason: 'v14_ath3_plus', ath_num: currentAthNum };
       }
 
-      const scoreAction = 'BUY_FULL';
-      const superGrowth = idx?.super_index ? idx.super_index.growth.toFixed(0) : '?';
-      console.log(`🎯 [v13] $${signal.symbol} ATH#${currentAthNum} ✅ 全部通过!`);
-      console.log(`  Super=${superCurrent}(+${superGrowth}%) AI增长=${aiGrowth.toFixed(0)}% Trade=${tradeCurrent} Security=${securityCurrent} LP=$${(liqUsd/1000).toFixed(1)}K MC=$${(mc/1000).toFixed(1)}K`);
-      console.log(`  → ${entryTier}级信号 ${boostDetails.length > 0 ? '[' + boostDetails.join(', ') + ']' : '(无加分)'} → 买 ${tieredPositionSize} SOL`);
-
-      // 构造兼容的AI结果（v13不使用AI，但执行流需要此格式）
+      // 构造兼容的AI结果
       const aiResult = {
-        action: scoreAction,
-        confidence: tierBoost >= 2 ? 95 : tierBoost >= 1 ? 85 : 75,
-        narrative_tier: entryTier,
-        narrative_reason: `v13: ATH#${currentAthNum} Super=${superCurrent} AI增长=${aiGrowth.toFixed(0)}% Trade=${tradeCurrent} Security=${securityCurrent} ${boostDetails.join(' ')}`,
+        action: 'BUY_FULL',
+        confidence: isDCAAdd ? 90 : 70,
+        narrative_tier: isDCAAdd ? 'DCA' : 'SCOUT',
+        narrative_reason: `v14: ATH#${currentAthNum} Trade=${tradeCurrent} Security=${securityCurrent} MC=$${(mc/1000).toFixed(1)}K${isDCAAdd ? ' DCA加仓' : ' 探索仓'}`,
         entry_timing: 'OPTIMAL',
         stop_loss_percent: 25
       };
 
-      // Step 6: 仓位检查（使用 MC 梯度仓位）
-      const positionSize = tieredPositionSize;
+      // 仓位检查（v14使用固定仓位，跳过 positionSizer）
       const decision = {
         action: 'AUTO_BUY',
         chain: 'SOL',
         auto_buy_enabled: this.autoBuyEnabled,
-        position: positionSize
+        position: finalSize
       };
       const tokenData = {
         token_ca: ca,
@@ -533,72 +536,77 @@ export class PremiumSignalEngine {
         narrative: aiResult.narrative_reason
       };
 
-      const positionCheck = this.shadowMode ? { allowed: true } : await this.positionSizer.canOpenPosition(decision, tokenData);
-      if (!positionCheck.allowed) {
-        this.stats.position_denied++;
-        console.log(`🚫 [仓位] 不允许: ${positionCheck.reason}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult);
-        return { action: 'SKIP', reason: 'position_denied', details: positionCheck.reason };
+      if (!this.shadowMode) {
+        const positionCheck = await this.positionSizer.canOpenPosition(decision, tokenData);
+        if (!positionCheck.allowed && !isDCAAdd) {
+          this.stats.position_denied++;
+          console.log(`🚫 [仓位] 不允许: ${positionCheck.reason}`);
+          this.saveSignalRecord(signal, gateResult.status, aiResult);
+          return { action: 'SKIP', reason: 'position_denied', details: positionCheck.reason };
+        }
       }
-      const finalSize = positionCheck.adjusted_size || positionSize;
-      console.log(`✅ [仓位] 允许开仓: ${finalSize} SOL`);
+      console.log(`✅ [仓位] 允许${isDCAAdd ? 'DCA加仓' : '开仓'}: ${finalSize} SOL`);
 
-      // Step 7: Exit Gates
-      console.log('🚪 [Exit Gates] 退出可行性检查...');
-      const exitResult = this.exitGateFilter.evaluate(snapshot, finalSize);
-      if (exitResult.status === 'REJECT') {
-        this.stats.exit_gate_rejected++;
-        console.log(`🚫 [Exit Gates] REJECT: ${exitResult.reasons.join(', ')}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult);
-        return { action: 'SKIP', reason: 'exit_gate_reject', details: exitResult.reasons };
+      // Exit Gates（仅ATH#1新开仓时检查）
+      if (!isDCAAdd) {
+        console.log('🚪 [Exit Gates] 退出可行性检查...');
+        const exitResult = this.exitGateFilter.evaluate(snapshot, finalSize);
+        if (exitResult.status === 'REJECT') {
+          this.stats.exit_gate_rejected++;
+          console.log(`🚫 [Exit Gates] REJECT: ${exitResult.reasons.join(', ')}`);
+          this.saveSignalRecord(signal, gateResult.status, aiResult);
+          return { action: 'SKIP', reason: 'exit_gate_reject', details: exitResult.reasons };
+        }
+        console.log(`✅ [Exit Gates] ${exitResult.status}`);
       }
-      console.log(`✅ [Exit Gates] ${exitResult.status}`);
 
-      // Step 8: 检查是否已持仓
-      if (this.shadowTracker.hasOpenPosition(ca)) {
-        console.log(`⏭️ [已持仓] $${signal.symbol} 已有未平仓持仓，跳过`);
+      // Shadow已持仓检查（仅ATH#1）
+      if (!isDCAAdd && this.shadowTracker.hasOpenPosition(ca)) {
+        console.log(`⏭️ [已持仓] $${signal.symbol} Shadow已有未平仓持仓，跳过`);
         return { action: 'SKIP', reason: 'already_in_position' };
       }
 
-      // Step 9: 执行交易
+      // ===== 执行交易 =====
       if (this.shadowMode) {
         this.stats.shadow_logged++;
-        console.log(`🎭 [SHADOW] 模拟买入 $${signal.symbol} | ${finalSize} SOL | 叙事: ${aiResult.narrative_tier}`);
+        console.log(`🎭 [SHADOW] 模拟${isDCAAdd ? 'DCA加仓' : '买入'} $${signal.symbol} | ${finalSize} SOL`);
         this.saveSignalRecord(signal, gateResult.status, aiResult, true);
         this.saveShadowTrade(signal, aiResult, finalSize);
 
-        // 优先用 LivePriceMonitor（Jupiter 实时价格）作为入场 MC
         let entryMC = dexData?.market_cap || signal.market_cap || 0;
         if (this.livePriceMonitor) {
           const livePrice = this.livePriceMonitor.priceCache.get(ca);
           if (livePrice && livePrice.mc && (Date.now() - livePrice.timestamp) < 10000) {
-            console.log(`📡 [入场MC] Jupiter实时: $${(livePrice.mc/1000).toFixed(1)}K (DexScreener: $${(entryMC/1000).toFixed(1)}K)`);
             entryMC = livePrice.mc;
           }
         }
-        this.shadowTracker.addPosition(ca, signal.symbol || 'UNKNOWN', entryMC, aiResult.confidence);
 
-        // Shadow 模式也注册到 LivePriceMonitor（验证价格追踪）
-        if (this.livePriceMonitor) {
-          this.livePriceMonitor.addToken(ca);
+        if (!isDCAAdd) {
+          this.shadowTracker.addPosition(ca, signal.symbol || 'UNKNOWN', entryMC, aiResult.confidence);
+          // ATH#1: 加入观察列表
+          this._watchlist.set(ca, { signal, mc1: mc, idx1: idx, entryTime: Date.now(), positionSol: finalSize });
+          if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
+        } else {
+          // ATH#2 DCA: 从观察列表移除
+          this._watchlist.delete(ca);
         }
 
         return { action: 'SHADOW_BUY', size: finalSize, ai: aiResult };
       }
 
       if (!this.autoBuyEnabled) {
-        console.log(`📋 [通知] 建议买入 $${signal.symbol} | ${finalSize} SOL (自动买入未开启)`);
+        console.log(`📋 [通知] 建议${isDCAAdd ? 'DCA加仓' : '买入'} $${signal.symbol} | ${finalSize} SOL (自动买入未开启)`);
         this.saveSignalRecord(signal, gateResult.status, aiResult, false);
         return { action: 'NOTIFY', size: finalSize, ai: aiResult };
       }
 
-      // 🔧 实盘买入前：检查链上 SOL 余额
+      // 实盘买入前：检查链上 SOL 余额
       if (this.jupiterExecutor) {
         try {
           const solBalance = await this.jupiterExecutor.getSolBalance();
-          const minRequired = finalSize + 0.025; // 买入金额 + gas(~0.005) + Jito tip(~0.005) + priority fee + rent 预留
+          const minRequired = finalSize + 0.025;
           if (solBalance < minRequired) {
-            console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过买入 $${signal.symbol}`);
+            console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过 $${signal.symbol}`);
             this.saveSignalRecord(signal, gateResult.status, aiResult, false);
             return { action: 'SKIP_INSUFFICIENT_BALANCE', balance: solBalance, required: minRequired };
           }
@@ -609,91 +617,72 @@ export class PremiumSignalEngine {
       }
 
       // 实盘执行 (不重试，避免重复花 SOL)
-      const maxBuyAttempts = 1;
-      let lastError = null;
+      console.log(`💰 [执行] ${isDCAAdd ? 'DCA加仓' : '买入'} $${signal.symbol} | ${finalSize} SOL...`);
 
-      for (let buyAttempt = 1; buyAttempt <= maxBuyAttempts; buyAttempt++) {
-        console.log(`💰 [执行] 买入 $${signal.symbol} | ${finalSize} SOL... ${buyAttempt > 1 ? `(重试 ${buyAttempt}/${maxBuyAttempts})` : ''}`);
+      try {
+        let tradeResult;
 
-        try {
-          let tradeResult;
+        if (this.jupiterExecutor) {
+          tradeResult = await this.jupiterExecutor.buy(ca, finalSize, {
+            liquidity: dexData?.liquidity_usd || 0,
+            mc: mc || 0
+          });
 
-          if (this.jupiterExecutor) {
-            // Jupiter Swap 买入（传流动性+MC用于自适应滑点）
-            tradeResult = await this.jupiterExecutor.buy(ca, finalSize, {
-              liquidity: dexData?.liquidity_usd || 0,
-              mc: mc || 0
-            });
+          if (tradeResult.success && this.livePositionMonitor) {
+            const entryMC = dexData?.market_cap || signal.market_cap || 0;
 
-            // 注册到 LivePositionMonitor
-            if (tradeResult.success && this.livePositionMonitor) {
-              const entryMC = dexData?.market_cap || signal.market_cap || 0;
+            // 等待余额更新
+            await new Promise(r => setTimeout(r, 3000));
+            const balance = await this.jupiterExecutor.getTokenBalance(ca);
 
-              // Ultra V3 /execute 同步确认，3秒足够余额更新
-              await new Promise(r => setTimeout(r, 3000));
-              const balance = await this.jupiterExecutor.getTokenBalance(ca);
+            if (balance.amount <= 0) {
+              console.error(`❌ [验证失败] 买入交易发送但余额为0，交易可能失败`);
+              this.stats.errors++;
+              return { action: 'EXEC_FAILED', reason: '买入后余额为0' };
+            }
 
-              if (balance.amount <= 0) {
-                console.error(`❌ [验证失败] 买入交易发送但余额为0，交易可能失败`);
-                lastError = '买入后余额为0，交易可能失败';
-                if (buyAttempt < maxBuyAttempts) {
-                  console.log(`   🔄 等待3秒后重试...`);
-                  await new Promise(r => setTimeout(r, 3000));
-                  continue;  // 重试
-                }
-                this.stats.errors++;
-                return { action: 'EXEC_FAILED', reason: lastError };
-              }
+            const tokenAmount = balance.amount;
+            const tokenDecimals = balance.decimals || 6;
+            console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
 
-              // 使用实际余额，而不是报价
-              const tokenAmount = balance.amount;
-              const tokenDecimals = balance.decimals || 6;
-              console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
-
-              // 🔧 关键修复：使用实际交易价格计算 entryPrice (SOL 单位)
-              // entryPrice = SOL 花费 / token 数量 (考虑 decimals)
+            if (isDCAAdd) {
+              // ATH#2 DCA加仓：更新已有持仓
+              this.livePositionMonitor.addToPosition(ca, finalSize, tokenAmount - (this.livePositionMonitor.positions.get(ca)?.tokenAmount || 0), tokenDecimals, entryMC);
+              // 从观察列表移除
+              this._watchlist.delete(ca);
+              console.log(`📈 [v14] DCA加仓完成 $${signal.symbol} | 总投入: ${(0.02 + finalSize).toFixed(2)} SOL`);
+            } else {
+              // ATH#1 新开仓
               const actualTokenAmount = tokenAmount / Math.pow(10, tokenDecimals);
-              const entryPrice = finalSize / actualTokenAmount;  // SOL per token
+              const entryPrice = finalSize / actualTokenAmount;
               console.log(`💰 [Entry] 入场价格: ${entryPrice.toFixed(10)} SOL/token | ${finalSize} SOL → ${actualTokenAmount.toFixed(2)} tokens`);
 
               this.livePositionMonitor.addPosition(
-                ca,
-                signal.symbol,
-                entryPrice,
-                entryMC,
-                finalSize,
-                tokenAmount,
-                tokenDecimals,
-                tradeConviction  // v8: 'NORMAL' or 'HIGH' — 高信念模式使用更宽松的退出策略
+                ca, signal.symbol, entryPrice, entryMC, finalSize,
+                tokenAmount, tokenDecimals, tradeConviction
               );
 
-              // 🔧 标记Symbol已处理（15分钟窗口）
-              this.recentSymbols.set(signal.symbol, Date.now());
+              // ATH#1: 加入观察列表，等待ATH#2 DCA
+              this._watchlist.set(ca, { signal, mc1: mc, idx1: idx, entryTime: Date.now(), positionSol: finalSize });
+              console.log(`🔍 [v14] 探索仓开仓完成 $${signal.symbol} | 0.02 SOL | 已加入观察列表等待ATH#2`);
             }
-          } else {
-            // Fallback: GMGN Telegram 执行
-            tradeResult = await this.executor.executeBuy(ca, 'SOL', finalSize);
-          }
 
-          this.stats.executed++;
-          console.log(`✅ [执行] 交易成功: ${JSON.stringify(tradeResult)}`);
-          this.saveSignalRecord(signal, gateResult.status, aiResult, true);
-          return { action: 'EXECUTED', size: finalSize, ai: aiResult, trade: tradeResult };
-        } catch (execError) {
-          lastError = execError.message;
-          console.error(`❌ [执行] 交易失败 (${buyAttempt}/${maxBuyAttempts}): ${execError.message}`);
-
-          if (buyAttempt < maxBuyAttempts) {
-            console.log(`   🔄 等待3秒后重试...`);
-            await new Promise(r => setTimeout(r, 3000));
+            this.recentSymbols.set(signal.symbol, Date.now());
           }
+        } else {
+          tradeResult = await this.executor.executeBuy(ca, 'SOL', finalSize);
         }
-      }
 
-      // 所有重试都失败
-      this.stats.errors++;
-      this.saveSignalRecord(signal, gateResult.status, aiResult, false);
-      return { action: 'EXEC_FAILED', reason: lastError || '买入失败' };
+        this.stats.executed++;
+        console.log(`✅ [执行] 交易成功: ${JSON.stringify(tradeResult)}`);
+        this.saveSignalRecord(signal, gateResult.status, aiResult, true);
+        return { action: 'EXECUTED', size: finalSize, ai: aiResult, trade: tradeResult };
+      } catch (execError) {
+        this.stats.errors++;
+        console.error(`❌ [执行] 交易失败: ${execError.message}`);
+        this.saveSignalRecord(signal, gateResult.status, aiResult, false);
+        return { action: 'EXEC_FAILED', reason: execError.message };
+      }
 
     } catch (error) {
       this.stats.errors++;

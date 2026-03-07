@@ -295,6 +295,55 @@ export class LivePositionMonitor {
   }
 
   /**
+   * v14: DCA加仓 — 向已有持仓追加资金
+   * 更新入场价为加权平均, 增加token数量和SOL投入
+   */
+  addToPosition(tokenCA, addSol, addTokenAmount, addTokenDecimals, addEntryMC) {
+    const pos = this.positions.get(tokenCA);
+    if (!pos || pos.closed) {
+      console.warn(`⚠️ [DCA] ${tokenCA.slice(0,8)} 无持仓或已关闭，无法加仓`);
+      return false;
+    }
+
+    const oldSol = pos.entrySol;
+    const oldMC = pos.entryMC;
+    const oldTokenAmount = pos.tokenAmount;
+
+    // 加权平均入场MC
+    const newTotalSol = oldSol + addSol;
+    const newEntryMC = (oldSol * oldMC + addSol * addEntryMC) / newTotalSol;
+
+    // 更新持仓
+    pos.entrySol = newTotalSol;
+    pos.entryMC = newEntryMC;
+    pos.tokenAmount = oldTokenAmount + addTokenAmount;
+
+    // 重算入场价 (SOL per token)
+    const totalActualTokens = pos.tokenAmount / Math.pow(10, pos.tokenDecimals);
+    if (totalActualTokens > 0) {
+      pos.entryPrice = newTotalSol / totalActualTokens;
+    }
+
+    // 标记为DCA加仓
+    pos.isDCA = true;
+    pos.dcaAddTime = Date.now();
+    pos.dcaAddSol = addSol;
+
+    // 持久化
+    try {
+      this.db.prepare(`
+        UPDATE live_positions SET entry_price=?, entry_mc=?, entry_sol=?, token_amount=?
+        WHERE token_ca=? AND status='open'
+      `).run(pos.entryPrice, pos.entryMC, pos.entrySol, pos.tokenAmount, tokenCA);
+    } catch (e) {
+      console.warn(`⚠️ [DCA] DB 更新失败: ${e.message}`);
+    }
+
+    console.log(`📈 [DCA加仓] $${pos.symbol} | ${oldSol}→${newTotalSol} SOL | MC: $${(oldMC/1000).toFixed(1)}K→$${(newEntryMC/1000).toFixed(1)}K(avg) | tokens: ${oldTokenAmount}→${pos.tokenAmount}`);
+    return true;
+  }
+
+  /**
    * 价格更新事件处理
    */
   async _onPriceUpdate(event) {
