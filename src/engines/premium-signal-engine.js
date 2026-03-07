@@ -425,7 +425,7 @@ export class PremiumSignalEngine {
       // ===== v14: DCA两阶段入场逻辑 =====
       // 核心依据: 48h/1992条信号回测，ATH#1小仓+ATH#2 DCA加仓 = 50.8% WR, +1076% 总回报
       // ATH#1: Trade≤5, MC≤$75K → 买0.02 SOL (探索仓)
-      // ATH#2: MC增长≥1.5x, Security≤25 → 加仓0.05 SOL (确认仓)
+      // ATH#2: MC增长≥1.2x, Security≤25, Address≥10 → 买入0.07 SOL (v14.4)
       const isATH = signal.is_ath === true;
       const idx = signal.indices;
       let mc = dexData?.market_cap || signal.market_cap || 0;
@@ -468,6 +468,7 @@ export class PremiumSignalEngine {
       const tradeCurrent = idx?.trade_index?.current || 0;
       const securityCurrent = idx?.security_index?.current || 0;
       const superCurrent = idx?.super_index?.current || 0;
+      const addressCurrent = idx?.address_index?.current || 0;
 
       // ===== 全局开关: SOL市场环境 =====
       if (this._solMarketPaused) {
@@ -481,7 +482,7 @@ export class PremiumSignalEngine {
       if (currentAthNum === 1) {
         // ====== ATH#1: 只观察，不买入 ======
         const ath1Reasons = [];
-        if (tradeCurrent < 2) ath1Reasons.push(`Trade=${tradeCurrent}<2(流动性不足)`);
+        if (tradeCurrent < 4) ath1Reasons.push(`Trade=${tradeCurrent}<4(流动性不足)`);
         if (mc > 75000) ath1Reasons.push(`MC=$${(mc/1000).toFixed(1)}K>$75K`);
 
         if (ath1Reasons.length > 0) {
@@ -511,11 +512,12 @@ export class PremiumSignalEngine {
           return { action: 'SKIP', reason: 'v14_ath2_not_watched' };
         }
 
-        // ATH#2 筛选条件
+        // ATH#2 筛选条件 (v14.4: MC≥1.2x, Sec≤25, Address≥10)
         const mcGrowth = watchItem.mc1 > 0 ? mc / watchItem.mc1 : 0;
         const ath2Reasons = [];
-        if (mcGrowth < 1.5) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.5x`);
+        if (mcGrowth < 1.2) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.2x`);
         if (securityCurrent > 25) ath2Reasons.push(`Security=${securityCurrent}>25(波动性不足)`);
+        if (addressCurrent < 10) ath2Reasons.push(`Address=${addressCurrent}<10(持币地址不足)`);
 
         if (ath2Reasons.length > 0) {
           console.log(`⏭️ [v14] $${signal.symbol} ATH#2 过滤不通过: ${ath2Reasons.join(' | ')} (MC1=$${(watchItem.mc1/1000).toFixed(1)}K→MC2=$${(mc/1000).toFixed(1)}K)`);
@@ -534,7 +536,7 @@ export class PremiumSignalEngine {
 
         finalSize = 0.07;
         tradeConviction = 'HIGH';
-        console.log(`🎯 [v14] $${signal.symbol} ATH#2 ✅ 确认买入! MC增长=${mcGrowth.toFixed(2)}x Security=${securityCurrent} → 买 ${finalSize} SOL`);
+        console.log(`🎯 [v14.4] $${signal.symbol} ATH#2 ✅ 确认买入! MC增长=${mcGrowth.toFixed(2)}x Security=${securityCurrent} Address=${addressCurrent} → 买 ${finalSize} SOL`);
         console.log(`  MC1=$${(watchItem.mc1/1000).toFixed(1)}K → MC2=$${(mc/1000).toFixed(1)}K | 间隔=${((Date.now() - watchItem.entryTime)/60000).toFixed(1)}min`);
 
       } else {
