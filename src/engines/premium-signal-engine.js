@@ -482,6 +482,7 @@ export class PremiumSignalEngine {
         // ====== ATH#1: 只观察，不买入 ======
         const ath1Reasons = [];
         if (tradeCurrent > 5) ath1Reasons.push(`Trade=${tradeCurrent}>5`);
+        if (tradeCurrent < 2) ath1Reasons.push(`Trade=${tradeCurrent}<2(流动性不足)`);
         if (mc > 75000) ath1Reasons.push(`MC=$${(mc/1000).toFixed(1)}K>$75K`);
 
         if (ath1Reasons.length > 0) {
@@ -514,8 +515,8 @@ export class PremiumSignalEngine {
         // ATH#2 筛选条件
         const mcGrowth = watchItem.mc1 > 0 ? mc / watchItem.mc1 : 0;
         const ath2Reasons = [];
-        if (mcGrowth < 1.5) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.5x`);
-        if (securityCurrent > 25) ath2Reasons.push(`Security=${securityCurrent}>25`);
+        if (mcGrowth < 1.2) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.2x`);
+        if (securityCurrent > 30) ath2Reasons.push(`Security=${securityCurrent}>30`);
 
         if (ath2Reasons.length > 0) {
           console.log(`⏭️ [v14] $${signal.symbol} ATH#2 过滤不通过: ${ath2Reasons.join(' | ')} (MC1=$${(watchItem.mc1/1000).toFixed(1)}K→MC2=$${(mc/1000).toFixed(1)}K)`);

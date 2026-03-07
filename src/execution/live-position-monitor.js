@@ -478,20 +478,36 @@ export class LivePositionMonitor {
       console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} 入:${pos.entryPrice.toExponential(3)} 现:${price.toExponential(3)} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
     }
 
-    // ==================== v13 退出条件评估 ====================
-    // v13简化: SL(-25%) → TP1(+100%卖40%) → TP2(+250%卖30%) → Trailing(-25%from peak) → TimeStop(24h)
+    // ==================== v14.1 退出条件评估 ====================
+    // v14.1: 动态止损(+25%→保本,+50%→+20%,+75%→+40%) → TP1(+80%卖40%) → TP2(+250%卖30%) → Trailing(-25%from peak) → TimeStop(24h)
     const holdTimeMin = holdTimeSec / 60;
 
-    // 1. SL (Stop Loss): PnL ≤ -25% → 全卖
-    if (pnl <= -25) {
+    // 0. 动态止损保护 (v14.1): 根据历史峰值动态提升止损线
+    const highPnl = pos.highPnl || 0;
+    let dynamicSL = -25; // 默认止损
+    if (highPnl >= 75) {
+      dynamicSL = 40; // 峰值≥75%: 止损线提升到+40%
+    } else if (highPnl >= 50) {
+      dynamicSL = 20; // 峰值≥50%: 止损线提升到+20%
+    } else if (highPnl >= 25) {
+      dynamicSL = 0;  // 峰值≥25%: 止损线提升到保本
+    }
+
+    // 1. SL / 动态止损
+    if (pnl <= dynamicSL) {
       const remainingPct = 100 - pos.soldPct;
-      await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
+      if (dynamicSL > -25) {
+        console.log(`🛡️ [v14.1:动态止损] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% < 止损线+${dynamicSL}% (峰值+${highPnl.toFixed(1)}%) → 卖出${remainingPct}%`);
+        await this._triggerExit(pos, `DYN_SL(peak+${highPnl.toFixed(0)}%,floor+${dynamicSL}%)`, remainingPct);
+      } else {
+        await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
+      }
       return;
     }
 
-    // 2. TP1: PnL ≥ +100% → 卖40%
-    if (!pos.tp1 && pnl >= 100) {
-      console.log(`🎯 [v13:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 100% → 卖出40%锁利`);
+    // 2. TP1: PnL ≥ +80% → 卖40% (从+100%降到+80%)
+    if (!pos.tp1 && pnl >= 80) {
+      console.log(`🎯 [v14.1:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 80% → 卖出40%锁利`);
       await this._triggerPartialSell(pos, 'TP1', 40, pnl);
       return;
     }
