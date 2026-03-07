@@ -745,6 +745,9 @@ export class LivePositionMonitor {
       console.warn(`⚠️  [LivePositionMonitor] DB 更新失败: ${e.message}`);
     }
 
+    // 🔧 BUG FIX: 从内存Map中删除持仓，释放持仓槽位
+    this.positions.delete(pos.tokenCA);
+
     // 🔧 通知退出回调（触发信号引擎冷却）
     for (const cb of this.onExitCallbacks) {
       try { cb(pos.symbol, pos.tokenCA, finalPnl); } catch (_) {}
