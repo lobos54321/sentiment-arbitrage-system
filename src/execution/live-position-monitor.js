@@ -6,10 +6,10 @@
  *
  * v13 退出策略（简化为4+2条规则）:
  * - SL: PnL ≤ -25% → 全卖
- * - TP1: PnL ≥ +100% → 卖40%
- * - TP2: PnL ≥ +250% → 卖30% (TP1后)
- * - Trailing: TP2后，从峰值回撤25% → 卖剩余30%
- * - TP1保底: TP1后未达TP2，PnL跌至+10%以下 → 卖剩余
+ * - TP1: PnL ≥ +120% → 卖25%
+ * - TP2: PnL ≥ +300% → 卖30% (TP1后)
+ * - Trailing: TP2后，从峰值回撒25% → 卖剩余45%
+ * - TP1保底: TP1后未达TP2，PnL跌至+15%以下 → 卖剩余
  * - TimeStop: 持仓24h → 全卖
  */
 
@@ -479,7 +479,7 @@ export class LivePositionMonitor {
     }
 
     // ==================== v14.1 退出条件评估 ====================
-    // v14.1: 动态止损(+25%→保本,+50%→+20%,+75%→+40%) → TP1(+80%卖40%) → TP2(+250%卖30%) → Trailing(-25%from peak) → TimeStop(24h)
+    // v14.5: 动态止损(+25%→保本,+50%→+20%,+75%→+40%) → TP1(+120%卖25%) → TP2(+300%卖30%) → Trailing(-25%from peak) → TimeStop(24h)
     const holdTimeMin = holdTimeSec / 60;
 
     // 0. 动态止损保护 (v14.1): 根据历史峰值动态提升止损线
@@ -505,16 +505,16 @@ export class LivePositionMonitor {
       return;
     }
 
-    // 2. TP1: PnL ≥ +80% → 卖40% (从+100%降到+80%)
-    if (!pos.tp1 && pnl >= 80) {
-      console.log(`🎯 [v14.1:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 80% → 卖出40%锁利`);
-      await this._triggerPartialSell(pos, 'TP1', 40, pnl);
+    // 2. TP1: PnL ≥ +120% → 卖25% (v14.5: 从+80%/40%优化为+120%/25%，让利润跑)
+    if (!pos.tp1 && pnl >= 120) {
+      console.log(`🎯 [v14.5:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 120% → 卖出25%锁利`);
+      await this._triggerPartialSell(pos, 'TP1', 25, pnl);
       return;
     }
 
-    // 3. TP2: PnL ≥ +250% → 卖30% (TP1后才可触发)
-    if (pos.tp1 && !pos.tp2 && pnl >= 250) {
-      console.log(`🚀 [v13:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 250% → 卖出30%`);
+    // 3. TP2: PnL ≥ +300% → 卖30% (v14.5: 从+250%提高到+300%)
+    if (pos.tp1 && !pos.tp2 && pnl >= 300) {
+      console.log(`🚀 [v14.5:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 300% → 卖出30%`);
       await this._triggerPartialSell(pos, 'TP2', 30, pnl);
       return;
     }
@@ -534,11 +534,11 @@ export class LivePositionMonitor {
       }
     }
 
-    // 5. TP1保底: TP1已触发但未到TP2，跌回+10%以下 → 卖剩余
-    if (pos.tp1 && !pos.tp2 && pnl < 10) {
+    // 5. TP1保底: TP1已触发但未到TP2，跌回+15%以下 → 卖剩余 (v14.5: 从10%提到15%)
+    if (pos.tp1 && !pos.tp2 && pnl < 15) {
       const remainingPct = 100 - pos.soldPct;
-      console.log(`🛡️ [v13:TP1保底] $${pos.symbol} PnL:+${pnl.toFixed(1)}% < +10% → 卖剩余${remainingPct}%`);
-      await this._triggerExit(pos, `TP1_FLOOR(PnL+${pnl.toFixed(0)}%<10%)`, remainingPct);
+      console.log(`🛡️ [v14.5:TP1保底] $${pos.symbol} PnL:+${pnl.toFixed(1)}% < +15% → 卖剩余${remainingPct}%`);
+      await this._triggerExit(pos, `TP1_FLOOR(PnL+${pnl.toFixed(0)}%<15%)`, remainingPct);
       return;
     }
 
