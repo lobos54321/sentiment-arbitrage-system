@@ -516,7 +516,7 @@ export class PremiumSignalEngine {
         const mcGrowth = watchItem.mc1 > 0 ? mc / watchItem.mc1 : 0;
         const ath2Reasons = [];
         if (mcGrowth < 1.2) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.2x`);
-        if (securityCurrent > 30) ath2Reasons.push(`Security=${securityCurrent}>30`);
+        if (securityCurrent > 0 && securityCurrent < 20) ath2Reasons.push(`Security=${securityCurrent}<20(安全评分过低)`);
 
         if (ath2Reasons.length > 0) {
           console.log(`⏭️ [v14] $${signal.symbol} ATH#2 过滤不通过: ${ath2Reasons.join(' | ')} (MC1=$${(watchItem.mc1/1000).toFixed(1)}K→MC2=$${(mc/1000).toFixed(1)}K)`);
