@@ -140,6 +140,28 @@ export class PremiumSignalEngine {
       // v14: 加载观察列表
       this._loadWatchlist();
 
+      // v14: 从ATH计数中重建观察列表（处理重部署/过渡期）
+      const timeout = 2 * 60 * 60 * 1000;
+      const now = Date.now();
+      let rebuilt = 0;
+      for (const [ca, history] of this.signalHistory) {
+        if (history.athCount === 1 && history.mc1 && !this._watchlist.has(ca)) {
+          const entryTime = history.lastSeen || now;
+          if (now - entryTime < timeout) {
+            this._watchlist.set(ca, {
+              symbol: history.symbol || 'UNKNOWN',
+              mc1: history.mc1,
+              entryTime: entryTime
+            });
+            rebuilt++;
+          }
+        }
+      }
+      if (rebuilt > 0) {
+        this._saveWatchlist();
+        console.log(`🔄 [v14] 从ATH计数重建${rebuilt}个观察列表条目`);
+      }
+
       // v13: 启动SOL市场环境检查（每5分钟）
       this._startSolMarketCheck();
 
@@ -433,6 +455,10 @@ export class PremiumSignalEngine {
         if (idx?.super_index) {
           sigHistory.lastSuperIndex = idx.super_index.current;
           if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = idx.super_index.signal;
+        }
+        // v14: 记录ATH#1时的MC（用于ATH#2 MC增长计算）
+        if (prevAthCount === 0 && mc > 0) {
+          sigHistory.mc1 = mc;
         }
       }
       const currentAthNum = prevAthCount + 1;
@@ -778,7 +804,8 @@ export class PremiumSignalEngine {
             firstSeen: history.firstSeen,
             lastSeen: history.lastSeen,
             firstSuperIndex: history.firstSuperIndex || null,
-            lastSuperIndex: history.lastSuperIndex || null
+            lastSuperIndex: history.lastSuperIndex || null,
+            mc1: history.mc1 || null
           };
         }
       }
@@ -806,6 +833,7 @@ export class PremiumSignalEngine {
         const existing = this.signalHistory.get(ca);
         if (existing) {
           existing.athCount = Math.max(existing.athCount || 0, info.athCount);
+          if (info.mc1 && !existing.mc1) existing.mc1 = info.mc1;
         } else {
           this.signalHistory.set(ca, {
             count: info.athCount,
@@ -817,7 +845,8 @@ export class PremiumSignalEngine {
             lastScore: 0,
             athCount: info.athCount,
             firstSuperIndex: info.firstSuperIndex || null,
-            lastSuperIndex: info.lastSuperIndex || null
+            lastSuperIndex: info.lastSuperIndex || null,
+            mc1: info.mc1 || null
           });
         }
         loaded++;
