@@ -481,7 +481,6 @@ export class PremiumSignalEngine {
       if (currentAthNum === 1) {
         // ====== ATH#1: 只观察，不买入 ======
         const ath1Reasons = [];
-        if (tradeCurrent > 5) ath1Reasons.push(`Trade=${tradeCurrent}>5`);
         if (tradeCurrent < 2) ath1Reasons.push(`Trade=${tradeCurrent}<2(流动性不足)`);
         if (mc > 75000) ath1Reasons.push(`MC=$${(mc/1000).toFixed(1)}K>$75K`);
 
