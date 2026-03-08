@@ -512,11 +512,11 @@ export class PremiumSignalEngine {
           return { action: 'SKIP', reason: 'v14_ath2_not_watched' };
         }
 
-        // ATH#2 筛选条件 (v14.6: MC≥1.6x, Sec≤25, Address≥10)
+        // ATH#2 筛选条件 (v14.8: MC≥1.5x, Sec≤30, Address≥10)
         const mcGrowth = watchItem.mc1 > 0 ? mc / watchItem.mc1 : 0;
         const ath2Reasons = [];
-        if (mcGrowth < 1.6) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.6x`);
-        if (securityCurrent > 25) ath2Reasons.push(`Security=${securityCurrent}>25(波动性不足)`);
+        if (mcGrowth < 1.5) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.5x`);
+        if (securityCurrent > 30) ath2Reasons.push(`Security=${securityCurrent}>30(波动性不足)`);
         if (addressCurrent < 10) ath2Reasons.push(`Address=${addressCurrent}<10(持币地址不足)`);
 
         if (ath2Reasons.length > 0) {
@@ -536,7 +536,7 @@ export class PremiumSignalEngine {
 
         finalSize = 0.07;
         tradeConviction = 'HIGH';
-        console.log(`🎯 [v14.6] $${signal.symbol} ATH#2 ✅ 确认买入! MC增长=${mcGrowth.toFixed(2)}x≥1.6x Security=${securityCurrent} Address=${addressCurrent} → 买 ${finalSize} SOL`);
+        console.log(`🎯 [v14.8] $${signal.symbol} ATH#2 ✅ 确认买入! MC增长=${mcGrowth.toFixed(2)}x≥1.5x Security=${securityCurrent} Address=${addressCurrent} → 买 ${finalSize} SOL`);
         console.log(`  MC1=$${(watchItem.mc1/1000).toFixed(1)}K → MC2=$${(mc/1000).toFixed(1)}K | 间隔=${((Date.now() - watchItem.entryTime)/60000).toFixed(1)}min`);
 
       } else {
