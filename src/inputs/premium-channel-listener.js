@@ -10,6 +10,8 @@ import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { NewMessage } from 'telegram/events/index.js';
 import { Api } from 'telegram';
+import https from 'https';
+import http from 'http';
 
 const DEFAULT_CHANNEL_ID = 3636518327;
 const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
@@ -28,6 +30,14 @@ export class PremiumChannelListener {
     this.channelEntity = null;
     this.signalCallbacks = [];
     this.recentTokens = new Map(); // token_ca -> timestamp for dedup
+    // Webhook URLs for real-time signal forwarding (comma-separated in env)
+    this.webhookUrls = (process.env.SIGNAL_WEBHOOK_URLS || '')
+      .split(',')
+      .map(u => u.trim())
+      .filter(u => u.length > 0);
+    if (this.webhookUrls.length > 0) {
+      console.log(`🔗 Signal webhook configured: ${this.webhookUrls.length} endpoint(s)`);
+    }
   }
 
   /**
@@ -369,6 +379,68 @@ export class PremiumChannelListener {
         cb(signal);
       } catch (error) {
         console.error('❌ Signal callback error:', error.message);
+      }
+    }
+
+    // Forward to webhook endpoints (non-blocking)
+    this._forwardToWebhooks(signal);
+
+    // Broadcast to SSE clients (non-blocking)
+    if (global.__sseClients && global.__sseClients.size > 0) {
+      const sseData = JSON.stringify({ event: 'signal', timestamp: new Date().toISOString(), signal });
+      for (const client of global.__sseClients) {
+        try { client.write(`data: ${sseData}\n\n`); } catch (e) { /* client gone */ }
+      }
+    }
+  }
+
+  /**
+   * Forward signal to all configured webhook URLs (fire-and-forget)
+   */
+  _forwardToWebhooks(signal) {
+    if (this.webhookUrls.length === 0) return;
+
+    const payload = JSON.stringify({
+      event: 'signal',
+      timestamp: new Date().toISOString(),
+      signal: signal,
+    });
+
+    for (const url of this.webhookUrls) {
+      try {
+        const parsedUrl = new URL(url);
+        const transport = parsedUrl.protocol === 'https:' ? https : http;
+        const options = {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'X-Signal-Source': 'sentiment-arbitrage',
+          },
+          timeout: 5000,
+        };
+
+        const req = transport.request(options, (res) => {
+          if (res.statusCode >= 400) {
+            console.warn(`⚠️ Webhook ${parsedUrl.hostname} returned ${res.statusCode}`);
+          }
+          res.resume(); // consume response
+        });
+
+        req.on('error', (err) => {
+          console.warn(`⚠️ Webhook ${parsedUrl.hostname} error: ${err.message}`);
+        });
+        req.on('timeout', () => {
+          req.destroy();
+        });
+
+        req.write(payload);
+        req.end();
+      } catch (err) {
+        console.warn(`⚠️ Webhook URL error (${url}): ${err.message}`);
       }
     }
   }

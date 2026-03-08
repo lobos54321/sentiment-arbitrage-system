@@ -1717,6 +1717,32 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
     return;
+  } else if (url.pathname === '/api/signals/stream') {
+    // SSE (Server-Sent Events) endpoint for real-time signal streaming
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.write('data: {"event":"connected","timestamp":"' + new Date().toISOString() + '"}\n\n');
+
+    // Register this SSE client
+    if (!global.__sseClients) global.__sseClients = new Set();
+    global.__sseClients.add(res);
+    console.log(`📡 SSE client connected (total: ${global.__sseClients.size})`);
+
+    // Keep-alive ping every 30s
+    const keepAlive = setInterval(() => {
+      try { res.write(':ping\n\n'); } catch (e) { /* client disconnected */ }
+    }, 30000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      if (global.__sseClients) global.__sseClients.delete(res);
+      console.log(`📡 SSE client disconnected (total: ${global.__sseClients?.size || 0})`);
+    });
+    return;
   } else if (url.pathname === '/api/logs') {
     // 最近日志 API（JSON格式）
     const limit = parseInt(url.searchParams?.get('limit') || '100');
