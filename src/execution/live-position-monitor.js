@@ -591,6 +591,16 @@ export class LivePositionMonitor {
       pos.lockedPnl += currentPnl * (sellPct / 100);
       pos[tpName.toLowerCase()] = true;
 
+      // 🔧 v14.6 FIX: 同步链上真实余额，防止跟踪偏移
+      try {
+        await new Promise(r => setTimeout(r, 2000));
+        const realBalance = await this.executor.getTokenBalance(pos.tokenCA);
+        if (realBalance.amount > 0 && realBalance.amount !== pos.tokenAmount) {
+          console.log(`   🔄 余额同步: 跟踪=${pos.tokenAmount} 链上=${realBalance.amount} → 使用链上值`);
+          pos.tokenAmount = realBalance.amount;
+        }
+      } catch (_) {}
+
       console.log(`   ✅ 已卖出 ${pos.soldPct}% | 剩余 ${100 - pos.soldPct}% | 锁定利润: +${pos.lockedPnl.toFixed(1)}%`);
 
     } catch (error) {
@@ -643,8 +653,15 @@ export class LivePositionMonitor {
         return;
       }
 
+      // 🔧 v14.6 FIX: 使用链上真实余额而非pos.tokenAmount（防止跟踪偏差导致残余）
+      const actualBalance = balance.amount;
+      if (actualBalance !== pos.tokenAmount) {
+        console.log(`   ⚠️  余额修正: 跟踪=${pos.tokenAmount} 链上=${actualBalance} → 使用链上值`);
+        pos.tokenAmount = actualBalance;
+      }
+
       // 计算实际卖出数量（如果是部分卖出，使用剩余数量）
-      const sellAmount = sellPct >= 100 ? pos.tokenAmount : Math.floor(pos.tokenAmount * (sellPct / 100));
+      const sellAmount = sellPct >= 100 ? actualBalance : Math.floor(actualBalance * (sellPct / 100));
 
       if (sellAmount > 0) {
         const result = await this.executor.sell(pos.tokenCA, sellAmount);
@@ -659,6 +676,26 @@ export class LivePositionMonitor {
 
         // 累加实际收到的 SOL
         pos.totalSolReceived += solReceived;
+
+        // 🔧 v14.6 FIX: 卖出后验证链上余额，清理残余token
+        try {
+          await new Promise(r => setTimeout(r, 2000));  // 等链上确认
+          const postSellBalance = await this.executor.getTokenBalance(pos.tokenCA);
+          if (postSellBalance.amount > 0) {
+            console.log(`   ⚠️  卖出后仍有残余 ${postSellBalance.amount} tokens，尝试清理...`);
+            try {
+              const cleanupResult = await this.executor.sell(pos.tokenCA, postSellBalance.amount);
+              if (cleanupResult.success) {
+                pos.totalSolReceived += (cleanupResult.amountOut || 0);
+                console.log(`   ✅ 残余清理成功: +${(cleanupResult.amountOut || 0).toFixed(6)} SOL`);
+              }
+            } catch (cleanErr) {
+              console.log(`   ⚠️  残余清理失败: ${cleanErr.message} (${postSellBalance.amount} tokens留在钱包)`);
+            }
+          }
+        } catch (balErr) {
+          // 余额查询失败不影响主流程
+        }
 
         // 如果有锁定利润，显示总收益
         if (pos.lockedPnl > 0) {
@@ -697,10 +734,31 @@ export class LivePositionMonitor {
       // 🔧 BUG FIX: 检查是否达到最大重试次数
       if (retryInfo.count >= this.maxRetries) {
         console.log(`   🚫 达到最大重试次数 ${this.maxRetries}，停止重试 $${pos.symbol}`);
+        
+        // 🔧 v14.6 FIX: 尝试用链上余额做最后一次紧急卖出
+        try {
+          const emergBalance = await this.executor.getTokenBalance(pos.tokenCA);
+          if (emergBalance.amount > 0) {
+            console.log(`   🚨 钱包仍有 ${emergBalance.amount} tokens，尝试紧急清理...`);
+            const emergResult = await this.executor.emergencySell(pos.tokenCA, emergBalance.amount);
+            if (emergResult.success) {
+              console.log(`   ✅ 紧急清理成功`);
+            } else {
+              console.log(`   ❌ 紧急清理失败，${emergBalance.amount} tokens留在钱包，需手动处理`);
+            }
+          }
+        } catch (emergErr) {
+          console.log(`   ❌ 紧急清理异常: ${emergErr.message}`);
+        }
+        
+        // 无论清理是否成功，都关闭仓位防止卡死
+        pos.closed = true;
+        pos.exitInProgress = false;
         pos.pendingSell = false;
         pos.retryLimitReached = true;
+        this._closePosition(pos, finalPnl);
+        this.priceMonitor.removeToken(pos.tokenCA);
         this.retryCounter.set(pos.tokenCA, retryInfo);
-        pos.exitInProgress = false;
         return;
       }
 
