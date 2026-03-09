@@ -259,7 +259,7 @@ export class LivePositionMonitor {
       exitReason: null,
       conviction,             // v8: 'NORMAL' or 'HIGH' — 高信念模式
       dynFloorBelowCount: 0,  // v9: DYN_FLOOR确认计数（需连续2次才触发）
-      exitStrategy,           // v15: 'DYNSL_20_40_60' or 'TP_SL' or 'DYNSL_25_50_75'
+      exitStrategy,           // v16: 'TP_SL' (主力), 向后兼容: 'DYNSL_20_40_60', 'DYNSL_25_50_75'
 
       // 新策略字段
       tp1: false,           // TP1是否已触发
@@ -486,27 +486,27 @@ export class LivePositionMonitor {
     const strategy = pos.exitStrategy || 'DYNSL_25_50_75';
 
     if (strategy === 'TP_SL') {
-      // ====== 信号B出场: TP1.75x / SL-20% (简单止盈止损) ======
-      // 回测依据: ATH#2 Sec≤20 + TP1.75x/SL0.80x = 44.4%WR, +22.2%平均
+      // ====== v16统一出场: TP+75% / SL-20% (简单止盈止损) ======
+      // 回测依据: Super≥200 + TP75/SL20 = 47笔, 25.5%WR, +247%总PnL
       // TP = +75%, SL = -20%
 
       if (pnl >= 75) {
         // 止盈: PnL ≥ +75% → 全卖
-        console.log(`🎯 [v15:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
+        console.log(`🎯 [v16:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
         await this._triggerExit(pos, `TP_75(PnL+${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
       if (pnl <= -20) {
         // 止损: PnL ≤ -20% → 全卖
-        console.log(`🛑 [v15:SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -20% → 止损全卖`);
+        console.log(`🛑 [v16:SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -20% → 止损全卖`);
         await this._triggerExit(pos, `SL_20(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
       // 时间停损: 24小时
       if (holdTimeMin >= 1440) {
-        console.log(`⏰ [v15:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
+        console.log(`⏰ [v16:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
         await this._triggerExit(pos, 'TIMEOUT_24H', 100);
         return;
       }
@@ -591,7 +591,7 @@ export class LivePositionMonitor {
       // 6. 时间停损: 24小时 → 全卖剩余
       if (holdTimeMin >= 1440) {
         const remainingPct = 100 - pos.soldPct;
-        console.log(`⏰ [v15:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
+        console.log(`⏰ [v16:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
         await this._triggerExit(pos, 'TIMEOUT_24H', remainingPct);
         return;
       }
