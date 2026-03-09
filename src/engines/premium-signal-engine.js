@@ -476,8 +476,13 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'market_paused' };
       }
 
-      // ===== v14 两阶段入场分支 (ATH#1观察 + ATH#2买入) =====
+      // ===== v15: 双信号入场策略 =====
+      // 回测验证 (187代币/138组合): ATH#3 Sec≤20+Addr≥15+MCG≥1.5 = 62.5%WR +10%平均
+      //                              ATH#2 Sec≤20+MCG≥2.0 = 44.4%WR +22.2%平均
+      // 信号A(主力): ATH#3 → DynSL 20/40/60, 0.02 SOL
+      // 信号B(辅助): ATH#2 → TP1.75x/SL-20%, 0.01 SOL
       let finalSize, tradeConviction;
+      let exitStrategy = 'DYNSL_20_40_60'; // 默认出场策略
 
       if (currentAthNum === 1) {
         // ====== ATH#1: 只观察，不买入 ======
@@ -486,74 +491,121 @@ export class PremiumSignalEngine {
         if (mc > 75000) ath1Reasons.push(`MC=$${(mc/1000).toFixed(1)}K>$75K`);
 
         if (ath1Reasons.length > 0) {
-          console.log(`⏭️ [v14] $${signal.symbol} ATH#1 过滤不通过: ${ath1Reasons.join(' | ')}`);
-          this.saveSignalRecord(signal, 'V14_ATH1_FILTER', null);
-          return { action: 'SKIP', reason: 'v14_ath1_filter', details: ath1Reasons };
+          console.log(`⏭️ [v15] $${signal.symbol} ATH#1 过滤不通过: ${ath1Reasons.join(' | ')}`);
+          this.saveSignalRecord(signal, 'V15_ATH1_FILTER', null);
+          return { action: 'SKIP', reason: 'v15_ath1_filter', details: ath1Reasons };
         }
 
         // ATH#1通过筛选 → 加入观察列表，不买入
         this._watchlist.set(ca, { symbol: signal.symbol, mc1: mc, idx1: idx, entryTime: Date.now() });
         this._saveWatchlist();
-        console.log(`👀 [v14] $${signal.symbol} ATH#1 ✅ 加入观察列表! Trade=${tradeCurrent} MC=$${(mc/1000).toFixed(1)}K → 等待ATH#2确认`);
-        this.saveSignalRecord(signal, 'V14_ATH1_WATCH', null);
+        console.log(`👀 [v15] $${signal.symbol} ATH#1 ✅ 加入观察列表! Trade=${tradeCurrent} MC=$${(mc/1000).toFixed(1)}K → 等待ATH#2/3`);
+        this.saveSignalRecord(signal, 'V15_ATH1_WATCH', null);
 
         // 注册价格追踪
         if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
 
-        return { action: 'WATCH', reason: 'v14_ath1_observe', symbol: signal.symbol };
+        return { action: 'WATCH', reason: 'v15_ath1_observe', symbol: signal.symbol };
 
       } else if (currentAthNum === 2) {
-        // ====== ATH#2: 确认后买入 (0.07 SOL) ======
+        // ====== 信号B: ATH#2 辅助信号 (TP1.75x/SL-20%, 0.01 SOL) ======
+        // v15回测依据: ATH#2 Sec≤20 + TP1.75x/SL0.80x = 9笔, 44.4%WR, +22.2%平均, +200%总PnL
         const watchItem = this._watchlist.get(ca);
 
         if (!watchItem) {
-          console.log(`⏭️ [v14] $${signal.symbol} ATH#2 但不在观察列表中（ATH#1被过滤或超时），跳过`);
-          this.saveSignalRecord(signal, 'V14_ATH2_NOT_WATCHED', null);
-          return { action: 'SKIP', reason: 'v14_ath2_not_watched' };
+          console.log(`⏭️ [v15] $${signal.symbol} ATH#2 但不在观察列表中 → 跳过`);
+          this.saveSignalRecord(signal, 'V15_ATH2_NOT_WATCHED', null);
+          return { action: 'SKIP', reason: 'v15_ath2_not_watched' };
         }
 
-        // ATH#2 筛选条件 (v14.8: MC≥1.5x, Sec≤30, Address≥10)
+        // ATH#2 筛选条件 (v15: Sec≤20, MCG≥2.0)
         const mcGrowth = watchItem.mc1 > 0 ? mc / watchItem.mc1 : 0;
         const ath2Reasons = [];
-        if (mcGrowth < 1.5) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<1.5x`);
-        if (securityCurrent > 30) ath2Reasons.push(`Security=${securityCurrent}>30(波动性不足)`);
-        if (addressCurrent < 10) ath2Reasons.push(`Address=${addressCurrent}<10(持币地址不足)`);
+        if (mcGrowth < 2.0) ath2Reasons.push(`MC增长=${mcGrowth.toFixed(2)}x<2.0x`);
+        if (securityCurrent > 20) ath2Reasons.push(`Security=${securityCurrent}>20`);
 
         if (ath2Reasons.length > 0) {
-          console.log(`⏭️ [v14] $${signal.symbol} ATH#2 过滤不通过: ${ath2Reasons.join(' | ')} (MC1=$${(watchItem.mc1/1000).toFixed(1)}K→MC2=$${(mc/1000).toFixed(1)}K)`);
-          this._watchlist.delete(ca);
-          this._saveWatchlist();
-          this.saveSignalRecord(signal, 'V14_ATH2_FILTER', null);
-          return { action: 'SKIP', reason: 'v14_ath2_filter', details: ath2Reasons };
+          console.log(`⏭️ [v15] $${signal.symbol} ATH#2 过滤不通过: ${ath2Reasons.join(' | ')} (MC1=$${(watchItem.mc1/1000).toFixed(1)}K→MC2=$${(mc/1000).toFixed(1)}K)`);
+          // 不删除watchlist，ATH#3仍有机会
+          this.saveSignalRecord(signal, 'V15_ATH2_FILTER', null);
+          return { action: 'SKIP', reason: 'v15_ath2_filter', details: ath2Reasons };
         }
 
-        // 并发仓位检查 (最多2个)
-        const currentPositionCount = this.livePositionMonitor?.positions?.size || 0;
-        if (currentPositionCount >= 2) {
-          console.log(`⏭️ [v14] 当前${currentPositionCount}个持仓 >= 2 → 不开新仓`);
-          return { action: 'SKIP', reason: 'max_positions_v14' };
+        // 并发仓位检查 (最多3个 — 双信号需要更多仓位)
+        const currentPositionCount2 = this.livePositionMonitor?.positions?.size || 0;
+        if (currentPositionCount2 >= 3) {
+          console.log(`⏭️ [v15] 当前${currentPositionCount2}个持仓 >= 3 → 不开新仓`);
+          return { action: 'SKIP', reason: 'max_positions_v15' };
         }
 
-        finalSize = 0.07;
-        tradeConviction = 'HIGH';
-        console.log(`🎯 [v14.8] $${signal.symbol} ATH#2 ✅ 确认买入! MC增长=${mcGrowth.toFixed(2)}x≥1.5x Security=${securityCurrent} Address=${addressCurrent} → 买 ${finalSize} SOL`);
+        finalSize = 0.01;
+        tradeConviction = 'NORMAL';
+        exitStrategy = 'TP_SL'; // TP1.75x / SL-20%
+        console.log(`🎯 [v15:信号B] $${signal.symbol} ATH#2 ✅ 辅助买入! MCG=${mcGrowth.toFixed(2)}x≥2.0x Sec=${securityCurrent}≤20 → ${finalSize} SOL (TP/SL出场)`);
         console.log(`  MC1=$${(watchItem.mc1/1000).toFixed(1)}K → MC2=$${(mc/1000).toFixed(1)}K | 间隔=${((Date.now() - watchItem.entryTime)/60000).toFixed(1)}min`);
 
+      } else if (currentAthNum === 3) {
+        // ====== 信号A: ATH#3 主力信号 (DynSL 20/40/60, 0.02 SOL) ======
+        // v15回测依据: ATH#3 Sec≤20+Addr≥15+MCG≥1.5 = 8笔, 62.5%WR, +10%平均, +80%总PnL
+        const watchItem = this._watchlist.get(ca);
+        const mc1 = watchItem?.mc1 || (sigHistory?.mc1) || 0;
+        const mcGrowth3 = mc1 > 0 ? mc / mc1 : 0;
+
+        const ath3Reasons = [];
+        if (securityCurrent > 20) ath3Reasons.push(`Security=${securityCurrent}>20`);
+        if (addressCurrent < 15) ath3Reasons.push(`Address=${addressCurrent}<15`);
+        if (mcGrowth3 < 1.5) ath3Reasons.push(`MC增长=${mcGrowth3.toFixed(2)}x<1.5x`);
+
+        if (ath3Reasons.length > 0) {
+          console.log(`⏭️ [v15] $${signal.symbol} ATH#3 过滤不通过: ${ath3Reasons.join(' | ')}`);
+          this._watchlist.delete(ca);
+          this._saveWatchlist();
+          this.saveSignalRecord(signal, 'V15_ATH3_FILTER', null);
+          return { action: 'SKIP', reason: 'v15_ath3_filter', details: ath3Reasons };
+        }
+
+        // 如果ATH#2已经买入了这个代币，检查是否已持仓
+        const alreadyHoldingATH3 = this.livePositionMonitor?.positions?.has(ca);
+        if (alreadyHoldingATH3) {
+          console.log(`⏭️ [v15] $${signal.symbol} ATH#3 已有ATH#2仓位 → 跳过（不加仓）`);
+          this._watchlist.delete(ca);
+          this._saveWatchlist();
+          return { action: 'SKIP', reason: 'v15_ath3_already_holding' };
+        }
+
+        // 并发仓位检查
+        const currentPositionCount3 = this.livePositionMonitor?.positions?.size || 0;
+        if (currentPositionCount3 >= 3) {
+          console.log(`⏭️ [v15] 当前${currentPositionCount3}个持仓 >= 3 → 不开新仓`);
+          return { action: 'SKIP', reason: 'max_positions_v15' };
+        }
+
+        finalSize = 0.02;
+        tradeConviction = 'HIGH';
+        exitStrategy = 'DYNSL_20_40_60'; // 动态止损 20/40/60
+        console.log(`🎯 [v15:信号A] $${signal.symbol} ATH#3 ✅ 主力买入! Sec=${securityCurrent}≤20 Addr=${addressCurrent}≥15 MCG=${mcGrowth3.toFixed(2)}x≥1.5x → ${finalSize} SOL (DynSL出场)`);
+
+        // 清理观察列表
+        this._watchlist.delete(ca);
+        this._saveWatchlist();
+
       } else {
-        // ATH#3+: 不再入场
-        console.log(`⏭️ [v14] $${signal.symbol} ATH#${currentAthNum} ≥3 → 不再入场`);
-        this.saveSignalRecord(signal, 'V14_ATH3_PLUS', null);
-        return { action: 'SKIP', reason: 'v14_ath3_plus', ath_num: currentAthNum };
+        // ATH#4+: 不再入场
+        console.log(`⏭️ [v15] $${signal.symbol} ATH#${currentAthNum} ≥4 → 不再入场`);
+        this.saveSignalRecord(signal, 'V15_ATH4_PLUS', null);
+        return { action: 'SKIP', reason: 'v15_ath4_plus', ath_num: currentAthNum };
       }
 
       // 构造兼容的AI结果
+      const athLabel = currentAthNum === 2 ? '信号B:ATH#2' : '信号A:ATH#3';
       const aiResult = {
         action: 'BUY_FULL',
-        confidence: 90,
+        confidence: currentAthNum === 3 ? 95 : 85,
         narrative_tier: 'CONFIRMED',
-        narrative_reason: `v14: ATH#2确认 Trade=${tradeCurrent} Security=${securityCurrent} MC=$${(mc/1000).toFixed(1)}K`,
+        narrative_reason: `v15: ${athLabel} Trade=${tradeCurrent} Security=${securityCurrent} MC=$${(mc/1000).toFixed(1)}K`,
         entry_timing: 'OPTIMAL',
-        stop_loss_percent: 25
+        stop_loss_percent: exitStrategy === 'TP_SL' ? 20 : 25,
+        exitStrategy: exitStrategy // 传递出场策略
       };
 
       // 已持仓检查
@@ -662,13 +714,17 @@ export class PremiumSignalEngine {
 
             this.livePositionMonitor.addPosition(
               ca, signal.symbol, entryPrice, entryMC, finalSize,
-              tokenAmount, tokenDecimals, tradeConviction
+              tokenAmount, tokenDecimals, tradeConviction, exitStrategy
             );
 
-            // 从观察列表移除
-            this._watchlist.delete(ca);
-            this._saveWatchlist();
-            console.log(`🎯 [v14] ATH#2确认买入完成 $${signal.symbol} | ${finalSize} SOL`);
+            // 从观察列表移除（ATH#3已在入场分支中清理）
+            if (currentAthNum === 2) {
+              // ATH#2 不删除watchlist，ATH#3可能还要用
+            } else {
+              this._watchlist.delete(ca);
+              this._saveWatchlist();
+            }
+            console.log(`🎯 [v15] ATH#${currentAthNum} 买入完成 $${signal.symbol} | ${finalSize} SOL | 出场: ${exitStrategy}`);
 
             this.recentSymbols.set(signal.symbol, Date.now());
           }

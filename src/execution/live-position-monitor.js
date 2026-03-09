@@ -90,6 +90,8 @@ export class LivePositionMonitor {
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN tp1_triggered INTEGER DEFAULT 0`); } catch (e) { /* 已存在 */ }
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN sold_pct REAL DEFAULT 0`); } catch (e) { /* 已存在 */ }
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN entry_tier TEXT DEFAULT ''`); } catch (e) { /* 已存在 */ }
+    // v15: 添加出场策略字段
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN exit_strategy TEXT DEFAULT 'DYNSL_25_50_75'`); } catch (e) { /* 已存在 */ }
   }
 
   /**
@@ -238,7 +240,7 @@ export class LivePositionMonitor {
   /**
    * 注册新持仓（买入后调用）
    */
-  addPosition(tokenCA, symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, conviction = 'NORMAL') {
+  addPosition(tokenCA, symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, conviction = 'NORMAL', exitStrategy = 'DYNSL_25_50_75') {
     const position = {
       tokenCA,
       symbol: symbol || 'UNKNOWN',
@@ -257,6 +259,7 @@ export class LivePositionMonitor {
       exitReason: null,
       conviction,             // v8: 'NORMAL' or 'HIGH' — 高信念模式
       dynFloorBelowCount: 0,  // v9: DYN_FLOOR确认计数（需连续2次才触发）
+      exitStrategy,           // v15: 'DYNSL_20_40_60' or 'TP_SL' or 'DYNSL_25_50_75'
 
       // 新策略字段
       tp1: false,           // TP1是否已触发
@@ -281,17 +284,17 @@ export class LivePositionMonitor {
       this.priceMonitor.addToken(tokenCA);
     }
 
-    // 持久化（v12: 包含conviction用于重启恢复）
+    // 持久化（v15: 包含conviction和exit_strategy用于重启恢复）
     try {
       this.db.prepare(`
-        INSERT INTO live_positions (token_ca, symbol, entry_price, entry_mc, entry_sol, token_amount, token_decimals, entry_time, conviction)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(tokenCA, position.symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, position.entryTime, conviction);
+        INSERT INTO live_positions (token_ca, symbol, entry_price, entry_mc, entry_sol, token_amount, token_decimals, entry_time, conviction, exit_strategy)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(tokenCA, position.symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, position.entryTime, conviction, exitStrategy);
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] DB 写入失败: ${e.message}`);
     }
 
-    console.log(`🎯 [LivePositionMonitor] 新持仓: $${position.symbol} | ${entrySol} SOL | ${tokenAmount} tokens${conviction === 'HIGH' ? ' | 🔥高信念模式' : ''}`);
+    console.log(`🎯 [LivePositionMonitor] 新持仓: $${position.symbol} | ${entrySol} SOL | ${tokenAmount} tokens | 出场:${exitStrategy}${conviction === 'HIGH' ? ' | 🔥高信念模式' : ''}`);
   }
 
   /**
@@ -478,76 +481,120 @@ export class LivePositionMonitor {
       console.log(`📡 [价格#${pos._updateCount}] $${pos.symbol} 入:${pos.entryPrice.toExponential(3)} 现:${price.toExponential(3)} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% 峰:+${pos.highPnl.toFixed(1)}% 持:${holdTimeSec.toFixed(0)}s ${tag}`);
     }
 
-    // ==================== v14.1 退出条件评估 ====================
-    // v14.5: 动态止损(+25%→保本,+50%→+20%,+75%→+40%) → TP1(+120%卖25%) → TP2(+300%卖30%) → Trailing(-25%from peak) → TimeStop(24h)
+    // ==================== v15 退出条件评估（按出场策略分流） ====================
     const holdTimeMin = holdTimeSec / 60;
+    const strategy = pos.exitStrategy || 'DYNSL_25_50_75';
 
-    // 0. 动态止损保护 (v14.1): 根据历史峰值动态提升止损线
-    const highPnl = pos.highPnl || 0;
-    let dynamicSL = -25; // 默认止损
-    if (highPnl >= 75) {
-      dynamicSL = 40; // 峰值≥75%: 止损线提升到+40%
-    } else if (highPnl >= 50) {
-      dynamicSL = 20; // 峰值≥50%: 止损线提升到+20%
-    } else if (highPnl >= 25) {
-      dynamicSL = 0;  // 峰值≥25%: 止损线提升到保本
-    }
+    if (strategy === 'TP_SL') {
+      // ====== 信号B出场: TP1.75x / SL-20% (简单止盈止损) ======
+      // 回测依据: ATH#2 Sec≤20 + TP1.75x/SL0.80x = 44.4%WR, +22.2%平均
+      // TP = +75%, SL = -20%
 
-    // 1. SL / 动态止损
-    if (pnl <= dynamicSL) {
-      const remainingPct = 100 - pos.soldPct;
-      if (dynamicSL > -25) {
-        console.log(`🛡️ [v14.1:动态止损] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% < 止损线+${dynamicSL}% (峰值+${highPnl.toFixed(1)}%) → 卖出${remainingPct}%`);
-        await this._triggerExit(pos, `DYN_SL(peak+${highPnl.toFixed(0)}%,floor+${dynamicSL}%)`, remainingPct);
-      } else {
-        await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
-      }
-      return;
-    }
-
-    // 2. TP1: PnL ≥ +120% → 卖25% (v14.5: 从+80%/40%优化为+120%/25%，让利润跑)
-    if (!pos.tp1 && pnl >= 120) {
-      console.log(`🎯 [v14.5:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 120% → 卖出25%锁利`);
-      await this._triggerPartialSell(pos, 'TP1', 25, pnl);
-      return;
-    }
-
-    // 3. TP2: PnL ≥ +300% → 卖30% (v14.5: 从+250%提高到+300%)
-    if (pos.tp1 && !pos.tp2 && pnl >= 300) {
-      console.log(`🚀 [v14.5:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 300% → 卖出30%`);
-      await this._triggerPartialSell(pos, 'TP2', 30, pnl);
-      return;
-    }
-
-    // 4. Trailing Stop: TP2触发后，从峰值回撤25% → 卖剩余30%
-    if (pos.tp2) {
-      const dropFromPeak = pos.highPnl - pnl;
-      const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
-      // 接近触发时打警告
-      if (dropPct >= 20 && dropPct < 25) {
-        console.log(`⚠️  [接近TRAILING] $${pos.symbol} PnL:+${pnl.toFixed(1)}% peak:+${pos.highPnl.toFixed(1)}% 回撤:${dropPct.toFixed(0)}% (≥25%触发)`);
-      }
-      if (dropPct >= 25) {
-        const remainingPct = 100 - pos.soldPct;
-        await this._triggerExit(pos, `TRAILING(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%)`, remainingPct);
+      if (pnl >= 75) {
+        // 止盈: PnL ≥ +75% → 全卖
+        console.log(`🎯 [v15:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
+        await this._triggerExit(pos, `TP_75(PnL+${pnl.toFixed(0)}%)`, 100);
         return;
       }
-    }
 
-    // 5. TP1保底: TP1已触发但未到TP2，跌回+15%以下 → 卖剩余 (v14.5: 从10%提到15%)
-    if (pos.tp1 && !pos.tp2 && pnl < 15) {
-      const remainingPct = 100 - pos.soldPct;
-      console.log(`🛡️ [v14.5:TP1保底] $${pos.symbol} PnL:+${pnl.toFixed(1)}% < +15% → 卖剩余${remainingPct}%`);
-      await this._triggerExit(pos, `TP1_FLOOR(PnL+${pnl.toFixed(0)}%<15%)`, remainingPct);
-      return;
-    }
+      if (pnl <= -20) {
+        // 止损: PnL ≤ -20% → 全卖
+        console.log(`🛑 [v15:SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -20% → 止损全卖`);
+        await this._triggerExit(pos, `SL_20(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
 
-    // 6. 时间停损: 24小时 → 全卖剩余
-    if (holdTimeMin >= 1440) {
-      const remainingPct = 100 - pos.soldPct;
-      console.log(`⏰ [v13:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
-      await this._triggerExit(pos, 'TIMEOUT_24H', remainingPct);
-      return;
+      // 时间停损: 24小时
+      if (holdTimeMin >= 1440) {
+        console.log(`⏰ [v15:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
+        await this._triggerExit(pos, 'TIMEOUT_24H', 100);
+        return;
+      }
+
+    } else {
+      // ====== 信号A出场: DynSL 动态止损 ======
+      // 根据策略选择DynSL阶梯
+      let dynslConfig;
+      if (strategy === 'DYNSL_20_40_60') {
+        // v15 信号A: 回测最优 DynSL 20/40/60
+        dynslConfig = [
+          { threshold: 20, floor: 0 },   // 峰值≥20%: 保本
+          { threshold: 40, floor: 15 },   // 峰值≥40%: 止损+15%
+          { threshold: 60, floor: 30 },   // 峰值≥60%: 止损+30%
+        ];
+      } else {
+        // 默认 DYNSL_25_50_75 (旧策略)
+        dynslConfig = [
+          { threshold: 25, floor: 0 },
+          { threshold: 50, floor: 20 },
+          { threshold: 75, floor: 40 },
+        ];
+      }
+
+      // 计算动态止损线
+      const highPnl = pos.highPnl || 0;
+      let dynamicSL = -25; // 默认止损
+      for (const tier of dynslConfig) {
+        if (highPnl >= tier.threshold) {
+          dynamicSL = tier.floor;
+        }
+      }
+
+      // 1. SL / 动态止损
+      if (pnl <= dynamicSL) {
+        const remainingPct = 100 - pos.soldPct;
+        if (dynamicSL > -25) {
+          console.log(`🛡️ [v15:DynSL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% < 止损线+${dynamicSL}% (峰值+${highPnl.toFixed(1)}%) → 卖出${remainingPct}%`);
+          await this._triggerExit(pos, `DYN_SL(peak+${highPnl.toFixed(0)}%,floor+${dynamicSL}%)`, remainingPct);
+        } else {
+          await this._triggerExit(pos, 'STOP_LOSS', remainingPct);
+        }
+        return;
+      }
+
+      // 2. TP1: PnL ≥ +120% → 卖25%
+      if (!pos.tp1 && pnl >= 120) {
+        console.log(`🎯 [v15:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 120% → 卖出25%锁利`);
+        await this._triggerPartialSell(pos, 'TP1', 25, pnl);
+        return;
+      }
+
+      // 3. TP2: PnL ≥ +300% → 卖30%
+      if (pos.tp1 && !pos.tp2 && pnl >= 300) {
+        console.log(`🚀 [v15:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ 300% → 卖出30%`);
+        await this._triggerPartialSell(pos, 'TP2', 30, pnl);
+        return;
+      }
+
+      // 4. Trailing Stop: TP2触发后，从峰值回撤25% → 卖剩余
+      if (pos.tp2) {
+        const dropFromPeak = pos.highPnl - pnl;
+        const dropPct = pos.highPnl > 0 ? (dropFromPeak / pos.highPnl) * 100 : 0;
+        if (dropPct >= 20 && dropPct < 25) {
+          console.log(`⚠️  [接近TRAILING] $${pos.symbol} PnL:+${pnl.toFixed(1)}% peak:+${pos.highPnl.toFixed(1)}% 回撤:${dropPct.toFixed(0)}% (≥25%触发)`);
+        }
+        if (dropPct >= 25) {
+          const remainingPct = 100 - pos.soldPct;
+          await this._triggerExit(pos, `TRAILING(peak+${pos.highPnl.toFixed(0)}%,drop${dropPct.toFixed(0)}%)`, remainingPct);
+          return;
+        }
+      }
+
+      // 5. TP1保底: TP1已触发但未到TP2，跌回+15%以下 → 卖剩余
+      if (pos.tp1 && !pos.tp2 && pnl < 15) {
+        const remainingPct = 100 - pos.soldPct;
+        console.log(`🛡️ [v15:TP1保底] $${pos.symbol} PnL:+${pnl.toFixed(1)}% < +15% → 卖剩余${remainingPct}%`);
+        await this._triggerExit(pos, `TP1_FLOOR(PnL+${pnl.toFixed(0)}%<15%)`, remainingPct);
+        return;
+      }
+
+      // 6. 时间停损: 24小时 → 全卖剩余
+      if (holdTimeMin >= 1440) {
+        const remainingPct = 100 - pos.soldPct;
+        console.log(`⏰ [v15:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
+        await this._triggerExit(pos, 'TIMEOUT_24H', remainingPct);
+        return;
+      }
     }
   }
 
@@ -863,7 +910,9 @@ export class LivePositionMonitor {
           soldPct: row.sold_pct || 0,
           dynFloorBelowCount: 0,
           lockedPnl: 0,
-          partialSellInProgress: false
+          partialSellInProgress: false,
+          // v15: 恢复出场策略
+          exitStrategy: row.exit_strategy || 'DYNSL_25_50_75'
         });
         // 注册到价格监控（V2 需要 tokenAmount 和 decimals）
         const tokenAmount = row.token_amount || row.tokenAmount;
@@ -878,7 +927,8 @@ export class LivePositionMonitor {
         }
         restored++;
         const convLabel = (row.conviction || 'NORMAL') === 'HIGH' ? '🔥HC' : 'NM';
-        console.log(`  ✅ $${row.symbol} | peak:+${(row.high_pnl||0).toFixed(1)}% | ${convLabel}${row.tp1_triggered ? ' | TP1已触发' : ''}`);
+        const exitLabel = row.exit_strategy || 'DYNSL_25_50_75';
+        console.log(`  ✅ $${row.symbol} | peak:+${(row.high_pnl||0).toFixed(1)}% | ${convLabel} | 出场:${exitLabel}${row.tp1_triggered ? ' | TP1已触发' : ''}`);
       }
       console.log(`🔄 [LivePositionMonitor] 恢复 ${restored} 个持仓，清理 ${cleaned} 个已卖出`);
     } catch (e) {
