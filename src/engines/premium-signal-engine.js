@@ -592,6 +592,8 @@ export class PremiumSignalEngine {
       } else {
         // ATH#4+: 不再入场
         console.log(`⏭️ [v15] $${signal.symbol} ATH#${currentAthNum} ≥4 → 不再入场`);
+        this._watchlist.delete(ca);
+        this._saveWatchlist();
         this.saveSignalRecord(signal, 'V15_ATH4_PLUS', null);
         return { action: 'SKIP', reason: 'v15_ath4_plus', ath_num: currentAthNum };
       }
@@ -679,8 +681,8 @@ export class PremiumSignalEngine {
         }
       }
 
-      // 实盘执行 (ATH#2确认买入)
-      console.log(`💰 [执行] ATH#2确认买入 $${signal.symbol} | ${finalSize} SOL...`);
+      // 实盘执行 (v15 双信号)
+      console.log(`💰 [执行] ATH#${currentAthNum} ${athLabel} 买入 $${signal.symbol} | ${finalSize} SOL | 出场:${exitStrategy}...`);
 
       try {
         let tradeResult;
