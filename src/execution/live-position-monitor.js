@@ -1,16 +1,12 @@
 /**
- * Live Position Monitor — v13
+ * Live Position Monitor — v17
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v13 退出策略（简化为4+2条规则）:
- * - SL: PnL ≤ -25% → 全卖
- * - TP1: PnL ≥ +120% → 卖25%
- * - TP2: PnL ≥ +300% → 卖30% (TP1后)
- * - Trailing: TP2后，从峰值回撒25% → 卖剩余45%
- * - TP1保底: TP1后未达TP2，PnL跌至+15%以下 → 卖剩余
- * - TimeStop: 持仓24h → 全卖
+ * v17 退出策略:
+ * - TP_SL: TP+75% / SL-25% / 24h超时 (回测最优)
+ * - DynSL: 保留向后兼容
  */
 
 import Database from 'better-sqlite3';
@@ -486,27 +482,27 @@ export class LivePositionMonitor {
     const strategy = pos.exitStrategy || 'DYNSL_25_50_75';
 
     if (strategy === 'TP_SL') {
-      // ====== v16统一出场: TP+75% / SL-20% (简单止盈止损) ======
-      // 回测依据: Super≥200 + TP75/SL20 = 47笔, 25.5%WR, +247%总PnL
-      // TP = +75%, SL = -20%
+      // ====== v17统一出场: TP+75% / SL-25% (简单止盈止损) ======
+      // 回测依据: ATH#1 + MC$20-75K + Super(sig)≥80 + TP75/SL25 = 129笔, 42.6%WR, +2248%总PnL
+      // TP = +75%, SL = -25%
 
       if (pnl >= 75) {
         // 止盈: PnL ≥ +75% → 全卖
-        console.log(`🎯 [v16:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
+        console.log(`🎯 [v17:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
         await this._triggerExit(pos, `TP_75(PnL+${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
-      if (pnl <= -20) {
-        // 止损: PnL ≤ -20% → 全卖
-        console.log(`🛑 [v16:SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -20% → 止损全卖`);
-        await this._triggerExit(pos, `SL_20(PnL${pnl.toFixed(0)}%)`, 100);
+      if (pnl <= -25) {
+        // 止损: PnL ≤ -25% → 全卖
+        console.log(`🛑 [v17:SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -25% → 止损全卖`);
+        await this._triggerExit(pos, `SL_25(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
       // 时间停损: 24小时
       if (holdTimeMin >= 1440) {
-        console.log(`⏰ [v16:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
+        console.log(`⏰ [v17:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h → 全卖`);
         await this._triggerExit(pos, 'TIMEOUT_24H', 100);
         return;
       }
