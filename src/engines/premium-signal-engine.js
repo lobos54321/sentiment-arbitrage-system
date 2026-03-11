@@ -451,7 +451,7 @@ export class PremiumSignalEngine {
       //   v17是v16的9.1倍！核心改变: ATH#1入场(优于ATH#3+), SL-25%(优于SL-20%)
       const superSignal = idx?.super_index?.signal || 0;
       let finalSize, tradeConviction;
-      let exitStrategy = 'TP_SL'; // v17: 统一TP+75%/SL-25%出场
+      let exitStrategy = 'TP_NOSL'; // v17.1: TP+75%/无SL/24h超时 (K线回测: 无SL ROI=+18.1% > SL-25% ROI=+8.1%)
 
       if (currentAthNum === 1) {
         // ====== ATH#1: 主力入场 ======
@@ -488,7 +488,7 @@ export class PremiumSignalEngine {
         // ✅ 通过所有过滤 → 买入
         finalSize = 0.02;
         tradeConviction = 'HIGH';
-        console.log(`🎯 [v17] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} → ${finalSize} SOL (TP75/SL25)`);
+        console.log(`🎯 [v17.1] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} → ${finalSize} SOL (TP75/无SL/24h超时)`);
         console.log(`  Super(cur)=${superCurrent} Sec=${securityCurrent} Addr=${addressCurrent} Trade=${tradeCurrent}`);
 
       } else {
@@ -506,8 +506,8 @@ export class PremiumSignalEngine {
         narrative_tier: 'CONFIRMED',
         narrative_reason: `v17: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} Super(cur)=${superCurrent} Sec=${securityCurrent} Addr=${addressCurrent}`,
         entry_timing: 'OPTIMAL',
-        stop_loss_percent: 25,
-        exitStrategy: exitStrategy // v17: 统一TP+75%/SL-25%
+        stop_loss_percent: 0,
+        exitStrategy: exitStrategy // v17.1: TP+75%/无SL/24h超时
       };
 
       // 已持仓检查

@@ -1,11 +1,12 @@
 /**
- * Live Position Monitor — v17
+ * Live Position Monitor — v17.1
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v17 退出策略:
- * - TP_SL: TP+75% / SL-25% / 24h超时 (回测最优)
+ * v17.1 退出策略:
+ * - TP_NOSL: TP+75% / 无SL / 24h超时 (K线回测: 无SL ROI=+18.1% > SL-25% ROI=+8.1%)
+ * - TP_SL: TP+75% / SL-25% / 24h超时 (保留向后兼容)
  * - DynSL: 保留向后兼容
  */
 
@@ -481,7 +482,28 @@ export class LivePositionMonitor {
     const holdTimeMin = holdTimeSec / 60;
     const strategy = pos.exitStrategy || 'DYNSL_25_50_75';
 
-    if (strategy === 'TP_SL') {
+    if (strategy === 'TP_NOSL') {
+      // ====== v17.1: TP+75% / 无SL / 24h超时 ======
+      // K线回测: V17 TP75/无SL ROI=+18.1% (现实3%滑点), 比SL-25%的+8.1%高10%
+      // 无SL原因: MEME币73.5%的金狗经历>-50%最大回撤后才涨起来, SL-25%误杀41%的金狗
+
+      if (pnl >= 75) {
+        // 止盈: PnL ≥ +75% → 全卖
+        console.log(`🎯 [v17.1:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
+        await this._triggerExit(pos, `TP_75(PnL+${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 无SL — 不止损, 只有超时退出
+
+      // 时间停损: 24小时
+      if (holdTimeMin >= 1440) {
+        console.log(`⏰ [v17.1:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 24h PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 超时全卖`);
+        await this._triggerExit(pos, `TIMEOUT_24H(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+    } else if (strategy === 'TP_SL') {
       // ====== v17统一出场: TP+75% / SL-25% (简单止盈止损) ======
       // 回测依据: ATH#1 + MC$20-75K + Super(sig)≥80 + TP75/SL25 = 129笔, 42.6%WR, +2248%总PnL
       // TP = +75%, SL = -25%
