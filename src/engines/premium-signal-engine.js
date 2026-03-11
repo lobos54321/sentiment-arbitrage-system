@@ -4,12 +4,13 @@
  * 独立的信号处理引擎，专门处理付费频道信号
  * Pipeline: 信号 → 预检 → 链上快照 → Hard Gates → v17条件过滤 → 执行
  * 
- * v17: ATH#1早期入场 — 22策略×6退出/187代币K线大规模回测驱动
+ * v17.3: ATH#1早期入场 + Delta增强
  * - ATH#1直接入场（彻底放弃ATH#3+等待策略）
- * - 入场条件: ATH#1 + MC $20-75K + Super(signal) ≥ 80
+ * - 入场条件: ATH#1 + MC $20-75K + Super(signal) ≥ 80 + SupΔ≥10 + TΔ≥1
+ * - SupΔ = Super(current) - Super(signal), TΔ = Trade(current) - Trade(signal)
  * - 仓位: 0.02 SOL
- * - 出场: TP+75% / SL-25% / 24h超时
- * - 回测: 129笔, 42.6%WR, +2248%总PnL (是v16的9.1倍)
+ * - 出场: TP+75% / 无SL / 4h超时
+ * - 回测(3%滑点): 88笔, 66%WR, ROI=+26.3% (v17基准=+19.1%)
  */
 
 import fs from 'fs';
@@ -434,6 +435,7 @@ export class PremiumSignalEngine {
 
       // 读取常用指标
       const tradeCurrent = idx?.trade_index?.current || 0;
+      const tradeSignal = idx?.trade_index?.signal || 0;
       const securityCurrent = idx?.security_index?.current || 0;
       const superCurrent = idx?.super_index?.current || 0;
       const addressCurrent = idx?.address_index?.current || 0;
@@ -444,14 +446,16 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'market_paused' };
       }
 
-      // ===== v17: ATH#1早期入场策略 — 数据驱动最优解 =====
-      // 22策略×6退出/187代币K线回测:
-      //   ATH#1 + MC$20-75K + Super(sig)≥80 + TP75/SL25 = 129笔, 42.6%WR, +2248%总PnL
-      //   v16参比(ATH#3+ + Super≥200 + TP75/SL20) = 47笔, 25.5%WR, +247%总PnL
-      //   v17是v16的9.1倍！核心改变: ATH#1入场(优于ATH#3+), SL-25%(优于SL-20%)
+      // ===== v17.3: ATH#1早期入场 + Delta增强 — K线回测(3%滑点)驱动 =====
+      // v17基准: ATH#1 + MC$20-75K + Super(sig)≥80 = 129笔, ROI=+19.1%
+      // v17.3: +SupΔ≥10 +TΔ≥1 = 88笔, ROI=+26.3%, WR=66% (ROI提升+7.2%!)
+      // SupΔ = Super(current) - Super(signal) = 超级指数增量，过滤掉super不涨的死币
+      // TΔ = Trade(current) - Trade(signal) = 交易指数增量，确认有新交易活动
       const superSignal = idx?.super_index?.signal || 0;
+      const superDelta = superCurrent - superSignal; // v17.3: SupΔ
+      const tradeDelta = tradeCurrent - tradeSignal; // v17.3: TΔ
       let finalSize, tradeConviction;
-      let exitStrategy = 'TP_NOSL'; // v17.1: TP+75%/无SL/24h超时 (K线回测: 无SL ROI=+18.1% > SL-25% ROI=+8.1%)
+      let exitStrategy = 'TP_NOSL'; // v17.1: TP+75%/无SL/4h超时 (K线回测: 无SL ROI=+18.1% > SL-25% ROI=+8.1%)
 
       if (currentAthNum === 1) {
         // ====== ATH#1: 主力入场 ======
@@ -485,10 +489,26 @@ export class PremiumSignalEngine {
           return { action: 'SKIP', reason: 'v17_super_filter', superSignal };
         }
 
+        // v17.3: Super Delta过滤: SupΔ ≥ 10
+        // K线回测: SupΔ≥10+TΔ≥1 = 88笔, ROI=+26.3% > 无过滤129笔 ROI=+19.1%
+        if (superDelta < 10) {
+          console.log(`⏭️ [v17.3] $${signal.symbol} ATH#1 SupΔ=${superDelta}<10 → 跳过`);
+          this.saveSignalRecord(signal, 'V17_SUPDELTA_FILTER', null);
+          return { action: 'SKIP', reason: 'v17_supdelta_filter', superDelta };
+        }
+
+        // v17.3: Trade Delta过滤: TΔ ≥ 1
+        // 确认有至少1笔新交易活动，过滤掉无交易的死代币
+        if (tradeDelta < 1) {
+          console.log(`⏭️ [v17.3] $${signal.symbol} ATH#1 TΔ=${tradeDelta}<1 → 跳过`);
+          this.saveSignalRecord(signal, 'V17_TRADEDELTA_FILTER', null);
+          return { action: 'SKIP', reason: 'v17_tradedelta_filter', tradeDelta };
+        }
+
         // ✅ 通过所有过滤 → 买入
         finalSize = 0.02;
         tradeConviction = 'HIGH';
-        console.log(`🎯 [v17.1] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} → ${finalSize} SOL (TP75/无SL/24h超时)`);
+        console.log(`🎯 [v17.3] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} SupΔ=${superDelta} TΔ=${tradeDelta} → ${finalSize} SOL (TP75/无SL/4h超时)`);
         console.log(`  Super(cur)=${superCurrent} Sec=${securityCurrent} Addr=${addressCurrent} Trade=${tradeCurrent}`);
 
       } else {
@@ -504,7 +524,7 @@ export class PremiumSignalEngine {
         action: 'BUY_FULL',
         confidence: 90,
         narrative_tier: 'CONFIRMED',
-        narrative_reason: `v17: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} Super(cur)=${superCurrent} Sec=${securityCurrent} Addr=${addressCurrent}`,
+        narrative_reason: `v17.3: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} SupΔ=${superDelta} TΔ=${tradeDelta} Sec=${securityCurrent} Addr=${addressCurrent}`,
         entry_timing: 'OPTIMAL',
         stop_loss_percent: 0,
         exitStrategy: exitStrategy // v17.1: TP+75%/无SL/24h超时
