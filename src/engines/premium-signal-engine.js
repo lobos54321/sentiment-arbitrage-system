@@ -507,7 +507,7 @@ export class PremiumSignalEngine {
         }
 
         // ✅ 通过所有过滤 → 买入
-        finalSize = 0.02;
+        finalSize = 0.06;
         tradeConviction = 'HIGH';
         console.log(`🎯 [v17.4] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} SupΔ=${superDelta} TΔ=${tradeDelta} → ${finalSize} SOL (TP100/无SL/1h快出/4h超时)`);
         console.log(`  Super(cur)=${superCurrent} Sec=${securityCurrent} Addr=${addressCurrent} Trade=${tradeCurrent}`);
