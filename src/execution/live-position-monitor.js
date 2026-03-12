@@ -483,22 +483,30 @@ export class LivePositionMonitor {
     const strategy = pos.exitStrategy || 'DYNSL_25_50_75';
 
     if (strategy === 'TP_NOSL') {
-      // ====== v17.2: TP+75% / 无SL / 4h超时 ======
-      // K线回测(3%滑点): 4h超时 ROI=+19.1% 🏆 > 24h超时 ROI=+18.1% > 3h超时 ROI=+17.1%
+      // ====== v17.4: TP+100% / 无SL / 1h<30%快出 / 4h超时 ======
+      // DB回测(5天): TP+100% ROI=+19.0% > TP+75% ROI=+12.2%
       // 无SL原因: MEME币73.5%的金狗经历>-50%最大回撤后才涨起来, SL-25%误杀41%的金狗
+      // 1h快出: 持仓>1h且峰值<30% → 大概率不会涨了，及时止损
 
-      if (pnl >= 75) {
-        // 止盈: PnL ≥ +75% → 全卖
-        console.log(`🎯 [v17.2:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +75% → 止盈全卖`);
-        await this._triggerExit(pos, `TP_75(PnL+${pnl.toFixed(0)}%)`, 100);
+      if (pnl >= 100) {
+        // 止盈: PnL ≥ +100% → 全卖
+        console.log(`🎯 [v17.4:TP] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +100% → 止盈全卖`);
+        await this._triggerExit(pos, `TP_100(PnL+${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 1h快出: 持仓超过1小时，如果峰值<30%，大概率不会涨到TP → 尽早止损
+      if (holdTimeMin >= 60 && pos.highPnl < 30) {
+        console.log(`⚡ [v17.4:1h快出] $${pos.symbol} 持仓${holdTimeMin.toFixed(0)}m≥60m 峰值+${pos.highPnl.toFixed(1)}%<30% PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 快速止损`);
+        await this._triggerExit(pos, `QUICK_1H(peak+${pos.highPnl.toFixed(0)}%,PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
       // 无SL — 不止损, 只有超时退出
 
-      // 时间停损: 4小时 (回测最优: 4h=+19.1% > 24h=+18.1% > 3h=+17.1%)
+      // 时间停损: 4小时
       if (holdTimeMin >= 240) {
-        console.log(`⏰ [v17.2:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 4h PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 超时全卖`);
+        console.log(`⏰ [v17.4:超时] $${pos.symbol} 持仓${(holdTimeMin/60).toFixed(1)}h ≥ 4h PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 超时全卖`);
         await this._triggerExit(pos, `TIMEOUT_4H(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
