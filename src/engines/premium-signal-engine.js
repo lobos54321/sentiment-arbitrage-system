@@ -1,16 +1,15 @@
 /**
- * Premium Signal Engine — v17
+ * Premium Signal Engine — v18
  *
  * 独立的信号处理引擎，专门处理付费频道信号
- * Pipeline: 信号 → 预检 → 链上快照 → Hard Gates → v17条件过滤 → 执行
+ * Pipeline: 信号 → 预检 → 链上快照 → Hard Gates → v18条件过滤 → 执行
  * 
- * v17.3: ATH#1早期入场 + Delta增强
- * - ATH#1直接入场（彻底放弃ATH#3+等待策略）
- * - 入场条件: ATH#1 + MC $20-75K + Super(signal) ≥ 80 + SupΔ≥10 + TΔ≥1
- * - SupΔ = Super(current) - Super(signal), TΔ = Trade(current) - Trade(signal)
- * - 仓位: 0.02 SOL
- * - 出场: TP+75% / 无SL / 4h超时
- * - 回测(3%滑点): 88笔, 66%WR, ROI=+26.3% (v17基准=+19.1%)
+ * v18: 精准掐头去尾 + 非对称收割
+ * - ATH#1直接入场
+ * - 入场条件: MC 30-300K + Super_cur 80-1000 + SupΔ≥5 + Trade_cur≥1&TΔ≥1 + Addr_cur≥3 + Sec_cur≥15
+ * - 仓位: 0.06 SOL
+ * - 出场: ASYMMETRIC (TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500% + 15分死水/30分大限)
+ * - 回测(18h): 40笔, 65%WR, ROI=+16%, 盈亏比1.26
  */
 
 import fs from 'fs';
@@ -447,16 +446,14 @@ export class PremiumSignalEngine {
       }
 
       // ===== v17.4: ATH#1早期入场 + Delta增强 — DB回测(5天)驱动 =====
-      // v17.3: +SupΔ≥10 +TΔ≥1 = 88笔, ROI=+26.3% (K线回测)
-      // v17.4: +SupΔ≥15 +TΔ≥1 = 231笔/5天, 27%WR, ROI=+19.0% (DB回测)
-      // 变更: SupΔ 10→15 过滤更多super增长不足的币; TP 75%→100%提高每笔收益
-      // SupΔ = Super(current) - Super(signal) = 超级指数增量，过滤掉super不涨的死币
-      // TΔ = Trade(current) - Trade(signal) = 交易指数增量，过滤TΔ=0(14%TP)的死币
+      // v18: 精准掐头去尾策略 — 18h回测(40笔): 65%WR, ROI=+16%, 盈亏比1.26
+      // 买入: MC 30-300K + Super_cur 80-1000 + SupΔ≥5 + Trade_cur≥1&TΔ≥1 + Addr_cur≥3 + Sec_cur≥15
+      // 卖出: ASYMMETRIC (非对称收割: TP1@50%卖60%→SL移至0%保本→TP2-4阶梯登月)
       const superSignal = idx?.super_index?.signal || 0;
-      const superDelta = superCurrent - superSignal; // v17.3: SupΔ
-      const tradeDelta = tradeCurrent - tradeSignal; // v17.3: TΔ
+      const superDelta = superCurrent - superSignal; // SupΔ
+      const tradeDelta = tradeCurrent - tradeSignal; // TΔ
       let finalSize, tradeConviction;
-      let exitStrategy = 'TP_NOSL'; // v17.4: TP+100%/无SL/1h<30%快出/4h超时
+      let exitStrategy = 'ASYMMETRIC'; // v18: 非对称收割
 
       if (currentAthNum === 1) {
         // ====== ATH#1: 主力入场 ======
@@ -476,41 +473,58 @@ export class PremiumSignalEngine {
           return { action: 'SKIP', reason: 'max_positions_v17' };
         }
 
-        // MC过滤: $20K - $75K
-        if (mc < 20000 || mc > 75000) {
-          console.log(`⏭️ [v17] $${signal.symbol} ATH#1 MC=$${(mc/1000).toFixed(1)}K 不在$20-75K范围 → 跳过`);
-          this.saveSignalRecord(signal, 'V17_MC_FILTER', null);
-          return { action: 'SKIP', reason: 'v17_mc_filter', mc };
+        // MC过滤: $30K - $300K (v18: 扩大范围, 抛弃30K以下绞肉机, 接纳100K+强共识盘)
+        if (mc < 30000 || mc > 300000) {
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 MC=$${(mc/1000).toFixed(1)}K 不在$30-300K范围 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_mc_filter', mc };
         }
 
-        // Super(signal)过滤: ≥ 80
-        if (superSignal < 80) {
-          console.log(`⏭️ [v17] $${signal.symbol} ATH#1 Super(signal)=${superSignal}<80 → 跳过`);
-          this.saveSignalRecord(signal, 'V17_SUPER_FILTER', null);
-          return { action: 'SKIP', reason: 'v17_super_filter', superSignal };
+        // Super_cur过滤: 80 ≤ Super_cur ≤ 1000 (防脚本上限, 不碰几千的机器对敲盘)
+        if (superCurrent < 80 || superCurrent > 1000) {
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Super_cur=${superCurrent} 不在80-1000范围 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_SUPERCUR_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_supercur_filter', superCurrent };
         }
 
-        // v17.4: Super Delta过滤: SupΔ ≥ 15
-        // DB回测(5天): SupΔ≥15+TΔ≥1 = 231笔, 27%WR, ROI=+19.0%
-        if (superDelta < 15) {
-          console.log(`⏭️ [v17.4] $${signal.symbol} ATH#1 SupΔ=${superDelta}<15 → 跳过`);
-          this.saveSignalRecord(signal, 'V17_SUPDELTA_FILTER', null);
-          return { action: 'SKIP', reason: 'v17_supdelta_filter', superDelta };
+        // v18: Super Delta过滤: SupΔ ≥ 5 (动能最低门槛)
+        if (superDelta < 5) {
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 SupΔ=${superDelta}<5 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_SUPDELTA_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_supdelta_filter', superDelta };
         }
 
-        // v17.4: Trade Delta过滤: TΔ ≥ 1
-        // DB回测: TΔ=0只有14%TP率，TΔ≥1有27%TP率
+        // v18: Trade_cur ≥ 1 且 TΔ ≥ 1 (动能与底座)
+        if (tradeCurrent < 1) {
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Trade_cur=${tradeCurrent}<1 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_TRADECUR_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_tradecur_filter', tradeCurrent };
+        }
         if (tradeDelta < 1) {
-          console.log(`⏭️ [v17.4] $${signal.symbol} ATH#1 TΔ=${tradeDelta}<1 → 跳过`);
-          this.saveSignalRecord(signal, 'V17_TRADEDELTA_FILTER', null);
-          return { action: 'SKIP', reason: 'v17_tradedelta_filter', tradeDelta };
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 TΔ=${tradeDelta}<1 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_TRADEDELTA_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_tradedelta_filter', tradeDelta };
+        }
+
+        // v18: Addr_cur ≥ 3 (防鼠仓)
+        if (addressCurrent < 3) {
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Addr_cur=${addressCurrent}<3 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_ADDR_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_addr_filter', addressCurrent };
+        }
+
+        // v18: Sec_cur ≥ 15 (防貔貅)
+        if (securityCurrent < 15) {
+          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Sec_cur=${securityCurrent}<15 → 跳过`);
+          this.saveSignalRecord(signal, 'V18_SEC_FILTER', null);
+          return { action: 'SKIP', reason: 'v18_sec_filter', securityCurrent };
         }
 
         // ✅ 通过所有过滤 → 买入
         finalSize = 0.06;
         tradeConviction = 'HIGH';
-        console.log(`🎯 [v17.4] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} SupΔ=${superDelta} TΔ=${tradeDelta} → ${finalSize} SOL (TP100/无SL/1h快出/4h超时)`);
-        console.log(`  Super(cur)=${superCurrent} Sec=${securityCurrent} Addr=${addressCurrent} Trade=${tradeCurrent}`);
+        console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent} → ${finalSize} SOL (非对称收割: TP1@50%/SL40%→保本/TP2-4登月)`);
+        console.log(`  Super(sig)=${superSignal} Trade(cur)=${tradeCurrent} Trade(sig)=${tradeSignal}`);
 
       } else {
         // ====== ATH#2+: 不入场 ======
@@ -525,10 +539,10 @@ export class PremiumSignalEngine {
         action: 'BUY_FULL',
         confidence: 90,
         narrative_tier: 'CONFIRMED',
-        narrative_reason: `v17.4: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super(sig)=${superSignal} SupΔ=${superDelta} TΔ=${tradeDelta} Sec=${securityCurrent} Addr=${addressCurrent}`,
+        narrative_reason: `v18: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent}`,
         entry_timing: 'OPTIMAL',
-        stop_loss_percent: 0,
-        exitStrategy: exitStrategy // v17.1: TP+75%/无SL/24h超时
+        stop_loss_percent: 40, // -40% hard SL
+        exitStrategy: exitStrategy // v18: ASYMMETRIC 非对称收割
       };
 
       // 已持仓检查
@@ -640,7 +654,7 @@ export class PremiumSignalEngine {
 
             // 清理观察列表（v17不再使用，保留兼容）
             this._watchlist.delete(ca);
-            console.log(`🎯 [v17] ATH#1 买入完成 $${signal.symbol} | ${finalSize} SOL | 出场: ${exitStrategy}`);
+            console.log(`🎯 [v18] ATH#1 买入完成 $${signal.symbol} | ${finalSize} SOL | 出场: ${exitStrategy}`);
 
             this.recentSymbols.set(signal.symbol, Date.now());
           }
