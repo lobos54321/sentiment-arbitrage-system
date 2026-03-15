@@ -5,7 +5,7 @@
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
  * v18 退出策略:
- * - ASYMMETRIC: 非对称收割 (TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500% + 15分死水/30分大限)
+ * - ASYMMETRIC: 非对称收割 (TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%卖5% + 5%Moonbag回撤35%平仓)
  * - TP_NOSL: TP+100% / 无SL / 4h超时 (保留向后兼容)
  * - TP_SL: TP+75% / SL-25% / 24h超时 (保留向后兼容)
  * - DynSL: 保留向后兼容
@@ -268,6 +268,8 @@ export class LivePositionMonitor {
       lockedPnl: 0,         // 已锁定的利润
       moonMode: false,      // 是否进入月球模式
       moonHighPnl: 0,       // 月球模式的最高PnL
+      moonbag: false,       // 是否进入Moonbag模式(TP4后5%仓位)
+      moonbagHighPnl: 0,    // Moonbag最高PnL
       partialSellInProgress: false  // 是否正在分批卖出
     };
 
@@ -488,7 +490,8 @@ export class LivePositionMonitor {
       // 回测(18h): 40笔, 65%WR, ROI=+16%, 盈亏比1.26
       // Hard SL: -40% (TP1前) / 0%保本 (TP1后)
       // TP1: +50% → 卖60% (回本90%) → SL上移至0%
-      // TP2: +100% → 卖15% | TP3: +200% → 卖15% | TP4: +500% → 卖10%
+      // TP2: +100% → 卖15% | TP3: +200% → 卖15% | TP4: +500% → 卖5%
+      // 剩余5% = 登月彩票Moonbag: 不主动止盈, 从最高点回撤35%才被动平仓
       // 15分死水: 未碰TP1 && peak<50% && -15%~+15% → 全平
       // 30分大限: 未碰TP1 → 全平
 
@@ -496,7 +499,8 @@ export class LivePositionMonitor {
       const remainingPct = 100 - (pos.soldPct || 0);
 
       // 1. 止损检查 (Hard SL -40% 或 TP1后保本 0%)
-      if (pnl <= currentSL) {
+      // Moonbag模式下不用保本SL, 用回撤止损
+      if (!pos.moonbag && pnl <= currentSL) {
         if (pos.tp1) {
           console.log(`🛡️ [ASYM:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出剩余${remainingPct}% (已锁TP1利润)`);
           await this._triggerExit(pos, `BREAKEVEN_SL(PnL${pnl.toFixed(0)}%,locked_TP1)`, remainingPct);
@@ -528,14 +532,36 @@ export class LivePositionMonitor {
         return;
       }
 
-      // 5. TP4: +500% → 卖10% (零成本登月舱最后一卖)
+      // 5. TP4: +500% → 卖5% (只卖5%, 剩余5%进入Moonbag模式)
       if (pos.tp3 && !pos.tp4 && pnl >= 500) {
-        console.log(`🌕 [ASYM:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出10%`);
-        await this._triggerPartialSell(pos, 'TP4', 10, pnl);
+        console.log(`🌕 [ASYM:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出5% (剩余5%=登月彩票🎫)`);
+        await this._triggerPartialSell(pos, 'TP4', 5, pnl);
+        pos.moonbag = true;
+        pos.moonbagHighPnl = pnl;
         return;
       }
 
-      // 6. 15分钟死水清理: 未碰TP1 && peak<50% && 当前价在-15%~+15% → 全平
+      // 6. Moonbag模式: TP4触发后, 剩余5%永不主动止盈, 从最高点回撤35%才被动平仓
+      if (pos.moonbag) {
+        // 更新moonbag最高PnL
+        if (pnl > (pos.moonbagHighPnl || 0)) {
+          pos.moonbagHighPnl = pnl;
+        }
+        const moonPeak = pos.moonbagHighPnl || pnl;
+        const dropFromPeak = moonPeak - pnl;
+        const dropPct = moonPeak > 0 ? (dropFromPeak / moonPeak) * 100 : 0;
+
+        if (dropPct >= 35) {
+          const moonRemaining = 100 - (pos.soldPct || 0);
+          console.log(`🎫 [ASYM:Moonbag平仓] $${pos.symbol} 从峰值+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}%≥35% → 卖出最后${moonRemaining}%`);
+          await this._triggerExit(pos, `MOONBAG_EXIT(peak+${moonPeak.toFixed(0)}%,drop${dropPct.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`, moonRemaining);
+          return;
+        }
+        // Moonbag不受时间限制，不受保本SL限制，只看回撤
+        return;
+      }
+
+      // 7. 15分钟死水清理: 未碰TP1 && peak<50% && 当前价在-15%~+15% → 全平
       if (!pos.tp1 && holdTimeMin >= 15) {
         if (pos.highPnl < 50 && pnl >= -15 && pnl <= 15) {
           console.log(`💀 [ASYM:死水] $${pos.symbol} 15分钟无起色 peak:+${pos.highPnl.toFixed(1)}%<50% PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 全平`);
@@ -544,21 +570,11 @@ export class LivePositionMonitor {
         }
       }
 
-      // 7. 30分钟大限: 未碰TP1 → 全平
+      // 8. 30分钟大限: 未碰TP1 → 全平
       if (!pos.tp1 && holdTimeMin >= 30) {
         console.log(`⏰ [ASYM:30分大限] $${pos.symbol} 持仓${holdTimeMin.toFixed(0)}m≥30m 未触TP1 PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 全平`);
         await this._triggerExit(pos, `TIMEOUT_30M(PnL${pnl.toFixed(0)}%)`, 100);
         return;
-      }
-
-      // 8. TP4触发后 + 持仓2h → 收工
-      if (pos.tp4 && holdTimeMin >= 120) {
-        const finalRemaining = 100 - (pos.soldPct || 0);
-        if (finalRemaining > 0) {
-          console.log(`⏰ [ASYM:收工] $${pos.symbol} TP4已触发 持仓${(holdTimeMin/60).toFixed(1)}h≥2h → 卖出剩余${finalRemaining}%`);
-          await this._triggerExit(pos, `CLEANUP_2H(PnL${pnl.toFixed(0)}%)`, finalRemaining);
-          return;
-        }
       }
 
     } else if (strategy === 'TP_NOSL') {
