@@ -672,56 +672,121 @@ export class SolanaSnapshotService {
    * @returns {Promise<Object>} { name, symbol, description }
    */
   async getTokenMetadata(tokenCA) {
-    if (!this.alchemyApiKey) {
-      console.log('   ⚠️  Alchemy API key not configured - cannot fetch metadata');
-      return { name: null, symbol: null, description: null };
+    // Try Alchemy first (if API key is available), with retry on 429
+    if (this.alchemyApiKey) {
+      const alchemyResult = await this._getTokenMetadataAlchemy(tokenCA);
+      if (alchemyResult.name || alchemyResult.symbol) {
+        return alchemyResult;
+      }
     }
 
-    try {
-      // ⏱️  Rate limiting: wait for token before Alchemy API call
-      await this.rateLimiter.throttle();
+    // Fallback: Jupiter Token List API (free, no rate limit)
+    return await this._getTokenMetadataJupiter(tokenCA);
+  }
 
-      const response = await axios.post(
-        `https://solana-mainnet.g.alchemy.com/v2/${this.alchemyApiKey}`,
-        {
-          jsonrpc: '2.0',
-          id: 'metadata-fetch',
-          method: 'getAsset',
-          params: {
-            id: tokenCA,
-            displayOptions: {
-              showCollectionMetadata: true
+  /**
+   * Fetch token metadata from Alchemy with exponential backoff retry on 429
+   * @private
+   */
+  async _getTokenMetadataAlchemy(tokenCA, maxRetries = 3) {
+    let delay = 2000; // Start with 2s backoff
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        // ⏱️  Rate limiting: wait for token before Alchemy API call
+        await this.rateLimiter.throttle();
+
+        const response = await axios.post(
+          `https://solana-mainnet.g.alchemy.com/v2/${this.alchemyApiKey}`,
+          {
+            jsonrpc: '2.0',
+            id: 'metadata-fetch',
+            method: 'getAsset',
+            params: {
+              id: tokenCA,
+              displayOptions: {
+                showCollectionMetadata: true
+              }
             }
+          },
+          {
+            timeout: 10000,
+            headers: { 'Content-Type': 'application/json' }
           }
-        },
-        {
-          timeout: 10000,
-          headers: { 'Content-Type': 'application/json' }
+        );
+
+        const asset = response.data?.result;
+        if (!asset) {
+          console.log('   ⚠️  Token metadata not found in Alchemy');
+          return { name: null, symbol: null, description: null };
         }
+
+        const metadata = {
+          name: asset.content?.metadata?.name || null,
+          symbol: asset.content?.metadata?.symbol || null,
+          description: asset.content?.metadata?.description || null
+        };
+
+        if (metadata.name || metadata.symbol) {
+          console.log(`   📝 Token: ${metadata.name || 'Unknown'} (${metadata.symbol || 'Unknown'}) [Alchemy]`);
+        }
+
+        return metadata;
+
+      } catch (error) {
+        const status = error.response?.status;
+
+        if (status === 429) {
+          if (attempt < maxRetries) {
+            console.log(`   ⏳ Alchemy rate limited (429), retrying in ${delay / 1000}s... (attempt ${attempt + 1}/${maxRetries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2; // Exponential backoff: 2s → 4s → 8s
+            continue;
+          } else {
+            console.log(`   ⚠️  Alchemy rate limited after ${maxRetries} retries, falling back to Jupiter`);
+          }
+        } else {
+          console.log(`   ⚠️  Alchemy metadata fetch failed: ${error.message}`);
+        }
+
+        return { name: null, symbol: null, description: null };
+      }
+    }
+
+    return { name: null, symbol: null, description: null };
+  }
+
+  /**
+   * Fallback: Fetch token metadata from Jupiter Token List API
+   * Free, no rate limits, but only covers listed tokens
+   * @private
+   */
+  async _getTokenMetadataJupiter(tokenCA) {
+    try {
+      const response = await axios.get(
+        `https://tokens.jup.ag/token/${tokenCA}`,
+        { timeout: 8000 }
       );
 
-      const asset = response.data?.result;
-
-      if (!asset) {
-        console.log('   ⚠️  Token metadata not found');
+      const token = response.data;
+      if (!token) {
         return { name: null, symbol: null, description: null };
       }
 
       const metadata = {
-        name: asset.content?.metadata?.name || null,
-        symbol: asset.content?.metadata?.symbol || null,
-        description: asset.content?.metadata?.description || null
+        name: token.name || null,
+        symbol: token.symbol || null,
+        description: null // Jupiter doesn't provide description
       };
 
-      // Log the metadata
       if (metadata.name || metadata.symbol) {
-        console.log(`   📝 Token: ${metadata.name || 'Unknown'} (${metadata.symbol || 'Unknown'}) [Alchemy]`);
+        console.log(`   📝 Token: ${metadata.name || 'Unknown'} (${metadata.symbol || 'Unknown'}) [Jupiter]`);
       }
 
       return metadata;
 
     } catch (error) {
-      console.log(`   ⚠️  Token metadata fetch failed: ${error.message}`);
+      // Token not in Jupiter list — silently return null (common for new/unknown tokens)
       return { name: null, symbol: null, description: null };
     }
   }
