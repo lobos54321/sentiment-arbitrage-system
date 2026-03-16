@@ -5,6 +5,7 @@
  */
 
 import http from 'http';
+import https from 'https';
 import fs from 'fs';
 import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
@@ -1782,9 +1783,9 @@ const server = http.createServer(async (req, res) => {
       });
       const rpcRes = await new Promise((resolve, reject) => {
         const isHttps = rpcUrl.startsWith('https');
-        const mod = isHttps ? await import('https') : await import('http');
         const urlObj = new URL(rpcUrl);
-        const req = mod.default.request({
+        const mod = isHttps ? https : http;
+        const req = mod.request({
           hostname: urlObj.hostname, port: urlObj.port || (isHttps ? 443 : 80),
           path: urlObj.pathname, method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(rpcBody) }
