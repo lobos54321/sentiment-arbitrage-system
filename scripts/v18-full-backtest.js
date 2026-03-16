@@ -8,6 +8,13 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 
+// ─── 本地OHLCV缓存（避免重复拉取+绕过限流）────────────────────────────────
+const CACHE_FILE = 'data/ohlcv-cache.json';
+let ohlcvCache = {};
+try { ohlcvCache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch {}
+
+function saveCache() { fs.writeFileSync(CACHE_FILE, JSON.stringify(ohlcvCache, null, 2)); }
+
 // ─── 42个真实PASS信号 (38 + 4新) ────────────────────────────────────────
 const SIGNALS = [
   { symbol: 'Eclipse',    ca: 'ApwtY1HWHgDLDY5unJ7awPrBeQo4UwstCM83A5zFpump', entry_ts: 1773576800963, mc: 115280 },
@@ -66,55 +73,59 @@ const MAX_HOLD_MINS = 30;
 const DEAD_WATER_MINS = 15;
 const SLIPPAGE = 0.004;         // 0.4% 滑点+手续费
 
-// ─── K线拉取：DexScreener 找 pair → GeckoTerminal 拉历史OHLCV ─────────────
+// ─── K线拉取：DexScreener 找 pair → GeckoTerminal 双窗口拉历史OHLCV ────────
 function fetchOHLCV(ca, entryTsSec) {
-  const lookAhead = entryTsSec + 35 * 60;  // 入场后35分钟
-  const lookBack  = entryTsSec - 5 * 60;   // 入场前5分钟
+  // === 缓存命中直接返回 ===
+  if (ohlcvCache[ca]) return ohlcvCache[ca];
 
-  // === 数据源1: DexScreener 获取 pair 地址（速度快，覆盖全）===
+  const lookBack = entryTsSec - 5 * 60;   // 入场前5分钟
+
+  // === DexScreener 获取 pair 地址（最全覆盖，不限流）===
   const dsData = fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
-  const dsPairs = (dsData?.pairs || [])
+  const candidates = (dsData?.pairs || [])
     .filter(p => p.chainId === 'solana')
-    .map(p => ({ id: p.pairAddress, created: (p.pairCreatedAt || 0) / 1000 }))
+    .map(p => ({ id: p.pairAddress, created: (p.pairCreatedAt || 0) / 1000,
+                 dex: p.dexId, liq: p.liquidity?.usd || 0 }))
     .filter(p => p.created > 0 && p.created <= entryTsSec + 600)
-    .sort((a, b) => b.created - a.created);   // 最接近入场的排前面
+    .sort((a, b) => b.created !== a.created ? b.created - a.created : b.liq - a.liq);
 
-  // === 数据源2: GeckoTerminal 获取 pool 列表（备用，GT有时索引更全）===
-  const gtData = fetchJson(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${ca}/pools?page=1`);
-  sleep(800);  // GT 限流保护
-  const gtPairs = (gtData?.data || [])
-    .map(p => ({ id: p.id.replace('solana_', ''), created: new Date(p.attributes?.pool_created_at || 0).getTime() / 1000 }))
-    .filter(p => p.created > 0 && p.created <= entryTsSec + 600)
-    .sort((a, b) => b.created - a.created);
+  if (!candidates.length) { ohlcvCache[ca] = null; saveCache(); return null; }
 
-  // 合并两个来源，去重，优先 DS（DS pairCreatedAt 精度更高）
-  const seen = new Set();
-  const candidates = [...dsPairs, ...gtPairs].filter(p => {
-    if (seen.has(p.id)) return false;
-    seen.add(p.id);
-    return true;
-  });
+  // === 双窗口查询：确保入场时刻+持仓期均有K线 ===
+  function fetchBars(poolId) {
+    // 窗口A：entry+10min（覆盖刚开盘的稀疏池）
+    sleep(1500);
+    const rawA = fetchJson(
+      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolId}/ohlcv/minute?aggregate=1&limit=30&before_timestamp=${entryTsSec + 600}&token=base`
+    )?.data?.attributes?.ohlcv_list || [];
 
-  if (!candidates.length) return null;
+    // 窗口B：entry+35min（完整持仓期）
+    sleep(1500);
+    const rawB = fetchJson(
+      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolId}/ohlcv/minute?aggregate=1&limit=200&before_timestamp=${entryTsSec + 35 * 60}&token=base`
+    )?.data?.attributes?.ohlcv_list || [];
 
-  // === 用 GeckoTerminal OHLCV 拉历史K线，最多尝试3个池 ===
-  for (const pool of candidates.slice(0, 3)) {
-    sleep(600);  // 每次请求间隔 600ms
-    const gt = fetchJson(
-      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool.id}/ohlcv/minute?aggregate=1&limit=200&before_timestamp=${lookAhead}&token=base`
-    );
-    const raw = gt?.data?.attributes?.ohlcv_list;
-    if (!raw?.length) continue;
-
-    const candles = raw.map(c => ({ ts:c[0], o:c[1], h:c[2], l:c[3], c:c[4], vol:c[5] }))
-                       .sort((a, b) => a.ts - b.ts);
-
-    const hasEntry = candles.some(c => c.ts >= lookBack && c.ts <= entryTsSec + 300);
-    if (!hasEntry) continue;
-
-    return { pairAddr: pool.id, candles };
+    return Object.values(
+      [...rawA, ...rawB].reduce((m, c) => { m[c[0]] = c; return m; }, {})
+    ).sort((a, b) => a[0] - b[0]);
   }
 
+  for (const pool of candidates.slice(0, 3)) {
+    const raw = fetchBars(pool.id);
+    if (!raw.length) continue;
+
+    const candles = raw.map(c => ({ ts:c[0], o:c[1], h:c[2], l:c[3], c:c[4], vol:c[5] }));
+    const hasEntry = candles.some(c => c.ts >= lookBack && c.ts <= entryTsSec + 600);
+    if (!hasEntry) continue;
+
+    const result = { pairAddr: pool.id, candles };
+    ohlcvCache[ca] = result;   // 写入缓存
+    saveCache();
+    return result;
+  }
+
+  ohlcvCache[ca] = null;  // 缓存"无数据"结果，避免重复查询
+  saveCache();
   return null;
 }
 
@@ -143,9 +154,11 @@ function simulate(signal, candles) {
   // Snap to 5-min bar
   const entryBar = Math.floor(entryTsSec / 300) * 300;
 
-  // Find the entry candle: the 5m bar that contains the signal time, or the one right before
+  // Find the entry candle: bar at signal time, or closest bar within ±10 minutes
+  // (some pools open slightly after the signal → use first available bar as entry)
   const entryCandle = candles.find(c => c.ts === entryBar)
-    || candles.find(c => c.ts <= entryBar && c.ts > entryBar - 600); // fallback: within ±2 bars
+    || candles.find(c => c.ts <= entryBar && c.ts > entryBar - 600)      // up to 10m before
+    || candles.find(c => c.ts > entryBar && c.ts <= entryBar + 600);     // up to 10m after (pool opened late)
   if (!entryCandle) return { result: 'NO_DATA' };
 
   // Use entryMinute as alias for consistency
@@ -283,7 +296,7 @@ function main() {
 
     try {
       // slight delay via sync sleep
-      sleep(500);  // 0.5s（主延迟已在 fetchOHLCV 内部处理）
+      sleep(300);  // 主延迟已在 fetchOHLCV 内部处理
       const data = fetchOHLCV(sig.ca, Math.floor(sig.entry_ts / 1000));
 
       if (!data || !data.candles.length) {
