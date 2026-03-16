@@ -132,16 +132,14 @@ export class JupiterUltraExecutor {
         console.error(`❌ [JupiterUltra] 买入失败 (${attempt}/${maxRetries}): ${error.message}`);
 
         if (isSlippage && attempt < maxRetries) {
-          // 滑点失败：等 1 秒后重试（重新获取 order = 新的价格和滑点计算）
-          console.log(`   🔄 滑点失败，${1}秒后重新获取报价重试...`);
+          console.log(`   🔄 滑点失败，1秒后重新获取报价重试...`);
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
 
-        if (attempt >= maxRetries) {
-          this.stats.buy_failures++;
-          throw error;
-        }
+        // 非滑点错误或最后一次重试 → 立即失败
+        this.stats.buy_failures++;
+        throw error;
       }
     }
   }
@@ -151,6 +149,8 @@ export class JupiterUltraExecutor {
    * 滑点失败自动重试，每次重新获取 order
    */
   async sell(tokenCA, tokenAmount, options = {}) {
+    // 重置每日亏损计数器（跨越 UTC 午夜后解除暂停，确保能卖出平仓）
+    this._resetDailyLoss();
     if (this.tradingPaused) {
       throw new Error('交易已暂停（每日亏损限制）');
     }
@@ -211,10 +211,9 @@ export class JupiterUltraExecutor {
           continue;
         }
 
-        if (attempt >= maxRetries) {
-          this.stats.sell_failures++;
-          throw error;
-        }
+        // 非滑点错误或最后一次重试 → 立即失败
+        this.stats.sell_failures++;
+        throw error;
       }
     }
   }
