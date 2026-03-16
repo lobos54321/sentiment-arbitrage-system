@@ -1,31 +1,31 @@
 {
-  "generatedAt": "2026-03-16T22:53:02.210Z",
+  "generatedAt": "2026-03-16T23:12:40.817Z",
   "window": "悉尼 2026-03-15 22:00 → 2026-03-17 09:30",
   "totalSignals": 42,
-  "tradeableCount": 17,
-  "noDataCount": 25,
-  "winRate": 58.8,
-  "wins": 10,
-  "losses": 7,
-  "avgWinPct": 43.7,
-  "avgLossPct": -13.1,
-  "rr": 3.34,
-  "totalPnlSol": 0.20708,
-  "investedSol": 1.02,
-  "roiPct": 20.3,
+  "tradeableCount": 24,
+  "noDataCount": 18,
+  "winRate": 58.3,
+  "wins": 14,
+  "losses": 10,
+  "avgWinPct": 37,
+  "avgLossPct": -24.8,
+  "rr": 1.49,
+  "totalPnlSol": 0.16213,
+  "investedSol": 1.44,
+  "roiPct": 11.3,
   "tpDistribution": {
-    "0": 11,
-    "1": 1,
-    "2": 3,
-    "3": 2,
+    "0": 16,
+    "1": 2,
+    "2": 6,
+    "3": 0,
     "4": 0
   },
   "exitDistribution": {
-    "DEAD_WATER": 10,
-    "TP2_PARTIAL": 3,
-    "TP1_PARTIAL": 1,
-    "STOP_LOSS": 1,
-    "TP3_PARTIAL": 2
+    "DEAD_WATER": 9,
+    "TP2_PARTIAL": 6,
+    "STOP_LOSS": 5,
+    "TP1_PARTIAL": 2,
+    "MAX_HOLD": 2
   },
   "trades": [
     {
@@ -66,10 +66,10 @@
       "ca": "BdsjNF4MzF2WSjokZwQiCpekcpMksUEz1piUYppCpump",
       "mc": 60350,
       "result": "WIN",
-      "pnlPct": 42.8,
-      "pnlSol": 0.0257,
+      "pnlPct": 42.6,
+      "pnlSol": 0.02554,
       "tpsHit": 2,
-      "peakGain": 145,
+      "peakGain": 134,
       "exitReason": "TP2_PARTIAL"
     },
     {
@@ -87,23 +87,23 @@
       "symbol": "5",
       "ca": "HeVhJttfPiKwVn2z2U7BfyqHqDYcBuJjVJhWwzYspump",
       "mc": 111230,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
-      "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "result": "WIN",
+      "pnlPct": 31,
+      "pnlSol": 0.01858,
+      "tpsHit": 2,
+      "peakGain": 108,
+      "exitReason": "TP2_PARTIAL"
     },
     {
       "symbol": "FIVE",
       "ca": "6ScrjJgnV4tWnpY9vQWychPdweW6YWNE7N94iS4Rpump",
       "mc": 89910,
-      "result": "LOSS",
-      "pnlPct": -0.7,
-      "pnlSol": -0.00043,
-      "tpsHit": 0,
-      "peakGain": 2,
-      "exitReason": "DEAD_WATER"
+      "result": "WIN",
+      "pnlPct": 75.2,
+      "pnlSol": 0.04509,
+      "tpsHit": 2,
+      "peakGain": 184,
+      "exitReason": "TP2_PARTIAL"
     },
     {
       "symbol": "DISTROLL",
@@ -120,23 +120,23 @@
       "symbol": "PIKE",
       "ca": "FnsrVv2iJWmrChyWLsPRKrdRPnshBPhgR8VZLfugpump",
       "mc": 37220,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
+      "result": "WIN",
+      "pnlPct": 23.3,
+      "pnlSol": 0.01399,
       "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "peakGain": 40,
+      "exitReason": "DEAD_WATER"
     },
     {
       "symbol": "Agent",
       "ca": "HM8dJbqLo38PAy9qeLBMzxbu3BiAFHPW37MwGFbepump",
       "mc": 97020,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
+      "result": "LOSS",
+      "pnlPct": -40.2,
+      "pnlSol": -0.02414,
       "tpsHit": 0,
       "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "exitReason": "STOP_LOSS"
     },
     {
       "symbol": "Terafab",
@@ -153,22 +153,22 @@
       "symbol": "Yahu",
       "ca": "21vxm3YMMFedY5e4PLyGYaRAgYQJTA17dvzYuKwApump",
       "mc": 32590,
-      "result": "WIN",
-      "pnlPct": 25,
-      "pnlSol": 0.01497,
-      "tpsHit": 1,
-      "peakGain": 81,
-      "exitReason": "TP1_PARTIAL"
+      "result": "NO_DATA",
+      "pnlPct": 0,
+      "pnlSol": 0,
+      "tpsHit": 0,
+      "peakGain": 0,
+      "exitReason": "NO_DATA"
     },
     {
       "symbol": "NETAINYAHU",
       "ca": "BBkUQdTDdVySDKXT4TngbmbpC2ktwBeymMSdn41ppump",
       "mc": 100240,
       "result": "WIN",
-      "pnlPct": 78.9,
-      "pnlSol": 0.04732,
+      "pnlPct": 71.2,
+      "pnlSol": 0.04271,
       "tpsHit": 2,
-      "peakGain": 148,
+      "peakGain": 109,
       "exitReason": "TP2_PARTIAL"
     },
     {
@@ -197,23 +197,23 @@
       "symbol": "Elongate",
       "ca": "3aGbWBEpCfDxMSb5KfpSvWrBo3tCCbMiZP9x8PpKpump",
       "mc": 93350,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
-      "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "result": "WIN",
+      "pnlPct": 58.7,
+      "pnlSol": 0.0352,
+      "tpsHit": 1,
+      "peakGain": 82,
+      "exitReason": "TP1_PARTIAL"
     },
     {
       "symbol": "BTC",
       "ca": "KWmej3HSuuLgaoWWdELniXGhA3gKzLxkf7FRj7xpump",
       "mc": 85500,
       "result": "LOSS",
-      "pnlPct": -17.8,
-      "pnlSol": -0.01065,
+      "pnlPct": -7.7,
+      "pnlSol": -0.00459,
       "tpsHit": 0,
-      "peakGain": 12,
-      "exitReason": "DEAD_WATER"
+      "peakGain": 0,
+      "exitReason": "MAX_HOLD"
     },
     {
       "symbol": "BLUECOLLAR",
@@ -230,45 +230,45 @@
       "symbol": "PUSHEEN",
       "ca": "7ttsZScQAsya7eiUfkG6PoTVNARkkZXccqRviDtTpump",
       "mc": 84080,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
-      "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "result": "WIN",
+      "pnlPct": 16.2,
+      "pnlSol": 0.00972,
+      "tpsHit": 1,
+      "peakGain": 54,
+      "exitReason": "TP1_PARTIAL"
     },
     {
       "symbol": "herry",
       "ca": "AMbTjmCCUoWH96dwAn1ukG5WigK86RBfZZ39K5ubpump",
       "mc": 37480,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
+      "result": "WIN",
+      "pnlPct": 10.7,
+      "pnlSol": 0.00642,
       "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "peakGain": 31,
+      "exitReason": "DEAD_WATER"
     },
     {
       "symbol": "XAIC",
       "ca": "KfByHk48ecitUq8gXji2vr9smmRJKtqJwGAh2E9pump",
       "mc": 109450,
+      "result": "WIN",
+      "pnlPct": 1.2,
+      "pnlSol": 0.00069,
+      "tpsHit": 0,
+      "peakGain": 7,
+      "exitReason": "DEAD_WATER"
+    },
+    {
+      "symbol": "TFW",
+      "ca": "8Y7u8PdV78wJwZwXqukAXZAnHZ3jFbStgXoL7Z1jpump",
+      "mc": 278610,
       "result": "NO_DATA",
       "pnlPct": 0,
       "pnlSol": 0,
       "tpsHit": 0,
       "peakGain": 0,
       "exitReason": "NO_DATA"
-    },
-    {
-      "symbol": "TFW",
-      "ca": "8Y7u8PdV78wJwZwXqukAXZAnHZ3jFbStgXoL7Z1jpump",
-      "mc": 278610,
-      "result": "WIN",
-      "pnlPct": 85.5,
-      "pnlSol": 0.05131,
-      "tpsHit": 3,
-      "peakGain": 310,
-      "exitReason": "TP3_PARTIAL"
     },
     {
       "symbol": "Feels",
@@ -296,17 +296,28 @@
       "symbol": "FOOD",
       "ca": "GPT8cWShgWrN27FYSLFbQTEJvHsQkwr6GE6VJMY5pump",
       "mc": 36640,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
+      "result": "LOSS",
+      "pnlPct": -40.2,
+      "pnlSol": -0.02414,
       "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "peakGain": 20,
+      "exitReason": "STOP_LOSS"
     },
     {
       "symbol": "TRUMPHOUSE",
       "ca": "3acb8mmdBqrNMoFUgSpUtLAWQ4xj6kNmVDnmDD8Wpump",
       "mc": 264160,
+      "result": "LOSS",
+      "pnlPct": -13.4,
+      "pnlSol": -0.00802,
+      "tpsHit": 0,
+      "peakGain": 21,
+      "exitReason": "DEAD_WATER"
+    },
+    {
+      "symbol": "PVE",
+      "ca": "2s6Ckb6oGd8syc55nV8QjX19urqhXJUTmv2UsSMbpump",
+      "mc": 88060,
       "result": "NO_DATA",
       "pnlPct": 0,
       "pnlSol": 0,
@@ -315,37 +326,26 @@
       "exitReason": "NO_DATA"
     },
     {
-      "symbol": "PVE",
-      "ca": "2s6Ckb6oGd8syc55nV8QjX19urqhXJUTmv2UsSMbpump",
-      "mc": 88060,
-      "result": "WIN",
-      "pnlPct": 93.4,
-      "pnlSol": 0.05605,
-      "tpsHit": 3,
-      "peakGain": 264,
-      "exitReason": "TP3_PARTIAL"
-    },
-    {
       "symbol": "Rosie",
       "ca": "3RkocKJzxokazPBV5kvARwho36JbVcc9S775SitMpump",
       "mc": 89070,
-      "result": "WIN",
-      "pnlPct": 4.2,
-      "pnlSol": 0.00254,
+      "result": "NO_DATA",
+      "pnlPct": 0,
+      "pnlSol": 0,
       "tpsHit": 0,
-      "peakGain": 8,
-      "exitReason": "DEAD_WATER"
+      "peakGain": 0,
+      "exitReason": "NO_DATA"
     },
     {
       "symbol": "MOLTY",
       "ca": "CrxLwZkm16KppGMmDKQJmSTnuSGLtTPMd6WKgPTcpump",
       "mc": 129170,
-      "result": "WIN",
-      "pnlPct": 56.4,
-      "pnlSol": 0.03382,
-      "tpsHit": 2,
-      "peakGain": 142,
-      "exitReason": "TP2_PARTIAL"
+      "result": "NO_DATA",
+      "pnlPct": 0,
+      "pnlSol": 0,
+      "tpsHit": 0,
+      "peakGain": 0,
+      "exitReason": "NO_DATA"
     },
     {
       "symbol": "LOYAL",
@@ -373,23 +373,23 @@
       "symbol": "Salary",
       "ca": "HYntXiazzANDFmxnLVHAQiwFszzEVjKHZ4cMVc6dpump",
       "mc": 67030,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
+      "result": "LOSS",
+      "pnlPct": -40.2,
+      "pnlSol": -0.02414,
       "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "peakGain": 8,
+      "exitReason": "STOP_LOSS"
     },
     {
       "symbol": "plumber",
       "ca": "2Pah9ZUfpii27ABrWfQorzdW8FSJimxj6izFr4oGpump",
       "mc": 79710,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
-      "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "result": "WIN",
+      "pnlPct": 70.7,
+      "pnlSol": 0.04244,
+      "tpsHit": 2,
+      "peakGain": 175,
+      "exitReason": "TP2_PARTIAL"
     },
     {
       "symbol": "T-Nega",
@@ -406,12 +406,12 @@
       "symbol": "SRAA",
       "ca": "6onRcUxc3PChE4DK6FygJeuPDBUFhoZjJauNfPsapump",
       "mc": 30890,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
-      "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "result": "WIN",
+      "pnlPct": 63.4,
+      "pnlSol": 0.03806,
+      "tpsHit": 2,
+      "peakGain": 156,
+      "exitReason": "TP2_PARTIAL"
     },
     {
       "symbol": "ANMOO",
@@ -439,12 +439,12 @@
       "symbol": "MULERUN",
       "ca": "3tN15KJSEA1NsYn3nbDrUWNiTyubUxXbS5roZxuYpump",
       "mc": 47200,
-      "result": "NO_DATA",
-      "pnlPct": 0,
-      "pnlSol": 0,
+      "result": "LOSS",
+      "pnlPct": -40.2,
+      "pnlSol": -0.02414,
       "tpsHit": 0,
       "peakGain": 0,
-      "exitReason": "NO_DATA"
+      "exitReason": "STOP_LOSS"
     },
     {
       "symbol": "Moe-chan",
@@ -472,23 +472,23 @@
       "symbol": "HOSPICE",
       "ca": "6uq3r5mMQL6tKkJd9JpuA3bPbrqitpFfhSQDVPCMpump",
       "mc": 73300,
-      "result": "LOSS",
-      "pnlPct": -7.2,
-      "pnlSol": -0.0043,
+      "result": "WIN",
+      "pnlPct": 15.5,
+      "pnlSol": 0.0093,
       "tpsHit": 0,
-      "peakGain": 0,
-      "exitReason": "DEAD_WATER"
+      "peakGain": 19,
+      "exitReason": "MAX_HOLD"
     },
     {
       "symbol": "CLAIR",
       "ca": "2hhAKwDhigLKnqLdZ6LwY8snmbYQk9vtxy63YcD2yUA4",
       "mc": 118800,
-      "result": "WIN",
-      "pnlPct": 12,
-      "pnlSol": 0.00719,
+      "result": "NO_DATA",
+      "pnlPct": 0,
+      "pnlSol": 0,
       "tpsHit": 0,
-      "peakGain": 13,
-      "exitReason": "DEAD_WATER"
+      "peakGain": 0,
+      "exitReason": "NO_DATA"
     }
   ]
 }
