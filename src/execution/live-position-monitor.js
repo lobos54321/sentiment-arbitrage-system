@@ -89,7 +89,7 @@ export class LivePositionMonitor {
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN sold_pct REAL DEFAULT 0`); } catch (e) { /* 已存在 */ }
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN entry_tier TEXT DEFAULT ''`); } catch (e) { /* 已存在 */ }
     // v15: 添加出场策略字段
-    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN exit_strategy TEXT DEFAULT 'DYNSL_25_50_75'`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN exit_strategy TEXT DEFAULT 'ASYMMETRIC'`); } catch (e) { /* 已存在 */ }
   }
 
   /**
@@ -483,7 +483,7 @@ export class LivePositionMonitor {
 
     // ==================== v15 退出条件评估（按出场策略分流） ====================
     const holdTimeMin = holdTimeSec / 60;
-    const strategy = pos.exitStrategy || 'DYNSL_25_50_75';
+    const strategy = pos.exitStrategy || 'ASYMMETRIC';
 
     if (strategy === 'ASYMMETRIC') {
       // ====== 精准掐头去尾 × 非对称收割 ======
@@ -502,8 +502,8 @@ export class LivePositionMonitor {
       // Moonbag模式下不用保本SL, 用回撤止损
       if (!pos.moonbag && pnl <= currentSL) {
         if (pos.tp1) {
-          console.log(`🛡️ [ASYM:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出剩余${remainingPct}% (已锁TP1利润)`);
-          await this._triggerExit(pos, `BREAKEVEN_SL(PnL${pnl.toFixed(0)}%,locked_TP1)`, remainingPct);
+          console.log(`🛡️ [ASYM:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出全部剩余 (已锁TP1利润)`);
+          await this._triggerExit(pos, `BREAKEVEN_SL(PnL${pnl.toFixed(0)}%,locked_TP1)`, 100);
         } else {
           console.log(`🛑 [ASYM:硬SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -40% → 止损全卖`);
           await this._triggerExit(pos, `HARD_SL_40(PnL${pnl.toFixed(0)}%)`, 100);
@@ -552,9 +552,8 @@ export class LivePositionMonitor {
         const dropPct = moonPeak > 0 ? (dropFromPeak / moonPeak) * 100 : 0;
 
         if (dropPct >= 35) {
-          const moonRemaining = 100 - (pos.soldPct || 0);
-          console.log(`🎫 [ASYM:Moonbag平仓] $${pos.symbol} 从峰值+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}%≥35% → 卖出最后${moonRemaining}%`);
-          await this._triggerExit(pos, `MOONBAG_EXIT(peak+${moonPeak.toFixed(0)}%,drop${dropPct.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`, moonRemaining);
+          console.log(`🎫 [ASYM:Moonbag平仓] $${pos.symbol} 从峰值+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}%≥35% → 卖出全部剩余`);
+          await this._triggerExit(pos, `MOONBAG_EXIT(peak+${moonPeak.toFixed(0)}%,drop${dropPct.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`, 100);
           return;
         }
         // Moonbag不受时间限制，不受保本SL限制，只看回撤
@@ -753,10 +752,14 @@ export class LivePositionMonitor {
       console.log(`   TX: ${result.txHash} | 收到: ${solReceived.toFixed(6)} SOL`);
 
       // 更新持仓状态
+      // actualSoldFraction: 本次卖出占原始仓位的真实百分比
+      // sellPct 是「当前余额的百分比」，需换算成原始仓位百分比
+      const remainingBeforeSell = 100 - (pos.soldPct || 0);
+      const actualSoldFraction = (sellPct / 100) * remainingBeforeSell;
       pos.tokenAmount -= sellAmount;
       pos.totalSolReceived += solReceived;
-      pos.soldPct += sellPct;
-      pos.lockedPnl += currentPnl * (sellPct / 100);
+      pos.soldPct += actualSoldFraction;
+      pos.lockedPnl += currentPnl * (actualSoldFraction / 100);
       pos[tpName.toLowerCase()] = true;
 
       // 🔧 v14.6 FIX: 同步链上真实余额，防止跟踪偏移
@@ -1033,7 +1036,7 @@ export class LivePositionMonitor {
           lockedPnl: 0,
           partialSellInProgress: false,
           // v15: 恢复出场策略
-          exitStrategy: row.exit_strategy || 'DYNSL_25_50_75'
+          exitStrategy: row.exit_strategy || 'ASYMMETRIC'
         });
         // 注册到价格监控（V2 需要 tokenAmount 和 decimals）
         const tokenAmount = row.token_amount || row.tokenAmount;
