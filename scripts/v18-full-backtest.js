@@ -66,53 +66,66 @@ const MAX_HOLD_MINS = 30;
 const DEAD_WATER_MINS = 15;
 const SLIPPAGE = 0.004;         // 0.4% 滑点+手续费
 
-// ─── GeckoTerminal K线拉取 ────────────────────────────────────────────────
+// ─── GeckoTerminal K线拉取（改进版：精准历史查询）────────────────────────
 function fetchOHLCV(ca, entryTsSec) {
-  // 1) Get pair address from DexScreener
-  const pairData = fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
-  if (!pairData?.pairs?.length) return null;
+  // 1) 从 GeckoTerminal 获取该代币所有 pools，按创建时间排序
+  const gtPools = fetchJson(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${ca}/pools?page=1`);
+  const allPools = (gtPools?.data || []).map(p => ({
+    id:      p.id.replace('solana_', ''),
+    name:    p.attributes?.name || '',
+    created: new Date(p.attributes?.pool_created_at || 0).getTime() / 1000,
+  }));
 
-  // Pick highest liquidity Solana pair (prefer non-pumpfun for better data coverage)
-  const solanaPairs = pairData.pairs.filter(p => p.chainId === 'solana');
-  const nonPump = solanaPairs.filter(p => p.dexId !== 'pumpfun')
-    .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
-  const pumpPair = solanaPairs.find(p => p.dexId === 'pumpfun');
+  if (!allPools.length) return null;
 
-  const pair = nonPump[0] || pumpPair;
-  if (!pair) return null;
+  // 2) 找入场时刻最近的有效池（创建于入场前，最多允许提前2小时；或入场后10分钟内刚创建）
+  const candidates = allPools
+    .filter(p => p.created <= entryTsSec + 600)   // 允许池子比信号晚至多10分钟（pumpswap毕业）
+    .sort((a, b) => b.created - a.created);        // 最新创建的优先
 
-  const pairAddr = pair.pairAddress;
+  if (!candidates.length) return null;
 
-  // 2) Fetch 5m OHLCV from GeckoTerminal — 5m × 1000 = ~83 hours coverage
-  let gt = fetchJson(
-    `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddr}/ohlcv/minute?aggregate=5&limit=1000&token=base`
-  );
+  // 3) 尝试每个候选池，用 before_timestamp 精准拉入场时刻附近的历史K线
+  const lookAhead = entryTsSec + 35 * 60;   // 入场后35分钟（覆盖30分最大持仓+余量）
+  const lookBack  = entryTsSec - 5 * 60;    // 入场前5分钟
 
-  // Fallback: try pumpfun pool if primary has no data
-  if (!gt?.data?.attributes?.ohlcv_list?.length && pumpPair && pumpPair.pairAddress !== pairAddr) {
-    gt = fetchJson(
-      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pumpPair.pairAddress}/ohlcv/minute?aggregate=5&limit=1000&token=base`
+  for (const pool of candidates.slice(0, 4)) {  // 最多尝试4个池
+    // 1分钟K线，before_timestamp=入场后35分钟，取200根（覆盖3.3小时历史）
+    const gt = fetchJson(
+      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool.id}/ohlcv/minute?aggregate=1&limit=200&before_timestamp=${lookAhead}&token=base`
     );
+    const raw = gt?.data?.attributes?.ohlcv_list;
+    if (!raw?.length) continue;
+
+    const candles = raw.map(c => ({ ts:c[0], o:c[1], h:c[2], l:c[3], c:c[4], vol:c[5] }))
+                       .sort((a, b) => a.ts - b.ts);
+
+    // 检查是否覆盖了入场时刻（±5分钟）
+    const hasEntry = candles.some(c => c.ts >= lookBack && c.ts <= entryTsSec + 300);
+    if (!hasEntry) continue;
+
+    return { pairAddr: pool.id, candles };
   }
 
-  if (!gt?.data?.attributes?.ohlcv_list) return null;
-
-  const candles = gt.data.attributes.ohlcv_list.map(c => ({
-    ts: c[0],       // unix seconds (5-min bars)
-    o: c[1], h: c[2], l: c[3], c: c[4], vol: c[5]
-  })).sort((a, b) => a.ts - b.ts);
-
-  return { pairAddr, candles };
+  return null;
 }
 
-function fetchJson(url) {
-  try {
-    const out = execSync(
-      `curl -s --max-time 12 -H "Accept: application/json" -H "User-Agent: Mozilla/5.0" "${url}"`,
-      { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] }
-    );
-    return JSON.parse(out);
-  } catch { return null; }
+function sleep(ms) { execSync(`sleep ${(ms/1000).toFixed(1)}`); }
+
+function fetchJson(url, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const out = execSync(
+        `curl -s --max-time 15 -H "Accept: application/json" -H "User-Agent: Mozilla/5.0" "${url}"`,
+        { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] }
+      );
+      if (!out?.trim()) { sleep(2000); continue; }
+      return JSON.parse(out);
+    } catch {
+      if (i < retries - 1) sleep(2000 * (i + 1));
+    }
+  }
+  return null;
 }
 
 
@@ -262,7 +275,7 @@ function main() {
 
     try {
       // slight delay via sync sleep
-      execSync('sleep 0.4');
+      sleep(1500);  // 1.5s 防限流
       const data = fetchOHLCV(sig.ca, Math.floor(sig.entry_ts / 1000));
 
       if (!data || !data.candles.length) {
