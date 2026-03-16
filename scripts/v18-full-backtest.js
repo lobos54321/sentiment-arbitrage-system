@@ -151,8 +151,8 @@ function fetchJson(url, retries = 3) {
 // ─── ASYMMETRIC 出场模拟 ──────────────────────────────────────────────────
 function simulate(signal, candles) {
   const entryTsSec = Math.floor(signal.entry_ts / 1000);
-  // Snap to 5-min bar
-  const entryBar = Math.floor(entryTsSec / 300) * 300;
+  // Snap to 1-min bar (K线是1分钟粒度)
+  const entryBar = Math.floor(entryTsSec / 60) * 60;
 
   // Find the entry candle: bar at signal time, or closest bar within ±10 minutes
   // (some pools open slightly after the signal → use first available bar as entry)
@@ -223,10 +223,10 @@ function simulate(signal, candles) {
       break;
     }
 
-    // Dead water (15 min no new high, only before TP1) — 5m bars so threshold = 3 bars
+    // Dead water (15 min no new high, only before TP1) — 1m bars so threshold = 15 bars
     if (candle.h > peakPrice) { peakPrice = candle.h; minsSincePeak = 0; }
     else minsSincePeak++;
-    if (!tp1Hit && minsSincePeak >= Math.ceil(DEAD_WATER_MINS / 5)) {
+    if (!tp1Hit && minsSincePeak >= DEAD_WATER_MINS) {
       solReceived += remainTokens * candle.c * (1 - SLIPPAGE);
       remainTokens = 0;
       exitReason = 'DEAD_WATER';
