@@ -3,7 +3,7 @@
  * 使用真实数据库信号 + GeckoTerminal 实际K线
  */
 
-// Node 18+ native fetch
+import { execSync } from 'child_process';
 
 // ─── 38个真实PASS信号（从数据库导出） ────────────────────────────────────
 const SIGNALS = [
@@ -59,63 +59,68 @@ const DEAD_WATER_MINS = 15;
 const SLIPPAGE = 0.004;         // 0.4% 滑点+手续费
 
 // ─── GeckoTerminal K线拉取 ────────────────────────────────────────────────
-async function fetchOHLCV(ca, entryTsSec) {
+function fetchOHLCV(ca, entryTsSec) {
   // 1) Get pair address from DexScreener
-  const pairData = await fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
+  const pairData = fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
   if (!pairData?.pairs?.length) return null;
 
-  // Pick highest liquidity Solana pair
-  const pairs = pairData.pairs
-    .filter(p => p.chainId === 'solana' && p.dexId !== 'pumpfun') // pumpfun has own pool, prefer others
+  // Pick highest liquidity Solana pair (prefer non-pumpfun for better data coverage)
+  const solanaPairs = pairData.pairs.filter(p => p.chainId === 'solana');
+  const nonPump = solanaPairs.filter(p => p.dexId !== 'pumpfun')
     .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+  const pumpPair = solanaPairs.find(p => p.dexId === 'pumpfun');
 
-  // fallback to pumpfun if nothing else
-  const pair = pairs[0] || pairData.pairs.filter(p => p.chainId === 'solana')[0];
+  const pair = nonPump[0] || pumpPair;
   if (!pair) return null;
 
   const pairAddr = pair.pairAddress;
 
-  // 2) Fetch 1m OHLCV from GeckoTerminal
-  // We need ~60 candles after entry (30min trade + buffer)
-  // GeckoTerminal free API: /networks/solana/pools/{pool}/ohlcv/minute?aggregate=1&limit=300
-  const gt = await fetchJson(
-    `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddr}/ohlcv/minute?aggregate=1&limit=300&token=base`,
-    { 'Accept': 'application/json' }
+  // 2) Fetch 5m OHLCV from GeckoTerminal — 5m × 1000 = ~83 hours coverage
+  let gt = fetchJson(
+    `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddr}/ohlcv/minute?aggregate=5&limit=1000&token=base`
   );
+
+  // Fallback: try pumpfun pool if primary has no data
+  if (!gt?.data?.attributes?.ohlcv_list?.length && pumpPair && pumpPair.pairAddress !== pairAddr) {
+    gt = fetchJson(
+      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pumpPair.pairAddress}/ohlcv/minute?aggregate=5&limit=1000&token=base`
+    );
+  }
 
   if (!gt?.data?.attributes?.ohlcv_list) return null;
 
   const candles = gt.data.attributes.ohlcv_list.map(c => ({
-    ts: c[0],       // unix seconds
+    ts: c[0],       // unix seconds (5-min bars)
     o: c[1], h: c[2], l: c[3], c: c[4], vol: c[5]
   })).sort((a, b) => a.ts - b.ts);
 
   return { pairAddr, candles };
 }
 
-async function fetchJson(url, headers = {}) {
+function fetchJson(url) {
   try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', ...headers },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return null;
-    return await res.json();
+    const out = execSync(
+      `curl -s --max-time 12 -H "Accept: application/json" -H "User-Agent: Mozilla/5.0" "${url}"`,
+      { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] }
+    );
+    return JSON.parse(out);
   } catch { return null; }
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─── ASYMMETRIC 出场模拟 ──────────────────────────────────────────────────
 function simulate(signal, candles) {
   const entryTsSec = Math.floor(signal.entry_ts / 1000);
-  const entryMinute = Math.floor(entryTsSec / 60) * 60;
+  // Snap to 5-min bar
+  const entryBar = Math.floor(entryTsSec / 300) * 300;
 
-  // Find the entry candle (the minute the signal arrived)
-  const entryCandle = candles.find(c => c.ts === entryMinute)
-    || candles.find(c => c.ts <= entryMinute && c.ts > entryMinute - 120); // fallback ±2min
+  // Find the entry candle: the 5m bar that contains the signal time, or the one right before
+  const entryCandle = candles.find(c => c.ts === entryBar)
+    || candles.find(c => c.ts <= entryBar && c.ts > entryBar - 600); // fallback: within ±2 bars
   if (!entryCandle) return { result: 'NO_DATA' };
 
+  // Use entryMinute as alias for consistency
+  const entryMinute = entryCandle.ts;
   const entryPrice = entryCandle.c * (1 + SLIPPAGE); // buy at close + slippage
   const tokens = POSITION_SOL / entryPrice;
 
@@ -176,10 +181,10 @@ function simulate(signal, candles) {
       break;
     }
 
-    // Dead water (15 min no new high, only before TP1)
+    // Dead water (15 min no new high, only before TP1) — 5m bars so threshold = 3 bars
     if (candle.h > peakPrice) { peakPrice = candle.h; minsSincePeak = 0; }
     else minsSincePeak++;
-    if (!tp1Hit && minsSincePeak >= DEAD_WATER_MINS) {
+    if (!tp1Hit && minsSincePeak >= Math.ceil(DEAD_WATER_MINS / 5)) {
       solReceived += remainTokens * candle.c * (1 - SLIPPAGE);
       remainTokens = 0;
       exitReason = 'DEAD_WATER';
@@ -233,7 +238,7 @@ function simulate(signal, candles) {
 }
 
 // ─── 主程序 ───────────────────────────────────────────────────────────────
-async function main() {
+function main() {
   console.log('\n' + '═'.repeat(72));
   console.log('🔬 v18 完整回测 | 悉尼 2026-03-15 22:00 → 2026-03-16 22:00');
   console.log(`   38个真实信号 | ASYMMETRIC出场 | ${POSITION_SOL} SOL/笔`);
@@ -248,8 +253,9 @@ async function main() {
     process.stdout.write(`  [${(i+1).toString().padStart(2)}/${SIGNALS.length}] $${sig.symbol.padEnd(14)} `);
 
     try {
-      await sleep(600); // rate limit: ~1.5 req/s
-      const data = await fetchOHLCV(sig.ca, Math.floor(sig.entry_ts / 1000));
+      // slight delay via sync sleep
+      execSync('sleep 0.4');
+      const data = fetchOHLCV(sig.ca, Math.floor(sig.entry_ts / 1000));
 
       if (!data || !data.candles.length) {
         console.log('❌ 无K线数据 (代币可能已下架)');
@@ -360,4 +366,4 @@ async function main() {
 `);
 }
 
-main().catch(console.error);
+main();
