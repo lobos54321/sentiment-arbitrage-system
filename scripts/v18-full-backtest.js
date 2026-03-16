@@ -1,11 +1,14 @@
 /**
- * v18 完整回测 — 悉尼时间 2026-03-15 22:00 → 2026-03-16 22:00
+ * v18 完整回测 — 悉尼时间 2026-03-15 22:00 → 2026-03-17 09:30
  * 使用真实数据库信号 + GeckoTerminal 实际K线
+ * 窗口1: 38个信号 (UTC Mar 15 11:00 → Mar 16 11:00)
+ * 窗口2:  4个信号 (UTC Mar 16 13:57 → Mar 16 22:30) — 从部署API实时拉取
  */
 
 import { execSync } from 'child_process';
+import fs from 'fs';
 
-// ─── 38个真实PASS信号（从数据库导出） ────────────────────────────────────
+// ─── 42个真实PASS信号 (38 + 4新) ────────────────────────────────────────
 const SIGNALS = [
   { symbol: 'Eclipse',    ca: 'ApwtY1HWHgDLDY5unJ7awPrBeQo4UwstCM83A5zFpump', entry_ts: 1773576800963, mc: 115280 },
   { symbol: 'AGENTPUMPY', ca: '6xxKkqfd1nqstqhbHrhdCXsEFZ3Ge3SWhXV5bzNApump', entry_ts: 1773578922235, mc: 40750 },
@@ -45,6 +48,11 @@ const SIGNALS = [
   { symbol: 'ANMOO',      ca: 'Ddzw3HJH7hpJHuBTCjBzX7QRNjTxiazchtiZZrHXpump', entry_ts: 1773648375952, mc: 82690 },
   { symbol: 'ケイジ',     ca: '4d7hkcY3MGAmYRi1vYNaDwi9C5Sfvdi4FqWCiLhtpump', entry_ts: 1773653254892, mc: 63730 },
   { symbol: 'MULERUN',    ca: '3tN15KJSEA1NsYn3nbDrUWNiTyubUxXbS5roZxuYpump', entry_ts: 1773658615925, mc: 47200 },
+  // ── 窗口2: UTC Mar 16 13:57 → Mar 16 22:30 (悉尼 Mar 17 00:57 → 09:30) ──
+  { symbol: 'Moe-chan',   ca: '7x4QEfAMo4rxMNbRUxC9jS36Hnmgp5Yh5Rm3pNCDpump', entry_ts: 1773664642014, mc: 75900  },
+  { symbol: 'Gayatollah', ca: 'AN52QGkAUU6kmoHHHDhYUz1TjkFUPcAU3RxTNgJbpump', entry_ts: 1773665172998, mc: 123700 },
+  { symbol: 'HOSPICE',    ca: '6uq3r5mMQL6tKkJd9JpuA3bPbrqitpFfhSQDVPCMpump', entry_ts: 1773671789279, mc: 73300  },
+  { symbol: 'CLAIR',      ca: '2hhAKwDhigLKnqLdZ6LwY8snmbYQk9vtxy63YcD2yUA4',  entry_ts: 1773674358328, mc: 118800 },
 ];
 
 const POSITION_SOL = 0.06;
@@ -240,8 +248,8 @@ function simulate(signal, candles) {
 // ─── 主程序 ───────────────────────────────────────────────────────────────
 function main() {
   console.log('\n' + '═'.repeat(72));
-  console.log('🔬 v18 完整回测 | 悉尼 2026-03-15 22:00 → 2026-03-16 22:00');
-  console.log(`   38个真实信号 | ASYMMETRIC出场 | ${POSITION_SOL} SOL/笔`);
+  console.log('🔬 v18 完整回测 | 悉尼 2026-03-15 22:00 → 2026-03-17 09:30');
+  console.log(`   42个真实信号 (38+4新) | ASYMMETRIC出场 | ${POSITION_SOL} SOL/笔`);
   console.log('═'.repeat(72));
   console.log('⏳ 正在拉取所有代币K线数据...\n');
 
@@ -326,8 +334,8 @@ function main() {
   console.log('═'.repeat(72));
   console.log(`
 ┌─ 信号统计 ──────────────────────────────────────────────────────────┐
-│  窗口总信号:  275个  (ATH×129 + 非ATH×135 + Greylist×2 + MC失败×7) │
-│  v18 通过:    38个  (过滤率 86%)                                    │
+│  窗口总信号:  ~290个 (窗口1≈275 + 窗口2≈15)                         │
+│  v18 通过:    42个  (38+4新, 过滤率≈86%)                            │
 │  可交易数据:  ${tradeable.length}个  (${noData}个代币K线无法获取)                       │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -364,6 +372,40 @@ function main() {
    • 已含 ${(SLIPPAGE*100).toFixed(1)}% 滑点+手续费
    • 代币死亡/下架无K线数据的按0计算 (保守估算)
 `);
+
+  // ─── 保存结果到 JSON ───────────────────────────────────────────────────
+  const saveData = {
+    generatedAt: new Date().toISOString(),
+    window: '悉尼 2026-03-15 22:00 → 2026-03-17 09:30',
+    totalSignals: SIGNALS.length,
+    tradeableCount: tradeable.length,
+    noDataCount: noData,
+    winRate: parseFloat(winRate.toFixed(1)),
+    wins: wins.length,
+    losses: losses.length,
+    avgWinPct: parseFloat(avgWin.toFixed(1)),
+    avgLossPct: parseFloat(avgLoss.toFixed(1)),
+    rr: Math.abs(avgLoss) > 0 ? parseFloat((avgWin / Math.abs(avgLoss)).toFixed(2)) : null,
+    totalPnlSol: parseFloat(totalPnl.toFixed(5)),
+    investedSol: parseFloat(invested.toFixed(4)),
+    roiPct: parseFloat((invested > 0 ? (totalPnl/invested)*100 : 0).toFixed(1)),
+    tpDistribution: tpDist,
+    exitDistribution: exitDist,
+    trades: results.map(r => ({
+      symbol: r.symbol,
+      ca: r.ca,
+      mc: r.mc,
+      result: r.result,
+      pnlPct: r.pnlPct,
+      pnlSol: r.pnlSol,
+      tpsHit: r.tpsHit,
+      peakGain: r.peakGain,
+      exitReason: r.exitReason,
+    })),
+  };
+  const savePath = 'data/v18-backtest-mar15-17.json';
+  fs.writeFileSync(savePath, JSON.stringify(saveData, null, 2));
+  console.log(`\n💾 结果已保存到 ${savePath}`);
 }
 
 main();
