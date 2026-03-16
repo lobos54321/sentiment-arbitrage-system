@@ -90,6 +90,12 @@ export class LivePositionMonitor {
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN entry_tier TEXT DEFAULT ''`); } catch (e) { /* 已存在 */ }
     // v15: 添加出场策略字段
     try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN exit_strategy TEXT DEFAULT 'ASYMMETRIC'`); } catch (e) { /* 已存在 */ }
+    // v18: 添加 tp2/tp3/tp4/moonbag 状态字段（修复重启后重复触发 TP）
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN tp2_triggered INTEGER DEFAULT 0`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN tp3_triggered INTEGER DEFAULT 0`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN tp4_triggered INTEGER DEFAULT 0`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN moonbag_active INTEGER DEFAULT 0`); } catch (e) { /* 已存在 */ }
+    try { this.db.exec(`ALTER TABLE live_positions ADD COLUMN moonbag_high_pnl REAL DEFAULT 0`); } catch (e) { /* 已存在 */ }
   }
 
   /**
@@ -462,9 +468,9 @@ export class LivePositionMonitor {
     if (pos._updateCount % 60 === 0) {
       try {
         this.db.prepare(`
-          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, sold_pct=?, token_amount=?
+          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?
           WHERE token_ca=? AND status='open'
-        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
+        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
       } catch (e) { /* ignore */ }
     }
 
@@ -977,6 +983,10 @@ export class LivePositionMonitor {
     // 🔧 BUG FIX: 从内存Map中删除持仓，释放持仓槽位
     this.positions.delete(pos.tokenCA);
 
+    // 清理防抖和重试计数器，防止内存泄漏
+    this.sellDebounce.delete(pos.tokenCA);
+    this.retryCounter.delete(pos.tokenCA);
+
     // 🔧 通知退出回调（触发信号引擎冷却）
     for (const cb of this.onExitCallbacks) {
       try { cb(pos.symbol, pos.tokenCA, finalPnl); } catch (_) {}
@@ -1031,6 +1041,12 @@ export class LivePositionMonitor {
           // v12: 恢复关键交易状态（解决server重启后conviction/tp1丢失问题）
           conviction: row.conviction || 'NORMAL',
           tp1: row.tp1_triggered === 1,
+          // v18: 恢复 tp2/tp3/tp4/moonbag 状态（修复重启后重复触发 TP）
+          tp2: row.tp2_triggered === 1,
+          tp3: row.tp3_triggered === 1,
+          tp4: row.tp4_triggered === 1,
+          moonbag: row.moonbag_active === 1,
+          moonbagHighPnl: row.moonbag_high_pnl || 0,
           soldPct: row.sold_pct || 0,
           dynFloorBelowCount: 0,
           lockedPnl: 0,
