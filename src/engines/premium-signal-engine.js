@@ -466,11 +466,28 @@ export class PremiumSignalEngine {
           return { action: 'SKIP', reason: 'v17_already_holding' };
         }
 
-        // 并发仓位检查 (最多5个)
-        const currentPositionCount = this.livePositionMonitor?.positions?.size || 0;
-        if (currentPositionCount >= 5) {
-          console.log(`⏭️ [v17] 当前${currentPositionCount}个持仓 >= 5 → 不开新仓`);
-          return { action: 'SKIP', reason: 'max_positions_v17' };
+        // 改动2: 并发仓位检查 — 只算「在险仓位」(未触TP1), 零成本登月仓不占槽
+        const allPositions = this.livePositionMonitor?.positions;
+        const atRiskPositions = allPositions
+          ? [...allPositions.values()].filter(p => !p.tp1)
+          : [];
+        const atRiskCount = atRiskPositions.length;
+        const moonBagCount = (allPositions?.size || 0) - atRiskCount;
+        if (atRiskCount >= 5) {
+          console.log(`⏭️ [v18] 在险仓位 ${atRiskCount}/5 已满 → 不开新仓 (${moonBagCount}个零成本登月仓不占槽)`);
+          return { action: 'SKIP', reason: 'max_atrisk_positions' };
+        }
+        if (moonBagCount > 0) {
+          console.log(`   ℹ️ [槽位] 在险: ${atRiskCount}/5 | 零成本登月仓: ${moonBagCount}个 (不占槽)`);
+        }
+
+        // 改动1: 防追高保护 — 当前MC不能超过信号MC的120%
+        const signalMC = signal.market_cap || 0;
+        if (signalMC > 0 && mc > 0 && mc > signalMC * 1.20) {
+          const premium = ((mc / signalMC - 1) * 100).toFixed(1);
+          console.log(`🚫 [防追高] $${signal.symbol} 信号MC=$${(signalMC/1000).toFixed(1)}K → 当前MC=$${(mc/1000).toFixed(1)}K (溢价+${premium}% > 20%) → 放弃`);
+          this.saveSignalRecord(signal, 'ANTI_CHASE', null);
+          return { action: 'SKIP', reason: 'anti_chase', premium: parseFloat(premium) };
         }
 
         // MC过滤: $30K - $300K (v18: 扩大范围, 抛弃30K以下绞肉机, 接纳100K+强共识盘)
