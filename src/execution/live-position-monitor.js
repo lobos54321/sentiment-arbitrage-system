@@ -244,7 +244,7 @@ export class LivePositionMonitor {
   /**
    * 注册新持仓（买入后调用）
    */
-  addPosition(tokenCA, symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, conviction = 'NORMAL', exitStrategy = 'DYNSL_25_50_75') {
+  addPosition(tokenCA, symbol, entryPrice, entryMC, entrySol, tokenAmount, tokenDecimals, conviction = 'NORMAL', exitStrategy = 'ASYMMETRIC') {
     const position = {
       tokenCA,
       symbol: symbol || 'UNKNOWN',
@@ -542,8 +542,11 @@ export class LivePositionMonitor {
       if (pos.tp3 && !pos.tp4 && pnl >= 500) {
         console.log(`🌕 [ASYM:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出5% (剩余5%=登月彩票🎫)`);
         await this._triggerPartialSell(pos, 'TP4', 5, pnl);
-        pos.moonbag = true;
-        pos.moonbagHighPnl = pnl;
+        // 只有 TP4 卖出成功（pos.tp4=true）才进入 Moonbag 模式
+        if (pos.tp4) {
+          pos.moonbag = true;
+          pos.moonbagHighPnl = pnl;
+        }
         return;
       }
 
@@ -779,6 +782,16 @@ export class LivePositionMonitor {
       } catch (_) {}
 
       console.log(`   ✅ 已卖出 ${pos.soldPct}% | 剩余 ${100 - pos.soldPct}% | 锁定利润: +${pos.lockedPnl.toFixed(1)}%`);
+
+      // 即时持久化 TP 状态到 DB，防止重启后重复触发
+      try {
+        this.db.prepare(`
+          UPDATE live_positions SET tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, high_pnl=?, total_sol_received=?
+          WHERE token_ca=? AND status='open'
+        `).run(pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.highPnl, pos.totalSolReceived || 0, pos.tokenCA);
+      } catch (e) {
+        console.warn(`   ⚠️ TP状态持久化失败: ${e.message}`);
+      }
 
     } catch (error) {
       console.error(`   ❌ 分批卖出失败: ${error.message}`);

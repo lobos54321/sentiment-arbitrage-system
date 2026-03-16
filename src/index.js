@@ -823,6 +823,9 @@ class PremiumChannelSystem {
   async stop() {
     await this.listener.stop();
     await this.engine.stop();
+    if (this.livePositionMonitor) {
+      this.livePositionMonitor.stop();
+    }
     if (this.livePriceMonitor) {
       this.livePriceMonitor.stop();
     }

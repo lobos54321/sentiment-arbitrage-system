@@ -333,6 +333,9 @@ export class PremiumSignalEngine {
         this.saveSignalRecord(signal, 'PRECHECK_FAIL', null);
         return { action: 'SKIP', reason: 'precheck_failed' };
       }
+      if (signal.freeze_ok === null || signal.mint_ok === null) {
+        console.log(`⚠️ [预检] freeze=${signal.freeze_ok} mint=${signal.mint_ok} 未知(ATH信号无此数据)，继续`);
+      }
 
       // ─── Step 4: v18 所有过滤 — 全部来自 signal.indices (~0ms) ─
       const idx = signal.indices;
@@ -345,19 +348,10 @@ export class PremiumSignalEngine {
       const addressCurrent  = idx?.address_index?.current  || 0;
       const securityCurrent = idx?.security_index?.current || 0;
 
-      // ATH 计数器
+      // ATH 计数器 — 先读取但不递增，等所有过滤通过后才提交
       const sigHistory = this.signalHistory.get(ca);
       const prevAthCount = sigHistory ? (sigHistory.athCount || 0) : 0;
-      if (sigHistory) {
-        sigHistory.athCount = prevAthCount + 1;
-        if (idx?.super_index) {
-          sigHistory.lastSuperIndex = superCurrent;
-          if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = superSignal;
-        }
-        if (prevAthCount === 0 && signal.market_cap > 0) sigHistory.mc1 = signal.market_cap;
-      }
       const currentAthNum = prevAthCount + 1;
-      this._saveAthCounts();
 
       if (currentAthNum !== 1) {
         console.log(`⏭️ [v17] $${signal.symbol} ATH#${currentAthNum} → 仅ATH#1入场`);
@@ -437,6 +431,17 @@ export class PremiumSignalEngine {
 
       const elapsed = Date.now() - t0;
       console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super=${superCurrent}(Δ${superDelta}) Trade=${tradeCurrent}(Δ${tradeDelta}) Addr=${addressCurrent} Sec=${securityCurrent} | 决策耗时:${elapsed}ms`);
+
+      // 所有过滤通过，正式提交 ATH 计数器
+      if (sigHistory) {
+        sigHistory.athCount = prevAthCount + 1;
+        if (idx?.super_index) {
+          sigHistory.lastSuperIndex = superCurrent;
+          if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = superSignal;
+        }
+        if (prevAthCount === 0 && signal.market_cap > 0) sigHistory.mc1 = signal.market_cap;
+      }
+      this._saveAthCounts();
 
       const finalSize = 0.06;
       const exitStrategy = 'ASYMMETRIC';
@@ -672,7 +677,10 @@ export class PremiumSignalEngine {
       }
       const dir = path.dirname(this._athCountsPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(this._athCountsPath, JSON.stringify(data, null, 2));
+      // 异步写入避免阻塞事件循环
+      fs.writeFile(this._athCountsPath, JSON.stringify(data, null, 2), (err) => {
+        if (err) console.warn(`⚠️ [ATH] 异步写入失败: ${err.message}`);
+      });
     } catch (e) {
       console.warn(`⚠️ [ATH] 保存ATH计数失败: ${e.message}`);
     }
