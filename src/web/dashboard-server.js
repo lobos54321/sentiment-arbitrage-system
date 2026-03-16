@@ -209,8 +209,27 @@ function renderDashboard(data) {
   </style>
   <!-- 移除 meta refresh，改用 AJAX 轮询 -->
   <script>
+    // SOL 余额轮询（每 30 秒，不刷页面）
+    async function refreshSolBalance() {
+      try {
+        const r = await fetch('/api/wallet-balance');
+        const d = await r.json();
+        const el = document.getElementById('stat-sol-balance');
+        if (el) {
+          if (d.balance !== null && d.balance !== undefined) {
+            el.textContent = d.balance.toFixed(4);
+            el.style.color = d.balance < 0.5 ? '#ff4757' : d.balance < 1 ? '#ffa502' : '#00ff88';
+          } else {
+            el.textContent = '未知';
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+
     // 自动刷新页面 (保持表格数据最新)
     document.addEventListener('DOMContentLoaded', () => {
+      refreshSolBalance();
+      setInterval(refreshSolBalance, 30000);
       // 每 60 秒刷新一次整页
       setInterval(() => {
         location.reload();
@@ -259,6 +278,10 @@ function renderDashboard(data) {
               ${data.risk.is_paused ? '已暂停' : '正常'}
             </div>
             <div class="stat-label">风控状态</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="stat-sol-balance">--</div>
+            <div class="stat-label">钱包余额 (SOL)</div>
           </div>
         </div>
       </div>
@@ -1742,6 +1765,47 @@ const server = http.createServer(async (req, res) => {
       if (global.__sseClients) global.__sseClients.delete(res);
       console.log(`📡 SSE client disconnected (total: ${global.__sseClients?.size || 0})`);
     });
+    return;
+  } else if (url.pathname === '/api/wallet-balance') {
+    // 钱包 SOL 余额查询
+    try {
+      const walletAddr = process.env.TRADE_WALLET_ADDRESS || process.env.WALLET_ADDRESS || '';
+      const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+      if (!walletAddr) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ balance: null, error: 'TRADE_WALLET_ADDRESS not set' }));
+        return;
+      }
+      const rpcBody = JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'getBalance',
+        params: [walletAddr, { commitment: 'confirmed' }]
+      });
+      const rpcRes = await new Promise((resolve, reject) => {
+        const isHttps = rpcUrl.startsWith('https');
+        const mod = isHttps ? await import('https') : await import('http');
+        const urlObj = new URL(rpcUrl);
+        const req = mod.default.request({
+          hostname: urlObj.hostname, port: urlObj.port || (isHttps ? 443 : 80),
+          path: urlObj.pathname, method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(rpcBody) }
+        }, r => {
+          let data = '';
+          r.on('data', c => data += c);
+          r.on('end', () => resolve(JSON.parse(data)));
+        });
+        req.on('error', reject);
+        req.setTimeout(5000, () => { req.destroy(); reject(new Error('RPC timeout')); });
+        req.write(rpcBody);
+        req.end();
+      });
+      const lamports = rpcRes?.result?.value ?? null;
+      const balance = lamports !== null ? +(lamports / 1e9).toFixed(4) : null;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ balance, wallet: walletAddr.substring(0, 8) + '...' + walletAddr.slice(-4) }));
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ balance: null, error: e.message }));
+    }
     return;
   } else if (url.pathname === '/api/logs') {
     // 最近日志 API（JSON格式）

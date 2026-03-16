@@ -50,10 +50,12 @@ export class SolanaSnapshotService {
   /**
    * Main entry: Get complete snapshot for a SOL token
    */
-  async getSnapshot(tokenCA, plannedPosition = null) {
-    console.log(`📸 [SOL] Getting snapshot for ${tokenCA}`);
+  async getSnapshot(tokenCA, plannedPosition = null, fastMode = false) {
+    console.log(`📸 [SOL] Getting snapshot for ${tokenCA}${fastMode ? ' (fast mode)' : ''}`);
 
     try {
+      // fastMode: 跳过 detectWashTrading + identifyRiskWallets，节省 1-3 秒
+      // 用于 v18 实时入场决策（这两项对 Hard Gate 无影响）
       const [
         mintInfo,
         lpStatus,
@@ -67,11 +69,10 @@ export class SolanaSnapshotService {
         this.getLPStatus(tokenCA),
         this.getLiquidity(tokenCA),
         // 🚨 TEMPORARILY DISABLED: Top10 analysis consumes too many CU (causes 429 errors)
-        // Re-enable after implementing rate limiter
-        Promise.resolve({ top10_percent: null, holder_count: null }),  // this.getTop10Analysis(tokenCA),
+        Promise.resolve({ top10_percent: null, holder_count: null }),
         plannedPosition ? this.testSlippage(tokenCA, plannedPosition) : Promise.resolve(null),
-        this.detectWashTrading(tokenCA),
-        this.identifyRiskWallets(tokenCA)
+        fastMode ? Promise.resolve({ flag: 'SKIPPED', score: null }) : this.detectWashTrading(tokenCA),
+        fastMode ? Promise.resolve([]) : this.identifyRiskWallets(tokenCA)
       ]);
 
       return {

@@ -331,8 +331,8 @@ export class PremiumSignalEngine {
       // Step 3: 链上快照
       let snapshot;
       try {
-        console.log('📡 [链上] 获取 Solana 快照...');
-        snapshot = await this.solService.getSnapshot(ca);
+        console.log('📡 [链上] 获取 Solana 快照 (fast mode)...');
+        snapshot = await this.solService.getSnapshot(ca, null, true); // fastMode=true: 跳过 wash/risk 检测节省 1-3s
         if (!snapshot) throw new Error('快照为空');
         snapshot.chain = 'SOL';
         snapshot.token_ca = ca;
