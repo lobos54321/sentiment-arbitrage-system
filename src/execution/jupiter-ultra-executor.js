@@ -158,10 +158,10 @@ export class JupiterUltraExecutor {
     const maxRetries = options.urgent ? 3 : 2;
     console.log(`🪐 [JupiterUltra] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...`);
 
-    // 记录卖出前 SOL 余额，用于计算实际到账
-    const solBefore = await this.getSolBalance();
-
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // 每次重试前重新查询 SOL 余额，避免重试时使用过期快照
+      const solBefore = await this.getSolBalance();
+
       try {
         // 1. 获取 Ultra Order（Token → SOL）
         const order = await this._getOrder(tokenCA, SOL_MINT, tokenAmount);
