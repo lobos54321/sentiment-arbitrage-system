@@ -16,6 +16,26 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+
+/**
+ * 验证敏感 API 的访问令牌
+ * 需要设置环境变量 DASHBOARD_TOKEN，否则敏感端点被禁用
+ */
+function checkAuth(req, url, res) {
+  if (!DASHBOARD_TOKEN) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'DASHBOARD_TOKEN not configured. Set DASHBOARD_TOKEN env var to enable this endpoint.' }));
+    return false;
+  }
+  const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
+  if (token !== DASHBOARD_TOKEN) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid or missing token' }));
+    return false;
+  }
+  return true;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -647,126 +667,90 @@ function renderDashboard(data) {
       </table>
     </div>
     
-    <!-- 信号热度与时效 -->
+    <!-- v18 最近信号记录 -->
     <div class="card" style="margin-bottom: 20px;">
-      <h2>🔥 最近信号热度与时效分布 (Entry Timing & Social Heat)</h2>
+      <h2>🔥 最近信号 (v18 指标过滤)</h2>
       <table>
         <thead>
           <tr>
             <th>代币</th>
-            <th>AI叙事</th>
-            <th>TG传播</th>
-            <th>时效加成</th>
-            <th>总评分</th>
-            <th>推荐级别</th>
+            <th>MC</th>
+            <th>Super</th>
+            <th>SupΔ</th>
+            <th>Trade</th>
+            <th>结果</th>
           </tr>
         </thead>
         <tbody>
           ${data.recent_scores.map(s => `
             <tr>
               <td>${s.symbol}</td>
-              <td><span class="badge ${s.narrative >= 20 ? 'badge-green' : 'badge-yellow'}">${s.narrative}</span></td>
-              <td><span class="badge ${s.tg_spread >= 20 ? 'badge-green' : 'badge-yellow'}">${s.tg_spread}</span></td>
-              <td><span class="pnl-positive">+${s.timing_bonus}</span></td>
-              <td><strong>${s.total_score}</strong></td>
-              <td><span class="badge ${s.rating === 'PREMIUM' ? 'badge-green' : s.rating === 'NORMAL' ? 'badge-yellow' : ''}">${s.rating}</span></td>
+              <td>${s.mc}</td>
+              <td>${s.superCurrent}</td>
+              <td>${s.superDelta}</td>
+              <td>${s.tradeCurrent}</td>
+              <td><span class="badge ${s.passed ? 'badge-green' : 'badge-red'}">${s.status}</span></td>
             </tr>
           `).join('')}
-          ${data.recent_scores.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#666;">等待新信号进行评估...</td></tr>' : ''}
+          ${data.recent_scores.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#666;">等待新信号...</td></tr>' : ''}
         </tbody>
       </table>
     </div>
 
-    <!-- 止盈止损策略 -->
+    <!-- v18 出场策略 ASYMMETRIC -->
     <div class="card">
-      <h2>⚙️ 策略 v7.4：猎人追踪系统 + 哑铃型仓位</h2>
+      <h2>⚙️ 策略 v18：非对称收割 (ASYMMETRIC)</h2>
       <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
         <div class="exit-strategy">
-          <h3>🛑 止损（铁律）</h3>
-          <div class="exit-rule"><span>普通止损</span><span class="pnl-negative">-50%</span></div>
-          <div class="exit-rule"><span>FOX 猎人止损</span><span class="pnl-negative">-30%</span></div>
-          <div class="exit-rule"><span>时间止损(SOL)</span><span class="pnl-negative">60分钟</span></div>
-          <div class="exit-rule"><span>每日风控</span><span class="pnl-negative">-0.5 SOL</span></div>
+          <h3>🛑 止损</h3>
+          <div class="exit-rule"><span>止损线</span><span class="pnl-negative">${data.config.exitStrategy.stopLoss}</span></div>
+          <div class="exit-rule"><span>死水超时</span><span class="pnl-negative">${data.config.exitStrategy.deadWater}</span></div>
+          <div class="exit-rule"><span>最大持仓</span><span class="pnl-negative">${data.config.exitStrategy.maxHold}</span></div>
         </div>
         <div class="exit-strategy">
-          <h3>💰 翻倍出本</h3>
-          <div class="exit-rule"><span>触发点</span><span class="pnl-positive">+100%</span></div>
-          <div class="exit-rule"><span>卖出比例</span><span>50%</span></div>
-          <div class="exit-rule"><span>TURTLE 延迟</span><span>30分钟验证</span></div>
-          <div class="exit-rule"><span>剩余利润仓</span><span>50% (Free)</span></div>
+          <h3>💰 分批止盈</h3>
+          <div class="exit-rule"><span>TP1</span><span class="pnl-positive">${data.config.exitStrategy.tp1}</span></div>
+          <div class="exit-rule"><span>TP2</span><span class="pnl-positive">${data.config.exitStrategy.tp2}</span></div>
         </div>
         <div class="exit-strategy">
-          <h3>🎯 猎人类型 (v7.4)</h3>
-          <div class="exit-rule"><span>🦊 FOX</span><span>1.2x 仓位</span></div>
-          <div class="exit-rule"><span>🐢 TURTLE</span><span>1.5x 仓位</span></div>
-          <div class="exit-rule"><span>🐺 WOLF</span><span>1.0x 仓位</span></div>
-          <div class="exit-rule"><span>跟单策略</span><span>按类型分流</span></div>
+          <h3>🚀 高倍止盈</h3>
+          <div class="exit-rule"><span>TP3</span><span class="pnl-positive">${data.config.exitStrategy.tp3}</span></div>
+          <div class="exit-rule"><span>TP4</span><span class="pnl-positive">${data.config.exitStrategy.tp4}</span></div>
         </div>
         <div class="exit-strategy">
-          <h3>🤖 利润仓 AI管理</h3>
-          <div class="exit-rule"><span>热度下降</span><span>卖1/3</span></div>
-          <div class="exit-rule"><span>聪明钱减持</span><span>卖1/3</span></div>
-          <div class="exit-rule"><span>横盘30分钟</span><span>卖1/3</span></div>
-          <div class="exit-rule"><span>回撤50%</span><span>卖1/3</span></div>
+          <h3>📊 仓位</h3>
+          <div class="exit-rule"><span>单笔仓位</span><span class="pnl-positive">${data.config.position.sizeSol} SOL</span></div>
+          <div class="exit-rule"><span>在险上限</span><span>${data.config.position.maxAtRisk} 个</span></div>
+          <div class="exit-rule"><span>Moonbag</span><span>不占槽位</span></div>
         </div>
       </div>
     </div>
     
-    <!-- 风险管理规则 - 动态显示 CrossValidator 配置 -->
+    <!-- v18 入场过滤条件 -->
     <div class="card" style="margin-top: 20px;">
-      <h2>🛡️ 分级仓位管理 (CrossValidator v2.0)</h2>
+      <h2>🎯 v18 入场过滤条件</h2>
       <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
         <div class="exit-strategy">
-          <h3>🐦 Scout级 (${data.config.thresholds.buyScout}-${data.config.thresholds.buyNormal - 1}分)</h3>
-          <div class="exit-rule"><span>单笔金额</span><span class="pnl-positive">${data.config.positions.scout} SOL</span></div>
-          <div class="exit-rule"><span>最大仓位</span><span>${data.config.maxPositions.scout} 个</span></div>
-          <div class="exit-rule"><span>最大敞口</span><span>${(data.config.positions.scout * data.config.maxPositions.scout).toFixed(2)} SOL</span></div>
+          <h3>📊 市值 & ATH</h3>
+          <div class="exit-rule"><span>Market Cap</span><span>${data.config.entryFilters.marketCap}</span></div>
+          <div class="exit-rule"><span>ATH</span><span>${data.config.entryFilters.athOnly}</span></div>
         </div>
         <div class="exit-strategy">
-          <h3>✅ 普通级 (${data.config.thresholds.buyNormal}-${data.config.thresholds.buyPremium - 1}分)</h3>
-          <div class="exit-rule"><span>单笔金额</span><span class="pnl-positive">${data.config.positions.normal} SOL</span></div>
-          <div class="exit-rule"><span>最大仓位</span><span>${data.config.maxPositions.normal} 个</span></div>
-          <div class="exit-rule"><span>最大敞口</span><span>${(data.config.positions.normal * data.config.maxPositions.normal).toFixed(2)} SOL</span></div>
+          <h3>🔥 Super Index</h3>
+          <div class="exit-rule"><span>Super_cur</span><span>${data.config.entryFilters.superIndex}</span></div>
+          <div class="exit-rule"><span>SupΔ</span><span>${data.config.entryFilters.superDelta}</span></div>
         </div>
         <div class="exit-strategy">
-          <h3>🚀 精选级 (${data.config.thresholds.buyPremium}+分)</h3>
-          <div class="exit-rule"><span>单笔金额</span><span class="pnl-positive">${data.config.positions.premium} SOL</span></div>
-          <div class="exit-rule"><span>最大仓位</span><span>${data.config.maxPositions.premium} 个</span></div>
-          <div class="exit-rule"><span>最大敞口</span><span>${(data.config.positions.premium * data.config.maxPositions.premium).toFixed(2)} SOL</span></div>
+          <h3>📈 Trade & Address</h3>
+          <div class="exit-rule"><span>Trade_cur</span><span>${data.config.entryFilters.tradeCurrent}</span></div>
+          <div class="exit-rule"><span>TΔ</span><span>${data.config.entryFilters.tradeDelta}</span></div>
+          <div class="exit-rule"><span>Addr_cur</span><span>${data.config.entryFilters.addressCurrent}</span></div>
         </div>
         <div class="exit-strategy">
-          <h3>📊 总览</h3>
-          <div class="exit-rule"><span>总仓位数</span><span>${data.config.maxPositions.scout + data.config.maxPositions.normal + data.config.maxPositions.premium} 个</span></div>
-          <div class="exit-rule"><span>最大总敞口</span><span class="pnl-positive">${(data.config.positions.scout * data.config.maxPositions.scout + data.config.positions.normal * data.config.maxPositions.normal + data.config.positions.premium * data.config.maxPositions.premium).toFixed(2)} SOL</span></div>
-          <div class="exit-rule"><span>IGNORE阈值</span><span>&lt;${data.config.thresholds.ignore}分</span></div>
-          <div class="exit-rule"><span>WATCH阈值</span><span>${data.config.thresholds.ignore}-${data.config.thresholds.buyScout - 1}分</span></div>
-        </div>
-      </div>
-    </div>
-    
-    <!-- 评分权重 -->
-    <div class="card" style="margin-top: 20px;">
-      <h2>⚖️ 评分权重配置</h2>
-      <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
-        <div class="stat">
-          <div class="stat-value">${data.config.weights.smartMoney}%</div>
-          <div class="stat-label">🧠 聪明钱</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${data.config.weights.narrative}%</div>
-          <div class="stat-label">📖 AI叙事</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${data.config.weights.telegram}%</div>
-          <div class="stat-label">📱 TG共识</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${data.config.weights.signalMomentum}%</div>
-          <div class="stat-label">📈 动量</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">${data.config.weights.safety}%</div>
-          <div class="stat-label">🛡️ 安全</div>
+          <h3>🛡️ 安全 & 防追高</h3>
+          <div class="exit-rule"><span>Sec_cur</span><span>${data.config.entryFilters.securityCurrent}</span></div>
+          <div class="exit-rule"><span>防追高</span><span>实时MC &gt; 信号MC×1.2 拒绝</span></div>
+          <div class="exit-rule"><span>Freeze/Mint</span><span>必须 DISABLED</span></div>
         </div>
       </div>
     </div>
@@ -848,36 +832,36 @@ function renderDashboard(data) {
 }
 
 /**
- * CrossValidator 分级仓位配置（与 cross-validator.js 保持同步）
+ * v18 策略配置（与 premium-signal-engine.js 保持同步）
+ * 不再使用 CrossValidator 评分，改用信号指标直接过滤
  */
-const CROSS_VALIDATOR_CONFIG = {
-  // 评分阈值
-  thresholds: {
-    ignore: 50,
-    watch: 60,
-    buyScout: 60,
-    buyNormal: 70,
-    buyPremium: 80
+const V18_STRATEGY_CONFIG = {
+  // 入场条件（信号指标硬过滤）
+  entryFilters: {
+    marketCap: '30K - 300K',
+    superIndex: '80 - 1000',
+    superDelta: '≥ 5',
+    tradeCurrent: '≥ 1',
+    tradeDelta: '≥ 1',
+    addressCurrent: '≥ 3',
+    securityCurrent: '≥ 15',
+    athOnly: 'ATH#1 直接入场'
   },
-  // 仓位配置 (SOL)
-  positions: {
-    scout: 0.10,
-    normal: 0.15,
-    premium: 0.25
+  // 仓位
+  position: {
+    sizeSol: parseFloat(process.env.PREMIUM_POSITION_SOL || '0.06'),
+    maxAtRisk: 5,
+    moonbagNotCounted: true
   },
-  // 各级别最大仓位数
-  maxPositions: {
-    scout: 2,
-    normal: 3,
-    premium: 3
-  },
-  // 权重
-  weights: {
-    smartMoney: 40,
-    narrative: 25,
-    telegram: 15,
-    signalMomentum: 10,
-    safety: 10
+  // 出场策略 ASYMMETRIC
+  exitStrategy: {
+    tp1: '+50% → 卖60% (SL移至0%)',
+    tp2: '+100% → 卖50%剩余',
+    tp3: '+200% → 卖50%剩余',
+    tp4: '+500% → 卖80%剩余 → Moonbag',
+    stopLoss: '-40%',
+    deadWater: '15分钟无波动',
+    maxHold: '30分钟'
   }
 };
 
@@ -910,7 +894,7 @@ function getDashboardData() {
     thresholds: [],
     reviewHistory: [],
     observationPool: { tokens: [], counts: { total: 0, gold: 0, silver: 0, bronze: 0 } },
-    config: CROSS_VALIDATOR_CONFIG,
+    config: V18_STRATEGY_CONFIG,
     // v7.4 新增模块状态
     hunterPerformance: {
       FOX: { trades: 0, wins: 0, avgPnl: 0, multiplier: 1.2 },
@@ -1075,15 +1059,38 @@ function getDashboardData() {
     `).all();
     data.positions = positions || [];
 
-    // 最近评分分布 (模拟从最近 positions 构建)
-    data.recent_scores = data.positions.slice(0, 10).map(p => ({
-      symbol: p.symbol || p.token_ca?.substring(0, 8),
-      narrative: Math.floor(p.alpha_score * 0.4),
-      tg_spread: Math.floor(p.alpha_score * 0.3),
-      timing_bonus: p.alpha_tier === 'tier1' ? 12 : p.alpha_tier === 'tier2' ? 8 : (p.alpha_tier === 'tier3' ? 5 : 0),
-      total_score: p.alpha_score,
-      rating: p.alpha_score >= 80 ? 'PREMIUM' : (p.alpha_score >= 70 ? 'NORMAL' : 'SCOUT')
-    }));
+    // 最近信号记录 — 从 premium_signals 表获取真实数据
+    try {
+      const recentSignals = database.prepare(`
+        SELECT symbol, market_cap, hard_gate_status, ai_narrative_tier, executed, timestamp
+        FROM premium_signals ORDER BY id DESC LIMIT 15
+      `).all();
+      data.recent_scores = recentSignals.map(s => {
+        const passed = s.hard_gate_status === 'PASS';
+        const mc = s.market_cap ? `$${(s.market_cap / 1000).toFixed(1)}K` : '?';
+        // 尝试从 narrative_reason 解析指标值
+        let superCurrent = '-', superDelta = '-', tradeCurrent = '-';
+        if (s.ai_narrative_tier) {
+          const superMatch = s.ai_narrative_tier.match(/Super_cur=(\d+)/);
+          const supDeltaMatch = s.ai_narrative_tier.match(/SupΔ=(\d+)/);
+          const tradeMatch = s.ai_narrative_tier.match(/TΔ=(\d+)/);
+          if (superMatch) superCurrent = superMatch[1];
+          if (supDeltaMatch) superDelta = supDeltaMatch[1];
+          if (tradeMatch) tradeCurrent = tradeMatch[1];
+        }
+        return {
+          symbol: s.symbol || '?',
+          mc,
+          superCurrent,
+          superDelta,
+          tradeCurrent,
+          passed,
+          status: passed ? (s.executed ? 'BUY' : 'PASS') : s.hard_gate_status?.replace('V18_', '').replace('V17_', '') || 'SKIP'
+        };
+      });
+    } catch (e) {
+      data.recent_scores = [];
+    }
 
     // ==================== v7.4 新增查询 ====================
 
@@ -1652,7 +1659,13 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (url.pathname === '/api/close-position') {
-    // 手动关闭持仓 API
+    // 手动关闭持仓 API — 需要 POST + token 认证
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed. Use POST.' }));
+      return;
+    }
+    if (!checkAuth(req, url, res)) return;
     try {
       const d = getDb();
       if (!d) throw new Error('Database not ready');
@@ -1699,7 +1712,8 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (url.pathname === '/api/download/database') {
-    // 数据库下载端点
+    // 数据库下载端点 — 需要 token 认证
+    if (!checkAuth(req, url, res)) return;
     const filePath = resolvedDbPath;
     if (!fs.existsSync(filePath)) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -1716,7 +1730,8 @@ const server = http.createServer(async (req, res) => {
     fileStream.pipe(res);
     return;
   } else if (url.pathname === '/api/export') {
-    // v10: 导出所有DB数据为JSON（用于回测分析）
+    // v10: 导出所有DB数据为JSON（用于回测分析） — 需要 token 认证
+    if (!checkAuth(req, url, res)) return;
     try {
       const database = getDb();
       if (!database) {
