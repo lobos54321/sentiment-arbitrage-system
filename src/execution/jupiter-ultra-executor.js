@@ -276,7 +276,7 @@ export class JupiterUltraExecutor {
 
       const res = await axios.get(`${this.ultraApiBase}/order?${params.toString()}`, {
         headers,
-        timeout: 10000
+        timeout: 5000  // 5s: 报价接口快速失败，触发重试拿新价格
       });
 
       return res.data;
@@ -312,7 +312,7 @@ export class JupiterUltraExecutor {
         requestId
       }, {
         headers,
-        timeout: 60000  // Ultra 内置确认，可能需要较长时间
+        timeout: 30000  // 30s: Solana 链上确认通常 10-15s，超时即重试
       });
 
       return res.data;

@@ -270,13 +270,14 @@ export class PremiumSignalEngine {
     this.stats.signals_received++;
     const ca = signal.token_ca;
     const shortCA = ca.substring(0, 8);
+    const t0 = Date.now();
 
     console.log('\n' + '═'.repeat(60));
     console.log(`💎 [Premium] 新信号: $${signal.symbol || shortCA} | MC: $${signal.market_cap ? (signal.market_cap / 1000).toFixed(1) + 'K' : '?'}`);
     console.log('═'.repeat(60));
 
     try {
-      // Step 1: 记录信号历史 + 短期去重
+      // ─── Step 1: 去重 + 冷却检查 (全内存, ~0ms) ───────────────
       const history = this.signalHistory.get(ca);
       if (history) {
         history.count++;
@@ -284,13 +285,9 @@ export class PremiumSignalEngine {
         if (signal.market_cap > 0) history.latestMC = signal.market_cap;
       } else {
         this.signalHistory.set(ca, {
-          count: 1,
-          firstSeen: Date.now(),
-          lastSeen: Date.now(),
-          symbol: signal.symbol,
-          firstMC: signal.market_cap || 0,
-          latestMC: signal.market_cap || 0,
-          lastScore: 0  // 用于重复信号评分比较
+          count: 1, firstSeen: Date.now(), lastSeen: Date.now(),
+          symbol: signal.symbol, firstMC: signal.market_cap || 0,
+          latestMC: signal.market_cap || 0, lastScore: 0
         });
       }
 
@@ -301,392 +298,239 @@ export class PremiumSignalEngine {
       }
       this.markProcessed(ca);
 
-      // 🔧 Symbol级去重（15分钟窗口）— 防止同名不同CA的仿盘
       const symbol = signal.symbol;
       const lastSymbolSeen = this.recentSymbols.get(symbol);
       if (lastSymbolSeen && (Date.now() - lastSymbolSeen) < 15 * 60 * 1000) {
         this.stats.duplicates_skipped++;
-        console.log(`⏭️  [Symbol去重] $${symbol} 15分钟内已处理过同名代币，跳过 (CA: ${shortCA}...)`);
+        console.log(`⏭️  [Symbol去重] $${symbol} 15分钟内已处理过同名代币，跳过`);
         return { action: 'SKIP', reason: 'symbol_duplicate' };
       }
 
-      // 🔧 退出冷却检查（10分钟）— 防止退出后立即重买同名代币
       const cooldownUntil = this.exitCooldown.get(symbol);
       if (cooldownUntil && Date.now() < cooldownUntil) {
         const remainSec = Math.round((cooldownUntil - Date.now()) / 1000);
-        console.log(`⏭️  [冷却中] $${symbol} 退出后冷却期，剩余${remainSec}s，跳过 (CA: ${shortCA}...)`);
+        console.log(`⏭️  [冷却中] $${symbol} 退出后冷却期，剩余${remainSec}s，跳过`);
         return { action: 'SKIP', reason: 'exit_cooldown' };
       }
 
-      // Step 2: 预检 - 频道自带的 freeze/mint 数据
-      // 只有明确标记为 false（❌）才拦截，未知的放过让链上快照验证
-      if (signal.freeze_ok === false && signal.mint_ok === false && signal.market_cap > 0) {
-        this.stats.precheck_failed++;
-        console.log(`🚫 [预检] freeze=${signal.freeze_ok} mint=${signal.mint_ok} → 跳过`);
-        this.saveSignalRecord(signal, 'PRECHECK_FAIL', null);
-        return { action: 'SKIP', reason: 'precheck_failed' };
-      }
-      console.log(`✅ [预检] freeze=${signal.freeze_ok ?? '未知'} mint=${signal.mint_ok ?? '未知'} → 继续`);
-
-      // Step 3: 链上快照
-      let snapshot;
-      try {
-        console.log('📡 [链上] 获取 Solana 快照...');
-        snapshot = await this.solService.getSnapshot(ca);
-        if (!snapshot) throw new Error('快照为空');
-        snapshot.chain = 'SOL';
-        snapshot.token_ca = ca;
-        console.log(`✅ [链上] 流动性: ${snapshot.liquidity ? snapshot.liquidity.toFixed(2) + ' SOL' : '未知'}`);
-      } catch (error) {
-        this.stats.snapshot_failed++;
-        console.log(`⚠️  [链上] 快照获取失败: ${error.message}，使用频道数据继续`);
-        // 构造最小快照用于 hard gates
-        snapshot = {
-          token_ca: ca,
-          chain: 'SOL',
-          freeze_authority: signal.freeze_ok ? 'Disabled' : 'Unknown',
-          mint_authority: signal.mint_ok ? 'Disabled' : 'Unknown',
-          liquidity: null,
-          top10_percent: signal.top10_pct || null
-        };
-      }
-
-      // Step 4: Hard Gates
-      console.log('🚨 [Hard Gates] 安全检查...');
-      const gateResult = this.hardGateFilter.evaluate(snapshot);
-      if (gateResult.status === 'REJECT') {
-        this.stats.hard_gate_rejected++;
-        console.log(`🚫 [Hard Gates] REJECT: ${gateResult.reasons.join(', ')}`);
-        this.saveSignalRecord(signal, 'REJECT', null);
-        return { action: 'SKIP', reason: 'hard_gate_reject', details: gateResult.reasons };
-      }
-      const isGreylist = gateResult.status === 'GREYLIST';
-      console.log(`✅ [Hard Gates] ${gateResult.status}${isGreylist ? ' ⚠️ (灰名单)' : ''}`);
-
-      // Step 5: DexScreener 数据 + 量化评分
-      console.log('📊 [评分] 获取 DexScreener 数据...');
-      let dexData = null;
-      try {
-        const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-        const pair = dexRes.data?.pairs?.[0];
-        if (pair) {
-          dexData = {
-            buy_count_24h: pair.txns?.h24?.buys || 0,
-            sell_count_24h: pair.txns?.h24?.sells || 0,
-            buy_count_1h: pair.txns?.h1?.buys || 0,
-            sell_count_1h: pair.txns?.h1?.sells || 0,
-            buy_count_5m: pair.txns?.m5?.buys || 0,
-            sell_count_5m: pair.txns?.m5?.sells || 0,
-            volume_24h: pair.volume?.h24 || 0,
-            price_change_5m: pair.priceChange?.m5 || 0,
-            price_change_1h: pair.priceChange?.h1 || 0,
-            liquidity_usd: pair.liquidity?.usd || 0,
-            market_cap: pair.marketCap || pair.fdv || 0,
-          };
-          const buyRatio = dexData.sell_count_24h > 0 ? (dexData.buy_count_24h / dexData.sell_count_24h).toFixed(2) : '∞';
-          console.log(`  📊 买=${dexData.buy_count_24h}/卖=${dexData.sell_count_24h} (比=${buyRatio}) | 量=$${(dexData.volume_24h/1000).toFixed(1)}K | 流动性=$${(dexData.liquidity_usd/1000).toFixed(1)}K`);
-        }
-      } catch (e) {
-        console.log(`  ⚠️ DexScreener 失败: ${e.message}`);
-      }
-
-      // ===== v17: 入场逻辑 =====
-      // 核心依据: 22策略×6退出/187代币K线回测 → ATH#1 + MC$20-75K + Super(sig)≥80 + TP75/SL25
-      // 回测: 129笔, 42.6%WR, +17.4%avg, +2248%总PnL (v16的9.1倍)
-      // ATH#1直接入场, ATH#2+不入场
+      // ─── Step 2: ATH 检查 — 最先过滤，非ATH立即退出 (~0ms) ───
       const isATH = signal.is_ath === true;
-      const idx = signal.indices;
-      let mc = dexData?.market_cap || signal.market_cap || 0;
-
-      // MC 补充（Jupiter fallback）
-      if (mc === 0 && this.livePriceMonitor) {
-        const jupiterPrice = this.livePriceMonitor.priceCache.get(ca);
-        if (jupiterPrice && jupiterPrice.mc && (Date.now() - jupiterPrice.timestamp) < 30000) {
-          mc = jupiterPrice.mc;
-        }
-      }
-
-      const liqUsd = dexData?.liquidity_usd || 0;
-
-      // v17: 只交易ATH信号
       if (!isATH) {
         console.log(`⏭️ [v17] $${signal.symbol} 非ATH信号 → 不交易`);
         this.saveSignalRecord(signal, 'NOT_ATH_V17', null);
         return { action: 'SKIP', reason: 'not_ath_v17' };
       }
 
-      // ATH计数器（在signalHistory中维护，持久化到JSON）
-      const sigHistory = this.signalHistory.get(ca);
-      const prevAthCount = sigHistory ? (sigHistory.athCount || 0) : 0;
-      if (sigHistory) {
-        sigHistory.athCount = prevAthCount + 1;
-        if (idx?.super_index) {
-          sigHistory.lastSuperIndex = idx.super_index.current;
-          if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = idx.super_index.signal;
-        }
-        // 记录ATH#1时的MC
-        if (prevAthCount === 0 && mc > 0) {
-          sigHistory.mc1 = mc;
-        }
-      }
-      const currentAthNum = prevAthCount + 1;
-      this._saveAthCounts(); // 持久化
-
-      // 读取常用指标
-      const tradeCurrent = idx?.trade_index?.current || 0;
-      const tradeSignal = idx?.trade_index?.signal || 0;
-      const securityCurrent = idx?.security_index?.current || 0;
-      const superCurrent = idx?.super_index?.current || 0;
-      const addressCurrent = idx?.address_index?.current || 0;
-
-      // ===== 全局开关: SOL市场环境 =====
+      // ─── Step 3: 市场环境 + Freeze/Mint 预检 (全内存, ~0ms) ───
       if (this._solMarketPaused) {
         console.log(`⏸️ [v17] SOL 24h跌>10%，市场暂停中，不开新仓`);
         return { action: 'SKIP', reason: 'market_paused' };
       }
 
-      // ===== v17.4: ATH#1早期入场 + Delta增强 — DB回测(5天)驱动 =====
-      // v18: 精准掐头去尾策略 — 18h回测(40笔): 65%WR, ROI=+16%, 盈亏比1.26
-      // 买入: MC 30-300K + Super_cur 80-1000 + SupΔ≥5 + Trade_cur≥1&TΔ≥1 + Addr_cur≥3 + Sec_cur≥15
-      // 卖出: ASYMMETRIC (非对称收割: TP1@50%卖60%→SL移至0%保本→TP2-4阶梯登月)
-      const superSignal = idx?.super_index?.signal || 0;
-      const superDelta = superCurrent - superSignal; // SupΔ
-      const tradeDelta = tradeCurrent - tradeSignal; // TΔ
-      let finalSize, tradeConviction;
-      let exitStrategy = 'ASYMMETRIC'; // v18: 非对称收割
+      if (signal.freeze_ok === false || signal.mint_ok === false) {
+        this.stats.precheck_failed++;
+        console.log(`🚫 [预检] freeze=${signal.freeze_ok} mint=${signal.mint_ok} → 跳过`);
+        this.saveSignalRecord(signal, 'PRECHECK_FAIL', null);
+        return { action: 'SKIP', reason: 'precheck_failed' };
+      }
 
-      if (currentAthNum === 1) {
-        // ====== ATH#1: 主力入场 ======
-        // 回测: ATH#1 + MC$20-75K + Super(sig)≥80 → 129笔, 42.6%WR, +2248%总PnL
+      // ─── Step 4: v18 所有过滤 — 全部来自 signal.indices (~0ms) ─
+      const idx = signal.indices;
+      const superCurrent = idx?.super_index?.current || 0;
+      const superSignal  = idx?.super_index?.signal  || 0;
+      const superDelta   = superCurrent - superSignal;
+      const tradeCurrent = idx?.trade_index?.current || 0;
+      const tradeSignal  = idx?.trade_index?.signal  || 0;
+      const tradeDelta   = tradeCurrent - tradeSignal;
+      const addressCurrent  = idx?.address_index?.current  || 0;
+      const securityCurrent = idx?.security_index?.current || 0;
 
-        // 已持仓？跳过
-        const alreadyHoldingThis = this.livePositionMonitor?.positions?.has(ca);
-        if (alreadyHoldingThis) {
-          console.log(`⏭️ [v17] $${signal.symbol} ATH#1 已持仓 → 跳过`);
-          return { action: 'SKIP', reason: 'v17_already_holding' };
+      // ATH 计数器
+      const sigHistory = this.signalHistory.get(ca);
+      const prevAthCount = sigHistory ? (sigHistory.athCount || 0) : 0;
+      if (sigHistory) {
+        sigHistory.athCount = prevAthCount + 1;
+        if (idx?.super_index) {
+          sigHistory.lastSuperIndex = superCurrent;
+          if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = superSignal;
         }
+        if (prevAthCount === 0 && signal.market_cap > 0) sigHistory.mc1 = signal.market_cap;
+      }
+      const currentAthNum = prevAthCount + 1;
+      this._saveAthCounts();
 
-        // 改动2: 并发仓位检查 — 只算「在险仓位」(未触TP1), 零成本登月仓不占槽
-        const allPositions = this.livePositionMonitor?.positions;
-        const atRiskPositions = allPositions
-          ? [...allPositions.values()].filter(p => !p.tp1)
-          : [];
-        const atRiskCount = atRiskPositions.length;
-        const moonBagCount = (allPositions?.size || 0) - atRiskCount;
-        if (atRiskCount >= 5) {
-          console.log(`⏭️ [v18] 在险仓位 ${atRiskCount}/5 已满 → 不开新仓 (${moonBagCount}个零成本登月仓不占槽)`);
-          return { action: 'SKIP', reason: 'max_atrisk_positions' };
-        }
-        if (moonBagCount > 0) {
-          console.log(`   ℹ️ [槽位] 在险: ${atRiskCount}/5 | 零成本登月仓: ${moonBagCount}个 (不占槽)`);
-        }
-
-        // 改动1: 防追高保护 — 当前MC不能超过信号MC的120%
-        const signalMC = signal.market_cap || 0;
-        if (signalMC > 0 && mc > 0 && mc > signalMC * 1.20) {
-          const premium = ((mc / signalMC - 1) * 100).toFixed(1);
-          console.log(`🚫 [防追高] $${signal.symbol} 信号MC=$${(signalMC/1000).toFixed(1)}K → 当前MC=$${(mc/1000).toFixed(1)}K (溢价+${premium}% > 20%) → 放弃`);
-          this.saveSignalRecord(signal, 'ANTI_CHASE', null);
-          return { action: 'SKIP', reason: 'anti_chase', premium: parseFloat(premium) };
-        }
-
-        // MC过滤: $30K - $300K (v18: 扩大范围, 抛弃30K以下绞肉机, 接纳100K+强共识盘)
-        if (mc < 30000 || mc > 300000) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 MC=$${(mc/1000).toFixed(1)}K 不在$30-300K范围 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_mc_filter', mc };
-        }
-
-        // Super_cur过滤: 80 ≤ Super_cur ≤ 1000 (防脚本上限, 不碰几千的机器对敲盘)
-        if (superCurrent < 80 || superCurrent > 1000) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Super_cur=${superCurrent} 不在80-1000范围 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_SUPERCUR_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_supercur_filter', superCurrent };
-        }
-
-        // v18: Super Delta过滤: SupΔ ≥ 5 (动能最低门槛)
-        if (superDelta < 5) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 SupΔ=${superDelta}<5 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_SUPDELTA_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_supdelta_filter', superDelta };
-        }
-
-        // v18: Trade_cur ≥ 1 且 TΔ ≥ 1 (动能与底座)
-        if (tradeCurrent < 1) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Trade_cur=${tradeCurrent}<1 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_TRADECUR_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_tradecur_filter', tradeCurrent };
-        }
-        if (tradeDelta < 1) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 TΔ=${tradeDelta}<1 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_TRADEDELTA_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_tradedelta_filter', tradeDelta };
-        }
-
-        // v18: Addr_cur ≥ 3 (防鼠仓)
-        if (addressCurrent < 3) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Addr_cur=${addressCurrent}<3 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_ADDR_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_addr_filter', addressCurrent };
-        }
-
-        // v18: Sec_cur ≥ 15 (防貔貅)
-        if (securityCurrent < 15) {
-          console.log(`⏭️ [v18] $${signal.symbol} ATH#1 Sec_cur=${securityCurrent}<15 → 跳过`);
-          this.saveSignalRecord(signal, 'V18_SEC_FILTER', null);
-          return { action: 'SKIP', reason: 'v18_sec_filter', securityCurrent };
-        }
-
-        // ✅ 通过所有过滤 → 买入
-        finalSize = 0.06;
-        tradeConviction = 'HIGH';
-        console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent} → ${finalSize} SOL (非对称收割: TP1@50%/SL40%→保本/TP2-4登月)`);
-        console.log(`  Super(sig)=${superSignal} Trade(cur)=${tradeCurrent} Trade(sig)=${tradeSignal}`);
-
-      } else {
-        // ====== ATH#2+: 不入场 ======
-        // v17: 回测证明ATH#1入场最优，ATH#2+在有ATH#1的情况下是负贡献
-        console.log(`⏭️ [v17] $${signal.symbol} ATH#${currentAthNum} → 仅ATH#1入场 (v17策略)`);
+      if (currentAthNum !== 1) {
+        console.log(`⏭️ [v17] $${signal.symbol} ATH#${currentAthNum} → 仅ATH#1入场`);
         this.saveSignalRecord(signal, 'V17_NOT_ATH1', null);
         return { action: 'SKIP', reason: 'v17_only_ath1' };
       }
 
-      // 构造兼容的AI结果
-      const aiResult = {
-        action: 'BUY_FULL',
-        confidence: 90,
-        narrative_tier: 'CONFIRMED',
-        narrative_reason: `v18: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent}`,
-        entry_timing: 'OPTIMAL',
-        stop_loss_percent: 40, // -40% hard SL
-        exitStrategy: exitStrategy // v18: ASYMMETRIC 非对称收割
-      };
-
       // 已持仓检查
-      const alreadyHolding = this.livePositionMonitor?.positions?.has(ca);
-      if (alreadyHolding) {
-        console.log(`⏭️ [已持仓] $${signal.symbol} ATH#1 已有仓位，跳过`);
+      if (this.livePositionMonitor?.positions?.has(ca)) {
+        console.log(`⏭️ [v17] $${signal.symbol} 已持仓 → 跳过`);
         return { action: 'SKIP', reason: 'already_holding' };
       }
-
-      // Shadow已持仓检查
       if (this.shadowTracker.hasOpenPosition(ca)) {
         console.log(`⏭️ [已持仓] $${signal.symbol} Shadow已有未平仓持仓，跳过`);
         return { action: 'SKIP', reason: 'already_in_position' };
       }
 
-      // Exit Gates
-      console.log('🚪 [Exit Gates] 退出可行性检查...');
-      const exitResult = this.exitGateFilter.evaluate(snapshot, finalSize);
-      if (exitResult.status === 'REJECT') {
-        this.stats.exit_gate_rejected++;
-        console.log(`🚫 [Exit Gates] REJECT: ${exitResult.reasons.join(', ')}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult);
-        return { action: 'SKIP', reason: 'exit_gate_reject', details: exitResult.reasons };
+      // 仓位槽位检查 — 只算在险仓位
+      const allPositions = this.livePositionMonitor?.positions;
+      const atRiskCount = allPositions ? [...allPositions.values()].filter(p => !p.tp1).length : 0;
+      const moonBagCount = (allPositions?.size || 0) - atRiskCount;
+      if (atRiskCount >= 5) {
+        console.log(`⏭️ [v18] 在险仓位 ${atRiskCount}/5 已满 → 不开新仓 (${moonBagCount}个零成本登月仓不占槽)`);
+        return { action: 'SKIP', reason: 'max_atrisk_positions' };
       }
-      console.log(`✅ [Exit Gates] ${exitResult.status}`);
+      if (moonBagCount > 0) {
+        console.log(`   ℹ️ [槽位] 在险: ${atRiskCount}/5 | 零成本登月仓: ${moonBagCount}个`);
+      }
 
-      // ===== 执行交易 =====
+      // v18 指标过滤 (全部 signal.indices，无网络请求)
+      const mc = signal.market_cap || 0;
+      if (mc < 30000 || mc > 300000) {
+        console.log(`⏭️ [v18] MC=$${(mc/1000).toFixed(1)}K 不在$30-300K → 跳过`);
+        this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_mc_filter', mc };
+      }
+      if (superCurrent < 80 || superCurrent > 1000) {
+        console.log(`⏭️ [v18] Super_cur=${superCurrent} 不在80-1000 → 跳过`);
+        this.saveSignalRecord(signal, 'V18_SUPERCUR_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_supercur_filter', superCurrent };
+      }
+      if (superDelta < 5) {
+        console.log(`⏭️ [v18] SupΔ=${superDelta}<5 → 跳过`);
+        this.saveSignalRecord(signal, 'V18_SUPDELTA_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_supdelta_filter', superDelta };
+      }
+      if (tradeCurrent < 1) {
+        console.log(`⏭️ [v18] Trade_cur=${tradeCurrent}<1 → 跳过`);
+        this.saveSignalRecord(signal, 'V18_TRADECUR_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_tradecur_filter', tradeCurrent };
+      }
+      if (tradeDelta < 1) {
+        console.log(`⏭️ [v18] TΔ=${tradeDelta}<1 → 跳过`);
+        this.saveSignalRecord(signal, 'V18_TRADEDELTA_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_tradedelta_filter', tradeDelta };
+      }
+      if (addressCurrent < 3) {
+        console.log(`⏭️ [v18] Addr_cur=${addressCurrent}<3 → 跳过`);
+        this.saveSignalRecord(signal, 'V18_ADDR_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_addr_filter', addressCurrent };
+      }
+      if (securityCurrent < 15) {
+        console.log(`⏭️ [v18] Sec_cur=${securityCurrent}<15 → 跳过`);
+        this.saveSignalRecord(signal, 'V18_SEC_FILTER', null);
+        return { action: 'SKIP', reason: 'v18_sec_filter', securityCurrent };
+      }
+
+      // ─── Step 5: 唯一网络请求 — 实时价格查询 + 防追高 (~200ms) ─
+      // 优先 livePriceMonitor 缓存（0ms），否则查 Jupiter Price API
+      const liveMC = this._getCachedMC(ca);
+      if (liveMC > 0 && mc > 0 && liveMC > mc * 1.20) {
+        const premium = ((liveMC / mc - 1) * 100).toFixed(1);
+        console.log(`🚫 [防追高] $${signal.symbol} 信号MC=$${(mc/1000).toFixed(1)}K → 实时MC=$${(liveMC/1000).toFixed(1)}K (溢价+${premium}% > 20%) → 放弃`);
+        this.saveSignalRecord(signal, 'ANTI_CHASE', null);
+        return { action: 'SKIP', reason: 'anti_chase', premium: parseFloat(premium) };
+      }
+
+      const elapsed = Date.now() - t0;
+      console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super=${superCurrent}(Δ${superDelta}) Trade=${tradeCurrent}(Δ${tradeDelta}) Addr=${addressCurrent} Sec=${securityCurrent} | 决策耗时:${elapsed}ms`);
+
+      const finalSize = 0.06;
+      const exitStrategy = 'ASYMMETRIC';
+      const tradeConviction = 'HIGH';
+
+      const aiResult = {
+        action: 'BUY_FULL', confidence: 90,
+        narrative_tier: 'CONFIRMED',
+        narrative_reason: `v18: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent}`,
+        entry_timing: 'OPTIMAL', stop_loss_percent: 40,
+        exitStrategy
+      };
+
+      // ─── Step 6: 执行 ─────────────────────────────────────────
       if (this.shadowMode) {
         this.stats.shadow_logged++;
         console.log(`🎭 [SHADOW] 模拟买入 $${signal.symbol} | ${finalSize} SOL`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult, true);
+        this.saveSignalRecord(signal, 'PASS', aiResult, true);
         this.saveShadowTrade(signal, aiResult, finalSize);
-
-        let entryMC = dexData?.market_cap || signal.market_cap || 0;
-        if (this.livePriceMonitor) {
-          const livePrice = this.livePriceMonitor.priceCache.get(ca);
-          if (livePrice && livePrice.mc && (Date.now() - livePrice.timestamp) < 10000) {
-            entryMC = livePrice.mc;
-          }
-        }
-
+        const entryMC = liveMC || mc;
         this.shadowTracker.addPosition(ca, signal.symbol || 'UNKNOWN', entryMC, aiResult.confidence);
         this._watchlist.delete(ca);
         this._saveWatchlist();
         if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
-
         return { action: 'SHADOW_BUY', size: finalSize, ai: aiResult };
       }
 
       if (!this.autoBuyEnabled) {
         console.log(`📋 [通知] 建议买入 $${signal.symbol} | ${finalSize} SOL (自动买入未开启)`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult, false);
+        this.saveSignalRecord(signal, 'PASS', aiResult, false);
         return { action: 'NOTIFY', size: finalSize, ai: aiResult };
       }
 
-      // 实盘买入前：检查链上 SOL 余额
+      // SOL 余额检查
       if (this.jupiterExecutor) {
         try {
           const solBalance = await this.jupiterExecutor.getSolBalance();
           const minRequired = finalSize + 0.025;
           if (solBalance < minRequired) {
-            console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过 $${signal.symbol}`);
-            this.saveSignalRecord(signal, gateResult.status, aiResult, false);
+            console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过`);
+            this.saveSignalRecord(signal, 'PASS', aiResult, false);
             return { action: 'SKIP_INSUFFICIENT_BALANCE', balance: solBalance, required: minRequired };
           }
-          console.log(`💰 [余额检查] SOL余额: ${solBalance.toFixed(4)} ≥ 需要: ${minRequired.toFixed(4)} → 可以买入`);
+          console.log(`💰 [余额] ${solBalance.toFixed(4)} SOL ≥ ${minRequired.toFixed(4)} → 可买入`);
         } catch (e) {
-          console.warn(`⚠️ [余额检查] 查询失败: ${e.message}，继续买入`);
+          console.warn(`⚠️ [余额检查] 查询失败: ${e.message}，继续`);
         }
       }
 
-      // 实盘执行 (v17)
-      console.log(`💰 [执行] ATH#1 买入 $${signal.symbol} | ${finalSize} SOL | 出场:${exitStrategy}...`);
+      console.log(`💰 [执行] 买入 $${signal.symbol} | ${finalSize} SOL | ${exitStrategy}...`);
 
       try {
         let tradeResult;
-
         if (this.jupiterExecutor) {
-          tradeResult = await this.jupiterExecutor.buy(ca, finalSize, {
-            liquidity: dexData?.liquidity_usd || 0,
-            mc: mc || 0
-          });
+          tradeResult = await this.jupiterExecutor.buy(ca, finalSize, { mc: mc || 0 });
 
           if (tradeResult.success && this.livePositionMonitor) {
-            const entryMC = dexData?.market_cap || signal.market_cap || 0;
-
             // 等待余额更新
             await new Promise(r => setTimeout(r, 3000));
             const balance = await this.jupiterExecutor.getTokenBalance(ca);
 
             if (balance.amount <= 0) {
-              console.error(`❌ [验证失败] 买入交易发送但余额为0，交易可能失败`);
+              console.error(`❌ [验证失败] 买入后余额为0，交易可能失败`);
               this.stats.errors++;
               return { action: 'EXEC_FAILED', reason: '买入后余额为0' };
             }
 
             const tokenAmount = balance.amount;
             const tokenDecimals = balance.decimals || 6;
-            console.log(`📦 [Token] 验证余额: ${tokenAmount} tokens (decimals: ${tokenDecimals})`);
-
             const actualTokenAmount = tokenAmount / Math.pow(10, tokenDecimals);
             const entryPrice = finalSize / actualTokenAmount;
-            console.log(`💰 [Entry] 入场价格: ${entryPrice.toFixed(10)} SOL/token | ${finalSize} SOL → ${actualTokenAmount.toFixed(2)} tokens`);
+            const entryMC = liveMC || mc;
+            console.log(`💰 [Entry] ${entryPrice.toFixed(10)} SOL/token | ${finalSize} SOL → ${actualTokenAmount.toFixed(2)} tokens`);
 
             this.livePositionMonitor.addPosition(
               ca, signal.symbol, entryPrice, entryMC, finalSize,
               tokenAmount, tokenDecimals, tradeConviction, exitStrategy
             );
-
-            // 清理观察列表（v17不再使用，保留兼容）
             this._watchlist.delete(ca);
-            console.log(`🎯 [v18] ATH#1 买入完成 $${signal.symbol} | ${finalSize} SOL | 出场: ${exitStrategy}`);
-
             this.recentSymbols.set(signal.symbol, Date.now());
+            if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
+            console.log(`🎯 [v18] 买入完成 $${signal.symbol} | 总耗时:${Date.now()-t0}ms`);
           }
         } else {
           tradeResult = await this.executor.executeBuy(ca, 'SOL', finalSize);
         }
 
         this.stats.executed++;
-        console.log(`✅ [执行] 交易成功: ${JSON.stringify(tradeResult)}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult, true);
+        this.saveSignalRecord(signal, 'PASS', aiResult, true);
         return { action: 'EXECUTED', size: finalSize, ai: aiResult, trade: tradeResult };
       } catch (execError) {
         this.stats.errors++;
         console.error(`❌ [执行] 交易失败: ${execError.message}`);
-        this.saveSignalRecord(signal, gateResult.status, aiResult, false);
+        this.saveSignalRecord(signal, 'PASS', aiResult, false);
         return { action: 'EXEC_FAILED', reason: execError.message };
       }
 
@@ -695,6 +539,18 @@ export class PremiumSignalEngine {
       console.error(`❌ [Premium] Pipeline 异常: ${error.message}`);
       return { action: 'ERROR', reason: error.message };
     }
+  }
+
+  /**
+   * 从 livePriceMonitor 缓存中获取实时 MC（无网络请求）
+   */
+  _getCachedMC(ca) {
+    if (!this.livePriceMonitor) return 0;
+    const cached = this.livePriceMonitor.priceCache.get(ca);
+    if (cached && cached.mc && (Date.now() - cached.timestamp) < 30000) {
+      return cached.mc;
+    }
+    return 0;
   }
 
   /**
