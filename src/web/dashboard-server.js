@@ -1874,7 +1874,7 @@ h1{color:#00d9ff}pre{background:#111;padding:15px;border-radius:8px;overflow-x:a
 async function refresh(){
   const level=document.getElementById('level').value;
   const limit=document.getElementById('limit').value;
-  const res=await fetch('/api/logs?limit='+limit+(level?&'level='+level:''));
+  const res=await fetch('/api/logs?limit='+limit+(level?'&level='+level:''));
   const data=await res.json();
   document.getElementById('logs').innerHTML=data.logs.map(l=>
     '<span class="'+l.level+'">['+l.timestamp.slice(11,19)+'] ['+l.level+'] '+l.message.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</span>'
