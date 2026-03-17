@@ -148,6 +148,28 @@ export class RiskManager {
       };
     }
 
+    // 1.5 检查每日净亏损限制 (收回SOL - 投入SOL)
+    const dailyLossLimit = this.params.DAILY_LOSS_LIMIT?.SOL || 0.3;
+    try {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayRows = this.db.prepare(`
+        SELECT COALESCE(SUM(entry_sol), 0) as total_spent,
+               COALESCE(SUM(CASE WHEN total_sol_received > 0 THEN total_sol_received ELSE 0 END), 0) as total_received
+        FROM live_positions
+        WHERE status = 'closed' AND closed_at >= ?
+      `).get(todayStart.toISOString());
+      if (todayRows) {
+        const netPnl = todayRows.total_received - todayRows.total_spent;
+        if (netPnl <= -dailyLossLimit) {
+          return {
+            allowed: false,
+            reason: `今日净亏损 ${netPnl.toFixed(4)} SOL，达到每日上限 -${dailyLossLimit} SOL`
+          };
+        }
+      }
+    } catch (e) { /* live_positions表可能不存在 */ }
+
     // 2. 🛑 v6.8 静默熔断模式 (Stress Test) - 记录但不停机
     if (this.state.consecutiveLosses >= this.params.CIRCUIT_BREAKER.CONSECUTIVE_LOSS_PAUSE) {
       // 模拟盘阶段：只记录，不真的停机，用于采集数据
@@ -784,8 +806,24 @@ ${lossDetails || '(无记录)'}
       inRecoveryPeriod: isInRecovery,
       recoveryTimeRemaining: isInRecovery
         ? Math.ceil((this.params.CIRCUIT_BREAKER.RECOVERY_PERIOD_HOURS * 60 * 60 * 1000 - (Date.now() - this._lastCircuitBreakerTime)) / 60000)
-        : 0
+        : 0,
+      dailyNetPnlSol: this._getDailyNetPnl(),
+      dailyLossLimitSol: this.params.DAILY_LOSS_LIMIT?.SOL || 0.3
     };
+  }
+
+  _getDailyNetPnl() {
+    try {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const row = this.db.prepare(`
+        SELECT COALESCE(SUM(entry_sol), 0) as total_spent,
+               COALESCE(SUM(CASE WHEN total_sol_received > 0 THEN total_sol_received ELSE 0 END), 0) as total_received
+        FROM live_positions
+        WHERE status = 'closed' AND closed_at >= ?
+      `).get(todayStart.toISOString());
+      return row ? +(row.total_received - row.total_spent).toFixed(4) : 0;
+    } catch (e) { return 0; }
   }
 
   /**

@@ -1805,7 +1805,7 @@ const server = http.createServer(async (req, res) => {
       if (rm) {
         const status = rm.getStatus();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ paused: !!status.pausedUntil, pausedUntil: status.pausedUntil, consecutiveLosses: status.consecutiveLosses, canTrade: status.canTrade }));
+        res.end(JSON.stringify({ paused: !!status.pausedUntil, pausedUntil: status.pausedUntil, consecutiveLosses: status.consecutiveLosses, canTrade: status.canTrade, dailyNetPnl: status.dailyNetPnlSol, dailyLossLimit: status.dailyLossLimitSol }));
       } else {
         const d = getDb();
         const row = d.prepare(`SELECT value, expires_at FROM system_state WHERE key = 'trading_paused'`).get();
@@ -2203,15 +2203,17 @@ function renderPremiumDashboard() {
         const canTrade=d.canTrade;
         const isPaused=d.paused;
         const isBlocked=canTrade&&!canTrade.allowed;
+        const lossInfo=d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'';
+        const dailyInfo=d.dailyNetPnl!==undefined?' | 今日:'+(d.dailyNetPnl>=0?'+':'')+d.dailyNetPnl+'/'+(-d.dailyLossLimit)+' SOL':'';
         if(isPaused){
           const until=d.pausedUntil?new Date(d.pausedUntil).toLocaleString('zh-CN'):'';
-          el.innerHTML='🔴 <span style="color:#ff4757">交易已暂停</span>'+(until?' (至 '+until+')':'')+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
+          el.innerHTML='🔴 <span style="color:#ff4757">交易已暂停</span>'+(until?' (至 '+until+')':'')+lossInfo+dailyInfo;
           btnP.style.display='none';btnR.style.display='inline-block';
         }else if(isBlocked){
-          el.innerHTML='🟡 <span style="color:#ffa502">交易受限</span> — '+(canTrade.reason||'')+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
+          el.innerHTML='🟡 <span style="color:#ffa502">交易受限</span> — '+(canTrade.reason||'')+lossInfo+dailyInfo;
           btnP.style.display='none';btnR.style.display='inline-block';
         }else{
-          el.innerHTML='🟢 <span style="color:#2ed573">交易正常</span>'+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
+          el.innerHTML='🟢 <span style="color:#2ed573">交易正常</span>'+lossInfo+dailyInfo;
           btnP.style.display='inline-block';btnR.style.display='none';
         }
       }catch(e){}

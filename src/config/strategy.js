@@ -445,7 +445,7 @@ const config = {
 
         // 物理熔断
         CIRCUIT_BREAKER: {
-            CONSECUTIVE_LOSS_PAUSE: 3,
+            CONSECUTIVE_LOSS_PAUSE: 6,
             PAUSE_DURATION_HOURS: 4,
             WIN_RATE_THRESHOLD: 0.25,
             MIN_TRADES_FOR_STATS: 10,
