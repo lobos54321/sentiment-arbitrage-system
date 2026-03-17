@@ -1829,7 +1829,7 @@ const server = http.createServer(async (req, res) => {
       const d = getDb();
       const count = d.prepare(`SELECT COUNT(*) as c FROM live_positions`).get().c;
       d.prepare(`DELETE FROM live_positions`).run();
-      d.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run();
+      try { d.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run(); } catch(e) { /* table may not exist */ }
       const rm = global.__riskManager;
       if (rm) {
         rm.state.pausedUntil = null;
@@ -2125,6 +2125,11 @@ function renderPremiumDashboard() {
   <button class="refresh-btn" onclick="loadData()">刷新</button>
   <div class="container">
     <h1>💎 Premium Channel Dashboard</h1>
+    <!-- 钱包余额 - 始终显示 -->
+    <div style="text-align:center;margin-bottom:15px">
+      <span style="font-size:1.8em;font-weight:bold;color:#00d9ff" id="wallet-sol">--</span>
+      <span style="color:#888;font-size:0.9em;margin-left:6px">SOL</span>
+    </div>
     <!-- 交易控制面板 -->
     <div style="display:flex;gap:10px;justify-content:center;margin-bottom:15px;align-items:center">
       <span id="trading-status" style="font-size:0.9em;color:#888">加载中...</span>
@@ -2153,12 +2158,7 @@ function renderPremiumDashboard() {
         const solSpent=(ls.totalSolSpent||0);
         const solRecv=(ls.totalSolReceived||0);
         const netSol=solRecv-solSpent;
-        const realPnl=solSpent>0?((netSol/solSpent)*100):0;
-        // 钱包余额
-        let walletHtml='<div class="card"><div class="big-num blue">--</div><div class="label">钱包余额 SOL</div></div>';
-        try{const wr=await fetch('/api/wallet-balance'+_q);const wd=await wr.json();if(wd.sol!==undefined)walletHtml='<div class="card"><div class="big-num blue">'+Number(wd.sol).toFixed(4)+'</div><div class="label">钱包余额 SOL</div></div>';}catch(e){}
         document.getElementById('live-summary').innerHTML=
-          walletHtml+
           '<div class="card"><div class="big-num '+(ls.winRate>=60?'green':ls.winRate>=40?'yellow':'red')+'">'+(ls.winRate||0)+'%</div><div class="label">胜率 ('+(ls.wins||0)+'W/'+(ls.losses||0)+'L / '+(ls.total||0)+'笔)</div></div>'+
           '<div class="card"><div class="big-num '+(netSol>=0?'green':'red')+'">'+(netSol>=0?'+':'')+netSol.toFixed(4)+'</div><div class="label">净盈亏 SOL</div></div>'+
           '<div class="card"><div class="big-num orange">'+(solSpent).toFixed(4)+'</div><div class="label">总投入 SOL</div></div>'+
@@ -2232,10 +2232,20 @@ function renderPremiumDashboard() {
       }catch(e){alert('请求失败: '+e.message);}
     }
 
+    async function refreshWallet(){
+      try{
+        const r=await fetch('/api/wallet-balance'+_q);
+        const d=await r.json();
+        if(d.sol!==undefined) document.getElementById('wallet-sol').textContent=Number(d.sol).toFixed(4);
+      }catch(e){}
+    }
+
     loadData();
     refreshTradingStatus();
+    refreshWallet();
     setInterval(loadData,15000);
     setInterval(refreshTradingStatus,10000);
+    setInterval(refreshWallet,8000);
   </script>
 </body>
 </html>`;
