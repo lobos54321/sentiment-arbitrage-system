@@ -829,6 +829,7 @@ class PremiumChannelSystem {
 
     // 暴露给 dashboard-server 用于手动暂停/恢复交易
     global.__riskManager = this.engine.riskManager;
+    if (this.jupiterExecutor) global.__executor = this.jupiterExecutor;
 
     // 启动 Dashboard Server（Zeabur 健康检查 + /premium 页面）
     startDashboardServer();

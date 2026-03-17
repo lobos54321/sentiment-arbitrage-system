@@ -1919,6 +1919,14 @@ const server = http.createServer(async (req, res) => {
     // 钱包 SOL 余额查询
     if (!checkAuth(req, url, res)) return;
     try {
+      const executor = global.__executor;
+      if (executor && executor.walletAddress) {
+        const balance = await executor.getSolBalance();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ balance: +balance.toFixed(4), wallet: executor.walletAddress.substring(0, 8) + '...' + executor.walletAddress.slice(-4) }));
+        return;
+      }
+      // fallback: 用环境变量
       const walletAddr = process.env.TRADE_WALLET_ADDRESS || process.env.WALLET_ADDRESS || '';
       const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
       if (!walletAddr) {
@@ -2201,7 +2209,7 @@ function renderPremiumDashboard() {
           btnP.style.display='none';btnR.style.display='inline-block';
         }else if(isBlocked){
           el.innerHTML='🟡 <span style="color:#ffa502">交易受限</span> — '+(canTrade.reason||'')+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
-          btnP.style.display='inline-block';btnR.style.display='none';
+          btnP.style.display='none';btnR.style.display='inline-block';
         }else{
           el.innerHTML='🟢 <span style="color:#2ed573">交易正常</span>'+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
           btnP.style.display='inline-block';btnR.style.display='none';
@@ -2236,8 +2244,18 @@ function renderPremiumDashboard() {
       try{
         const r=await fetch('/api/wallet-balance'+_q);
         const d=await r.json();
-        if(d.sol!==undefined) document.getElementById('wallet-sol').textContent=Number(d.sol).toFixed(4);
-      }catch(e){}
+        const el=document.getElementById('wallet-sol');
+        if(d.balance!==null&&d.balance!==undefined){
+          el.textContent=Number(d.balance).toFixed(4);
+          el.style.color='#00d9ff';
+        }else{
+          el.textContent=d.error||'无法获取';
+          el.style.color='#ff4757';
+          el.style.fontSize='0.8em';
+        }
+      }catch(e){
+        document.getElementById('wallet-sol').textContent='连接失败';
+      }
     }
 
     loadData();
