@@ -285,6 +285,7 @@ export class RiskManager {
         FROM live_positions
         WHERE status = 'closed'
         AND closed_at >= strftime('%s', 'now', 'start of day') * 1000
+        AND total_sol_received >= 0
       `).get();
 
       return { sol: result.total_pnl || 0, bnb: 0 };

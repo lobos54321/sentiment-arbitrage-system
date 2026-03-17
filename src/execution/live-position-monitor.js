@@ -189,10 +189,10 @@ export class LivePositionMonitor {
           const balance = await this.executor.getTokenBalance(row.token_ca);
           if (balance.amount <= 0) {
             // token 已经不在钱包里了（可能手动卖了或转走了）
-            console.log(`   ✓ $${row.symbol} 已不在钱包中，移除记录`);
-            // 设置 total_sol_received = -1 标记为"手动处理"，避免重复检查
+            console.log(`   ✓ $${row.symbol} 已不在钱包中，标记为手动处理`);
+            // total_sol_received = 0 表示手动处理，无法追踪实际收回
             this.db.prepare(`
-              UPDATE live_positions SET total_sol_received = -1, exit_reason = ? WHERE id = ?
+              UPDATE live_positions SET total_sol_received = 0, exit_reason = ? WHERE id = ?
             `).run(`${row.exit_reason}(MANUAL_SOLD)`, row.id);
             continue;
           }

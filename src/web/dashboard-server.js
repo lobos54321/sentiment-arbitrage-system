@@ -1648,7 +1648,7 @@ const server = http.createServer(async (req, res) => {
           AVG(exit_pnl) as avgPnl,
           SUM(exit_pnl) as totalPnl,
           SUM(entry_sol) as totalSolSpent,
-          SUM(total_sol_received) as totalSolReceived
+          SUM(CASE WHEN total_sol_received >= 0 THEN total_sol_received ELSE 0 END) as totalSolReceived
         FROM live_positions WHERE status = 'closed'
       `).get();
 
