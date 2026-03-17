@@ -1061,9 +1061,12 @@ export class LivePositionMonitor {
             const balance = await this.executor.getTokenBalance(row.token_ca);
             if (balance.amount <= 0) {
               const exitReason = row.status === 'selling' ? 'SELL_COMPLETED_BEFORE_CRASH' : 'MANUAL_SELL';
-              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭 (${exitReason})`);
-              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason=?, closed_at=? WHERE token_ca=? AND status IN ('open', 'selling')`)
-                .run(exitReason, Date.now(), row.token_ca);
+              // 尝试用已记录的 total_sol_received 或标记为 -1（手动卖出标记）
+              const solReceived = (row.total_sol_received && row.total_sol_received > 0) ? row.total_sol_received : -1;
+              const exitPnl = solReceived > 0 ? ((solReceived - row.entry_sol) / row.entry_sol * 100) : null;
+              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭 (${exitReason})${exitPnl !== null ? ' PnL:' + exitPnl.toFixed(1) + '%' : ''}`);
+              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason=?, closed_at=?, total_sol_received=COALESCE(NULLIF(total_sol_received,0),?), exit_pnl=COALESCE(exit_pnl,?) WHERE token_ca=? AND status IN ('open', 'selling')`)
+                .run(exitReason, Date.now(), solReceived, exitPnl, row.token_ca);
               cleaned++;
               continue;
             }
