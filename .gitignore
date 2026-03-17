@@ -1,15 +1,13 @@
 node_modules/
 data/*.db
 data/*.db-journal
+data/*.json
 npm-debug.log
 .DS_Store
 *.log
 .env
 .env.local
 .env.production
-
-# Backtest data and scripts (local only)
-data/ohlcv-cache.json
-data/v18-backtest-*.json
-scripts/v18-backtest-*.js
-scripts/v18-full-backtest.js
+scripts/v18-*.js
+scripts/backtest-*.py
+scripts/backtest-*.js
