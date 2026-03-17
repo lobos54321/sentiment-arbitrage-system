@@ -230,10 +230,13 @@ function renderDashboard(data) {
   </style>
   <!-- 移除 meta refresh，改用 AJAX 轮询 -->
   <script>
+    const _token=new URLSearchParams(window.location.search).get('token')||'';
+    const _q=_token?'?token='+encodeURIComponent(_token):'';
+    const _a=_token?'&token='+encodeURIComponent(_token):'';
     // SOL 余额轮询（每 30 秒，不刷页面）
     async function refreshSolBalance() {
       try {
-        const r = await fetch('/api/wallet-balance');
+        const r = await fetch('/api/wallet-balance'+_q);
         const d = await r.json();
         const el = document.getElementById('stat-sol-balance');
         if (el) {
@@ -1900,10 +1903,12 @@ h1{color:#00d9ff}pre{background:#111;padding:15px;border-radius:8px;overflow-x:a
 </div>
 <pre id="logs">加载中...</pre>
 <script>
+const _token=new URLSearchParams(window.location.search).get('token')||'';
+const _a=_token?'&token='+encodeURIComponent(_token):'';
 async function refresh(){
   const level=document.getElementById('level').value;
   const limit=document.getElementById('limit').value;
-  const res=await fetch('/api/logs?limit='+limit+(level?'&level='+level:''));
+  const res=await fetch('/api/logs?limit='+limit+(level?'&level='+level:'')+_a);
   const data=await res.json();
   document.getElementById('logs').innerHTML=data.logs.map(l=>
     '<span class="'+l.level+'">['+l.timestamp.slice(11,19)+'] ['+l.level+'] '+l.message.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</span>'
@@ -2038,10 +2043,12 @@ function renderPremiumDashboard() {
       }
     }
 
+    const _token=new URLSearchParams(window.location.search).get('token')||'';
+    const _q=_token?'?token='+encodeURIComponent(_token):'';
     async function loadData(){
       try{
         // Shadow 数据
-        const res=await fetch('/api/shadow-pnl');
+        const res=await fetch('/api/shadow-pnl'+_q);
         const d=await res.json();
         const s=d.summary;
         document.getElementById('summary').innerHTML=
@@ -2074,7 +2081,7 @@ function renderPremiumDashboard() {
         }).join('');
 
         // 实盘数据
-        const liveRes=await fetch('/api/live-positions');
+        const liveRes=await fetch('/api/live-positions'+_q);
         const live=await liveRes.json();
         const ls=live.summary;
         document.getElementById('live-summary').innerHTML=
