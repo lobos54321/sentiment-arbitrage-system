@@ -22,6 +22,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteJSON } from '../utils/atomic-write.js';
 
 class DeadDogPool {
     constructor(config = {}) {
@@ -360,7 +361,7 @@ class DeadDogPool {
                 fs.mkdirSync(dir, { recursive: true });
             }
 
-            fs.writeFileSync(this.config.DATA_FILE, JSON.stringify(data, null, 2));
+            await atomicWriteJSON(this.config.DATA_FILE, data);
         } catch (error) {
             console.error('❌ [DeadDogPool] 保存失败:', error.message);
         }

@@ -36,6 +36,17 @@ import { LivePositionMonitor } from './execution/live-position-monitor.js';
 
 dotenv.config();
 
+// 全局兜底：防止 async EventEmitter 回调的未捕获 rejection 导致进程崩溃
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🔴 [GLOBAL] Unhandled Promise Rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('🔴 [GLOBAL] Uncaught Exception:', error);
+  // 给一点时间让日志写完，然后退出（uncaughtException 后状态不可信）
+  setTimeout(() => process.exit(1), 3000);
+});
+
 class SentimentArbitrageSystem {
   constructor() {
     this.config = this.loadConfig();
@@ -767,7 +778,7 @@ class PremiumChannelSystem {
           this.engine.setLivePriceMonitor(this.livePriceMonitor);
         }
 
-        this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor);
+        this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor, this.engine.riskManager);
         await this.livePositionMonitor.start();
 
         // 注入到 engine

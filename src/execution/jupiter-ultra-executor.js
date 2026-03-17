@@ -180,12 +180,17 @@ export class JupiterUltraExecutor {
         const result = await this._executeOrder(signedTx, order.requestId);
 
         if (result.status === 'Success') {
-          // 查询实际 SOL 到账（链上真实值，而非报价）
-          await new Promise(r => setTimeout(r, 2000));  // 等待余额更新
-          const solAfter = await this.getSolBalance();
-          const actualSolReceived = solAfter - solBefore;
-          // 如果查询失败或异常，fallback 到报价值
-          const outSol = actualSolReceived > 0 ? actualSolReceived : quotedSol;
+          // 优先使用 API 返回的精确值，避免并发余额竞态（CR-4）
+          let outSol;
+          if (result.outputAmount) {
+            outSol = parseFloat(result.outputAmount) / LAMPORTS_PER_SOL;
+          } else {
+            // fallback：查询余额差值（单笔时准确，并发时可能包含其他交易）
+            await new Promise(r => setTimeout(r, 2000));  // 等待余额更新
+            const solAfter = await this.getSolBalance();
+            const actualSolReceived = solAfter - solBefore;
+            outSol = actualSolReceived > 0 ? actualSolReceived : quotedSol;
+          }
 
           this.stats.sells++;
           this.stats.total_sol_received += outSol;

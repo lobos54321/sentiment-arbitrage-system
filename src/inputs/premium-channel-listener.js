@@ -259,11 +259,16 @@ export class PremiumChannelListener {
     // Extract Egeye AI Index data
     const indices = this._parseIndices(text);
 
+    if (!mcTo || mcTo === 0) {
+      console.log(`⚠️ [ATH] $${symbol || 'UNKNOWN'} mcTo=0, 使用 mcFrom=${mcFrom} 作为估算`);
+    }
+    const mc = mcTo || mcFrom || 0;
+
     return {
       token_ca,
       chain: 'SOL',
       symbol: symbol || 'UNKNOWN',
-      market_cap: mcTo || mcFrom,
+      market_cap: mc,
       market_cap_from: mcFrom,
       gain_pct: gainPct,
       is_ath: true,

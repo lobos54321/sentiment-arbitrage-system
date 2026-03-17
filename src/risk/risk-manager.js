@@ -20,6 +20,7 @@ export class RiskManager {
 
     // 风险参数 - 从 strategy.js 统一配置读取
     this.params = RISK;
+    this.shadowMode = process.env.SHADOW_MODE !== 'false';
 
     // 状态追踪
     this.state = {
@@ -57,18 +58,17 @@ export class RiskManager {
 
       // 获取连续亏损次数（只统计重置时间点之后的记录）
       const recentTrades = this.db.prepare(`
-        SELECT pnl_percent
-        FROM positions
+        SELECT exit_pnl
+        FROM live_positions
         WHERE status = 'closed'
-        AND exit_time > datetime(?, 'unixepoch')
-        AND signal_source NOT LIKE '%CYCLE_RESET%'
-        ORDER BY exit_time DESC
+        AND closed_at > ? * 1000
+        ORDER BY closed_at DESC
         LIMIT 10
       `).all(resetTs);
 
       let consecutiveLosses = 0;
       for (const trade of recentTrades) {
-        if (trade.pnl_percent < 0) {
+        if (trade.exit_pnl < 0) {
           consecutiveLosses++;
         } else {
           break;
@@ -108,6 +108,23 @@ export class RiskManager {
             this._lastCircuitBreakerTime = ts;
             const remaining = Math.ceil((recoveryPeriodMs - (Date.now() - ts)) / 60000);
             console.log(`   🔥 熔断恢复期: 还剩 ${remaining} 分钟，仓位减半`);
+          }
+        }
+      } catch (e) { /* ignore */ }
+
+      // 恢复熔断激活标志（_circuitBreakerTriggered）
+      try {
+        const cbState = this.db.prepare(`
+          SELECT value FROM system_state WHERE key = 'circuit_breaker_active'
+        `).get();
+        if (cbState) {
+          const cbTime = parseInt(cbState.value);
+          const recoveryMs = (this.params.CIRCUIT_BREAKER?.RECOVERY_PERIOD_HOURS || 4) * 3600000;
+          if (Date.now() - cbTime < recoveryMs) {
+            this._lastCircuitBreakerTime = this._lastCircuitBreakerTime || cbTime;
+            this._circuitBreakerTriggered = true;
+            this._circuitBreakerLogged = true;
+            console.log(`   🚨 熔断状态已从DB恢复，仍在恢复期内`);
           }
         }
       } catch (e) { /* ignore */ }
@@ -152,6 +169,14 @@ export class RiskManager {
             INSERT INTO system_state (key, value, expires_at)
             VALUES ('circuit_breaker_' || ?, ?, ?)
           `).run(Date.now(), this.state.consecutiveLosses, Math.floor(Date.now() / 1000));
+        } catch (e) { /* ignore */ }
+
+        // 持久化熔断激活状态，重启后可恢复
+        try {
+          this.db.prepare(`
+            INSERT OR REPLACE INTO system_state (key, value)
+            VALUES ('circuit_breaker_active', ?)
+          `).run(Date.now().toString());
         } catch (e) { /* ignore */ }
 
         // 发送通知但不停机
@@ -234,16 +259,16 @@ export class RiskManager {
 
     // 5. 检查每日亏损上限
     const dailyPnL = this.getTodayPnL();
-    if (dailyPnL.sol <= -this.params.DAILY_LOSS_LIMIT_SOL) {
+    if (dailyPnL.sol <= -(this.params.DAILY_LOSS_LIMIT?.SOL || 0.5)) {
       return {
         allowed: false,
-        reason: `今日 SOL 亏损 ${Math.abs(dailyPnL.sol).toFixed(2)} 已达上限 ${this.params.DAILY_LOSS_LIMIT_SOL}`
+        reason: `今日 SOL 亏损 ${Math.abs(dailyPnL.sol).toFixed(2)} 已达上限 ${this.params.DAILY_LOSS_LIMIT?.SOL || 0.5}`
       };
     }
-    if (dailyPnL.bnb <= -this.params.DAILY_LOSS_LIMIT_BNB) {
+    if (dailyPnL.bnb <= -(this.params.DAILY_LOSS_LIMIT?.BNB || 0.1)) {
       return {
         allowed: false,
-        reason: `今日 BNB 亏损 ${Math.abs(dailyPnL.bnb).toFixed(2)} 已达上限 ${this.params.DAILY_LOSS_LIMIT_BNB}`
+        reason: `今日 BNB 亏损 ${Math.abs(dailyPnL.bnb).toFixed(2)} 已达上限 ${this.params.DAILY_LOSS_LIMIT?.BNB || 0.1}`
       };
     }
 
@@ -255,22 +280,14 @@ export class RiskManager {
    */
   getTodayPnL() {
     try {
-      const stats = this.db.prepare(`
-        SELECT 
-          chain,
-          SUM(pnl_native) as total_pnl
-        FROM positions 
+      const result = this.db.prepare(`
+        SELECT COALESCE(SUM(total_sol_received - entry_sol), 0) as total_pnl
+        FROM live_positions
         WHERE status = 'closed'
-        AND exit_time >= date('now', 'start of day')
-        GROUP BY chain
-      `).all();
+        AND closed_at >= strftime('%s', 'now', 'start of day') * 1000
+      `).get();
 
-      const result = { sol: 0, bnb: 0 };
-      for (const row of stats) {
-        if (row.chain === 'SOL') result.sol = row.total_pnl;
-        if (row.chain === 'BSC') result.bnb = row.total_pnl;
-      }
-      return result;
+      return { sol: result.total_pnl || 0, bnb: 0 };
     } catch (error) {
       return { sol: 0, bnb: 0 };
     }
@@ -343,8 +360,8 @@ export class RiskManager {
           };
         }
         // 检查是否在允许列表中 (如果有明确限制)
-        if (allowedTiers.length > 0 && !allowedTiers.includes(narrativeTier) && narrativeTier !== 'TIER_C') {
-          // TIER_C 不做限制，因为很多信号没有叙事评级
+        if (allowedTiers.length > 0 && !allowedTiers.includes(narrativeTier)) {
+          // TIER_C（未评级）也受限 — 防御模式下只允许明确评级的优质标的
           return {
             allowed: false,
             adjustedScore: score,
@@ -531,11 +548,10 @@ export class RiskManager {
       this.state.consecutiveLosses++;
     }
 
-    // 🧪 v6.8 模拟盘模式：不真的暂停，只在 canTrade() 中记录
-    // 实盘时取消注释下面的代码：
-    // if (this.state.consecutiveLosses >= this.params.CONSECUTIVE_LOSS_PAUSE) {
-    //   this.pauseTrading();
-    // }
+    // 连亏暂停：shadow 模式只记录不暂停，实盘模式触发暂停
+    if (!this.shadowMode && this.state.consecutiveLosses >= (this.params.CIRCUIT_BREAKER?.CONSECUTIVE_LOSS_PAUSE || 8)) {
+      this.pauseTrading();
+    }
   }
 
   /**
@@ -577,10 +593,10 @@ export class RiskManager {
     let recentLosses = [];
     try {
       recentLosses = this.db.prepare(`
-        SELECT symbol, pnl_percent, exit_time
-        FROM positions
-        WHERE status = 'closed' AND pnl_percent < 0
-        ORDER BY exit_time DESC
+        SELECT symbol, exit_pnl, closed_at
+        FROM live_positions
+        WHERE status = 'closed' AND exit_pnl < 0
+        ORDER BY closed_at DESC
         LIMIT ?
       `).all(this.state.consecutiveLosses);
     } catch (e) {
@@ -588,7 +604,7 @@ export class RiskManager {
     }
 
     const lossDetails = recentLosses
-      .map((t, i) => `${i + 1}. ${t.symbol}: ${t.pnl_percent?.toFixed(1)}%`)
+      .map((t, i) => `${i + 1}. ${t.symbol}: ${t.exit_pnl?.toFixed(1)}%`)
       .join('\n');
 
     const resumeTime = this.state.pausedUntil?.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) || '未知';
@@ -640,7 +656,7 @@ ${lossDetails || '(无记录)'}
   getOpenPositionsCount() {
     try {
       const result = this.db.prepare(`
-        SELECT COUNT(*) as count FROM positions WHERE status = 'open'
+        SELECT COUNT(*) as count FROM live_positions WHERE status = 'open'
       `).get();
       return result?.count || 0;
     } catch (error) {
@@ -654,12 +670,12 @@ ${lossDetails || '(无记录)'}
   getRecentStats() {
     try {
       const stats = this.db.prepare(`
-        SELECT 
+        SELECT
           COUNT(*) as total,
-          SUM(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END) as wins
-        FROM positions
+          SUM(CASE WHEN exit_pnl > 0 THEN 1 ELSE 0 END) as wins
+        FROM live_positions
         WHERE status = 'closed'
-        AND created_at > strftime('%s', 'now', '-7 days')
+        AND closed_at > strftime('%s', 'now', '-7 days') * 1000
       `).get();
 
       return {
@@ -748,12 +764,12 @@ ${lossDetails || '(无记录)'}
     try {
       // 获取所有开放持仓，按盈亏排序（亏损最多的在前）
       const positions = this.db.prepare(`
-        SELECT 
-          id, symbol, token_ca, chain, entry_price, current_price,
-          entry_time, position_size_usd, pnl_percent, sm_entry, sm_current
-        FROM positions
+        SELECT
+          id, symbol, token_ca, entry_sol, total_sol_received, exit_pnl,
+          created_at, entry_sol as position_size
+        FROM live_positions
         WHERE status = 'open'
-        ORDER BY pnl_percent ASC
+        ORDER BY exit_pnl ASC
       `).all();
 
       if (positions.length === 0) {
@@ -765,24 +781,22 @@ ${lossDetails || '(无记录)'}
 
       // 找到符合替换条件的最差持仓
       for (const pos of positions) {
-        const holdTime = now - new Date(pos.entry_time).getTime();
-        const pnl = pos.pnl_percent || 0;
+        const holdTime = now - pos.created_at;
+        const pnl = pos.exit_pnl || 0;
         const smDelta = (pos.sm_current || 0) - (pos.sm_entry || 0);
 
         // 检查所有条件
         const isLoss = pnl < 0;
         const isOldEnough = holdTime >= minHoldTime;
-        const smExited = smDelta < 0;
 
         if (config.REQUIRE_LOSS && !isLoss) continue;
         if (!isOldEnough) continue;
-        if (config.REQUIRE_SM_EXIT && !smExited) continue;
 
         // 找到了可替换的持仓
         return {
           canSwap: true,
           position: pos,
-          reason: `可替换 ${pos.symbol} (PnL: ${pnl.toFixed(1)}%, 持有${(holdTime / 60000).toFixed(0)}min, SM: ${smDelta})`
+          reason: `可替换 ${pos.symbol} (PnL: ${pnl.toFixed(1)}%, 持有${(holdTime / 60000).toFixed(0)}min)`
         };
       }
 

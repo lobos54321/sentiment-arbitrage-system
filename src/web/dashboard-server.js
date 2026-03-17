@@ -1475,34 +1475,40 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { 'Location': '/premium' });
     res.end();
   } else if (url.pathname === '/api/status') {
+    if (!checkAuth(req, url, res)) return;
     const data = getDashboardData();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data, null, 2));
   } else if (url.pathname === '/api/module-health') {
     // v7.3 模块健康状态 API
+    if (!checkAuth(req, url, res)) return;
     const windowDays = parseInt(url.searchParams.get('window')) || 7;
     const moduleHealth = getModuleHealthData(windowDays);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(moduleHealth, null, 2));
   } else if (url.pathname === '/api/narrative-effectiveness') {
     // v7.3 AI 叙事有效性 API
+    if (!checkAuth(req, url, res)) return;
     const narrativeData = getNarrativeEffectivenessData();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(narrativeData, null, 2));
   } else if (url.pathname === '/api/ab-test') {
     // v7.3 A/B 测试状态 API
+    if (!checkAuth(req, url, res)) return;
     const windowDays = parseInt(url.searchParams.get('window')) || 14;
     const abTestData = getABTestData(windowDays);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(abTestData, null, 2));
   } else if (url.pathname === '/api/rejected-signals') {
     // v7.3 拒绝信号统计 API
+    if (!checkAuth(req, url, res)) return;
     const windowDays = parseInt(url.searchParams.get('window')) || 7;
     const rejectedData = getRejectedSignalsData(windowDays);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(rejectedData, null, 2));
   } else if (url.pathname === '/api/channel-history') {
     // Fetch Telegram channel message history for backtest
+    if (!checkAuth(req, url, res)) return;
     try {
       const tg = global.__telegramService;
       if (!tg || !tg.client) {
@@ -1520,6 +1526,7 @@ const server = http.createServer(async (req, res) => {
     }
   } else if (url.pathname === '/api/shadow-pnl') {
     // Premium Channel Shadow PnL API
+    if (!checkAuth(req, url, res)) return;
     try {
       const d = getDb();
       if (!d) throw new Error('Database not ready');
@@ -1578,10 +1585,12 @@ const server = http.createServer(async (req, res) => {
     }
   } else if (url.pathname === '/premium') {
     // Premium Channel Dashboard 页面
+    if (!checkAuth(req, url, res)) return;
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(renderPremiumDashboard());
   } else if (url.pathname === '/api/live-positions') {
     // 实盘交易记录 API
+    if (!checkAuth(req, url, res)) return;
     try {
       const d = getDb();
       if (!d) throw new Error('Database not ready');
@@ -1758,6 +1767,7 @@ const server = http.createServer(async (req, res) => {
     return;
   } else if (url.pathname === '/api/signals/stream') {
     // SSE (Server-Sent Events) endpoint for real-time signal streaming
+    if (!checkAuth(req, url, res)) return;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -1784,6 +1794,7 @@ const server = http.createServer(async (req, res) => {
     return;
   } else if (url.pathname === '/api/wallet-balance') {
     // 钱包 SOL 余额查询
+    if (!checkAuth(req, url, res)) return;
     try {
       const walletAddr = process.env.TRADE_WALLET_ADDRESS || process.env.WALLET_ADDRESS || '';
       const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
@@ -1825,6 +1836,7 @@ const server = http.createServer(async (req, res) => {
     return;
   } else if (url.pathname === '/api/logs') {
     // 最近日志 API（JSON格式）
+    if (!checkAuth(req, url, res)) return;
     const limit = parseInt(url.searchParams?.get('limit') || '100');
     const level = url.searchParams?.get('level'); // 可选过滤: INFO, ERROR, WARN
     let logs = logBuffer.slice(-limit);
@@ -1836,6 +1848,7 @@ const server = http.createServer(async (req, res) => {
     return;
   } else if (url.pathname === '/api/logs/download') {
     // 日志下载端点（完整日志文件）
+    if (!checkAuth(req, url, res)) return;
     if (fs.existsSync(runtimeLogPath)) {
       const stats = fs.statSync(runtimeLogPath);
       res.writeHead(200, {
@@ -1857,6 +1870,7 @@ const server = http.createServer(async (req, res) => {
     return;
   } else if (url.pathname === '/logs') {
     // 日志查看页面（HTML）
+    if (!checkAuth(req, url, res)) return;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html>
 <html><head><title>Runtime Logs</title>

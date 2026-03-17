@@ -6,6 +6,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteJSON } from './atomic-write.js';
 
 class CooldownManager {
     constructor() {
@@ -196,7 +197,7 @@ class CooldownManager {
     saveRecords() {
         try {
             const data = Array.from(this.records.entries());
-            fs.writeFileSync(this.persistPath, JSON.stringify(data, null, 2));
+            atomicWriteJSON(this.persistPath, data).catch(() => {});
         } catch (e) {
             // 静默处理
         }

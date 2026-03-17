@@ -14,9 +14,10 @@
 import Database from 'better-sqlite3';
 
 export class LivePositionMonitor {
-  constructor(priceMonitor, executor) {
+  constructor(priceMonitor, executor, riskManager = null) {
     this.priceMonitor = priceMonitor;
     this.executor = executor;
+    this.riskManager = riskManager;
 
     // 持仓 Map<tokenCA, position>
     this.positions = new Map();
@@ -358,7 +359,9 @@ export class LivePositionMonitor {
    */
   async _onPriceUpdate(event) {
     const { tokenCA, price, mc } = event;
-    const pos = this.positions.get(tokenCA);
+    let pos;
+    try {
+    pos = this.positions.get(tokenCA);
     if (!pos || pos.closed) return;
 
     // 如果正在退出中，跳过评估
@@ -585,6 +588,16 @@ export class LivePositionMonitor {
         return;
       }
 
+      // v19: TP1+ 仓位 2h 绝对超时兜底（防止 TP4 卖出失败后永远卡死）
+      if (pos.tp1 && !pos.closed && !pos.exitInProgress) {
+        if (holdTimeMin > 120) {
+          console.log(`⏰ [v19] $${pos.symbol} TP1+仓位持有 ${holdTimeMin.toFixed(0)}分 > 120分钟，强制退出`);
+          pos.exitReason = 'TP1_PLUS_TIMEOUT_2H';
+          await this._triggerExit(pos, `TP1_PLUS_TIMEOUT_2H(PnL${pnl.toFixed(0)}%,held${holdTimeMin.toFixed(0)}m)`, 100);
+          return;
+        }
+      }
+
     } else if (strategy === 'TP_NOSL') {
       // ====== v17.4: TP+100% / 无SL / 1h<30%快出 / 4h超时 ======
       // DB回测(5天): TP+100% ROI=+19.0% > TP+75% ROI=+12.2%
@@ -725,6 +738,10 @@ export class LivePositionMonitor {
         return;
       }
     }
+    } catch (error) {
+      console.error(`🔴 [CRITICAL] _onPriceUpdate 异常: ${error.message}`, error.stack);
+      if (pos) { pos.exitInProgress = false; pos.partialSellInProgress = false; }
+    }
   }
 
   /**
@@ -827,6 +844,11 @@ export class LivePositionMonitor {
     const icon = finalPnl > 0 ? '🟢' : '🔴';
     const sellPctStr = sellPct < 100 ? ` | 卖出剩余${sellPct}%` : '';
     console.log(`\n${icon} [EXIT] $${pos.symbol} | ${reason} | PnL: ${finalPnl >= 0 ? '+' : ''}${finalPnl.toFixed(1)}% | 最高: +${pos.highPnl.toFixed(1)}%${sellPctStr}`);
+
+    // 标记中间状态，防止崩溃后重复卖出
+    try {
+      this.db.prepare(`UPDATE live_positions SET status='selling' WHERE token_ca=? AND status='open'`).run(pos.tokenCA);
+    } catch(e) {}
 
     // 执行卖出
     let solReceived = 0;
@@ -1004,6 +1026,12 @@ export class LivePositionMonitor {
     // 🔧 BUG FIX: 从内存Map中删除持仓，释放持仓槽位
     this.positions.delete(pos.tokenCA);
 
+    // 通知 RiskManager 交易结果
+    if (this.riskManager) {
+      const isWin = finalPnl > 0;
+      this.riskManager.recordTradeResult(isWin);
+    }
+
     // 清理防抖和重试计数器，防止内存泄漏
     this.sellDebounce.delete(pos.tokenCA);
     this.retryCounter.delete(pos.tokenCA);
@@ -1019,7 +1047,7 @@ export class LivePositionMonitor {
    */
   async _restorePositions() {
     try {
-      const rows = this.db.prepare(`SELECT * FROM live_positions WHERE status='open'`).all();
+      const rows = this.db.prepare(`SELECT * FROM live_positions WHERE status IN ('open', 'selling')`).all();
       if (rows.length === 0) return;
 
       console.log(`🔄 [LivePositionMonitor] 发现 ${rows.length} 个未关闭持仓，验证链上余额...`);
@@ -1027,20 +1055,27 @@ export class LivePositionMonitor {
       let cleaned = 0;
 
       for (const row of rows) {
-        // 先检查链上余额，如果为 0 说明已手动卖出
+        // 先检查链上余额，如果为 0 说明已手动卖出（包括 status='selling' 时崩溃后实际已卖出的情况）
         if (this.executor) {
           try {
             const balance = await this.executor.getTokenBalance(row.token_ca);
             if (balance.amount <= 0) {
-              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭`);
-              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason='MANUAL_SELL', closed_at=? WHERE token_ca=? AND status='open'`)
-                .run(Date.now(), row.token_ca);
+              const exitReason = row.status === 'selling' ? 'SELL_COMPLETED_BEFORE_CRASH' : 'MANUAL_SELL';
+              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭 (${exitReason})`);
+              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason=?, closed_at=? WHERE token_ca=? AND status IN ('open', 'selling')`)
+                .run(exitReason, Date.now(), row.token_ca);
               cleaned++;
               continue;
             }
           } catch (e) {
             console.warn(`⚠️ [恢复] $${row.symbol} 余额查询失败: ${e.message}，仍然恢复`);
           }
+        }
+        // 如果 status='selling' 但余额不为0，恢复为 open 状态继续监控
+        if (row.status === 'selling') {
+          try {
+            this.db.prepare(`UPDATE live_positions SET status='open' WHERE token_ca=? AND status='selling'`).run(row.token_ca);
+          } catch(e) {}
         }
 
         this.positions.set(row.token_ca, {

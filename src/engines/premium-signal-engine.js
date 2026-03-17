@@ -14,6 +14,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteJSON } from '../utils/atomic-write.js';
 import { SolanaSnapshotService } from '../inputs/chain-snapshot-sol.js';
 import { HardGateFilter } from '../gates/hard-gates.js';
 import { ExitGateFilter } from '../gates/exit-gates.js';
@@ -24,12 +25,14 @@ import ClaudeAnalyst from '../utils/claude-analyst.js';
 import { generatePremiumBuyPrompt } from '../prompts/premium-signal-prompts.js';
 import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
 import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
+import { RiskManager } from '../risk/risk-manager.js';
 import axios from 'axios';
 
 export class PremiumSignalEngine {
   constructor(config, db) {
     this.config = config;
     this.db = db;
+    this.riskManager = new RiskManager(config, db);
 
     // 配置
     this.shadowMode = process.env.SHADOW_MODE !== 'false';
@@ -57,6 +60,9 @@ export class PremiumSignalEngine {
     this.exitCooldown = new Map(); // symbol → timestamp
     // 信号历史（长期追踪重复信号）
     this.signalHistory = new Map(); // token_ca → { count, firstSeen, lastSeen, symbol }
+
+    // 每小时清理超过24h的信号历史，防止内存泄漏
+    setInterval(() => this._cleanupSignalHistory(), 60 * 60 * 1000);
 
     // v13: SOL市场环境暂停标志
     this._solMarketPaused = false;
@@ -359,6 +365,15 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'v17_only_ath1' };
       }
 
+      // 立即提交 ATH 计数 — 即使后续过滤拒绝，也标记此 token 已经处理过 ATH#1
+      if (!sigHistory) {
+        this.signalHistory.set(ca, { athCount: 1, lastSeen: Date.now() });
+      } else {
+        sigHistory.athCount = (sigHistory.athCount || 0) + 1;
+        sigHistory.lastSeen = Date.now();
+      }
+      this._saveAthCounts();
+
       // 已持仓检查
       if (this.livePositionMonitor?.positions?.has(ca)) {
         console.log(`⏭️ [v17] $${signal.symbol} 已持仓 → 跳过`);
@@ -432,16 +447,23 @@ export class PremiumSignalEngine {
       const elapsed = Date.now() - t0;
       console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super=${superCurrent}(Δ${superDelta}) Trade=${tradeCurrent}(Δ${tradeDelta}) Addr=${addressCurrent} Sec=${securityCurrent} | 决策耗时:${elapsed}ms`);
 
-      // 所有过滤通过，正式提交 ATH 计数器
-      if (sigHistory) {
-        sigHistory.athCount = prevAthCount + 1;
+      // 所有过滤通过，补充 sigHistory 元数据（ATH 计数已在过滤前提交）
+      const updatedHistory = this.signalHistory.get(ca);
+      if (updatedHistory) {
         if (idx?.super_index) {
-          sigHistory.lastSuperIndex = superCurrent;
-          if (!sigHistory.firstSuperIndex) sigHistory.firstSuperIndex = superSignal;
+          updatedHistory.lastSuperIndex = superCurrent;
+          if (!updatedHistory.firstSuperIndex) updatedHistory.firstSuperIndex = superSignal;
         }
-        if (prevAthCount === 0 && signal.market_cap > 0) sigHistory.mc1 = signal.market_cap;
+        if (prevAthCount === 0 && signal.market_cap > 0) updatedHistory.mc1 = signal.market_cap;
       }
-      this._saveAthCounts();
+
+      // ─── Step 5.5: 风控检查 ─────────────────────────────────────
+      const riskCheck = this.riskManager.canTrade();
+      if (!riskCheck.allowed) {
+        console.log(`🛡️ [RISK] 风控拒绝: ${riskCheck.reason}`);
+        this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
+        return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
+      }
 
       const finalSize = 0.06;
       const exitStrategy = 'ASYMMETRIC';
@@ -451,7 +473,7 @@ export class PremiumSignalEngine {
         action: 'BUY_FULL', confidence: 90,
         narrative_tier: 'CONFIRMED',
         narrative_reason: `v18: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent}`,
-        entry_timing: 'OPTIMAL', stop_loss_percent: 40,
+        entry_timing: 'OPTIMAL', stop_loss_percent: 35,
         exitStrategy
       };
 
@@ -465,6 +487,7 @@ export class PremiumSignalEngine {
         this.shadowTracker.addPosition(ca, signal.symbol || 'UNKNOWN', entryMC, aiResult.confidence);
         this._watchlist.delete(ca);
         this._saveWatchlist();
+        this.recentSymbols.set(signal.symbol, Date.now());
         if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
         return { action: 'SHADOW_BUY', size: finalSize, ai: aiResult };
       }
@@ -657,6 +680,23 @@ export class PremiumSignalEngine {
   // ===== v13: ATH计数持久化 =====
 
   /**
+   * 清理超过24h的信号历史，防止内存泄漏
+   */
+  _cleanupSignalHistory() {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let cleaned = 0;
+    for (const [ca, history] of this.signalHistory) {
+      if (history.lastSeen && history.lastSeen < cutoff) {
+        this.signalHistory.delete(ca);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      console.log(`🧹 [Cleanup] 清理了 ${cleaned} 条过期信号历史 (剩余 ${this.signalHistory.size})`);
+    }
+  }
+
+  /**
    * 保存ATH计数到JSON文件（容器重启后恢复）
    */
   _saveAthCounts() {
@@ -677,9 +717,9 @@ export class PremiumSignalEngine {
       }
       const dir = path.dirname(this._athCountsPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      // 异步写入避免阻塞事件循环
-      fs.writeFile(this._athCountsPath, JSON.stringify(data, null, 2), (err) => {
-        if (err) console.warn(`⚠️ [ATH] 异步写入失败: ${err.message}`);
+      // 原子写入，防止崩溃时数据损坏
+      atomicWriteJSON(this._athCountsPath, data).catch((err) => {
+        console.warn(`⚠️ [ATH] 原子写入失败: ${err.message}`);
       });
     } catch (e) {
       console.warn(`⚠️ [ATH] 保存ATH计数失败: ${e.message}`);

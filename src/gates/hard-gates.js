@@ -391,15 +391,15 @@ export class HardGateFilter {
    * Check dangerous functions
    */
   checkDangerousFunctions(snapshot) {
-    const dangerousFuncs = snapshot.dangerous_functions || [];
-
-    if (dangerousFuncs === null) {
+    if (snapshot.dangerous_functions === null || snapshot.dangerous_functions === undefined) {
       return {
         reject: false,
         unknown: true,
-        reasons: ['Dangerous functions check not performed (contract not verified?)']
+        reasons: ['dangerous_functions 数据缺失']
       };
     }
+
+    const dangerousFuncs = snapshot.dangerous_functions || [];
 
     if (dangerousFuncs.length === 0) {
       // No dangerous functions found

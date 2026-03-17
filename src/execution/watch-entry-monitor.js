@@ -21,6 +21,7 @@ export class WatchEntryMonitor extends EventEmitter {
 
         this.poolPath = path.join(process.cwd(), 'data', 'watch_entry_pool.json');
         this.tokens = new Map();
+        this.triggeringTokens = new Set(); // 正在触发买入的代币，防止重复触发
 
         // 轮询间隔 (默认 60 秒)
         this.checkIntervalMs = config.watchIntervalMs || 60000;
@@ -174,9 +175,17 @@ export class WatchEntryMonitor extends EventEmitter {
      * 触发买入信号
      */
     triggerBuy(record, snapshot) {
+        // 防止重复触发（在买入确认前不允许再次触发同一代币）
+        if (this.triggeringTokens.has(record.address)) {
+            console.log(`⏭️  [WatchEntry] ${record.symbol} 正在触发买入，跳过重复触发`);
+            return;
+        }
+        this.triggeringTokens.add(record.address);
+
         console.log(`🎯 [WatchEntry] TRIGGERED! ${record.symbol} reached target price $${record.targetPrice}`);
 
         // 发出 trigger 事件，供 index.js 捕获并推送到交易流程
+        // 买入成功后，调用方应调用 removeToken(address) 从监控池移除
         this.emit('trigger', {
             token: {
                 ...record.token,
@@ -189,8 +198,24 @@ export class WatchEntryMonitor extends EventEmitter {
             snapshot: snapshot
         });
 
-        // 买入后从监控池移除
-        this.removeToken(record.address);
+        // 不立即删除 token — 由调用方在买入成功后调用 confirmTrigger(address) 移除
+        // triggeringTokens 防重入保护会阻止重复触发，直到 confirmTrigger 或 cancelTrigger 被调用
+    }
+
+    /**
+     * 买入成功后确认触发 — 移除 token 并清理防重入标记
+     */
+    confirmTrigger(address) {
+        this.removeToken(address);
+        this.triggeringTokens.delete(address);
+    }
+
+    /**
+     * 买入失败后取消触发 — 保留 token 继续监控，清理防重入标记
+     */
+    cancelTrigger(address) {
+        this.triggeringTokens.delete(address);
+        console.log(`🔄 [WatchEntry] ${address} 买入失败，恢复监控`);
     }
 }
 
