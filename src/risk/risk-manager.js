@@ -576,6 +576,44 @@ export class RiskManager {
   }
 
   /**
+   * 手动暂停交易（指定小时数）
+   */
+  manualPause(hours = 4) {
+    const pauseUntil = new Date();
+    pauseUntil.setHours(pauseUntil.getHours() + hours);
+    this.state.pausedUntil = pauseUntil;
+
+    try {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO system_state (key, value, expires_at)
+        VALUES ('trading_paused', 'true', ?)
+      `).run(Math.floor(pauseUntil.getTime() / 1000));
+    } catch (error) {
+      // 忽略
+    }
+
+    console.log(`\n🛑 [手动] 交易已暂停至 ${pauseUntil.toLocaleString()} (${hours}小时)\n`);
+  }
+
+  /**
+   * 恢复交易
+   */
+  resumeTrading() {
+    this.state.pausedUntil = null;
+    this.state.consecutiveLosses = 0;
+    this._circuitBreakerTriggered = false;
+    this._circuitBreakerLogged = false;
+
+    try {
+      this.db.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run();
+    } catch (error) {
+      // 忽略
+    }
+
+    console.log(`\n✅ [手动] 交易已恢复，连亏计数已重置\n`);
+  }
+
+  /**
    * 🛑 v6.7 物理熔断机制
    * 连续亏损达到阈值时，强制停止交易并发送微信通知
    */

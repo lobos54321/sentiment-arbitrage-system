@@ -264,6 +264,25 @@ function renderDashboard(data) {
     function manualRefresh() {
       location.reload();
     }
+
+    // 暂停/恢复交易
+    async function toggleTrading(action) {
+      if (action === 'pause' && !confirm('确认暂停交易？将暂停4小时。')) return;
+      if (action === 'resume' && !confirm('确认恢复交易？连亏计数将重置。')) return;
+      try {
+        const endpoint = action === 'pause' ? '/api/pause-trading' : '/api/resume-trading';
+        const r = await fetch(endpoint + _q, { method: 'POST' });
+        const d = await r.json();
+        if (d.success) {
+          alert(d.message);
+          location.reload();
+        } else {
+          alert('操作失败: ' + (d.error || '未知错误'));
+        }
+      } catch (e) {
+        alert('请求失败: ' + e.message);
+      }
+    }
   </script>
 </head>
 <body>
@@ -298,10 +317,14 @@ function renderDashboard(data) {
             <div class="stat-label">今日 SOL 盈亏</div>
           </div>
           <div class="stat">
-            <div class="stat-value ${data.risk.is_paused ? 'negative' : ''}">
+            <div class="stat-value ${data.risk.is_paused ? 'negative' : ''}" id="stat-trading-status">
               ${data.risk.is_paused ? '已暂停' : '正常'}
             </div>
             <div class="stat-label">风控状态</div>
+            <div style="margin-top:8px;display:flex;gap:6px;justify-content:center">
+              <button id="btn-pause" onclick="toggleTrading('pause')" style="font-size:0.75em;padding:4px 10px;cursor:pointer;background:#ff4757;border:none;border-radius:4px;color:#fff;${data.risk.is_paused ? 'display:none' : ''}">⏸ 暂停</button>
+              <button id="btn-resume" onclick="toggleTrading('resume')" style="font-size:0.75em;padding:4px 10px;cursor:pointer;background:#2ed573;border:none;border-radius:4px;color:#fff;${data.risk.is_paused ? '' : 'display:none'}">▶ 恢复</button>
+            </div>
           </div>
           <div class="stat">
             <div class="stat-value" id="stat-sol-balance">--</div>
@@ -1723,6 +1746,77 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (url.pathname === '/api/pause-trading') {
+    // 手动暂停交易
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Use POST' }));
+      return;
+    }
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const hours = parseInt(url.searchParams.get('hours') || '4');
+      const rm = global.__riskManager;
+      if (rm) {
+        rm.manualPause(hours);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: `交易已暂停 ${hours} 小时`, pausedUntil: rm.state.pausedUntil }));
+      } else {
+        // fallback: 直接写 DB
+        const d = getDb();
+        const pauseUntil = Math.floor(Date.now() / 1000) + hours * 3600;
+        d.prepare(`INSERT OR REPLACE INTO system_state (key, value, expires_at) VALUES ('trading_paused', 'true', ?)`).run(pauseUntil);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: `交易已暂停 ${hours} 小时 (DB only)`, pausedUntil: new Date(pauseUntil * 1000) }));
+      }
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  } else if (url.pathname === '/api/resume-trading') {
+    // 手动恢复交易
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Use POST' }));
+      return;
+    }
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const rm = global.__riskManager;
+      if (rm) {
+        rm.resumeTrading();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '交易已恢复，连亏计数已重置' }));
+      } else {
+        const d = getDb();
+        d.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '交易已恢复 (DB only)' }));
+      }
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  } else if (url.pathname === '/api/trading-status') {
+    // 获取交易状态
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const rm = global.__riskManager;
+      if (rm) {
+        const status = rm.getStatus();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ paused: !!status.pausedUntil, pausedUntil: status.pausedUntil, consecutiveLosses: status.consecutiveLosses, canTrade: status.canTrade }));
+      } else {
+        const d = getDb();
+        const row = d.prepare(`SELECT value, expires_at FROM system_state WHERE key = 'trading_paused'`).get();
+        const paused = row && row.expires_at > Date.now() / 1000;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ paused, pausedUntil: paused ? new Date(row.expires_at * 1000) : null }));
+      }
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (url.pathname === '/api/download/database') {
     // 数据库下载端点 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
@@ -2010,6 +2104,12 @@ function renderPremiumDashboard() {
   <button class="refresh-btn" onclick="loadData()">刷新</button>
   <div class="container">
     <h1>💎 Premium Channel Dashboard</h1>
+    <!-- 交易控制面板 -->
+    <div style="display:flex;gap:10px;justify-content:center;margin-bottom:15px;align-items:center">
+      <span id="trading-status" style="font-size:0.9em;color:#888">加载中...</span>
+      <button id="btn-pause-p" onclick="toggleTrading('pause')" style="padding:6px 16px;cursor:pointer;background:#ff4757;border:none;border-radius:6px;color:#fff;font-weight:bold;display:none">⏸ 暂停交易</button>
+      <button id="btn-resume-p" onclick="toggleTrading('resume')" style="padding:6px 16px;cursor:pointer;background:#2ed573;border:none;border-radius:6px;color:#fff;font-weight:bold;display:none">▶ 恢复交易</button>
+    </div>
     <div class="tabs">
       <div class="tab active" onclick="switchTab('shadow')">🎭 Shadow 模式</div>
       <div class="tab" onclick="switchTab('live')">💰 实盘交易</div>
@@ -2109,8 +2209,42 @@ function renderPremiumDashboard() {
         }).join('');
       }catch(e){document.getElementById('summary').innerHTML='<div class="card"><div class="big-num red">加载失败</div></div>';}
     }
+
+    // 交易状态轮询
+    async function refreshTradingStatus(){
+      try{
+        const r=await fetch('/api/trading-status'+_q);
+        const d=await r.json();
+        const el=document.getElementById('trading-status');
+        const btnP=document.getElementById('btn-pause-p');
+        const btnR=document.getElementById('btn-resume-p');
+        if(d.paused){
+          const until=d.pausedUntil?new Date(d.pausedUntil).toLocaleString('zh-CN'):'';
+          el.innerHTML='🔴 <span style="color:#ff4757">交易已暂停</span>'+(until?' (至 '+until+')':'')+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
+          btnP.style.display='none';btnR.style.display='inline-block';
+        }else{
+          el.innerHTML='🟢 <span style="color:#2ed573">交易正常</span>'+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
+          btnP.style.display='inline-block';btnR.style.display='none';
+        }
+      }catch(e){}
+    }
+
+    async function toggleTrading(action){
+      if(action==='pause'&&!confirm('确认暂停交易？将暂停4小时。'))return;
+      if(action==='resume'&&!confirm('确认恢复交易？连亏计数将重置。'))return;
+      try{
+        const ep=action==='pause'?'/api/pause-trading':'/api/resume-trading';
+        const r=await fetch(ep+_q,{method:'POST'});
+        const d=await r.json();
+        if(d.success){alert(d.message);refreshTradingStatus();}
+        else alert('失败: '+(d.error||'未知'));
+      }catch(e){alert('请求失败: '+e.message);}
+    }
+
     loadData();
+    refreshTradingStatus();
     setInterval(loadData,15000);
+    setInterval(refreshTradingStatus,10000);
   </script>
 </body>
 </html>`;

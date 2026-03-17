@@ -827,6 +827,9 @@ class PremiumChannelSystem {
     console.log('\n✅ Premium Channel System 运行中...');
     console.log('   等待频道信号...\n');
 
+    // 暴露给 dashboard-server 用于手动暂停/恢复交易
+    global.__riskManager = this.engine.riskManager;
+
     // 启动 Dashboard Server（Zeabur 健康检查 + /premium 页面）
     startDashboardServer();
   }
