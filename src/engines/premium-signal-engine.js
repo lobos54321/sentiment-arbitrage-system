@@ -365,7 +365,16 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'v17_only_ath1' };
       }
 
-      // 立即提交 ATH 计数 — 即使后续过滤拒绝，也标记此 token 已经处理过 ATH#1
+      // ─── 风控检查（在 ATH 计数提交之前）─────────────────────────
+      // 风控拒绝不应消耗 ATH#1 — 损失限额重置后该 token 仍应有机会进场
+      const riskCheck = this.riskManager.canTrade();
+      if (!riskCheck.allowed) {
+        console.log(`🛡️ [RISK] 风控拒绝: ${riskCheck.reason} | $${signal.symbol} ATH#1 计数未消耗`);
+        this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
+        return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
+      }
+
+      // 风控通过，立即提交 ATH 计数 — 即使后续过滤拒绝，也标记此 token 已经处理过 ATH#1
       if (!sigHistory) {
         this.signalHistory.set(ca, { athCount: 1, lastSeen: Date.now() });
       } else {
@@ -455,14 +464,6 @@ export class PremiumSignalEngine {
           if (!updatedHistory.firstSuperIndex) updatedHistory.firstSuperIndex = superSignal;
         }
         if (prevAthCount === 0 && signal.market_cap > 0) updatedHistory.mc1 = signal.market_cap;
-      }
-
-      // ─── Step 5.5: 风控检查 ─────────────────────────────────────
-      const riskCheck = this.riskManager.canTrade();
-      if (!riskCheck.allowed) {
-        console.log(`🛡️ [RISK] 风控拒绝: ${riskCheck.reason}`);
-        this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
-        return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
       }
 
       const finalSize = 0.06;

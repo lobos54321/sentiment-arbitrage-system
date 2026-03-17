@@ -762,14 +762,19 @@ ${lossDetails || '(无记录)'}
     }
 
     try {
-      // 获取所有开放持仓，按盈亏排序（亏损最多的在前）
+      // 获取所有开放持仓，按实时盈亏排序（亏损最多的在前）
+      // open 仓位 exit_pnl 为 NULL，用 partial sell 收入估算
       const positions = this.db.prepare(`
         SELECT
-          id, symbol, token_ca, entry_sol, total_sol_received, exit_pnl,
+          id, symbol, token_ca, entry_sol, total_sol_received,
+          CASE
+            WHEN entry_sol > 0 THEN (total_sol_received - entry_sol) / entry_sol * 100
+            ELSE 0
+          END as estimated_pnl,
           created_at, entry_sol as position_size
         FROM live_positions
         WHERE status = 'open'
-        ORDER BY exit_pnl ASC
+        ORDER BY estimated_pnl ASC, created_at ASC
       `).all();
 
       if (positions.length === 0) {
@@ -782,8 +787,8 @@ ${lossDetails || '(无记录)'}
       // 找到符合替换条件的最差持仓
       for (const pos of positions) {
         const holdTime = now - pos.created_at;
-        const pnl = pos.exit_pnl || 0;
-        const smDelta = (pos.sm_current || 0) - (pos.sm_entry || 0);
+        const pnl = pos.estimated_pnl || 0;
+        const smDelta = 0; // live_positions 没有 sm 字段
 
         // 检查所有条件
         const isLoss = pnl < 0;

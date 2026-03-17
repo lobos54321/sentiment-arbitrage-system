@@ -198,12 +198,15 @@ export class WatchEntryMonitor extends EventEmitter {
             snapshot: snapshot
         });
 
-        // 不立即删除 token — 由调用方在买入成功后调用 confirmTrigger(address) 移除
-        // triggeringTokens 防重入保护会阻止重复触发，直到 confirmTrigger 或 cancelTrigger 被调用
+        // emit 后立即移除 — WatchEntryMonitor 目前是自包含模块，没有外部调用方
+        // triggeringTokens 防重入保护确保同一价格检查周期内不会重复触发
+        this.removeToken(record.address);
+        this.triggeringTokens.delete(record.address);
     }
 
     /**
      * 买入成功后确认触发 — 移除 token 并清理防重入标记
+     * （预留接口，未来接入 index.js 时使用）
      */
     confirmTrigger(address) {
         this.removeToken(address);
