@@ -1817,6 +1817,32 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (url.pathname === '/api/reset-live-data') {
+    // 清空实盘交易数据，重新开始
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Use POST' }));
+      return;
+    }
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const d = getDb();
+      const count = d.prepare(`SELECT COUNT(*) as c FROM live_positions`).get().c;
+      d.prepare(`DELETE FROM live_positions`).run();
+      d.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run();
+      const rm = global.__riskManager;
+      if (rm) {
+        rm.state.pausedUntil = null;
+        rm.state.consecutiveLosses = 0;
+        rm._circuitBreakerTriggered = false;
+        rm._circuitBreakerLogged = false;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: `已清空 ${count} 条实盘记录，风控状态已重置` }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (url.pathname === '/api/download/database') {
     // 数据库下载端点 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
@@ -2076,11 +2102,6 @@ function renderPremiumDashboard() {
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e4e4e4;min-height:100vh;padding:20px}
     .container{max-width:1400px;margin:0 auto}
     h1{text-align:center;margin-bottom:20px;color:#00d9ff;font-size:2em;text-shadow:0 0 20px rgba(0,217,255,0.3)}
-    .tabs{display:flex;gap:10px;margin-bottom:20px;justify-content:center}
-    .tab{padding:10px 20px;border-radius:8px;cursor:pointer;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#888}
-    .tab.active{background:#00d9ff;color:#1a1a2e;font-weight:bold}
-    .tab-content{display:none}
-    .tab-content.active{display:block}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:25px}
     .card{background:rgba(255,255,255,0.05);border-radius:12px;padding:18px;border:1px solid rgba(255,255,255,0.1)}
     .card h2{color:#00d9ff;margin-bottom:12px;font-size:1.1em}
@@ -2110,85 +2131,38 @@ function renderPremiumDashboard() {
       <button id="btn-pause-p" onclick="toggleTrading('pause')" style="padding:6px 16px;cursor:pointer;background:#ff4757;border:none;border-radius:6px;color:#fff;font-weight:bold;display:none">⏸ 暂停交易</button>
       <button id="btn-resume-p" onclick="toggleTrading('resume')" style="padding:6px 16px;cursor:pointer;background:#2ed573;border:none;border-radius:6px;color:#fff;font-weight:bold;display:none">▶ 恢复交易</button>
     </div>
-    <div class="tabs">
-      <div class="tab active" onclick="switchTab('shadow')">🎭 Shadow 模式</div>
-      <div class="tab" onclick="switchTab('live')">💰 实盘交易</div>
-    </div>
-
-    <!-- Shadow 模式 -->
-    <div id="shadow-content" class="tab-content active">
-      <div class="grid" id="summary"></div>
-      <div class="card" style="margin-bottom:20px"><h2>📊 止损/止盈分布</h2><div id="reasons"></div></div>
-      <div class="card" style="margin-bottom:20px"><h2>🟢 当前持仓</h2><table id="open-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>当前PnL</th><th>最高</th><th>最低</th><th>⏱️持有</th></tr></thead><tbody></tbody></table></div>
-      <div class="card"><h2>📋 最近交易</h2><table id="recent-table"><thead><tr><th>代币</th><th>评分</th><th>入场MC</th><th>PnL</th><th>最高</th><th>最低</th><th>出场原因</th><th>⏱️持仓</th><th>时间</th></tr></thead><tbody></tbody></table></div>
-    </div>
 
     <!-- 实盘交易 -->
-    <div id="live-content" class="tab-content">
+    <div id="live-content">
       <div class="grid" id="live-summary"></div>
       <div class="card" style="margin-bottom:20px"><h2>🟢 实盘持仓</h2><table id="live-open-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位(SOL)</th><th>最高</th><th>最低</th><th>⏱️持有时间</th></tr></thead><tbody></tbody></table></div>
       <div class="card"><h2>📋 实盘交易记录</h2><table id="live-recent-table"><thead><tr><th>代币</th><th>入场MC</th><th>仓位</th><th>实际PnL</th><th>峰值</th><th>损失</th><th>捕获率</th><th>出场原因</th><th>⏱️持仓</th><th>时间</th></tr></thead><tbody></tbody></table></div>
+      <div style="text-align:center;margin-top:20px"><button id="btn-reset" onclick="resetLiveData()" style="padding:8px 20px;cursor:pointer;background:#ff6348;border:none;border-radius:6px;color:#fff;font-weight:bold">🗑 清空实盘数据重新开始</button></div>
     </div>
   </div>
   <script>
-    function switchTab(tab) {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      if (tab === 'shadow') {
-        document.querySelector('.tab:first-child').classList.add('active');
-        document.getElementById('shadow-content').classList.add('active');
-      } else {
-        document.querySelector('.tab:last-child').classList.add('active');
-        document.getElementById('live-content').classList.add('active');
-      }
-    }
 
     const _token=new URLSearchParams(window.location.search).get('token')||'';
     const _q=_token?'?token='+encodeURIComponent(_token):'';
     async function loadData(){
       try{
-        // Shadow 数据
-        const res=await fetch('/api/shadow-pnl'+_q);
-        const d=await res.json();
-        const s=d.summary;
-        document.getElementById('summary').innerHTML=
-          '<div class="card"><div class="big-num '+(s.winRate>=60?'green':s.winRate>=40?'yellow':'red')+'">'+s.winRate+'%</div><div class="label">胜率 ('+s.wins+'W/'+s.losses+'L)</div></div>'+
-          '<div class="card"><div class="big-num '+(s.totalPnl>=0?'green':'red')+'">'+(s.totalPnl>=0?'+':'')+s.totalPnl+'%</div><div class="label">总PnL ('+s.total+'笔)</div></div>'+
-          '<div class="card"><div class="big-num '+(s.avgPnl>=0?'green':'red')+'">'+(s.avgPnl>=0?'+':'')+s.avgPnl+'%</div><div class="label">平均PnL</div></div>'+
-          '<div class="card"><div class="big-num blue">'+d.open.length+'</div><div class="label">当前持仓</div></div>';
-
-        let rhtml='<table><thead><tr><th>类型</th><th>笔数</th><th>总PnL</th></tr></thead><tbody>';
-        for(const[k,v]of Object.entries(d.byReason||{}).sort((a,b)=>b[1].totalPnl-a[1].totalPnl)){
-          rhtml+='<tr><td>'+k+'</td><td>'+v.count+'</td><td class="'+(v.totalPnl>=0?'pnl-pos':'pnl-neg')+'">'+(v.totalPnl>=0?'+':'')+v.totalPnl.toFixed(1)+'%</td></tr>';
-        }
-        rhtml+='</tbody></table>';
-        document.getElementById('reasons').innerHTML=rhtml;
-
-        const otb=document.querySelector('#open-table tbody');
-        otb.innerHTML=d.open.map(r=>{
-          const holdSec=r.entry_time?Math.floor((Date.now()-new Date(r.entry_time).getTime())/1000):0;
-          const holdStr=holdSec>=3600?Math.floor(holdSec/3600)+'h'+Math.floor((holdSec%3600)/60)+'m':(holdSec>=60?Math.floor(holdSec/60)+'m'+(holdSec%60)+'s':holdSec+'s');
-          return '<tr><td>$'+r.symbol+' <span class="open-tag">OPEN</span></td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td>-</td><td class="pnl-pos">+'+(r.high_pnl||0).toFixed(1)+'%</td><td class="pnl-neg">'+(r.low_pnl||0).toFixed(1)+'%</td><td style="color:#00d9ff;font-weight:bold">'+holdStr+'</td></tr>';
-        }).join('');
-
-        const rtb=document.querySelector('#recent-table tbody');
-        rtb.innerHTML=d.recent.map(r=>{
-          const pnlCls=r.exit_pnl>0?'pnl-pos':'pnl-neg';
-          const t=r.closed_at?new Date(r.closed_at).toLocaleString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
-          let holdStr='-';
-          if(r.entry_time&&r.closed_at){const hs=Math.floor((new Date(r.closed_at).getTime()-new Date(r.entry_time).getTime())/1000);holdStr=hs>=3600?Math.floor(hs/3600)+'h'+Math.floor((hs%3600)/60)+'m':(hs>=60?Math.floor(hs/60)+'m'+(hs%60)+'s':hs+'s');}
-          return '<tr><td>$'+r.symbol+'</td><td>'+r.score+'</td><td>$'+r.entry_mc_k+'K</td><td class="'+pnlCls+'">'+(r.exit_pnl>=0?'+':'')+r.exit_pnl.toFixed(1)+'%</td><td class="pnl-pos">+'+r.high_pnl.toFixed(1)+'%</td><td class="pnl-neg">'+r.low_pnl.toFixed(1)+'%</td><td>'+r.exit_reason+'</td><td>'+holdStr+'</td><td>'+t+'</td></tr>';
-        }).join('');
-
         // 实盘数据
         const liveRes=await fetch('/api/live-positions'+_q);
         const live=await liveRes.json();
         const ls=live.summary;
+        const solSpent=(ls.totalSolSpent||0);
+        const solRecv=(ls.totalSolReceived||0);
+        const netSol=solRecv-solSpent;
+        const realPnl=solSpent>0?((netSol/solSpent)*100):0;
+        // 钱包余额
+        let walletHtml='<div class="card"><div class="big-num blue">--</div><div class="label">钱包余额 SOL</div></div>';
+        try{const wr=await fetch('/api/wallet-balance'+_q);const wd=await wr.json();if(wd.sol!==undefined)walletHtml='<div class="card"><div class="big-num blue">'+Number(wd.sol).toFixed(4)+'</div><div class="label">钱包余额 SOL</div></div>';}catch(e){}
         document.getElementById('live-summary').innerHTML=
-          '<div class="card"><div class="big-num '+(ls.winRate>=60?'green':ls.winRate>=40?'yellow':'red')+'">'+ls.winRate+'%</div><div class="label">胜率 ('+ls.wins+'W/'+ls.losses+'L)</div></div>'+
-          '<div class="card"><div class="big-num '+(ls.realTotalPnl>=0?'green':'red')+'">'+(ls.realTotalPnl>=0?'+':'')+ls.realTotalPnl+'%</div><div class="label">真实PnL (含滑点+手续费)</div></div>'+
-          '<div class="card"><div class="big-num orange">'+ls.totalSolSpent+'</div><div class="label">总投入 SOL</div></div>'+
-          '<div class="card"><div class="big-num '+(ls.totalSolReceived>=ls.totalSolSpent?'green':'red')+'">'+(ls.totalSolReceived||0)+'</div><div class="label">总收回 SOL</div></div>'+
+          walletHtml+
+          '<div class="card"><div class="big-num '+(ls.winRate>=60?'green':ls.winRate>=40?'yellow':'red')+'">'+(ls.winRate||0)+'%</div><div class="label">胜率 ('+(ls.wins||0)+'W/'+(ls.losses||0)+'L / '+(ls.total||0)+'笔)</div></div>'+
+          '<div class="card"><div class="big-num '+(netSol>=0?'green':'red')+'">'+(netSol>=0?'+':'')+netSol.toFixed(4)+'</div><div class="label">净盈亏 SOL</div></div>'+
+          '<div class="card"><div class="big-num orange">'+(solSpent).toFixed(4)+'</div><div class="label">总投入 SOL</div></div>'+
+          '<div class="card"><div class="big-num '+(solRecv>=solSpent?'green':'red')+'">'+(solRecv).toFixed(4)+'</div><div class="label">总收回 SOL</div></div>'+
           '<div class="card"><div class="big-num blue">'+live.open.length+'</div><div class="label">当前持仓</div></div>';
 
         const lotb=document.querySelector('#live-open-table tbody');
@@ -2218,10 +2192,16 @@ function renderPremiumDashboard() {
         const el=document.getElementById('trading-status');
         const btnP=document.getElementById('btn-pause-p');
         const btnR=document.getElementById('btn-resume-p');
-        if(d.paused){
+        const canTrade=d.canTrade;
+        const isPaused=d.paused;
+        const isBlocked=canTrade&&!canTrade.allowed;
+        if(isPaused){
           const until=d.pausedUntil?new Date(d.pausedUntil).toLocaleString('zh-CN'):'';
           el.innerHTML='🔴 <span style="color:#ff4757">交易已暂停</span>'+(until?' (至 '+until+')':'')+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
           btnP.style.display='none';btnR.style.display='inline-block';
+        }else if(isBlocked){
+          el.innerHTML='🟡 <span style="color:#ffa502">交易受限</span> — '+(canTrade.reason||'')+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
+          btnP.style.display='inline-block';btnR.style.display='none';
         }else{
           el.innerHTML='🟢 <span style="color:#2ed573">交易正常</span>'+(d.consecutiveLosses?' | 连亏:'+d.consecutiveLosses:'');
           btnP.style.display='inline-block';btnR.style.display='none';
@@ -2237,6 +2217,17 @@ function renderPremiumDashboard() {
         const r=await fetch(ep+_q,{method:'POST'});
         const d=await r.json();
         if(d.success){alert(d.message);refreshTradingStatus();}
+        else alert('失败: '+(d.error||'未知'));
+      }catch(e){alert('请求失败: '+e.message);}
+    }
+
+    async function resetLiveData(){
+      if(!confirm('⚠️ 确认清空所有实盘交易数据？此操作不可撤销！'))return;
+      if(!confirm('再次确认：将删除所有实盘交易记录并重置风控状态'))return;
+      try{
+        const r=await fetch('/api/reset-live-data'+_q,{method:'POST'});
+        const d=await r.json();
+        if(d.success){alert(d.message);location.reload();}
         else alert('失败: '+(d.error||'未知'));
       }catch(e){alert('请求失败: '+e.message);}
     }
