@@ -889,6 +889,12 @@ export class LivePositionMonitor {
         // 累加实际收到的 SOL
         pos.totalSolReceived += solReceived;
 
+        // 立即持久化 total_sol_received，防止重启时丢失
+        try {
+          this.db.prepare(`UPDATE live_positions SET total_sol_received=? WHERE token_ca=? AND status IN ('open','selling')`)
+            .run(pos.totalSolReceived, pos.tokenCA);
+        } catch (_) {}
+
         // 🔧 v14.6 FIX: 卖出后验证链上余额，清理残余token
         try {
           await new Promise(r => setTimeout(r, 2000));  // 等链上确认
@@ -1061,12 +1067,14 @@ export class LivePositionMonitor {
             const balance = await this.executor.getTokenBalance(row.token_ca);
             if (balance.amount <= 0) {
               const exitReason = row.status === 'selling' ? 'SELL_COMPLETED_BEFORE_CRASH' : 'MANUAL_SELL';
-              // 尝试用已记录的 total_sol_received 或标记为 -1（手动卖出标记）
-              const solReceived = (row.total_sol_received && row.total_sol_received > 0) ? row.total_sol_received : -1;
-              const exitPnl = solReceived > 0 ? ((solReceived - row.entry_sol) / row.entry_sol * 100) : null;
-              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭 (${exitReason})${exitPnl !== null ? ' PnL:' + exitPnl.toFixed(1) + '%' : ''}`);
-              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason=?, closed_at=?, total_sol_received=COALESCE(NULLIF(total_sol_received,0),?), exit_pnl=COALESCE(exit_pnl,?) WHERE token_ca=? AND status IN ('open', 'selling')`)
-                .run(exitReason, Date.now(), solReceived, exitPnl, row.token_ca);
+              const solReceived = row.total_sol_received || 0;
+              // 用已记录的 total_sol_received 计算真实 PnL
+              const exitPnl = (solReceived > 0 && row.entry_sol > 0)
+                ? ((solReceived - row.entry_sol) / row.entry_sol * 100)
+                : null;
+              console.log(`🧹 [清理] $${row.symbol} (${row.token_ca.substring(0, 8)}...) 链上余额为 0，标记已关闭 (${exitReason}) | 收回: ${solReceived.toFixed(4)} SOL${exitPnl !== null ? ' PnL:' + exitPnl.toFixed(1) + '%' : ''}`);
+              this.db.prepare(`UPDATE live_positions SET status='closed', exit_reason=?, closed_at=?, exit_pnl=? WHERE token_ca=? AND status IN ('open', 'selling')`)
+                .run(exitReason, Date.now(), exitPnl, row.token_ca);
               cleaned++;
               continue;
             }
