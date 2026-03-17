@@ -855,11 +855,11 @@ const V18_STRATEGY_CONFIG = {
   },
   // 出场策略 ASYMMETRIC
   exitStrategy: {
-    tp1: '+50% → 卖60% (SL移至0%)',
+    tp1: '+45-60%区间峰值 → 卖60% (SL移至0%)',
     tp2: '+100% → 卖50%剩余',
     tp3: '+200% → 卖50%剩余',
     tp4: '+500% → 卖80%剩余 → Moonbag',
-    stopLoss: '-40%',
+    stopLoss: '-35%',
     deadWater: '15分钟无波动',
     maxHold: '30分钟'
   }

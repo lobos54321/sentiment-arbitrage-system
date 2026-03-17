@@ -5,7 +5,7 @@
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
  * v18 退出策略:
- * - ASYMMETRIC: 非对称收割 (TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%卖5% + 5%Moonbag回撤35%平仓)
+ * - ASYMMETRIC: 非对称收割 (SL-35%→TP1@动态45-60%区间峰值卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%卖5% + 5%Moonbag回撤35%平仓)
  * - TP_NOSL: TP+100% / 无SL / 4h超时 (保留向后兼容)
  * - TP_SL: TP+75% / SL-25% / 24h超时 (保留向后兼容)
  * - DynSL: 保留向后兼容
@@ -267,6 +267,7 @@ export class LivePositionMonitor {
 
       // 新策略字段
       tp1: false,           // TP1是否已触发
+      tp1ZonePeak: 0,       // TP1动态区间(45-60%)内的峰值PnL
       tp2: false,           // TP2是否已触发
       tp3: false,           // TP3是否已触发
       tp4: false,           // TP4是否已触发
@@ -493,34 +494,44 @@ export class LivePositionMonitor {
 
     if (strategy === 'ASYMMETRIC') {
       // ====== 精准掐头去尾 × 非对称收割 ======
-      // 回测(18h): 40笔, 65%WR, ROI=+16%, 盈亏比1.26
-      // Hard SL: -40% (TP1前) / 0%保本 (TP1后)
-      // TP1: +50% → 卖60% (回本90%) → SL上移至0%
+      // Hard SL: -35% (TP1前) / 0%保本 (TP1后)
+      // TP1: 动态区间45-60%, 进入区间后追踪峰值, 从峰值回落时卖60% → SL上移至0%
       // TP2: +100% → 卖15% | TP3: +200% → 卖15% | TP4: +500% → 卖5%
       // 剩余5% = 登月彩票Moonbag: 不主动止盈, 从最高点回撤35%才被动平仓
-      // 15分死水: 未碰TP1 && peak<50% && -15%~+15% → 全平
+      // 15分死水: 未碰TP1 && peak<45% && -15%~+15% → 全平
       // 30分大限: 未碰TP1 → 全平
 
-      const currentSL = pos.tp1 ? 0 : -40;
+      const currentSL = pos.tp1 ? 0 : -35;
       const remainingPct = 100 - (pos.soldPct || 0);
 
-      // 1. 止损检查 (Hard SL -40% 或 TP1后保本 0%)
+      // 1. 止损检查 (Hard SL -35% 或 TP1后保本 0%)
       // Moonbag模式下不用保本SL, 用回撤止损
       if (!pos.moonbag && pnl <= currentSL) {
         if (pos.tp1) {
           console.log(`🛡️ [ASYM:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出全部剩余 (已锁TP1利润)`);
           await this._triggerExit(pos, `BREAKEVEN_SL(PnL${pnl.toFixed(0)}%,locked_TP1)`, 100);
         } else {
-          console.log(`🛑 [ASYM:硬SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -40% → 止损全卖`);
-          await this._triggerExit(pos, `HARD_SL_40(PnL${pnl.toFixed(0)}%)`, 100);
+          console.log(`🛑 [ASYM:硬SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -35% → 止损全卖`);
+          await this._triggerExit(pos, `HARD_SL_35(PnL${pnl.toFixed(0)}%)`, 100);
         }
         return;
       }
 
-      // 2. TP1: +50% → 卖60% (回本约90%, 进入无风险状态)
-      if (!pos.tp1 && pnl >= 50) {
-        console.log(`🎯 [ASYM:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +50% → 卖出60% (SL上移至0%保本)`);
-        await this._triggerPartialSell(pos, 'TP1', 60, pnl);
+      // 2. TP1: 动态区间45-60%, 进入后追踪峰值, 回落时在峰值卖60%
+      if (!pos.tp1 && pnl >= 45) {
+        // 进入TP1区间, 追踪峰值
+        if (pnl > (pos.tp1ZonePeak || 0)) {
+          pos.tp1ZonePeak = pnl;
+        }
+        // 超过60%直接触发TP1 (区间上限)
+        // 或者在区间内从峰值回落5%触发 (峰值回落信号)
+        const peakDrop = pos.tp1ZonePeak - pnl;
+        if (pnl >= 60 || (pos.tp1ZonePeak >= 45 && peakDrop >= 5)) {
+          console.log(`🎯 [ASYM:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% 区间峰值:+${pos.tp1ZonePeak.toFixed(1)}% → 卖出60% (SL上移至0%保本)`);
+          await this._triggerPartialSell(pos, 'TP1', 60, pnl);
+          return;
+        }
+        // 还在上涨中, 继续追踪
         return;
       }
 
@@ -569,10 +580,10 @@ export class LivePositionMonitor {
         return;
       }
 
-      // 7. 15分钟死水清理: 未碰TP1 && peak<50% && 当前价在-15%~+15% → 全平
+      // 7. 15分钟死水清理: 未碰TP1 && peak<45% && 当前价在-15%~+15% → 全平
       if (!pos.tp1 && holdTimeMin >= 15) {
-        if (pos.highPnl < 50 && pnl >= -15 && pnl <= 15) {
-          console.log(`💀 [ASYM:死水] $${pos.symbol} 15分钟无起色 peak:+${pos.highPnl.toFixed(1)}%<50% PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 全平`);
+        if (pos.highPnl < 45 && pnl >= -15 && pnl <= 15) {
+          console.log(`💀 [ASYM:死水] $${pos.symbol} 15分钟无起色 peak:+${pos.highPnl.toFixed(1)}%<45% PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 全平`);
           await this._triggerExit(pos, `DEAD_WATER_15M(PnL${pnl.toFixed(0)}%,peak+${pos.highPnl.toFixed(0)}%)`, 100);
           return;
         }
