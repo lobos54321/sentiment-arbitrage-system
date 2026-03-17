@@ -489,7 +489,7 @@ export class PremiumSignalEngine {
         this._watchlist.delete(ca);
         this._saveWatchlist();
         this.recentSymbols.set(signal.symbol, Date.now());
-        if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
+        // Shadow 模式也不需要重复 addToken — shadowTracker 有自己的价格逻辑
         return { action: 'SHADOW_BUY', size: finalSize, ai: aiResult };
       }
 
@@ -546,7 +546,8 @@ export class PremiumSignalEngine {
             );
             this._watchlist.delete(ca);
             this.recentSymbols.set(signal.symbol, Date.now());
-            if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
+            // 注意：不要在这里调用 livePriceMonitor.addToken(ca) — addPosition 内部已正确注册（含 tokenAmount/decimals）
+            // 重复调用只传 ca 会覆盖 V2 的 watchList 导致 tokenAmount=undefined，价格监控完全失效
             console.log(`🎯 [v18] 买入完成 $${signal.symbol} | 总耗时:${Date.now()-t0}ms`);
           }
         } else {
