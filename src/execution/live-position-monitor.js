@@ -105,6 +105,9 @@ export class LivePositionMonitor {
   async start() {
     this.priceMonitor.on('price-update', this._onPriceUpdate);
 
+    // 修复损坏数据（清理重复 MANUAL_SOLD 标记、修正错误 exit_reason）
+    this._fixCorruptedData();
+
     // 恢复未关闭的持仓（检查链上余额清理已卖出的）
     await this._restorePositions();
 
@@ -190,10 +193,13 @@ export class LivePositionMonitor {
           if (balance.amount <= 0) {
             // token 已经不在钱包里了（可能手动卖了或转走了）
             console.log(`   ✓ $${row.symbol} 已不在钱包中，标记为手动处理`);
-            // total_sol_received = 0 表示手动处理，无法追踪实际收回
+            // 不覆盖 total_sol_received（可能有部分卖出记录），只追加一次标记
+            const newReason = row.exit_reason && row.exit_reason.includes('MANUAL_SOLD')
+              ? row.exit_reason  // 已标记过，不重复追加
+              : `${row.exit_reason || 'UNKNOWN'}(MANUAL_SOLD)`;
             this.db.prepare(`
-              UPDATE live_positions SET total_sol_received = 0, exit_reason = ? WHERE id = ?
-            `).run(`${row.exit_reason}(MANUAL_SOLD)`, row.id);
+              UPDATE live_positions SET exit_reason = ?, scan_retry_count = ? WHERE id = ?
+            `).run(newReason, this.maxWalletScanRetries, row.id);  // 设到最大重试次数，防止再扫
             continue;
           }
 
@@ -1045,6 +1051,38 @@ export class LivePositionMonitor {
     // 🔧 通知退出回调（触发信号引擎冷却）
     for (const cb of this.onExitCallbacks) {
       try { cb(pos.symbol, pos.tokenCA, finalPnl); } catch (_) {}
+    }
+  }
+
+  /**
+   * 修复损坏数据：清理重复 MANUAL_SOLD 标记等
+   */
+  _fixCorruptedData() {
+    try {
+      // 1. 清理重复的 (MANUAL_SOLD) 标记
+      const dupes = this.db.prepare(`
+        SELECT id, exit_reason FROM live_positions
+        WHERE exit_reason LIKE '%(MANUAL_SOLD)%(MANUAL_SOLD)%'
+      `).all();
+      for (const row of dupes) {
+        // 只保留一个 (MANUAL_SOLD)
+        const cleaned = row.exit_reason.replace(/\(MANUAL_SOLD\)/g, '').trim() + '(MANUAL_SOLD)';
+        this.db.prepare(`UPDATE live_positions SET exit_reason = ? WHERE id = ?`).run(cleaned, row.id);
+        console.log(`🔧 [数据修复] 清理重复标记: ${row.exit_reason} → ${cleaned}`);
+      }
+
+      // 2. 对 total_sol_received=0 但 status='closed' 的记录，标记 exit_pnl=-100（无法追踪）
+      // 不覆盖已有的 exit_pnl
+      const zeroRecv = this.db.prepare(`
+        SELECT id, symbol, entry_sol, exit_pnl FROM live_positions
+        WHERE status = 'closed' AND (total_sol_received = 0 OR total_sol_received IS NULL) AND exit_pnl IS NULL
+      `).all();
+      for (const row of zeroRecv) {
+        this.db.prepare(`UPDATE live_positions SET exit_pnl = -100, total_sol_received = -1 WHERE id = ?`).run(row.id);
+        console.log(`🔧 [数据修复] $${row.symbol} 无收回记录，标记 PnL=-100% (投入: ${row.entry_sol} SOL)`);
+      }
+    } catch (e) {
+      console.warn(`⚠️ [数据修复] ${e.message}`);
     }
   }
 
