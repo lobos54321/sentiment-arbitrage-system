@@ -162,7 +162,6 @@ export class PremiumChannelListener {
           return;
         }
         console.log(`📈 [ATH解析] $${signal.symbol} gain=${signal.gain_pct}% MC=${signal.market_cap_from}→${signal.market_cap} is_ath=${signal.is_ath}`);
-        if (this._isDuplicate(signal.token_ca)) return;
         this._emitSignal(signal);
       }
 

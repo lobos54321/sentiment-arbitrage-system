@@ -31,7 +31,7 @@ export class LivePositionMonitor {
     // 🔧 BUG FIX: 重试计数器 Map<tokenCA, { count, pauseUntil }>
     this.retryCounter = new Map();
     this.maxRetries = 5;              // 最大重试 5 次
-    this.retryPauseMs = 60000;        // 滑点错误后暂停 1 分钟
+    this.retryPauseMs = 15000;         // 滑点错误后暂停 15 秒
     this.maxWalletScanRetries = 3;    // 钱包扫描最大重试次数
 
     // 持久化
@@ -472,7 +472,7 @@ export class LivePositionMonitor {
           UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?
           WHERE token_ca=? AND status='open'
         `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
-      } catch (e) { /* ignore */ }
+      } catch (e) { console.warn(`⚠️ [DB] $${pos.symbol} 定期持久化失败: ${e.message}`); }
     }
 
     const holdTimeMs = Date.now() - pos.entryTime;
@@ -910,6 +910,10 @@ export class LivePositionMonitor {
       retryInfo.count += 1;
       retryInfo.lastRetryTime = Date.now();
 
+      // 🔧 指数退避: 第1次 15s, 第2次 30s, 第3次 60s, 第4次 120s (上限120s)
+      const backoffMs = Math.min(this.retryPauseMs * Math.pow(2, retryInfo.count - 1), 120000);
+      const backoffSec = (backoffMs / 1000).toFixed(0);
+
       // 🔧 BUG FIX: 检测滑点错误，暂停更长时间
       const isSlippageError = error.message.includes('6025') ||
                               error.message.includes('6024') ||
@@ -917,8 +921,12 @@ export class LivePositionMonitor {
                               error.message.includes('滑点');
 
       if (isSlippageError) {
-        console.log(`   ⚠️  滑点错误，暂停 ${this.retryPauseMs / 1000} 秒后重试`);
-        retryInfo.pauseUntil = Date.now() + this.retryPauseMs;
+        console.log(`   ⚠️  滑点错误，暂停 ${backoffSec}s 后重试 (第${retryInfo.count}次)`);
+        retryInfo.pauseUntil = Date.now() + backoffMs;
+      } else {
+        // 非滑点错误也加退避，防止刷爆 API
+        const nonSlipBackoff = Math.min(5000 * retryInfo.count, 30000);
+        retryInfo.pauseUntil = Date.now() + nonSlipBackoff;
       }
 
       // 🔧 BUG FIX: 检查是否达到最大重试次数
