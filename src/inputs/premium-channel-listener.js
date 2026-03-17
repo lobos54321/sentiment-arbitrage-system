@@ -152,7 +152,7 @@ export class PremiumChannelListener {
       if (text.includes('🔥') && text.includes('New Trending')) {
         const signal = this._parseSignal(text);
         if (!signal) return;
-        if (this._isDuplicate(signal.token_ca)) return;
+        if (this._isDuplicate('NT_' + signal.token_ca)) return;
         this._emitSignal(signal);
       } else if (text.includes('📈') && text.includes('ATH')) {
         console.log(`📈 [ATH原文] ${text.substring(0, 200)}`);
@@ -162,6 +162,8 @@ export class PremiumChannelListener {
           return;
         }
         console.log(`📈 [ATH解析] $${signal.symbol} gain=${signal.gain_pct}% MC=${signal.market_cap_from}→${signal.market_cap} is_ath=${signal.is_ath}`);
+        // ATH 用独立 key，不被同 CA 的 New Trending 信号误拦截
+        if (this._isDuplicate('ATH_' + signal.token_ca)) return;
         this._emitSignal(signal);
       }
 
