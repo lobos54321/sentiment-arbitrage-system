@@ -31,6 +31,7 @@ import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
 import { LivePriceMonitor } from './tracking/live-price-monitor.js';
 import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
+import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
 
@@ -776,6 +777,10 @@ class PremiumChannelSystem {
         if (this.livePriceMonitor) {
           this.livePriceMonitor.start();
           this.engine.setLivePriceMonitor(this.livePriceMonitor);
+
+          // K 线收集器：持续记录价格到 SQLite 供回测使用
+          this.klineCollector = new KlineCollector();
+          this.klineCollector.attach(this.livePriceMonitor);
         }
 
         this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor, this.engine.riskManager);
@@ -843,6 +848,9 @@ class PremiumChannelSystem {
     }
     if (this.livePriceMonitor) {
       this.livePriceMonitor.stop();
+    }
+    if (this.klineCollector) {
+      this.klineCollector.stop();
     }
     this.db.close();
     console.log('⏹️  Premium Channel System 已停止');
