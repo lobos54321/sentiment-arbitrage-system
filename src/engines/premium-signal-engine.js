@@ -88,7 +88,36 @@ export class PremiumSignalEngine {
       exit_gate_rejected: 0,
       executed: 0,
       shadow_logged: 0,
-      errors: 0
+      errors: 0,
+      // 漏斗计数器（每层被过滤掉的数量）
+      funnel: {
+        f0_received:       0,  // 原始信号数
+        f1_after_dedup:    0,  // 去重后
+        f2_is_ath:         0,  // 通过ATH检查
+        f3_is_ath1:        0,  // 通过ATH#1检查
+        f4_precheck:       0,  // 通过freeze/mint预检
+        f5_mc:             0,  // 通过MC过滤
+        f6_super:          0,  // 通过Super指标
+        f7_trade:          0,  // 通过Trade指标
+        f8_addr:           0,  // 通过Addr指标
+        f9_sec:            0,  // 通过Sec指标
+        f10_position_slot: 0,  // 通过仓位槽位检查
+        f11_anti_chase:    0,  // 通过防追高
+        f12_executed:      0,  // 最终执行（含shadow）
+        // 被各层过滤掉的数量
+        drop_dedup:        0,
+        drop_not_ath:      0,
+        drop_not_ath1:     0,
+        drop_precheck:     0,
+        drop_mc:           0,
+        drop_super:        0,
+        drop_trade:        0,
+        drop_addr:         0,
+        drop_sec:          0,
+        drop_position_full:0,
+        drop_anti_chase:   0,
+        drop_already_hold: 0,
+      }
     };
 
     console.log('\n' + '─'.repeat(60));
@@ -274,6 +303,8 @@ export class PremiumSignalEngine {
    */
   async processSignal(signal) {
     this.stats.signals_received++;
+    this.stats.funnel.f0_received++;
+    if (this.stats.funnel.f0_received % 50 === 0) this.printFunnel();
     const ca = signal.token_ca;
     const shortCA = ca.substring(0, 8);
     const t0 = Date.now();
@@ -299,6 +330,7 @@ export class PremiumSignalEngine {
 
       if (this.isDuplicate(ca)) {
         this.stats.duplicates_skipped++;
+        this.stats.funnel.drop_dedup++;
         console.log(`⏭️  [去重] ${shortCA}... 5分钟内已处理，跳过`);
         return { action: 'SKIP', reason: 'duplicate' };
       }
@@ -308,6 +340,7 @@ export class PremiumSignalEngine {
       const lastSymbolSeen = this.recentSymbols.get(symbol);
       if (lastSymbolSeen && (Date.now() - lastSymbolSeen) < 15 * 60 * 1000) {
         this.stats.duplicates_skipped++;
+        this.stats.funnel.drop_dedup++;
         console.log(`⏭️  [Symbol去重] $${symbol} 15分钟内已处理过同名代币，跳过`);
         return { action: 'SKIP', reason: 'symbol_duplicate' };
       }
@@ -315,26 +348,32 @@ export class PremiumSignalEngine {
       const cooldownUntil = this.exitCooldown.get(symbol);
       if (cooldownUntil && Date.now() < cooldownUntil) {
         const remainSec = Math.round((cooldownUntil - Date.now()) / 1000);
+        this.stats.funnel.drop_dedup++;
         console.log(`⏭️  [冷却中] $${symbol} 退出后冷却期，剩余${remainSec}s，跳过`);
         return { action: 'SKIP', reason: 'exit_cooldown' };
       }
+      this.stats.funnel.f1_after_dedup++;
 
       // ─── Step 2: ATH 检查 — 最先过滤，非ATH立即退出 (~0ms) ───
       const isATH = signal.is_ath === true;
       if (!isATH) {
+        this.stats.funnel.drop_not_ath++;
         console.log(`⏭️ [v17] $${signal.symbol} 非ATH信号 → 不交易`);
         this.saveSignalRecord(signal, 'NOT_ATH_V17', null);
         return { action: 'SKIP', reason: 'not_ath_v17' };
       }
+      this.stats.funnel.f2_is_ath++;
 
       // ─── Step 3: 市场环境 + Freeze/Mint 预检 (全内存, ~0ms) ───
       if (this._solMarketPaused) {
+        this.stats.funnel.drop_precheck++;
         console.log(`⏸️ [v17] SOL 24h跌>10%，市场暂停中，不开新仓`);
         return { action: 'SKIP', reason: 'market_paused' };
       }
 
       if (signal.freeze_ok === false || signal.mint_ok === false) {
         this.stats.precheck_failed++;
+        this.stats.funnel.drop_precheck++;
         console.log(`🚫 [预检] freeze=${signal.freeze_ok} mint=${signal.mint_ok} → 跳过`);
         this.saveSignalRecord(signal, 'PRECHECK_FAIL', null);
         return { action: 'SKIP', reason: 'precheck_failed' };
@@ -342,6 +381,7 @@ export class PremiumSignalEngine {
       if (signal.freeze_ok === null || signal.mint_ok === null) {
         console.log(`⚠️ [预检] freeze=${signal.freeze_ok} mint=${signal.mint_ok} 未知(ATH信号无此数据)，继续`);
       }
+      this.stats.funnel.f4_precheck++;
 
       // ─── Step 4: v18 所有过滤 — 全部来自 signal.indices (~0ms) ─
       const idx = signal.indices;
@@ -360,10 +400,12 @@ export class PremiumSignalEngine {
       const currentAthNum = prevAthCount + 1;
 
       if (currentAthNum !== 1) {
+        this.stats.funnel.drop_not_ath1++;
         console.log(`⏭️ [v17] $${signal.symbol} ATH#${currentAthNum} → 仅ATH#1入场`);
         this.saveSignalRecord(signal, 'V17_NOT_ATH1', null);
         return { action: 'SKIP', reason: 'v17_only_ath1' };
       }
+      this.stats.funnel.f3_is_ath1++;
 
       // ─── 风控检查（在 ATH 计数提交之前）─────────────────────────
       // 风控拒绝不应消耗 ATH#1 — 损失限额重置后该 token 仍应有机会进场
@@ -385,10 +427,12 @@ export class PremiumSignalEngine {
 
       // 已持仓检查
       if (this.livePositionMonitor?.positions?.has(ca)) {
+        this.stats.funnel.drop_already_hold++;
         console.log(`⏭️ [v17] $${signal.symbol} 已持仓 → 跳过`);
         return { action: 'SKIP', reason: 'already_holding' };
       }
       if (this.shadowTracker.hasOpenPosition(ca)) {
+        this.stats.funnel.drop_already_hold++;
         console.log(`⏭️ [已持仓] $${signal.symbol} Shadow已有未平仓持仓，跳过`);
         return { action: 'SKIP', reason: 'already_in_position' };
       }
@@ -398,6 +442,7 @@ export class PremiumSignalEngine {
       const atRiskCount = allPositions ? [...allPositions.values()].filter(p => !p.tp1).length : 0;
       const moonBagCount = (allPositions?.size || 0) - atRiskCount;
       if (atRiskCount >= 5) {
+        this.stats.funnel.drop_position_full++;
         console.log(`⏭️ [v18] 在险仓位 ${atRiskCount}/5 已满 → 不开新仓 (${moonBagCount}个零成本登月仓不占槽)`);
         return { action: 'SKIP', reason: 'max_atrisk_positions' };
       }
@@ -408,50 +453,65 @@ export class PremiumSignalEngine {
       // v18 指标过滤 (全部 signal.indices，无网络请求)
       const mc = signal.market_cap || 0;
       if (mc < 30000 || mc > 300000) {
+        this.stats.funnel.drop_mc++;
         console.log(`⏭️ [v18] MC=$${(mc/1000).toFixed(1)}K 不在$30-300K → 跳过`);
         this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
         return { action: 'SKIP', reason: 'v18_mc_filter', mc };
       }
+      this.stats.funnel.f5_mc++;
       if (superCurrent < 80 || superCurrent > 1000) {
+        this.stats.funnel.drop_super++;
         console.log(`⏭️ [v18] Super_cur=${superCurrent} 不在80-1000 → 跳过`);
         this.saveSignalRecord(signal, 'V18_SUPERCUR_FILTER', null);
         return { action: 'SKIP', reason: 'v18_supercur_filter', superCurrent };
       }
       if (superDelta < 5) {
+        this.stats.funnel.drop_super++;
         console.log(`⏭️ [v18] SupΔ=${superDelta}<5 → 跳过`);
         this.saveSignalRecord(signal, 'V18_SUPDELTA_FILTER', null);
         return { action: 'SKIP', reason: 'v18_supdelta_filter', superDelta };
       }
+      this.stats.funnel.f6_super++;
       if (tradeCurrent < 1) {
+        this.stats.funnel.drop_trade++;
         console.log(`⏭️ [v18] Trade_cur=${tradeCurrent}<1 → 跳过`);
         this.saveSignalRecord(signal, 'V18_TRADECUR_FILTER', null);
         return { action: 'SKIP', reason: 'v18_tradecur_filter', tradeCurrent };
       }
       if (tradeDelta < 1) {
+        this.stats.funnel.drop_trade++;
         console.log(`⏭️ [v18] TΔ=${tradeDelta}<1 → 跳过`);
         this.saveSignalRecord(signal, 'V18_TRADEDELTA_FILTER', null);
         return { action: 'SKIP', reason: 'v18_tradedelta_filter', tradeDelta };
       }
+      this.stats.funnel.f7_trade++;
       if (addressCurrent < 3) {
+        this.stats.funnel.drop_addr++;
         console.log(`⏭️ [v18] Addr_cur=${addressCurrent}<3 → 跳过`);
         this.saveSignalRecord(signal, 'V18_ADDR_FILTER', null);
         return { action: 'SKIP', reason: 'v18_addr_filter', addressCurrent };
       }
+      this.stats.funnel.f8_addr++;
       if (securityCurrent < 15) {
+        this.stats.funnel.drop_sec++;
         console.log(`⏭️ [v18] Sec_cur=${securityCurrent}<15 → 跳过`);
         this.saveSignalRecord(signal, 'V18_SEC_FILTER', null);
         return { action: 'SKIP', reason: 'v18_sec_filter', securityCurrent };
       }
+      this.stats.funnel.f9_sec++;
+      this.stats.funnel.f10_position_slot++; // 到这里仓位槽位已通过（检查在上面）
 
       // ─── Step 5: 唯一网络请求 — 实时价格查询 + 防追高 (~200ms) ─
       // 优先 livePriceMonitor 缓存（0ms），否则查 Jupiter Price API
       const liveMC = this._getCachedMC(ca);
       if (liveMC > 0 && mc > 0 && liveMC > mc * 1.20) {
         const premium = ((liveMC / mc - 1) * 100).toFixed(1);
+        this.stats.funnel.drop_anti_chase++;
         console.log(`🚫 [防追高] $${signal.symbol} 信号MC=$${(mc/1000).toFixed(1)}K → 实时MC=$${(liveMC/1000).toFixed(1)}K (溢价+${premium}% > 20%) → 放弃`);
         this.saveSignalRecord(signal, 'ANTI_CHASE', null);
         return { action: 'SKIP', reason: 'anti_chase', premium: parseFloat(premium) };
       }
+      this.stats.funnel.f11_anti_chase++;
 
       const elapsed = Date.now() - t0;
       console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super=${superCurrent}(Δ${superDelta}) Trade=${tradeCurrent}(Δ${tradeDelta}) Addr=${addressCurrent} Sec=${securityCurrent} | 决策耗时:${elapsed}ms`);
@@ -481,6 +541,7 @@ export class PremiumSignalEngine {
       // ─── Step 6: 执行 ─────────────────────────────────────────
       if (this.shadowMode) {
         this.stats.shadow_logged++;
+        this.stats.funnel.f12_executed++;
         console.log(`🎭 [SHADOW] 模拟买入 $${signal.symbol} | ${finalSize} SOL`);
         this.saveSignalRecord(signal, 'PASS', aiResult, true);
         this.saveShadowTrade(signal, aiResult, finalSize);
@@ -555,6 +616,7 @@ export class PremiumSignalEngine {
         }
 
         this.stats.executed++;
+        this.stats.funnel.f12_executed++;
         this.saveSignalRecord(signal, 'PASS', aiResult, true);
         return { action: 'EXECUTED', size: finalSize, ai: aiResult, trade: tradeResult };
       } catch (execError) {
@@ -866,6 +928,40 @@ export class PremiumSignalEngine {
       await this.executor.disconnect();
     }
     console.log('⏹️  [Premium Engine] 已停止');
+  }
+
+  /**
+   * 打印信号漏斗统计
+   */
+  printFunnel() {
+    const f = this.stats.funnel;
+    const total = f.f0_received;
+    if (total === 0) return;
+
+    const pct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
+    const bar = (n) => {
+      const filled = Math.round((n / total) * 20);
+      return '█'.repeat(filled) + '░'.repeat(20 - filled);
+    };
+
+    console.log('\n' + '═'.repeat(65));
+    console.log('📊 [信号漏斗] 过滤效率统计');
+    console.log('═'.repeat(65));
+    console.log(`  原始信号          ${String(f.f0_received).padStart(4)}  ${bar(f.f0_received)}  100%`);
+    console.log(`  去重后            ${String(f.f1_after_dedup).padStart(4)}  ${bar(f.f1_after_dedup)}  ${pct(f.f1_after_dedup)}  (丢弃${f.drop_dedup})`);
+    console.log(`  是ATH信号         ${String(f.f2_is_ath).padStart(4)}  ${bar(f.f2_is_ath)}  ${pct(f.f2_is_ath)}  (丢弃${f.drop_not_ath})`);
+    console.log(`  是ATH#1           ${String(f.f3_is_ath1).padStart(4)}  ${bar(f.f3_is_ath1)}  ${pct(f.f3_is_ath1)}  (丢弃${f.drop_not_ath1})`);
+    console.log(`  预检通过          ${String(f.f4_precheck).padStart(4)}  ${bar(f.f4_precheck)}  ${pct(f.f4_precheck)}  (丢弃${f.drop_precheck})`);
+    console.log(`  MC $30-300K       ${String(f.f5_mc).padStart(4)}  ${bar(f.f5_mc)}  ${pct(f.f5_mc)}  (丢弃${f.drop_mc})`);
+    console.log(`  Super指标         ${String(f.f6_super).padStart(4)}  ${bar(f.f6_super)}  ${pct(f.f6_super)}  (丢弃${f.drop_super})`);
+    console.log(`  Trade指标         ${String(f.f7_trade).padStart(4)}  ${bar(f.f7_trade)}  ${pct(f.f7_trade)}  (丢弃${f.drop_trade})`);
+    console.log(`  Addr指标          ${String(f.f8_addr).padStart(4)}  ${bar(f.f8_addr)}  ${pct(f.f8_addr)}  (丢弃${f.drop_addr})`);
+    console.log(`  Sec指标           ${String(f.f9_sec).padStart(4)}  ${bar(f.f9_sec)}  ${pct(f.f9_sec)}  (丢弃${f.drop_sec})`);
+    console.log(`  仓位槽位          ${String(f.f10_position_slot).padStart(4)}  ${bar(f.f10_position_slot)}  ${pct(f.f10_position_slot)}  (丢弃${f.drop_position_full + f.drop_already_hold})`);
+    console.log(`  防追高            ${String(f.f11_anti_chase).padStart(4)}  ${bar(f.f11_anti_chase)}  ${pct(f.f11_anti_chase)}  (丢弃${f.drop_anti_chase})`);
+    console.log('─'.repeat(65));
+    console.log(`  ✅ 最终执行       ${String(f.f12_executed).padStart(4)}  ${bar(f.f12_executed)}  ${pct(f.f12_executed)}`);
+    console.log('═'.repeat(65) + '\n');
   }
 
   /**
