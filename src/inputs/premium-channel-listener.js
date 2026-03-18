@@ -290,36 +290,48 @@ export class PremiumChannelListener {
 
   /**
    * Parse Egeye AI Index data from signal text
-   * Format: ✡Super Index：(signal)116🔮 --> (current)124🔮 🔺6%
-   * Returns: { super_index: {signal, current, change_pct}, ai_index: {...}, ... }
+   *
+   * ATH format:      ✡ Super Index：(signal)116🔮 --> (current)124🔮 🔺6%
+   *   → { signal: 116, current: 124, growth: 6.9 }
+   *
+   * Trending format: ✡ Super Index： 128🔮
+   *   → { value: 128 }
    */
   _parseIndices(text) {
     const indices = {};
     const indexNames = [
-      ['super_index', 'Super Index'],
-      ['ai_index', 'AI Index'],
-      ['trade_index', 'Trade Index'],
-      ['security_index', 'Security Index'],
-      ['address_index', 'Address Index'],
-      ['viral_index', 'Viral Index'],
-      ['media_index', 'Media Index'],
+      ['super_index',     'Super Index'],
+      ['ai_index',        'AI Index'],
+      ['trade_index',     'Trade Index'],
+      ['security_index',  'Security Index'],
+      ['address_index',   'Address Index'],
+      ['sentiment_index', 'Sentiment Index'],
+      ['viral_index',     'Viral Index'],
+      ['media_index',     'Media Index'],
     ];
 
     for (const [key, label] of indexNames) {
-      // Match patterns like: Super Index：(signal)116🔮 --> (current)124🔮 🔺6%
-      // Or: Super Index：(signal)116🔮 --> (current)x124🔮
-      // Also handles full-width parentheses: （current) or （signal)
-      const escaped = label.replace(/\s+/g, '\\s*');
-      const re = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
-      const match = text.match(re);
-      if (match) {
-        const signalVal = parseInt(match[1]);
-        const currentVal = parseInt(match[2]);
+      const escaped = label.replace(/\s+/g, '\\s+');
+
+      // ATH delta format: Label：(signal)116🔮 --> (current)124🔮
+      const reDelta = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
+      const mDelta = text.match(reDelta);
+      if (mDelta) {
+        const signalVal = parseInt(mDelta[1]);
+        const currentVal = parseInt(mDelta[2]);
         indices[key] = {
           signal: signalVal,
           current: currentVal,
           growth: signalVal > 0 ? ((currentVal - signalVal) / signalVal * 100) : (currentVal > 0 ? 999 : 0),
         };
+        continue;
+      }
+
+      // Trending single-value format: Label： 128🔮  (no (signal)/(current))
+      const reSingle = new RegExp(escaped + '[：:]\\s*(\\d+)\\s*🔮', 'i');
+      const mSingle = text.match(reSingle);
+      if (mSingle) {
+        indices[key] = { value: parseInt(mSingle[1]) };
       }
     }
 

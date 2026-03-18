@@ -115,18 +115,31 @@ function parseATH(text, date) {
 function parseIndices(text) {
   const result = {};
   const names = [
-    ['super_index', 'Super Index'],
-    ['ai_index', 'AI Index'],
-    ['trade_index', 'Trade Index'],
-    ['security_index', 'Security Index'],
-    ['address_index', 'Address Index'],
+    ['super_index',     'Super Index'],
+    ['ai_index',        'AI Index'],
+    ['trade_index',     'Trade Index'],
+    ['security_index',  'Security Index'],
+    ['address_index',   'Address Index'],
+    ['sentiment_index', 'Sentiment Index'],
+    ['viral_index',     'Viral Index'],
+    ['media_index',     'Media Index'],
   ];
   for (const [key, label] of names) {
-    const escaped = label.replace(/\s+/g, '\\s*');
-    const re = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
-    const m = text.match(re);
-    if (m) {
-      result[key] = { signal: parseInt(m[1]), current: parseInt(m[2]) };
+    const escaped = label.replace(/\s+/g, '\\s+');
+
+    // ATH delta format: Label：(signal)116🔮 --> (current)124🔮
+    const reDelta = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
+    const mDelta = text.match(reDelta);
+    if (mDelta) {
+      result[key] = { signal: parseInt(mDelta[1]), current: parseInt(mDelta[2]) };
+      continue;
+    }
+
+    // Trending single-value format: Label： 128🔮
+    const reSingle = new RegExp(escaped + '[：:]\\s*(\\d+)\\s*🔮', 'i');
+    const mSingle = text.match(reSingle);
+    if (mSingle) {
+      result[key] = { value: parseInt(mSingle[1]) };
     }
   }
   return Object.keys(result).length > 0 ? result : null;
