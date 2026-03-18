@@ -479,7 +479,7 @@ export class LivePositionMonitor {
       try {
         this.db.prepare(`
           UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?
-          WHERE token_ca=? AND status='open'
+          WHERE token_ca=? AND status IN ('open', 'selling')
         `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
       } catch (e) { console.warn(`⚠️ [DB] $${pos.symbol} 定期持久化失败: ${e.message}`); }
     }
@@ -810,7 +810,7 @@ export class LivePositionMonitor {
       try {
         this.db.prepare(`
           UPDATE live_positions SET tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, high_pnl=?, total_sol_received=?
-          WHERE token_ca=? AND status='open'
+          WHERE token_ca=? AND status IN ('open', 'selling')
         `).run(pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.highPnl, pos.totalSolReceived || 0, pos.tokenCA);
       } catch (e) {
         console.warn(`   ⚠️ TP状态持久化失败: ${e.message}`);
@@ -1029,7 +1029,7 @@ export class LivePositionMonitor {
       this.db.prepare(`
         UPDATE live_positions
         SET exit_pnl=?, exit_reason=?, high_pnl=?, low_pnl=?, total_sol_received=?, status='closed', closed_at=?
-        WHERE token_ca=? AND status='open'
+        WHERE token_ca=? AND status IN ('open', 'selling')
       `).run(finalPnl, pos.exitReason, pos.highPnl, pos.lowPnl, pos.totalSolReceived || 0, Date.now(), pos.tokenCA);
     } catch (e) {
       console.warn(`⚠️  [LivePositionMonitor] DB 更新失败: ${e.message}`);
