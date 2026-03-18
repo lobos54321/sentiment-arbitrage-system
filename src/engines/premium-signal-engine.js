@@ -706,7 +706,8 @@ export class PremiumSignalEngine {
     }
 
     // 2b. ai_index 过滤：需 ≥ 40 (回测优化结果)
-    const aiIdx = signal.ai_index ?? signal.aiIndex ?? null;
+    // ai_index 在 signal.indices.ai_index 里，不在顶层
+    const aiIdx = signal.indices?.ai_index ?? null;
     if (aiIdx !== null && aiIdx < 40) {
       console.log(`⏭️ [v19/NOT_ATH] $${symbol} ai_index=${aiIdx} < 40 → 跳过`);
       this.saveSignalRecord(signal, 'NOT_ATH_AI_LOW', null);
