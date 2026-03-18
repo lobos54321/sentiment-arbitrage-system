@@ -6,6 +6,7 @@
  *
  * v18 退出策略:
  * - ASYMMETRIC: 非对称收割 (SL-35%→TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%卖5% + 5%Moonbag回撤35%平仓)
+ * - NOT_ATH: NOT_ATH专用 (SL-15%→TP1@80%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%+ 8分死水/15分大限)
  * - TP_NOSL: TP+100% / 无SL / 4h超时 (保留向后兼容)
  * - TP_SL: TP+75% / SL-25% / 24h超时 (保留向后兼容)
  * - DynSL: 保留向后兼容
@@ -603,6 +604,63 @@ export class LivePositionMonitor {
           return;
         }
       }
+
+    } else if (strategy === 'NOT_ATH') {
+      // ====== NOT_ATH 专用出场 (回测优化 v19) ======
+      const currentSL = pos.tp1 ? 0 : -15;
+
+      if (!pos.moonbag && pnl <= currentSL) {
+        if (pos.tp1) {
+          console.log(`🛡️ [NOT_ATH:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出全部剩余`);
+          await this._triggerExit(pos, `NOT_ATH_BE_SL(PnL${pnl.toFixed(0)}%)`, 100);
+        } else {
+          console.log(`🛑 [NOT_ATH:硬SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -15% → 止损全卖`);
+          await this._triggerExit(pos, `NOT_ATH_HARD_SL_15(PnL${pnl.toFixed(0)}%)`, 100);
+        }
+        return;
+      }
+      if (!pos.tp1 && pnl >= 80) {
+        console.log(`🎯 [NOT_ATH:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +80% → 卖出60%`);
+        await this._triggerPartialSell(pos, 'TP1', 60, pnl);
+        return;
+      }
+      if (pos.tp1 && !pos.tp2 && pnl >= 100) {
+        console.log(`🚀 [NOT_ATH:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +100% → 卖出50%`);
+        await this._triggerPartialSell(pos, 'TP2', 50, pnl);
+        return;
+      }
+      if (pos.tp2 && !pos.tp3 && pnl >= 200) {
+        console.log(`🌙 [NOT_ATH:TP3] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +200% → 卖出50%`);
+        await this._triggerPartialSell(pos, 'TP3', 50, pnl);
+        return;
+      }
+      if (pos.tp3 && !pos.tp4 && pnl >= 500) {
+        console.log(`🌕 [NOT_ATH:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出80%`);
+        await this._triggerPartialSell(pos, 'TP4', 80, pnl);
+        if (pos.tp4) { pos.moonbag = true; pos.moonbagHighPnl = pnl; }
+        return;
+      }
+      if (pos.moonbag) {
+        if (pnl > (pos.moonbagHighPnl || 0)) pos.moonbagHighPnl = pnl;
+        const moonPeak = pos.moonbagHighPnl || pnl;
+        const dropPct = moonPeak > 0 ? ((moonPeak - pnl) / moonPeak) * 100 : 0;
+        if (dropPct >= 35) {
+          console.log(`🎫 [NOT_ATH:Moonbag] $${pos.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}%≥35% → 平仓`);
+          await this._triggerExit(pos, `NOT_ATH_MOONBAG(peak+${moonPeak.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`, 100);
+        }
+        return;
+      }
+      if (!pos.tp1 && holdTimeMin >= 8 && pos.highPnl < 80 && pnl <= 20) {
+        console.log(`💀 [NOT_ATH:死水] $${pos.symbol} 8分无起色 → 全平`);
+        await this._triggerExit(pos, `NOT_ATH_DEAD_8M(PnL${pnl.toFixed(0)}%,peak+${pos.highPnl.toFixed(0)}%)`, 100);
+        return;
+      }
+      if (!pos.tp1 && holdTimeMin >= 15) {
+        console.log(`⏰ [NOT_ATH:15分大限] $${pos.symbol} → 全平`);
+        await this._triggerExit(pos, `NOT_ATH_TIMEOUT_15M(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
 
     } else if (strategy === 'TP_NOSL') {
       // ====== v17.4: TP+100% / 无SL / 1h<30%快出 / 4h超时 ======

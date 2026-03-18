@@ -6,11 +6,12 @@
  *
  * v19: ATH#1 原策略 + NOT_ATH 涨速过滤新路径
  * - ATH#1: 同v18，MC 30-300K + Super_cur 80-1000 + SupΔ≥5 + Trade/Addr/Sec过滤
- * - NOT_ATH: MC<30K + 实时涨速≥20%(DexScreener priceChange.m5) + super_index≥100
- *   → 回测(3天): 胜率78-90%, EV=+0.023~0.037 SOL/笔
+ * - NOT_ATH: MC<30K + 实时涨速≥30%(DexScreener priceChange.m5) + super_index≥100 + ai_index≥40
+ *   → 回测(86笔): WR=27%, EV=+7.9%/笔, 大亏率0%
  * - 仓位: 0.06 SOL
- * - 出场: ASYMMETRIC (SL-35%→TP1@50%卖60%→SL移至0%→TP2@100% + 15分死水/30分大限)
- * - 回测(3天 Mar16-18): ATH 87笔 +0.69SOL | NOT_ATH_vel20 107笔 +2.44SOL
+ * - ATH出场: ASYMMETRIC (SL-35%→TP1@50%卖60%→SL移至0%→TP2@100% + 15分死水/30分大限)
+ * - NOT_ATH出场: NOT_ATH (SL-15%→TP1@80%卖60%→SL移至0%→TP2@100% + 8分死水/15分大限)
+ * - 回测(3天 Mar16-18): ATH 87笔 +0.69SOL | NOT_ATH 86笔 +0.41SOL
  */
 
 import fs from 'fs';
@@ -704,6 +705,14 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'not_ath_si_low', superIdx };
     }
 
+    // 2b. ai_index 过滤：需 ≥ 40 (回测优化结果)
+    const aiIdx = signal.ai_index ?? signal.aiIndex ?? null;
+    if (aiIdx !== null && aiIdx < 40) {
+      console.log(`⏭️ [v19/NOT_ATH] $${symbol} ai_index=${aiIdx} < 40 → 跳过`);
+      this.saveSignalRecord(signal, 'NOT_ATH_AI_LOW', null);
+      return { action: 'SKIP', reason: 'not_ath_ai_low', aiIdx };
+    }
+
     // 3. 实时涨速检查：调用 DexScreener priceChange.m5
     let priceChangePct = null;
     try {
@@ -728,7 +737,7 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'not_ath_no_m5' };
     }
 
-    const VEL_THRESHOLD = 20; // 5分钟涨速 ≥ 20%
+    const VEL_THRESHOLD = 30; // 5分钟涨速 ≥ 30% (回测优化: 原20%→30%)
     if (priceChangePct < VEL_THRESHOLD) {
       console.log(`⏭️ [v19/NOT_ATH] $${symbol} 5min涨速=${priceChangePct.toFixed(1)}% < ${VEL_THRESHOLD}% → 跳过`);
       this.saveSignalRecord(signal, 'NOT_ATH_VEL_LOW', null);
@@ -742,15 +751,16 @@ export class PremiumSignalEngine {
     }
 
     const elapsed = Date.now() - t0;
-    console.log(`🚀 [v19/NOT_ATH] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx} 5min涨速=+${priceChangePct.toFixed(1)}% | 决策耗时:${elapsed}ms`);
+    const aiIdxStr = aiIdx !== null ? ` AI=${aiIdx}` : '';
+    console.log(`🚀 [v19/NOT_ATH] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr} 5min涨速=+${priceChangePct.toFixed(1)}% | 决策耗时:${elapsed}ms`);
 
     const finalSize = 0.06;
     const aiResult = {
       action: 'BUY_FULL', confidence: 80,
       narrative_tier: 'CONFIRMED',
-      narrative_reason: `v19/NOT_ATH: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx} vel5m=+${priceChangePct.toFixed(1)}%`,
-      entry_timing: 'MOMENTUM', stop_loss_percent: 35,
-      exitStrategy: 'ASYMMETRIC'
+      narrative_reason: `v19/NOT_ATH: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr} vel5m=+${priceChangePct.toFixed(1)}%`,
+      entry_timing: 'MOMENTUM', stop_loss_percent: 15,
+      exitStrategy: 'NOT_ATH'
     };
 
     if (this.shadowMode) {
@@ -802,7 +812,7 @@ export class PremiumSignalEngine {
             const liveMC = this._getCachedMC(ca);
             this.livePositionMonitor.addPosition(
               ca, symbol, entryPrice, liveMC || mc, finalSize,
-              balance.amount, tokenDecimals, 'MEDIUM', 'ASYMMETRIC'
+              balance.amount, tokenDecimals, 'MEDIUM', 'NOT_ATH'
             );
             if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
           }
