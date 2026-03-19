@@ -159,9 +159,6 @@ export class JupiterUltraExecutor {
     console.log(`🪐 [JupiterUltra] 卖出 ${tokenAmount} tokens → SOL | ${tokenCA.substring(0, 8)}...`);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      // 每次重试前重新查询 SOL 余额，避免重试时使用过期快照
-      const solBefore = await this.getSolBalance();
-
       try {
         // 1. 获取 Ultra Order（Token → SOL）
         const order = await this._getOrder(tokenCA, SOL_MINT, tokenAmount);
@@ -180,18 +177,11 @@ export class JupiterUltraExecutor {
         const result = await this._executeOrder(signedTx, order.requestId);
 
         if (result.status === 'Success') {
-          // 优先使用 API 返回的精确值，避免并发余额竞态（CR-4）
-          let outSol;
-          if (result.outputAmount) {
-            outSol = parseFloat(result.outputAmount) / LAMPORTS_PER_SOL;
-          } else {
-            // fallback：查询余额差值（单笔时准确，并发时可能包含其他交易）
-            // Ultra 已内置链上确认，500ms 足够余额刷新
-            await new Promise(r => setTimeout(r, 500));
-            const solAfter = await this.getSolBalance();
-            const actualSolReceived = solAfter - solBefore;
-            outSol = actualSolReceived > 0 ? actualSolReceived : quotedSol;
-          }
+          // Jupiter Ultra 几乎必然返回 outputAmount，直接使用
+          // fallback 用报价值（误差在滑点范围内，无需额外 RPC 查余额）
+          const outSol = result.outputAmount
+            ? parseFloat(result.outputAmount) / LAMPORTS_PER_SOL
+            : quotedSol;
 
           this.stats.sells++;
           this.stats.total_sol_received += outSol;
