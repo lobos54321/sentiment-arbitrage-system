@@ -51,7 +51,7 @@ export class JupiterUltraExecutor {
 
     // Jupiter Ultra API
     this.ultraApiBase = 'https://api.jup.ag/ultra/v1';
-    this.jupiterApiKey = process.env.JUPITER_API_KEY || '';
+    this.jupiterApiKey = process.env.JUPITER_API_KEY || '';  // 免费 API Key: portal.jup.ag（有 key 比无 key 快 0.5-1s）
 
     // 统计
     this.stats = {
@@ -276,7 +276,8 @@ export class JupiterUltraExecutor {
         inputMint,
         outputMint,
         amount: amount.toString(),
-        taker: this.walletAddress
+        taker: this.walletAddress,
+        prioritizationFeeLamports: 'auto'  // 动态优先费，确保快速上链
       });
 
       const res = await axios.get(`${this.ultraApiBase}/order?${params.toString()}`, {
