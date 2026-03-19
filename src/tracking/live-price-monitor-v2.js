@@ -50,6 +50,11 @@ export class LivePriceMonitorV2 extends EventEmitter {
       errors: 0
     };
 
+    // 防止 setInterval 回调叠加
+    this._queryRunning = false;
+    // 单 token 连续失败计数（只计非429错误）
+    this._tokenFailCounts = new Map();
+
     console.log('📡 [LivePriceMonitorV2] 初始化 - 使用 Jupiter Swap Quote');
   }
 
@@ -115,58 +120,89 @@ export class LivePriceMonitorV2 extends EventEmitter {
    * 查询所有 token 的实时价格（使用 Jupiter Swap Quote）
    */
   async _queryAllPrices() {
+    // 防止 setInterval 叠加：上一次轮询未完成时跳过本次
+    if (this._queryRunning) return;
     if (this.watchList.size === 0) return;
 
+    this._queryRunning = true;
     const tokens = [...this.watchList.entries()];
     this.stats.quote_queries++;
 
-    // 逐个查询（避免并发过多触发 rate limit）
-    for (const [tokenCA, { tokenAmount, decimals }] of tokens) {
-      try {
-        // 使用 Jupiter Quote API 获取实际可交易价格
-        const quote = await this._getSwapQuote(tokenCA, tokenAmount);
+    try {
+      // 逐个查询（避免并发过多触发 rate limit）
+      for (const [tokenCA, { tokenAmount, decimals }] of tokens) {
+        try {
+          // 使用 Jupiter Quote API 获取实际可交易价格
+          const quote = await this._getSwapQuote(tokenCA, tokenAmount);
 
-        if (quote && quote.outAmount) {
-          // 计算 SOL per token 价格
-          const outSol = parseInt(quote.outAmount) / 1e9; // lamports to SOL
-          const actualTokenAmount = tokenAmount / Math.pow(10, decimals);
-          const solPrice = outSol / actualTokenAmount;
+          if (quote && quote.outAmount) {
+            // 查询成功 → 重置该 token 的失败计数
+            this._tokenFailCounts.delete(tokenCA);
 
-          const cached = this.priceCache.get(tokenCA);
+            // 计算 SOL per token 价格
+            const outSol = parseInt(quote.outAmount) / 1e9; // lamports to SOL
+            const actualTokenAmount = tokenAmount / Math.pow(10, decimals);
+            const solPrice = outSol / actualTokenAmount;
 
-          this.priceCache.set(tokenCA, {
-            price: solPrice,  // SOL per token
-            outSol,           // 卖出可得 SOL
-            timestamp: Date.now(),
-            source: 'jupiter-quote',
-            mc: cached?.mc || null  // MC 由 DexScreener 补充
-          });
+            const cached = this.priceCache.get(tokenCA);
 
-          this.stats.quote_hits++;
+            this.priceCache.set(tokenCA, {
+              price: solPrice,  // SOL per token
+              outSol,           // 卖出可得 SOL
+              timestamp: Date.now(),
+              source: 'jupiter-quote',
+              mc: cached?.mc || null  // MC 由 DexScreener 补充
+            });
 
-          // Emit 价格更新事件
-          this.emit('price-update', {
-            tokenCA,
-            price: solPrice,
-            outSol,
-            mc: cached?.mc || null,
-            timestamp: Date.now(),
-            source: 'jupiter-quote'
-          });
-        } else {
-          this.stats.quote_failures++;
+            this.stats.quote_hits++;
+
+            // Emit 价格更新事件
+            this.emit('price-update', {
+              tokenCA,
+              price: solPrice,
+              outSol,
+              mc: cached?.mc || null,
+              timestamp: Date.now(),
+              source: 'jupiter-quote'
+            });
+          } else {
+            // 路由找不到（非限速）→ 记录该 token 的失败次数
+            const prev = this._tokenFailCounts.get(tokenCA) || 0;
+            this._tokenFailCounts.set(tokenCA, prev + 1);
+            this.stats.quote_failures++;
+          }
+        } catch (error) {
+          if (error._is429) {
+            // Jupiter API 限速 → 不计入 token 失败（是全局问题，不是单 token 死亡）
+            this.stats.errors++;
+            if (this.stats.errors <= 10 || this.stats.errors % 50 === 0) {
+              console.warn(`⚠️  [LivePriceMonitorV2] Jupiter API 限速 (429)，跳过本轮 (累计 ${this.stats.errors} 次)`);
+            }
+          } else {
+            // 真正的查询失败 → 计入 token 失败
+            const prev = this._tokenFailCounts.get(tokenCA) || 0;
+            this._tokenFailCounts.set(tokenCA, prev + 1);
+            this.stats.errors++;
+            if (this.stats.errors <= 10 || this.stats.errors % 50 === 0) {
+              console.warn(`⚠️  [LivePriceMonitorV2] Quote 查询失败 (${this.stats.errors}): ${error.message}`);
+            }
+          }
         }
-      } catch (error) {
-        this.stats.errors++;
-        // 前10次每次打，之后每50次打一次
-        if (this.stats.errors <= 10 || this.stats.errors % 50 === 0) {
-          console.warn(`⚠️  [LivePriceMonitorV2] Quote 查询失败 (${this.stats.errors}): ${error.message}`);
-        }
+
+        // 避免 rate limit，每次查询间隔 100ms
+        await new Promise(r => setTimeout(r, 100));
       }
-
-      // 避免 rate limit，每次查询间隔 100ms
-      await new Promise(r => setTimeout(r, 100));
+    } finally {
+      this._queryRunning = false;
     }
+  }
+
+  /**
+   * 获取 token 连续失败次数（用于外部判断是否为流动性枯竭）
+   * 只统计非429错误，避免把 API 限速误判为 token 死亡
+   */
+  getTokenFailCount(tokenCA) {
+    return this._tokenFailCounts.get(tokenCA) || 0;
   }
 
   /**
@@ -195,7 +231,13 @@ export class LivePriceMonitorV2 extends EventEmitter {
 
       return res.data;
     } catch (error) {
-      // 静默失败
+      // 区分 429 限速（全局问题）vs 其他错误（可能是 token 流动性问题）
+      if (error.response?.status === 429) {
+        const rateErr = new Error('Jupiter API rate limit (429)');
+        rateErr._is429 = true;
+        throw rateErr;
+      }
+      // 其他错误（路由超时、网络抖动等）→ 返回 null，由调用方计入 token 失败
       return null;
     }
   }

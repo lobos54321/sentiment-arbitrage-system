@@ -186,7 +186,8 @@ export class JupiterUltraExecutor {
             outSol = parseFloat(result.outputAmount) / LAMPORTS_PER_SOL;
           } else {
             // fallback：查询余额差值（单笔时准确，并发时可能包含其他交易）
-            await new Promise(r => setTimeout(r, 2000));  // 等待余额更新
+            // Ultra 已内置链上确认，500ms 足够余额刷新
+            await new Promise(r => setTimeout(r, 500));
             const solAfter = await this.getSolBalance();
             const actualSolReceived = solAfter - solBefore;
             outSol = actualSolReceived > 0 ? actualSolReceived : quotedSol;
