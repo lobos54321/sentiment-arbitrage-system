@@ -158,7 +158,7 @@ export class RiskManager {
                COALESCE(SUM(CASE WHEN total_sol_received > 0 THEN total_sol_received ELSE 0 END), 0) as total_received
         FROM live_positions
         WHERE status = 'closed' AND closed_at >= ?
-      `).get(todayStart.toISOString());
+      `).get(todayStart.getTime()); // ms 整数，与 closed_at (Date.now()) 类型一致
       if (todayRows) {
         const netPnl = todayRows.total_received - todayRows.total_spent;
         if (netPnl <= -dailyLossLimit) {
@@ -830,7 +830,7 @@ ${lossDetails || '(无记录)'}
                COALESCE(SUM(CASE WHEN total_sol_received > 0 THEN total_sol_received ELSE 0 END), 0) as total_received
         FROM live_positions
         WHERE status = 'closed' AND closed_at >= ?
-      `).get(todayStart.toISOString());
+      `).get(todayStart.getTime()); // ms 整数，与 closed_at (Date.now()) 类型一致
       return row ? +(row.total_received - row.total_spent).toFixed(4) : 0;
     } catch (e) { return 0; }
   }
