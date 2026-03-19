@@ -56,6 +56,17 @@ export class RiskManager {
         }
       } catch (e) { /* ignore */ }
 
+      // 加载手动"今日亏损重置"时间戳（用于"重新开始"）
+      try {
+        const dlReset = this.db.prepare(`
+          SELECT value FROM system_state WHERE key = 'daily_loss_reset_ts'
+        `).get();
+        if (dlReset?.value) {
+          this._dailyLossResetTs = parseInt(dlReset.value, 10);
+          console.log(`   🔄 今日亏损统计起点: ${new Date(this._dailyLossResetTs).toLocaleString()}`);
+        }
+      } catch (e) { /* ignore */ }
+
       // 获取连续亏损次数（只统计重置时间点之后的记录）
       const recentTrades = this.db.prepare(`
         SELECT exit_pnl
@@ -158,7 +169,7 @@ export class RiskManager {
                COALESCE(SUM(CASE WHEN total_sol_received > 0 THEN total_sol_received ELSE 0 END), 0) as total_received
         FROM live_positions
         WHERE status = 'closed' AND closed_at >= ?
-      `).get(todayStart.toISOString());
+      `).get(this._getDailyStartTs()); // 支持手动重置：max(今日零点, 手动重置时间戳)
       if (todayRows) {
         const netPnl = todayRows.total_received - todayRows.total_spent;
         if (netPnl <= -dailyLossLimit) {
@@ -307,6 +318,31 @@ export class RiskManager {
   }
 
   /**
+   * 获取今日统计起点（ms）= max(今日零点, 手动重置时间戳)
+   * 用于所有"今日亏损"查询，支持手动"重新开始"
+   */
+  _getDailyStartTs() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    return Math.max(todayStart.getTime(), this._dailyLossResetTs || 0);
+  }
+
+  /**
+   * 重置今日亏损统计（用于"重新开始"场景）
+   * 将统计起点设为当前时间，之前的亏损不再计入今日上限
+   */
+  resetDailyLoss() {
+    this._dailyLossResetTs = Date.now();
+    try {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO system_state (key, value)
+        VALUES ('daily_loss_reset_ts', ?)
+      `).run(this._dailyLossResetTs.toString());
+    } catch (e) { /* ignore */ }
+    console.log(`\n✅ [手动] 今日亏损统计已重置 — 从 ${new Date(this._dailyLossResetTs).toLocaleString()} 起重新计算\n`);
+  }
+
+  /**
    * 获取今日盈亏统计
    */
   getTodayPnL() {
@@ -315,9 +351,9 @@ export class RiskManager {
         SELECT COALESCE(SUM(total_sol_received - entry_sol), 0) as total_pnl
         FROM live_positions
         WHERE status = 'closed'
-        AND closed_at >= strftime('%s', 'now', 'start of day') * 1000
+        AND closed_at >= ?
         AND total_sol_received >= 0
-      `).get();
+      `).get(this._getDailyStartTs());
 
       return { sol: result.total_pnl || 0, bnb: 0 };
     } catch (error) {
@@ -830,7 +866,7 @@ ${lossDetails || '(无记录)'}
                COALESCE(SUM(CASE WHEN total_sol_received > 0 THEN total_sol_received ELSE 0 END), 0) as total_received
         FROM live_positions
         WHERE status = 'closed' AND closed_at >= ?
-      `).get(todayStart.toISOString());
+      `).get(this._getDailyStartTs());
       return row ? +(row.total_received - row.total_spent).toFixed(4) : 0;
     } catch (e) { return 0; }
   }

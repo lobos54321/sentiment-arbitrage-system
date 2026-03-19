@@ -283,6 +283,22 @@ function renderDashboard(data) {
         alert('请求失败: ' + e.message);
       }
     }
+
+    async function resetDailyLoss() {
+      if (!confirm('确认重置今日亏损统计起点？\n历史数据不会被删除，仅从当前时间重新开始计算。')) return;
+      try {
+        const r = await fetch('/api/reset-daily-loss' + _q, { method: 'POST' });
+        const d = await r.json();
+        if (d.success) {
+          alert(d.message);
+          location.reload();
+        } else {
+          alert('操作失败: ' + (d.error || '未知错误'));
+        }
+      } catch (e) {
+        alert('请求失败: ' + e.message);
+      }
+    }
   </script>
 </head>
 <body>
@@ -321,9 +337,10 @@ function renderDashboard(data) {
               ${data.risk.is_paused ? '已暂停' : '正常'}
             </div>
             <div class="stat-label">风控状态</div>
-            <div style="margin-top:8px;display:flex;gap:6px;justify-content:center">
+            <div style="margin-top:8px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap">
               <button id="btn-pause" onclick="toggleTrading('pause')" style="font-size:0.75em;padding:4px 10px;cursor:pointer;background:#ff4757;border:none;border-radius:4px;color:#fff;${data.risk.is_paused ? 'display:none' : ''}">⏸ 暂停</button>
               <button id="btn-resume" onclick="toggleTrading('resume')" style="font-size:0.75em;padding:4px 10px;cursor:pointer;background:#2ed573;border:none;border-radius:4px;color:#fff;${data.risk.is_paused ? '' : 'display:none'}">▶ 恢复</button>
+              <button onclick="resetDailyLoss()" style="font-size:0.75em;padding:4px 10px;cursor:pointer;background:#ffa502;border:none;border-radius:4px;color:#fff;" title="重置今日亏损统计起点，不删除历史数据">🔄 重置今日亏损</button>
             </div>
           </div>
           <div class="stat">
@@ -1821,6 +1838,31 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (url.pathname === '/api/reset-daily-loss') {
+    // 重置今日亏损统计起点（用于"重新开始"，不删除历史数据）
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Use POST' }));
+      return;
+    }
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const rm = global.__riskManager;
+      if (rm) {
+        rm.resetDailyLoss();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: `今日亏损统计已重置，从 ${new Date().toLocaleString()} 起重新计算` }));
+      } else {
+        const d = getDb();
+        d.prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('daily_loss_reset_ts', ?)`).run(Date.now().toString());
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '今日亏损统计已重置 (DB only)' }));
+      }
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+
   } else if (url.pathname === '/api/reset-live-data') {
     // 清空实盘交易数据，重新开始
     if (req.method !== 'POST') {
@@ -2155,6 +2197,7 @@ function renderPremiumDashboard() {
       <span id="trading-status" style="font-size:0.9em;color:#888">加载中...</span>
       <button id="btn-pause-p" onclick="toggleTrading('pause')" style="padding:6px 16px;cursor:pointer;background:#ff4757;border:none;border-radius:6px;color:#fff;font-weight:bold;display:none">⏸ 暂停交易</button>
       <button id="btn-resume-p" onclick="toggleTrading('resume')" style="padding:6px 16px;cursor:pointer;background:#2ed573;border:none;border-radius:6px;color:#fff;font-weight:bold;display:none">▶ 恢复交易</button>
+      <button onclick="resetDailyLoss()" style="padding:6px 16px;cursor:pointer;background:#ffa502;border:none;border-radius:6px;color:#fff;font-weight:bold;" title="重置今日亏损统计起点，不删除历史数据">🔄 重置今日亏损</button>
     </div>
 
     <!-- 实盘交易 -->
@@ -2251,6 +2294,16 @@ function renderPremiumDashboard() {
         const r=await fetch(ep+_q,{method:'POST'});
         const d=await r.json();
         if(d.success){alert(d.message);refreshTradingStatus();}
+        else alert('失败: '+(d.error||'未知'));
+      }catch(e){alert('请求失败: '+e.message);}
+    }
+
+    async function resetDailyLoss(){
+      if(!confirm('确认重置今日亏损统计起点？\n历史数据不会被删除，仅从当前时间重新开始计算。'))return;
+      try{
+        const r=await fetch('/api/reset-daily-loss'+_q,{method:'POST'});
+        const d=await r.json();
+        if(d.success){alert(d.message);location.reload();}
         else alert('失败: '+(d.error||'未知'));
       }catch(e){alert('请求失败: '+e.message);}
     }

@@ -338,6 +338,7 @@ export class PremiumSignalEngine {
       this.markProcessed(ca);
 
       const symbol = signal.symbol;
+      // Symbol 级去重：同名代币 15 分钟内只处理一次（防仿盘）
       const lastSymbolSeen = this.recentSymbols.get(symbol);
       if (lastSymbolSeen && (Date.now() - lastSymbolSeen) < 15 * 60 * 1000) {
         this.stats.duplicates_skipped++;
@@ -345,6 +346,8 @@ export class PremiumSignalEngine {
         console.log(`⏭️  [Symbol去重] $${symbol} 15分钟内已处理过同名代币，跳过`);
         return { action: 'SKIP', reason: 'symbol_duplicate' };
       }
+      // 通过去重检查后，记录本次处理时间
+      if (symbol) this.recentSymbols.set(symbol, Date.now());
 
       const cooldownUntil = this.exitCooldown.get(symbol);
       if (cooldownUntil && Date.now() < cooldownUntil) {
@@ -731,7 +734,10 @@ export class PremiumSignalEngine {
       }
       const dir = path.dirname(this._watchlistPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(this._watchlistPath, JSON.stringify(data, null, 2));
+      // 原子写入，防止崩溃时 JSON 文件损坏
+      atomicWriteJSON(this._watchlistPath, data).catch((err) => {
+        console.warn(`⚠️ [v16] 观察列表原子写入失败: ${err.message}`);
+      });
     } catch (e) {
       console.warn(`⚠️ [v16] 保存观察列表失败: ${e.message}`);
     }

@@ -497,8 +497,8 @@ class SentimentArbitrageSystem {
       // ==========================================
       console.log('\n💰 [5/7] Calculating position size...');
 
-      // Reuse tokenData from Step 3
-      const positionCheck = await this.positionSizer.canOpenPosition(decision, tokenData);
+      // 使用 snapshot + tokenMetadata 作为仓位检查的 token 数据
+      const positionCheck = await this.positionSizer.canOpenPosition(decision, { ...snapshot, ...tokenMetadata });
 
       if (!positionCheck.allowed) {
         console.log(`   ❌ Cannot trade: ${positionCheck.reason}`);
@@ -543,7 +543,7 @@ class SentimentArbitrageSystem {
         this.stats.executions_success++;
 
         // Record position
-        this.recordPosition(signal, snapshot, scoreResult, positionSize, executionResult);
+        this.recordPosition(signal, snapshot, scoreResult, positionCheck.adjusted_size || decision.position_size, executionResult);
 
       } else {
         console.log(`   ❌ Execution failed: ${executionResult.error}`);
