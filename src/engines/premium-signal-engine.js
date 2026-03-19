@@ -431,6 +431,14 @@ export class PremiumSignalEngine {
     const symbol = signal.symbol || ca.slice(0, 8);
     const mc = signal.market_cap || 0;
 
+    // 0. 风控检查（每日亏损上限、连亏熔断、最大仓位）
+    const riskCheck = this.riskManager.canTrade();
+    if (!riskCheck.allowed) {
+      console.log(`🛡️ [RISK] 风控拒绝: ${riskCheck.reason} | $${symbol}`);
+      this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
+      return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
+    }
+
     // 1. MC 硬过滤：仅处理 MC ≤ 20K (v20 BALANCED)
     if (mc > 20000) {
       console.log(`⏭️ [v20/BALANCED] $${symbol} MC=$${(mc/1000).toFixed(1)}K > 20K → 跳过`);
@@ -488,8 +496,8 @@ export class PremiumSignalEngine {
       action: 'BUY_FULL', confidence: 85,
       narrative_tier: 'CONFIRMED',
       narrative_reason: `v20/BALANCED: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}`,
-      entry_timing: 'MOMENTUM', stop_loss_percent: 20,
-      exitStrategy: 'BALANCED'
+      entry_timing: 'MOMENTUM', stop_loss_percent: 15,
+      exitStrategy: 'NOT_ATH'
     };
 
     if (this.shadowMode) {
@@ -541,7 +549,7 @@ export class PremiumSignalEngine {
             const liveMC = this._getCachedMC(ca);
             this.livePositionMonitor.addPosition(
               ca, symbol, entryPrice, liveMC || mc, finalSize,
-              balance.amount, tokenDecimals, 'MEDIUM', 'BALANCED'
+              balance.amount, tokenDecimals, 'MEDIUM', 'NOT_ATH'
             );
             if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
           }

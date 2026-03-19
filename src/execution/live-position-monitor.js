@@ -1,15 +1,21 @@
 /**
- * Live Position Monitor — v18
+ * Live Position Monitor — v19
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v18 退出策略:
+ * v19 退出策略:
  * - ASYMMETRIC: 非对称收割 (SL-35%→TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%卖5% + 5%Moonbag回撤35%平仓)
  * - NOT_ATH: NOT_ATH专用 (SL-15%→TP1@80%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%+ 8分死水/15分大限)
  * - TP_NOSL: TP+100% / 无SL / 4h超时 (保留向后兼容)
  * - TP_SL: TP+75% / SL-25% / 24h超时 (保留向后兼容)
  * - DynSL: 保留向后兼容
+ *
+ * v19 Bug修复:
+ * - #19: highPnl/locked_pnl 创新高时立即持久化（之前每60次，崩溃时峰值丢失 → Moonbag退出点算错）
+ * - #21: 钱包扫描器 _walletScanRunning 并发保护（之前可能双重 emergencySell）
+ * - #22: lockedPnl 持久化到DB + 重启恢复（之前重启后 lockedPnl=0，总收益计算偏低）
+ * - #23: _asyncCleanupResidual 清理残余后更新DB总收回金额（之前仅更新内存）
  */
 
 import Database from 'better-sqlite3';
@@ -145,12 +151,50 @@ export class LivePositionMonitor {
    * 启动钱包扫描器 — 定期检查滞留 token 并重试卖出
    */
   _startWalletScanner() {
+    this._walletScanRunning = false; // 并发保护标志
     this.walletScanInterval = setInterval(async () => {
-      await this._scanAndRetrySell();
-    }, 30000); // 每30秒扫描一次（从60秒缩短）
+      if (this._walletScanRunning) return; // 防止上次扫描未结束时重入
+      this._walletScanRunning = true;
+      try {
+        await this._scanAndRetrySell();
+      } finally {
+        this._walletScanRunning = false;
+      }
+    }, 30000); // 每30秒扫描一次
 
     // 首次启动时立即扫描一次
     setTimeout(() => this._scanAndRetrySell(), 5000);
+  }
+
+  /**
+   * 卖出后异步清理残余 token（等链上确认后检查余额，不阻塞主流程）
+   */
+  _asyncCleanupResidual(pos) {
+    new Promise(async (resolve) => {
+      try {
+        await new Promise(r => setTimeout(r, 3000)); // 等链上确认
+        const postSellBalance = await this.executor.getTokenBalance(pos.tokenCA);
+        if (postSellBalance.amount > 0) {
+          console.log(`   ⚠️  卖出后仍有残余 ${postSellBalance.amount} tokens，尝试清理...`);
+          try {
+            const cleanupResult = await this.executor.sell(pos.tokenCA, postSellBalance.amount);
+            if (cleanupResult.success) {
+              const cleanupSol = cleanupResult.amountOut || 0;
+              pos.totalSolReceived += cleanupSol;
+              // 即使仓位已关闭也更新DB，确保实际收回金额被记录
+              try {
+                this.db.prepare(`UPDATE live_positions SET total_sol_received=? WHERE token_ca=?`)
+                  .run(pos.totalSolReceived, pos.tokenCA);
+              } catch (_) {}
+              console.log(`   ✅ 残余清理成功: +${cleanupSol.toFixed(6)} SOL`);
+            }
+          } catch (cleanErr) {
+            console.log(`   ⚠️  残余清理失败: ${cleanErr.message} (${postSellBalance.amount} tokens留在钱包)`);
+          }
+        }
+      } catch (_) {}
+      resolve();
+    });
   }
 
   /**
@@ -275,6 +319,8 @@ export class LivePositionMonitor {
 
       // 新策略字段
       tp1: false,           // TP1是否已触发
+      tp1Time: null,        // TP1触发时间（用于40min超时）
+      breakeven: false,     // 是否已触发保本（highPnl曾≥35%）
       // tp1ZonePeak removed — v19 uses fixed 50% TP1
       tp2: false,           // TP2是否已触发
       tp3: false,           // TP3是否已触发
@@ -474,14 +520,14 @@ export class LivePositionMonitor {
     if (pnl > pos.highPnl) pos.highPnl = pnl;
     if (pnl < pos.lowPnl) pos.lowPnl = pnl;
 
-    // v12: 每60次价格更新(~30s)持久化high_pnl/low_pnl/tp1/sold_pct到DB
-    // 解决: server重启时high_pnl=0导致退出逻辑错误
-    if (pos._updateCount % 60 === 0) {
+    // 每60次 OR 创新高时立即持久化（防止崩溃后丢失峰值，影响Moonbag退出阈值）
+    const isNewHighForDB = pnl > prevHigh && pnl > 0;
+    if (pos._updateCount % 60 === 0 || isNewHighForDB) {
       try {
         this.db.prepare(`
-          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?
+          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, locked_pnl=?
           WHERE token_ca=? AND status IN ('open', 'selling')
-        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
+        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.lockedPnl || 0, pos.tokenCA);
       } catch (e) { console.warn(`⚠️ [DB] $${pos.symbol} 定期持久化失败: ${e.message}`); }
     }
 
@@ -606,24 +652,53 @@ export class LivePositionMonitor {
       }
 
     } else if (strategy === 'NOT_ATH') {
-      // ====== NOT_ATH 专用出场 (回测优化 v19) ======
-      const currentSL = pos.tp1 ? 0 : -15;
+      // ====== NOT_ATH 专用出场 (v20 BALANCED，与 shadow 完全对齐) ======
+      // SL: 默认 -20%，highPnl 曾达 +35% 则上移至 0%（保本）
+      // FAST_STOP: 前3次更新内 pnl < -5% 且从未涨过 → 立即出
+      // TP1: +80% → 卖60%，剩40% SL移至成本
+      // TP1后: pnl < 0 → 平剩余（成本止损）
+      // DW: 10分钟无 TP1 → 全平
+      // MH: 20分钟硬超时 → 全平
+      // TP1超时: TP1后40分钟 → 平剩余
 
-      if (!pos.moonbag && pnl <= currentSL) {
-        if (pos.tp1) {
-          console.log(`🛡️ [NOT_ATH:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出全部剩余`);
-          await this._triggerExit(pos, `NOT_ATH_BE_SL(PnL${pnl.toFixed(0)}%)`, 100);
-        } else {
-          console.log(`🛑 [NOT_ATH:硬SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -15% → 止损全卖`);
-          await this._triggerExit(pos, `NOT_ATH_HARD_SL_15(PnL${pnl.toFixed(0)}%)`, 100);
-        }
+      // 1. 保本触发（永久记录，重启后从 highPnl 重算）
+      if (!pos.breakeven && pos.highPnl >= 35) {
+        pos.breakeven = true;
+        console.log(`🔒 [NOT_ATH:保本] $${pos.symbol} 曾到+${pos.highPnl.toFixed(0)}% → SL上移至0%`);
+      }
+      const dynamicSL = pos.breakeven ? 0 : -20;
+
+      // 2. FAST_STOP: 前3次价格更新内，从未涨过且已跌 -5%
+      if (!pos.tp1 && !pos.breakeven && (pos._updateCount || 0) <= 3 && pos.highPnl <= 0 && pnl < -5) {
+        console.log(`⚡ [NOT_ATH:FAST_STOP] $${pos.symbol} 入场即下跌 PnL:${pnl.toFixed(1)}% → 快速止损`);
+        await this._triggerExit(pos, `NOT_ATH_FAST_STOP(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
+
+      // 3. 动态止损（TP1前）
+      if (!pos.tp1 && pnl <= dynamicSL) {
+        const label = pos.breakeven ? 'BREAKEVEN_SL' : 'HARD_SL_20';
+        console.log(`🛑 [NOT_ATH:${label}] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ ${dynamicSL}% → 全卖`);
+        await this._triggerExit(pos, `NOT_ATH_${label}(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 4. TP1: +80% → 卖60%，剩余40% SL移至成本
       if (!pos.tp1 && pnl >= 80) {
-        console.log(`🎯 [NOT_ATH:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +80% → 卖出60%`);
+        pos.tp1Time = Date.now();
+        console.log(`🎯 [NOT_ATH:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +80% → 卖出60%，SL→成本`);
         await this._triggerPartialSell(pos, 'TP1', 60, pnl);
         return;
       }
+
+      // 5. TP1后成本止损（rawPnl < 0）
+      if (pos.tp1 && !pos.moonbag && pnl < 0) {
+        console.log(`🛡️ [NOT_ATH:TP1后成本SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% < 0% → 平剩余仓位`);
+        await this._triggerExit(pos, `NOT_ATH_COST_SL(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 6. TP2/TP3/TP4 连续止盈（超预期大涨时让利润跑）
       if (pos.tp1 && !pos.tp2 && pnl >= 100) {
         console.log(`🚀 [NOT_ATH:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +100% → 卖出50%`);
         await this._triggerPartialSell(pos, 'TP2', 50, pnl);
@@ -635,32 +710,44 @@ export class LivePositionMonitor {
         return;
       }
       if (pos.tp3 && !pos.tp4 && pnl >= 500) {
-        console.log(`🌕 [NOT_ATH:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出80%`);
+        console.log(`🌕 [NOT_ATH:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出80%，进入Moonbag`);
         await this._triggerPartialSell(pos, 'TP4', 80, pnl);
         if (pos.tp4) { pos.moonbag = true; pos.moonbagHighPnl = pnl; }
         return;
       }
+
+      // 7. Moonbag: 从最高点回撤35%平仓
       if (pos.moonbag) {
         if (pnl > (pos.moonbagHighPnl || 0)) pos.moonbagHighPnl = pnl;
         const moonPeak = pos.moonbagHighPnl || pnl;
         const dropPct = moonPeak > 0 ? ((moonPeak - pnl) / moonPeak) * 100 : 0;
         if (dropPct >= 35) {
-          console.log(`🎫 [NOT_ATH:Moonbag] $${pos.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}%≥35% → 平仓`);
+          console.log(`🎫 [NOT_ATH:Moonbag] $${pos.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}% → 平仓`);
           await this._triggerExit(pos, `NOT_ATH_MOONBAG(peak+${moonPeak.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`, 100);
         }
         return;
       }
-      if (!pos.tp1 && holdTimeMin >= 8 && pos.highPnl < 80 && pnl <= 20) {
-        console.log(`💀 [NOT_ATH:死水] $${pos.symbol} 8分无起色 → 全平`);
-        await this._triggerExit(pos, `NOT_ATH_DEAD_8M(PnL${pnl.toFixed(0)}%,peak+${pos.highPnl.toFixed(0)}%)`, 100);
-        return;
-      }
-      if (!pos.tp1 && holdTimeMin >= 15) {
-        console.log(`⏰ [NOT_ATH:15分大限] $${pos.symbol} → 全平`);
-        await this._triggerExit(pos, `NOT_ATH_TIMEOUT_15M(PnL${pnl.toFixed(0)}%)`, 100);
+
+      // 8. TP1后40分钟超时 → 平剩余
+      if (pos.tp1 && pos.tp1Time && (Date.now() - pos.tp1Time) >= 40 * 60 * 1000) {
+        console.log(`⏰ [NOT_ATH:TP1超时40m] $${pos.symbol} TP1后已持仓40分钟 → 平剩余`);
+        await this._triggerExit(pos, `NOT_ATH_TP1_TIMEOUT_40M(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
+      // 9. 死水超时: 10分钟无 TP1 → 全平
+      if (!pos.tp1 && holdTimeMin >= 10) {
+        console.log(`💧 [NOT_ATH:死水] $${pos.symbol} 10分钟未触TP1 PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 全平`);
+        await this._triggerExit(pos, `NOT_ATH_DEAD_WATER_10M(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 10. 20分钟硬超时
+      if (holdTimeMin >= 20) {
+        console.log(`⏰ [NOT_ATH:20分大限] $${pos.symbol} 持仓${holdTimeMin.toFixed(0)}m ≥ 20m → 强制全平`);
+        await this._triggerExit(pos, `NOT_ATH_MAX_HOLD_20M(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
 
     } else if (strategy === 'TP_NOSL') {
       // ====== v17.4: TP+100% / 无SL / 1h<30%快出 / 4h超时 ======
@@ -852,24 +939,27 @@ export class LivePositionMonitor {
       pos.lockedPnl += currentPnl * (actualSoldFraction / 100);
       pos[tpName.toLowerCase()] = true;
 
-      // 🔧 v14.6 FIX: 同步链上真实余额，防止跟踪偏移
-      try {
-        await new Promise(r => setTimeout(r, 2000));
-        const realBalance = await this.executor.getTokenBalance(pos.tokenCA);
-        if (realBalance.amount > 0 && realBalance.amount !== pos.tokenAmount) {
-          console.log(`   🔄 余额同步: 跟踪=${pos.tokenAmount} 链上=${realBalance.amount} → 使用链上值`);
-          pos.tokenAmount = realBalance.amount;
-        }
-      } catch (_) {}
+      // 🔧 v14.6 FIX: 异步同步链上真实余额（不阻塞主流程，下次卖出前会再次查链上余额）
+      new Promise(async (resolve) => {
+        try {
+          await new Promise(r => setTimeout(r, 3000));
+          const realBalance = await this.executor.getTokenBalance(pos.tokenCA);
+          if (realBalance.amount > 0 && realBalance.amount !== pos.tokenAmount) {
+            console.log(`   🔄 余额同步: 跟踪=${pos.tokenAmount} 链上=${realBalance.amount} → 使用链上值`);
+            pos.tokenAmount = realBalance.amount;
+          }
+        } catch (_) {}
+        resolve();
+      });
 
       console.log(`   ✅ 已卖出 ${pos.soldPct}% | 剩余 ${100 - pos.soldPct}% | 锁定利润: +${pos.lockedPnl.toFixed(1)}%`);
 
       // 即时持久化 TP 状态到 DB，防止重启后重复触发
       try {
         this.db.prepare(`
-          UPDATE live_positions SET tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, high_pnl=?, total_sol_received=?
+          UPDATE live_positions SET tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, high_pnl=?, total_sol_received=?, locked_pnl=?
           WHERE token_ca=? AND status IN ('open', 'selling')
-        `).run(pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.highPnl, pos.totalSolReceived || 0, pos.tokenCA);
+        `).run(pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.highPnl, pos.totalSolReceived || 0, pos.lockedPnl || 0, pos.tokenCA);
       } catch (e) {
         console.warn(`   ⚠️ TP状态持久化失败: ${e.message}`);
       }
@@ -959,25 +1049,8 @@ export class LivePositionMonitor {
             .run(pos.totalSolReceived, pos.tokenCA);
         } catch (_) {}
 
-        // 🔧 v14.6 FIX: 卖出后验证链上余额，清理残余token
-        try {
-          await new Promise(r => setTimeout(r, 2000));  // 等链上确认
-          const postSellBalance = await this.executor.getTokenBalance(pos.tokenCA);
-          if (postSellBalance.amount > 0) {
-            console.log(`   ⚠️  卖出后仍有残余 ${postSellBalance.amount} tokens，尝试清理...`);
-            try {
-              const cleanupResult = await this.executor.sell(pos.tokenCA, postSellBalance.amount);
-              if (cleanupResult.success) {
-                pos.totalSolReceived += (cleanupResult.amountOut || 0);
-                console.log(`   ✅ 残余清理成功: +${(cleanupResult.amountOut || 0).toFixed(6)} SOL`);
-              }
-            } catch (cleanErr) {
-              console.log(`   ⚠️  残余清理失败: ${cleanErr.message} (${postSellBalance.amount} tokens留在钱包)`);
-            }
-          }
-        } catch (balErr) {
-          // 余额查询失败不影响主流程
-        }
+        // 🔧 v14.6 FIX: 卖出后异步清理残余token（不阻塞主流程）
+        this._asyncCleanupResidual(pos);
 
         // 如果有锁定利润，显示总收益
         if (pos.lockedPnl > 0) {
@@ -1204,6 +1277,8 @@ export class LivePositionMonitor {
           // v12: 恢复关键交易状态（解决server重启后conviction/tp1丢失问题）
           conviction: row.conviction || 'NORMAL',
           tp1: row.tp1_triggered === 1,
+          tp1Time: row.tp1_triggered === 1 ? Date.now() : null,  // 重启后从现在起重计40min超时
+          breakeven: false,  // 每次价格更新时由 highPnl>=35 自动重置
           // v18: 恢复 tp2/tp3/tp4/moonbag 状态（修复重启后重复触发 TP）
           tp2: row.tp2_triggered === 1,
           tp3: row.tp3_triggered === 1,
@@ -1212,7 +1287,7 @@ export class LivePositionMonitor {
           moonbagHighPnl: row.moonbag_high_pnl || 0,
           soldPct: row.sold_pct || 0,
           dynFloorBelowCount: 0,
-          lockedPnl: 0,
+          lockedPnl: row.locked_pnl || 0,  // 恢复已锁定利润（重启后总收益计算正确）
           partialSellInProgress: false,
           // v15: 恢复出场策略
           exitStrategy: row.exit_strategy || 'ASYMMETRIC'
