@@ -60,9 +60,10 @@ MIN_VEL         = 0        # 0=禁用
 PRE_DUMP_THRESH = -10.0
 SKIP_UTC_20_22  = True
 
-# ─── v3 新参数 (0=禁用，分析时验证后再决定是否开启) ───────────────────────
-MIN_TRADE_INDEX   = 0      # 建议测试值: 1 or 2
-MIN_ADDRESS_INDEX = 0      # 建议测试值: 1
+# ─── v3 新参数 ────────────────────────────────────────────────────────────
+MIN_TRADE_INDEX   = 2      # trade=1 是死区(0% WR)，跳过
+MAX_ADDRESS_INDEX = 5      # addr≥6 = FOMO散户已涌入，我们入场偏晚
+MIN_ADDRESS_INDEX = 0      # 下限（暂不限制）
 SKIP_AI_FAKE      = False  # AI高(≥80)但trade低(≤1) → 虚假热度过滤
 AI_FAKE_AI_THRESH = 80
 AI_FAKE_TRADE_MAX = 1
@@ -241,6 +242,9 @@ def filter_signal(sig, candles, entry_bar_ts, sig_dt):
     if MIN_ADDRESS_INDEX > 0 and addi < MIN_ADDRESS_INDEX:
         return False, f'addr_low({addi})'
 
+    if MAX_ADDRESS_INDEX > 0 and addi > MAX_ADDRESS_INDEX:
+        return False, f'addr_high({addi})'
+
     # AI 虚假热度过滤: AI 高但链上无成交 → 跳过
     if SKIP_AI_FAKE and ai >= AI_FAKE_AI_THRESH and ti <= AI_FAKE_TRADE_MAX:
         return False, f'ai_fake(ai={ai},trade={ti})'
@@ -341,6 +345,7 @@ def main():
     v3_flags = []
     if MIN_TRADE_INDEX > 0:   v3_flags.append(f'trade≥{MIN_TRADE_INDEX}')
     if MIN_ADDRESS_INDEX > 0: v3_flags.append(f'addr≥{MIN_ADDRESS_INDEX}')
+    if MAX_ADDRESS_INDEX > 0: v3_flags.append(f'addr≤{MAX_ADDRESS_INDEX}')
     if SKIP_AI_FAKE:          v3_flags.append(f'ai_fake过滤(ai≥{AI_FAKE_AI_THRESH}&trade≤{AI_FAKE_TRADE_MAX})')
     print(f'v3 新过滤: {", ".join(v3_flags) if v3_flags else "全部禁用 (纯分析模式)"}')
     print('=' * 70)
