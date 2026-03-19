@@ -488,8 +488,8 @@ export class PremiumSignalEngine {
       action: 'BUY_FULL', confidence: 85,
       narrative_tier: 'CONFIRMED',
       narrative_reason: `v20/BALANCED: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}`,
-      entry_timing: 'MOMENTUM', stop_loss_percent: 20,
-      exitStrategy: 'BALANCED'
+      entry_timing: 'MOMENTUM', stop_loss_percent: 15,
+      exitStrategy: 'NOT_ATH'
     };
 
     if (this.shadowMode) {
@@ -541,7 +541,7 @@ export class PremiumSignalEngine {
             const liveMC = this._getCachedMC(ca);
             this.livePositionMonitor.addPosition(
               ca, symbol, entryPrice, liveMC || mc, finalSize,
-              balance.amount, tokenDecimals, 'MEDIUM', 'BALANCED'
+              balance.amount, tokenDecimals, 'MEDIUM', 'NOT_ATH'
             );
             if (this.livePriceMonitor) this.livePriceMonitor.addToken(ca);
           }
