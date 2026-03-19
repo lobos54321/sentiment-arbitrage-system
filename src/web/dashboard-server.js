@@ -1877,9 +1877,17 @@ const server = http.createServer(async (req, res) => {
       }
       const tables = ['premium_signals', 'tokens', 'trades', 'live_positions', 'rejected_signals', 'passed_signals', 'hunter_signals', 'signal_source_performance'];
       const exportData = { exported_at: new Date().toISOString(), tables: {} };
+      // 支持分页: ?before_id=X 拉取 id < X 的历史数据
+      const beforeId = url.searchParams.get('before_id');
+      const exportLimit = parseInt(url.searchParams.get('limit') || '1000');
       for (const table of tables) {
         try {
-          const rows = database.prepare(`SELECT * FROM ${table} ORDER BY rowid DESC LIMIT 1000`).all();
+          let rows;
+          if (beforeId && table === 'premium_signals') {
+            rows = database.prepare(`SELECT * FROM ${table} WHERE id < ? ORDER BY id DESC LIMIT ?`).all(parseInt(beforeId), exportLimit);
+          } else {
+            rows = database.prepare(`SELECT * FROM ${table} ORDER BY rowid DESC LIMIT ?`).all(exportLimit);
+          }
           exportData.tables[table] = { count: rows.length, rows };
         } catch (e) {
           exportData.tables[table] = { count: 0, rows: [], error: e.message };
