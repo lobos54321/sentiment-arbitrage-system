@@ -1,15 +1,21 @@
 /**
- * Live Position Monitor — v18
+ * Live Position Monitor — v19
  *
  * 事件驱动仓位监控，监听 LivePriceMonitor 的 price-update 事件
  * 每次价格更新立即评估退出条件（~0.5 秒响应）
  *
- * v18 退出策略:
+ * v19 退出策略:
  * - ASYMMETRIC: 非对称收割 (SL-35%→TP1@50%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%卖5% + 5%Moonbag回撤35%平仓)
  * - NOT_ATH: NOT_ATH专用 (SL-15%→TP1@80%卖60%→SL移至0%→TP2@100%/TP3@200%/TP4@500%+ 8分死水/15分大限)
  * - TP_NOSL: TP+100% / 无SL / 4h超时 (保留向后兼容)
  * - TP_SL: TP+75% / SL-25% / 24h超时 (保留向后兼容)
  * - DynSL: 保留向后兼容
+ *
+ * v19 Bug修复:
+ * - #19: highPnl/locked_pnl 创新高时立即持久化（之前每60次，崩溃时峰值丢失 → Moonbag退出点算错）
+ * - #21: 钱包扫描器 _walletScanRunning 并发保护（之前可能双重 emergencySell）
+ * - #22: lockedPnl 持久化到DB + 重启恢复（之前重启后 lockedPnl=0，总收益计算偏低）
+ * - #23: _asyncCleanupResidual 清理残余后更新DB总收回金额（之前仅更新内存）
  */
 
 import Database from 'better-sqlite3';
@@ -145,9 +151,16 @@ export class LivePositionMonitor {
    * 启动钱包扫描器 — 定期检查滞留 token 并重试卖出
    */
   _startWalletScanner() {
+    this._walletScanRunning = false; // 并发保护标志
     this.walletScanInterval = setInterval(async () => {
-      await this._scanAndRetrySell();
-    }, 30000); // 每30秒扫描一次（从60秒缩短）
+      if (this._walletScanRunning) return; // 防止上次扫描未结束时重入
+      this._walletScanRunning = true;
+      try {
+        await this._scanAndRetrySell();
+      } finally {
+        this._walletScanRunning = false;
+      }
+    }, 30000); // 每30秒扫描一次
 
     // 首次启动时立即扫描一次
     setTimeout(() => this._scanAndRetrySell(), 5000);
@@ -166,8 +179,14 @@ export class LivePositionMonitor {
           try {
             const cleanupResult = await this.executor.sell(pos.tokenCA, postSellBalance.amount);
             if (cleanupResult.success) {
-              pos.totalSolReceived += (cleanupResult.amountOut || 0);
-              console.log(`   ✅ 残余清理成功: +${(cleanupResult.amountOut || 0).toFixed(6)} SOL`);
+              const cleanupSol = cleanupResult.amountOut || 0;
+              pos.totalSolReceived += cleanupSol;
+              // 即使仓位已关闭也更新DB，确保实际收回金额被记录
+              try {
+                this.db.prepare(`UPDATE live_positions SET total_sol_received=? WHERE token_ca=?`)
+                  .run(pos.totalSolReceived, pos.tokenCA);
+              } catch (_) {}
+              console.log(`   ✅ 残余清理成功: +${cleanupSol.toFixed(6)} SOL`);
             }
           } catch (cleanErr) {
             console.log(`   ⚠️  残余清理失败: ${cleanErr.message} (${postSellBalance.amount} tokens留在钱包)`);
@@ -501,14 +520,14 @@ export class LivePositionMonitor {
     if (pnl > pos.highPnl) pos.highPnl = pnl;
     if (pnl < pos.lowPnl) pos.lowPnl = pnl;
 
-    // v12: 每60次价格更新(~30s)持久化high_pnl/low_pnl/tp1/sold_pct到DB
-    // 解决: server重启时high_pnl=0导致退出逻辑错误
-    if (pos._updateCount % 60 === 0) {
+    // 每60次 OR 创新高时立即持久化（防止崩溃后丢失峰值，影响Moonbag退出阈值）
+    const isNewHighForDB = pnl > prevHigh && pnl > 0;
+    if (pos._updateCount % 60 === 0 || isNewHighForDB) {
       try {
         this.db.prepare(`
-          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?
+          UPDATE live_positions SET high_pnl=?, low_pnl=?, tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, locked_pnl=?
           WHERE token_ca=? AND status IN ('open', 'selling')
-        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.tokenCA);
+        `).run(pos.highPnl, pos.lowPnl, pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.lockedPnl || 0, pos.tokenCA);
       } catch (e) { console.warn(`⚠️ [DB] $${pos.symbol} 定期持久化失败: ${e.message}`); }
     }
 
@@ -938,9 +957,9 @@ export class LivePositionMonitor {
       // 即时持久化 TP 状态到 DB，防止重启后重复触发
       try {
         this.db.prepare(`
-          UPDATE live_positions SET tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, high_pnl=?, total_sol_received=?
+          UPDATE live_positions SET tp1_triggered=?, tp2_triggered=?, tp3_triggered=?, tp4_triggered=?, moonbag_active=?, moonbag_high_pnl=?, sold_pct=?, token_amount=?, high_pnl=?, total_sol_received=?, locked_pnl=?
           WHERE token_ca=? AND status IN ('open', 'selling')
-        `).run(pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.highPnl, pos.totalSolReceived || 0, pos.tokenCA);
+        `).run(pos.tp1 ? 1 : 0, pos.tp2 ? 1 : 0, pos.tp3 ? 1 : 0, pos.tp4 ? 1 : 0, pos.moonbag ? 1 : 0, pos.moonbagHighPnl || 0, pos.soldPct || 0, pos.tokenAmount, pos.highPnl, pos.totalSolReceived || 0, pos.lockedPnl || 0, pos.tokenCA);
       } catch (e) {
         console.warn(`   ⚠️ TP状态持久化失败: ${e.message}`);
       }
@@ -1268,7 +1287,7 @@ export class LivePositionMonitor {
           moonbagHighPnl: row.moonbag_high_pnl || 0,
           soldPct: row.sold_pct || 0,
           dynFloorBelowCount: 0,
-          lockedPnl: 0,
+          lockedPnl: row.locked_pnl || 0,  // 恢复已锁定利润（重启后总收益计算正确）
           partialSellInProgress: false,
           // v15: 恢复出场策略
           exitStrategy: row.exit_strategy || 'ASYMMETRIC'
