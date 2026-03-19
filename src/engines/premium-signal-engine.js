@@ -6,7 +6,7 @@
  *
  * v19: ATH#1 原策略 + NOT_ATH 涨速过滤新路径
  * - ATH#1: 同v18，MC 30-300K + Super_cur 80-1000 + SupΔ≥5 + Trade/Addr/Sec过滤
- * - NOT_ATH: MC<30K + 实时涨速≥30%(DexScreener priceChange.m5) + super_index≥100 + ai_index≥40
+ * - NOT_ATH: MC<30K + 实时涨速≥30%(DexScreener priceChange.m5) + super_index≥100 + ai_index≥40 + media_index≥60
  *   → 回测(86笔): WR=27%, EV=+7.9%/笔, 大亏率0%
  * - 仓位: 0.06 SOL
  * - ATH出场: ASYMMETRIC (SL-35%→TP1@50%卖60%→SL移至0%→TP2@100% + 15分死水/30分大限)
@@ -714,6 +714,14 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'not_ath_ai_low', aiIdx };
     }
 
+    // 2c. media_index 过滤：需 ≥ 60 (回测: EV +7.9%→+11.6%, WR 26.7%→30.4%)
+    const mediaIdx = signal.indices?.media_index ?? null;
+    if (mediaIdx !== null && mediaIdx < 60) {
+      console.log(`⏭️ [v19/NOT_ATH] $${symbol} media_index=${mediaIdx} < 60 → 跳过`);
+      this.saveSignalRecord(signal, 'NOT_ATH_MEDIA_LOW', null);
+      return { action: 'SKIP', reason: 'not_ath_media_low', mediaIdx };
+    }
+
     // 3. 实时涨速检查：调用 DexScreener priceChange.m5
     let priceChangePct = null;
     try {
@@ -752,14 +760,15 @@ export class PremiumSignalEngine {
     }
 
     const elapsed = Date.now() - t0;
-    const aiIdxStr = aiIdx !== null ? ` AI=${aiIdx}` : '';
-    console.log(`🚀 [v19/NOT_ATH] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr} 5min涨速=+${priceChangePct.toFixed(1)}% | 决策耗时:${elapsed}ms`);
+    const aiIdxStr   = aiIdx    !== null ? ` AI=${aiIdx}`       : '';
+    const mediaIdxStr = mediaIdx !== null ? ` Media=${mediaIdx}` : '';
+    console.log(`🚀 [v19/NOT_ATH] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}${mediaIdxStr} 5min涨速=+${priceChangePct.toFixed(1)}% | 决策耗时:${elapsed}ms`);
 
     const finalSize = 0.06;
     const aiResult = {
       action: 'BUY_FULL', confidence: 80,
       narrative_tier: 'CONFIRMED',
-      narrative_reason: `v19/NOT_ATH: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr} vel5m=+${priceChangePct.toFixed(1)}%`,
+      narrative_reason: `v19/NOT_ATH: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}${mediaIdxStr} vel5m=+${priceChangePct.toFixed(1)}%`,
       entry_timing: 'MOMENTUM', stop_loss_percent: 15,
       exitStrategy: 'NOT_ATH'
     };
