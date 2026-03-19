@@ -267,29 +267,30 @@ export class ShadowPnlTracker {
       // 止损判断全部用 rawPnl（不含交易损耗），避免入场就触发止损
       // 注意：已分批止盈的仓位不用普通止损，用 MOON_STOP
 
-      // 模拟止损 -20%（原始跌20%，含损耗实际-27%）
-      if (rawPnl <= -20 && !pos.closed && !pos.tp1) {
+      // 动态止损线（随盈利上移）
+      // - 默认: -20%
+      // - rawPnl 曾达到 +35%: SL上移至 0%（保本）
+      // - TP1后(+80%已卖60%): SL上移至成本（在TP1逻辑里处理）
+      if (!pos.breakeven && pos.highPnl >= 35) {
+        pos.breakeven = true;
+        console.log(`  🔒 $${pos.symbol} 曾到+${pos.highPnl.toFixed(0)}% → SL上移至成本价`);
+      }
+      const dynamicSL = pos.breakeven ? 0 : -20;
+
+      // 止损（含损耗用rawPnl判断，保本线用rawPnl=0）
+      if (!pos.closed && !pos.tp1 && rawPnl <= dynamicSL) {
         pos.closed = true;
-        pos.exitReason = 'STOP_LOSS';
-        pos.lastPnl = pnl;
-        this.stopLossHistory.set(ca, Date.now()); // 记录止损时间
+        pos.exitReason = pos.breakeven ? 'BREAKEVEN_STOP' : 'STOP_LOSS';
+        pos.lastPnl = pos.breakeven ? Math.max(pnl, -this.tradingCostPct) : pnl;
+        this.stopLossHistory.set(ca, Date.now());
       }
 
       // 快速止损：前 3 次检查（~15s），从未涨过且原始 < -5%，直接出
-      if (!pos.closed && !pos.tp1 && pos.checks <= 3 && pos.highPnl <= 0 && rawPnl < -5) {
+      if (!pos.closed && !pos.tp1 && !pos.breakeven && pos.checks <= 3 && pos.highPnl <= 0 && rawPnl < -5) {
         pos.closed = true;
         pos.exitReason = 'FAST_STOP';
         pos.lastPnl = pnl;
-        this.stopLossHistory.set(ca, Date.now()); // 记录止损时间
-      }
-
-      // 中速止损：任何时候原始 < -12% 且从未涨过 +10%，直接出
-      // 已分批止盈的仓位不用这个，用 MOON_STOP
-      if (!pos.closed && !pos.tp1 && rawPnl < -12 && pos.highPnl < 10) {
-        pos.closed = true;
-        pos.exitReason = 'MID_STOP';
-        pos.lastPnl = pnl;
-        this.stopLossHistory.set(ca, Date.now()); // 记录止损时间
+        this.stopLossHistory.set(ca, Date.now());
       }
 
       // v20 BALANCED 出场逻辑：

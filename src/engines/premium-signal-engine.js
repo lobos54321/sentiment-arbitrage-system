@@ -456,7 +456,23 @@ export class PremiumSignalEngine {
 
     // media_index: v20 不限制（≥0 全通过）
 
-    // 3. 已持仓检查
+    // 3. 软涨速检查（DexScreener m5）：DS失败继续，m5 < -5% 才跳过
+    let priceChangePct = null;
+    try {
+      const dsUrl = `https://api.dexscreener.com/latest/dex/tokens/${ca}`;
+      const res = await axios.get(dsUrl, { timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const pair = res.data?.pairs?.[0];
+      if (pair?.priceChange?.m5 !== undefined) priceChangePct = pair.priceChange.m5;
+    } catch (err) {
+      console.log(`⚠️ [v20/BALANCED] $${symbol} DexScreener失败: ${err.message}，继续执行`);
+    }
+    if (priceChangePct !== null && priceChangePct < -5) {
+      console.log(`⏭️ [v20/BALANCED] $${symbol} 5min涨速=${priceChangePct.toFixed(1)}% < -5%（价格下跌中）→ 跳过`);
+      this.saveSignalRecord(signal, 'BALANCED_FALLING', null);
+      return { action: 'SKIP', reason: 'balanced_falling', velocity: priceChangePct };
+    }
+
+    // 4. 已持仓检查
     if (this.livePositionMonitor?.positions?.has(ca) || this.shadowTracker.hasOpenPosition(ca)) {
       console.log(`⏭️ [v20/BALANCED] $${symbol} 已持仓 → 跳过`);
       return { action: 'SKIP', reason: 'already_in_position' };
@@ -464,7 +480,8 @@ export class PremiumSignalEngine {
 
     const elapsed = Date.now() - t0;
     const aiIdxStr = aiIdx !== null ? ` AI=${aiIdx}` : '';
-    console.log(`🚀 [v20/BALANCED] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr} | 决策耗时:${elapsed}ms`);
+    const velStr = priceChangePct !== null ? ` vel5m=${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(1)}%` : '';
+    console.log(`🚀 [v20/BALANCED] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}${velStr} | 决策耗时:${elapsed}ms`);
 
     const finalSize = 0.06;
     const aiResult = {
