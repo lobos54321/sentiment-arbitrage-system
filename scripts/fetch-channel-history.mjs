@@ -255,8 +255,8 @@ async function main() {
   
   console.log(`📢 频道: ${channelEntity.title}`);
   
-  // 拉历史消息 (最多3000条，覆盖约3天)
-  const LIMIT = 3000;
+  // 拉历史消息 (8000条，覆盖约8天，确保能回溯到03/13)
+  const LIMIT = 8000;
   console.log(`📨 拉取最近 ${LIMIT} 条消息...`);
   
   const messages = await client.getMessages(channelEntity, { limit: LIMIT });
