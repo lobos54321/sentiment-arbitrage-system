@@ -431,6 +431,14 @@ export class PremiumSignalEngine {
     const symbol = signal.symbol || ca.slice(0, 8);
     const mc = signal.market_cap || 0;
 
+    // 0. 风控检查（每日亏损上限、连亏熔断、最大仓位）
+    const riskCheck = this.riskManager.canTrade();
+    if (!riskCheck.allowed) {
+      console.log(`🛡️ [RISK] 风控拒绝: ${riskCheck.reason} | $${symbol}`);
+      this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
+      return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
+    }
+
     // 1. MC 硬过滤：仅处理 MC ≤ 20K (v20 BALANCED)
     if (mc > 20000) {
       console.log(`⏭️ [v20/BALANCED] $${symbol} MC=$${(mc/1000).toFixed(1)}K > 20K → 跳过`);

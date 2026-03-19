@@ -212,8 +212,17 @@ export class RiskManager {
         `).catch(() => { });
       }
 
-      // 🧪 模拟盘：返回 allowed: true，继续交易
-      // return { allowed: false, reason: '...' };  // 实盘时启用这行
+      // 实盘模式：真正暂停交易
+      if (!this.shadowMode) {
+        const pauseHours = this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS || 4;
+        this.state.pausedUntil = new Date(Date.now() + pauseHours * 60 * 60 * 1000);
+        return {
+          allowed: false,
+          reason: `连亏 ${this.state.consecutiveLosses} 笔，熔断暂停 ${pauseHours} 小时`
+        };
+      }
+
+      // 🧪 模拟盘：返回 allowed: true，继续交易采集数据
 
       // v9.4: 记录熔断触发时间，用于恢复期仓位减半
       if (!this._lastCircuitBreakerTime) {
