@@ -275,6 +275,8 @@ export class LivePositionMonitor {
 
       // 新策略字段
       tp1: false,           // TP1是否已触发
+      tp1Time: null,        // TP1触发时间（用于40min超时）
+      breakeven: false,     // 是否已触发保本（highPnl曾≥35%）
       // tp1ZonePeak removed — v19 uses fixed 50% TP1
       tp2: false,           // TP2是否已触发
       tp3: false,           // TP3是否已触发
@@ -606,24 +608,53 @@ export class LivePositionMonitor {
       }
 
     } else if (strategy === 'NOT_ATH') {
-      // ====== NOT_ATH 专用出场 (回测优化 v19) ======
-      const currentSL = pos.tp1 ? 0 : -15;
+      // ====== NOT_ATH 专用出场 (v20 BALANCED，与 shadow 完全对齐) ======
+      // SL: 默认 -20%，highPnl 曾达 +35% 则上移至 0%（保本）
+      // FAST_STOP: 前3次更新内 pnl < -5% 且从未涨过 → 立即出
+      // TP1: +80% → 卖60%，剩40% SL移至成本
+      // TP1后: pnl < 0 → 平剩余（成本止损）
+      // DW: 10分钟无 TP1 → 全平
+      // MH: 20分钟硬超时 → 全平
+      // TP1超时: TP1后40分钟 → 平剩余
 
-      if (!pos.moonbag && pnl <= currentSL) {
-        if (pos.tp1) {
-          console.log(`🛡️ [NOT_ATH:保本SL] $${pos.symbol} PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% ≤ 0% → 卖出全部剩余`);
-          await this._triggerExit(pos, `NOT_ATH_BE_SL(PnL${pnl.toFixed(0)}%)`, 100);
-        } else {
-          console.log(`🛑 [NOT_ATH:硬SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ -15% → 止损全卖`);
-          await this._triggerExit(pos, `NOT_ATH_HARD_SL_15(PnL${pnl.toFixed(0)}%)`, 100);
-        }
+      // 1. 保本触发（永久记录，重启后从 highPnl 重算）
+      if (!pos.breakeven && pos.highPnl >= 35) {
+        pos.breakeven = true;
+        console.log(`🔒 [NOT_ATH:保本] $${pos.symbol} 曾到+${pos.highPnl.toFixed(0)}% → SL上移至0%`);
+      }
+      const dynamicSL = pos.breakeven ? 0 : -20;
+
+      // 2. FAST_STOP: 前3次价格更新内，从未涨过且已跌 -5%
+      if (!pos.tp1 && !pos.breakeven && (pos._updateCount || 0) <= 3 && pos.highPnl <= 0 && pnl < -5) {
+        console.log(`⚡ [NOT_ATH:FAST_STOP] $${pos.symbol} 入场即下跌 PnL:${pnl.toFixed(1)}% → 快速止损`);
+        await this._triggerExit(pos, `NOT_ATH_FAST_STOP(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
+
+      // 3. 动态止损（TP1前）
+      if (!pos.tp1 && pnl <= dynamicSL) {
+        const label = pos.breakeven ? 'BREAKEVEN_SL' : 'HARD_SL_20';
+        console.log(`🛑 [NOT_ATH:${label}] $${pos.symbol} PnL:${pnl.toFixed(1)}% ≤ ${dynamicSL}% → 全卖`);
+        await this._triggerExit(pos, `NOT_ATH_${label}(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 4. TP1: +80% → 卖60%，剩余40% SL移至成本
       if (!pos.tp1 && pnl >= 80) {
-        console.log(`🎯 [NOT_ATH:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +80% → 卖出60%`);
+        pos.tp1Time = Date.now();
+        console.log(`🎯 [NOT_ATH:TP1] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +80% → 卖出60%，SL→成本`);
         await this._triggerPartialSell(pos, 'TP1', 60, pnl);
         return;
       }
+
+      // 5. TP1后成本止损（rawPnl < 0）
+      if (pos.tp1 && !pos.moonbag && pnl < 0) {
+        console.log(`🛡️ [NOT_ATH:TP1后成本SL] $${pos.symbol} PnL:${pnl.toFixed(1)}% < 0% → 平剩余仓位`);
+        await this._triggerExit(pos, `NOT_ATH_COST_SL(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 6. TP2/TP3/TP4 连续止盈（超预期大涨时让利润跑）
       if (pos.tp1 && !pos.tp2 && pnl >= 100) {
         console.log(`🚀 [NOT_ATH:TP2] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +100% → 卖出50%`);
         await this._triggerPartialSell(pos, 'TP2', 50, pnl);
@@ -635,32 +666,44 @@ export class LivePositionMonitor {
         return;
       }
       if (pos.tp3 && !pos.tp4 && pnl >= 500) {
-        console.log(`🌕 [NOT_ATH:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出80%`);
+        console.log(`🌕 [NOT_ATH:TP4] $${pos.symbol} PnL:+${pnl.toFixed(1)}% ≥ +500% → 卖出80%，进入Moonbag`);
         await this._triggerPartialSell(pos, 'TP4', 80, pnl);
         if (pos.tp4) { pos.moonbag = true; pos.moonbagHighPnl = pnl; }
         return;
       }
+
+      // 7. Moonbag: 从最高点回撤35%平仓
       if (pos.moonbag) {
         if (pnl > (pos.moonbagHighPnl || 0)) pos.moonbagHighPnl = pnl;
         const moonPeak = pos.moonbagHighPnl || pnl;
         const dropPct = moonPeak > 0 ? ((moonPeak - pnl) / moonPeak) * 100 : 0;
         if (dropPct >= 35) {
-          console.log(`🎫 [NOT_ATH:Moonbag] $${pos.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}%≥35% → 平仓`);
+          console.log(`🎫 [NOT_ATH:Moonbag] $${pos.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}% → 平仓`);
           await this._triggerExit(pos, `NOT_ATH_MOONBAG(peak+${moonPeak.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`, 100);
         }
         return;
       }
-      if (!pos.tp1 && holdTimeMin >= 8 && pos.highPnl < 80 && pnl <= 20) {
-        console.log(`💀 [NOT_ATH:死水] $${pos.symbol} 8分无起色 → 全平`);
-        await this._triggerExit(pos, `NOT_ATH_DEAD_8M(PnL${pnl.toFixed(0)}%,peak+${pos.highPnl.toFixed(0)}%)`, 100);
-        return;
-      }
-      if (!pos.tp1 && holdTimeMin >= 15) {
-        console.log(`⏰ [NOT_ATH:15分大限] $${pos.symbol} → 全平`);
-        await this._triggerExit(pos, `NOT_ATH_TIMEOUT_15M(PnL${pnl.toFixed(0)}%)`, 100);
+
+      // 8. TP1后40分钟超时 → 平剩余
+      if (pos.tp1 && pos.tp1Time && (Date.now() - pos.tp1Time) >= 40 * 60 * 1000) {
+        console.log(`⏰ [NOT_ATH:TP1超时40m] $${pos.symbol} TP1后已持仓40分钟 → 平剩余`);
+        await this._triggerExit(pos, `NOT_ATH_TP1_TIMEOUT_40M(PnL${pnl.toFixed(0)}%)`, 100);
         return;
       }
 
+      // 9. 死水超时: 10分钟无 TP1 → 全平
+      if (!pos.tp1 && holdTimeMin >= 10) {
+        console.log(`💧 [NOT_ATH:死水] $${pos.symbol} 10分钟未触TP1 PnL:${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}% → 全平`);
+        await this._triggerExit(pos, `NOT_ATH_DEAD_WATER_10M(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
+
+      // 10. 20分钟硬超时
+      if (holdTimeMin >= 20) {
+        console.log(`⏰ [NOT_ATH:20分大限] $${pos.symbol} 持仓${holdTimeMin.toFixed(0)}m ≥ 20m → 强制全平`);
+        await this._triggerExit(pos, `NOT_ATH_MAX_HOLD_20M(PnL${pnl.toFixed(0)}%)`, 100);
+        return;
+      }
 
     } else if (strategy === 'TP_NOSL') {
       // ====== v17.4: TP+100% / 无SL / 1h<30%快出 / 4h超时 ======
@@ -1204,6 +1247,8 @@ export class LivePositionMonitor {
           // v12: 恢复关键交易状态（解决server重启后conviction/tp1丢失问题）
           conviction: row.conviction || 'NORMAL',
           tp1: row.tp1_triggered === 1,
+          tp1Time: row.tp1_triggered === 1 ? Date.now() : null,  // 重启后从现在起重计40min超时
+          breakeven: false,  // 每次价格更新时由 highPnl>=35 自动重置
           // v18: 恢复 tp2/tp3/tp4/moonbag 状态（修复重启后重复触发 TP）
           tp2: row.tp2_triggered === 1,
           tp3: row.tp3_triggered === 1,
