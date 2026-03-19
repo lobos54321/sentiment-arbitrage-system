@@ -43,7 +43,7 @@ SLIP = 0.004
 POS  = 0.06
 
 # ─── TP 参数 ─────────────────────────────────────────────────────────────
-SL    = -0.25
+SL    = -0.15
 TP1   = 0.80;  TP1s = 0.60
 TP2   = 1.00;  TP2s = 0.50
 TP3   = 2.00;  TP3s = 0.50
@@ -53,8 +53,8 @@ MH    = 15
 
 # ─── 信号过滤参数 ─────────────────────────────────────────────────────────
 MIN_SI          = 100
-MIN_AI          = 40
-MAX_AI          = 0       # 0=禁用; 本次测试 ai 40-100 不设上限
+MIN_AI          = 60
+MAX_AI          = 90      # 0=禁用; AI≥90 往往已被过度追捧
 MAX_MC_K        = 30
 MIN_MC_K        = 5
 MIN_VEL         = 0        # 0=禁用
@@ -256,32 +256,47 @@ def filter_signal(sig, candles, entry_bar_ts, sig_dt):
     return True, None
 
 
+def _merge_aux(signals, aux_path, label=''):
+    """将辅助信号文件合并进 signals，跳过重复。"""
+    if not os.path.exists(aux_path):
+        return 0
+    aux = json.load(open(aux_path))
+    seen = {(s.get('token_ca'), s['ts']) for s in signals}
+    added = 0
+    for s in aux:
+        ca = s.get('token_ca') or s.get('ca', '')
+        key = (ca, s['ts'])
+        if key in seen:
+            continue
+        seen.add(key)
+        if 'indices' not in s:
+            s['indices'] = {
+                'super_index':     s.get('super_index', 0),
+                'ai_index':        s.get('ai_index', 0),
+                'trade_index':     s.get('trade_index', 0),
+                'address_index':   s.get('address_index', 0),
+                'sentiment_index': s.get('sentiment_index', 0),
+                'media_index':     s.get('media_index', 0),
+            }
+        s['token_ca'] = ca
+        if not s.get('market_cap'):
+            s['_mc_unknown'] = True
+        signals.append(s)
+        added += 1
+    if added:
+        print(f'  辅助数据: +{added}笔 ({label or aux_path})')
+    return added
+
+
 def load_signals():
+    # 基础: channel-history（03/16-18，仅 super_index）
     hist = json.load(open('data/channel-history.json'))
     signals = list(hist['signals'])
 
-    aux_path = '/tmp/mar1316_signals_filtered.json'
-    if os.path.exists(aux_path):
-        aux = json.load(open(aux_path))
-        seen = {(s.get('token_ca'), s['ts']) for s in signals}
-        added = 0
-        for s in aux:
-            ca = s.get('token_ca') or s.get('ca', '')
-            key = (ca, s['ts'])
-            if key in seen:
-                continue
-            seen.add(key)
-            if 'indices' not in s:
-                s['indices'] = {
-                    'super_index': s.get('super_index', 0),
-                    'ai_index':    s.get('ai_index', 0),
-                    'media_index': s.get('media_index', 0),
-                }
-            s['token_ca'] = ca
-            s['_mc_unknown'] = True
-            signals.append(s)
-            added += 1
-        print(f'  辅助数据: +{added}笔 ({aux_path})')
+    # 03/13-16 完整指数
+    _merge_aux(signals, '/tmp/mar1316_signals_filtered.json', 'mar13-16')
+    # 03/16-18 完整指数（从 premium_signals 解析）
+    _merge_aux(signals, '/tmp/mar1618_signals.json', 'mar16-18 premium')
 
     return signals
 
