@@ -54,6 +54,7 @@ MH    = 15
 # ─── 信号过滤参数 ─────────────────────────────────────────────────────────
 MIN_SI          = 100
 MIN_AI          = 60
+MAX_AI          = 90      # 0=禁用; AI≥90 往往已被过度追捧
 MAX_MC_K        = 30
 MIN_MC_K        = 5
 MIN_VEL         = 0        # 0=禁用
@@ -223,6 +224,9 @@ def filter_signal(sig, candles, entry_bar_ts, sig_dt):
     if ai < MIN_AI:
         return False, f'ai_low({ai})'
 
+    if MAX_AI > 0 and ai >= MAX_AI:
+        return False, f'ai_high({ai})'
+
     if SKIP_UTC_20_22 and 20 <= hour < 22:
         return False, 'utc_20_22'
 
@@ -340,7 +344,8 @@ def cross_analysis(results):
 def main():
     print('=' * 70)
     print('NOT_ATH 完全策略 v3.0  — 链上维度全激活')
-    print(f'基础过滤: NOT_ATH | MC {MIN_MC_K}-{MAX_MC_K}K | si≥{MIN_SI} | ai≥{MIN_AI}')
+    ai_range = f'ai {MIN_AI}-{MAX_AI-1}' if MAX_AI > 0 else f'ai≥{MIN_AI}'
+    print(f'基础过滤: NOT_ATH | MC {MIN_MC_K}-{MAX_MC_K}K | si≥{MIN_SI} | {ai_range}')
     print(f'          UTC20-22排除={SKIP_UTC_20_22} | 前3分急跌<{PRE_DUMP_THRESH}%')
     v3_flags = []
     if MIN_TRADE_INDEX > 0:   v3_flags.append(f'trade≥{MIN_TRADE_INDEX}')
