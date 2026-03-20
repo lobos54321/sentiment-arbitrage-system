@@ -470,18 +470,23 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'balanced_mc_too_high', mc };
     }
 
-    // 2. super_index 过滤：需 ≥ 120 (v20 BALANCED)
+    // 2. super_index 过滤：需 ≥ 110 (v21 数据分析: si110-119 银金率100%, 降低不漏好货)
+    // 数据来源: not-ath-backtest-mar1318, n=150, si<120 区间银金率=100%
     const superIdx = this._getIdxVal(signal.indices?.super_index ?? signal.super_index) ?? 0;
-    if (superIdx < 120) {
-      console.log(`⏭️ [v20/BALANCED] $${symbol} super_index=${superIdx} < 120 → 跳过`);
+    if (superIdx < 110) {
+      console.log(`⏭️ [v21/BALANCED] $${symbol} super_index=${superIdx} < 110 → 跳过`);
       this.saveSignalRecord(signal, 'BALANCED_SI_LOW', null);
       return { action: 'SKIP', reason: 'balanced_si_low', superIdx };
     }
 
-    // 2b. ai_index 带状过滤：需在 50-79 区间 (v20 BALANCED)
+    // 2b. ai_index 带状过滤：需在 40-79 区间 (v21 数据分析: ai=40有95%银金率, 原50下限漏掉42%好信号)
+    // 数据来源: not-ath-backtest-mar1318, n=150
+    //   ai=40: 63信号, 银金率95%  ai=45: 35信号, 银金率97%  ai>=50: 23信号, 银金率100%
+    //   ai>=80: COPPER/TRASH开始出现, 保留上限79
+    // 旧阈值(ai>=50)每天丢掉~84%的好信号，代价极高
     const aiIdx = this._getIdxVal(signal.indices?.ai_index ?? signal.ai_index);
-    if (aiIdx !== null && (aiIdx < 50 || aiIdx >= 80)) {
-      console.log(`⏭️ [v20/BALANCED] $${symbol} ai_index=${aiIdx} 不在50-79区间 → 跳过`);
+    if (aiIdx !== null && (aiIdx < 40 || aiIdx >= 80)) {
+      console.log(`⏭️ [v21/BALANCED] $${symbol} ai_index=${aiIdx} 不在40-79区间 → 跳过`);
       this.saveSignalRecord(signal, 'BALANCED_AI_OOB', null);
       return { action: 'SKIP', reason: 'balanced_ai_out_of_band', aiIdx };
     }
