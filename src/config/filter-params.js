@@ -22,58 +22,6 @@ export const FILTER_PARAMS = {
     // ═══════════════════════════════════════════════════════════════
     ACTIVE_STRATEGY: 'BALANCED',  // 'AGGRESSIVE' | 'BALANCED' | 'CONSERVATIVE' | 'ULTRA_CONSERVATIVE'
 
-    // ═══════════════════════════════════════════════════════════════
-    // 🗑️ 垃圾信号过滤器配置 v1.0
-    // 目标: 银狗/铜狗比例从 45% → 60%+
-    // 运行时机: applyFilter() 之前，最早拦截垃圾
-    // ═══════════════════════════════════════════════════════════════
-    GARBAGE_FILTER: {
-        // 总开关
-        enabled: true,
-
-        // 垃圾分决策阈值
-        garbageThreshold: 60,    // >= 60 → 直接拒绝
-        suspectThreshold: 40,    // 40-59 → 降级铜池 + 仓位 0.5x
-
-        // G1: 信号喷发阈值
-        spam: {
-            signalPerMinHigh:    3.0,   // 每分钟 > 3 条 = 高度喷发
-            signalPerMinMedium:  1.5,   // 每分钟 > 1.5 条 = 中度喷发
-            accelWithoutSM:      2.0,   // tg_accel > 2 且 SM=0 = 假加速
-        },
-
-        // G2: 聪明钱背离阈值
-        smDivergence: {
-            earlyWarningDivergence:  0.15,  // divergence < 0.15 = 早期预警
-            earlyWarningSignalCount: 15,    // 触发早期预警的信号量下限
-            highSignalLowSM:         20,    // signalCount > 20 且 SM < 2 = 危险
-        },
-
-        // G3: 渠道降质阈值
-        channelDecay: {
-            allTierCThreshold:  0.95,   // 95%+ Tier C = 全矩阵拒绝
-            highTierCThreshold: 0.80,   // 80%+ Tier C = 高度矩阵警告
-            minChannelsForCheck: 4,     // 至少4渠道才触发渠道检查
-        },
-
-        // G4: 时机衰退阈值
-        timingDecay: {
-            lateAgeMinutes:     20,     // token > 20min = 晚入场
-            veryLateAgeMinutes: 35,     // token > 35min = 极度晚入场
-            decayingTimeLag:    25,     // timeLag > 25min = 严重滞后
-        },
-
-        // G5: 社交注水阈值
-        socialInflation: {
-            highMentionsNoKOL:  25,     // 25条推特但0 KOL = 水军
-            mediumMentionsNoKOL: 12,    // 12条推特但0 KOL = 轻度水军
-            lowUniqueAuthors:   2,      // unique_authors < 2 = 重复发布
-            lowOrganicRatio:    0.35,   // 有机比例 < 35% = 高度注水
-        },
-
-        // GOLDEN tag 免疫加成 (减少误杀高质量信号)
-        goldenTagImmunity: 10,          // GOLDEN tag 的垃圾分豁免值
-    },
 
     // ═══════════════════════════════════════════════════════════════
     // 风控配置 (配合过滤策略使用)

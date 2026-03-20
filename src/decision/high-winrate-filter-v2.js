@@ -13,7 +13,6 @@
 
 import GrokTwitterClient from '../social/grok-twitter-client.js';
 import { applyFilter, FILTER_PARAMS } from '../config/filter-params.js';
-import garbageDetector from '../scoring/garbage-signal-detector.js';
 
 class HighWinRateFilterV2 {
     constructor() {
@@ -50,33 +49,7 @@ class HighWinRateFilterV2 {
      * 单个代币分析
      */
     async analyzeToken(token) {
-        // ── 0. 垃圾信号预检 (最早拦截，节省后续算力) ──────────────────
-        const garbageConfig = FILTER_PARAMS.GARBAGE_FILTER;
-        if (garbageConfig?.enabled !== false) {
-            const socialData = token.socialData || token._socialSnapshot || {};
-            const dynamicFactors = token.dynamicFactors || {};
-            const garbageResult = garbageDetector.detect(token, socialData, dynamicFactors);
-
-            if (garbageResult.verdict === 'GARBAGE') {
-                return {
-                    action: 'GARBAGE_REJECTED',
-                    reason: `垃圾信号拦截 (垃圾分=${garbageResult.garbageScore}): ${garbageResult.reasons.slice(0, 2).join(' | ')}`,
-                    garbageScore: garbageResult.garbageScore,
-                    garbageBreakdown: garbageResult.breakdown
-                };
-            }
-
-            // SUSPECT: 存入 token 以便后续降级决策
-            if (garbageResult.verdict === 'SUSPECT') {
-                token._garbageSuspect = true;
-                token._garbageScore = garbageResult.garbageScore;
-                token._garbagePositionMultiplier = garbageResult.positionMultiplier;
-                console.log(`⚠️  [GarbageDetector] SUSPECT 信号: ${token.symbol || token.ca} ` +
-                    `垃圾分=${garbageResult.garbageScore}，仓位降至 0.5x`);
-            }
-        }
-
-        // ── 1. 检查是否通过BALANCED ────────────────────────────────────
+        // 检查是否通过BALANCED
         const filterResult = applyFilter(token);
         if (!filterResult.pass) {
             return {
@@ -126,10 +99,7 @@ class HighWinRateFilterV2 {
             position: this.getPositionSize(prediction, token),
             stopLoss: this.getStopLoss(prediction),
             xSummary: xData ? this.summarizeXData(xData) : null,
-            action: this.getAction(prediction),
-            // 垃圾检测附加信息 (供 analytics 追踪)
-            garbageSuspect: token._garbageSuspect ?? false,
-            garbageScore: token._garbageScore ?? 0
+            action: this.getAction(prediction)
         };
     }
 
@@ -332,10 +302,7 @@ class HighWinRateFilterV2 {
                 return 0;
         }
 
-        // 垃圾预警降级: SUSPECT 信号仓位缩减至 0.5x
-        const garbageMultiplier = token._garbagePositionMultiplier ?? 1.0;
-
-        return Math.min(base * multiplier * signalWeight * garbageMultiplier, max);
+        return Math.min(base * multiplier * signalWeight, max);
     }
 
     /**

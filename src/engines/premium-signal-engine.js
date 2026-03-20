@@ -425,6 +425,27 @@ export class PremiumSignalEngine {
   }
 
   /**
+   * 从 Egeye 指数对象中提取数值
+   * 兼容两种格式:
+   *   - 平铺数值:     signal.super_index = 128
+   *   - 嵌套对象:     signal.indices.super_index = { value: 128 }
+   *   - ATH 增量格式: signal.indices.super_index = { signal: 116, current: 124, growth: 6.9 }
+   *
+   * @param {number|Object|null} raw
+   * @returns {number|null}
+   */
+  _getIdxVal(raw) {
+    if (raw == null) return null;
+    if (typeof raw === 'number') return raw;
+    if (typeof raw === 'object') {
+      if (typeof raw.value   === 'number') return raw.value;
+      if (typeof raw.current === 'number') return raw.current;
+      if (typeof raw.signal  === 'number') return raw.signal;
+    }
+    return null;
+  }
+
+  /**
    * v19: NOT_ATH 涨速过滤路径
    * 条件: MC<30K + DexScreener priceChange.m5 ≥ 20% + super_index ≥ 100
    * 回测胜率 78%, EV +0.023 SOL/笔
@@ -450,7 +471,7 @@ export class PremiumSignalEngine {
     }
 
     // 2. super_index 过滤：需 ≥ 120 (v20 BALANCED)
-    const superIdx = signal.super_index || 0;
+    const superIdx = this._getIdxVal(signal.indices?.super_index ?? signal.super_index) ?? 0;
     if (superIdx < 120) {
       console.log(`⏭️ [v20/BALANCED] $${symbol} super_index=${superIdx} < 120 → 跳过`);
       this.saveSignalRecord(signal, 'BALANCED_SI_LOW', null);
@@ -458,11 +479,53 @@ export class PremiumSignalEngine {
     }
 
     // 2b. ai_index 带状过滤：需在 50-79 区间 (v20 BALANCED)
-    const aiIdx = signal.indices?.ai_index ?? signal.ai_index ?? null;
+    const aiIdx = this._getIdxVal(signal.indices?.ai_index ?? signal.ai_index);
     if (aiIdx !== null && (aiIdx < 50 || aiIdx >= 80)) {
       console.log(`⏭️ [v20/BALANCED] $${symbol} ai_index=${aiIdx} 不在50-79区间 → 跳过`);
       this.saveSignalRecord(signal, 'BALANCED_AI_OOB', null);
       return { action: 'SKIP', reason: 'balanced_ai_out_of_band', aiIdx };
+    }
+
+    // ─── 2c. 多维指数垃圾过滤 (v21) — 利用 Egeye 6 个未用指数 ────────
+    // trade_index: 真实交易活跃度。过低 = 假量/无人接盘
+    const tradeIdx = this._getIdxVal(signal.indices?.trade_index ?? signal.trade_index);
+    if (tradeIdx !== null && tradeIdx < 50) {
+      console.log(`⏭️ [v21/MULTI] $${symbol} trade_index=${tradeIdx} < 50 → 交易活跃度差，跳过`);
+      this.saveSignalRecord(signal, 'MULTI_TRADE_LOW', null);
+      return { action: 'SKIP', reason: 'multi_trade_low', tradeIdx };
+    }
+
+    // security_index: 合约安全评分。过低 = 存在蜜罐/税率/Owner风险
+    const secIdx = this._getIdxVal(signal.indices?.security_index ?? signal.security_index);
+    if (secIdx !== null && secIdx < 60) {
+      console.log(`⏭️ [v21/MULTI] $${symbol} security_index=${secIdx} < 60 → 安全风险，跳过`);
+      this.saveSignalRecord(signal, 'MULTI_SEC_LOW', null);
+      return { action: 'SKIP', reason: 'multi_security_low', secIdx };
+    }
+
+    // address_index: 地址质量/分散度。过低 = 鲸鱼/团队集中持仓 = 砸盘风险
+    const addrIdx = this._getIdxVal(signal.indices?.address_index ?? signal.address_index);
+    if (addrIdx !== null && addrIdx < 40) {
+      console.log(`⏭️ [v21/MULTI] $${symbol} address_index=${addrIdx} < 40 → 地址集中，跳过`);
+      this.saveSignalRecord(signal, 'MULTI_ADDR_LOW', null);
+      return { action: 'SKIP', reason: 'multi_address_low', addrIdx };
+    }
+
+    // ─── 2d. 链上基础指标垃圾过滤 (v21) ─────────────────────────────
+    // Top10 持仓过高：前10地址持仓 > 60% = 庄家控盘，随时砸盘
+    const top10 = signal.top10_pct || 0;
+    if (top10 > 60) {
+      console.log(`⏭️ [v21/MULTI] $${symbol} top10_pct=${top10.toFixed(1)}% > 60% → 鲸鱼集中，跳过`);
+      this.saveSignalRecord(signal, 'MULTI_TOP10_HIGH', null);
+      return { action: 'SKIP', reason: 'multi_top10_high', top10 };
+    }
+
+    // 持有人太少：holders < 50 = 流通极差，无接盘
+    const holders = signal.holders || 0;
+    if (holders > 0 && holders < 50) {
+      console.log(`⏭️ [v21/MULTI] $${symbol} holders=${holders} < 50 → 持有人极少，跳过`);
+      this.saveSignalRecord(signal, 'MULTI_HOLDERS_LOW', null);
+      return { action: 'SKIP', reason: 'multi_holders_low', holders };
     }
 
     // media_index: v20 不限制（≥0 全通过）
@@ -490,15 +553,19 @@ export class PremiumSignalEngine {
     }
 
     const elapsed = Date.now() - t0;
-    const aiIdxStr = aiIdx !== null ? ` AI=${aiIdx}` : '';
-    const velStr = priceChangePct !== null ? ` vel5m=${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(1)}%` : '';
-    console.log(`🚀 [v20/BALANCED] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}${velStr} | 决策耗时:${elapsed}ms`);
+    const aiIdxStr  = aiIdx    !== null ? ` AI=${aiIdx}`         : '';
+    const trIdxStr  = tradeIdx !== null ? ` TR=${tradeIdx}`      : '';
+    const secIdxStr = secIdx   !== null ? ` SEC=${secIdx}`       : '';
+    const addrIdxStr= addrIdx  !== null ? ` ADDR=${addrIdx}`     : '';
+    const top10Str  = top10 > 0         ? ` top10=${top10.toFixed(0)}%` : '';
+    const velStr    = priceChangePct !== null ? ` vel5m=${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(1)}%` : '';
+    console.log(`🚀 [v21/BALANCED] $${symbol} ✅ MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}${trIdxStr}${secIdxStr}${addrIdxStr}${top10Str}${velStr} | 决策耗时:${elapsed}ms`);
 
     const finalSize = 0.06;
     const aiResult = {
       action: 'BUY_FULL', confidence: 85,
       narrative_tier: 'CONFIRMED',
-      narrative_reason: `v20/BALANCED: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}`,
+      narrative_reason: `v21/BALANCED: MC=$${(mc/1000).toFixed(1)}K SI=${superIdx}${aiIdxStr}${trIdxStr}${secIdxStr}${addrIdxStr}`,
       entry_timing: 'MOMENTUM', stop_loss_percent: 15,
       exitStrategy: 'NOT_ATH'
     };
