@@ -222,7 +222,7 @@ def get_new_signals(last_signal_id):
             SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
             FROM premium_signals
             WHERE id > ?
-              AND hard_gate_status IN ('NOT_ATH_V17', 'V17_NOT_ATH1', 'V18_SUPERCUR_FILTER')
+              AND hard_gate_status IN ('PASS', 'GREYLIST', '5M_DUMP')
             ORDER BY id ASC
         """, (last_signal_id,)).fetchall()
         sdb.close()
@@ -240,7 +240,7 @@ def get_recent_signals(limit=20):
         rows = sdb.execute("""
             SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
             FROM premium_signals
-            WHERE hard_gate_status IN ('NOT_ATH_V17', 'V17_NOT_ATH1', 'V18_SUPERCUR_FILTER')
+            WHERE hard_gate_status IN ('PASS', 'GREYLIST', '5M_DUMP')
             ORDER BY id DESC
             LIMIT ?
         """, (limit,)).fetchall()
@@ -426,81 +426,194 @@ def print_all_stats(db):
     log.info(f"{'='*60}")
 
 
+# === K-line Data Access ===
+
+def init_kline_db():
+    """Open kline cache DB."""
+    db = sqlite3.connect(KLINE_DB)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def get_kline_bars(kline_db, token_ca, start_ts, limit=120):
+    """Fetch K-line bars for a token from signal time onward.
+
+    Args:
+        kline_db: kline_cache.db connection
+        token_ca: token contract address
+        start_ts: signal timestamp in seconds
+        limit: max bars to fetch (default 120 = 2h)
+
+    Returns:
+        List of dicts with {timestamp, open, high, low, close, volume}
+    """
+    rows = kline_db.execute("""
+        SELECT timestamp, open, high, low, close, volume
+        FROM kline_1m
+        WHERE token_ca = ? AND timestamp >= ?
+        ORDER BY timestamp ASC
+        LIMIT ?
+    """, (token_ca, start_ts, limit)).fetchall()
+
+    return [dict(row) for row in rows]
+
+
 # === Dry Run Mode ===
 
 def dry_run(db):
-    """Simulate paper trading on recent signals without calling APIs.
-    Uses mock prices to test the full pipeline logic."""
+    """Simulate paper trading on recent signals using REAL K-line data.
+
+    Fetches historical K-line bars from kline_cache.db and replays price
+    action starting from each signal. Falls back to synthetic walk if
+    no K-line data available.
+    """
     import random
 
-    log.info("=== DRY RUN MODE ===")
-    log.info("Using recent signals with synthetic price trajectories")
+    log.info("=== DRY RUN MODE (REAL K-LINE REPLAY) ===")
 
-    signals = get_recent_signals(limit=10)
+    # Open K-line DB
+    try:
+        kline_db = init_kline_db()
+    except Exception as e:
+        log.error(f"Failed to open kline_cache.db: {e}")
+        return
+
+    # Check K-line DB stats
+    kline_count = kline_db.execute("SELECT COUNT(*) FROM kline_1m").fetchone()[0]
+    log.info(f"K-line DB: {kline_count:,} bars available")
+
+    signals = get_recent_signals(limit=500)  # Process more signals
     if not signals:
         log.warning("No recent signals found in premium_signals")
         return
 
     log.info(f"Found {len(signals)} recent signals")
 
+    # Track stats
+    real_klines_used = 0
+    synthetic_used = 0
     completed = []
+
     for sig in signals:
         token_ca = sig['token_ca']
         symbol = sig['symbol'] or token_ca[:8]
-        signal_ts = sig['timestamp'] // 1000 if sig['timestamp'] > 1e12 else sig['timestamp']
+        signal_ts_ms = sig['timestamp']
+        # Convert ms to seconds
+        signal_ts = signal_ts_ms // 1000 if signal_ts_ms > 1e12 else signal_ts_ms
 
-        # Synthetic entry price
-        entry_price = random.uniform(0.00001, 0.01)
-        entry_ts = int(signal_ts)
+        # Try to get real K-line bars
+        bars = get_kline_bars(kline_db, token_ca, signal_ts, limit=TIMEOUT_MIN)
 
-        log.info(f"  Signal: {symbol} ({token_ca[:12]}...) entry=${entry_price:.8f}")
+        if len(bars) >= 5:
+            # REAL K-LINE REPLAY
+            real_klines_used += 1
+            entry_price = bars[0]['close']
+            if entry_price <= 0:
+                entry_price = bars[0]['open']
+            if entry_price <= 0:
+                continue
 
-        # Simulate minute-by-minute with synthetic price walk
-        peak_pnl = 0.0
-        trailing_active = False
-        exit_reason = 'timeout'
-        exit_pnl = 0.0
-        bars = 0
+            peak_pnl = 0.0
+            trailing_active = False
+            exit_reason = 'timeout'
+            exit_pnl = 0.0
+            bars_held = 0
+            exit_price = entry_price
 
-        random.seed(hash(token_ca))  # reproducible per token
-        price = entry_price
+            for i, bar in enumerate(bars):
+                price = bar['close']
+                if price <= 0:
+                    price = bar.get('open', entry_price)
+                if price <= 0:
+                    continue
 
-        for minute in range(1, TIMEOUT_MIN + 1):
-            # Random walk with slight upward bias matching real memecoin dynamics
-            shock = random.gauss(0.002, 0.03)
-            price = price * (1 + shock)
-            if price <= 0:
-                price = entry_price * 0.01
+                pnl = (price - entry_price) / entry_price
+                peak_pnl = max(peak_pnl, pnl)
+                bars_held = i + 1
 
-            pnl = (price - entry_price) / entry_price
-            peak_pnl = max(peak_pnl, pnl)
-            bars = minute
+                # Trail activation
+                if not trailing_active and peak_pnl >= TRAIL_START:
+                    trailing_active = True
 
-            # Trail activation
-            if not trailing_active and peak_pnl >= TRAIL_START:
-                trailing_active = True
-
-            # Stop loss
-            if not trailing_active and pnl <= SL_PCT:
-                exit_reason = 'sl'
-                exit_pnl = SL_PCT
-                break
-
-            # Trailing stop
-            if trailing_active:
-                trail_level = peak_pnl * TRAIL_FACTOR
-                if pnl <= trail_level:
-                    exit_reason = 'trail'
-                    exit_pnl = max(pnl, trail_level)
+                # Stop loss
+                if not trailing_active and pnl <= SL_PCT:
+                    exit_reason = 'sl'
+                    exit_pnl = SL_PCT
+                    exit_price = entry_price * (1 + exit_pnl)
                     break
 
-            exit_pnl = pnl
+                # Trailing stop
+                if trailing_active:
+                    trail_level = peak_pnl * TRAIL_FACTOR
+                    if pnl <= trail_level:
+                        exit_reason = 'trail'
+                        exit_pnl = max(pnl, trail_level)
+                        exit_price = entry_price * (1 + exit_pnl)
+                        break
 
-        exit_price = entry_price * (1 + exit_pnl)
-        exit_ts = entry_ts + bars * 60
+                exit_pnl = pnl
+                exit_price = price
 
-        # Synthetic regime
-        regime = random.choice(['bull', 'bear', 'neutral'])
+            exit_ts = int(signal_ts + bars_held * 60)
+            regime = 'real_kline'
+
+            log.info(
+                f"  [{symbol}] REAL  bars={len(bars)}  "
+                f"pnl={exit_pnl*100:+.1f}%  peak={peak_pnl*100:+.1f}%  "
+                f"reason={exit_reason}  bars_held={bars_held}"
+            )
+        else:
+            # SYNTHETIC FALLBACK (insufficient K-line data)
+            synthetic_used += 1
+            entry_price = random.uniform(0.00001, 0.01)
+            entry_ts = int(signal_ts)
+
+            log.info(f"  Signal: {symbol} ({token_ca[:12]}...) entry=${entry_price:.8f}")
+
+            peak_pnl = 0.0
+            trailing_active = False
+            exit_reason = 'timeout'
+            exit_pnl = 0.0
+            bars_held = 0
+
+            random.seed(hash(token_ca))  # reproducible per token
+            price = entry_price
+
+            for minute in range(1, TIMEOUT_MIN + 1):
+                shock = random.gauss(0.002, 0.03)
+                price = price * (1 + shock)
+                if price <= 0:
+                    price = entry_price * 0.01
+
+                pnl = (price - entry_price) / entry_price
+                peak_pnl = max(peak_pnl, pnl)
+                bars_held = minute
+
+                if not trailing_active and peak_pnl >= TRAIL_START:
+                    trailing_active = True
+
+                if not trailing_active and pnl <= SL_PCT:
+                    exit_reason = 'sl'
+                    exit_pnl = SL_PCT
+                    break
+
+                if trailing_active:
+                    trail_level = peak_pnl * TRAIL_FACTOR
+                    if pnl <= trail_level:
+                        exit_reason = 'trail'
+                        exit_pnl = max(pnl, trail_level)
+                        break
+
+                exit_pnl = pnl
+
+            exit_price = entry_price * (1 + exit_pnl)
+            exit_ts = entry_ts + bars_held * 60
+            regime = 'synthetic'
+
+            log.info(
+                f"    -> {exit_reason:7s}  pnl={exit_pnl*100:+.1f}%  "
+                f"peak={peak_pnl*100:+.1f}%  bars={bars_held}  [SYNTHETIC]"
+            )
 
         # Write to DB
         db.execute("""
@@ -510,28 +623,35 @@ def dry_run(db):
                  market_regime, peak_pnl, trailing_active)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            token_ca, symbol, int(signal_ts), entry_price, entry_ts,
-            exit_price, exit_ts, exit_reason, exit_pnl, bars,
+            token_ca, symbol, int(signal_ts_ms), entry_price, int(signal_ts),
+            exit_price, exit_ts, exit_reason, exit_pnl, bars_held,
             regime, peak_pnl, int(trailing_active),
         ))
         db.commit()
 
         completed.append(exit_pnl)
-        log.info(
-            f"    -> {exit_reason:7s}  pnl={exit_pnl*100:+.1f}%  peak={peak_pnl*100:+.1f}%  "
-            f"bars={bars}  regime={regime}"
-        )
+
+    kline_db.close()
 
     # Summary
+    log.info(f"\n=== DRY RUN COMPLETE ===")
+    log.info(f"Real K-line replays: {real_klines_used}")
+    log.info(f"Synthetic fallbacks: {synthetic_used}")
+
     if completed:
         n = len(completed)
         ev = sum(completed) / n
         wins = sum(1 for p in completed if p > 0)
         wr = wins / n
+        total_pnl = sum(completed)
         std = (sum((p - ev) ** 2 for p in completed) / n) ** 0.5
         sharpe = ev / std if std > 0 else 0
-        log.info(f"")
-        log.info(f"  Dry Run Summary: n={n}  EV={ev*100:+.2f}%  WR={wr*100:.1f}%  Sharpe={sharpe:.3f}")
+
+        log.info(f"\n  Trades: {n}")
+        log.info(f"  EV: {ev*100:+.3f}%")
+        log.info(f"  WR: {wr*100:.1f}% ({wins} wins)")
+        log.info(f"  Sharpe: {sharpe:.3f}")
+        log.info(f"  Total PnL: {total_pnl*100:+.2f}%")
 
     # Print from DB to verify persistence
     log.info(f"")
