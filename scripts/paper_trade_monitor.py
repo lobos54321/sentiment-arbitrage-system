@@ -24,10 +24,11 @@ from pathlib import Path
 from collections import defaultdict
 
 # === Configuration ===
-SENTIMENT_DB = '/tmp/sentiment.db'
+SENTIMENT_DB = os.environ.get('SENTIMENT_DB', '/tmp/sentiment.db')
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
-PAPER_DB = str(DATA_DIR / 'paper_trades.db')
+PAPER_DB = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
+KLINE_DB = os.environ.get('KLINE_DB', str(DATA_DIR / 'kline_cache.db'))
 
 # Sim parameters (Canonical v2: SL=-3%, trail@+3%/0.90, timeout=120min)
 SL_PCT = -0.03

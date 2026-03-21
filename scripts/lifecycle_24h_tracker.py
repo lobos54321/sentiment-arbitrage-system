@@ -32,15 +32,17 @@ import os
 import signal
 import logging
 import random
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 
 # === Configuration ===
-SENTIMENT_DB = '/tmp/sentiment.db'
+SENTIMENT_DB = os.environ.get('SENTIMENT_DB', '/tmp/sentiment.db')
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
-LIFECYCLE_DB = str(DATA_DIR / 'lifecycle_tracks.db')
+LIFECYCLE_DB = os.environ.get('LIFECYCLE_DB', str(DATA_DIR / 'lifecycle_tracks.db'))
+KLINE_DB = os.environ.get('KLINE_DB', str(DATA_DIR / 'kline_cache.db'))
 
 # GeckoTerminal API
 GECKO_BASE = "https://api.geckoterminal.com/api/v2/networks/solana/pools"
