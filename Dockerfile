@@ -2,14 +2,14 @@
 FROM node:20-slim
 
 # Install build tools for native modules (better-sqlite3) + Python
-RUN apt-get update && apt-get install && apt-get install -y \
+RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
-    python3-venv \
     make \
     g++ \
     curl \
     ca-certificates \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -30,74 +30,21 @@ COPY . .
 # Expose port (if needed for health checks)
 EXPOSE 3000
 
-# Create startup script that runs Node.js + Python monitors
-RUN cat > /app/start.sh << 'SCRIPT'
-#!/bin/bash
-set -e
-
-echo "[startup] Starting services..."
-
-# Create data dir if not exists (Zeabur volume might be empty)
-mkdir -p /app/data
-
-# Set environment variables
-export SENTIMENT_DB="/app/data/sentiment.db"
-export PAPER_DB="/app/data/paper_trades.db"
-export LIFECYCLE_DB="/app/data/lifecycle_tracks.db"
-export KLINE_DB="/app/data/kline_cache.db"
-export PYTHONUNBUFFERED=1
-
-# Start Node.js application in background
-echo "[startup] Starting Node.js trader..."
-node src/index.js --premium &
-NODE_PID=$!
-
-# Give Node.js a moment to initialize
-sleep 3
-
-# Start lifecycle tracker in background
-echo "[startup] Starting lifecycle-tracker..."
-python3 scripts/lifecycle_24h_tracker.py --track &
-LIFECYCLE_PID=$!
-
-# Start paper trader in background
-echo "[startup] Starting paper-trader..."
-python3 scripts/paper_trade_monitor.py &
-PAPER_PID=$!
-
-echo "[startup] All services started"
-echo "  Node.js PID: $NODE_PID"
-echo "  lifecycle-tracker PID: $LIFECYCLE_PID"
-echo "  paper-trader PID: $PAPER_PID"
-
-# Wait for all processes
-# If any process dies, restart it
-while true; do
-    sleep 30
-
-    # Check Node.js
-    if ! kill -0 $NODE_PID 2>/dev/null; then
-        echo "[startup] Node.js died, restarting..."
-        node src/index.js --premium &
-        NODE_PID=$!
-    fi
-
-    # Check lifecycle tracker
-    if ! kill -0 $LIFECYCLE_PID 2>/dev/null; then
-        echo "[startup] lifecycle-tracker died, restarting..."
-        python3 scripts/lifecycle_24h_tracker.py --track &
-        LIFECYCLE_PID=$!
-    fi
-
-    # Check paper trader
-    if ! kill -0 $PAPER_PID 2>/dev/null; then
-        echo "[startup] paper-trader died, restarting..."
-        python3 scripts/paper_trade_monitor.py &
-        PAPER_PID=$!
-    fi
-done
-SCRIPT
-
-RUN chmod +x /app/start.sh
+# Create startup script
+RUN printf '#!/bin/bash\n\
+echo "[STARTUP] Initializing..."\n\
+mkdir -p /app/data\n\
+cd /app\n\
+echo "[STARTUP] Starting Node.js..."\n\
+node src/index.js --premium &\n\
+NODE_PID=$!\n\
+sleep 2\n\
+echo "[STARTUP] Node.js PID: $NODE_PID"\n\
+echo "[STARTUP] Starting lifecycle-tracker..."\n\
+python3 scripts/lifecycle_24h_tracker.py --track >> /app/data/lifecycle.log 2>&1 &\n\
+echo "[STARTUP] Starting paper-trader..."\n\
+python3 scripts/paper_trade_monitor.py >> /app/data/paper-trader.log 2>&1 &\n\
+echo "[STARTUP] All started. PID: $NODE_PID"\n\
+wait $NODE_PID\n' > /app/start.sh && chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
