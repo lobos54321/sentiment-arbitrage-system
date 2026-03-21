@@ -1,0 +1,473 @@
+{
+  "agent": "B",
+  "role": "Statistical Robustness Analyst",
+  "baseline": {
+    "ev": 0.155628,
+    "wr": 0.758929,
+    "sharpe": 0.797639,
+    "max_dd": 0.152792,
+    "n": 448,
+    "skew_top5_pct": 22.158296,
+    "max_consec_loss": 3
+  },
+  "walk_forward": {
+    "in_sample": {
+      "ev": 0.158102,
+      "wr": 0.763077,
+      "sharpe": 0.780173,
+      "max_dd": 0.09,
+      "n": 325,
+      "skew_top5_pct": 22.924071,
+      "max_consec_loss": 3
+    },
+    "out_of_sample": {
+      "ev": 0.149092,
+      "wr": 0.747967,
+      "sharpe": 0.859547,
+      "max_dd": 0.152792,
+      "n": 123,
+      "skew_top5_pct": 19.455068,
+      "max_consec_loss": 3
+    },
+    "ev_decay_pct": -5.7
+  },
+  "daily_stability": {
+    "daily": {
+      "2026-03-13": {
+        "n": 69,
+        "ev": 14.24,
+        "wr": 71.0
+      },
+      "2026-03-14": {
+        "n": 48,
+        "ev": 19.18,
+        "wr": 87.5
+      },
+      "2026-03-15": {
+        "n": 81,
+        "ev": 19.18,
+        "wr": 86.4
+      },
+      "2026-03-16": {
+        "n": 43,
+        "ev": 12.96,
+        "wr": 74.4
+      },
+      "2026-03-17": {
+        "n": 84,
+        "ev": 13.39,
+        "wr": 65.5
+      },
+      "2026-03-18": {
+        "n": 98,
+        "ev": 14.59,
+        "wr": 76.5
+      },
+      "2026-03-19": {
+        "n": 25,
+        "ev": 16.18,
+        "wr": 68.0
+      }
+    },
+    "ev_std_pct": 2.41,
+    "losing_days": 0,
+    "total_days": 7
+  },
+  "permutation_test": {
+    "n_iterations": 500,
+    "real_ev_pct": 15.5628,
+    "perm_mean_ev_pct": 15.5628,
+    "perm_95th_ev_pct": 15.5628,
+    "p_value": 0.98
+  },
+  "bootstrap_ci": {
+    "n_iterations": 1000,
+    "percentiles_pct": {
+      "5": 14.1577,
+      "25": 14.9846,
+      "50": 15.5585,
+      "75": 16.2003,
+      "95": 17.1869
+    },
+    "ci_90_width_pp": 3.03,
+    "prob_negative_ev_pct": 0.0
+  },
+  "friction_sensitivity": {
+    "levels": [
+      {
+        "friction_pct": 0,
+        "ev_pct": 15.5628,
+        "wr_pct": 75.9,
+        "sharpe": 0.7976
+      },
+      {
+        "friction_pct": 1.0,
+        "ev_pct": 14.5628,
+        "wr_pct": 75.9,
+        "sharpe": 0.7464
+      },
+      {
+        "friction_pct": 2.0,
+        "ev_pct": 13.5628,
+        "wr_pct": 75.9,
+        "sharpe": 0.6951
+      },
+      {
+        "friction_pct": 3.5,
+        "ev_pct": 12.0628,
+        "wr_pct": 72.5,
+        "sharpe": 0.6183
+      },
+      {
+        "friction_pct": 5.0,
+        "ev_pct": 10.5628,
+        "wr_pct": 66.1,
+        "sharpe": 0.5414
+      },
+      {
+        "friction_pct": 7.0,
+        "ev_pct": 8.5628,
+        "wr_pct": 59.8,
+        "sharpe": 0.4389
+      },
+      {
+        "friction_pct": 10.0,
+        "ev_pct": 5.5628,
+        "wr_pct": 52.0,
+        "sharpe": 0.2851
+      }
+    ],
+    "breakeven_friction_pct": 15.56
+  },
+  "outlier_analysis": {
+    "removal_tests": [
+      {
+        "removed_pct": 1.0,
+        "n_removed": 4,
+        "ev_pct": 14.7795,
+        "wr_pct": 75.7,
+        "sharpe": 0.8332
+      },
+      {
+        "removed_pct": 3.0,
+        "n_removed": 13,
+        "ev_pct": 13.5826,
+        "wr_pct": 75.2,
+        "sharpe": 0.8589
+      },
+      {
+        "removed_pct": 5.0,
+        "n_removed": 22,
+        "ev_pct": 12.5715,
+        "wr_pct": 74.6,
+        "sharpe": 0.8765
+      },
+      {
+        "removed_pct": 10.0,
+        "n_removed": 44,
+        "ev_pct": 10.6285,
+        "wr_pct": 73.3,
+        "sharpe": 0.8903
+      }
+    ],
+    "top5_profit_concentration_pct": 22.16
+  },
+  "parameter_landscape": {
+    "total_combos": 120,
+    "profitable_combos": 120,
+    "profitable_pct": 100.0,
+    "best_params": {
+      "sl": -0.01,
+      "trail_start": 0.01,
+      "trail_factor": 0.95,
+      "ev_pct": 16.8381
+    },
+    "baseline_rank": 30,
+    "ev_range_pct": [
+      11.0,
+      16.84
+    ],
+    "ev_median_pct": 14.86,
+    "neighbor_mean_ev_pct": 15.48,
+    "neighbor_min_ev_pct": 14.86,
+    "top_10": [
+      {
+        "sl": -0.01,
+        "trail_start": 0.01,
+        "trail_factor": 0.95,
+        "ev": 0.1684,
+        "sharpe": 0.8607,
+        "wr": 0.8371
+      },
+      {
+        "sl": -0.02,
+        "trail_start": 0.01,
+        "trail_factor": 0.95,
+        "ev": 0.1668,
+        "sharpe": 0.8467,
+        "wr": 0.8393
+      },
+      {
+        "sl": -0.01,
+        "trail_start": 0.02,
+        "trail_factor": 0.95,
+        "ev": 0.1668,
+        "sharpe": 0.8483,
+        "wr": 0.7924
+      },
+      {
+        "sl": -0.01,
+        "trail_start": 0.03,
+        "trail_factor": 0.95,
+        "ev": 0.1657,
+        "sharpe": 0.839,
+        "wr": 0.7589
+      },
+      {
+        "sl": -0.03,
+        "trail_start": 0.01,
+        "trail_factor": 0.95,
+        "ev": 0.1652,
+        "sharpe": 0.832,
+        "wr": 0.8393
+      },
+      {
+        "sl": -0.02,
+        "trail_start": 0.02,
+        "trail_factor": 0.95,
+        "ev": 0.1649,
+        "sharpe": 0.8314,
+        "wr": 0.7969
+      },
+      {
+        "sl": -0.02,
+        "trail_start": 0.03,
+        "trail_factor": 0.95,
+        "ev": 0.1633,
+        "sharpe": 0.8178,
+        "wr": 0.7589
+      },
+      {
+        "sl": -0.05,
+        "trail_start": 0.01,
+        "trail_factor": 0.95,
+        "ev": 0.1633,
+        "sharpe": 0.8071,
+        "wr": 0.8415
+      },
+      {
+        "sl": -0.01,
+        "trail_start": 0.01,
+        "trail_factor": 0.9,
+        "ev": 0.163,
+        "sharpe": 0.8634,
+        "wr": 0.8371
+      },
+      {
+        "sl": -0.03,
+        "trail_start": 0.02,
+        "trail_factor": 0.95,
+        "ev": 0.1629,
+        "sharpe": 0.8133,
+        "wr": 0.7969
+      }
+    ]
+  },
+  "regime_detection": {
+    "hourly": {
+      "0": {
+        "n": 21,
+        "ev_pct": 18.18,
+        "wr_pct": 85.7
+      },
+      "1": {
+        "n": 17,
+        "ev_pct": 20.2,
+        "wr_pct": 82.4
+      },
+      "2": {
+        "n": 24,
+        "ev_pct": 12.52,
+        "wr_pct": 70.8
+      },
+      "3": {
+        "n": 35,
+        "ev_pct": 15.83,
+        "wr_pct": 74.3
+      },
+      "4": {
+        "n": 12,
+        "ev_pct": 10.72,
+        "wr_pct": 58.3
+      },
+      "5": {
+        "n": 24,
+        "ev_pct": 17.1,
+        "wr_pct": 79.2
+      },
+      "6": {
+        "n": 17,
+        "ev_pct": 15.8,
+        "wr_pct": 88.2
+      },
+      "7": {
+        "n": 17,
+        "ev_pct": 10.96,
+        "wr_pct": 64.7
+      },
+      "8": {
+        "n": 18,
+        "ev_pct": 11.57,
+        "wr_pct": 83.3
+      },
+      "9": {
+        "n": 13,
+        "ev_pct": 14.96,
+        "wr_pct": 76.9
+      },
+      "10": {
+        "n": 14,
+        "ev_pct": 9.28,
+        "wr_pct": 64.3
+      },
+      "11": {
+        "n": 10,
+        "ev_pct": 12.53,
+        "wr_pct": 70.0
+      },
+      "12": {
+        "n": 17,
+        "ev_pct": 18.18,
+        "wr_pct": 82.4
+      },
+      "13": {
+        "n": 16,
+        "ev_pct": 9.51,
+        "wr_pct": 75.0
+      },
+      "14": {
+        "n": 22,
+        "ev_pct": 14.78,
+        "wr_pct": 68.2
+      },
+      "15": {
+        "n": 22,
+        "ev_pct": 25.4,
+        "wr_pct": 81.8
+      },
+      "16": {
+        "n": 23,
+        "ev_pct": 14.78,
+        "wr_pct": 69.6
+      },
+      "17": {
+        "n": 19,
+        "ev_pct": 19.44,
+        "wr_pct": 89.5
+      },
+      "18": {
+        "n": 19,
+        "ev_pct": 18.87,
+        "wr_pct": 78.9
+      },
+      "19": {
+        "n": 16,
+        "ev_pct": 15.24,
+        "wr_pct": 56.2
+      },
+      "20": {
+        "n": 23,
+        "ev_pct": 15.95,
+        "wr_pct": 78.3
+      },
+      "21": {
+        "n": 17,
+        "ev_pct": 14.71,
+        "wr_pct": 88.2
+      },
+      "22": {
+        "n": 19,
+        "ev_pct": 11.85,
+        "wr_pct": 63.2
+      },
+      "23": {
+        "n": 13,
+        "ev_pct": 18.59,
+        "wr_pct": 84.6
+      }
+    },
+    "day_of_week": {
+      "Mon": {
+        "n": 43,
+        "ev_pct": 12.96,
+        "wr_pct": 74.4
+      },
+      "Tue": {
+        "n": 84,
+        "ev_pct": 13.39,
+        "wr_pct": 65.5
+      },
+      "Wed": {
+        "n": 98,
+        "ev_pct": 14.59,
+        "wr_pct": 76.5
+      },
+      "Thu": {
+        "n": 25,
+        "ev_pct": 16.18,
+        "wr_pct": 68.0
+      },
+      "Fri": {
+        "n": 69,
+        "ev_pct": 14.24,
+        "wr_pct": 71.0
+      },
+      "Sat": {
+        "n": 48,
+        "ev_pct": 19.18,
+        "wr_pct": 87.5
+      },
+      "Sun": {
+        "n": 81,
+        "ev_pct": 19.18,
+        "wr_pct": 86.4
+      }
+    }
+  },
+  "verdict": {
+    "overfitting_risk": 9,
+    "oos_concern": 3,
+    "friction_concern": 3,
+    "param_cliff_risk": 3,
+    "outlier_dependence": 3,
+    "avg_risk_score": 4.2,
+    "overall": "LIKELY ALPHA WITH CAVEATS \u2014 needs more data to confirm",
+    "details": [
+      "1. Overfitting risk (0-10): 9/10",
+      "   - Only 7 days of data (448 trades)",
+      "   - Permutation test: WARNING: p=0.980 \u2014 random timing achieves similar returns",
+      "   - Bootstrap P(EV<0): 0.0%",
+      "",
+      "2. OOS vs IS: EV change = -5.7%",
+      "   IS: EV=+15.81%, OOS: EV=+14.91%",
+      "   Verdict: PASS",
+      "",
+      "3. Friction robustness: breakeven at ~15.6%",
+      "   At 3.5% friction: EV=+12.06%",
+      "   Verdict: PASS",
+      "",
+      "4. Parameter stability: baseline rank 30/120",
+      "   120/120 combos profitable (100%)",
+      "   Worst neighbor EV: +14.86% (baseline: +15.56%)",
+      "   Verdict: BROAD PLATEAU",
+      "",
+      "5. Outlier dependence: top 5% = 22.2% of profit",
+      "   Verdict: REASONABLE",
+      "",
+      "6. Daily stability: 0/7 losing days, EV std = 2.41%",
+      "",
+      "OVERALL RISK SCORE: 4.2/10",
+      "VERDICT: LIKELY ALPHA WITH CAVEATS \u2014 needs more data to confirm"
+    ]
+  }
+}
