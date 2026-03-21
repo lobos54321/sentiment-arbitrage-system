@@ -135,6 +135,19 @@ export class TelegramSignalParser {
       else if (unit === 'M') mc *= 1_000_000;
       else if (unit === 'B') mc *= 1_000_000_000;
       signal.mc_at_signal = mc;
+      signal.market_cap = mc;  // Alias for compatibility with premium-signal-engine
+    } else {
+      // Also check for format like "$31.88K" (no space between number and unit)
+      const mcMatch2 = text.match(/\$\s*([\d.]+)\s*([KMB])\b/i);
+      if (mcMatch2) {
+        let mc = parseFloat(mcMatch2[1]);
+        const unit = mcMatch2[2]?.toUpperCase();
+        if (unit === 'K') mc *= 1000;
+        else if (unit === 'M') mc *= 1_000_000;
+        else if (unit === 'B') mc *= 1_000_000_000;
+        signal.mc_at_signal = mc;
+        signal.market_cap = mc;
+      }
     }
 
     // Extract promoted channels

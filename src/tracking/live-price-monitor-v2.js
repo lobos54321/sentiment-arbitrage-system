@@ -64,9 +64,10 @@ export class LivePriceMonitorV2 extends EventEmitter {
    * @param {number} tokenAmount - Token 数量（raw amount，含 decimals）
    * @param {number} decimals - Token decimals
    */
-  addToken(tokenCA, tokenAmount, decimals) {
+  addToken(tokenCA, tokenAmount = 1e6, decimals = 6) {
+    // tokenAmount/decimals 仅用于价格换算，K线采集不需要
     this.watchList.set(tokenCA, { tokenAmount, decimals });
-    console.log(`📡 [LivePriceMonitorV2] 添加监控: ${tokenCA.substring(0, 8)}... | ${tokenAmount} tokens (共 ${this.watchList.size} 个)`);
+    console.log(`📡 [LivePriceMonitorV2] 添加监控: ${tokenCA.substring(0, 8)}... | ${this.watchList.size} 个`);
   }
 
   /**
