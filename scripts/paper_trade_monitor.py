@@ -846,7 +846,7 @@ def run_monitor(db):
                 log.info(f"New signal: {symbol} ({token_ca[:12]}...)")
 
                 # Parse Super Index from description, skip if < 80
-                super_idx = parse_super_index(sig.get('description', ''))
+                super_idx = parse_super_index(sig['description'] or '')
                 if super_idx is None:
                     log.info(f"  Super Index not found in description, skipping")
                     continue
