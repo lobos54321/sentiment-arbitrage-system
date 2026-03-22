@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Paper Trade Monitor — forward-test Telegram signals with simulated execution.
+Paper Trade Monitor — forward-test NOT_ATH signals with simulated execution.
+
+NOT_ATH Strategy:
+  - Entry: Super Index >= 80 + RED(+2) + lowVol(+1) + active(+1) >= 3
+  - Exit:  SL=-3%, trail@+3%/0.90, timeout=120min
 
 Monitors premium_signals for new entries, enters at live price via GeckoTerminal,
 tracks positions with trailing-stop logic, records results to paper_trades.db.
@@ -13,6 +17,7 @@ Usage:
 
 import sqlite3
 import json
+import re
 import time
 import subprocess
 import sys
@@ -147,6 +152,105 @@ def get_current_price(token_ca, pool_address=None):
     return ohlcv[0][4]  # close price
 
 
+# === NOT_ATH Scoring ===
+
+def parse_super_index(description):
+    """
+    Parse Super Index from NOT_ATH description.
+    Supports formats:
+      ✡ Super Index： 119🔮
+      ✡ Super Index： ✡ x 82
+    Returns int or None.
+    """
+    if not description:
+        return None
+    # Try format: " 119🔮"
+    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮', description)
+    if m:
+        return int(m.group(1))
+    # Try format: "✡ x 82"
+    m = re.search(r'Super\s+Index[：:]\s*✡\s*x\s*(\d+)', description, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def get_notath_bars(pool_address):
+    """
+    Get 5 most recent 1-minute bars for NOT_ATH scoring.
+    Returns list of bars (newest first), or None.
+    Each bar: {ts, open, high, low, close, volume}
+    """
+    url = (
+        f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
+        f"{pool_address}/ohlcv/minute?aggregate=1&limit=5"
+    )
+    data = curl_json(url)
+    if not data:
+        return None
+    ohlcv_list = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
+    if not ohlcv_list or len(ohlcv_list[0]) < 6:
+        return None
+    bars = []
+    for row in ohlcv_list:
+        bars.append({
+            'ts': int(row[0]),
+            'open': float(row[1]),
+            'high': float(row[2]),
+            'low': float(row[3]),
+            'close': float(row[4]),
+            'volume': float(row[5]),
+        })
+    return bars
+
+
+def compute_notath_score(bars):
+    """
+    Compute NOT_ATH entry score.
+    bars: [current, lag1, lag2, lag3] — newest first
+    Scoring: RED(+2) + lowVolume(+1) + active(+1) >= 3 to pass
+
+    Returns {passed, score, is_red, low_volume, is_active, mom, avg_vol}
+    """
+    if not bars or len(bars) < 4:
+        return {'passed': False, 'score': 0, 'is_red': False,
+                'low_volume': False, 'is_active': False, 'mom': 0, 'avg_vol': 0}
+
+    current = bars[0]
+    prev3 = bars[1:4]  # [lag1, lag2, lag3]
+
+    # RED bar: close < open (pullback confirmation)
+    is_red = current['close'] < current['open']
+    if not is_red:
+        return {'passed': False, 'score': 0, 'is_red': False,
+                'low_volume': False, 'is_active': False, 'mom': 0,
+                'avg_vol': sum(b['volume'] for b in prev3) / 3}
+
+    # lowVolume: current vol <= avg(prev3 vol) — accumulation not distribution
+    avg_vol = sum(b['volume'] for b in prev3) / 3
+    low_volume = current['volume'] <= avg_vol
+
+    # active: |mom_from_lag1| > 30% — momentum exists
+    mom = 0
+    if prev3[0]['close'] > 0:
+        mom = ((current['close'] - prev3[0]['close']) / prev3[0]['close']) * 100
+    is_active = abs(mom) > 30
+
+    # Score
+    score = 2 + (1 if low_volume else 0) + (1 if is_active else 0)
+    passed = score >= 3
+
+    return {
+        'passed': passed,
+        'score': score,
+        'is_red': True,
+        'low_volume': low_volume,
+        'is_active': is_active,
+        'mom': mom,
+        'avg_vol': avg_vol,
+    }
+
+
 def get_entry_bar_ohlcv(pool_address):
     """Get the most recent completed 1-minute OHLCV bar for FBR check."""
     url = (
@@ -222,7 +326,7 @@ def get_new_signals(last_signal_id):
             SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
             FROM premium_signals
             WHERE id > ?
-              AND hard_gate_status IN ('PASS', 'GREYLIST', '5M_DUMP')
+              AND hard_gate_status LIKE 'NOT_ATH%'
             ORDER BY id ASC
         """, (last_signal_id,)).fetchall()
         sdb.close()
@@ -240,7 +344,7 @@ def get_recent_signals(limit=20):
         rows = sdb.execute("""
             SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
             FROM premium_signals
-            WHERE hard_gate_status IN ('PASS', 'GREYLIST', '5M_DUMP')
+            WHERE hard_gate_status LIKE 'NOT_ATH%'
             ORDER BY id DESC
             LIMIT ?
         """, (limit,)).fetchall()
@@ -741,28 +845,37 @@ def run_monitor(db):
                 symbol = sig['symbol'] or token_ca[:8]
                 log.info(f"New signal: {symbol} ({token_ca[:12]}...)")
 
-                # Get entry bar (FBR check: need close > open)
+                # Parse Super Index from description, skip if < 80
+                super_idx = parse_super_index(sig.get('description', ''))
+                if super_idx is None:
+                    log.info(f"  Super Index not found in description, skipping")
+                    continue
+                if super_idx < 80:
+                    log.info(f"  Super Index={super_idx}<80, skipping")
+                    continue
+
+                # Get 4 bars for NOT_ATH scoring
                 pool = get_pool_address(token_ca)
                 if not pool:
                     log.warning(f"  Could not find pool for {symbol}, skipping")
                     continue
                 time.sleep(0.4)
 
-                bar = get_entry_bar_ohlcv(pool)
-                if not bar:
-                    log.warning(f"  Could not get entry bar for {symbol}, skipping")
+                bars = get_notath_bars(pool)
+                if not bars or len(bars) < 4:
+                    log.warning(f"  Not enough K-line bars for {symbol}, skipping")
                     continue
 
-                # FBR filter: skip if first bar is not green
-                if bar['close'] <= bar['open']:
-                    log.info(f"  FBR failed: bar close={bar['close']:.10f} <= open={bar['open']:.10f}, skipping")
+                # Compute NOT_ATH score
+                score_result = compute_notath_score(bars)
+                if not score_result['passed']:
+                    log.info(f"  NOT_ATH score={score_result['score']} < 3 (RED={score_result['is_red']}, lowVol={score_result['low_volume']}, active={score_result['is_active']}), skipping")
                     continue
 
-                fbr = (bar['close'] - bar['open']) / bar['open']
-                log.info(f"  FBR passed: close={bar['close']:.10f} > open={bar['open']:.10f} (FBR={fbr*100:+.2f}%)")
+                log.info(f"  NOT_ATH score={score_result['score']} ✅ (RED={score_result['is_red']}, lowVol={score_result['low_volume']}, active={score_result['is_active']}, mom={score_result['mom']:+.1f}%)")
 
-                # Get entry price
-                price = bar['close']  # enter at close of first bar
+                # Enter at close of current bar
+                price = bars[0]['close']
                 if not price or price <= 0:
                     log.warning(f"  Could not get price for {symbol}, skipping")
                     continue
