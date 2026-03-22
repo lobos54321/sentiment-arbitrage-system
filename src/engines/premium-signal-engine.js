@@ -483,6 +483,18 @@ export class PremiumSignalEngine {
       };
 
       // ─── Step 6: 执行 ─────────────────────────────────────────
+
+      // FBR过滤：检查第一根K线是否绿色
+      const fbrResult = await this._checkFBR(ca);
+      if (!fbrResult.passed) {
+        console.log(`🚫 [FBR] $${signal.symbol} 第一根K线红色 (open=${fbrResult.open?.toFixed(10)} close=${fbrResult.close?.toFixed(10)} FBR=${fbrResult.fbr?.toFixed(2)}%) → 跳过`);
+        this.saveSignalRecord(signal, 'FBR_FAIL', aiResult, false);
+        return { action: 'SKIP', reason: 'fbr_failed', fbr: fbrResult.fbr };
+      }
+      if (fbrResult.reason !== 'error_skip') {
+        console.log(`✅ [FBR] $${signal.symbol} 第一根K线绿色 (FBR=${fbrResult.fbr?.toFixed(2)}%)`);
+      }
+
       if (this.shadowMode) {
         this.stats.shadow_logged++;
         console.log(`🎭 [SHADOW] 模拟买入 $${signal.symbol} | ${finalSize} SOL`);
@@ -917,6 +929,52 @@ export class PremiumSignalEngine {
       max_positions: this.maxPositions,
       dedup_cache_size: this.recentSignals.size
     };
+  }
+
+  /**
+   * FBR过滤：获取最近一根K线，检查是否绿色 (close > open)
+   * @param {string} tokenCA - 代币CA
+   * @returns {Promise<{passed: boolean, close: number, open: number, fbr: number}>}
+   */
+  async _checkFBR(tokenCA) {
+    try {
+      // 先从缓存获取pool地址
+      const poolAddress = this._poolCache?.get(tokenCA);
+      if (!poolAddress) {
+        // 从DexScreener获取
+        const dexRes = await axios.get(
+          `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
+          { timeout: 5000 }
+        );
+        const pairs = dexRes.data?.pairs;
+        if (!pairs?.length) return { passed: false, reason: 'no_pool' };
+        const solPairs = pairs.filter(p => p.chainId === 'solana');
+        const pool = solPairs?.length
+          ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
+          : pairs[0];
+        if (!pool?.pairAddress) return { passed: false, reason: 'no_pool' };
+        this._poolCache = this._poolCache || new Map();
+        this._poolCache.set(tokenCA, pool.pairAddress);
+      }
+
+      // 从GeckoTerminal获取最近1分钟K线
+      const geckoRes = await axios.get(
+        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=2`,
+        { timeout: 5000 }
+      );
+      const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
+      if (!ohlcv?.length) return { passed: false, reason: 'no_bars' };
+
+      const [ts, open, high, low, close] = ohlcv[0].map(Number);
+      const passed = close > open;
+      const fbr = open > 0 ? ((close - open) / open) * 100 : 0;
+
+      return { passed, close, open, fbr, reason: passed ? 'pass' : 'fbr_failed' };
+    } catch (error) {
+      // 网络错误时默认通过，避免错过交易机会
+      console.warn(`⚠️ [FBR] 检查失败: ${error.message}`);
+      return { passed: true, reason: 'error_skip' };
+    }
   }
 }
 
