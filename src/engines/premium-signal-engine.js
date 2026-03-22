@@ -356,7 +356,7 @@ export class PremiumSignalEngine {
       // ─── Step 2: ATH 检查 — 最先过滤，非ATH检查 super_index (~0ms) ───
       const isATH = signal.is_ath === true;
       const signalIndices = signal.indices || {};
-      const superIndex = signalIndices?.super_index?.current || 0;
+      const superIndex = signalIndices?.super_index?.current || signalIndices?.super_index?.value || 0;
 
       if (!isATH) {
         // NOT_ATH 信号：需要 super_index >= 80 才允许交易
