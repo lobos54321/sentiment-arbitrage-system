@@ -1104,7 +1104,7 @@ export class PremiumSignalEngine {
   /**
    * K线评分：获取20根K线，新币/老币分别判断
    * - 新币(<10根)：前一根绿 + 当前红 + 成交量放大
-   * - 老币(≥10根)：EMA21趋势(+2) + 回调≥3%胜率更高(+1) + 下影线≥1倍(+1) score≥3执行（去掉vol_ratio）
+   * - 老币(≥10根)：EMA21趋势(+2) + 回调≥3%(+1) + vol_ratio≥1(+1) + 下影线≥1倍(+1) score≥3执行
    * @param {string} tokenCA - 代币CA
    * @param {object} options - { isATH: boolean }
    * @returns {Promise<{passed, close, open, fbr, volume, reason, score?, pullback?, volRatio?, wickRatio?}>}
@@ -1199,7 +1199,8 @@ export class PremiumSignalEngine {
 
       let score = 0;
       if (current.close > ema21) score += 2;   // 趋势向上（在均线上）
-      if (pullback >= 3) score += 1;           // 回调够深(≥3%)，数据证明越高越好
+      if (pullback >= 3) score += 1;           // 回调够深(≥3%)
+      if (volRatio >= 1) score += 1;          // 成交量放大（成熟币基数稳定，≥1x有意义）
       if (wickRatio >= 1) score += 1;          // 下影线够长(≥1倍body)
 
       const passed = score >= 3;
