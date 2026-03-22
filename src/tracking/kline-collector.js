@@ -40,14 +40,19 @@ export class KlineCollector {
         low REAL NOT NULL,
         close REAL NOT NULL,
         volume REAL NOT NULL DEFAULT 0,
+        score INTEGER,
+        pullback REAL,
+        vol_ratio REAL,
+        wick_ratio REAL,
+        ema21 REAL,
         PRIMARY KEY (token_ca, timestamp)
       )
     `);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_kline_ts ON kline_1m(token_ca, timestamp)`);
 
     this._insertStmt = this.db.prepare(`
-      INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume)
-      VALUES (?, '', ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, score, pullback, vol_ratio, wick_ratio, ema21)
+      VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
   }
 
@@ -113,7 +118,7 @@ export class KlineCollector {
 
   _writeBar(tokenCA, bar) {
     try {
-      this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close, bar.volume || 0);
+      this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close, bar.volume || 0, null, null, null, null, null);
       this.stats.bars_written++;
     } catch (e) {
       // 静默忽略重复写入

@@ -267,6 +267,40 @@ export class PremiumSignalEngine {
     addCol('trades', 'is_simulation', 'INTEGER DEFAULT 1');
     addCol('trades', 'entry_time', 'INTEGER');
     addCol('trades', 'entry_price', 'REAL');
+
+    // K线评分数据表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS kline_1m (
+        token_ca TEXT NOT NULL,
+        pool_address TEXT NOT NULL DEFAULT '',
+        timestamp INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL DEFAULT 0,
+        score INTEGER,
+        pullback REAL,
+        vol_ratio REAL,
+        wick_ratio REAL,
+        ema21 REAL,
+        source TEXT DEFAULT 'geckoterminal',
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        PRIMARY KEY (token_ca, timestamp)
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_kline_1m_ts ON kline_1m(token_ca, timestamp)`);
+    // 兼容旧库：补新增列
+    addCol('kline_1m', 'score', 'INTEGER');
+    addCol('kline_1m', 'pullback', 'REAL');
+    addCol('kline_1m', 'vol_ratio', 'REAL');
+    addCol('kline_1m', 'wick_ratio', 'REAL');
+    addCol('kline_1m', 'ema21', 'REAL');
+    addCol('kline_1m', 'source', 'TEXT');
+    this._klineInsertStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, score, pullback, vol_ratio, wick_ratio, ema21, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'geckoterminal')
+    `);
   }
 
   /**
@@ -1117,6 +1151,7 @@ export class PremiumSignalEngine {
       // ─── ATH 路径：绿K（简单逻辑不变）──────────────────────────────
       if (isATH) {
         const passed = current.close > current.open;
+        this._saveKlineBars(tokenCA, poolAddress, bars, {});
         return { passed, close: current.close, open: current.open, fbr, volume: current.volume,
                  reason: passed ? 'pass' : 'not_green_bar' };
       }
@@ -1138,6 +1173,7 @@ export class PremiumSignalEngine {
         else if (!prevGreen) reason = 'prev_not_green';
         else if (!volAbsorbed) reason = 'vol_not_absorbed';
 
+        this._saveKlineBars(tokenCA, poolAddress, bars, { isNewCoin: true });
         return { passed, close: current.close, open: current.open, fbr,
                  volume: current.volume, reason, isNewCoin: true };
       }
@@ -1170,12 +1206,48 @@ export class PremiumSignalEngine {
       const passed = score >= 3;
       const reason = passed ? 'pass' : `low_score_${score}`;
 
+      // 保存所有K线数据（含评分）供回测用
+      this._saveKlineBars(tokenCA, poolAddress, bars, { score, pullback, volRatio, wickRatio, ema21, isNewCoin: false });
+
       return { passed, close: current.close, open: current.open, fbr,
                volume: current.volume, reason, isNewCoin: false,
                score, pullback, volRatio, wickRatio, ema21 };
     } catch (error) {
       console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
       return { passed: true, reason: 'error_skip' };
+    }
+  }
+
+  /**
+   * 保存K线数据到本地DB，供未来回测使用
+   * @param {string} tokenCA
+   * @param {string} poolAddress
+   * @param {Array} bars - K线数组
+   * @param {object} scores - 评分数据 {score, pullback, volRatio, wickRatio, ema21, isNewCoin}
+   */
+  _saveKlineBars(tokenCA, poolAddress, bars, scores = {}) {
+    if (!this._klineInsertStmt || !bars?.length) return;
+    try {
+      for (const bar of bars) {
+        this._klineInsertStmt.run(
+          tokenCA,
+          poolAddress || '',
+          bar.ts,          // timestamp (秒)
+          bar.open,
+          bar.high,
+          bar.low,
+          bar.close,
+          bar.volume,
+          scores.score ?? null,
+          scores.pullback ?? null,
+          scores.volRatio ?? null,
+          scores.wickRatio ?? null,
+          scores.ema21 ?? null
+        );
+      }
+    } catch (e) {
+      // 静默失败，不影响交易
+      console.warn(`⚠️ [K线DB] $${tokenCA.substring(0,8)} 写入失败: ${e.message}`);
     }
   }
 }
