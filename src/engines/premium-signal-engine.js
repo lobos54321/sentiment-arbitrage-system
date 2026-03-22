@@ -972,8 +972,8 @@ export class PremiumSignalEngine {
 
   /**
    * NOT_ATH 执行路径：super>=80 的 NOT_ATH 信号独立执行
-   * 新币：前一根绿 + 当前红 + 成交量增加（相对比较）
-   * 成熟币：EMA21趋势+2 + 回调≥3% + vol_ratio≥1 + 下影线≥1倍，score≥3执行
+   * 统一3维度评分：趋势强度(+1) + 守住支撑(+1) + 成交量增加(+1) score≥2执行
+   * @param {string} ca - Token CA
    * @param {string} ca - Token CA
    * @param {object} signal - 信号对象
    */
@@ -1004,13 +1004,13 @@ export class PremiumSignalEngine {
       const reasonMap = {
         no_pool: '无流动性池',
         no_bars: 'K线数据缺失',
-        no_history: '历史K线不足',
-        not_pullback: '非回调K线',
-        prev_not_green: '前一根非绿K',
+        no_history: '历史K线不足(<3根)',
+        not_red_bar: '非红色K线',
+        weak_trend: '前3根绿K<2根',
+        broke_support: '跌破前3根最低点',
         vol_not_increasing: '成交量未增加',
-        low_score_0: `评分0分(差)`,
-        low_score_1: `评分1分(差)`,
-        low_score_2: `评分2分(差)`,
+        score_0: '评分0分',
+        score_1: '评分1分',
         error_skip: 'K线查询异常'
       };
       const detail = klineResult.score !== undefined ? `score=${klineResult.score}` : '';
@@ -1103,12 +1103,11 @@ export class PremiumSignalEngine {
   }
 
   /**
-   * K线评分：获取20根K线，新币/老币分别判断
-   * - 新币(<10根)：前一根绿 + 当前红 + 成交量放大
-   * - 老币(≥10根)：EMA21趋势(+2) + 回调≥3%(+1) + vol_ratio≥1(+1) + 下影线≥1倍(+1) score≥3执行
+   * K线评分：统一逻辑，3维度评分≥2执行
+   * NOT_ATH: 趋势强度(+1) + 守住支撑(+1) + 成交量增加(+1)
    * @param {string} tokenCA - 代币CA
    * @param {object} options - { isATH: boolean }
-   * @returns {Promise<{passed, close, open, fbr, volume, reason, score?, pullback?, volRatio?, wickRatio?}>}
+   * @returns {Promise<{passed, close, open, fbr, volume, reason, score?, trendOk?, holdsSupport?, volIncreasing?, greenCount?, minLow?}>}
    */
   async _checkKline(tokenCA, options = {}) {
     const { isATH = true } = options;
@@ -1157,62 +1156,47 @@ export class PremiumSignalEngine {
                  reason: passed ? 'pass' : 'not_green_bar' };
       }
 
-      // ─── NOT_ATH 路径 ─────────────────────────────────────────────
-      if (!prev) return { passed: false, reason: 'no_history' };
+      // ─── NOT_ATH 路径：统一逻辑（3维度评分，≥2分执行）────────────
+      // 需要至少3根K线（当前+前2根）
+      if (!prev || bars.length < 3) return { passed: false, reason: 'no_history' };
 
-      const isNewCoin = bars.length < 10;
       const isRed = current.close < current.open;
+      if (!isRed) return { passed: false, reason: 'not_red_bar' };
 
-      // ── 新币逻辑：前面在涨 + 当前回调 + 成交量增加（相对比较，无固定阈值） ──
-      if (isNewCoin) {
-        const prevGreen = prev.close > prev.open;
-        const volIncreasing = current.volume > prev.volume;
+      // 维度1：趋势强度 — 前3根K线中，绿K≥2根
+      const prev3 = bars.slice(1, 4);  // 前3根K线
+      const greenCount = prev3.filter(b => b.close > b.open).length;
+      const trendOk = greenCount >= 2;
 
-        const passed = isRed && prevGreen && volIncreasing;
-        let reason = 'pass';
-        if (!isRed) reason = 'not_pullback';
-        else if (!prevGreen) reason = 'prev_not_green';
-        else if (!volIncreasing) reason = 'vol_not_increasing';
+      // 维度2：守住支撑 — 红K收盘 > 前3根最低点
+      const minLow = Math.min(...prev3.map(b => b.low));
+      const holdsSupport = current.close > minLow;
 
-        this._saveKlineBars(tokenCA, poolAddress, bars, { isNewCoin: true });
-        return { passed, close: current.close, open: current.open, fbr,
-                 volume: current.volume, reason, isNewCoin: true };
-      }
+      // 维度3：成交量增加 — 当前成交量 > 前一根
+      const volIncreasing = current.volume > prev.volume;
 
-      // ── 老币逻辑：EMA21趋势 + 回调深度 + 相对成交量 + 下影线 ──
-      const closes = bars.slice(1).map(b => b.close);
-      const avgVol = bars.slice(1).reduce((s, b) => s + b.volume, 0) / Math.max(bars.length - 1, 1);
-      const volRatio = avgVol > 0 ? current.volume / avgVol : 0;
-
-      // EMA21 计算（简单指数移动平均）
-      const calcEMA = (data, period) => {
-        const k = 2 / (period + 1);
-        let ema = data[0];
-        for (let i = 1; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
-        return ema;
-      };
-      const ema21 = closes.length >= 21 ? calcEMA(closes.slice(0, 21), 21) : closes[closes.length - 1];
-
-      const pullback = ema21 > 0 ? ((ema21 - current.close) / ema21) * 100 : 0;
-      const lowerWick = current.close - current.low;
-      const body = current.open - current.close;
-      const wickRatio = body > 0 ? lowerWick / body : 0;
-
+      // 综合评分
       let score = 0;
-      if (current.close > ema21) score += 2;   // 趋势向上（在均线上）
-      if (pullback >= 3) score += 1;           // 回调够深(≥3%)
-      if (volRatio >= 1) score += 1;          // 成交量放大（成熟币基数稳定，≥1x有意义）
-      if (wickRatio >= 1) score += 1;          // 下影线够长(≥1倍body)
+      if (trendOk) score += 1;
+      if (holdsSupport) score += 1;
+      if (volIncreasing) score += 1;
 
-      const passed = score >= 3;
-      const reason = passed ? 'pass' : `low_score_${score}`;
+      const passed = score >= 2;
+      let reason = passed ? 'pass' : `score_${score}`;
+      if (!trendOk) reason = 'weak_trend';
+      else if (!holdsSupport) reason = 'broke_support';
+      else if (!volIncreasing) reason = 'vol_not_increasing';
 
-      // 保存所有K线数据（含评分）供回测用
-      this._saveKlineBars(tokenCA, poolAddress, bars, { score, pullback, volRatio, wickRatio, ema21, isNewCoin: false });
+      // 保存K线数据供回测用
+      this._saveKlineBars(tokenCA, poolAddress, bars, {
+        score, trendOk, holdsSupport, volIncreasing,
+        greenCount, minLow
+      });
 
       return { passed, close: current.close, open: current.open, fbr,
-               volume: current.volume, reason, isNewCoin: false,
-               score, pullback, volRatio, wickRatio, ema21 };
+               volume: current.volume, reason, score,
+               trendOk, holdsSupport, volIncreasing,
+               greenCount, minLow };
     } catch (error) {
       console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
       return { passed: true, reason: 'error_skip' };
