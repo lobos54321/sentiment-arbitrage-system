@@ -160,12 +160,16 @@ def get_pool_address(token_ca, cache={}):
     return pool or None
 
 
-def get_ohlcv(pool_address, aggregate=5, limit=288):
-    """Get OHLCV from GeckoTerminal. aggregate=5 means 5-minute candles."""
+def get_ohlcv(pool_address, aggregate=5, limit=288, before_timestamp=None):
+    """Get OHLCV from GeckoTerminal. aggregate=5 means 5-minute candles.
+    If before_timestamp is set, returns candles before that timestamp.
+    """
     if not pool_address:
         return None
     url = (f"{GECKO_BASE}/{pool_address}/ohlcv/minute"
            f"?aggregate={aggregate}&limit={limit}")
+    if before_timestamp:
+        url += f"&before_timestamp={before_timestamp}"
     data = curl_json(url)
     if not data:
         return None
@@ -375,19 +379,37 @@ class Tracker:
             entry_price = ohlcv[-1]['close']
 
         entry_ts = int(time.time())
-        signal_ts = signal_ts_ms // 1000 if signal_ts_ms > 1e12 else signal_ts_ms
+        signal_ts_sec = signal_ts_ms // 1000 if signal_ts_ms > 1e12 else signal_ts_ms
 
+        # ── Insert track first to get track_id ─────────────────────────────
         cursor = self.db.execute("""
             INSERT OR IGNORE INTO tracks
                 (token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, status)
             VALUES (?, ?, ?, ?, ?, ?, 'active')
-        """, (token_ca, symbol, signal_ts, entry_price, entry_ts, pool))
+        """, (token_ca, symbol, signal_ts_sec, entry_price, entry_ts, pool))
         self.db.commit()
 
         if cursor.rowcount == 0:
             return None
 
         track_id = cursor.lastrowid
+
+        # ── Save pre-signal K-lines (signal之前的历史) ───────────────────
+        # Try 1-minute bars first, then 5-minute
+        for agg, lim in [(1, 30), (5, 50)]:
+            hist = get_ohlcv(pool, aggregate=agg, limit=lim,
+                             before_timestamp=signal_ts_sec)
+            if hist:
+                for bar in hist:
+                    if bar['ts'] < signal_ts_sec:
+                        self.db.execute("""
+                            INSERT OR IGNORE INTO price_samples
+                                (track_id, ts, price, open_, high, low, close, volume)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (track_id, bar['ts'], bar['close'],
+                              bar['open'], bar['high'], bar['low'], bar['close'], bar['volume']))
+
+        self.db.commit()
         log.info(f"  [+T] {symbol} entry=${entry_price:.8f} track={track_id}")
         return track_id
 
