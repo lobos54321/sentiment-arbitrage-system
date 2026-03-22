@@ -1907,6 +1907,42 @@ const server = http.createServer(async (req, res) => {
     const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
     return;
+  } else if (url.pathname === '/api/download/kline_cache') {
+    // K线数据库下载 — 需要 token 认证
+    if (!checkAuth(req, url, res)) return;
+    const klineDbPath = join(projectRoot, 'data', 'kline_cache.db');
+    if (!fs.existsSync(klineDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Kline cache database not found' }));
+      return;
+    }
+    const stats = fs.statSync(klineDbPath);
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': 'attachment; filename="kline_cache.db"',
+      'Content-Length': stats.size
+    });
+    const fileStream = fs.createReadStream(klineDbPath);
+    fileStream.pipe(res);
+    return;
+  } else if (url.pathname === '/api/download/paper_trades') {
+    // Paper trades数据库下载 — 需要 token 认证
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = join(projectRoot, 'data', 'paper_trades.db');
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    const stats = fs.statSync(paperDbPath);
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': 'attachment; filename="paper_trades.db"',
+      'Content-Length': stats.size
+    });
+    const fileStream = fs.createReadStream(paperDbPath);
+    fileStream.pipe(res);
+    return;
   } else if (url.pathname === '/api/export') {
     // v10: 导出所有DB数据为JSON（用于回测分析） — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
