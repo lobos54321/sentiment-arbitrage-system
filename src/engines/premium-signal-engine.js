@@ -972,7 +972,7 @@ export class PremiumSignalEngine {
 
   /**
    * NOT_ATH 执行路径：super>=80 的 NOT_ATH 信号独立执行
-   * 新币：前一根绿 + 当前红 + 成交量增加 + vol≥2000
+   * 新币：前一根绿 + 当前红 + 成交量增加（相对比较）
    * 成熟币：EMA21趋势+2 + 回调≥3% + vol_ratio≥1 + 下影线≥1倍，score≥3执行
    * @param {string} ca - Token CA
    * @param {object} signal - 信号对象
@@ -1007,8 +1007,7 @@ export class PremiumSignalEngine {
         no_history: '历史K线不足',
         not_pullback: '非回调K线',
         prev_not_green: '前一根非绿K',
-        vol_not_absorbed: '成交量未放大',
-        vol_too_low: `成交量不足2000(${klineResult.volume})`,
+        vol_not_increasing: '成交量未增加',
         low_score_0: `评分0分(差)`,
         low_score_1: `评分1分(差)`,
         low_score_2: `评分2分(差)`,
@@ -1164,18 +1163,16 @@ export class PremiumSignalEngine {
       const isNewCoin = bars.length < 10;
       const isRed = current.close < current.open;
 
-      // ── 新币逻辑：前面在涨 + 当前回调 + 成交量放大 ──
+      // ── 新币逻辑：前面在涨 + 当前回调 + 成交量增加（相对比较，无固定阈值） ──
       if (isNewCoin) {
         const prevGreen = prev.close > prev.open;
-        const volAbsorbed = current.volume > prev.volume;
-        const volAbs = current.volume >= 2000;  // 绝对成交量（新币也有参考价值）
+        const volIncreasing = current.volume > prev.volume;
 
-        const passed = isRed && prevGreen && volAbsorbed && volAbs;
+        const passed = isRed && prevGreen && volIncreasing;
         let reason = 'pass';
         if (!isRed) reason = 'not_pullback';
         else if (!prevGreen) reason = 'prev_not_green';
-        else if (!volAbsorbed) reason = 'vol_not_absorbed';
-        else if (!volAbs) reason = 'vol_too_low';
+        else if (!volIncreasing) reason = 'vol_not_increasing';
 
         this._saveKlineBars(tokenCA, poolAddress, bars, { isNewCoin: true });
         return { passed, close: current.close, open: current.open, fbr,
