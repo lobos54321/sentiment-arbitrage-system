@@ -140,6 +140,14 @@ function parseIndices(text) {
     const mSingle = text.match(reSingle);
     if (mSingle) {
       result[key] = { value: parseInt(mSingle[1]) };
+      continue;
+    }
+
+    // NOT_ATH format: Label： ✡ x 82  or  Label：✡ x 82 (x separator, no emoji suffix)
+    const reXSep = new RegExp(escaped + '[：:]\\s*✡\\s*x\\s*(\\d+)', 'i');
+    const mXSep = text.match(reXSep);
+    if (mXSep) {
+      result[key] = { value: parseInt(mXSep[1]) };
     }
   }
   return Object.keys(result).length > 0 ? result : null;

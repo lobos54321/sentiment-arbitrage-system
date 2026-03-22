@@ -150,8 +150,11 @@ export class PremiumChannelListener {
 
       // Process 🔥 New Trending OR 📈 ATH messages
       if (text.includes('🔥') && text.includes('New Trending')) {
+        console.log(`🔥 [NOT_ATH原文] ${text.substring(0, 500)}`);
         const signal = this._parseSignal(text);
         if (!signal) return;
+        const superIdx = signal.indices?.super_index?.value ?? signal.indices?.super_index ?? 0;
+        console.log(`🔥 [NOT_ATH解析] $${signal.symbol||'?'} MC=${signal.market_cap} super=${superIdx}`);
         if (this._isDuplicate('NT_' + signal.token_ca)) return;
         this._emitSignal(signal);
       } else if (text.includes('📈') && text.includes('ATH')) {
@@ -332,6 +335,15 @@ export class PremiumChannelListener {
       const mSingle = text.match(reSingle);
       if (mSingle) {
         indices[key] = { value: parseInt(mSingle[1]) };
+        continue;
+      }
+
+      // NOT_ATH format: Label： ✡ x 82  or  Label：✡ x 82 (x separator, no emoji suffix)
+      // Pattern: "✡ x NUMBER" or "✡x NUMBER" after the label
+      const reXSep = new RegExp(escaped + '[：:]\\s*✡\\s*x\\s*(\\d+)', 'i');
+      const mXSep = text.match(reXSep);
+      if (mXSep) {
+        indices[key] = { value: parseInt(mXSep[1]) };
       }
     }
 
