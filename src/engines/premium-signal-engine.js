@@ -319,16 +319,21 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'exit_cooldown' };
       }
 
-      // ─── Step 2: ATH 检查 — 最先过滤，非ATH立即退出 (~0ms) ───
+      // ─── Step 2: ATH 检查 — 最先过滤，非ATH检查 super_index (~0ms) ───
       const isATH = signal.is_ath === true;
+      const signalIndices = signal.indices || {};
+      const superIndex = signalIndices?.super_index?.current || 0;
+
       if (!isATH) {
-        console.log(`⏭️ [v17] $${signal.symbol} 非ATH信号 → 不交易`);
-        this.saveSignalRecord(signal, 'NOT_ATH_V17', null);
-
-        // 📊 NOT_ATH K线采集：临时加入价格监控25分钟，为回测积累数据
-        this._trackForKline(ca, signal.symbol);
-
-        return { action: 'SKIP', reason: 'not_ath_v17' };
+        // NOT_ATH 信号：需要 super_index >= 80 才允许交易
+        if (superIndex < 80) {
+          console.log(`⏭️ [NOT_ATH] $${signal.symbol} Super=${superIndex}<80 → 跳过`);
+          this.saveSignalRecord(signal, 'NOT_ATH_V17', null);
+          this._trackForKline(ca, signal.symbol);
+          return { action: 'SKIP', reason: 'not_ath_v17' };
+        }
+        // NOT_ATH + super>=80：独立执行路径 — 红K + vol≥2000
+        return await this._executeNotAth(ca, signal);
       }
 
       // ─── Step 3: 市场环境 + Freeze/Mint 预检 (全内存, ~0ms) ───
@@ -932,16 +937,150 @@ export class PremiumSignalEngine {
   }
 
   /**
-   * FBR过滤：获取最近一根K线，检查是否绿色 (close > open)
-   * @param {string} tokenCA - 代币CA
-   * @returns {Promise<{passed: boolean, close: number, open: number, fbr: number}>}
+   * NOT_ATH 执行路径：super>=80 的 NOT_ATH 信号独立执行
+   * 过滤条件：红K + vol≥2000
+   * @param {string} ca - Token CA
+   * @param {object} signal - 信号对象
    */
-  async _checkFBR(tokenCA) {
+  async _executeNotAth(ca, signal) {
+    const symbol = signal.symbol || ca.substring(0, 8);
+
+    // 已持仓检查
+    if (this.livePositionMonitor?.positions?.has(ca)) {
+      console.log(`⏭️ [NOT_ATH] $${symbol} 已持仓 → 跳过`);
+      return { action: 'SKIP', reason: 'already_holding' };
+    }
+    if (this.shadowTracker.hasOpenPosition(ca)) {
+      console.log(`⏭️ [NOT_ATH] $${symbol} Shadow已有未平仓持仓，跳过`);
+      return { action: 'SKIP', reason: 'already_in_position' };
+    }
+
+    // 风控检查
+    const riskCheck = this.riskManager.canTrade();
+    if (!riskCheck.allowed) {
+      console.log(`🛡️ [RISK] $${symbol} 风控拒绝: ${riskCheck.reason}`);
+      this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
+      return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
+    }
+
+    // K线评分检查（新逻辑）
+    const klineResult = await this._checkKline(ca, { isATH: false });
+    if (!klineResult.passed) {
+      const reasonMap = {
+        no_pool: '无流动性池',
+        no_bars: 'K线数据缺失',
+        no_history: '历史K线不足',
+        not_pullback: '非回调K线',
+        prev_not_green: '前一根非绿K',
+        vol_not_absorbed: '成交量未放大',
+        low_score_0: `评分0分(差)`,
+        low_score_1: `评分1分(差)`,
+        low_score_2: `评分2分(差)`,
+        error_skip: 'K线查询异常'
+      };
+      const detail = klineResult.score !== undefined ? `score=${klineResult.score}` : '';
+      console.log(`🚫 [NOT_ATH] $${symbol} K线过滤失败: ${reasonMap[klineResult.reason] || klineResult.reason}${detail ? ` (${detail})` : ''}`);
+      this.saveSignalRecord(signal, 'RED_K_FAIL', null);
+      return { action: 'SKIP', reason: `red_k_${klineResult.reason}` };
+    }
+
+    // 打印评分详情
+    if (klineResult.score !== undefined) {
+      const { score, pullback, volRatio, wickRatio } = klineResult;
+      console.log(`📊 [NOT_ATH] $${symbol} 评分: ${score}分 | 回调:${pullback?.toFixed(1) ?? 'N/A'}% | vol比:${volRatio?.toFixed(1) ?? 'N/A'}x | 下影比:${wickRatio?.toFixed(1) ?? 'N/A'}`);
+    } else {
+      console.log(`📊 [NOT_ATH] $${symbol} 新币逻辑通过 | vol=${klineResult.volume}`);
+    }
+
+    // 执行 Shadow Buy
+    const finalSize = 0.06;
+
+    if (this.shadowMode) {
+      this.stats.shadow_logged++;
+      console.log(`🎭 [SHADOW] 模拟买入 $${symbol} | ${finalSize} SOL`);
+      this.saveSignalRecord(signal, 'PASS', null, true);
+      this.saveShadowTrade(signal, null, finalSize);
+      const entryMC = this._getCachedMC(ca) || signal.market_cap || 0;
+      this.shadowTracker.addPosition(ca, symbol, entryMC, 80);
+      this._watchlist.delete(ca);
+      this._saveWatchlist();
+      this.recentSymbols.set(symbol, Date.now());
+      return { action: 'SHADOW_BUY', size: finalSize };
+    }
+
+    if (!this.autoBuyEnabled) {
+      console.log(`📋 [通知] 建议买入 $${symbol} | ${finalSize} SOL (自动买入未开启)`);
+      this.saveSignalRecord(signal, 'PASS', null, false);
+      return { action: 'NOTIFY', size: finalSize };
+    }
+
+    // SOL 余额检查
+    if (this.jupiterExecutor) {
+      try {
+        const solBalance = await this.jupiterExecutor.getSolBalance();
+        const minRequired = finalSize + 0.025;
+        if (solBalance < minRequired) {
+          console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过`);
+          this.saveSignalRecord(signal, 'PASS', null, false);
+          return { action: 'SKIP_INSUFFICIENT_BALANCE', balance: solBalance, required: minRequired };
+        }
+      } catch (e) {
+        console.warn(`⚠️ [余额检查] 查询失败: ${e.message}，继续`);
+      }
+    }
+
+    console.log(`💰 [执行] 买入 $${symbol} | ${finalSize} SOL ...`);
+
+    try {
+      let tradeResult;
+      if (this.jupiterExecutor) {
+        tradeResult = await this.jupiterExecutor.buy(ca, finalSize, { mc: signal.market_cap || 0 });
+        if (tradeResult.success && this.livePositionMonitor) {
+          await new Promise(r => setTimeout(r, 3000));
+          const balance = await this.jupiterExecutor.getTokenBalance(ca);
+          if (balance.amount <= 0) {
+            console.error(`❌ [验证失败] 买入后余额为0，交易可能失败`);
+            this.stats.errors++;
+            return { action: 'EXEC_FAILED', reason: '买入后余额为0' };
+          }
+          this.livePositionMonitor.addPosition(ca, symbol, balance.amount, balance.decimals);
+        }
+      } else {
+        tradeResult = { success: false, reason: 'no_executor' };
+      }
+
+      if (tradeResult.success) {
+        this.stats.buy_success++;
+        console.log(`✅ [成交] $${symbol} 买入成功`);
+        this.saveSignalRecord(signal, 'BOUGHT', null, false);
+        return { action: 'BUY', size: finalSize };
+      } else {
+        this.stats.buy_failed++;
+        console.log(`❌ [买入失败] $${symbol}: ${tradeResult.reason}`);
+        this.saveSignalRecord(signal, 'BUY_FAIL', null, false);
+        return { action: 'BUY_FAILED', reason: tradeResult.reason };
+      }
+    } catch (error) {
+      this.stats.errors++;
+      console.error(`❌ [执行异常] $${symbol}: ${error.message}`);
+      return { action: 'ERROR', reason: error.message };
+    }
+  }
+
+  /**
+   * K线评分：获取20根K线，新币/老币分别判断
+   * - 新币(<10根)：前一根绿 + 当前红 + 成交量放大
+   * - 老币(≥10根)：EMA21趋势 + 回调深度 + 相对成交量 + 下影线比例 综合评分
+   * @param {string} tokenCA - 代币CA
+   * @param {object} options - { isATH: boolean }
+   * @returns {Promise<{passed, close, open, fbr, volume, reason, score?, pullback?, volRatio?, wickRatio?}>}
+   */
+  async _checkKline(tokenCA, options = {}) {
+    const { isATH = true } = options;
     try {
       // 先从缓存获取pool地址
-      const poolAddress = this._poolCache?.get(tokenCA);
+      let poolAddress = this._poolCache?.get(tokenCA);
       if (!poolAddress) {
-        // 从DexScreener获取
         const dexRes = await axios.get(
           `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
           { timeout: 5000 }
@@ -955,24 +1094,87 @@ export class PremiumSignalEngine {
         if (!pool?.pairAddress) return { passed: false, reason: 'no_pool' };
         this._poolCache = this._poolCache || new Map();
         this._poolCache.set(tokenCA, pool.pairAddress);
+        poolAddress = pool.pairAddress;
       }
 
-      // 从GeckoTerminal获取最近1分钟K线
+      // 获取20根K线（足够新币判断，老币计算EMA21）
       const geckoRes = await axios.get(
-        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=2`,
+        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=20`,
         { timeout: 5000 }
       );
       const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
       if (!ohlcv?.length) return { passed: false, reason: 'no_bars' };
 
-      const [ts, open, high, low, close] = ohlcv[0].map(Number);
-      const passed = close > open;
-      const fbr = open > 0 ? ((close - open) / open) * 100 : 0;
+      const bars = ohlcv.map(row => ({
+        ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
+        low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
+      }));
 
-      return { passed, close, open, fbr, reason: passed ? 'pass' : 'fbr_failed' };
+      const current = bars[0];
+      const prev = bars[1] || null;
+      const fbr = current.open > 0 ? ((current.close - current.open) / current.open) * 100 : 0;
+
+      // ─── ATH 路径：绿K（简单逻辑不变）──────────────────────────────
+      if (isATH) {
+        const passed = current.close > current.open;
+        return { passed, close: current.close, open: current.open, fbr, volume: current.volume,
+                 reason: passed ? 'pass' : 'not_green_bar' };
+      }
+
+      // ─── NOT_ATH 路径 ─────────────────────────────────────────────
+      if (!prev) return { passed: false, reason: 'no_history' };
+
+      const isNewCoin = bars.length < 10;
+      const isRed = current.close < current.open;
+
+      // ── 新币逻辑：前面在涨 + 当前回调 + 成交量放大 ──
+      if (isNewCoin) {
+        const prevGreen = prev.close > prev.open;
+        const volAbsorbed = current.volume > prev.volume;
+
+        const passed = isRed && prevGreen && volAbsorbed;
+        let reason = 'pass';
+        if (!isRed) reason = 'not_pullback';
+        else if (!prevGreen) reason = 'prev_not_green';
+        else if (!volAbsorbed) reason = 'vol_not_absorbed';
+
+        return { passed, close: current.close, open: current.open, fbr,
+                 volume: current.volume, reason, isNewCoin: true };
+      }
+
+      // ── 老币逻辑：EMA21趋势 + 回调深度 + 相对成交量 + 下影线 ──
+      const closes = bars.slice(1).map(b => b.close);
+      const avgVol = bars.slice(1).reduce((s, b) => s + b.volume, 0) / Math.max(bars.length - 1, 1);
+      const volRatio = avgVol > 0 ? current.volume / avgVol : 0;
+
+      // EMA21 计算（简单指数移动平均）
+      const calcEMA = (data, period) => {
+        const k = 2 / (period + 1);
+        let ema = data[0];
+        for (let i = 1; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
+        return ema;
+      };
+      const ema21 = closes.length >= 21 ? calcEMA(closes.slice(0, 21), 21) : closes[closes.length - 1];
+
+      const pullback = ema21 > 0 ? ((ema21 - current.close) / ema21) * 100 : 0;
+      const lowerWick = current.close - current.low;
+      const body = current.open - current.close;
+      const wickRatio = body > 0 ? lowerWick / body : 0;
+
+      let score = 0;
+      if (current.close > ema21) score += 2;   // 趋势向上（在均线上）
+      if (pullback >= 3) score += 1;            // 回调够深(≥3%)
+      if (volRatio >= 2) score += 1;            // 相对放量(≥2倍)
+      if (wickRatio >= 1) score += 1;           // 下影线够长(≥1倍body)
+
+      const passed = score >= 3;
+      const reason = passed ? 'pass' : `low_score_${score}`;
+
+      return { passed, close: current.close, open: current.open, fbr,
+               volume: current.volume, reason, isNewCoin: false,
+               score, pullback, volRatio, wickRatio, ema21 };
     } catch (error) {
-      // 网络错误时默认通过，避免错过交易机会
-      console.warn(`⚠️ [FBR] 检查失败: ${error.message}`);
+      console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
       return { passed: true, reason: 'error_skip' };
     }
   }

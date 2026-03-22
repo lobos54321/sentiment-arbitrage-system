@@ -47,7 +47,7 @@ export class KlineCollector {
 
     this._insertStmt = this.db.prepare(`
       INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume)
-      VALUES (?, '', ?, ?, ?, ?, ?, 0)
+      VALUES (?, '', ?, ?, ?, ?, ?, ?)
     `);
   }
 
@@ -101,6 +101,7 @@ export class KlineCollector {
         high: price,
         low: price,
         close: price,
+        volume: 0,  // TODO: 从 DexScreener Trades API 获取交易量
       });
     } else {
       // 更新当前 bar
@@ -112,7 +113,7 @@ export class KlineCollector {
 
   _writeBar(tokenCA, bar) {
     try {
-      this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close);
+      this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close, bar.volume || 0);
       this.stats.bars_written++;
     } catch (e) {
       // 静默忽略重复写入
