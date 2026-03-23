@@ -183,34 +183,34 @@ export class PremiumChannelListener {
    * Parse a 🔥 New Trending message into a signal object
    */
   _parseSignal(text) {
-    // Extract symbol: 📍 SYMBOL：$xxx
-    const symbolMatch = text.match(/📍\s*SYMBOL[：:]\s*\$(\S+)/);
+    // Extract symbol: 📍 SYMBOL：$xxx (tolerate markdown bold)
+    const symbolMatch = text.match(/📍\s*\*{0,2}\s*SYMBOL\s*\*{0,2}[：:]\s*\$(\S+)/i);
     const symbol = symbolMatch ? symbolMatch[1] : null;
 
-    // Extract market cap: 🏦 MC: xxx
-    const mcMatch = text.match(/🏦\s*MC[：:]?\s*\$?([\d,.]+)\s*([KMBkmb])?/);
+    // Extract market cap: 🏦 **MC:** 21.83K (tolerate markdown bold)
+    const mcMatch = text.match(/🏦\s*\*{0,2}\s*MC\s*\*{0,2}[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
     const market_cap = mcMatch ? this._parseNumber(mcMatch[1], mcMatch[2]) : 0;
 
-    // Extract holders: 👥 Holders: xxx
-    const holdersMatch = text.match(/👥\s*Holders[：:]\s*([\d,]+)/);
+    // Extract holders: 👥 **Holders:** 132
+    const holdersMatch = text.match(/👥\s*\*{0,2}\s*Holders\s*\*{0,2}[：:]\s*([\d,]+)/i);
     const holders = holdersMatch ? parseInt(holdersMatch[1].replace(/,/g, '')) : 0;
 
-    // Extract volume 24h: 💰 Vol24H: $xxx
-    const volMatch = text.match(/💰\s*Vol24H[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/);
+    // Extract volume 24h: 💰 **Vol24H:** $27.08K
+    const volMatch = text.match(/💰\s*\*{0,2}\s*Vol24H\s*\*{0,2}[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
     const volume_24h = volMatch ? this._parseNumber(volMatch[1], volMatch[2]) : 0;
 
-    // Extract top10 percentage: 📊 Top10: xx.xx%
-    const top10Match = text.match(/📊\s*Top10[：:]\s*([\d.]+)%/);
+    // Extract top10 percentage: 📊 **Top10:** 22.85%
+    const top10Match = text.match(/📊\s*\*{0,2}\s*Top10\s*\*{0,2}[：:]\s*([\d.]+)%/i);
     const top10_pct = top10Match ? parseFloat(top10Match[1]) : 0;
 
-    // Extract freeze authority: ⚠freezeAuthority: ✅
-    const freeze_ok = /freezeAuthority[：:]\s*✅/.test(text);
+    // Extract freeze authority: freezeAuthority / **freezeAuthority:** ✅
+    const freeze_ok = /freezeAuthority\*{0,2}\s*[：:]\s*✅/i.test(text) || /\*{0,2}freezeAuthority\*{0,2}\s*[：:]\s*✅/i.test(text);
 
-    // Extract mint authority disabled: mintAuthorityDisabled: ✅
-    const mint_ok = /mintAuthorityDisabled[：:]\s*✅/.test(text);
+    // Extract mint authority disabled: NoMint / mintAuthorityDisabled
+    const mint_ok = /NoMint\*{0,2}\s*[：:]\s*✅/i.test(text) || /\*{0,2}NoMint\*{0,2}\s*[：:]\s*✅/i.test(text) || /mintAuthorityDisabled\*{0,2}\s*[：:]\s*✅/i.test(text) || /\*{0,2}mintAuthorityDisabled\*{0,2}\s*[：:]\s*✅/i.test(text);
 
-    // Extract age: 🕒 Age: xxx
-    const ageMatch = text.match(/🕒\s*Age[：:]\s*(\S+)/);
+    // Extract age: 🕒 **Age:** 4M
+    const ageMatch = text.match(/🕒\s*\*{0,2}\s*Age\s*\*{0,2}[：:]\s*(\S+)/i);
     const age = ageMatch ? ageMatch[1] : '';
 
     // Extract Solana contract address

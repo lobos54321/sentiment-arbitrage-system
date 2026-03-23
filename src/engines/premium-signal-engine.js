@@ -1037,21 +1037,25 @@ export class PremiumSignalEngine {
     // K线评分检查（新逻辑）
     const klineResult = await this._checkKline(ca, { isATH: false });
     if (!klineResult.passed) {
-      const reasonMap = {
-        no_pool: '无流动性池',
-        no_bars: 'K线数据缺失',
-        no_history: '历史K线不足(<3根)',
-        not_red_bar: '非红色K线',
-        high_vol_calm: '高成交量+低波动',
-        high_vol: '成交量偏高',
-        inactive: '动量不足(不活跃)',
-        rate_limited: 'K线接口限流',
-        error_skip: 'K线查询异常'
-      };
-      const detail = klineResult.score !== undefined ? `score=${klineResult.score}` : '';
-      console.log(`🚫 [NOT_ATH] $${symbol} K线过滤失败: ${reasonMap[klineResult.reason] || klineResult.reason}${detail ? ` (${detail})` : ''}`);
-      this.saveSignalRecord(signal, 'RED_K_FAIL', null);
-      return { action: 'SKIP', reason: `red_k_${klineResult.reason}` };
+      if ((klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip') && this.shadowMode) {
+        console.log(`⚠️ [NOT_ATH] $${symbol} K线检查暂不可用，paper-only 模式跳过K线拦截: ${klineResult.reason}`);
+      } else {
+        const reasonMap = {
+          no_pool: '无流动性池',
+          no_bars: 'K线数据缺失',
+          no_history: '历史K线不足(<3根)',
+          not_red_bar: '非红色K线',
+          high_vol_calm: '高成交量+低波动',
+          high_vol: '成交量偏高',
+          inactive: '动量不足(不活跃)',
+          rate_limited: 'K线接口限流',
+          error_skip: 'K线查询异常'
+        };
+        const detail = klineResult.score !== undefined ? `score=${klineResult.score}` : '';
+        console.log(`🚫 [NOT_ATH] $${symbol} K线过滤失败: ${reasonMap[klineResult.reason] || klineResult.reason}${detail ? ` (${detail})` : ''}`);
+        this.saveSignalRecord(signal, 'RED_K_FAIL', null);
+        return { action: 'SKIP', reason: `red_k_${klineResult.reason}` };
+      }
     }
 
     // 打印评分详情
