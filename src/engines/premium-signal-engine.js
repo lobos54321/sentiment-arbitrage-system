@@ -1037,8 +1037,8 @@ export class PremiumSignalEngine {
     // K线评分检查（新逻辑）
     const klineResult = await this._checkKline(ca, { isATH: false });
     if (!klineResult.passed) {
-      if ((klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip') && this.shadowMode) {
-        console.log(`⚠️ [NOT_ATH] $${symbol} K线检查暂不可用，paper-only 模式跳过K线拦截: ${klineResult.reason}`);
+      if (klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip') {
+        console.log(`⚠️ [NOT_ATH] $${symbol} K线检查暂不可用，跳过K线拦截: ${klineResult.reason}`);
       } else {
         const reasonMap = {
           no_pool: '无流动性池',
