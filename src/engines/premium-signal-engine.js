@@ -1045,6 +1045,7 @@ export class PremiumSignalEngine {
         high_vol_calm: '高成交量+低波动',
         high_vol: '成交量偏高',
         inactive: '动量不足(不活跃)',
+        rate_limited: 'K线接口限流',
         error_skip: 'K线查询异常'
       };
       const detail = klineResult.score !== undefined ? `score=${klineResult.score}` : '';
@@ -1267,8 +1268,13 @@ export class PremiumSignalEngine {
                isRed, lowVolume, isActive,
                momFromLag1, avgVol3 };
     } catch (error) {
+      const status = error?.response?.status;
+      if (status === 429) {
+        console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message}`);
+        return { passed: false, reason: 'rate_limited' };
+      }
       console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
-      return { passed: true, reason: 'error_skip' };
+      return { passed: false, reason: 'error_skip' };
     }
   }
 
