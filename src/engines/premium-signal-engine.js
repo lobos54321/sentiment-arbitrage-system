@@ -26,8 +26,6 @@ import { generatePremiumBuyPrompt } from '../prompts/premium-signal-prompts.js';
 import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
 import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
 import { RiskManager } from '../risk/risk-manager.js';
-import { PaperStrategyRegistry } from '../config/paper-strategy-registry.js';
-import PaperTradeRecorder from '../database/paper-trade-recorder.js';
 import axios from 'axios';
 
 export class PremiumSignalEngine {
@@ -53,8 +51,8 @@ export class PremiumSignalEngine {
     this.livePriceMonitor = null; // 外部注入（shadow 也可用）
     this.buzzScanner = null; // 需要 setTelegramClient 初始化
     this.shadowTracker = new ShadowPnlTracker();
-    this.paperStrategyRegistry = process.env.AUTONOMY_PREMIUM_REGISTRY !== 'false' ? new PaperStrategyRegistry() : null;
-    this.paperTradeRecorder = this.paperStrategyRegistry ? new PaperTradeRecorder(this.config.DB_PATH || process.env.DB_PATH || './data/sentiment_arb.db') : null;
+    this.paperStrategyRegistry = null;
+    this.paperTradeRecorder = null;
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp

@@ -34,8 +34,6 @@ import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
-import autonomyConfig from './config/autonomy-config.js';
-import { OctopusOrchestrator } from './autonomy/octopus-orchestrator.js';
 
 dotenv.config();
 
@@ -699,7 +697,7 @@ class PremiumChannelSystem {
     this.db = new Database(this.config.DB_PATH);
     this.listener = new PremiumChannelListener(this.config);
     this.engine = new PremiumSignalEngine(this.config, this.db);
-    this.autonomySidecar = autonomyConfig.enabled ? new OctopusOrchestrator() : null;
+    this.autonomySidecar = null;
 
     // 实盘组件（SHADOW_MODE=false 时启用）
     this.jupiterExecutor = null;
