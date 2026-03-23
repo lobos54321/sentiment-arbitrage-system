@@ -11,14 +11,14 @@ import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
-import ExperimentStore from '../database/experiment-store.js';
 
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
-const experimentStore = new ExperimentStore(dbPath);
+const getExperimentLeaderboard = () => [];
+const listRecentExperiments = () => [];
 
 /**
  * 验证敏感 API 的访问令牌
@@ -960,7 +960,7 @@ function getDashboardData() {
     autonomy: {
       enabled: !!global.__autonomySidecar,
       status: global.__autonomySidecar?.getStatus?.() || null,
-      leaderboard: experimentStore.getLeaderboard(5),
+      leaderboard: getExperimentLeaderboard(),
       premiumEngine: global.__premiumEngine?.getStats?.() || null
     }
   };
@@ -1534,8 +1534,8 @@ const server = http.createServer(async (req, res) => {
     if (!checkAuth(req, url, res)) return;
     const payload = {
       autonomy: global.__autonomySidecar?.getStatus?.() || { enabled: false },
-      leaderboard: experimentStore.getLeaderboard(10),
-      recentExperiments: experimentStore.list(10)
+      leaderboard: getExperimentLeaderboard(),
+      recentExperiments: listRecentExperiments()
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(payload, null, 2));
