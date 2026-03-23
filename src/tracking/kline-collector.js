@@ -50,6 +50,21 @@ export class KlineCollector {
     `);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_kline_ts ON kline_1m(token_ca, timestamp)`);
 
+    const columns = this.db.prepare(`PRAGMA table_info(kline_1m)`).all();
+    const columnNames = new Set(columns.map(col => col.name));
+    const addCol = (col, type) => {
+      if (columnNames.has(col)) return;
+      this.db.exec(`ALTER TABLE kline_1m ADD COLUMN ${col} ${type}`);
+      columnNames.add(col);
+      console.log(`📊 [KlineCollector] 已迁移 kline_1m.${col}`);
+    };
+
+    addCol('score', 'INTEGER');
+    addCol('pullback', 'REAL');
+    addCol('vol_ratio', 'REAL');
+    addCol('wick_ratio', 'REAL');
+    addCol('ema21', 'REAL');
+
     this._insertStmt = this.db.prepare(`
       INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, score, pullback, vol_ratio, wick_ratio, ema21)
       VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -121,7 +136,7 @@ export class KlineCollector {
       this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close, bar.volume || 0, null, null, null, null, null);
       this.stats.bars_written++;
     } catch (e) {
-      // 静默忽略重复写入
+      console.error(`❌ [KlineCollector] 写入 K 线失败 ${tokenCA}@${bar.minute}: ${e.message}`);
     }
   }
 

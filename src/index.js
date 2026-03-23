@@ -34,6 +34,8 @@ import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
+import autonomyConfig from './config/autonomy-config.js';
+import { OctopusOrchestrator } from './autonomy/octopus-orchestrator.js';
 
 dotenv.config();
 
@@ -697,6 +699,7 @@ class PremiumChannelSystem {
     this.db = new Database(this.config.DB_PATH);
     this.listener = new PremiumChannelListener(this.config);
     this.engine = new PremiumSignalEngine(this.config, this.db);
+    this.autonomySidecar = autonomyConfig.enabled ? new OctopusOrchestrator() : null;
 
     // 实盘组件（SHADOW_MODE=false 时启用）
     this.jupiterExecutor = null;
@@ -819,7 +822,7 @@ class PremiumChannelSystem {
     });
 
     // 启动监听
-    await this.listener.start();
+    const listenerStarted = await this.listener.start();
 
     // Expose listener globally for API access (channel history)
     global.__telegramService = this.listener;
@@ -830,11 +833,23 @@ class PremiumChannelSystem {
     }
 
     console.log('\n✅ Premium Channel System 运行中...');
-    console.log('   等待频道信号...\n');
+    if (listenerStarted) {
+      console.log('   等待频道信号...\n');
+    } else {
+      console.log('   ⚠️ Premium Telegram listener 未连接，premium_signals 不会有新数据');
+      console.log('   请先配置 TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION');
+      console.log('   然后运行: node scripts/authenticate-telegram.js\n');
+    }
 
     // 暴露给 dashboard-server 用于手动暂停/恢复交易
     global.__riskManager = this.engine.riskManager;
+    global.__premiumEngine = this.engine;
+    global.__autonomySidecar = this.autonomySidecar;
     if (this.jupiterExecutor) global.__executor = this.jupiterExecutor;
+
+    if (this.autonomySidecar) {
+      this.autonomySidecar.start();
+    }
 
     // 启动 Dashboard Server（Zeabur 健康检查 + /premium 页面）
     startDashboardServer();
@@ -843,6 +858,9 @@ class PremiumChannelSystem {
   async stop() {
     await this.listener.stop();
     await this.engine.stop();
+    if (this.autonomySidecar) {
+      this.autonomySidecar.stop();
+    }
     if (this.livePositionMonitor) {
       this.livePositionMonitor.stop();
     }

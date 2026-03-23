@@ -20,7 +20,7 @@ export class RiskManager {
 
     // 风险参数 - 从 strategy.js 统一配置读取
     this.params = RISK;
-    this.shadowMode = process.env.SHADOW_MODE !== 'false';
+    this.shadowMode = this.config?.SHADOW_MODE === true || process.env.SHADOW_MODE === 'true';
 
     // 状态追踪
     this.state = {
@@ -85,15 +85,23 @@ export class RiskManager {
           break;
         }
       }
-      this.state.consecutiveLosses = consecutiveLosses;
 
       // 检查是否在暂停期
       const pauseState = this.db.prepare(`
         SELECT value, expires_at FROM system_state WHERE key = 'trading_paused'
       `).get();
 
-      if (pauseState && pauseState.expires_at > Date.now() / 1000) {
+      if (pauseState?.expires_at && pauseState.expires_at > Date.now() / 1000) {
         this.state.pausedUntil = new Date(pauseState.expires_at * 1000);
+        this.state.consecutiveLosses = consecutiveLosses;
+      } else {
+        this.state.pausedUntil = null;
+        this.state.consecutiveLosses = 0;
+        if (pauseState) {
+          try {
+            this.db.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run();
+          } catch (e) { /* ignore */ }
+        }
       }
 
       console.log(`   当前连续亏损: ${this.state.consecutiveLosses}`);
@@ -103,15 +111,17 @@ export class RiskManager {
 
       // v9.4: 从数据库恢复最近的熔断时间（用于恢复期仓位减半）
       try {
-        const lastBreaker = this.db.prepare(`
+        const breakerRows = this.db.prepare(`
           SELECT key FROM system_state
           WHERE key LIKE 'circuit_breaker_%'
-          ORDER BY key DESC LIMIT 1
-        `).get();
+        `).all();
 
-        if (lastBreaker) {
-          // key格式: circuit_breaker_1768310917482.0
-          const ts = parseFloat(lastBreaker.key.replace('circuit_breaker_', ''));
+        const breakerTimes = breakerRows
+          .map(row => Number(row.key.replace('circuit_breaker_', '')))
+          .filter(ts => Number.isFinite(ts));
+
+        if (breakerTimes.length > 0) {
+          const ts = Math.max(...breakerTimes);
           const recoveryHours = this.params.CIRCUIT_BREAKER.RECOVERY_PERIOD_HOURS || 4;
           const recoveryPeriodMs = recoveryHours * 60 * 60 * 1000;
 
@@ -128,14 +138,21 @@ export class RiskManager {
         const cbState = this.db.prepare(`
           SELECT value FROM system_state WHERE key = 'circuit_breaker_active'
         `).get();
-        if (cbState) {
-          const cbTime = parseInt(cbState.value);
+        if (cbState?.value) {
+          const cbTime = parseInt(cbState.value, 10);
           const recoveryMs = (this.params.CIRCUIT_BREAKER?.RECOVERY_PERIOD_HOURS || 4) * 3600000;
-          if (Date.now() - cbTime < recoveryMs) {
+          if (Number.isFinite(cbTime) && Date.now() - cbTime < recoveryMs) {
             this._lastCircuitBreakerTime = this._lastCircuitBreakerTime || cbTime;
-            this._circuitBreakerTriggered = true;
+            this._circuitBreakerTriggered = !!this.state.pausedUntil;
             this._circuitBreakerLogged = true;
-            console.log(`   🚨 熔断状态已从DB恢复，仍在恢复期内`);
+            if (this._circuitBreakerTriggered) {
+              console.log(`   🚨 熔断状态已从DB恢复，仍在恢复期内`);
+            }
+          } else {
+            this._circuitBreakerTriggered = false;
+            try {
+              this.db.prepare(`DELETE FROM system_state WHERE key = 'circuit_breaker_active'`).run();
+            } catch (e) { /* ignore */ }
           }
         }
       } catch (e) { /* ignore */ }
@@ -181,64 +198,8 @@ export class RiskManager {
       }
     } catch (e) { /* live_positions表可能不存在 */ }
 
-    // 2. 🛑 v6.8 静默熔断模式 (Stress Test) - 记录但不停机
-    if (this.state.consecutiveLosses >= this.params.CIRCUIT_BREAKER.CONSECUTIVE_LOSS_PAUSE) {
-      // 模拟盘阶段：只记录，不真的停机，用于采集数据
-      if (!this._circuitBreakerLogged) {
-        this._circuitBreakerLogged = true;
-        this._circuitBreakerCount = (this._circuitBreakerCount || 0) + 1;
-
-        console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║  🚨 [静默熔断 #${this._circuitBreakerCount}] 连亏 ${this.state.consecutiveLosses} 笔！                        ║
-║  📝 实盘模式下此刻会暂停 ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时                          ║
-║  🧪 模拟盘继续运行，采集极端数据...                          ║
-╚══════════════════════════════════════════════════════════════╝
-`);
-
-        // 记录到数据库用于后续分析
-        try {
-          this.db.prepare(`
-            INSERT INTO system_state (key, value, expires_at)
-            VALUES ('circuit_breaker_' || ?, ?, ?)
-          `).run(Date.now(), this.state.consecutiveLosses, Math.floor(Date.now() / 1000));
-        } catch (e) { /* ignore */ }
-
-        // 持久化熔断激活状态，重启后可恢复
-        try {
-          this.db.prepare(`
-            INSERT OR REPLACE INTO system_state (key, value)
-            VALUES ('circuit_breaker_active', ?)
-          `).run(Date.now().toString());
-        } catch (e) { /* ignore */ }
-
-        // 发送通知但不停机
-        notifier.systemStatus('静默熔断触发', `
-连续亏损 ${this.state.consecutiveLosses} 笔，已触发第 ${this._circuitBreakerCount} 次熔断记录。
-
-📝 **模拟盘模式：继续运行采集数据**
-🔬 实盘模式下会暂停 ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时
-
-*后续复盘将分析：熔断后继续交易的胜负情况*
-        `).catch(() => { });
-      }
-
-      // 实盘模式：真正暂停交易
-      if (!this.shadowMode) {
-        const pauseHours = this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS || 4;
-        this.state.pausedUntil = new Date(Date.now() + pauseHours * 60 * 60 * 1000);
-        return {
-          allowed: false,
-          reason: `连亏 ${this.state.consecutiveLosses} 笔，熔断暂停 ${pauseHours} 小时`
-        };
-      }
-
-      // 🧪 模拟盘：返回 allowed: true，继续交易采集数据
-
-      // v9.4: 记录熔断触发时间，用于恢复期仓位减半
-      if (!this._lastCircuitBreakerTime) {
-        this._lastCircuitBreakerTime = Date.now();
-      }
+    if (this.state.pausedUntil && new Date() >= this.state.pausedUntil) {
+      this.resumeTrading();
     }
 
     // 3. 检查当前持仓数 (v6.3 升级: 支持金狗额外槽和 Swap)
@@ -612,20 +573,24 @@ export class RiskManager {
       this.state.consecutiveLosses = 0;
       // 盈利时重置熔断记录标志，允许下次连亏时再次记录
       this._circuitBreakerLogged = false;
-    } else {
-      this.state.consecutiveLosses++;
+      if (!this.state.pausedUntil) {
+        this._circuitBreakerTriggered = false;
+      }
+      return;
     }
 
-    // 连亏暂停：shadow 模式只记录不暂停，实盘模式触发暂停
-    if (!this.shadowMode && this.state.consecutiveLosses >= (this.params.CIRCUIT_BREAKER?.CONSECUTIVE_LOSS_PAUSE || 8)) {
-      this.pauseTrading();
+    this.state.consecutiveLosses++;
+
+    const threshold = this.params.CIRCUIT_BREAKER?.CONSECUTIVE_LOSS_PAUSE || 8;
+    if (this.state.consecutiveLosses >= threshold && !this._circuitBreakerTriggered) {
+      this.triggerCircuitBreaker();
     }
   }
 
   /**
    * 暂停交易
    */
-  pauseTrading() {
+  pauseTrading(lossCount = this.state.consecutiveLosses) {
     const pauseUntil = new Date();
     pauseUntil.setHours(pauseUntil.getHours() + this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS);
     this.state.pausedUntil = pauseUntil;
@@ -640,7 +605,7 @@ export class RiskManager {
     }
 
     console.log(`\n⚠️  交易已暂停至 ${pauseUntil.toLocaleString()}`);
-    console.log(`   原因：连续亏损 ${this.state.consecutiveLosses} 笔\n`);
+    console.log(`   原因：连续亏损 ${lossCount} 笔\n`);
   }
 
   /**
@@ -674,6 +639,7 @@ export class RiskManager {
 
     try {
       this.db.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run();
+      this.db.prepare(`DELETE FROM system_state WHERE key = 'circuit_breaker_active'`).run();
     } catch (error) {
       // 忽略
     }
@@ -692,8 +658,11 @@ export class RiskManager {
     }
     this._circuitBreakerTriggered = true;
 
-    // 立即暂停交易
-    this.pauseTrading();
+    const lossCount = this.state.consecutiveLosses;
+    const triggerTime = Date.now();
+    this._lastCircuitBreakerTime = triggerTime;
+    this._circuitBreakerLogged = true;
+    this._circuitBreakerCount = (this._circuitBreakerCount || 0) + 1;
 
     // 获取最近亏损的交易
     let recentLosses = [];
@@ -704,22 +673,43 @@ export class RiskManager {
         WHERE status = 'closed' AND exit_pnl < 0
         ORDER BY closed_at DESC
         LIMIT ?
-      `).all(this.state.consecutiveLosses);
+      `).all(lossCount);
     } catch (e) {
       // ignore
+    }
+
+    // 记录到数据库用于后续分析 / 恢复期恢复
+    try {
+      this.db.prepare(`
+        INSERT INTO system_state (key, value, expires_at)
+        VALUES ('circuit_breaker_' || ?, ?, ?)
+      `).run(triggerTime, lossCount, Math.floor(triggerTime / 1000));
+    } catch (e) { /* ignore */ }
+
+    try {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO system_state (key, value)
+        VALUES ('circuit_breaker_active', ?)
+      `).run(triggerTime.toString());
+    } catch (e) { /* ignore */ }
+
+    const shouldPause = !this.shadowMode;
+    if (shouldPause) {
+      this.pauseTrading(lossCount);
     }
 
     const lossDetails = recentLosses
       .map((t, i) => `${i + 1}. ${t.symbol}: ${t.exit_pnl?.toFixed(1)}%`)
       .join('\n');
 
-    const resumeTime = this.state.pausedUntil?.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) || '未知';
+    const resumeTime = shouldPause
+      ? (this.state.pausedUntil?.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) || '未知')
+      : 'Shadow模式不停机';
 
-    // 发送微信通知
-    const content = `
+    const content = shouldPause ? `
 ## 🛑 物理熔断触发！
 
-**连续亏损**: ${this.state.consecutiveLosses} 笔
+**连续亏损**: ${lossCount} 笔
 **暂停时长**: ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时
 **恢复时间**: ${resumeTime}
 
@@ -734,26 +724,48 @@ ${lossDetails || '(无记录)'}
 休息一下，等市场冷静后再战。
 
 *记住：不亏就是赚！*
+` : `
+连续亏损 ${lossCount} 笔，已触发第 ${this._circuitBreakerCount} 次熔断记录。
+
+📝 **模拟盘模式：继续运行采集数据**
+🔬 实盘模式下会暂停 ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时
+
+### 最近亏损交易:
+${lossDetails || '(无记录)'}
 `;
 
-    notifier.critical('物理熔断触发', content).catch(e => {
+    const notifierCall = shouldPause
+      ? notifier.critical('物理熔断触发', content)
+      : notifier.systemStatus('静默熔断触发', content);
+
+    notifierCall.catch(e => {
       console.error('[RISK] 熔断通知发送失败:', e.message);
     });
 
-    console.log(`
+    console.log(shouldPause ? `
 ╔══════════════════════════════════════════════════════════════╗
-║  🛑  物理熔断触发！连续亏损 ${this.state.consecutiveLosses} 笔                       ║
+║  🛑  物理熔断触发！连续亏损 ${lossCount} 笔                       ║
 ║  ⏸️   交易暂停至 ${resumeTime}           ║
 ║  💡  这是保护机制，不是故障！                                ║
 ╚══════════════════════════════════════════════════════════════╝
+` : `
+╔══════════════════════════════════════════════════════════════╗
+║  🚨 [静默熔断 #${this._circuitBreakerCount}] 连亏 ${lossCount} 笔！                        ║
+║  📝 实盘模式下此刻会暂停 ${this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS} 小时                          ║
+║  🧪 模拟盘继续运行，采集极端数据...                          ║
+╚══════════════════════════════════════════════════════════════╝
 `);
 
-    // 设置定时器，熔断结束后重置标志
-    setTimeout(() => {
+    if (shouldPause) {
+      this.state.consecutiveLosses = 0;
+      setTimeout(() => {
+        this._circuitBreakerTriggered = false;
+        console.log('[RISK] 🔓 熔断期结束，交易已恢复');
+        notifier.systemStatus('熔断期结束', '交易已恢复，请关注接下来的交易表现。').catch(() => { });
+      }, this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS * 60 * 60 * 1000);
+    } else {
       this._circuitBreakerTriggered = false;
-      console.log('[RISK] 🔓 熔断期结束，交易已恢复');
-      notifier.systemStatus('熔断期结束', '交易已恢复，请关注接下来的交易表现。').catch(() => { });
-    }, this.params.CIRCUIT_BREAKER.PAUSE_DURATION_HOURS * 60 * 60 * 1000);
+    }
   }
 
   /**

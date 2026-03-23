@@ -26,6 +26,8 @@ import { generatePremiumBuyPrompt } from '../prompts/premium-signal-prompts.js';
 import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
 import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
 import { RiskManager } from '../risk/risk-manager.js';
+import { PaperStrategyRegistry } from '../config/paper-strategy-registry.js';
+import PaperTradeRecorder from '../database/paper-trade-recorder.js';
 import axios from 'axios';
 
 export class PremiumSignalEngine {
@@ -51,6 +53,8 @@ export class PremiumSignalEngine {
     this.livePriceMonitor = null; // 外部注入（shadow 也可用）
     this.buzzScanner = null; // 需要 setTelegramClient 初始化
     this.shadowTracker = new ShadowPnlTracker();
+    this.paperStrategyRegistry = process.env.AUTONOMY_PREMIUM_REGISTRY !== 'false' ? new PaperStrategyRegistry() : null;
+    this.paperTradeRecorder = this.paperStrategyRegistry ? new PaperTradeRecorder(this.config.DB_PATH || process.env.DB_PATH || './data/sentiment_arb.db') : null;
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -109,6 +113,18 @@ export class PremiumSignalEngine {
     console.log('✅ [Premium Engine] Jupiter + LivePositionMonitor 已注入');
   }
 
+  _checkEntryRisk(symbol, context = 'ENTRY') {
+    if (this.shadowMode) {
+      return { allowed: true, reason: 'SHADOW_SKIP_RISK' };
+    }
+
+    const riskCheck = this.riskManager.canTrade();
+    if (!riskCheck.allowed) {
+      console.log(`🛡️ [RISK] ${context === 'NOT_ATH' ? `$${symbol} ` : ''}风控拒绝: ${riskCheck.reason}${context === 'ATH' ? ` | $${symbol} ATH#1 计数未消耗` : ''}`);
+    }
+    return riskCheck;
+  }
+
   /**
    * 设置 LivePriceMonitor（shadow 模式也可用）
    */
@@ -156,10 +172,7 @@ export class PremiumSignalEngine {
 
       console.log('✅ [Premium Engine] 所有服务初始化完成');
 
-      // 启动 Shadow PnL 追踪
-      if (this.shadowMode) {
-        this.shadowTracker.start();
-      }
+      // JS Shadow 交易链路已停用，Paper Trade 由独立 monitor 负责
     } catch (error) {
       console.error('❌ [Premium Engine] 初始化失败:', error.message);
       throw error;
@@ -388,6 +401,7 @@ export class PremiumSignalEngine {
 
       // ─── Step 4: v18 所有过滤 — 全部来自 signal.indices (~0ms) ─
       const idx = signal.indices;
+      this.recordPaperComparisons(signal);
       const superCurrent = idx?.super_index?.current || 0;
       const superSignal  = idx?.super_index?.signal  || 0;
       const superDelta   = superCurrent - superSignal;
@@ -410,9 +424,8 @@ export class PremiumSignalEngine {
 
       // ─── 风控检查（在 ATH 计数提交之前）─────────────────────────
       // 风控拒绝不应消耗 ATH#1 — 损失限额重置后该 token 仍应有机会进场
-      const riskCheck = this.riskManager.canTrade();
+      const riskCheck = this._checkEntryRisk(signal.symbol, 'ATH');
       if (!riskCheck.allowed) {
-        console.log(`🛡️ [RISK] 风控拒绝: ${riskCheck.reason} | $${signal.symbol} ATH#1 计数未消耗`);
         this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
         return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
       }
@@ -431,7 +444,7 @@ export class PremiumSignalEngine {
         console.log(`⏭️ [v17] $${signal.symbol} 已持仓 → 跳过`);
         return { action: 'SKIP', reason: 'already_holding' };
       }
-      if (this.shadowTracker.hasOpenPosition(ca)) {
+      if (this.shadowMode && this.shadowTracker.hasOpenPosition(ca)) {
         console.log(`⏭️ [已持仓] $${signal.symbol} Shadow已有未平仓持仓，跳过`);
         return { action: 'SKIP', reason: 'already_in_position' };
       }
@@ -535,17 +548,9 @@ export class PremiumSignalEngine {
       }
 
       if (this.shadowMode) {
-        this.stats.shadow_logged++;
-        console.log(`🎭 [SHADOW] 模拟买入 $${signal.symbol} | ${finalSize} SOL`);
-        this.saveSignalRecord(signal, 'PASS', aiResult, true);
-        this.saveShadowTrade(signal, aiResult, finalSize);
-        const entryMC = liveMC || mc;
-        this.shadowTracker.addPosition(ca, signal.symbol || 'UNKNOWN', entryMC, aiResult.confidence);
-        this._watchlist.delete(ca);
-        this._saveWatchlist();
-        this.recentSymbols.set(signal.symbol, Date.now());
-        // Shadow 模式也不需要重复 addToken — shadowTracker 有自己的价格逻辑
-        return { action: 'SHADOW_BUY', size: finalSize, ai: aiResult };
+        console.log(`📋 [PAPER_ONLY] Shadow执行已停用，$${signal.symbol} 仅记录信号，不在JS引擎内开模拟仓`);
+        this.saveSignalRecord(signal, 'PASS', aiResult, false);
+        return { action: 'PAPER_ONLY_SKIP', reason: 'shadow_disabled', ai: aiResult };
       }
 
       if (!this.autoBuyEnabled) {
@@ -699,6 +704,47 @@ export class PremiumSignalEngine {
 
     this._klineTrackers.set(ca, timer);
     console.log(`📊 [KlineTrack] $${symbol} 加入临时监控 25min (追踪中: ${this._klineTrackers.size})`);
+  }
+
+  recordPaperComparisons(signal) {
+    if (!this.paperStrategyRegistry || !this.paperTradeRecorder || process.env.AUTONOMY_PAPER_SHADOW !== 'true') {
+      return;
+    }
+
+    try {
+      const baseline = this.paperStrategyRegistry.getBaseline();
+      const challenger = this.paperStrategyRegistry.getChallenger();
+      const strategies = [
+        baseline ? { role: 'baseline', candidate: baseline } : null,
+        challenger ? { role: 'challenger', candidate: challenger } : null
+      ].filter(Boolean);
+
+      for (const item of strategies) {
+        const decision = this.paperStrategyRegistry.evaluateSignal(signal, item.candidate);
+        this.paperTradeRecorder.recordDecision({
+          tradeId: `${item.role}-${item.candidate.id}-${signal.token_ca}-${signal.timestamp || Date.now()}`,
+          strategyId: item.candidate.id,
+          strategyRole: item.role,
+          tokenCa: signal.token_ca,
+          symbol: signal.symbol,
+          chain: 'SOL',
+          signalSource: 'premium',
+          entryContext: {
+            marketCap: signal.market_cap || 0,
+            isAth: !!signal.is_ath
+          },
+          decisionContext: decision,
+          paperEntry: decision.action === 'BUY' ? { enteredAt: new Date().toISOString(), marketCap: signal.market_cap || 0 } : {},
+          paperExit: {},
+          pnl: null,
+          exitReason: null,
+          status: decision.action === 'BUY' ? 'open' : 'skipped',
+          createdAt: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      console.warn(`⚠️ [Paper Registry] comparison failed: ${error.message}`);
+    }
   }
 
   /**
@@ -945,7 +991,7 @@ export class PremiumSignalEngine {
     }
     // 停止前保存ATH计数
     this._saveAthCounts();
-    if (this.shadowTracker) {
+    if (this.shadowMode && this.shadowTracker) {
       this.shadowTracker.stop();
     }
     if (this.livePositionMonitor) {
@@ -963,7 +1009,7 @@ export class PremiumSignalEngine {
   getStats() {
     return {
       ...this.stats,
-      mode: this.shadowMode ? 'SHADOW' : 'LIVE',
+      mode: this.shadowMode ? 'PAPER_ONLY' : 'LIVE',
       position_sol: this.positionSol,
       max_positions: this.maxPositions,
       dedup_cache_size: this.recentSignals.size
@@ -985,17 +1031,9 @@ export class PremiumSignalEngine {
       console.log(`⏭️ [NOT_ATH] $${symbol} 已持仓 → 跳过`);
       return { action: 'SKIP', reason: 'already_holding' };
     }
-    if (this.shadowTracker.hasOpenPosition(ca)) {
+    if (this.shadowMode && this.shadowTracker.hasOpenPosition(ca)) {
       console.log(`⏭️ [NOT_ATH] $${symbol} Shadow已有未平仓持仓，跳过`);
       return { action: 'SKIP', reason: 'already_in_position' };
-    }
-
-    // 风控检查
-    const riskCheck = this.riskManager.canTrade();
-    if (!riskCheck.allowed) {
-      console.log(`🛡️ [RISK] $${symbol} 风控拒绝: ${riskCheck.reason}`);
-      this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
-      return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
     }
 
     // K线评分检查（新逻辑）
@@ -1027,18 +1065,13 @@ export class PremiumSignalEngine {
 
     // 执行 Shadow Buy
     const finalSize = 0.06;
+    const exitStrategy = 'NOT_ATH';
+    const tradeConviction = 'HIGH';
 
     if (this.shadowMode) {
-      this.stats.shadow_logged++;
-      console.log(`🎭 [SHADOW] 模拟买入 $${symbol} | ${finalSize} SOL`);
-      this.saveSignalRecord(signal, 'PASS', null, true);
-      this.saveShadowTrade(signal, null, finalSize);
-      const entryMC = this._getCachedMC(ca) || signal.market_cap || 0;
-      this.shadowTracker.addPosition(ca, symbol, entryMC, 80);
-      this._watchlist.delete(ca);
-      this._saveWatchlist();
-      this.recentSymbols.set(symbol, Date.now());
-      return { action: 'SHADOW_BUY', size: finalSize };
+      console.log(`📋 [PAPER_ONLY] Shadow执行已停用，$${symbol} 仅记录信号，不在JS引擎内开模拟仓`);
+      this.saveSignalRecord(signal, 'PASS', null, false);
+      return { action: 'PAPER_ONLY_SKIP', reason: 'shadow_disabled' };
     }
 
     if (!this.autoBuyEnabled) {
@@ -1062,7 +1095,13 @@ export class PremiumSignalEngine {
       }
     }
 
-    console.log(`💰 [执行] 买入 $${symbol} | ${finalSize} SOL ...`);
+    const riskCheck = this._checkEntryRisk(symbol, 'NOT_ATH');
+    if (!riskCheck.allowed) {
+      this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
+      return { action: 'SKIP', reason: `risk: ${riskCheck.reason}` };
+    }
+
+    console.log(`💰 [执行] 买入 $${symbol} | ${finalSize} SOL | ${exitStrategy}...`);
 
     try {
       let tradeResult;
@@ -1076,7 +1115,18 @@ export class PremiumSignalEngine {
             this.stats.errors++;
             return { action: 'EXEC_FAILED', reason: '买入后余额为0' };
           }
-          this.livePositionMonitor.addPosition(ca, symbol, balance.amount, balance.decimals);
+
+          const tokenAmount = balance.amount;
+          const tokenDecimals = balance.decimals || 6;
+          const actualTokenAmount = tokenAmount / Math.pow(10, tokenDecimals);
+          const entryPrice = finalSize / actualTokenAmount;
+          const entryMC = this._getCachedMC(ca) || signal.market_cap || 0;
+          console.log(`💰 [Entry] ${entryPrice.toFixed(10)} SOL/token | ${finalSize} SOL → ${actualTokenAmount.toFixed(2)} tokens`);
+
+          this.livePositionMonitor.addPosition(
+            ca, symbol, entryPrice, entryMC, finalSize,
+            tokenAmount, tokenDecimals, tradeConviction, exitStrategy
+          );
         }
       } else {
         tradeResult = { success: false, reason: 'no_executor' };

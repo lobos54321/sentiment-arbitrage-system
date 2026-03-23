@@ -59,7 +59,8 @@ export class PremiumChannelListener {
       if (!apiId || !apiHash || !sessionString) {
         console.error('❌ Missing Telegram User API credentials');
         console.error('   Please run: node scripts/authenticate-telegram.js');
-        return;
+        this.isRunning = false;
+        return false;
       }
 
       const channelId = parseInt(process.env.PREMIUM_CHANNEL_ID || String(DEFAULT_CHANNEL_ID));
@@ -77,7 +78,8 @@ export class PremiumChannelListener {
       if (!this.channelEntity) {
         console.error(`❌ Could not find premium channel with ID ${channelId}`);
         console.error('   Make sure the account has joined the channel');
-        return;
+        this.isRunning = false;
+        return false;
       }
 
       console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
@@ -90,10 +92,12 @@ export class PremiumChannelListener {
 
       this.isRunning = true;
       console.log('✅ Premium channel listener started');
+      return true;
 
     } catch (error) {
+      this.isRunning = false;
       console.error('❌ Failed to start premium channel listener:', error.message);
-      throw error;
+      return false;
     }
   }
 

@@ -24,22 +24,28 @@ import sys
 import os
 import signal
 import logging
+import urllib.request
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
 
 # === Configuration ===
-SENTIMENT_DB = os.environ.get('SENTIMENT_DB', '/tmp/sentiment.db')
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
+SENTIMENT_DB = os.environ.get('SENTIMENT_DB', str(DATA_DIR / 'sentiment_arb.db'))
 PAPER_DB = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
 KLINE_DB = os.environ.get('KLINE_DB', str(DATA_DIR / 'kline_cache.db'))
+REMOTE_SIGNAL_URL = os.environ.get('REMOTE_SIGNAL_URL', '').strip()
+REMOTE_SIGNAL_TOKEN = os.environ.get('REMOTE_SIGNAL_TOKEN', '').strip()
+REMOTE_SIGNAL_LOOKBACK = max(50, int(os.environ.get('REMOTE_SIGNAL_LOOKBACK', '500')))
 
 # Sim parameters (Canonical v2: SL=-3%, trail@+3%/0.90, timeout=120min)
 SL_PCT = -0.03
 TRAIL_START = 0.03
 TRAIL_FACTOR = 0.90
 TIMEOUT_MIN = 120
+ALLOW_SYNTHETIC_REPLAY = os.environ.get('ALLOW_SYNTHETIC_REPLAY', 'false').lower() == 'true'
 
 # Polling intervals (seconds)
 SIGNAL_POLL_INTERVAL = 30       # check for new signals
@@ -77,6 +83,7 @@ def init_paper_db(db_path=None):
             pnl_pct REAL,
             bars_held INTEGER,
             market_regime TEXT,
+            replay_source TEXT DEFAULT 'live_monitor',
             peak_pnl REAL DEFAULT 0,
             trailing_active INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -85,6 +92,10 @@ def init_paper_db(db_path=None):
     db.execute("CREATE INDEX IF NOT EXISTS idx_pt_token ON paper_trades(token_ca)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit ON paper_trades(exit_reason)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_ts ON paper_trades(entry_ts)")
+    try:
+        db.execute("ALTER TABLE paper_trades ADD COLUMN replay_source TEXT DEFAULT 'live_monitor'")
+    except sqlite3.OperationalError:
+        pass
     db.commit()
     return db
 
@@ -129,8 +140,8 @@ def get_pool_address(token_ca, cache={}):
     return pool or None
 
 
-def get_current_price(token_ca, pool_address=None):
-    """Get latest price from GeckoTerminal (latest 1m candle close)."""
+def get_current_bar(token_ca, pool_address=None):
+    """Get latest GeckoTerminal 1m bar."""
     if not pool_address:
         pool_address = get_pool_address(token_ca)
     if not pool_address:
@@ -148,8 +159,23 @@ def get_current_price(token_ca, pool_address=None):
     if not ohlcv:
         return None
 
-    # ohlcv_list: [[timestamp, open, high, low, close, volume], ...]
-    return ohlcv[0][4]  # close price
+    row = ohlcv[0]
+    return {
+        'ts': int(row[0]),
+        'open': float(row[1]),
+        'high': float(row[2]),
+        'low': float(row[3]),
+        'close': float(row[4]),
+        'volume': float(row[5]),
+    }
+
+
+def get_current_price(token_ca, pool_address=None):
+    """Get latest price from GeckoTerminal (latest 1m candle close)."""
+    bar = get_current_bar(token_ca, pool_address)
+    if not bar:
+        return None
+    return bar['close']
 
 
 # === NOT_ATH Scoring ===
@@ -175,15 +201,15 @@ def parse_super_index(description):
     return None
 
 
-def get_notath_bars(pool_address):
+def get_notath_bars(pool_address, limit=5):
     """
-    Get 5 most recent 1-minute bars for NOT_ATH scoring.
+    Get recent 1-minute bars for NOT_ATH scoring.
     Returns list of bars (newest first), or None.
     Each bar: {ts, open, high, low, close, volume}
     """
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
-        f"{pool_address}/ohlcv/minute?aggregate=1&limit=5"
+        f"{pool_address}/ohlcv/minute?aggregate=1&limit={limit}"
     )
     data = curl_json(url)
     if not data:
@@ -317,42 +343,158 @@ def determine_market_regime(sol_price_now, sol_price_cache={}):
 
 # === Signal Monitoring ===
 
-def get_new_signals(last_signal_id):
-    """Query premium_signals for signals newer than last_signal_id."""
+def _normalize_signal_rows(rows):
+    normalized = []
+    for idx, row in enumerate(rows, start=1):
+        if isinstance(row, sqlite3.Row):
+            record = dict(row)
+        else:
+            record = dict(row)
+        record.setdefault('id', idx)
+        record.setdefault('token_ca', None)
+        record.setdefault('symbol', None)
+        record.setdefault('timestamp', None)
+        record.setdefault('description', '')
+        record.setdefault('hard_gate_status', None)
+        normalized.append(record)
+    return normalized
+
+
+def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
+    if not REMOTE_SIGNAL_URL:
+        return []
+
+    params = {'limit': str(limit)}
+    if before_id is not None:
+        params['before_id'] = str(before_id)
+    query = urllib.parse.urlencode(params)
+    url = REMOTE_SIGNAL_URL
+    sep = '&' if '?' in url else '?'
+    request_url = f"{url}{sep}{query}"
+
+    curl_cmd = ['curl', '-sS', '-m', '20', '-H', 'Accept: application/json']
+    if REMOTE_SIGNAL_TOKEN:
+        curl_cmd.extend(['-H', f'x-dashboard-token: {REMOTE_SIGNAL_TOKEN}'])
+    curl_cmd.append(request_url)
+
+    payload = None
     try:
-        sdb = sqlite3.connect(SENTIMENT_DB)
-        sdb.row_factory = sqlite3.Row
-        rows = sdb.execute("""
-            SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
-            FROM premium_signals
-            WHERE id > ?
-              AND hard_gate_status LIKE 'NOT_ATH%'
-            ORDER BY id ASC
-        """, (last_signal_id,)).fetchall()
-        sdb.close()
-        return rows
+        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=25)
+        if result.returncode == 0 and result.stdout.strip():
+            payload = json.loads(result.stdout)
+        elif result.stderr:
+            log.warning(f"Remote export curl failed: {result.stderr.strip()}")
+    except Exception as e:
+        log.warning(f"Remote export curl exception: {e}")
+
+    if payload is None:
+        headers = {'Accept': 'application/json'}
+        if REMOTE_SIGNAL_TOKEN:
+            headers['x-dashboard-token'] = REMOTE_SIGNAL_TOKEN
+        req = urllib.request.Request(request_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+
+    tables = payload.get('tables', {}) if isinstance(payload, dict) else {}
+    premium = tables.get('premium_signals', {}) if isinstance(tables, dict) else {}
+    rows = premium.get('rows', []) if isinstance(premium, dict) else []
+    return _normalize_signal_rows(rows)
+
+
+def _is_paper_trade_signal(record):
+    status = (record.get('hard_gate_status') or '').upper()
+    description = record.get('description') or ''
+    return status in {'PASS', 'RISK_BLOCKED'} and 'New Trending' in description
+
+
+def _query_local_new_signals(last_signal_id):
+    sdb = sqlite3.connect(SENTIMENT_DB)
+    sdb.row_factory = sqlite3.Row
+    rows = sdb.execute("""
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
+        FROM premium_signals
+        WHERE id > ?
+          AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
+          AND description LIKE '%New Trending%'
+        ORDER BY id ASC
+    """, (last_signal_id,)).fetchall()
+    sdb.close()
+    return _normalize_signal_rows(rows)
+
+
+def _query_local_recent_signals(limit=20):
+    sdb = sqlite3.connect(SENTIMENT_DB)
+    sdb.row_factory = sqlite3.Row
+    rows = sdb.execute("""
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
+        FROM premium_signals
+        WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
+          AND description LIKE '%New Trending%'
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    sdb.close()
+    return list(reversed(_normalize_signal_rows(rows)))
+
+
+def get_new_signals(last_signal_id):
+    """Query new paper-trade candidate New Trending signals from remote export or local DB."""
+    try:
+        if REMOTE_SIGNAL_URL:
+            rows = _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK)
+            rows = [
+                r for r in rows
+                if (r.get('id') or 0) > last_signal_id
+                and _is_paper_trade_signal(r)
+            ]
+            rows.sort(key=lambda r: r.get('id') or 0)
+            return rows
+        return _query_local_new_signals(last_signal_id)
     except Exception as e:
         log.warning(f"Failed to query signals: {e}")
         return []
 
 
 def get_recent_signals(limit=20):
-    """Get most recent signals for dry-run mode."""
+    """Get most recent paper-trade candidate New Trending signals for dry-run mode."""
     try:
-        sdb = sqlite3.connect(SENTIMENT_DB)
-        sdb.row_factory = sqlite3.Row
-        rows = sdb.execute("""
-            SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
-            FROM premium_signals
-            WHERE hard_gate_status LIKE 'NOT_ATH%'
-            ORDER BY id DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
-        sdb.close()
-        return list(reversed(rows))  # oldest first
+        if REMOTE_SIGNAL_URL:
+            rows = _read_remote_export(limit=max(limit, REMOTE_SIGNAL_LOOKBACK))
+            rows = [r for r in rows if _is_paper_trade_signal(r)]
+            rows.sort(key=lambda r: r.get('id') or 0)
+            return rows[-limit:]
+        return _query_local_recent_signals(limit)
     except Exception as e:
         log.warning(f"Failed to query signals: {e}")
         return []
+
+
+def get_signal_freshness():
+    """Return latest premium_signals timestamp metadata for health logging."""
+    try:
+        if REMOTE_SIGNAL_URL:
+            rows = _read_remote_export(limit=min(REMOTE_SIGNAL_LOOKBACK, 200))
+            if not rows:
+                return {'latest_ts': None, 'age_minutes': None, 'total': 0, 'source': 'remote'}
+            latest_ts = max(int(r['timestamp']) for r in rows if r.get('timestamp'))
+            latest_sec = latest_ts // 1000 if latest_ts > 1e12 else latest_ts
+            age_minutes = int((time.time() - latest_sec) / 60)
+            return {'latest_ts': latest_sec, 'age_minutes': age_minutes, 'total': len(rows), 'source': 'remote'}
+
+        sdb = sqlite3.connect(SENTIMENT_DB)
+        sdb.row_factory = sqlite3.Row
+        row = sdb.execute("SELECT MAX(timestamp) AS latest_ts, COUNT(*) AS total FROM premium_signals").fetchone()
+        sdb.close()
+        if not row or not row['latest_ts']:
+            return {'latest_ts': None, 'age_minutes': None, 'total': 0, 'source': 'local'}
+
+        latest_ts = int(row['latest_ts'])
+        latest_sec = latest_ts // 1000 if latest_ts > 1e12 else latest_ts
+        age_minutes = int((time.time() - latest_sec) / 60)
+        return {'latest_ts': latest_sec, 'age_minutes': age_minutes, 'total': int(row['total'] or 0), 'source': 'local'}
+    except Exception as e:
+        log.warning(f"Failed to inspect signal freshness: {e}")
+        return {'latest_ts': None, 'age_minutes': None, 'total': 0, 'source': 'unknown'}
 
 
 def get_last_processed_id(db):
@@ -367,7 +509,7 @@ class Position:
     """Tracks an open paper trade position."""
     __slots__ = [
         'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
-        'pool_address', 'peak_pnl', 'trailing_active', 'bars_held',
+        'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
     ]
 
     def __init__(self, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address):
@@ -380,13 +522,20 @@ class Position:
         self.peak_pnl = 0.0
         self.trailing_active = False
         self.bars_held = 0
+        self.last_bar_ts = int(entry_ts)
 
-    def check_exit(self, current_price):
-        """Apply exit logic. Returns (should_exit, exit_reason, pnl_pct) or (False, None, None)."""
-        if current_price is None or current_price <= 0:
+    def check_exit(self, current_price, bar_ts):
+        """Apply exit logic on a specific 1m bar. Returns (should_exit, exit_reason, pnl_pct) or (False, None, None)."""
+        if current_price is None or current_price <= 0 or bar_ts is None:
             return False, None, None
 
-        self.bars_held += 1
+        bar_ts = int(bar_ts)
+        if bar_ts <= self.last_bar_ts:
+            pnl = (current_price - self.entry_price) / self.entry_price
+            return False, None, pnl
+
+        self.last_bar_ts = bar_ts
+        self.bars_held = max(self.bars_held + 1, int((bar_ts - self.entry_ts) / 60) + 1)
         pnl = (current_price - self.entry_price) / self.entry_price
         self.peak_pnl = max(self.peak_pnl, pnl)
 
@@ -407,7 +556,7 @@ class Position:
                 return True, 'trail', exit_pnl
 
         # Timeout
-        elapsed_min = (int(time.time()) - self.entry_ts) / 60
+        elapsed_min = (bar_ts - self.entry_ts) / 60
         if elapsed_min >= TIMEOUT_MIN:
             return True, 'timeout', pnl
 
@@ -416,14 +565,44 @@ class Position:
 
 # === Daily Report ===
 
+def summarize_rows(rows):
+    if not rows:
+        return None
+    pnls = [r['pnl_pct'] for r in rows]
+    n = len(pnls)
+    ev = sum(pnls) / n
+    wins = sum(1 for p in pnls if p > 0)
+    wr = wins / n
+    std = (sum((p - ev) ** 2 for p in pnls) / n) ** 0.5
+    sharpe = ev / std if std > 0 else 0
+    return {
+        'n': n,
+        'ev': ev,
+        'wr': wr,
+        'sharpe': sharpe,
+        'total_pnl': sum(pnls)
+    }
+
+
+def print_summary_block(title, rows):
+    summary = summarize_rows(rows)
+    if not summary:
+        log.info(f"  {title}: no trades")
+        return
+    log.info(
+        f"  {title}: n={summary['n']}  EV={summary['ev']*100:+.2f}%  "
+        f"WR={summary['wr']*100:.1f}%  Sharpe={summary['sharpe']:.3f}  "
+        f"Total={summary['total_pnl']*100:+.2f}%"
+    )
+
+
 def print_daily_report(db, date_str=None):
     """Print daily statistics."""
     if not date_str:
         date_str = datetime.utcnow().strftime('%Y-%m-%d')
 
-    # Get trades closed today
     rows = db.execute("""
-        SELECT pnl_pct, exit_reason, market_regime, bars_held
+        SELECT pnl_pct, exit_reason, market_regime, replay_source, bars_held
         FROM paper_trades
         WHERE exit_reason IS NOT NULL
           AND date(exit_ts, 'unixepoch') = ?
@@ -433,20 +612,14 @@ def print_daily_report(db, date_str=None):
         log.info(f"=== Daily Report {date_str}: No closed trades ===")
         return
 
-    pnls = [r['pnl_pct'] for r in rows]
-    n = len(pnls)
-    ev = sum(pnls) / n
-    wins = sum(1 for p in pnls if p > 0)
-    wr = wins / n
-    std = (sum((p - ev) ** 2 for p in pnls) / n) ** 0.5
-    sharpe = ev / std if std > 0 else 0
+    real_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'real_kline_replay']
+    synthetic_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'synthetic_replay']
+    live_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'live_monitor']
 
-    # By exit reason
     by_reason = defaultdict(list)
     for r in rows:
         by_reason[r['exit_reason']].append(r['pnl_pct'])
 
-    # By regime
     by_regime = defaultdict(list)
     for r in rows:
         by_regime[r['market_regime'] or 'unknown'].append(r['pnl_pct'])
@@ -454,8 +627,10 @@ def print_daily_report(db, date_str=None):
     log.info(f"{'='*60}")
     log.info(f"  Daily Report: {date_str}")
     log.info(f"{'='*60}")
-    log.info(f"  Trades: {n}  |  EV: {ev*100:+.2f}%  |  WR: {wr*100:.1f}%  |  Sharpe: {sharpe:.3f}")
-    log.info(f"  Total PnL: {sum(pnls)*100:+.2f}%")
+    print_summary_block('All trades', rows)
+    print_summary_block('Live monitor', live_rows)
+    print_summary_block('Real K-line replay', real_rows)
+    print_summary_block('Synthetic replay', synthetic_rows)
     log.info(f"")
     log.info(f"  By Exit Reason:")
     for reason, ps in sorted(by_reason.items()):
@@ -466,13 +641,23 @@ def print_daily_report(db, date_str=None):
     for regime, ps in sorted(by_regime.items()):
         r_ev = sum(ps) / len(ps)
         log.info(f"    {regime:10s}  n={len(ps):3d}  EV={r_ev*100:+.2f}%")
+
+    by_source = defaultdict(list)
+    for r in rows:
+        by_source[r['replay_source'] or 'live_monitor'].append(r['pnl_pct'])
+
+    log.info(f"")
+    log.info(f"  By Replay Source:")
+    for source, ps in sorted(by_source.items()):
+        s_ev = sum(ps) / len(ps)
+        log.info(f"    {source:16s}  n={len(ps):3d}  EV={s_ev*100:+.2f}%")
     log.info(f"{'='*60}")
 
 
 def print_all_stats(db):
     """Print cumulative stats across all dates."""
     rows = db.execute("""
-        SELECT pnl_pct, exit_reason, market_regime, bars_held,
+        SELECT pnl_pct, exit_reason, market_regime, replay_source, bars_held,
                date(exit_ts, 'unixepoch') as exit_date
         FROM paper_trades
         WHERE exit_reason IS NOT NULL
@@ -483,19 +668,17 @@ def print_all_stats(db):
         log.info("No completed paper trades yet.")
         return
 
-    pnls = [r['pnl_pct'] for r in rows]
-    n = len(pnls)
-    ev = sum(pnls) / n
-    wins = sum(1 for p in pnls if p > 0)
-    wr = wins / n
-    std = (sum((p - ev) ** 2 for p in pnls) / n) ** 0.5
-    sharpe = ev / std if std > 0 else 0
+    real_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'real_kline_replay']
+    synthetic_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'synthetic_replay']
+    live_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'live_monitor']
 
     log.info(f"{'='*60}")
     log.info(f"  Cumulative Paper Trade Stats")
     log.info(f"{'='*60}")
-    log.info(f"  Trades: {n}  |  EV: {ev*100:+.2f}%  |  WR: {wr*100:.1f}%  |  Sharpe: {sharpe:.3f}")
-    log.info(f"  Total PnL: {sum(pnls)*100:+.2f}%")
+    print_summary_block('All trades', rows)
+    print_summary_block('Live monitor', live_rows)
+    print_summary_block('Real K-line replay', real_rows)
+    print_summary_block('Synthetic replay', synthetic_rows)
 
     # By date
     by_date = defaultdict(list)
@@ -574,6 +757,7 @@ def dry_run(db):
     import random
 
     log.info("=== DRY RUN MODE (REAL K-LINE REPLAY) ===")
+    log.info(f"Synthetic fallback: {'ENABLED' if ALLOW_SYNTHETIC_REPLAY else 'DISABLED'}")
 
     # Open K-line DB
     try:
@@ -660,6 +844,7 @@ def dry_run(db):
 
             exit_ts = int(signal_ts + bars_held * 60)
             regime = 'real_kline'
+            replay_source = 'real_kline_replay'
 
             log.info(
                 f"  [{symbol}] REAL  bars={len(bars)}  "
@@ -668,6 +853,10 @@ def dry_run(db):
             )
         else:
             # SYNTHETIC FALLBACK (insufficient K-line data)
+            if not ALLOW_SYNTHETIC_REPLAY:
+                log.info(f"  [{symbol}] insufficient K-line bars ({len(bars)}), skipping synthetic fallback")
+                continue
+
             synthetic_used += 1
             entry_price = random.uniform(0.00001, 0.01)
             entry_ts = int(signal_ts)
@@ -713,6 +902,7 @@ def dry_run(db):
             exit_price = entry_price * (1 + exit_pnl)
             exit_ts = entry_ts + bars_held * 60
             regime = 'synthetic'
+            replay_source = 'synthetic_replay'
 
             log.info(
                 f"    -> {exit_reason:7s}  pnl={exit_pnl*100:+.1f}%  "
@@ -724,12 +914,12 @@ def dry_run(db):
             INSERT INTO paper_trades
                 (token_ca, symbol, signal_ts, entry_price, entry_ts,
                  exit_price, exit_ts, exit_reason, pnl_pct, bars_held,
-                 market_regime, peak_pnl, trailing_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 market_regime, replay_source, peak_pnl, trailing_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             token_ca, symbol, int(signal_ts_ms), entry_price, int(signal_ts),
             exit_price, exit_ts, exit_reason, exit_pnl, bars_held,
-            regime, peak_pnl, int(trailing_active),
+            regime, replay_source, peak_pnl, int(trailing_active),
         ))
         db.commit()
 
@@ -762,6 +952,11 @@ def dry_run(db):
     print_all_stats(db)
 
 
+def get_signal_minute_ts(signal_ts):
+    signal_sec = signal_ts // 1000 if signal_ts > 1e12 else signal_ts
+    return int(signal_sec // 60 * 60)
+
+
 # === Live Monitor Loop ===
 
 def run_monitor(db):
@@ -770,10 +965,24 @@ def run_monitor(db):
     log.info(f"  SL={SL_PCT*100:.0f}%  Trail Start={TRAIL_START*100:.0f}%  "
              f"Trail Factor={TRAIL_FACTOR*100:.0f}%  Timeout={TIMEOUT_MIN}min")
     log.info(f"  Signal poll: {SIGNAL_POLL_INTERVAL}s  Position poll: {POSITION_POLL_INTERVAL}s")
-    log.info(f"  DB: {PAPER_DB}")
+    if REMOTE_SIGNAL_URL:
+        log.info(f"  Signal Source: remote export {REMOTE_SIGNAL_URL}")
+    else:
+        log.info(f"  Signal DB: {SENTIMENT_DB}")
+    log.info(f"  Paper DB: {PAPER_DB}")
+
+    freshness = get_signal_freshness()
+    if freshness['latest_ts']:
+        latest_iso = datetime.utcfromtimestamp(freshness['latest_ts']).strftime('%Y-%m-%d %H:%M:%S UTC')
+        log.info(f"  premium_signals latest: {latest_iso} ({freshness['age_minutes']} min ago, sample={freshness['total']}, source={freshness.get('source', 'unknown')})")
+        if freshness['age_minutes'] is not None and freshness['age_minutes'] > 120:
+            log.warning("  premium_signals is stale; paper trade monitor may idle until upstream signal source updates")
+    else:
+        log.warning(f"  premium_signals has no rows from {freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process")
 
     # Track open positions
     positions = {}  # token_ca -> Position
+    pending_entries = {}  # token_ca -> pending signal waiting for signal-minute close
 
     # Restore open positions from DB
     open_rows = db.execute("""
@@ -788,6 +997,7 @@ def run_monitor(db):
         pos.peak_pnl = r['peak_pnl'] or 0
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
+        pos.last_bar_ts = int(r['entry_ts']) + max((r['bars_held'] or 0) - 1, 0) * 60
         positions[r['token_ca']] = pos
         time.sleep(0.3)
 
@@ -798,18 +1008,14 @@ def run_monitor(db):
     last_id_row = db.execute("""
         SELECT MAX(signal_ts) as max_ts FROM paper_trades
     """).fetchone()
-    # Get signal ID from sentiment DB
     last_signal_id = 0
     if last_id_row and last_id_row['max_ts']:
         try:
-            sdb = sqlite3.connect(SENTIMENT_DB)
-            row = sdb.execute(
-                "SELECT MAX(id) as mid FROM premium_signals WHERE timestamp <= ?",
-                (last_id_row['max_ts'],)
-            ).fetchone()
-            if row and row[0]:
-                last_signal_id = row[0]
-            sdb.close()
+            signal_ts_cutoff = last_id_row['max_ts']
+            recent_rows = get_recent_signals(limit=REMOTE_SIGNAL_LOOKBACK)
+            eligible = [r for r in recent_rows if (r.get('timestamp') or 0) <= signal_ts_cutoff]
+            if eligible:
+                last_signal_id = max((r.get('id') or 0) for r in eligible)
         except Exception:
             pass
 
@@ -831,7 +1037,7 @@ def run_monitor(db):
                 last_signal_id = sig['id']
 
                 # Skip if already tracking
-                if token_ca in positions:
+                if token_ca in positions or token_ca in pending_entries:
                     continue
 
                 # Skip if already traded
@@ -854,60 +1060,91 @@ def run_monitor(db):
                     log.info(f"  Super Index={super_idx}<80, skipping")
                     continue
 
-                # Get 4 bars for NOT_ATH scoring
+                # Score on recent bars, but stage entry until signal-minute close is available
                 pool = get_pool_address(token_ca)
                 if not pool:
                     log.warning(f"  Could not find pool for {symbol}, skipping")
                     continue
                 time.sleep(0.4)
 
-                bars = get_notath_bars(pool)
+                bars = get_notath_bars(pool, limit=6)
                 if not bars or len(bars) < 4:
                     log.warning(f"  Not enough K-line bars for {symbol}, skipping")
                     continue
 
-                # Compute NOT_ATH score
-                score_result = compute_notath_score(bars)
+                score_result = compute_notath_score(bars[:4])
                 if not score_result['passed']:
                     log.info(f"  NOT_ATH score={score_result['score']} < 3 (RED={score_result['is_red']}, lowVol={score_result['low_volume']}, active={score_result['is_active']}), skipping")
                     continue
 
-                log.info(f"  NOT_ATH score={score_result['score']} ✅ (RED={score_result['is_red']}, lowVol={score_result['low_volume']}, active={score_result['is_active']}, mom={score_result['mom']:+.1f}%)")
-
-                # Enter at close of current bar
-                price = bars[0]['close']
-                if not price or price <= 0:
-                    log.warning(f"  Could not get price for {symbol}, skipping")
-                    continue
-
-                entry_ts = int(time.time())
                 signal_ts = sig['timestamp']
-
-                # Determine regime
-                if sol_price is None:
-                    sol_price = get_sol_price()
-                    time.sleep(0.3)
-                regime = determine_market_regime(sol_price) if sol_price else 'unknown'
-
-                # Insert open position
-                db.execute("""
-                    INSERT INTO paper_trades
-                        (token_ca, symbol, signal_ts, entry_price, entry_ts,
-                         market_regime, peak_pnl, trailing_active)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, 0)
-                """, (token_ca, symbol, signal_ts, price, entry_ts, regime))
-                db.commit()
-
-                pos = Position(token_ca, symbol, signal_ts, price, entry_ts, pool)
-                positions[token_ca] = pos
-                log.info(f"  Entered {symbol} @ ${price:.10f}  regime={regime}")
+                signal_minute_ts = get_signal_minute_ts(signal_ts)
+                pending_entries[token_ca] = {
+                    'token_ca': token_ca,
+                    'symbol': symbol,
+                    'signal_ts': signal_ts,
+                    'signal_minute_ts': signal_minute_ts,
+                    'pool': pool,
+                    'score_result': score_result,
+                }
+                log.info(
+                    f"  NOT_ATH score={score_result['score']} ✅ (RED={score_result['is_red']}, "
+                    f"lowVol={score_result['low_volume']}, active={score_result['is_active']}, "
+                    f"mom={score_result['mom']:+.1f}%) | staged for signal-minute close @ {signal_minute_ts}"
+                )
 
                 time.sleep(0.5)  # rate limit between signals
 
         except Exception as e:
             log.error(f"Signal check error: {e}")
 
-        # === 2. Update open positions ===
+        # === 2. Convert staged signals into entries at signal-minute close ===
+        if pending_entries:
+            for token_ca, pending in list(pending_entries.items()):
+                try:
+                    bars = get_notath_bars(pending['pool'], limit=8)
+                    if not bars:
+                        continue
+
+                    signal_bar = next((b for b in bars if int(b['ts']) == pending['signal_minute_ts']), None)
+                    if signal_bar is None:
+                        continue
+
+                    price = signal_bar['close']
+                    if not price or price <= 0:
+                        log.warning(f"  Could not get signal-minute close for {pending['symbol']}, skipping staged entry")
+                        pending_entries.pop(token_ca, None)
+                        continue
+
+                    entry_ts = int(signal_bar['ts'])
+                    signal_ts = pending['signal_ts']
+                    if sol_price is None:
+                        sol_price = get_sol_price()
+                        time.sleep(0.3)
+                    regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+
+                    db.execute("""
+                        INSERT INTO paper_trades
+                            (token_ca, symbol, signal_ts, entry_price, entry_ts,
+                             market_regime, replay_source, peak_pnl, trailing_active)
+                        VALUES (?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0)
+                    """, (token_ca, pending['symbol'], signal_ts, price, entry_ts, regime))
+                    db.commit()
+
+                    pos = Position(token_ca, pending['symbol'], signal_ts, price, entry_ts, pending['pool'])
+                    pos.last_bar_ts = entry_ts
+                    positions[token_ca] = pos
+                    pending_entries.pop(token_ca, None)
+                    delay_min = (entry_ts - (signal_ts // 1000 if signal_ts > 1e12 else signal_ts)) / 60
+                    log.info(
+                        f"  Entered {pending['symbol']} @ ${price:.10f}  regime={regime}  "
+                        f"signal_bar_ts={entry_ts}  delay={delay_min:+.1f}min"
+                    )
+                    time.sleep(0.4)
+                except Exception as e:
+                    log.error(f"  Pending entry error for {pending['symbol']}: {e}")
+
+        # === 3. Update open positions ===
         if now - last_position_check >= POSITION_POLL_INTERVAL and positions:
             last_position_check = now
             to_close = []
@@ -923,17 +1160,20 @@ def run_monitor(db):
 
             for token_ca, pos in list(positions.items()):
                 try:
-                    price = get_current_price(token_ca, pos.pool_address)
-                    if price is None:
-                        log.debug(f"  Price fetch failed for {pos.symbol}, skipping update")
-                        # Still check timeout
-                        elapsed = (int(time.time()) - pos.entry_ts) / 60
-                        if elapsed >= TIMEOUT_MIN:
-                            # Force timeout exit using entry price (conservative)
-                            to_close.append((token_ca, 'timeout', 0.0, pos.entry_price))
+                    current_bar = get_current_bar(token_ca, pos.pool_address)
+                    if not current_bar:
+                        log.debug(f"  Current bar fetch failed for {pos.symbol}, skipping update")
                         continue
 
-                    should_exit, reason, pnl = pos.check_exit(price)
+                    bar_ts = int(current_bar['ts'])
+                    price = current_bar['close']
+                    if not price or price <= 0:
+                        price = current_bar.get('open')
+                    if price is None or price <= 0:
+                        log.debug(f"  Invalid current bar for {pos.symbol}, skipping update")
+                        continue
+
+                    should_exit, reason, pnl = pos.check_exit(price, bar_ts)
 
                     # Update peak/trailing in DB
                     db.execute("""
@@ -945,7 +1185,7 @@ def run_monitor(db):
                     db.commit()
 
                     if should_exit:
-                        to_close.append((token_ca, reason, pnl, price))
+                        to_close.append((token_ca, reason, pnl, price, bar_ts))
 
                     time.sleep(0.4)  # rate limit
 
@@ -953,9 +1193,8 @@ def run_monitor(db):
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
             # Close positions
-            for token_ca, reason, pnl, exit_price in to_close:
+            for token_ca, reason, pnl, exit_price, exit_ts in to_close:
                 pos = positions.pop(token_ca)
-                exit_ts = int(time.time())
 
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
 
@@ -973,7 +1212,7 @@ def run_monitor(db):
 
                 log.info(
                     f"  CLOSED {pos.symbol}: {reason}  pnl={pnl*100:+.1f}%  "
-                    f"peak={pos.peak_pnl*100:+.1f}%  bars={pos.bars_held}  regime={regime}"
+                    f"peak={pos.peak_pnl*100:+.1f}%  bars={pos.bars_held}  regime={regime}  exit_bar_ts={exit_ts}"
                 )
 
             if positions:
@@ -1006,6 +1245,11 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
 
     db = init_paper_db()
+
+    if not REMOTE_SIGNAL_URL and not os.path.exists(SENTIMENT_DB):
+        log.error(f"Signal DB not found: {SENTIMENT_DB}")
+        log.error("Set SENTIMENT_DB or ensure data/sentiment_arb.db exists, or configure REMOTE_SIGNAL_URL.")
+        sys.exit(1)
 
     if '--dry-run' in sys.argv:
         dry_run(db)

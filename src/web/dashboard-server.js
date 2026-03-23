@@ -11,12 +11,14 @@ import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
+import ExperimentStore from '../database/experiment-store.js';
 
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+const experimentStore = new ExperimentStore(dbPath);
 
 /**
  * 验证敏感 API 的访问令牌
@@ -954,6 +956,12 @@ function getDashboardData() {
     apiHealth: {
       gmgn: { status: 'unknown', circuitBreaker: false, requestsToday: 0 },
       debot: { status: 'unknown', lastSuccess: null }
+    },
+    autonomy: {
+      enabled: !!global.__autonomySidecar,
+      status: global.__autonomySidecar?.getStatus?.() || null,
+      leaderboard: experimentStore.getLeaderboard(5),
+      premiumEngine: global.__premiumEngine?.getStats?.() || null
     }
   };
 
@@ -1522,6 +1530,15 @@ const server = http.createServer(async (req, res) => {
     const data = getDashboardData();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data, null, 2));
+  } else if (url.pathname === '/api/autonomy-status') {
+    if (!checkAuth(req, url, res)) return;
+    const payload = {
+      autonomy: global.__autonomySidecar?.getStatus?.() || { enabled: false },
+      leaderboard: experimentStore.getLeaderboard(10),
+      recentExperiments: experimentStore.list(10)
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload, null, 2));
   } else if (url.pathname === '/api/module-health') {
     // v7.3 模块健康状态 API
     if (!checkAuth(req, url, res)) return;
@@ -1953,7 +1970,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'Database not available' }));
         return;
       }
-      const tables = ['premium_signals', 'tokens', 'trades', 'live_positions', 'rejected_signals', 'passed_signals', 'hunter_signals', 'signal_source_performance'];
+      const tables = ['premium_signals', 'tokens', 'trades', 'live_positions', 'rejected_signals', 'passed_signals', 'hunter_signals', 'signal_source_performance', 'autonomy_runs', 'strategy_experiments', 'paper_trade_records'];
       const exportData = { exported_at: new Date().toISOString(), tables: {} };
       // 支持分页: ?before_id=X 拉取 id < X 的历史数据
       const beforeId = url.searchParams.get('before_id');
@@ -2388,9 +2405,26 @@ function renderPremiumDashboard() {
  * 启动服务器
  */
 export function startDashboardServer() {
-  server.listen(PORT, () => {
-    console.log(`🌐 Dashboard server running at http://localhost:${PORT}`);
+  server.on('error', (error) => {
+    if (error?.code === 'EADDRINUSE') {
+      console.warn(`⚠️ Dashboard server port ${PORT} already in use, skipping dashboard startup`);
+      return;
+    }
+    console.error(`❌ Dashboard server error: ${error.message}`);
   });
+
+  try {
+    server.listen(PORT, () => {
+      console.log(`🌐 Dashboard server running at http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    if (error?.code === 'EADDRINUSE') {
+      console.warn(`⚠️ Dashboard server port ${PORT} already in use, skipping dashboard startup`);
+      return null;
+    }
+    throw error;
+  }
+
   return server;
 }
 
