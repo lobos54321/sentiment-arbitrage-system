@@ -58,6 +58,9 @@ export class PremiumSignalEngine {
     this._klineApiCooldownUntil = 0;
     this._lastKlineRateLimitLogAt = 0;
     this._klinePriming = new Map();
+    this._klinePrimeCooldownUntil = 0;
+    this._lastKlinePrimeLogAt = 0;
+    this._klinePrimeMinGapMs = parseInt(process.env.KLINE_PRIME_MIN_GAP_MS || '30000', 10);
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -695,68 +698,102 @@ export class PremiumSignalEngine {
     if (this._klineTrackers.has(ca)) return;
 
     // 限制最大同时追踪数，防止 watchList 膨胀
-    if (this._klineTrackers.size >= 50) {
+    if (this._klineTrackers.size >= 30) {
       return;
     }
 
     this.livePriceMonitor.addToken(ca);
-    this._primeKlineCache(ca, symbol).catch((error) => {
-      console.warn(`⚠️ [KlinePrime] $${symbol} 预热失败: ${error.message}`);
-    });
     const timer = setTimeout(() => {
       this.livePriceMonitor.removeToken(ca);
       this._klineTrackers.delete(ca);
-    }, 25 * 60 * 1000); // 25 分钟
+    }, 20 * 60 * 1000); // 20 分钟
 
     this._klineTrackers.set(ca, timer);
-    console.log(`📊 [KlineTrack] $${symbol} 加入临时监控 25min (追踪中: ${this._klineTrackers.size})`);
+    console.log(`📊 [KlineTrack] $${symbol} 加入临时监控 20min (追踪中: ${this._klineTrackers.size})`);
   }
 
   async _primeKlineCache(tokenCA, symbol = tokenCA.substring(0, 8)) {
-    if (this._klinePriming.has(tokenCA)) {
-      return this._klinePriming.get(tokenCA);
+    return false;
+  }
+
+  async _backfillPrebuyKlines(tokenCA, signalTsSec, targetBars = 5) {
+    const existingBefore = this.db.prepare(`
+      SELECT COUNT(*) as cnt
+      FROM kline_1m
+      WHERE token_ca = ? AND timestamp < ?
+    `).get(tokenCA, signalTsSec)?.cnt || 0;
+
+    if (existingBefore >= targetBars) {
+      return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: true, provider: 'local' };
     }
 
-    const primePromise = (async () => {
-      let poolAddress = this._poolCache?.get(tokenCA);
-      if (!poolAddress) {
-        const dexRes = await axios.get(
-          `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
-          { timeout: 5000 }
-        );
-        const pairs = dexRes.data?.pairs;
-        if (!pairs?.length) return false;
+    let poolAddress = this._poolCache?.get(tokenCA) || null;
+    if (!poolAddress) {
+      try {
+        const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`, { timeout: 5000 });
+        const pairs = dexRes.data?.pairs || [];
         const solPairs = pairs.filter(p => p.chainId === 'solana');
         const pool = solPairs?.length
           ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
           : pairs[0];
-        if (!pool?.pairAddress) return false;
-        this._poolCache.set(tokenCA, pool.pairAddress);
-        poolAddress = pool.pairAddress;
+        poolAddress = pool?.pairAddress || null;
+        if (poolAddress) this._poolCache.set(tokenCA, poolAddress);
+      } catch (error) {
+        if (error?.response?.status === 429) {
+          this._klinePrimeCooldownUntil = Date.now() + 120_000;
+        }
+        return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: false, provider: null, reason: error.message };
       }
-
-      const geckoRes = await axios.get(
-        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=6`,
-        { timeout: 5000 }
-      );
-      const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
-      if (!ohlcv?.length) return false;
-
-      const bars = ohlcv.map(row => ({
-        ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
-        low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
-      }));
-      this._saveKlineBars(tokenCA, poolAddress, bars, {});
-      console.log(`📊 [KlinePrime] $${symbol} 预热 ${bars.length} 根1m bars`);
-      return true;
-    })();
-
-    this._klinePriming.set(tokenCA, primePromise);
-    try {
-      return await primePromise;
-    } finally {
-      this._klinePriming.delete(tokenCA);
     }
+
+    if (!poolAddress) {
+      return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: false, provider: null, reason: 'no_pool' };
+    }
+
+    const windows = [signalTsSec + 600, signalTsSec + 3600];
+    const byTs = new Map();
+    const limit = Math.max(20, targetBars * 4);
+
+    for (const windowEnd of windows) {
+      try {
+        const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=${limit}&before_timestamp=${windowEnd}&token=base`;
+        const geckoRes = await axios.get(url, { timeout: 20000 });
+        const list = geckoRes.data?.data?.attributes?.ohlcv_list || [];
+        for (const row of list) {
+          const ts = Number(row[0]);
+          if (!Number.isFinite(ts) || ts >= signalTsSec || byTs.has(ts)) continue;
+          byTs.set(ts, {
+            ts,
+            open: Number(row[1]),
+            high: Number(row[2]),
+            low: Number(row[3]),
+            close: Number(row[4]),
+            volume: Number(row[5])
+          });
+        }
+      } catch (error) {
+        if (error?.response?.status === 429) {
+          this._klineApiCooldownUntil = Date.now() + 120_000;
+          this._klinePrimeCooldownUntil = Date.now() + 120_000;
+          return { fetched: byTs.size, existingBefore, totalBefore: existingBefore + byTs.size, enough: existingBefore + byTs.size >= targetBars, provider: 'geckoterminal', poolAddress, reason: 'rate_limited' };
+        }
+      }
+    }
+
+    const bars = [...byTs.values()].sort((a, b) => a.ts - b.ts);
+    if (bars.length) {
+      this._saveKlineBars(tokenCA, poolAddress, bars, {});
+    }
+
+    const totalBefore = existingBefore + bars.length;
+    return {
+      fetched: bars.length,
+      existingBefore,
+      totalBefore,
+      enough: totalBefore >= targetBars,
+      provider: bars.length ? 'geckoterminal' : null,
+      poolAddress
+    };
   }
 
   async _waitForFreshLocalKlines(tokenCA, minBars = 4, waitMs = 1200) {
@@ -1114,8 +1151,18 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'already_in_position' };
     }
 
-    // K线评分检查（新逻辑）
-    this._trackForKline(ca, signal.symbol);
+    // K线评分检查（先回填信号前 5 根，再判断）
+    const signalTsSec = Math.floor((signal.timestamp || Date.now()) / 1000);
+    const backfillResult = await this._backfillPrebuyKlines(ca, signalTsSec, 5);
+    const prebarsCount = backfillResult.totalBefore || 0;
+    const prebuyEnough = backfillResult.enough === true;
+
+    if (!prebuyEnough) {
+      console.log(`⚠️ [NOT_ATH] $${symbol} pre-buy K线不足: ${prebarsCount}/5${backfillResult.reason ? ` | ${backfillResult.reason}` : ''}`);
+      this.saveSignalRecord(signal, 'INSUFFICIENT_KLINE', null);
+      return { action: 'SKIP', reason: 'insufficient_kline', prebarsCount, backfillResult };
+    }
+
     const klineResult = await this._checkKline(ca, { isATH: false });
     const klineBypassed = !klineResult.passed && (klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip');
     if (!klineResult.passed) {
@@ -1395,9 +1442,9 @@ export class PremiumSignalEngine {
         poolAddress = pool.pairAddress;
       }
 
-      // 5) 获取20根K线（仅在本地缓存不可用时）
+      // 5) 获取6根K线（仅在本地缓存不可用时）
       const geckoRes = await axios.get(
-        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=20`,
+        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=6`,
         { timeout: 5000 }
       );
       const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
@@ -1412,9 +1459,10 @@ export class PremiumSignalEngine {
     } catch (error) {
       const status = error?.response?.status;
       if (status === 429) {
-        this._klineApiCooldownUntil = Date.now() + 60_000;
+        this._klineApiCooldownUntil = Date.now() + 120_000;
+        this._klinePrimeCooldownUntil = Date.now() + 120_000;
         if (!this._lastKlineRateLimitLogAt || Date.now() - this._lastKlineRateLimitLogAt > 15_000) {
-          console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message} | 60s 内复用缓存/跳过外部查询`);
+          console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message} | 120s 内复用缓存/跳过外部查询`);
           this._lastKlineRateLimitLogAt = Date.now();
         }
         return persistKlineResult({ passed: false, reason: 'rate_limited' });
