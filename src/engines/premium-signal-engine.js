@@ -57,6 +57,7 @@ export class PremiumSignalEngine {
     this._klineResultCache = new Map();
     this._klineApiCooldownUntil = 0;
     this._lastKlineRateLimitLogAt = 0;
+    this._klinePriming = new Map();
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -699,6 +700,9 @@ export class PremiumSignalEngine {
     }
 
     this.livePriceMonitor.addToken(ca);
+    this._primeKlineCache(ca, symbol).catch((error) => {
+      console.warn(`⚠️ [KlinePrime] $${symbol} 预热失败: ${error.message}`);
+    });
     const timer = setTimeout(() => {
       this.livePriceMonitor.removeToken(ca);
       this._klineTrackers.delete(ca);
@@ -706,6 +710,78 @@ export class PremiumSignalEngine {
 
     this._klineTrackers.set(ca, timer);
     console.log(`📊 [KlineTrack] $${symbol} 加入临时监控 25min (追踪中: ${this._klineTrackers.size})`);
+  }
+
+  async _primeKlineCache(tokenCA, symbol = tokenCA.substring(0, 8)) {
+    if (this._klinePriming.has(tokenCA)) {
+      return this._klinePriming.get(tokenCA);
+    }
+
+    const primePromise = (async () => {
+      let poolAddress = this._poolCache?.get(tokenCA);
+      if (!poolAddress) {
+        const dexRes = await axios.get(
+          `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
+          { timeout: 5000 }
+        );
+        const pairs = dexRes.data?.pairs;
+        if (!pairs?.length) return false;
+        const solPairs = pairs.filter(p => p.chainId === 'solana');
+        const pool = solPairs?.length
+          ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
+          : pairs[0];
+        if (!pool?.pairAddress) return false;
+        this._poolCache.set(tokenCA, pool.pairAddress);
+        poolAddress = pool.pairAddress;
+      }
+
+      const geckoRes = await axios.get(
+        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=6`,
+        { timeout: 5000 }
+      );
+      const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
+      if (!ohlcv?.length) return false;
+
+      const bars = ohlcv.map(row => ({
+        ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
+        low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
+      }));
+      this._saveKlineBars(tokenCA, poolAddress, bars, {});
+      console.log(`📊 [KlinePrime] $${symbol} 预热 ${bars.length} 根1m bars`);
+      return true;
+    })();
+
+    this._klinePriming.set(tokenCA, primePromise);
+    try {
+      return await primePromise;
+    } finally {
+      this._klinePriming.delete(tokenCA);
+    }
+  }
+
+  async _waitForFreshLocalKlines(tokenCA, minBars = 4, waitMs = 1200) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < waitMs) {
+      try {
+        const rows = this.db.prepare(`
+          SELECT timestamp
+          FROM kline_1m
+          WHERE token_ca = ?
+          ORDER BY timestamp DESC
+          LIMIT ?
+        `).all(tokenCA, minBars);
+        if (rows?.length >= minBars) {
+          const newestTs = Number(rows[0].timestamp || 0);
+          if (Date.now() - newestTs * 1000 < 10 * 60_000) {
+            return true;
+          }
+        }
+      } catch {
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    return false;
   }
 
   recordPaperComparisons(signal) {
@@ -1097,7 +1173,7 @@ export class PremiumSignalEngine {
         const solBalance = await this.jupiterExecutor.getSolBalance();
         const minRequired = finalSize + 0.025;
         if (solBalance < minRequired) {
-          console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过`);
+          console.log(`💤 [LIVE未就绪] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)}，本次仅保留 paper 结果`);
           this.saveSignalRecord(signal, 'PASS', null, false);
           return { action: 'SKIP_INSUFFICIENT_BALANCE', balance: solBalance, required: minRequired };
         }
@@ -1265,12 +1341,43 @@ export class PremiumSignalEngine {
         console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 读取本地缓存失败: ${dbError.message}`);
       }
 
-      // 2) 如果刚被限流过，短时间内不再继续打外部接口
+      // 2) 对新币先等待一次异步预热结果，避免首跳就现场打外部接口
+      if (!isATH && this._klinePriming.has(tokenCA)) {
+        await Promise.race([
+          this._klinePriming.get(tokenCA),
+          new Promise(resolve => setTimeout(resolve, 1200))
+        ]);
+        try {
+          const primedBars = this.db.prepare(`
+            SELECT pool_address, timestamp, open, high, low, close, volume
+            FROM kline_1m
+            WHERE token_ca = ?
+            ORDER BY timestamp DESC
+            LIMIT 20
+          `).all(tokenCA);
+          if (primedBars?.length >= 4) {
+            const bars = primedBars.map(row => ({
+              ts: Number(row.timestamp),
+              open: Number(row.open),
+              high: Number(row.high),
+              low: Number(row.low),
+              close: Number(row.close),
+              volume: Number(row.volume)
+            }));
+            const freshEnough = nowMs - (bars[0].ts * 1000) < 10 * 60_000;
+            if (freshEnough) {
+              return persistKlineResult(scoreBars(bars, primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || ''));
+            }
+          }
+        } catch {}
+      }
+
+      // 3) 如果刚被限流过，短时间内不再继续打外部接口
       if (nowMs < this._klineApiCooldownUntil) {
         return persistKlineResult({ passed: false, reason: 'rate_limited' });
       }
 
-      // 3) 从外部接口获取 pool 地址
+      // 4) 从外部接口获取 pool 地址
       let poolAddress = this._poolCache?.get(tokenCA);
       if (!poolAddress) {
         const dexRes = await axios.get(
@@ -1288,7 +1395,7 @@ export class PremiumSignalEngine {
         poolAddress = pool.pairAddress;
       }
 
-      // 4) 获取20根K线（仅在本地缓存不可用时）
+      // 5) 获取20根K线（仅在本地缓存不可用时）
       const geckoRes = await axios.get(
         `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=20`,
         { timeout: 5000 }
