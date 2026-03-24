@@ -1036,8 +1036,9 @@ export class PremiumSignalEngine {
 
     // K线评分检查（新逻辑）
     const klineResult = await this._checkKline(ca, { isATH: false });
+    const klineBypassed = !klineResult.passed && (klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip');
     if (!klineResult.passed) {
-      if (klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip') {
+      if (klineBypassed) {
         console.log(`⚠️ [NOT_ATH] $${symbol} K线检查暂不可用，跳过K线拦截: ${klineResult.reason}`);
       } else {
         const reasonMap = {
@@ -1059,11 +1060,13 @@ export class PremiumSignalEngine {
     }
 
     // 打印评分详情
-    if (klineResult.score !== undefined) {
+    if (klineBypassed) {
+      console.log(`📊 [NOT_ATH] $${symbol} K线限流/异常，按新币兜底逻辑继续`);
+    } else if (klineResult.score !== undefined) {
       const { score, isRed, lowVolume, isActive, momFromLag1, avgVol3 } = klineResult;
       console.log(`📊 [NOT_ATH] $${symbol} 评分: ${score}分 | RED:${isRed} | lowVol:${lowVolume} | active:${isActive} | mom:${momFromLag1?.toFixed(1) ?? 'N/A'}%`);
     } else {
-      console.log(`📊 [NOT_ATH] $${symbol} 新币逻辑通过 | vol=${klineResult.volume}`);
+      console.log(`📊 [NOT_ATH] $${symbol} 新币逻辑通过`);
     }
 
     // 执行 Shadow Buy

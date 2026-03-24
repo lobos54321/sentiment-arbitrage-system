@@ -183,34 +183,37 @@ export class PremiumChannelListener {
    * Parse a 🔥 New Trending message into a signal object
    */
   _parseSignal(text) {
-    // Extract symbol: 📍 SYMBOL：$xxx (tolerate markdown bold)
-    const symbolMatch = text.match(/📍\s*\*{0,2}\s*SYMBOL\s*\*{0,2}[：:]\s*\$(\S+)/i);
-    const symbol = symbolMatch ? symbolMatch[1] : null;
+    const normalized = text
+      .replace(/\*\*/g, '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\r/g, '');
 
-    // Extract market cap: 🏦 **MC:** 21.83K (tolerate markdown bold)
-    const mcMatch = text.match(/🏦\s*\*{0,2}\s*MC\s*\*{0,2}[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
+    // Extract symbol: 📍 SYMBOL：$xxx
+    const symbolMatch = normalized.match(/📍\s*SYMBOL\s*[：:]\s*\$?([^\s\n]+)/i);
+    const symbol = symbolMatch ? symbolMatch[1].trim() : null;
+
+    // Extract market cap: 🏦 MC: 21.83K
+    const mcMatch = normalized.match(/🏦\s*MC\s*[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
     const market_cap = mcMatch ? this._parseNumber(mcMatch[1], mcMatch[2]) : 0;
 
-    // Extract holders: 👥 **Holders:** 132
-    const holdersMatch = text.match(/👥\s*\*{0,2}\s*Holders\s*\*{0,2}[：:]\s*([\d,]+)/i);
-    const holders = holdersMatch ? parseInt(holdersMatch[1].replace(/,/g, '')) : 0;
+    // Extract holders: 👥 Holders: 132
+    const holdersMatch = normalized.match(/👥\s*Holders\s*[：:]\s*([\d,]+)/i);
+    const holders = holdersMatch ? parseInt(holdersMatch[1].replace(/,/g, ''), 10) : 0;
 
-    // Extract volume 24h: 💰 **Vol24H:** $27.08K
-    const volMatch = text.match(/💰\s*\*{0,2}\s*Vol24H\s*\*{0,2}[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
+    // Extract volume 24h: 💰 Vol24H: $27.08K
+    const volMatch = normalized.match(/💰\s*Vol24H\s*[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
     const volume_24h = volMatch ? this._parseNumber(volMatch[1], volMatch[2]) : 0;
 
-    // Extract top10 percentage: 📊 **Top10:** 22.85%
-    const top10Match = text.match(/📊\s*\*{0,2}\s*Top10\s*\*{0,2}[：:]\s*([\d.]+)%/i);
+    // Extract top10 percentage: 📊 Top10: 22.85%
+    const top10Match = normalized.match(/📊\s*Top10\s*[：:]\s*([\d.]+)%/i);
     const top10_pct = top10Match ? parseFloat(top10Match[1]) : 0;
 
-    // Extract freeze authority: freezeAuthority / **freezeAuthority:** ✅
-    const freeze_ok = /freezeAuthority\*{0,2}\s*[：:]\s*✅/i.test(text) || /\*{0,2}freezeAuthority\*{0,2}\s*[：:]\s*✅/i.test(text);
+    // Extract freeze authority / mint authority flags
+    const freeze_ok = /freezeAuthority\s*[：:]\s*✅/i.test(normalized);
+    const mint_ok = /NoMint\s*[：:]\s*✅/i.test(normalized) || /mintAuthorityDisabled\s*[：:]\s*✅/i.test(normalized);
 
-    // Extract mint authority disabled: NoMint / mintAuthorityDisabled
-    const mint_ok = /NoMint\*{0,2}\s*[：:]\s*✅/i.test(text) || /\*{0,2}NoMint\*{0,2}\s*[：:]\s*✅/i.test(text) || /mintAuthorityDisabled\*{0,2}\s*[：:]\s*✅/i.test(text) || /\*{0,2}mintAuthorityDisabled\*{0,2}\s*[：:]\s*✅/i.test(text);
-
-    // Extract age: 🕒 **Age:** 4M
-    const ageMatch = text.match(/🕒\s*\*{0,2}\s*Age\s*\*{0,2}[：:]\s*(\S+)/i);
+    // Extract age: 🕒 Age: 4M
+    const ageMatch = normalized.match(/🕒\s*Age\s*[：:]\s*(\S+)/i);
     const age = ageMatch ? ageMatch[1] : '';
 
     // Extract Solana contract address
