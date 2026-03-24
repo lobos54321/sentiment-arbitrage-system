@@ -53,6 +53,10 @@ export class PremiumSignalEngine {
     this.shadowTracker = new ShadowPnlTracker();
     this.paperStrategyRegistry = null;
     this.paperTradeRecorder = null;
+    this._poolCache = new Map();
+    this._klineResultCache = new Map();
+    this._klineApiCooldownUntil = 0;
+    this._lastKlineRateLimitLogAt = 0;
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -1035,6 +1039,7 @@ export class PremiumSignalEngine {
     }
 
     // K线评分检查（新逻辑）
+    this._trackForKline(ca, signal.symbol);
     const klineResult = await this._checkKline(ca, { isATH: false });
     const klineBypassed = !klineResult.passed && (klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip');
     if (!klineResult.passed) {
@@ -1165,44 +1170,25 @@ export class PremiumSignalEngine {
    */
   async _checkKline(tokenCA, options = {}) {
     const { isATH = true } = options;
-    try {
-      // 先从缓存获取pool地址
-      let poolAddress = this._poolCache?.get(tokenCA);
-      if (!poolAddress) {
-        const dexRes = await axios.get(
-          `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
-          { timeout: 5000 }
-        );
-        const pairs = dexRes.data?.pairs;
-        if (!pairs?.length) return { passed: false, reason: 'no_pool' };
-        const solPairs = pairs.filter(p => p.chainId === 'solana');
-        const pool = solPairs?.length
-          ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
-          : pairs[0];
-        if (!pool?.pairAddress) return { passed: false, reason: 'no_pool' };
-        this._poolCache = this._poolCache || new Map();
-        this._poolCache.set(tokenCA, pool.pairAddress);
-        poolAddress = pool.pairAddress;
-      }
+    const cacheKey = `${tokenCA}:${isATH ? 'ath' : 'notath'}`;
+    const nowMs = Date.now();
+    const cachedResult = this._klineResultCache.get(cacheKey);
+    if (cachedResult && nowMs - cachedResult.at < 30_000) {
+      return cachedResult.result;
+    }
 
-      // 获取20根K线（足够新币判断，老币计算EMA21）
-      const geckoRes = await axios.get(
-        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=20`,
-        { timeout: 5000 }
-      );
-      const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
-      if (!ohlcv?.length) return { passed: false, reason: 'no_bars' };
+    const persistKlineResult = (result) => {
+      this._klineResultCache.set(cacheKey, { at: nowMs, result });
+      return result;
+    };
 
-      const bars = ohlcv.map(row => ({
-        ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
-        low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
-      }));
+    const scoreBars = (bars, poolAddress = '') => {
+      if (!bars?.length) return { passed: false, reason: 'no_bars' };
 
       const current = bars[0];
       const prev = bars[1] || null;
       const fbr = current.open > 0 ? ((current.close - current.open) / current.open) * 100 : 0;
 
-      // ─── ATH 路径：绿K（简单逻辑不变）──────────────────────────────
       if (isATH) {
         const passed = current.close > current.open;
         this._saveKlineBars(tokenCA, poolAddress, bars, {});
@@ -1210,48 +1196,24 @@ export class PremiumSignalEngine {
                  reason: passed ? 'pass' : 'not_green_bar' };
       }
 
-      // ─── NOT_ATH 路径：新评分逻辑（交叉验证验证）───────────────────
-      // 当前评分（trend+support+vol_inc）有严重问题：82.6% 交易立即触发止损
-      // 原因：选中了即将反转的币（追高），而非继续上涨的币
-      //
-      // 验证结论（129 样本，p=0.95 不显著）：
-      //   RED bar:   WR=33%, EV=+40%  ← 最强信号（回调确认）
-      //   LOW vol:    WR=34%, EV=+35%  ← 量能不高 = 吸筹，非派发
-      //   扩展动量:   WR=50%, EV=+88%  ← 反直觉，但大赢家来自这里
-      //
-      // 新评分设计：
-      //   +2 = RED bar（close < open）  ← 回调确认，必须
-      //   +1 = vol <= avg(prev3)         ← 量能不高
-      //   +1 = |mom_from_lag1| > 20%    ← 活跃币（无论方向）
-      //   阈值：≥2 分执行
-      //
-      // 重要：RED bar 是强信号，但在 ATH 路径里绿 K 是确认
-      //       NOT_ATH 是极新币（分钟级），回调入场是正确逻辑
-
       if (!prev || bars.length < 3) return { passed: false, reason: 'no_history' };
 
       const isRed = current.close < current.open;
       if (!isRed) return { passed: false, reason: 'not_red_bar' };
 
-      const prev3 = bars.slice(1, 4);  // 前3根K线（lag1, lag2, lag3）
-
-      // 维度1：成交量不高（当前量 <= 前3根平均量）= 吸筹而非FOMO
+      const prev3 = bars.slice(1, 4);
       const avgVol3 = prev3.reduce((sum, b) => sum + b.volume, 0) / 3;
       const lowVolume = current.volume <= avgVol3;
-
-      // 维度2：活跃度 |mom| > 30%（从lag1到当前的变化幅度）
-      // 验证结果：动量大的币 WR=50%, EV=+88% — 反直觉但大赢家来自这里
       const momFromLag1 = prev3[0].close > 0
         ? ((current.close - prev3[0].close) / prev3[0].close) * 100
         : 0;
       const isActive = Math.abs(momFromLag1) > 30;
 
-      // 综合评分
-      let score = 2;  // RED bar 基础 +2
+      let score = 2;
       if (lowVolume) score += 1;
       if (isActive) score += 1;
 
-      const passed = score >= 3;  // 需要 3+ 分（RED + 至少一个条件）
+      const passed = score >= 3;
 
       let reason;
       if (passed) {
@@ -1264,7 +1226,6 @@ export class PremiumSignalEngine {
         reason = 'inactive';
       }
 
-      // 保存K线数据供回测用
       this._saveKlineBars(tokenCA, poolAddress, bars, {
         score, isRed, lowVolume, isActive,
         momFromLag1, avgVol3
@@ -1274,14 +1235,85 @@ export class PremiumSignalEngine {
                volume: current.volume, reason, score,
                isRed, lowVolume, isActive,
                momFromLag1, avgVol3 };
+    };
+
+    try {
+      // 1) 优先尝试本地 K 线缓存，避免重复打外部接口
+      try {
+        const cachedBars = this.db.prepare(`
+          SELECT pool_address, timestamp, open, high, low, close, volume
+          FROM kline_1m
+          WHERE token_ca = ?
+          ORDER BY timestamp DESC
+          LIMIT 20
+        `).all(tokenCA);
+        if (cachedBars?.length >= (isATH ? 1 : 4)) {
+          const bars = cachedBars.map(row => ({
+            ts: Number(row.timestamp),
+            open: Number(row.open),
+            high: Number(row.high),
+            low: Number(row.low),
+            close: Number(row.close),
+            volume: Number(row.volume)
+          }));
+          const freshEnough = nowMs - (bars[0].ts * 1000) < 10 * 60_000;
+          if (freshEnough) {
+            return persistKlineResult(scoreBars(bars, cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || ''));
+          }
+        }
+      } catch (dbError) {
+        console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 读取本地缓存失败: ${dbError.message}`);
+      }
+
+      // 2) 如果刚被限流过，短时间内不再继续打外部接口
+      if (nowMs < this._klineApiCooldownUntil) {
+        return persistKlineResult({ passed: false, reason: 'rate_limited' });
+      }
+
+      // 3) 从外部接口获取 pool 地址
+      let poolAddress = this._poolCache?.get(tokenCA);
+      if (!poolAddress) {
+        const dexRes = await axios.get(
+          `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
+          { timeout: 5000 }
+        );
+        const pairs = dexRes.data?.pairs;
+        if (!pairs?.length) return persistKlineResult({ passed: false, reason: 'no_pool' });
+        const solPairs = pairs.filter(p => p.chainId === 'solana');
+        const pool = solPairs?.length
+          ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
+          : pairs[0];
+        if (!pool?.pairAddress) return persistKlineResult({ passed: false, reason: 'no_pool' });
+        this._poolCache.set(tokenCA, pool.pairAddress);
+        poolAddress = pool.pairAddress;
+      }
+
+      // 4) 获取20根K线（仅在本地缓存不可用时）
+      const geckoRes = await axios.get(
+        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=20`,
+        { timeout: 5000 }
+      );
+      const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
+      if (!ohlcv?.length) return persistKlineResult({ passed: false, reason: 'no_bars' });
+
+      const bars = ohlcv.map(row => ({
+        ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
+        low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
+      }));
+
+      return persistKlineResult(scoreBars(bars, poolAddress));
     } catch (error) {
       const status = error?.response?.status;
       if (status === 429) {
-        console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message}`);
-        return { passed: false, reason: 'rate_limited' };
+        this._klineApiCooldownUntil = Date.now() + 60_000;
+        if (!this._lastKlineRateLimitLogAt || Date.now() - this._lastKlineRateLimitLogAt > 15_000) {
+          console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message} | 60s 内复用缓存/跳过外部查询`);
+          this._lastKlineRateLimitLogAt = Date.now();
+        }
+        return persistKlineResult({ passed: false, reason: 'rate_limited' });
       }
       console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
-      return { passed: false, reason: 'error_skip' };
+      return persistKlineResult({ passed: false, reason: 'error_skip' });
     }
   }
 
