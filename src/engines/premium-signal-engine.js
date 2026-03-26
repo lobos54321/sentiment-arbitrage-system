@@ -26,6 +26,7 @@ import { generatePremiumBuyPrompt } from '../prompts/premium-signal-prompts.js';
 import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
 import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
 import { RiskManager } from '../risk/risk-manager.js';
+import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
 import axios from 'axios';
 
 export class PremiumSignalEngine {
@@ -53,6 +54,7 @@ export class PremiumSignalEngine {
     this.shadowTracker = new ShadowPnlTracker();
     this.paperStrategyRegistry = null;
     this.paperTradeRecorder = null;
+    this.marketDataBackfill = new MarketDataBackfillService();
     this._poolCache = new Map();
     this._klineResultCache = new Map();
     this._klineApiCooldownUntil = 0;
@@ -717,17 +719,39 @@ export class PremiumSignalEngine {
   }
 
   async _backfillPrebuyKlines(tokenCA, signalTsSec, targetBars = 5) {
-    const existingBefore = this.db.prepare(`
-      SELECT COUNT(*) as cnt
-      FROM kline_1m
-      WHERE token_ca = ? AND timestamp < ?
-    `).get(tokenCA, signalTsSec)?.cnt || 0;
+    const existingBefore = this.marketDataBackfill.getBarsBefore(tokenCA, signalTsSec, targetBars).length;
 
     if (existingBefore >= targetBars) {
       return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: true, provider: 'local' };
     }
 
-    let poolAddress = this._poolCache?.get(tokenCA) || null;
+    const lookbackStart = signalTsSec - Math.max(targetBars * 60, 30 * 60);
+    const heliusResult = await this.marketDataBackfill.backfillWindow({
+      tokenCa: tokenCA,
+      signalTsSec,
+      startTs: lookbackStart,
+      endTs: signalTsSec - 60,
+      minBars: targetBars
+    });
+    const heliusBarsBefore = this.marketDataBackfill.getBarsBefore(tokenCA, signalTsSec, Math.max(targetBars, 60)).length;
+
+    if (heliusBarsBefore >= targetBars) {
+      if (heliusResult.poolAddress) {
+        this._poolCache.set(tokenCA, heliusResult.poolAddress);
+      }
+      console.log(`📊 [HeliusBackfill] ${tokenCA.substring(0, 8)} sigs=${heliusResult.signaturesFetched} txs=${heliusResult.transactionsFetched} trades=${heliusResult.tradesInserted} bars=${heliusResult.barsWritten} cacheHit=${heliusResult.cacheHit}`);
+      return {
+        fetched: Math.max(0, heliusBarsBefore - existingBefore),
+        existingBefore,
+        totalBefore: heliusBarsBefore,
+        enough: true,
+        provider: 'helius',
+        poolAddress: heliusResult.poolAddress || null,
+        metrics: heliusResult
+      };
+    }
+
+    let poolAddress = heliusResult.poolAddress || this._poolCache?.get(tokenCA) || null;
     if (!poolAddress) {
       try {
         const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`, { timeout: 5000 });
@@ -742,12 +766,12 @@ export class PremiumSignalEngine {
         if (error?.response?.status === 429) {
           this._klinePrimeCooldownUntil = Date.now() + 120_000;
         }
-        return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: false, provider: null, reason: error.message };
+        return { fetched: 0, existingBefore, totalBefore: heliusBarsBefore, enough: false, provider: heliusResult.provider || null, reason: error.message };
       }
     }
 
     if (!poolAddress) {
-      return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: false, provider: null, reason: 'no_pool' };
+      return { fetched: 0, existingBefore, totalBefore: heliusBarsBefore, enough: false, provider: heliusResult.provider || null, reason: heliusResult.error || 'no_pool' };
     }
 
     const windows = [signalTsSec + 600, signalTsSec + 3600];
@@ -775,7 +799,7 @@ export class PremiumSignalEngine {
         if (error?.response?.status === 429) {
           this._klineApiCooldownUntil = Date.now() + 120_000;
           this._klinePrimeCooldownUntil = Date.now() + 120_000;
-          return { fetched: byTs.size, existingBefore, totalBefore: existingBefore + byTs.size, enough: existingBefore + byTs.size >= targetBars, provider: 'geckoterminal', poolAddress, reason: 'rate_limited' };
+          return { fetched: byTs.size, existingBefore, totalBefore: heliusBarsBefore + byTs.size, enough: heliusBarsBefore + byTs.size >= targetBars, provider: 'geckoterminal', poolAddress, reason: 'rate_limited' };
         }
       }
     }
@@ -785,14 +809,15 @@ export class PremiumSignalEngine {
       this._saveKlineBars(tokenCA, poolAddress, bars, {});
     }
 
-    const totalBefore = existingBefore + bars.length;
+    const totalBefore = heliusBarsBefore + bars.length;
     return {
-      fetched: bars.length,
+      fetched: Math.max(0, totalBefore - existingBefore),
       existingBefore,
       totalBefore,
       enough: totalBefore >= targetBars,
-      provider: bars.length ? 'geckoterminal' : null,
-      poolAddress
+      provider: bars.length ? 'geckoterminal' : heliusResult.provider,
+      poolAddress,
+      metrics: heliusResult
     };
   }
 
@@ -1095,6 +1120,7 @@ export class PremiumSignalEngine {
    * 停止引擎
    */
   async stop() {
+    try { this.marketDataBackfill?.close(); } catch {}
     if (this._solMarketCheckInterval) {
       clearInterval(this._solMarketCheckInterval);
       this._solMarketCheckInterval = null;
