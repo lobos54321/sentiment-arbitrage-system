@@ -89,7 +89,13 @@ export const autonomyConfig = {
     incrementalOverlapMinutes: parseInt(process.env.HELIUS_INCREMENTAL_OVERLAP_MINUTES || '15', 10),
     trackedSignalLookbackHours: parseInt(process.env.HELIUS_TRACKED_SIGNAL_LOOKBACK_HOURS || '72', 10),
     trackedSignalLimit: parseInt(process.env.HELIUS_TRACKED_SIGNAL_LIMIT || '40', 10),
-    openTradeLimit: parseInt(process.env.HELIUS_OPEN_TRADE_LIMIT || '20', 10)
+    openTradeLimit: parseInt(process.env.HELIUS_OPEN_TRADE_LIMIT || '20', 10),
+    stage3SignalWindowMinutes: parseInt(process.env.HELIUS_STAGE3_SIGNAL_WINDOW_MINUTES || '30', 10),
+    stage3LongContinuationMinutes: parseInt(process.env.HELIUS_STAGE3_LONG_CONTINUATION_MINUTES || '720', 10),
+    stage3PriorityPassBonus: parseInt(process.env.HELIUS_STAGE3_PRIORITY_PASS_BONUS || '30', 10),
+    stage3PriorityGreylistBonus: parseInt(process.env.HELIUS_STAGE3_PRIORITY_GREYLIST_BONUS || '15', 10),
+    stage3PriorityOpenTradeBonus: parseInt(process.env.HELIUS_STAGE3_PRIORITY_OPEN_TRADE_BONUS || '40', 10),
+    stage3PriorityRecentCursorPenalty: parseInt(process.env.HELIUS_STAGE3_PRIORITY_RECENT_CURSOR_PENALTY || '20', 10)
   }
 };
 
