@@ -1,5 +1,10 @@
 import { fetchWithRetry } from '../utils/fetch-with-retry.js';
 
+function normalizePoolAddress(poolAddress) {
+  if (!poolAddress) return null;
+  return String(poolAddress).replace(/^solana_/, '').trim() || null;
+}
+
 export class PoolResolver {
   constructor({ repository, timeoutMs = 15000 } = {}) {
     this.repository = repository;
@@ -7,44 +12,117 @@ export class PoolResolver {
     this.memoryCache = new Map();
   }
 
+  #remember(tokenCa, poolAddress, provider) {
+    const normalizedPoolAddress = normalizePoolAddress(poolAddress);
+    if (!tokenCa || !normalizedPoolAddress) return null;
+    const result = { poolAddress: normalizedPoolAddress, provider, error: null };
+    this.memoryCache.set(tokenCa, result);
+    if (provider && provider !== 'memory') {
+      this.repository?.upsertPoolMapping(tokenCa, normalizedPoolAddress, provider);
+    }
+    return result;
+  }
+
+  async #fetchGeckoTerminalPool(tokenCa) {
+    const response = await fetchWithRetry(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${tokenCa}/pools?page=1`, {
+      source: 'GECKOTERMINAL',
+      timeout: this.timeoutMs,
+      maxRetries: 2,
+      initialDelay: 2500,
+      maxDelay: 20000,
+      silent: true,
+      headers: { accept: 'application/json' }
+    });
+
+    if (response?.error) {
+      return { poolAddress: null, provider: null, error: response.error };
+    }
+
+    const pool = response?.data?.[0] || null;
+    const poolAddress = normalizePoolAddress(pool?.attributes?.address || pool?.id);
+    if (!poolAddress) {
+      return { poolAddress: null, provider: null, error: 'no_pool' };
+    }
+
+    return this.#remember(tokenCa, poolAddress, 'geckoterminal');
+  }
+
+  async #fetchDexScreenerPool(tokenCa) {
+    const response = await fetchWithRetry(`https://api.dexscreener.com/latest/dex/tokens/${tokenCa}`, {
+      source: 'DEXSCREENER',
+      timeout: this.timeoutMs,
+      maxRetries: 3,
+      initialDelay: 1000,
+      silent: true,
+      headers: { accept: 'application/json' }
+    });
+
+    if (response?.error) {
+      return { poolAddress: null, provider: null, error: response.error };
+    }
+
+    const pairs = response?.pairs || [];
+    const solPairs = pairs.filter((pair) => pair.chainId === 'solana');
+    const bestPair = (solPairs.length ? solPairs : pairs)
+      .sort((a, b) => (Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0)))[0] || null;
+
+    if (!bestPair?.pairAddress) {
+      return { poolAddress: null, provider: null, error: 'no_pool' };
+    }
+
+    return this.#remember(tokenCa, bestPair.pairAddress, 'dexscreener');
+  }
+
   async resolvePool(tokenCa) {
     if (!tokenCa) {
       return { poolAddress: null, provider: null, error: 'missing_token' };
     }
 
-    const cached = this.memoryCache.get(tokenCa) || this.repository?.getPoolMapping(tokenCa);
-    if (cached?.pool_address || cached?.poolAddress) {
-      const poolAddress = cached.pool_address || cached.poolAddress;
-      this.memoryCache.set(tokenCa, { poolAddress, provider: cached.provider || 'cache' });
-      return { poolAddress, provider: cached.provider || 'cache', error: null };
+    const memoryHit = this.memoryCache.get(tokenCa);
+    if (memoryHit?.poolAddress) {
+      return { poolAddress: memoryHit.poolAddress, provider: 'memory', error: null };
+    }
+
+    const mapped = this.repository?.getPoolMapping(tokenCa);
+    const mappedPool = normalizePoolAddress(mapped?.pool_address || mapped?.poolAddress);
+    if (mappedPool) {
+      return this.#remember(tokenCa, mappedPool, mapped.provider || 'pool_mapping');
+    }
+
+    const cursorHint = this.repository?.getLatestCursorPoolHint(tokenCa);
+    const cursorPool = normalizePoolAddress(cursorHint?.pool_address);
+    if (cursorPool) {
+      return this.#remember(tokenCa, cursorPool, 'cursor');
+    }
+
+    const tradeHint = this.repository?.getLikelyTradePoolHint(tokenCa);
+    const tradePool = normalizePoolAddress(tradeHint?.pool_address);
+    if (tradePool) {
+      return this.#remember(tokenCa, tradePool, 'helius_trades');
+    }
+
+    const klineHint = this.repository?.getLatestKlinePoolHint(tokenCa);
+    const klinePool = normalizePoolAddress(klineHint?.pool_address);
+    if (klinePool) {
+      return this.#remember(tokenCa, klinePool, 'kline_1m');
     }
 
     try {
-      const response = await fetchWithRetry(`https://api.dexscreener.com/latest/dex/tokens/${tokenCa}`, {
-        source: 'DEXSCREENER',
-        timeout: this.timeoutMs,
-        maxRetries: 3,
-        initialDelay: 1000,
-        silent: true,
-        headers: { accept: 'application/json' }
-      });
-      if (response?.error) {
-        return { poolAddress: null, provider: null, error: response.error };
+      const geckoResult = await this.#fetchGeckoTerminalPool(tokenCa);
+      if (geckoResult.poolAddress) {
+        return geckoResult;
       }
 
-      const pairs = response?.pairs || [];
-      const solPairs = pairs.filter((pair) => pair.chainId === 'solana');
-      const bestPair = (solPairs.length ? solPairs : pairs)
-        .sort((a, b) => (Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0)))[0] || null;
-
-      if (!bestPair?.pairAddress) {
-        return { poolAddress: null, provider: null, error: 'no_pool' };
+      const dexResult = await this.#fetchDexScreenerPool(tokenCa);
+      if (dexResult.poolAddress) {
+        return dexResult;
       }
 
-      const result = { poolAddress: bestPair.pairAddress, provider: 'dexscreener', error: null };
-      this.memoryCache.set(tokenCa, result);
-      this.repository?.upsertPoolMapping(tokenCa, bestPair.pairAddress, result.provider);
-      return result;
+      return {
+        poolAddress: null,
+        provider: null,
+        error: dexResult.error || geckoResult.error || 'no_pool'
+      };
     } catch (error) {
       return { poolAddress: null, provider: null, error: error.message };
     }

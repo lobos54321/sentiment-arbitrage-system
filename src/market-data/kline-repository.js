@@ -108,6 +108,44 @@ export class KlineRepository {
     return this.db.prepare(`SELECT token_ca, pool_address, provider, fetched_at FROM pool_mapping WHERE token_ca = ?`).get(tokenCa) || null;
   }
 
+  getLatestCursorPoolHint(tokenCa) {
+    return this.db.prepare(`
+      SELECT token_ca, pool_address, status, error, newest_block_time, oldest_block_time, last_backfill_at
+      FROM history_backfill_cursor
+      WHERE token_ca = ?
+        AND pool_address IS NOT NULL
+        AND TRIM(pool_address) != ''
+      ORDER BY COALESCE(newest_block_time, last_backfill_at, oldest_block_time, 0) DESC, COALESCE(last_backfill_at, 0) DESC
+      LIMIT 1
+    `).get(tokenCa) || null;
+  }
+
+  getLikelyTradePoolHint(tokenCa) {
+    return this.db.prepare(`
+      SELECT token_ca, pool_address, COUNT(*) AS trade_count, MAX(block_time) AS latest_block_time
+      FROM helius_trades
+      WHERE token_ca = ?
+        AND pool_address IS NOT NULL
+        AND TRIM(pool_address) != ''
+      GROUP BY token_ca, pool_address
+      ORDER BY COALESCE(latest_block_time, 0) DESC, trade_count DESC, pool_address ASC
+      LIMIT 1
+    `).get(tokenCa) || null;
+  }
+
+  getLatestKlinePoolHint(tokenCa) {
+    return this.db.prepare(`
+      SELECT token_ca, pool_address, provider, COUNT(*) AS bar_count, MAX(timestamp) AS latest_timestamp
+      FROM kline_1m
+      WHERE token_ca = ?
+        AND pool_address IS NOT NULL
+        AND TRIM(pool_address) != ''
+      GROUP BY token_ca, pool_address, provider
+      ORDER BY COALESCE(latest_timestamp, 0) DESC, bar_count DESC, pool_address ASC
+      LIMIT 1
+    `).get(tokenCa) || null;
+  }
+
   upsertPoolMapping(tokenCa, poolAddress, provider = 'unknown') {
     this.upsertPoolStmt.run(tokenCa, poolAddress, provider, Math.floor(Date.now() / 1000));
   }

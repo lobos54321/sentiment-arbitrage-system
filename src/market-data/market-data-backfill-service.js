@@ -57,11 +57,15 @@ export class MarketDataBackfillService {
       };
     }
 
-    const resolvedPool = poolAddress || (await this.poolResolver.resolvePool(tokenCa)).poolAddress;
+    const resolverResult = poolAddress
+      ? { poolAddress, provider: 'input', error: null }
+      : await this.poolResolver.resolvePool(tokenCa);
+    const resolvedPool = resolverResult.poolAddress;
     if (!resolvedPool) {
       return {
         provider: null,
         poolAddress: null,
+        poolProvider: resolverResult.provider || null,
         bars: beforeBars,
         tradesInserted: 0,
         barsWritten: 0,
@@ -133,6 +137,7 @@ export class MarketDataBackfillService {
       return {
         provider: null,
         poolAddress: resolvedPool,
+        poolProvider: resolverResult.provider || null,
         bars: beforeBars,
         tradesInserted: 0,
         barsWritten: 0,
@@ -144,15 +149,27 @@ export class MarketDataBackfillService {
     }
 
     const insertedTrades = this.repository.upsertTrades(normalizedTrades);
-    const relevantTrades = this.repository.getTrades(tokenCa, targetStartTs, targetEndTs, resolvedPool).map((trade) => ({
+    const allStoredTrades = this.repository.getTrades(tokenCa, oldestBlockTime || 0, newestBlockTime || targetEndTs, resolvedPool).map((trade) => ({
       ...trade,
       blockTime: Number(trade.block_time),
       price: Number(trade.price),
       volume: Number(trade.volume)
     }));
+    const relevantTrades = allStoredTrades.filter((trade) => trade.blockTime >= targetStartTs && trade.blockTime <= targetEndTs);
     const bars = BarAggregator.aggregateToMinuteBars(relevantTrades)
       .filter((bar) => bar.timestamp >= targetStartTs && bar.timestamp <= targetEndTs);
     const barsWritten = this.repository.upsertBars(tokenCa, resolvedPool, bars, 'helius');
+    const inWindowNormalizedTrades = normalizedTrades.filter((trade) => trade.blockTime >= targetStartTs && trade.blockTime <= targetEndTs);
+    const allBarsInFetchedRange = BarAggregator.aggregateToMinuteBars(allStoredTrades);
+    const heliusBarError = bars.length
+      ? null
+      : normalizedTrades.length === 0
+        ? 'no_helius_trades'
+        : inWindowNormalizedTrades.length === 0
+          ? 'helius_trades_outside_window'
+          : allBarsInFetchedRange.length === 0
+            ? 'helius_trades_unusable'
+            : 'no_helius_bars';
     this.repository.upsertPoolMapping(tokenCa, resolvedPool, 'helius');
     this.repository.updateCursor({
       poolAddress: resolvedPool,
@@ -162,19 +179,20 @@ export class MarketDataBackfillService {
       oldestBlockTime,
       newestBlockTime,
       status: 'ok',
-      error: null
+      error: heliusBarError
     });
 
     return {
       provider: bars.length ? 'helius' : null,
       poolAddress: resolvedPool,
+      poolProvider: resolverResult.provider || null,
       bars: this.repository.getBars(tokenCa, targetStartTs, targetEndTs),
       tradesInserted: insertedTrades,
       barsWritten,
       signaturesFetched,
       transactionsFetched,
       cacheHit: false,
-      error: bars.length ? null : 'no_helius_bars'
+      error: heliusBarError
     };
   }
 

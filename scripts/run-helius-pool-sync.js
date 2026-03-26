@@ -122,6 +122,63 @@ function deriveWindow(signal) {
   };
 }
 
+function createResolverSummary() {
+  return {
+    memory: 0,
+    pool_mapping: 0,
+    cursor: 0,
+    helius_trades: 0,
+    kline_1m: 0,
+    geckoterminal: 0,
+    dexscreener: 0,
+    input: 0,
+    unresolved: 0,
+    other: 0
+  };
+}
+
+function incrementResolverSource(summary, provider) {
+  if (!provider) {
+    summary.unresolved += 1;
+    return;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(summary, provider)) {
+    summary[provider] += 1;
+    return;
+  }
+
+  summary.other += 1;
+}
+
+function summarizeReadiness(results = []) {
+  const processedOpenTrades = results.filter((item) => item.source === 'open_trade').length;
+  const openTradeNoPool = results.filter((item) => item.source === 'open_trade' && item.error === 'no_pool').length;
+  const processedCandidates = results.length;
+  const unresolvedNoPool = results.filter((item) => item.error === 'no_pool').length;
+
+  const openTradeNoPoolRate = processedOpenTrades ? openTradeNoPool / processedOpenTrades : 0;
+  const unresolvedNoPoolRate = processedCandidates ? unresolvedNoPool / processedCandidates : 0;
+
+  return {
+    syncCoverage: {
+      processedOpenTrades,
+      openTradeNoPool,
+      openTradeNoPoolRate,
+      threshold: 0.05,
+      ready: processedOpenTrades > 0 ? openTradeNoPoolRate <= 0.05 : false
+    },
+    candidateCoverage: {
+      processedCandidates,
+      unresolvedNoPool,
+      unresolvedNoPoolRate,
+      threshold: 0.1,
+      ready: processedCandidates > 0 ? unresolvedNoPoolRate <= 0.1 : false
+    },
+    nextStep: 'Run `HELIUS_API_KEY=... node scripts/run-paper-eval-pipeline.js --covered-only` and confirm covered dataset ratio >= 0.80 plus baseline covered BUY count >= 30 before resuming the prior Stage 3 backtest.'
+  };
+}
+
 async function main() {
   if (!process.env.HELIUS_API_KEY) {
     throw new Error('HELIUS_API_KEY is required');
@@ -136,6 +193,7 @@ async function main() {
     fallbackNeeded: 0,
     totalTradesInserted: 0,
     totalBarsWritten: 0,
+    resolverSources: createResolverSummary(),
     results: []
   };
 
@@ -153,6 +211,7 @@ async function main() {
     summary.processed += 1;
     summary.totalTradesInserted += Number(result.tradesInserted || 0);
     summary.totalBarsWritten += Number(result.barsWritten || 0);
+    incrementResolverSource(summary.resolverSources, result.poolProvider || null);
     if (result.provider === 'helius') {
       summary.heliusWins += 1;
     } else {
@@ -171,6 +230,7 @@ async function main() {
       stage3Start,
       stage3End,
       provider: result.provider,
+      poolProvider: result.poolProvider || null,
       poolAddress: result.poolAddress || null,
       bars: result.bars?.length || 0,
       signaturesFetched: result.signaturesFetched || 0,
@@ -182,6 +242,7 @@ async function main() {
   }
 
   summary.repositoryStats = service.repository.getStats();
+  summary.readiness = summarizeReadiness(summary.results);
   summary.completedAt = new Date().toISOString();
   console.log(JSON.stringify(summary, null, 2));
 }

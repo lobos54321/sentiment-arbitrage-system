@@ -308,6 +308,10 @@ export class PremiumChannelListener {
    *   → { value: 128 }
    */
   _parseIndices(text) {
+    const normalized = String(text || '')
+      .replace(/\*\*/g, '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\r/g, '');
     const indices = {};
     const indexNames = [
       ['super_index',     'Super Index'],
@@ -325,7 +329,7 @@ export class PremiumChannelListener {
 
       // ATH delta format: Label：(signal)116🔮 --> (current)124🔮
       const reDelta = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
-      const mDelta = text.match(reDelta);
+      const mDelta = normalized.match(reDelta);
       if (mDelta) {
         const signalVal = parseInt(mDelta[1]);
         const currentVal = parseInt(mDelta[2]);
@@ -337,9 +341,9 @@ export class PremiumChannelListener {
         continue;
       }
 
-      // Trending single-value format: Label： 128🔮  (no (signal)/(current))
-      const reSingle = new RegExp(escaped + '[：:]\\s*(\\d+)\\s*🔮', 'i');
-      const mSingle = text.match(reSingle);
+      // Trending single-value format: Label： 128🔮 or Label： 0 (no (signal)/(current), emoji optional)
+      const reSingle = new RegExp(escaped + '[：:]\\s*(\\d+)\\s*(?:🔮)?', 'i');
+      const mSingle = normalized.match(reSingle);
       if (mSingle) {
         indices[key] = { value: parseInt(mSingle[1]) };
         continue;
@@ -348,7 +352,7 @@ export class PremiumChannelListener {
       // NOT_ATH format: Label： ✡ x 82  or  Label：✡ x 82 (x separator, no emoji suffix)
       // Pattern: "✡ x NUMBER" or "✡x NUMBER" after the label
       const reXSep = new RegExp(escaped + '[：:]\\s*✡\\s*x\\s*(\\d+)', 'i');
-      const mXSep = text.match(reXSep);
+      const mXSep = normalized.match(reXSep);
       if (mXSep) {
         indices[key] = { value: parseInt(mXSep[1]) };
       }

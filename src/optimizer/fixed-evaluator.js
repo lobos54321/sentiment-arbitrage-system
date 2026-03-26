@@ -424,7 +424,18 @@ export class FixedEvaluator {
     }
 
     cached = this.getCachedKlines(tokenCa, signalTsSec, lookaheadBars);
-    return { provider: fetched.provider, poolId: fetched.poolId, bars: cached, error: fetched.error || heliusResult.error || null };
+    return {
+      provider: fetched.provider,
+      poolId: fetched.poolId,
+      bars: cached,
+      error: heliusResult.error || fetched.error || null,
+      diagnostics: {
+        heliusError: heliusResult.error || null,
+        fallbackError: fetched.error || null,
+        heliusProvider: heliusResult.provider || null,
+        fallbackProvider: fetched.provider || null
+      }
+    };
   }
 
   async evaluateCandidate(candidate, baseline = this.registry.getBaseline(), options = {}) {
