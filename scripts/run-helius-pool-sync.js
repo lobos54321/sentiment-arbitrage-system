@@ -55,6 +55,32 @@ function scoreSignal(signal, recentCursorMap) {
   return priorityScore;
 }
 
+function loadOpenTrades() {
+  const params = [autonomyConfig.helius.openTradeLimit];
+
+  try {
+    return db.prepare(`
+      SELECT token_ca, symbol, timestamp, status, pool_address
+      FROM trades
+      WHERE token_ca IS NOT NULL AND status = 'OPEN'
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(...params);
+  } catch (error) {
+    if (!/no such column:\s*pool_address/i.test(String(error?.message || ''))) {
+      return [];
+    }
+  }
+
+  return safeQuery(`
+    SELECT token_ca, symbol, timestamp, status
+    FROM trades
+    WHERE token_ca IS NOT NULL AND status = 'OPEN'
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `, params);
+}
+
 function loadTrackedSignals() {
   const signalLimit = autonomyConfig.helius.trackedSignalLimit;
   const lookbackTs = nowSec() - (autonomyConfig.helius.trackedSignalLookbackHours * 3600);
@@ -73,13 +99,7 @@ function loadTrackedSignals() {
     priorityScore: 0
   }));
 
-  const openTrades = safeQuery(`
-    SELECT token_ca, symbol, timestamp, status
-    FROM trades
-    WHERE token_ca IS NOT NULL AND status = 'OPEN'
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `, [autonomyConfig.helius.openTradeLimit]).map((row) => ({
+  const openTrades = loadOpenTrades().map((row) => ({
     ...row,
     hard_gate_status: 'OPEN_TRADE',
     ai_action: 'OPEN',
@@ -205,7 +225,8 @@ async function main() {
       signalTsSec,
       startTs,
       endTs,
-      minBars: 3
+      minBars: 3,
+      poolAddress: signal.pool_address || null
     });
 
     summary.processed += 1;

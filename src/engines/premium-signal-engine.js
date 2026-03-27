@@ -267,6 +267,7 @@ export class PremiumSignalEngine {
         exit_reason TEXT,
         gmgn_tx_hash TEXT,
         gmgn_order_id TEXT,
+        pool_address TEXT,
         timestamp INTEGER,
         symbol TEXT,
         narrative TEXT,
@@ -288,6 +289,7 @@ export class PremiumSignalEngine {
     addCol('trades', 'is_simulation', 'INTEGER DEFAULT 1');
     addCol('trades', 'entry_time', 'INTEGER');
     addCol('trades', 'entry_price', 'REAL');
+    addCol('trades', 'pool_address', 'TEXT');
 
     // K线评分数据表
     this.db.exec(`
@@ -930,15 +932,17 @@ export class PremiumSignalEngine {
       `).run(signal.token_ca, signal.symbol || null, Math.floor(Date.now() / 1000), signal.market_cap || null);
 
       const now = Date.now();
+      const poolAddress = signal.pool_address || this._poolCache?.get(signal.token_ca) || null;
       this.db.prepare(`
         INSERT INTO trades (
-          token_ca, chain, action, position_size, entry_time, entry_price, timestamp,
+          token_ca, chain, action, position_size, entry_time, entry_price, pool_address, timestamp,
           symbol, narrative, rating, status, is_simulation
-        ) VALUES (?, 'SOL', 'BUY', ?, ?, 0, ?, ?, ?, ?, 'OPEN', 1)
+        ) VALUES (?, 'SOL', 'BUY', ?, ?, 0, ?, ?, ?, ?, ?, 'OPEN', 1)
       `).run(
         signal.token_ca,
         positionSize,
         Math.floor(now / 1000),  // entry_time (seconds)
+        poolAddress,
         now,                      // timestamp (milliseconds)
         signal.symbol || null,
         aiResult.narrative_reason || null,

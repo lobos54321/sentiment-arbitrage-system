@@ -394,10 +394,11 @@ export class GMGNTelegramExecutor {
           tokens_received,
           actual_slippage,
           tx_hash,
+          pool_address,
           timestamp,
           status,
           is_simulation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
       `);
 
       const info = stmt.run(
@@ -414,6 +415,7 @@ export class GMGNTelegramExecutor {
         tradeData.tokens_received || null,
         tradeData.actual_slippage || null,
         tradeData.tx_hash,
+        tradeData.pool_address || null,
         Date.now(),
         tradeData.is_simulation ? 1 : 0
       );

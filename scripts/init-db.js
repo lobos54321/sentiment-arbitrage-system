@@ -157,6 +157,7 @@ db.exec(`
     -- GMGN specific
     gmgn_tx_hash TEXT,
     gmgn_order_id TEXT,
+    pool_address TEXT,
 
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
