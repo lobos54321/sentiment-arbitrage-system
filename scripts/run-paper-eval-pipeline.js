@@ -116,7 +116,8 @@ if (!candidate) {
 }
 
 const evaluator = new FixedEvaluator(autonomyConfig);
-const datasetLimit = parseInt(process.env.AUTONOMY_EVAL_DATASET_LIMIT || '1000', 10);
+const datasetLimitRaw = process.env.AUTONOMY_EVAL_DATASET_LIMIT || limit;
+const datasetLimit = parseInt(datasetLimitRaw, 10);
 const cacheOnly = process.env.AUTONOMY_CACHE_ONLY_EVAL === 'true';
 const evaluation = await evaluator.evaluateCandidate(candidate, registry.getBaseline(), { coveredOnly, datasetLimit, cacheOnly });
 evaluator.close();

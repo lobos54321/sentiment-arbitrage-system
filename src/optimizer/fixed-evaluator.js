@@ -445,6 +445,7 @@ export class FixedEvaluator {
     const dataset = datasetLimit > 0 ? fullDataset.slice(0, datasetLimit) : fullDataset;
     const candidateResults = [];
     const baselineResults = [];
+    const progressEvery = Math.max(1, Number(process.env.AUTONOMY_EVAL_PROGRESS_EVERY || 25));
     let sourceMentions = 0;
     let coveredDatasetSize = 0;
     let uncoveredDatasetSize = 0;
@@ -455,8 +456,16 @@ export class FixedEvaluator {
     let candidateCoveredBuyCount = 0;
     let baselineUncoveredBuyCount = 0;
     let candidateUncoveredBuyCount = 0;
+    const coverageErrorBreakdown = {};
+    const heliusErrorBreakdown = {};
+    const fallbackErrorBreakdown = {};
 
-    for (const signal of dataset) {
+    for (let index = 0; index < dataset.length; index += 1) {
+      const signal = dataset[index];
+      if ((index + 1) % progressEvery === 0 || index === 0 || index === dataset.length - 1) {
+        console.log(`[eval] processing ${index + 1}/${dataset.length} ${signal?.symbol || signal?.token_ca || signal?.tokenCa || 'unknown'}`);
+      }
+
       const normalizedSignal = {
         ...signal,
         token_ca: signal.token_ca || signal.tokenCa,
@@ -472,6 +481,12 @@ export class FixedEvaluator {
         coveredDatasetSize += 1;
       } else {
         uncoveredDatasetSize += 1;
+        const errorKey = String(klineData.error || 'unknown');
+        coverageErrorBreakdown[errorKey] = (coverageErrorBreakdown[errorKey] || 0) + 1;
+        const heliusErrorKey = String(klineData.diagnostics?.heliusError || 'none');
+        heliusErrorBreakdown[heliusErrorKey] = (heliusErrorBreakdown[heliusErrorKey] || 0) + 1;
+        const fallbackErrorKey = String(klineData.diagnostics?.fallbackError || 'none');
+        fallbackErrorBreakdown[fallbackErrorKey] = (fallbackErrorBreakdown[fallbackErrorKey] || 0) + 1;
       }
 
       if (coveredOnly && !hasCoverage) {
@@ -523,7 +538,10 @@ export class FixedEvaluator {
         baselineUncoveredBuyCount,
         candidateUncoveredBuyCount,
         baselineSimulatedSampleSize: baselineMetrics.sampleSize,
-        candidateSimulatedSampleSize: candidateMetrics.sampleSize
+        candidateSimulatedSampleSize: candidateMetrics.sampleSize,
+        errorBreakdown: coverageErrorBreakdown,
+        heliusErrorBreakdown,
+        fallbackErrorBreakdown
       },
       baselineMetrics,
       candidateMetrics
