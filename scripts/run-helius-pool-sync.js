@@ -55,14 +55,42 @@ function scoreSignal(signal, recentCursorMap) {
   return priorityScore;
 }
 
-function loadOpenTrades() {
-  const params = [autonomyConfig.helius.openTradeLimit];
+function loadOpenTrades(limit = autonomyConfig.helius.openTradeLimit) {
+  const params = [limit];
 
   try {
     return db.prepare(`
       SELECT token_ca, symbol, timestamp, status, pool_address
       FROM trades
       WHERE token_ca IS NOT NULL AND status = 'OPEN'
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(...params);
+  } catch (error) {
+    if (!/no such column:\s*pool_address/i.test(String(error?.message || ''))) {
+      return [];
+    }
+  }
+
+  return safeQuery(`
+    SELECT token_ca, symbol, timestamp, status
+    FROM trades
+    WHERE token_ca IS NOT NULL AND status = 'OPEN'
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `, params);
+}
+
+function loadOpenTradesMissingPool(limit = 1000000) {
+  const params = [limit];
+
+  try {
+    return db.prepare(`
+      SELECT token_ca, symbol, timestamp, status, pool_address
+      FROM trades
+      WHERE token_ca IS NOT NULL
+        AND status = 'OPEN'
+        AND (pool_address IS NULL OR TRIM(pool_address) = '')
       ORDER BY timestamp DESC
       LIMIT ?
     `).all(...params);
@@ -125,6 +153,28 @@ function loadTrackedSignals() {
 
   return uniqByToken(combined)
     .sort((a, b) => Number(b.priorityScore || 0) - Number(a.priorityScore || 0));
+}
+
+function lookupKnownTradePoolAddress(tokenCa) {
+  if (!tokenCa) return null;
+
+  try {
+    const row = db.prepare(`
+      SELECT pool_address
+      FROM trades
+      WHERE token_ca = ?
+        AND pool_address IS NOT NULL
+        AND TRIM(pool_address) != ''
+      ORDER BY updated_at DESC, created_at DESC, timestamp DESC
+      LIMIT 1
+    `).get(tokenCa);
+    return row?.pool_address || null;
+  } catch (error) {
+    if (/no such column:\s*pool_address/i.test(String(error?.message || ''))) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function persistOpenTradePoolAddress(tokenCa, poolAddress) {
@@ -218,9 +268,78 @@ function summarizeReadiness(results = []) {
   };
 }
 
+async function runOpenTradePoolBackfill() {
+  const openTrades = uniqByToken(loadOpenTradesMissingPool()).map((row) => ({
+    ...row,
+    hard_gate_status: 'OPEN_TRADE',
+    ai_action: 'OPEN',
+    source: 'open_trade'
+  }));
+
+  const summary = {
+    startedAt: new Date().toISOString(),
+    mode: 'open_trade_pool_backfill',
+    totalOpenTradeTokens: openTrades.length,
+    processed: 0,
+    backfilledTrades: 0,
+    resolvedPools: 0,
+    unresolvedNoPool: 0,
+    resolverSources: createResolverSummary(),
+    results: []
+  };
+
+  for (const signal of openTrades) {
+    const tokenCa = signal.token_ca;
+    const { signalTsSec, startTs, endTs } = deriveWindow(signal);
+    const knownPoolAddress = signal.pool_address || lookupKnownTradePoolAddress(tokenCa) || null;
+    const result = await service.backfillWindow({
+      tokenCa,
+      signalTsSec,
+      startTs,
+      endTs,
+      minBars: 1,
+      poolAddress: knownPoolAddress
+    });
+
+    const poolAddressBackfilled = result.poolAddress
+      ? persistOpenTradePoolAddress(tokenCa, result.poolAddress)
+      : 0;
+
+    summary.processed += 1;
+    summary.backfilledTrades += Number(poolAddressBackfilled || 0);
+    summary.resolvedPools += result.poolAddress ? 1 : 0;
+    if (result.error === 'no_pool') {
+      summary.unresolvedNoPool += 1;
+    }
+    incrementResolverSource(summary.resolverSources, result.poolProvider || null);
+
+    summary.results.push({
+      tokenCa,
+      symbol: signal.symbol || null,
+      provider: result.provider,
+      poolProvider: result.poolProvider || null,
+      poolAddress: result.poolAddress || null,
+      poolAddressBackfilled,
+      signaturesFetched: result.signaturesFetched || 0,
+      transactionsFetched: result.transactionsFetched || 0,
+      tradesInserted: result.tradesInserted || 0,
+      barsWritten: result.barsWritten || 0,
+      error: result.error || null
+    });
+  }
+
+  summary.completedAt = new Date().toISOString();
+  console.log(JSON.stringify(summary, null, 2));
+}
+
 async function main() {
   if (!process.env.HELIUS_API_KEY) {
     throw new Error('HELIUS_API_KEY is required');
+  }
+
+  if (process.argv.includes('--backfill-open-trade-pools')) {
+    await runOpenTradePoolBackfill();
+    return;
   }
 
   const trackedSignals = loadTrackedSignals().slice(0, autonomyConfig.helius.incrementalMaxPoolsPerRun);
@@ -239,13 +358,14 @@ async function main() {
   for (const signal of trackedSignals) {
     const tokenCa = signal.token_ca;
     const { signalTsSec, startTs, endTs, stage3Start, stage3End } = deriveWindow(signal);
+    const resolvedPoolAddress = signal.pool_address || lookupKnownTradePoolAddress(tokenCa) || null;
     const result = await service.backfillWindow({
       tokenCa,
       signalTsSec,
       startTs,
       endTs,
       minBars: 3,
-      poolAddress: signal.pool_address || null
+      poolAddress: resolvedPoolAddress
     });
 
     const poolAddressBackfilled = signal.source === 'open_trade' && !signal.pool_address && result.poolAddress
