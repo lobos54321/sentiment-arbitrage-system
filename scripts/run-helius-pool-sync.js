@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import autonomyConfig from '../src/config/autonomy-config.js';
 import { MarketDataBackfillService } from '../src/market-data/market-data-backfill-service.js';
 
-const db = new Database(autonomyConfig.dbPath, { readonly: true });
+const db = new Database(autonomyConfig.dbPath);
 const service = new MarketDataBackfillService(autonomyConfig);
 
 function nowSec() {
@@ -127,6 +127,25 @@ function loadTrackedSignals() {
     .sort((a, b) => Number(b.priorityScore || 0) - Number(a.priorityScore || 0));
 }
 
+function persistOpenTradePoolAddress(tokenCa, poolAddress) {
+  if (!tokenCa || !poolAddress) return 0;
+
+  try {
+    return db.prepare(`
+      UPDATE trades
+      SET pool_address = ?
+      WHERE status = 'OPEN'
+        AND token_ca = ?
+        AND (pool_address IS NULL OR TRIM(pool_address) = '')
+    `).run(poolAddress, tokenCa).changes;
+  } catch (error) {
+    if (/no such column:\s*pool_address/i.test(String(error?.message || ''))) {
+      return 0;
+    }
+    throw error;
+  }
+}
+
 function deriveWindow(signal) {
   const signalTsSec = Math.floor(Number(signal.timestamp || Date.now()) / 1000);
   const overlap = autonomyConfig.helius.incrementalOverlapMinutes * 60;
@@ -229,6 +248,10 @@ async function main() {
       poolAddress: signal.pool_address || null
     });
 
+    const poolAddressBackfilled = signal.source === 'open_trade' && !signal.pool_address && result.poolAddress
+      ? persistOpenTradePoolAddress(tokenCa, result.poolAddress)
+      : 0;
+
     summary.processed += 1;
     summary.totalTradesInserted += Number(result.tradesInserted || 0);
     summary.totalBarsWritten += Number(result.barsWritten || 0);
@@ -258,6 +281,7 @@ async function main() {
       transactionsFetched: result.transactionsFetched || 0,
       tradesInserted: result.tradesInserted || 0,
       barsWritten: result.barsWritten || 0,
+      poolAddressBackfilled,
       error: result.error || null
     });
   }
