@@ -1,24 +1,35 @@
 #!/usr/bin/env node
 import fs from 'fs';
-import os from 'os';
-import { spawnSync } from 'child_process';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import StrategyResearchMemoryStore from '../src/database/strategy-research-memory-store.js';
 import autonomyConfig from '../src/config/autonomy-config.js';
 
-const ROOT = '/Users/boliu/sentiment-arbitrage-system';
+const ROOT = autonomyConfig.projectRoot;
 const syncScript = path.join(ROOT, 'scripts', 'sync-remote-premium-logs.js');
 const heliusPoolSyncScript = path.join(ROOT, 'scripts', 'run-helius-pool-sync.js');
-const pipelineScript = path.join(ROOT, 'scripts', 'run-paper-eval-pipeline.js');
-const memoryScript = path.join(ROOT, 'scripts', 'record-strategy-research-memory.js');
 
 function runStep(label, args, extraEnv = {}) {
-  console.log(`\n=== ${label} ===`);
-  return spawnSync('node', args, {
+  const result = spawnSync('node', args, {
     cwd: ROOT,
-    stdio: 'inherit',
     env: { ...process.env, ...extraEnv },
+    encoding: 'utf8'
   });
+
+  let parsed = null;
+  const stdout = String(result.stdout || '').trim();
+  try {
+    parsed = stdout ? JSON.parse(stdout) : null;
+  } catch {}
+
+  return {
+    step: label,
+    ok: result.status === 0,
+    code: result.status,
+    stdout,
+    stderr: String(result.stderr || '').trim(),
+    output: parsed
+  };
 }
 
 function loadMemoryContext() {
@@ -50,49 +61,57 @@ function main() {
     throw new Error('DASHBOARD_TOKEN is required');
   }
 
-  const coveredOnly = process.env.AUTONOMY_COVERED_ONLY_EVAL === 'true';
-  const pipelineArgs = coveredOnly ? [pipelineScript, '--covered-only'] : [pipelineScript];
-  const pipelineLabel = coveredOnly ? 'Run covered-only paper pipeline' : 'Run deep-research paper pipeline';
-
   const memoryContext = loadMemoryContext();
-  console.log(`\n=== Loaded memory context (${memoryContext.total || memoryContext.highlights?.length || 0} entries) ===`);
-  if (memoryContext.backlog?.length) {
-    console.log(JSON.stringify({ backlog: memoryContext.backlog.slice(0, 5) }, null, 2));
-  }
+  const summary = {
+    startedAt: new Date().toISOString(),
+    memoryHighlights: memoryContext.total || memoryContext.highlights?.length || 0,
+    steps: []
+  };
 
-  const syncResult = runStep('Sync remote premium logs', [syncScript]);
-  if (syncResult.status !== 0) {
-    console.warn('\n[remote-log-paper-loop] Sync failed, falling back to cached remote-runtime.log');
-  }
+  const syncResult = runStep('sync-remote-premium-logs', [syncScript]);
+  summary.steps.push(syncResult);
+  const remoteSync = syncResult.output || {};
+  const hasRemoteChanges = Boolean((remoteSync.inserted || 0) > 0 || (remoteSync.updated || 0) > 0);
 
+  let heliusResult = null;
   if (process.env.HELIUS_API_KEY && process.env.AUTONOMY_SKIP_HELIUS_INCREMENTAL_SYNC !== 'true') {
-    const heliusSyncResult = runStep('Run Helius incremental pool sync', [heliusPoolSyncScript]);
-    if (heliusSyncResult.status !== 0) {
-      console.warn('\n[remote-log-paper-loop] Helius incremental sync failed, continuing with existing cache/fallback coverage');
-    }
+    heliusResult = runStep('run-helius-pool-sync', [heliusPoolSyncScript]);
+    summary.steps.push(heliusResult);
   }
 
-  const pipelineOutputPath = path.join(os.tmpdir(), `paper-eval-${Date.now()}.json`);
-  try {
-    const pipelineResult = runStep(pipelineLabel, pipelineArgs, {
-      AUTONOMY_SKIP_EXPORT_SYNC: 'true',
-      AUTONOMY_EVAL_OUTPUT_PATH: pipelineOutputPath
-    });
-    if (pipelineResult.status !== 0) {
-      throw new Error(`${pipelineLabel} failed with exit code ${pipelineResult.status}`);
-    }
+  summary.remoteSync = {
+    ok: syncResult.ok,
+    parserVersion: remoteSync.parserVersion || null,
+    downloadedBytes: remoteSync.downloadedBytes || 0,
+    parsedSignals: remoteSync.parsedSignals || 0,
+    inserted: remoteSync.inserted || 0,
+    updated: remoteSync.updated || 0,
+    skipped: remoteSync.skipped || 0,
+    latest: remoteSync.latest || null,
+    changed: hasRemoteChanges,
+    reasonCode: hasRemoteChanges ? 'remote_logs_changed' : 'remote_logs_unchanged'
+  };
 
-    if (!fs.existsSync(pipelineOutputPath)) {
-      throw new Error(`Pipeline evaluation output not found: ${pipelineOutputPath}`);
-    }
+  summary.marketSync = heliusResult ? {
+    ok: heliusResult.ok,
+    readiness: heliusResult.output?.readiness || null,
+    processed: heliusResult.output?.processed || 0,
+    trackedCandidates: heliusResult.output?.trackedCandidates || 0,
+    reasonCode: heliusResult.ok ? 'market_sync_completed' : 'market_sync_failed'
+  } : {
+    skipped: true,
+    reasonCode: process.env.AUTONOMY_SKIP_HELIUS_INCREMENTAL_SYNC === 'true' ? 'market_sync_skipped_env' : 'market_sync_skipped_no_helius'
+  };
 
-    const memoryResult = runStep('Record strategy research memory', [memoryScript, '--from-json', pipelineOutputPath]);
-    if (memoryResult.status !== 0) {
-      throw new Error(`Record strategy research memory failed with exit code ${memoryResult.status}`);
-    }
-  } finally {
-    try { fs.unlinkSync(pipelineOutputPath); } catch {}
-  }
+  summary.machine = {
+    hasRemoteChanges,
+    shouldRunPaperEval: hasRemoteChanges,
+    nextEventType: hasRemoteChanges ? 'paper_eval_requested' : 'remote_logs_unchanged',
+    reasonCode: hasRemoteChanges ? 'new_remote_input_detected' : 'no_new_remote_input'
+  };
+  summary.completedAt = new Date().toISOString();
+
+  console.log(JSON.stringify(summary, null, 2));
 }
 
 try {

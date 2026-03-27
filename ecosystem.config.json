@@ -1,22 +1,47 @@
 {
-    "apps": [
-        {
-            "name": "sentiment-arbitrage",
-            "script": "src/index.js",
-            "cwd": "/Users/boliu/sentiment-arbitrage-system",
-            "interpreter": "node",
-            "env": {
-                "NODE_ENV": "production"
-            },
-            "watch": false,
-            "max_memory_restart": "1G",
-            "error_file": "./logs/pm2-error.log",
-            "out_file": "./logs/pm2-out.log",
-            "merge_logs": true,
-            "log_date_format": "YYYY-MM-DD HH:mm:ss",
-            "restart_delay": 5000,
-            "max_restarts": 10,
-            "autorestart": true
-        }
-    ]
+  "apps": [
+    {
+      "name": "sentiment-arbitrage",
+      "script": "src/index.js",
+      "cwd": "/Users/boliu/sentiment-arbitrage-system",
+      "interpreter": "node",
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "watch": false,
+      "max_memory_restart": "1G",
+      "error_file": "./logs/pm2-error.log",
+      "out_file": "./logs/pm2-out.log",
+      "merge_logs": true,
+      "log_date_format": "YYYY-MM-DD HH:mm:ss",
+      "restart_delay": 5000,
+      "max_restarts": 10,
+      "autorestart": true
+    },
+    {
+      "name": "autonomy-daemon",
+      "script": "scripts/run-autonomy-daemon.js",
+      "cwd": "/Users/boliu/sentiment-arbitrage-system",
+      "interpreter": "node",
+      "env": {
+        "NODE_ENV": "production",
+        "AUTONOMY_SKIP_EXPORT_SYNC": "true",
+        "AUTONOMY_SKIP_INSPECT_KLINE_COVERAGE": "true",
+        "AUTONOMY_SKIP_BACKFILL": "true",
+        "AUTONOMY_COVERED_ONLY_EVAL": "false",
+        "AUTONOMY_CACHE_ONLY_EVAL": "true",
+        "AUTONOMY_EVAL_DATASET_LIMIT": "1000",
+        "AUTONOMY_DEEP_EVAL_DATASET_LIMIT": "1000"
+      },
+      "watch": false,
+      "max_memory_restart": "1G",
+      "error_file": "./logs/autonomy-daemon-pm2-error.log",
+      "out_file": "./logs/autonomy-daemon-pm2-out.log",
+      "merge_logs": true,
+      "log_date_format": "YYYY-MM-DD HH:mm:ss",
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "autorestart": true
+    }
+  ]
 }

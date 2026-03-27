@@ -226,19 +226,53 @@ export class PaperStrategyRegistry {
     this.registry.history.push({
       action: 'register',
       candidateId: validated.id,
+      status: validated.status,
       createdAt: new Date().toISOString()
     });
     await this.save();
     return validated;
   }
 
-  async setChallenger(candidateId) {
-    if (!this.registry.candidates[candidateId]) {
+  async markCandidateStatus(candidateId, status, metadata = {}) {
+    const candidate = this.registry.candidates[candidateId];
+    if (!candidate) {
       throw new Error(`Unknown candidate: ${candidateId}`);
     }
-    this.registry.activeChallengerId = candidateId;
-    this.registry.history.push({ action: 'set_challenger', candidateId, createdAt: new Date().toISOString() });
+    candidate.status = status;
+    if (status === 'qualified' && !candidate.qualifiedAt) {
+      candidate.qualifiedAt = new Date().toISOString();
+    }
+    if (status === 'active_challenger') {
+      candidate.activatedAt = new Date().toISOString();
+    }
+    if (status === 'paused_target_reached') {
+      candidate.pausedAt = new Date().toISOString();
+    }
+    this.registry.history.push({ action: 'mark_status', candidateId, status, metadata, createdAt: new Date().toISOString() });
     await this.save();
+    return candidate;
+  }
+
+  async setChallenger(candidateId, reason = 'qualified_candidate') {
+    const candidate = this.registry.candidates[candidateId];
+    if (!candidate) {
+      throw new Error(`Unknown candidate: ${candidateId}`);
+    }
+    if (!['qualified', 'promotable', 'active_challenger'].includes(candidate.status)) {
+      throw new Error(`Candidate ${candidateId} must be qualified/promotable before activation (current=${candidate.status})`);
+    }
+    if (this.registry.activeChallengerId && this.registry.activeChallengerId !== candidateId) {
+      const previous = this.registry.candidates[this.registry.activeChallengerId];
+      if (previous && previous.status === 'active_challenger') {
+        previous.status = 'qualified';
+      }
+    }
+    candidate.status = 'active_challenger';
+    candidate.activatedAt = new Date().toISOString();
+    this.registry.activeChallengerId = candidateId;
+    this.registry.history.push({ action: 'set_challenger', candidateId, reason, createdAt: new Date().toISOString() });
+    await this.save();
+    return candidate;
   }
 
   async promote(candidateId, reason = 'guardrail_passed') {
@@ -246,6 +280,7 @@ export class PaperStrategyRegistry {
     if (!candidate) throw new Error(`Unknown candidate: ${candidateId}`);
 
     candidate.status = 'promoted';
+    candidate.promotedAt = new Date().toISOString();
     this.registry.activeBaselineId = candidateId;
     this.registry.activeChallengerId = null;
     if (!this.registry.promotedIds.includes(candidateId)) {
@@ -262,6 +297,7 @@ export class PaperStrategyRegistry {
     }
     this.registry.activeBaselineId = targetId;
     this.registry.activeChallengerId = null;
+    this.registry.candidates[targetId].status = 'promoted';
     this.registry.history.push({ action: 'rollback', candidateId: targetId, reason, createdAt: new Date().toISOString() });
     await this.save();
     return this.registry.candidates[targetId];

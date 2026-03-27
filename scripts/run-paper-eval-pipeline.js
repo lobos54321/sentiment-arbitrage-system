@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'fs';
+import crypto from 'crypto';
 import path from 'path';
 import { spawn } from 'child_process';
 import autonomyConfig from '../src/config/autonomy-config.js';
@@ -21,6 +22,39 @@ function runNodeScript(scriptPath, args = [], extraEnv = {}) {
     child.on('close', (code) => resolve({ ok: code === 0, code, stdout, stderr }));
     child.on('error', (error) => resolve({ ok: false, code: null, stdout, stderr: `${stderr}\n${error.message}`.trim() }));
   });
+}
+
+function hashObject(input) {
+  return crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+}
+
+function determineReadiness({ evaluation, coveredDatasetRatio, baselineCoveredBuyCount }) {
+  const coverageReady = coveredDatasetRatio >= 0.8;
+  const baselineBuysReady = baselineCoveredBuyCount >= 30;
+  return {
+    evaluatorCoverage: {
+      coveredDatasetRatio,
+      threshold: 0.8,
+      ready: coverageReady
+    },
+    baselineCoveredBuys: {
+      count: baselineCoveredBuyCount,
+      threshold: 30,
+      ready: baselineBuysReady
+    },
+    stage3BacktestReady: coverageReady && baselineBuysReady,
+    guidance: 'Resume Stage 3 only after evaluator coverage and baseline covered BUY thresholds are both green.'
+  };
+}
+
+function determineReasonCode({ readiness, comparisonScore, candidateMetrics }) {
+  if (!readiness.evaluatorCoverage.ready || !readiness.baselineCoveredBuys.ready) {
+    return 'coverage_gap_detected';
+  }
+  if (comparisonScore > 0 && Number(candidateMetrics.expectancy || 0) > 0) {
+    return 'promotion_review_ready';
+  }
+  return 'research_gap_detected';
 }
 
 const args = process.argv.slice(2);
@@ -65,6 +99,10 @@ if (skipBackfill) {
   if (!backfillResult.ok) {
     result.steps.push({ step: 'evaluation-skipped', reason: 'backfill_failed' });
     result.completedAt = new Date().toISOString();
+    result.machine = {
+      reasonCode: 'market_sync_failed',
+      nextEventType: 'market_sync_requested'
+    };
     console.log(JSON.stringify(result, null, 2));
     process.exit(1);
   }
@@ -84,23 +122,41 @@ const evaluation = await evaluator.evaluateCandidate(candidate, registry.getBase
 evaluator.close();
 const coveredDatasetRatio = evaluation.datasetSize ? evaluation.coverage.coveredDatasetSize / evaluation.datasetSize : 0;
 const baselineCoveredBuyCount = Number(evaluation.coverage.baselineCoveredBuyCount || 0);
+const errorBreakdownEntries = Object.entries(evaluation.coverage.errorBreakdown || {}).sort((a, b) => b[1] - a[1]);
+const heliusBreakdownEntries = Object.entries(evaluation.coverage.heliusErrorBreakdown || {}).sort((a, b) => b[1] - a[1]);
+const fallbackBreakdownEntries = Object.entries(evaluation.coverage.fallbackErrorBreakdown || {}).sort((a, b) => b[1] - a[1]);
+const readiness = determineReadiness({ evaluation, coveredDatasetRatio, baselineCoveredBuyCount });
+const comparisonScore = Number(evaluation.candidateMetrics?.comparisonToBaseline || 0);
+const datasetFingerprint = hashObject({
+  candidateId: candidate.id,
+  datasetLimit,
+  coveredOnly,
+  cacheOnly,
+  coverage: evaluation.coverage,
+  baselineMetrics: evaluation.baselineMetrics,
+  candidateMetrics: evaluation.candidateMetrics
+});
+const reasonCode = determineReasonCode({ readiness, comparisonScore, candidateMetrics: evaluation.candidateMetrics });
+
 result.evaluation = { candidateId: candidate.id, coveredOnly, datasetLimit, cacheOnly, ...evaluation };
 result.diagnostics = {
-  note: 'When Helius backfill misses and Gecko/Dex fallback also fails, evaluation.error now preserves the Helius root cause while diagnostics expose both Helius and fallback errors at the per-signal level.'
+  note: 'Helius and fallback coverage errors are preserved for machine-driven event branching.',
+  errorBreakdownSummary: errorBreakdownEntries,
+  heliusErrorBreakdownSummary: heliusBreakdownEntries,
+  fallbackErrorBreakdownSummary: fallbackBreakdownEntries,
+  topBlockingCategory: errorBreakdownEntries[0] || null
 };
-result.readiness = {
-  evaluatorCoverage: {
-    coveredDatasetRatio,
-    threshold: 0.8,
-    ready: coveredDatasetRatio >= 0.8
-  },
-  baselineCoveredBuys: {
-    count: baselineCoveredBuyCount,
-    threshold: 30,
-    ready: baselineCoveredBuyCount >= 30
-  },
-  stage3BacktestReady: coveredDatasetRatio >= 0.8 && baselineCoveredBuyCount >= 30,
-  guidance: 'Resume the prior Stage 3 backtest only when both evaluator thresholds are met and sync readiness from run-helius-pool-sync is also green.'
+result.readiness = readiness;
+result.machine = {
+  datasetFingerprint,
+  readinessChanged: true,
+  reasonCode,
+  nextEventType: reasonCode,
+  comparisonScore,
+  candidateId: candidate.id,
+  coverageGapDetected: reasonCode === 'coverage_gap_detected',
+  researchGapDetected: reasonCode === 'research_gap_detected',
+  promotionReviewReady: reasonCode === 'promotion_review_ready'
 };
 result.completedAt = new Date().toISOString();
 

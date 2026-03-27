@@ -58,6 +58,28 @@ export const autonomyConfig = {
     maxTailLoss95: parseFloat(process.env.AUTONOMY_MAX_TAIL_LOSS95 || '45'),
     maxFalsePositiveRate: parseFloat(process.env.AUTONOMY_MAX_FALSE_POSITIVE_RATE || '0.65')
   },
+  eventQueue: {
+    leaseMs: parseInt(process.env.AUTONOMY_EVENT_LEASE_MS || `${20 * 60 * 1000}`, 10),
+    idleSleepMs: parseInt(process.env.AUTONOMY_EVENT_IDLE_SLEEP_MS || '15000', 10),
+    maintenanceSweepMs: parseInt(process.env.AUTONOMY_EVENT_MAINTENANCE_SWEEP_MS || `${10 * 60 * 1000}`, 10),
+    retryBaseMs: parseInt(process.env.AUTONOMY_EVENT_RETRY_BASE_MS || `${5 * 60 * 1000}`, 10),
+    retryMaxMs: parseInt(process.env.AUTONOMY_EVENT_RETRY_MAX_MS || `${2 * 60 * 60 * 1000}`, 10),
+    maxAttempts: parseInt(process.env.AUTONOMY_EVENT_MAX_ATTEMPTS || '5', 10)
+  },
+  promotion: {
+    minFreshWindows: parseInt(process.env.AUTONOMY_PROMOTION_MIN_FRESH_WINDOWS || '2', 10),
+    challengerActivationMinScore: parseFloat(process.env.AUTONOMY_CHALLENGER_ACTIVATION_MIN_SCORE || '0'),
+    promotableMinScore: parseFloat(process.env.AUTONOMY_PROMOTABLE_MIN_SCORE || '0.02'),
+    promotableMinExpectancy: parseFloat(process.env.AUTONOMY_PROMOTABLE_MIN_EXPECTANCY || '0.02'),
+    promotableMinWinRate: parseFloat(process.env.AUTONOMY_PROMOTABLE_MIN_WIN_RATE || '0.4')
+  },
+  pauseTargets: {
+    consecutiveHitsRequired: parseInt(process.env.AUTONOMY_PAUSE_TARGET_CONSECUTIVE_HITS || '2', 10),
+    minExpectancy: parseFloat(process.env.AUTONOMY_PAUSE_TARGET_EXPECTANCY || '0.04'),
+    minWinRate: parseFloat(process.env.AUTONOMY_PAUSE_TARGET_WIN_RATE || '0.48'),
+    maxFalsePositiveRate: parseFloat(process.env.AUTONOMY_PAUSE_TARGET_FALSE_POSITIVE_RATE || '0.4'),
+    minSampleSize: parseInt(process.env.AUTONOMY_PAUSE_TARGET_MIN_SAMPLE_SIZE || '40', 10)
+  },
   octopus: {
     timeoutMs: parseInt(process.env.OCTOPUS_TIMEOUT_MS || '120000', 10),
     maxRetries: parseInt(process.env.OCTOPUS_MAX_RETRIES || '1', 10),
@@ -105,6 +127,9 @@ export function getAutonomyConfig(overrides = {}) {
     ...overrides,
     flags: { ...autonomyConfig.flags, ...(overrides.flags || {}) },
     guardrails: { ...autonomyConfig.guardrails, ...(overrides.guardrails || {}) },
+    eventQueue: { ...autonomyConfig.eventQueue, ...(overrides.eventQueue || {}) },
+    promotion: { ...autonomyConfig.promotion, ...(overrides.promotion || {}) },
+    pauseTargets: { ...autonomyConfig.pauseTargets, ...(overrides.pauseTargets || {}) },
     octopus: { ...autonomyConfig.octopus, ...(overrides.octopus || {}) },
     evaluator: { ...autonomyConfig.evaluator, ...(overrides.evaluator || {}) },
     helius: { ...autonomyConfig.helius, ...(overrides.helius || {}) }
