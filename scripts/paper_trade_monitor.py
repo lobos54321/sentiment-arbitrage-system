@@ -1384,12 +1384,20 @@ def run_monitor(db):
             cycle_low_super = 0
             cycle_no_pool = 0
             cycle_queued = 0
+            cycle_old = 0
             for sig in new_signals:
                 token_ca = sig['token_ca']
                 last_signal_id = sig['id']
                 signal_ts = sig['timestamp']
                 lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
                 cycle_seen += 1
+
+                # Skip signals older than PENDING_TTL_SECONDS — they can never find
+                # their signal bar in GeckoTerminal's recent window anyway.
+                signal_ts_sec = signal_ts // 1000 if signal_ts > 1e12 else signal_ts
+                if now - signal_ts_sec > PENDING_TTL_SECONDS:
+                    cycle_old += 1
+                    continue
 
                 if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
                     cycle_dup += 1
@@ -1448,7 +1456,7 @@ def run_monitor(db):
                 time.sleep(0.2)
 
             if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
-                log.info(f"Signal cycle: seen={cycle_seen} dup={cycle_dup} low_super={cycle_low_super} no_pool={cycle_no_pool} queued={cycle_queued} pending={len(pending_entries)}")
+                log.info(f"Signal cycle: seen={cycle_seen} old={cycle_old} dup={cycle_dup} low_super={cycle_low_super} no_pool={cycle_no_pool} queued={cycle_queued} pending={len(pending_entries)}")
                 last_signal_cycle_log = now
         except Exception as e:
             log.error(f"Signal check error: {e}")
