@@ -1343,7 +1343,6 @@ def run_monitor(db):
         log.warning(f"  premium_signals has no rows from {freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process")
 
     positions = {}
-    pending_entries = {}
     lifecycles = restore_lifecycles(db)
 
     open_rows = db.execute("""
@@ -1439,7 +1438,7 @@ def run_monitor(db):
                     cycle_old += 1
                     continue
 
-                if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
+                if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()):
                     cycle_dup += 1
                     continue
 
@@ -1458,25 +1457,41 @@ def run_monitor(db):
                     cycle_low_super += 1
                     continue
 
-                pool = get_pool_address(token_ca)
-                if not pool:
-                    log.warning(f"  Could not find pool for {symbol} (super={super_idx}), skipping")
+                # Enter immediately at current Jupiter price — no queue, no GeckoTerminal bar lookup
+                price = get_jupiter_price(token_ca)
+                if not price or price <= 0:
+                    log.warning(f"  [{symbol}] no Jupiter price, skipping")
                     cycle_no_pool += 1
                     continue
+
+                # Pool address kept for GeckoTerminal fallback during position monitoring
+                pool = get_pool_address(token_ca) or ''
                 time.sleep(0.3)
 
-                signal_minute_ts = get_signal_minute_ts(signal_ts)
-                pending_entries[lifecycle_id] = {
-                    'token_ca': token_ca,
-                    'symbol': symbol,
-                    'signal_ts': signal_ts,
-                    'signal_minute_ts': signal_minute_ts,
-                    'pool': pool,
-                    'lifecycle_id': lifecycle_id,
-                    'super_idx': super_idx,
-                    'queued_at': now,
-                }
-                lifecycles.setdefault(lifecycle_id, {
+                entry_ts = int(now)
+                if sol_price is None:
+                    sol_price = get_sol_price()
+                regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                try:
+                    db.execute("""
+                        INSERT INTO paper_trades
+                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                             token_ca, symbol, signal_ts, entry_price, entry_ts,
+                             market_regime, replay_source, peak_pnl, trailing_active,
+                             lifecycle_id, stage_seq, trigger_ts, trigger_price)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?)
+                    """, (
+                        strategy_id, strategy_role, 'stage1', 'stage1_entered',
+                        token_ca, symbol, signal_ts, price, entry_ts,
+                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price
+                    ))
+                    trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                    db.commit()
+                except Exception as e:
+                    log.error(f"  DB insert error for {symbol}: {e}")
+                    continue
+
+                lc = lifecycles.setdefault(lifecycle_id, {
                     'lifecycle_id': lifecycle_id,
                     'token_ca': token_ca,
                     'symbol': symbol,
@@ -1491,64 +1506,19 @@ def run_monitor(db):
                     'rolling_low_after_stop': None,
                     'rolling_low_ts': None,
                 })
+                lc['stage1_trade_id'] = trade_id
+                pos = Position(trade_id, token_ca, symbol, signal_ts, price, entry_ts, pool,
+                               'stage1', lifecycle_id, stage1_exit)
+                positions[pos.trade_id] = pos
                 cycle_queued += 1
-                log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 close @ {signal_minute_ts}")
+                log.info(f"  Entered {symbol}/stage1 @ ${price:.10f} super={super_idx} lifecycle={lifecycle_id}")
                 time.sleep(0.2)
 
             if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
-                log.info(f"Signal cycle: seen={cycle_seen} old={cycle_old} dup={cycle_dup} low_super={cycle_low_super} no_pool={cycle_no_pool} queued={cycle_queued} pending={len(pending_entries)}")
+                log.info(f"Signal cycle: seen={cycle_seen} old={cycle_old} dup={cycle_dup} low_super={cycle_low_super} no_price={cycle_no_pool} entered={cycle_queued}")
                 last_signal_cycle_log = now
         except Exception as e:
             log.error(f"Signal check error: {e}")
-
-        if pending_entries:
-            for lifecycle_id, pending in list(pending_entries.items()):
-                # TTL check: discard stale pending entries whose signal bar is unreachable
-                queued_at = pending.get('queued_at', now)
-                if now - queued_at > PENDING_TTL_SECONDS:
-                    log.warning(f"  Pending entry TTL expired for {pending.get('symbol', lifecycle_id)} "
-                                f"(queued {int(now - queued_at)}s ago, signal_minute_ts={pending['signal_minute_ts']}), discarding")
-                    pending_entries.pop(lifecycle_id, None)
-                    continue
-                try:
-                    bars = get_notath_bars(pending['pool'], limit=8)
-                    if not bars:
-                        continue
-                    signal_bar = next((b for b in bars if int(b['ts']) == pending['signal_minute_ts']), None)
-                    if signal_bar is None:
-                        continue
-                    price = signal_bar['close']
-                    if not price or price <= 0:
-                        pending_entries.pop(lifecycle_id, None)
-                        continue
-                    entry_ts = int(signal_bar['ts'])
-                    if sol_price is None:
-                        sol_price = get_sol_price()
-                        time.sleep(0.2)
-                    regime = determine_market_regime(sol_price) if sol_price else 'unknown'
-                    db.execute("""
-                        INSERT INTO paper_trades
-                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
-                             token_ca, symbol, signal_ts, entry_price, entry_ts,
-                             market_regime, replay_source, peak_pnl, trailing_active,
-                             lifecycle_id, stage_seq, trigger_ts, trigger_price)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?)
-                    """, (
-                        strategy_id, strategy_role, 'stage1', 'stage1_entered',
-                        pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
-                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price
-                    ))
-                    trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-                    db.commit()
-                    pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
-                                   'stage1', lifecycle_id, stage1_exit)
-                    positions[pos.trade_id] = pos
-                    lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
-                    pending_entries.pop(lifecycle_id, None)
-                    log.info(f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} lifecycle={lifecycle_id}")
-                    time.sleep(0.2)
-                except Exception as e:
-                    log.error(f"  Pending entry error for {pending.get('symbol', lifecycle_id)}: {e}")
 
         if now - last_position_check >= POSITION_POLL_INTERVAL:
             last_position_check = now
@@ -1761,8 +1731,7 @@ def run_monitor(db):
         if now - last_heartbeat >= HEARTBEAT_INTERVAL:
             last_heartbeat = now
             log.info(
-                f"[heartbeat] positions={len(positions)} pending={len(pending_entries)} "
-                f"lifecycles={len(lifecycles)} last_signal_id={last_signal_id}"
+                f"[heartbeat] positions={len(positions)} lifecycles={len(lifecycles)} last_signal_id={last_signal_id}"
             )
 
         time.sleep(SIGNAL_POLL_INTERVAL)
