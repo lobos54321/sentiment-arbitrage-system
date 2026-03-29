@@ -271,19 +271,28 @@ def get_current_price(token_ca, pool_address=None):
 def parse_super_index(description):
     """
     Parse Super Index from NOT_ATH description.
-    Supports formats:
+    Supports formats (raw Telegram markdown may contain ** markers):
       ✡ Super Index： 119🔮
+      ✡ **Super Index：** 119🔮   (Telegram bold markdown)
       ✡ Super Index： ✡ x 82
     Returns int or None.
     """
     if not description:
         return None
-    # Try format: " 119🔮"
-    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮', description)
+    # Strip Telegram markdown bold markers and invisible unicode (matching Node.js normalization)
+    text = description.replace('**', '').replace('\r', '')
+    # Strip zero-width chars
+    text = re.sub(r'[\u200B-\u200D\uFEFF]', '', text)
+    # Try format: "Super Index： 119🔮" or "Super Index：119🔮"
+    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮?', text)
     if m:
         return int(m.group(1))
-    # Try format: "✡ x 82"
-    m = re.search(r'Super\s+Index[：:]\s*✡\s*x\s*(\d+)', description, re.IGNORECASE)
+    # Try format: "Super Index： ✡ x 82"
+    m = re.search(r'Super\s+Index[：:]\s*✡?\s*x\s*(\d+)', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    # Try ATH delta format: "Super Index：(signal)116🔮 --> (current)124🔮"
+    m = re.search(r'Super\s+Index[：:]\s*[(\uff08]signal[)\uff09]\s*x?(\d+)', text, re.IGNORECASE)
     if m:
         return int(m.group(1))
     return None
