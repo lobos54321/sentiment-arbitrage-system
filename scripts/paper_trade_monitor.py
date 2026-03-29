@@ -1508,6 +1508,18 @@ def run_monitor(db):
                 try:
                     current_bar = get_current_bar(pos.token_ca, pos.pool_address)
                     if not current_bar:
+                        # No price data — check if position has exceeded timeout by a
+                        # grace period. If so, force-close at entry price (pnl=0) to
+                        # prevent zombie positions accumulating indefinitely.
+                        timeout_min = int(pos.exit_rules.get('timeoutMinutes', DEFAULT_STAGE1_EXIT['timeoutMinutes']))
+                        grace_min = 30
+                        elapsed_min = (now - pos.entry_ts) / 60
+                        if elapsed_min >= timeout_min + grace_min:
+                            log.warning(
+                                f"  Force-closing zombie {pos.symbol}/{pos.strategy_stage} "
+                                f"(no price data for {elapsed_min:.0f}min, timeout={timeout_min}min)"
+                            )
+                            to_close.append((trade_id, 'timeout_no_data', 0.0, pos.entry_price, int(now)))
                         continue
                     bar_ts = int(current_bar['ts'])
                     price = current_bar['close'] or current_bar.get('open')
