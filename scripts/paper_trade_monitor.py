@@ -228,8 +228,47 @@ def get_pool_address(token_ca, cache={}):
     return pool or None
 
 
+def get_jupiter_price(token_ca):
+    """Get current price from Jupiter Price API v2.
+    Returns float price or None.
+    """
+    url = f"https://api.jup.ag/price/v2?ids={token_ca}"
+    data = curl_json(url)
+    if not data:
+        return None
+    price_str = (data.get('data') or {}).get(token_ca, {}).get('price')
+    if price_str is None:
+        return None
+    try:
+        return float(price_str)
+    except (TypeError, ValueError):
+        return None
+
+
 def get_current_bar(token_ca, pool_address=None):
-    """Get latest GeckoTerminal 1m bar."""
+    """Get current price as a synthetic bar, using Jupiter Price API (primary)
+    with GeckoTerminal 1m OHLCV as fallback.
+
+    Position updates, Stage2A and Stage3 entries only need current price + timestamp,
+    so Jupiter is faster and avoids GeckoTerminal rate limits.
+    GeckoTerminal OHLCV is only needed for Stage1 signal-bar entry lookup.
+    """
+    now_sec = int(time.time())
+
+    # Primary: Jupiter Price API (no rate limit issues, real-time)
+    price = get_jupiter_price(token_ca)
+    if price and price > 0:
+        return {
+            'ts': now_sec,
+            'open': price,
+            'high': price,
+            'low': price,
+            'close': price,
+            'volume': 0.0,
+            'source': 'jupiter',
+        }
+
+    # Fallback: GeckoTerminal 1m OHLCV
     if not pool_address:
         pool_address = get_pool_address(token_ca)
     if not pool_address:
@@ -255,11 +294,12 @@ def get_current_bar(token_ca, pool_address=None):
         'low': float(row[3]),
         'close': float(row[4]),
         'volume': float(row[5]),
+        'source': 'gecko',
     }
 
 
 def get_current_price(token_ca, pool_address=None):
-    """Get latest price from GeckoTerminal (latest 1m candle close)."""
+    """Get latest price (Jupiter primary, GeckoTerminal fallback)."""
     bar = get_current_bar(token_ca, pool_address)
     if not bar:
         return None
@@ -1384,12 +1424,20 @@ def run_monitor(db):
             cycle_low_super = 0
             cycle_no_pool = 0
             cycle_queued = 0
+            cycle_old = 0
             for sig in new_signals:
                 token_ca = sig['token_ca']
                 last_signal_id = sig['id']
                 signal_ts = sig['timestamp']
                 lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
                 cycle_seen += 1
+
+                # Skip signals older than PENDING_TTL_SECONDS — they can never find
+                # their signal bar in GeckoTerminal's recent window anyway.
+                signal_ts_sec = signal_ts // 1000 if signal_ts > 1e12 else signal_ts
+                if now - signal_ts_sec > PENDING_TTL_SECONDS:
+                    cycle_old += 1
+                    continue
 
                 if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
                     cycle_dup += 1
@@ -1448,7 +1496,7 @@ def run_monitor(db):
                 time.sleep(0.2)
 
             if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
-                log.info(f"Signal cycle: seen={cycle_seen} dup={cycle_dup} low_super={cycle_low_super} no_pool={cycle_no_pool} queued={cycle_queued} pending={len(pending_entries)}")
+                log.info(f"Signal cycle: seen={cycle_seen} old={cycle_old} dup={cycle_dup} low_super={cycle_low_super} no_pool={cycle_no_pool} queued={cycle_queued} pending={len(pending_entries)}")
                 last_signal_cycle_log = now
         except Exception as e:
             log.error(f"Signal check error: {e}")
