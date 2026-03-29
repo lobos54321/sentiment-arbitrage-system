@@ -1572,11 +1572,25 @@ def run_monitor(db):
                         grace_min = 30
                         elapsed_min = (now - pos.entry_ts) / 60
                         if elapsed_min >= timeout_min + grace_min:
+                            # If trailing was already active, estimate exit at peak * trail_factor
+                            # (token likely crashed after pump, trail stop would have fired).
+                            # Otherwise record as breakeven (we genuinely don't know exit price).
+                            if pos.trailing_active and pos.peak_pnl > 0:
+                                trail_factor = float(pos.exit_rules.get('trailFactor', TRAIL_FACTOR))
+                                zombie_pnl = pos.peak_pnl * trail_factor
+                                zombie_exit_price = pos.entry_price * (1 + zombie_pnl)
+                                reason_str = 'timeout_no_data_trail'
+                            else:
+                                zombie_pnl = 0.0
+                                zombie_exit_price = pos.entry_price
+                                reason_str = 'timeout_no_data'
                             log.warning(
                                 f"  Force-closing zombie {pos.symbol}/{pos.strategy_stage} "
-                                f"(no price data for {elapsed_min:.0f}min, timeout={timeout_min}min)"
+                                f"(no price data for {elapsed_min:.0f}min, timeout={timeout_min}min, "
+                                f"trailing={pos.trailing_active}, peak={pos.peak_pnl*100:+.1f}%, "
+                                f"zombie_pnl={zombie_pnl*100:+.1f}%)"
                             )
-                            to_close.append((trade_id, 'timeout_no_data', 0.0, pos.entry_price, int(now)))
+                            to_close.append((trade_id, reason_str, zombie_pnl, zombie_exit_price, int(now)))
                         continue
                     bar_ts = int(current_bar['ts'])
                     price = current_bar['close'] or current_bar.get('open')
