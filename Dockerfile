@@ -40,9 +40,15 @@ LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
 KLINE_DB=/app/data/kline_cache.db \
 PYTHONUNBUFFERED=1 \
 python3 scripts/lifecycle_24h_tracker.py --track >> /app/data/lifecycle.log 2>&1 & \
-echo '[STARTUP] Starting paper-trader...' && \
-PAPER_DB=/app/data/paper_trades.db \
-KLINE_DB=/app/data/kline_cache.db \
-PYTHONUNBUFFERED=1 \
-python3 scripts/paper_trade_monitor.py >> /app/data/paper-trader.log 2>&1 & \
+echo '[STARTUP] Starting paper-trader (with auto-restart)...' && \
+( while true; do \
+    echo \"[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting\"; \
+    PAPER_DB=/app/data/paper_trades.db \
+    KLINE_DB=/app/data/kline_cache.db \
+    SENTIMENT_DB=/app/data/sentiment_arb.db \
+    PYTHONUNBUFFERED=1 \
+    python3 scripts/paper_trade_monitor.py >> /app/data/paper-trader.log 2>&1; \
+    echo \"[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $$?), restarting in 15s\"; \
+    sleep 15; \
+  done ) & \
 wait"
