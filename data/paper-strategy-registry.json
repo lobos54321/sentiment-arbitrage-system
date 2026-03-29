@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "updatedAt": "2026-03-29T00:00:00.000Z",
+  "activeBaselineId": "notath-selective-v1",
+  "activeChallengerId": null,
+  "promotedIds": ["baseline-v1", "notath-selective-v1"],
+  "candidates": {
+    "baseline-v1": {
+      "id": "baseline-v1",
+      "parentId": null,
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "createdBy": "system",
+      "configVersion": 1,
+      "mutationSet": [],
+      "status": "promoted",
+      "datasetRefs": [],
+      "metrics": {
+        "sampleSize": 0, "winRate": 0, "avgPnl": 0, "medianPnl": 0,
+        "expectancy": 0, "profitFactor": 0, "maxDrawdown": 0,
+        "tailLoss95": 0, "falsePositiveRate": 0, "missedGoldRate": 0,
+        "sourceDiversity": 0, "holdingTimeMedian": 0,
+        "comparisonToBaseline": 0, "comparatorScore": 0
+      },
+      "guardrailResults": {},
+      "notes": null,
+      "strategyConfig": {
+        "sourceWeights": { "telegram": 0.35, "twitter": 0.1, "smartMoney": 0.35, "narrative": 0.2 },
+        "scoreThresholds": { "buy": 75, "watch": 60, "confidence": 70 },
+        "narrativeThresholds": { "minConfidence": 65, "minTierScore": 60 },
+        "entryTimingFilters": { "minSuperIndex": 80, "minTradeDelta": 1, "minAddressIndex": 3, "minSecurityIndex": 15, "maxChasePremiumPct": 20 },
+        "cooldownWindows": { "sameSymbolMinutes": 15, "postExitMinutes": 10 },
+        "paperExitRules": { "stopLossPct": 35, "trailStartPct": 3, "trailFactor": 0.9, "takeProfitPct": [50, 100, 200], "timeoutMinutes": 30 },
+        "sourceToggles": { "allowATH": true, "allowNotAth": true, "requireKlineConfirmation": false },
+        "signalFilters": {
+          "aiConfidenceMin": 0, "holdersMin": 0,
+          "top10PctPrimaryMin": 0, "top10PctPrimaryMax": 100,
+          "top10PctSecondaryMin": 0, "top10PctSecondaryMax": 100,
+          "excludeTop10PctAtOrBelow": 0, "allowAthOverride": false,
+          "primaryBandBonus": 0, "secondaryBandBonus": 0
+        },
+        "stageRules": {},
+        "paperRiskCaps": { "maxPositions": 5, "positionSizeSol": 0.06 }
+      }
+    },
+    "notath-selective-v1": {
+      "id": "notath-selective-v1",
+      "parentId": "baseline-v1",
+      "createdAt": "2026-03-29T00:00:00.000Z",
+      "createdBy": "system",
+      "configVersion": 2,
+      "mutationSet": [
+        { "path": "stageRules.stage1Exit.stopLossPct",       "previousValue": 35, "nextValue": 3,   "reason": "stage 1 stop-loss" },
+        { "path": "stageRules.stage1Exit.trailStartPct",     "previousValue": 3,  "nextValue": 2,   "reason": "stage 1 trail activation" },
+        { "path": "stageRules.stage1Exit.trailFactor",       "previousValue": 0.9,"nextValue": 0.9, "reason": "unchanged" },
+        { "path": "stageRules.stage1Exit.timeoutMinutes",    "previousValue": 30, "nextValue": 120, "reason": "stage 1 timeout" },
+        { "path": "stageRules.stage2A.enabled",              "previousValue": true, "nextValue": true, "reason": "loser recovery" },
+        { "path": "stageRules.stage2A.waitBarsAfterStop",    "previousValue": 3,  "nextValue": 3,   "reason": "wait 3 bars after SL" },
+        { "path": "stageRules.stage2A.reboundFromRollingLowPct", "previousValue": 18, "nextValue": 18, "reason": "+18% rebound trigger" },
+        { "path": "stageRules.stage2A.rollingLowBars",       "previousValue": 3,  "nextValue": 3,   "reason": "rolling low window" },
+        { "path": "stageRules.stage2A.stopLossPct",          "previousValue": 4,  "nextValue": 4,   "reason": "stage 2A SL" },
+        { "path": "stageRules.stage2A.trailStartPct",        "previousValue": 3,  "nextValue": 3,   "reason": "stage 2A trail" },
+        { "path": "stageRules.stage2A.timeoutMinutes",       "previousValue": 120,"nextValue": 120, "reason": "stage 2A timeout" },
+        { "path": "stageRules.stage3.enabled",               "previousValue": false,"nextValue": true,"reason": "continuation re-entry" },
+        { "path": "stageRules.stage3.waitBarsFromSignal",    "previousValue": 0,  "nextValue": 30,  "reason": "30 bars after signal" },
+        { "path": "stageRules.stage3.firstPeakMinPct",       "previousValue": 0,  "nextValue": 10,  "reason": "require +10% first peak" },
+        { "path": "stageRules.stage3.stopLossPct",           "previousValue": 4,  "nextValue": 4,   "reason": "stage 3 SL" },
+        { "path": "stageRules.stage3.trailStartPct",         "previousValue": 3,  "nextValue": 3,   "reason": "stage 3 trail" },
+        { "path": "stageRules.stage3.timeoutMinutes",        "previousValue": 120,"nextValue": 120, "reason": "stage 3 timeout" }
+      ],
+      "status": "promoted",
+      "datasetRefs": [],
+      "metrics": {
+        "sampleSize": 0, "winRate": 0, "avgPnl": 0, "medianPnl": 0,
+        "expectancy": 0, "profitFactor": 0, "maxDrawdown": 0,
+        "tailLoss95": 0, "falsePositiveRate": 0, "missedGoldRate": 0,
+        "sourceDiversity": 0, "holdingTimeMedian": 0,
+        "comparisonToBaseline": 0, "comparatorScore": 0
+      },
+      "guardrailResults": {},
+      "notes": "Three-stage lifecycle: Stage1 super>80 NOT_ATH only, Stage2A SL-loser recovery, Stage3 continuation at bar30",
+      "strategyConfig": {
+        "sourceWeights": { "telegram": 0.35, "twitter": 0.1, "smartMoney": 0.35, "narrative": 0.2 },
+        "scoreThresholds": { "buy": 75, "watch": 60, "confidence": 70 },
+        "narrativeThresholds": { "minConfidence": 65, "minTierScore": 60 },
+        "entryTimingFilters": { "minSuperIndex": 80, "minTradeDelta": 1, "minAddressIndex": 3, "minSecurityIndex": 15, "maxChasePremiumPct": 20 },
+        "cooldownWindows": { "sameSymbolMinutes": 15, "postExitMinutes": 10 },
+        "paperExitRules": { "stopLossPct": 3, "trailStartPct": 2, "trailFactor": 0.9, "takeProfitPct": [50, 100, 200], "timeoutMinutes": 120 },
+        "sourceToggles": { "allowATH": false, "allowNotAth": true, "requireKlineConfirmation": false },
+        "signalFilters": {
+          "aiConfidenceMin": 0, "holdersMin": 0,
+          "top10PctPrimaryMin": 0, "top10PctPrimaryMax": 100,
+          "top10PctSecondaryMin": 0, "top10PctSecondaryMax": 100,
+          "excludeTop10PctAtOrBelow": 0, "allowAthOverride": false,
+          "primaryBandBonus": 0, "secondaryBandBonus": 0
+        },
+        "stageRules": {
+          "stage1": {
+            "enabled": true,
+            "universe": "NOT_ATH",
+            "aiConfidenceMin": 0,
+            "holdersMin": 0,
+            "top10PctPrimaryMin": 0,
+            "top10PctPrimaryMax": 100,
+            "top10PctSecondaryMin": 0,
+            "top10PctSecondaryMax": 100,
+            "excludeTop10PctAtOrBelow": 0,
+            "allowAthOverride": false
+          },
+          "stage1Exit": {
+            "stopLossPct": 3,
+            "trailStartPct": 2,
+            "trailFactor": 0.9,
+            "timeoutMinutes": 120
+          },
+          "stage2A": {
+            "enabled": true,
+            "waitBarsAfterStop": 3,
+            "reboundFromRollingLowPct": 18,
+            "rollingLowBars": 3,
+            "entryPriceMode": "close",
+            "stopLossPct": 4,
+            "trailStartPct": 3,
+            "trailFactor": 0.9,
+            "timeoutMinutes": 120
+          },
+          "stage3": {
+            "enabled": true,
+            "waitBarsFromSignal": 30,
+            "firstPeakMinPct": 10,
+            "entryPriceMode": "close",
+            "stopLossPct": 4,
+            "trailStartPct": 3,
+            "trailFactor": 0.9,
+            "timeoutMinutes": 120
+          }
+        },
+        "paperRiskCaps": { "maxPositions": 8, "positionSizeSol": 0.12 }
+      }
+    }
+  },
+  "history": [
+    { "action": "register", "candidateId": "baseline-v1", "status": "promoted", "createdAt": "2026-01-01T00:00:00.000Z" },
+    { "action": "register", "candidateId": "notath-selective-v1", "status": "promoted", "createdAt": "2026-03-29T00:00:00.000Z" },
+    { "action": "promote", "candidateId": "notath-selective-v1", "reason": "three_stage_lifecycle_activated", "createdAt": "2026-03-29T00:00:00.000Z" }
+  ]
+}
