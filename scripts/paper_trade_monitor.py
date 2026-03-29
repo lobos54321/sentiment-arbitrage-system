@@ -489,20 +489,29 @@ def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
     return _normalize_signal_rows(rows)
 
 
+# Statuses the paper trader will read from premium_signals.
+# INSUFFICIENT_KLINE is included because the paper trader does NOT need
+# pre-buy K-line history — it only needs the signal-minute close price
+# from GeckoTerminal, which is fetched independently.  Excluding these
+# was the primary reason Stage 1 stopped firing.
+_PAPER_TRADE_STATUSES = ('PASS', 'RISK_BLOCKED', 'INSUFFICIENT_KLINE')
+_PAPER_TRADE_STATUSES_SQL = ','.join(f"'{s}'" for s in _PAPER_TRADE_STATUSES)
+
+
 def _is_paper_trade_signal(record):
     status = (record.get('hard_gate_status') or '').upper()
     description = record.get('description') or ''
-    return status in {'PASS', 'RISK_BLOCKED'} and 'New Trending' in description
+    return status in set(_PAPER_TRADE_STATUSES) and 'New Trending' in description
 
 
 def _query_local_new_signals(last_signal_id):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
-    rows = sdb.execute("""
+    rows = sdb.execute(f"""
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
         FROM premium_signals
         WHERE id > ?
-          AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
+          AND hard_gate_status IN ({_PAPER_TRADE_STATUSES_SQL})
           AND description LIKE '%New Trending%'
         ORDER BY id ASC
     """, (last_signal_id,)).fetchall()
@@ -513,10 +522,10 @@ def _query_local_new_signals(last_signal_id):
 def _query_local_recent_signals(limit=20):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
-    rows = sdb.execute("""
+    rows = sdb.execute(f"""
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
         FROM premium_signals
-        WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
+        WHERE hard_gate_status IN ({_PAPER_TRADE_STATUSES_SQL})
           AND description LIKE '%New Trending%'
         ORDER BY id DESC
         LIMIT ?
