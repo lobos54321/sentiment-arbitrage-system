@@ -2106,6 +2106,27 @@ const server = http.createServer(async (req, res) => {
       res.end(content);
     }
     return;
+  } else if (url.pathname === '/api/logs/paper-trader') {
+    // Paper trader Python 进程日志
+    if (!checkAuth(req, url, res)) return;
+    const paperTraderLogPath = process.env.PAPER_TRADER_LOG || '/app/data/paper-trader.log';
+    const tailLines = parseInt(url.searchParams?.get('lines') || '500');
+    if (fs.existsSync(paperTraderLogPath)) {
+      try {
+        const content = fs.readFileSync(paperTraderLogPath, 'utf-8');
+        const lines = content.split('\n');
+        const tail = lines.slice(-tailLines).join('\n');
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(tail);
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `paper-trader.log not found at ${paperTraderLogPath}` }));
+    }
+    return;
   } else if (url.pathname === '/logs') {
     // 日志查看页面（HTML）
     if (!checkAuth(req, url, res)) return;
