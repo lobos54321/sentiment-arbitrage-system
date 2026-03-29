@@ -30,6 +30,8 @@ export const strategyConfigSchema = z.object({
   }).default({}),
   paperExitRules: z.object({
     stopLossPct: z.number().min(1).max(100).default(35),
+    trailStartPct: z.number().min(0).max(100).default(3),
+    trailFactor: z.number().min(0).max(1).default(0.9),
     takeProfitPct: z.array(z.number().min(1).max(1000)).default([50, 100, 200]),
     timeoutMinutes: z.number().min(1).max(1440).default(30)
   }).default({}),
@@ -37,6 +39,59 @@ export const strategyConfigSchema = z.object({
     allowATH: z.boolean().default(true),
     allowNotAth: z.boolean().default(true),
     requireKlineConfirmation: z.boolean().default(false)
+  }).default({}),
+  signalFilters: z.object({
+    aiConfidenceMin: z.number().min(0).max(100).default(0),
+    holdersMin: z.number().min(0).max(1000000).default(0),
+    top10PctPrimaryMin: z.number().min(0).max(100).default(0),
+    top10PctPrimaryMax: z.number().min(0).max(100).default(100),
+    top10PctSecondaryMin: z.number().min(0).max(100).default(0),
+    top10PctSecondaryMax: z.number().min(0).max(100).default(100),
+    excludeTop10PctAtOrBelow: z.number().min(0).max(100).default(0),
+    allowAthOverride: z.boolean().default(false),
+    primaryBandBonus: z.number().default(0),
+    secondaryBandBonus: z.number().default(0)
+  }).default({}),
+  stageRules: z.object({
+    stage1: z.object({
+      enabled: z.boolean().default(true),
+      universe: z.enum(['NOT_ATH']).default('NOT_ATH'),
+      aiConfidenceMin: z.number().min(0).max(100).default(0),
+      holdersMin: z.number().min(0).max(1000000).default(0),
+      top10PctPrimaryMin: z.number().min(0).max(100).default(0),
+      top10PctPrimaryMax: z.number().min(0).max(100).default(100),
+      top10PctSecondaryMin: z.number().min(0).max(100).default(0),
+      top10PctSecondaryMax: z.number().min(0).max(100).default(100),
+      excludeTop10PctAtOrBelow: z.number().min(0).max(100).default(0),
+      allowAthOverride: z.boolean().default(false)
+    }).default({}),
+    stage1Exit: z.object({
+      stopLossPct: z.number().min(0).max(100).default(3),
+      trailStartPct: z.number().min(0).max(100).default(2),
+      trailFactor: z.number().min(0).max(1).default(0.9),
+      timeoutMinutes: z.number().min(1).max(1440).default(120)
+    }).default({}),
+    stage2A: z.object({
+      enabled: z.boolean().default(true),
+      waitBarsAfterStop: z.number().min(0).max(20).default(3),
+      reboundFromRollingLowPct: z.number().min(0).max(100).default(18),
+      rollingLowBars: z.number().min(1).max(20).default(3),
+      entryPriceMode: z.enum(['close']).default('close'),
+      stopLossPct: z.number().min(0).max(100).default(4),
+      trailStartPct: z.number().min(0).max(100).default(3),
+      trailFactor: z.number().min(0).max(1).default(0.9),
+      timeoutMinutes: z.number().min(1).max(1440).default(120)
+    }).default({}),
+    stage3: z.object({
+      enabled: z.boolean().default(true),
+      waitBarsFromSignal: z.number().min(0).max(500).default(30),
+      firstPeakMinPct: z.number().min(0).max(500).default(10),
+      entryPriceMode: z.enum(['close']).default('close'),
+      stopLossPct: z.number().min(0).max(100).default(4),
+      trailStartPct: z.number().min(0).max(100).default(3),
+      trailFactor: z.number().min(0).max(1).default(0.9),
+      timeoutMinutes: z.number().min(1).max(1440).default(120)
+    }).default({})
   }).default({}),
   paperRiskCaps: z.object({
     maxPositions: z.number().min(1).max(20).default(5),
@@ -57,6 +112,11 @@ export const strategyCandidateSchema = z.object({
     reason: z.string().optional()
   })).default([]),
   status: z.enum(['draft', 'qualified', 'active_challenger', 'promotable', 'promoted', 'rejected', 'paused_target_reached', 'evaluating', 'retired']).default('draft'),
+  previousStatus: z.string().nullable().optional().default(null),
+  pausedAt: z.string().nullable().optional().default(null),
+  pauseReason: z.string().nullable().optional().default(null),
+  resumedAt: z.string().nullable().optional().default(null),
+  resumeReason: z.string().nullable().optional().default(null),
   datasetRefs: z.array(z.string()).default([]),
   metrics: z.object({
     sampleSize: z.number().default(0),
@@ -71,7 +131,9 @@ export const strategyCandidateSchema = z.object({
     missedGoldRate: z.number().default(0),
     sourceDiversity: z.number().default(0),
     holdingTimeMedian: z.number().default(0),
-    comparisonToBaseline: z.number().default(0)
+    comparisonToBaseline: z.number().default(0),
+    comparatorScore: z.number().default(0),
+    evaluatedAt: z.string().nullable().optional().default(null)
   }).default({}),
   guardrailResults: z.record(z.union([z.boolean(), z.number(), z.string(), z.null()])).default({}),
   notes: z.string().nullable().optional().default(null),

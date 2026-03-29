@@ -11,8 +11,20 @@ const defaultStrategyConfig = strategyConfigSchema.parse({
   narrativeThresholds: { minConfidence: 65, minTierScore: 60 },
   entryTimingFilters: { minSuperIndex: 80, minTradeDelta: 1, minAddressIndex: 3, minSecurityIndex: 15, maxChasePremiumPct: 20 },
   cooldownWindows: { sameSymbolMinutes: 15, postExitMinutes: 10 },
-  paperExitRules: { stopLossPct: 35, takeProfitPct: [50, 100, 200], timeoutMinutes: 30 },
+  paperExitRules: { stopLossPct: 35, trailStartPct: 3, trailFactor: 0.9, takeProfitPct: [50, 100, 200], timeoutMinutes: 30 },
   sourceToggles: { allowATH: true, allowNotAth: true, requireKlineConfirmation: false },
+  signalFilters: {
+    aiConfidenceMin: 0,
+    holdersMin: 0,
+    top10PctPrimaryMin: 0,
+    top10PctPrimaryMax: 100,
+    top10PctSecondaryMin: 0,
+    top10PctSecondaryMax: 100,
+    excludeTop10PctAtOrBelow: 0,
+    allowAthOverride: false,
+    primaryBandBonus: 0,
+    secondaryBandBonus: 0
+  },
   paperRiskCaps: { maxPositions: 5, positionSizeSol: 0.06 }
 });
 
@@ -39,10 +51,138 @@ function makeBaselineCandidate() {
       missedGoldRate: 0,
       sourceDiversity: 0,
       holdingTimeMedian: 0,
-      comparisonToBaseline: 0
+      comparisonToBaseline: 0,
+      comparatorScore: 0
     },
     guardrailResults: {},
     strategyConfig: defaultStrategyConfig
+  };
+}
+
+function makeSelectiveNotAthCandidate() {
+  return {
+    id: 'notath-selective-v1',
+    parentId: 'baseline-v1',
+    createdAt: new Date().toISOString(),
+    createdBy: 'system',
+    configVersion: 2,
+    mutationSet: [
+      { path: 'signalFilters.aiConfidenceMin', previousValue: 0, nextValue: 60, reason: 'tighten selection to higher-confidence NOT_ATH signals' },
+      { path: 'signalFilters.holdersMin', previousValue: 0, nextValue: 100, reason: 'prefer stronger holder base' },
+      { path: 'signalFilters.top10PctPrimaryMin', previousValue: 0, nextValue: 20, reason: 'select the stronger top10 concentration band' },
+      { path: 'signalFilters.top10PctPrimaryMax', previousValue: 100, nextValue: 25, reason: 'target the strongest observed top10 range' },
+      { path: 'signalFilters.top10PctSecondaryMin', previousValue: 0, nextValue: 25, reason: 'permit a secondary band below the primary band' },
+      { path: 'signalFilters.top10PctSecondaryMax', previousValue: 100, nextValue: 30, reason: 'allow the secondary band as a lower-ranked fallback' },
+      { path: 'signalFilters.excludeTop10PctAtOrBelow', previousValue: 0, nextValue: 20, reason: 'exclude materially weaker concentration cases' },
+      { path: 'sourceToggles.allowATH', previousValue: true, nextValue: false, reason: 'keep the new candidate NOT_ATH-only' },
+      { path: 'stageRules.stage1.aiConfidenceMin', previousValue: 0, nextValue: 60, reason: 'stage 1 entry floor' },
+      { path: 'stageRules.stage1.holdersMin', previousValue: 0, nextValue: 100, reason: 'stage 1 holder floor' },
+      { path: 'stageRules.stage1.top10PctPrimaryMin', previousValue: 0, nextValue: 20, reason: 'stage 1 primary band lower bound' },
+      { path: 'stageRules.stage1.top10PctPrimaryMax', previousValue: 100, nextValue: 25, reason: 'stage 1 primary band upper bound' },
+      { path: 'stageRules.stage1.top10PctSecondaryMin', previousValue: 0, nextValue: 25, reason: 'stage 1 secondary band lower bound' },
+      { path: 'stageRules.stage1.top10PctSecondaryMax', previousValue: 100, nextValue: 30, reason: 'stage 1 secondary band upper bound' },
+      { path: 'stageRules.stage1.excludeTop10PctAtOrBelow', previousValue: 0, nextValue: 20, reason: 'stage 1 exclude weak top10 buckets' },
+      { path: 'stageRules.stage1.allowAthOverride', previousValue: false, nextValue: false, reason: 'explicitly keep ATH override disabled' },
+      { path: 'stageRules.stage1Exit.stopLossPct', previousValue: 35, nextValue: 3, reason: 'stage 1 exit stop-loss' },
+      { path: 'stageRules.stage1Exit.trailStartPct', previousValue: 3, nextValue: 2, reason: 'stage 1 trailing activation' },
+      { path: 'stageRules.stage1Exit.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'keep trail factor unchanged' },
+      { path: 'stageRules.stage1Exit.timeoutMinutes', previousValue: 30, nextValue: 120, reason: 'stage 1 timeout' },
+      { path: 'stageRules.stage2A.enabled', previousValue: true, nextValue: true, reason: 'enable loser recovery re-entry' },
+      { path: 'stageRules.stage2A.waitBarsAfterStop', previousValue: 3, nextValue: 3, reason: 'wait 3 bars after stop-loss' },
+      { path: 'stageRules.stage2A.reboundFromRollingLowPct', previousValue: 18, nextValue: 18, reason: 'require +18% rebound from rolling low' },
+      { path: 'stageRules.stage2A.rollingLowBars', previousValue: 3, nextValue: 3, reason: 'use post-stop rolling low window' },
+      { path: 'stageRules.stage2A.entryPriceMode', previousValue: 'close', nextValue: 'close', reason: 'enter stage 2A on candle close' },
+      { path: 'stageRules.stage2A.stopLossPct', previousValue: 4, nextValue: 4, reason: 'stage 2A stop-loss' },
+      { path: 'stageRules.stage2A.trailStartPct', previousValue: 3, nextValue: 3, reason: 'stage 2A trailing activation' },
+      { path: 'stageRules.stage2A.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'stage 2A trailing factor' },
+      { path: 'stageRules.stage2A.timeoutMinutes', previousValue: 120, nextValue: 120, reason: 'stage 2A timeout' },
+      { path: 'stageRules.stage3.enabled', previousValue: false, nextValue: true, reason: 'enable continuation re-entry' },
+      { path: 'stageRules.stage3.waitBarsFromSignal', previousValue: 0, nextValue: 30, reason: 'wait 30 bars from original signal' },
+      { path: 'stageRules.stage3.firstPeakMinPct', previousValue: 0, nextValue: 10, reason: 'require initial +10% peak before stage 3' },
+      { path: 'stageRules.stage3.entryPriceMode', previousValue: 'close', nextValue: 'close', reason: 'enter stage 3 on candle close' },
+      { path: 'stageRules.stage3.stopLossPct', previousValue: 4, nextValue: 4, reason: 'stage 3 stop-loss' },
+      { path: 'stageRules.stage3.trailStartPct', previousValue: 3, nextValue: 3, reason: 'stage 3 trailing activation' },
+      { path: 'stageRules.stage3.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'stage 3 trailing factor' },
+      { path: 'stageRules.stage3.timeoutMinutes', previousValue: 120, nextValue: 120, reason: 'stage 3 timeout' }
+    ],
+    status: 'draft',
+    datasetRefs: [],
+    metrics: {
+      sampleSize: 0,
+      winRate: 0,
+      avgPnl: 0,
+      medianPnl: 0,
+      expectancy: 0,
+      profitFactor: 0,
+      maxDrawdown: 0,
+      tailLoss95: 0,
+      falsePositiveRate: 0,
+      missedGoldRate: 0,
+      sourceDiversity: 0,
+      holdingTimeMedian: 0,
+      comparisonToBaseline: 0,
+      comparatorScore: 0
+    },
+    guardrailResults: {},
+    notes: 'Selective NOT_ATH candidate with two-stage loser recovery',
+    strategyConfig: strategyConfigSchema.parse({
+      ...defaultStrategyConfig,
+      sourceToggles: { ...defaultStrategyConfig.sourceToggles, allowATH: false, allowNotAth: true },
+      signalFilters: {
+        aiConfidenceMin: 60,
+        holdersMin: 100,
+        top10PctPrimaryMin: 20,
+        top10PctPrimaryMax: 25,
+        top10PctSecondaryMin: 25,
+        top10PctSecondaryMax: 30,
+        excludeTop10PctAtOrBelow: 20,
+        allowAthOverride: false,
+        primaryBandBonus: 10,
+        secondaryBandBonus: 4
+      },
+      stageRules: {
+        stage1: {
+          enabled: true,
+          universe: 'NOT_ATH',
+          aiConfidenceMin: 60,
+          holdersMin: 100,
+          top10PctPrimaryMin: 20,
+          top10PctPrimaryMax: 25,
+          top10PctSecondaryMin: 25,
+          top10PctSecondaryMax: 30,
+          excludeTop10PctAtOrBelow: 20,
+          allowAthOverride: false
+        },
+        stage1Exit: {
+          stopLossPct: 3,
+          trailStartPct: 2,
+          trailFactor: 0.9,
+          timeoutMinutes: 120
+        },
+        stage2A: {
+          enabled: true,
+          waitBarsAfterStop: 3,
+          reboundFromRollingLowPct: 18,
+          rollingLowBars: 3,
+          entryPriceMode: 'close',
+          stopLossPct: 4,
+          trailStartPct: 3,
+          trailFactor: 0.9,
+          timeoutMinutes: 120
+        },
+        stage3: {
+          enabled: true,
+          waitBarsFromSignal: 30,
+          firstPeakMinPct: 10,
+          entryPriceMode: 'close',
+          stopLossPct: 4,
+          trailStartPct: 3,
+          trailFactor: 0.9,
+          timeoutMinutes: 120
+        }
+      },
+      paperExitRules: { stopLossPct: 3, trailStartPct: 2, trailFactor: 0.9, takeProfitPct: [50, 100, 200], timeoutMinutes: 120 }
+    })
   };
 }
 
@@ -183,7 +323,8 @@ export class PaperStrategyRegistry {
         activeChallengerId: null,
         promotedIds: ['baseline-v1'],
         candidates: {
-          'baseline-v1': makeBaselineCandidate()
+          'baseline-v1': makeBaselineCandidate(),
+          'notath-selective-v1': makeSelectiveNotAthCandidate()
         },
         history: []
       };
@@ -193,6 +334,12 @@ export class PaperStrategyRegistry {
     }
 
     const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
+    const candidates = parsed.candidates || {};
+    if (!candidates['notath-selective-v1']) {
+      candidates['notath-selective-v1'] = makeSelectiveNotAthCandidate();
+      parsed.candidates = candidates;
+      fs.writeFileSync(this.filePath, JSON.stringify(parsed, null, 2));
+    }
     for (const candidate of Object.values(parsed.candidates || {})) {
       validateCandidate(candidate);
     }
@@ -238,6 +385,7 @@ export class PaperStrategyRegistry {
     if (!candidate) {
       throw new Error(`Unknown candidate: ${candidateId}`);
     }
+    const previousStatus = candidate.status;
     candidate.status = status;
     if (status === 'qualified' && !candidate.qualifiedAt) {
       candidate.qualifiedAt = new Date().toISOString();
@@ -246,9 +394,32 @@ export class PaperStrategyRegistry {
       candidate.activatedAt = new Date().toISOString();
     }
     if (status === 'paused_target_reached') {
+      candidate.previousStatus = metadata.previousStatus || previousStatus || candidate.previousStatus || 'promotable';
       candidate.pausedAt = new Date().toISOString();
+      candidate.pauseReason = metadata.reason || candidate.pauseReason || null;
+      candidate.resumedAt = null;
+      candidate.resumeReason = null;
     }
     this.registry.history.push({ action: 'mark_status', candidateId, status, metadata, createdAt: new Date().toISOString() });
+    await this.save();
+    return candidate;
+  }
+
+  async resumeCandidateStatus(candidateId, reason = 'manual_resume') {
+    const candidate = this.registry.candidates[candidateId];
+    if (!candidate) {
+      throw new Error(`Unknown candidate: ${candidateId}`);
+    }
+    const restoredStatus = candidate.previousStatus && candidate.previousStatus !== 'paused_target_reached'
+      ? candidate.previousStatus
+      : 'promotable';
+    candidate.status = restoredStatus;
+    candidate.previousStatus = null;
+    candidate.pausedAt = null;
+    candidate.pauseReason = null;
+    candidate.resumedAt = new Date().toISOString();
+    candidate.resumeReason = reason;
+    this.registry.history.push({ action: 'resume_status', candidateId, restoredStatus, reason, createdAt: new Date().toISOString() });
     await this.save();
     return candidate;
   }
@@ -340,12 +511,39 @@ export class PaperStrategyRegistry {
       isAth: Boolean(signal.is_ath)
     }));
     const fallbackMode = !superCurrent && !tradeCurrent && !addressCurrent && !securityCurrent;
+    const stageRules = config.stageRules || {};
 
     let score = 0;
     let action = 'SKIP';
     let reason = '';
 
-    if (!fallbackMode) {
+    if (stageRules.stage1?.enabled) {
+      const stage1 = stageRules.stage1;
+      const isAth = Boolean(signal.is_ath);
+      const top10Pct = ctx.top10Pct;
+      const holders = ctx.holders;
+      const aiConfidence = narrativeConfidence;
+      const primaryBand = top10Pct >= stage1.top10PctPrimaryMin && top10Pct <= stage1.top10PctPrimaryMax;
+      const secondaryBand = top10Pct > stage1.top10PctPrimaryMax && top10Pct <= stage1.top10PctSecondaryMax;
+      const excludedLow = top10Pct > 0 && top10Pct <= stage1.excludeTop10PctAtOrBelow;
+      const allowedAth = !isAth || stage1.allowAthOverride || config.sourceToggles.allowATH;
+      const allowedNotAth = !isAth ? config.sourceToggles.allowNotAth : true;
+      const bandBonus = primaryBand ? (stage1.primaryBandBonus || 0) : secondaryBand ? (stage1.secondaryBandBonus || 0) : 0;
+
+      if (!allowedAth || !allowedNotAth || excludedLow || aiConfidence < stage1.aiConfidenceMin || holders < stage1.holdersMin) {
+        action = 'SKIP';
+        score = 0;
+        reason = `stage1 reject ai=${aiConfidence}, holders=${holders}, top10=${top10Pct}, isAth=${isAth}`;
+      } else if (primaryBand || secondaryBand) {
+        action = 'BUY';
+        score = primaryBand ? 100 + bandBonus : 90 + bandBonus;
+        reason = `stage1 ${primaryBand ? 'primary' : 'secondary'} band ai=${aiConfidence}, holders=${holders}, top10=${top10Pct}`;
+      } else {
+        action = 'WATCH';
+        score = 60 + bandBonus;
+        reason = `stage1 watch ai=${aiConfidence}, holders=${holders}, top10=${top10Pct}`;
+      }
+    } else if (!fallbackMode) {
       score += Math.min(40, (superCurrent / Math.max(config.entryTimingFilters.minSuperIndex, 1)) * 25);
       score += Math.min(20, Math.max(tradeDelta, 0) * 5);
       score += Math.min(15, addressCurrent * 2.5);

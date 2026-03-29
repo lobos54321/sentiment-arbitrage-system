@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Paper Trade Monitor — forward-test NOT_ATH signals with simulated execution.
+Paper Trade Monitor — forward-test NOT_ATH signals with staged lifecycle execution.
 
 NOT_ATH Strategy:
-  - Entry: Super Index >= 80 + RED(+2) + lowVol(+1) + active(+1) >= 3
-  - Exit:  SL=-3%, trail@+3%/0.90, timeout=120min
+  - Stage 1: super > 80
+  - Stage 1 exit: SL=-3%, trail@+2%/0.90, timeout=120min
+  - Stage 2A: after stage1 stop-loss, wait 3 bars and re-enter on +18% rebound from post-stop rolling low
+  - Stage 3: 30 bars after signal, if first peak >= 10%, continuation re-entry
 
 Monitors premium_signals for new entries, enters at live price via GeckoTerminal,
-tracks positions with trailing-stop logic, records results to paper_trades.db.
+tracks staged lifecycle positions, records results to paper_trades.db.
 
 Usage:
     python3 scripts/paper_trade_monitor.py              # live monitor
@@ -36,16 +38,22 @@ DATA_DIR = PROJECT_ROOT / 'data'
 SENTIMENT_DB = os.environ.get('SENTIMENT_DB', str(DATA_DIR / 'sentiment_arb.db'))
 PAPER_DB = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
 KLINE_DB = os.environ.get('KLINE_DB', str(DATA_DIR / 'kline_cache.db'))
+REGISTRY_JSON = os.environ.get('PAPER_STRATEGY_REGISTRY', str(DATA_DIR / 'paper-strategy-registry.json'))
 REMOTE_SIGNAL_URL = os.environ.get('REMOTE_SIGNAL_URL', '').strip()
 REMOTE_SIGNAL_TOKEN = os.environ.get('REMOTE_SIGNAL_TOKEN', '').strip()
 REMOTE_SIGNAL_LOOKBACK = max(50, int(os.environ.get('REMOTE_SIGNAL_LOOKBACK', '500')))
 
-# Sim parameters (Canonical v2: SL=-3%, trail@+3%/0.90, timeout=120min)
+DEFAULT_STRATEGY_ID = 'notath-selective-v1'
+DEFAULT_STRATEGY_ROLE = 'selective_challenger'
+DEFAULT_STAGE1_EXIT = {'stopLossPct': 3, 'trailStartPct': 2, 'trailFactor': 0.9, 'timeoutMinutes': 120}
+DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'entryPriceMode': 'close', 'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120}
+DEFAULT_STAGE3 = {'enabled': True, 'waitBarsFromSignal': 30, 'firstPeakMinPct': 10, 'entryPriceMode': 'close', 'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120}
+
+# Backward-compatible defaults for code paths that still use legacy constants.
 SL_PCT = -0.03
-TRAIL_START = 0.03
+TRAIL_START = 0.02
 TRAIL_FACTOR = 0.90
 TIMEOUT_MIN = 120
-ALLOW_SYNTHETIC_REPLAY = os.environ.get('ALLOW_SYNTHETIC_REPLAY', 'false').lower() == 'true'
 
 # Polling intervals (seconds)
 SIGNAL_POLL_INTERVAL = 30       # check for new signals
@@ -61,6 +69,54 @@ logging.basicConfig(
 log = logging.getLogger('paper_trade')
 
 
+# === Strategy Config ===
+
+def _deep_merge(base, override):
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_active_strategy_config():
+    base = {
+        'strategyId': DEFAULT_STRATEGY_ID,
+        'strategyRole': DEFAULT_STRATEGY_ROLE,
+        'entryTimingFilters': {'minSuperIndex': 80},
+        'stageRules': {
+            'stage1Exit': dict(DEFAULT_STAGE1_EXIT),
+            'stage2A': dict(DEFAULT_STAGE2A),
+            'stage3': dict(DEFAULT_STAGE3),
+        },
+    }
+    try:
+        with open(REGISTRY_JSON, 'r', encoding='utf-8') as f:
+            registry = json.load(f)
+        candidates = registry.get('candidates') or {}
+        candidate_id = registry.get('activeChallengerId') or registry.get('activeBaselineId') or DEFAULT_STRATEGY_ID
+        candidate = candidates.get(candidate_id) or candidates.get(DEFAULT_STRATEGY_ID)
+        if not candidate:
+            return base
+        strategy_config = candidate.get('strategyConfig') or {}
+        merged = _deep_merge(base, strategy_config)
+        merged['strategyId'] = candidate.get('id') or candidate_id
+        merged['strategyRole'] = 'active_challenger' if registry.get('activeChallengerId') == merged['strategyId'] else DEFAULT_STRATEGY_ROLE
+        return merged
+    except Exception as e:
+        log.warning(f"Failed to load strategy registry {REGISTRY_JSON}: {e}")
+        return base
+
+
+def pct_to_decimal(value):
+    try:
+        return float(value) / 100.0
+    except Exception:
+        return 0.0
+
+
 # === Database Setup ===
 
 def init_paper_db(db_path=None):
@@ -72,6 +128,10 @@ def init_paper_db(db_path=None):
     db.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id TEXT DEFAULT 'notath-selective-v1',
+            strategy_role TEXT DEFAULT 'selective_challenger',
+            strategy_stage TEXT DEFAULT 'stage1',
+            stage_outcome TEXT,
             token_ca TEXT NOT NULL,
             symbol TEXT,
             signal_ts INTEGER NOT NULL,
@@ -92,8 +152,29 @@ def init_paper_db(db_path=None):
     db.execute("CREATE INDEX IF NOT EXISTS idx_pt_token ON paper_trades(token_ca)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit ON paper_trades(exit_reason)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_ts ON paper_trades(entry_ts)")
+    for column_sql in [
+        "ALTER TABLE paper_trades ADD COLUMN strategy_id TEXT DEFAULT 'notath-selective-v1'",
+        "ALTER TABLE paper_trades ADD COLUMN strategy_role TEXT DEFAULT 'selective_challenger'",
+        "ALTER TABLE paper_trades ADD COLUMN strategy_stage TEXT DEFAULT 'stage1'",
+        "ALTER TABLE paper_trades ADD COLUMN stage_outcome TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN replay_source TEXT DEFAULT 'live_monitor'",
+        "ALTER TABLE paper_trades ADD COLUMN lifecycle_id TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN parent_trade_id INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN stage_seq INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN trigger_ts INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN trigger_price REAL",
+        "ALTER TABLE paper_trades ADD COLUMN armed_ts INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN first_peak_pct REAL",
+        "ALTER TABLE paper_trades ADD COLUMN rolling_low_price REAL",
+        "ALTER TABLE paper_trades ADD COLUMN rolling_low_ts INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN reentry_source TEXT",
+    ]:
+        try:
+            db.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
     try:
-        db.execute("ALTER TABLE paper_trades ADD COLUMN replay_source TEXT DEFAULT 'live_monitor'")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_stage ON paper_trades(token_ca, signal_ts, strategy_stage)")
     except sqlite3.OperationalError:
         pass
     db.commit()
@@ -508,17 +589,22 @@ def get_last_processed_id(db):
 class Position:
     """Tracks an open paper trade position."""
     __slots__ = [
-        'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
+        'trade_id', 'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
         'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
+        'strategy_stage', 'lifecycle_id', 'exit_rules',
     ]
 
-    def __init__(self, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address):
+    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules):
+        self.trade_id = trade_id
         self.token_ca = token_ca
         self.symbol = symbol
         self.signal_ts = signal_ts
         self.entry_price = entry_price
         self.entry_ts = entry_ts
         self.pool_address = pool_address
+        self.strategy_stage = strategy_stage
+        self.lifecycle_id = lifecycle_id
+        self.exit_rules = exit_rules or {}
         self.peak_pnl = 0.0
         self.trailing_active = False
         self.bars_held = 0
@@ -528,6 +614,11 @@ class Position:
         """Apply exit logic on a specific 1m bar. Returns (should_exit, exit_reason, pnl_pct) or (False, None, None)."""
         if current_price is None or current_price <= 0 or bar_ts is None:
             return False, None, None
+
+        stop_loss = -pct_to_decimal(self.exit_rules.get('stopLossPct', DEFAULT_STAGE1_EXIT['stopLossPct']))
+        trail_start = pct_to_decimal(self.exit_rules.get('trailStartPct', DEFAULT_STAGE1_EXIT['trailStartPct']))
+        trail_factor = float(self.exit_rules.get('trailFactor', DEFAULT_STAGE1_EXIT['trailFactor']))
+        timeout_min = int(self.exit_rules.get('timeoutMinutes', DEFAULT_STAGE1_EXIT['timeoutMinutes']))
 
         bar_ts = int(bar_ts)
         if bar_ts <= self.last_bar_ts:
@@ -539,28 +630,91 @@ class Position:
         pnl = (current_price - self.entry_price) / self.entry_price
         self.peak_pnl = max(self.peak_pnl, pnl)
 
-        # Check trailing activation
-        if not self.trailing_active and self.peak_pnl >= TRAIL_START:
+        if not self.trailing_active and self.peak_pnl >= trail_start:
             self.trailing_active = True
-            log.info(f"  [{self.symbol}] Trailing activated at peak={self.peak_pnl*100:+.1f}%")
+            log.info(f"  [{self.symbol}/{self.strategy_stage}] Trailing activated at peak={self.peak_pnl*100:+.1f}%")
 
-        # Stop loss (only before trailing is active)
-        if not self.trailing_active and pnl <= SL_PCT:
-            return True, 'sl', SL_PCT
+        if not self.trailing_active and pnl <= stop_loss:
+            return True, 'sl', stop_loss
 
-        # Trailing stop
         if self.trailing_active:
-            trail_level = self.peak_pnl * TRAIL_FACTOR
+            trail_level = self.peak_pnl * trail_factor
             if pnl <= trail_level:
                 exit_pnl = max(pnl, trail_level)
                 return True, 'trail', exit_pnl
 
-        # Timeout
         elapsed_min = (bar_ts - self.entry_ts) / 60
-        if elapsed_min >= TIMEOUT_MIN:
+        if elapsed_min >= timeout_min:
             return True, 'timeout', pnl
 
         return False, None, pnl
+
+
+def build_lifecycle_id(token_ca, signal_ts):
+    return f"{token_ca}:{int(signal_ts)}"
+
+
+def stage_seq(stage_name):
+    return {'stage1': 1, 'stage2A': 2, 'stage3': 3}.get(stage_name, 0)
+
+
+def get_exit_rules_for_stage(strategy_config, stage_name):
+    stage_rules = (strategy_config or {}).get('stageRules') or {}
+    if stage_name == 'stage1':
+        return dict(stage_rules.get('stage1Exit') or DEFAULT_STAGE1_EXIT)
+    if stage_name == 'stage2A':
+        return dict(stage_rules.get('stage2A') or DEFAULT_STAGE2A)
+    if stage_name == 'stage3':
+        return dict(stage_rules.get('stage3') or DEFAULT_STAGE3)
+    return dict(DEFAULT_STAGE1_EXIT)
+
+
+def restore_lifecycles(db):
+    lifecycles = {}
+    rows = db.execute("""
+        SELECT id, token_ca, symbol, signal_ts, strategy_stage, exit_reason, pnl_pct,
+               peak_pnl, entry_ts, exit_ts, lifecycle_id, parent_trade_id, bars_held,
+               first_peak_pct, rolling_low_price, rolling_low_ts, reentry_source
+        FROM paper_trades
+        ORDER BY signal_ts ASC, id ASC
+    """).fetchall()
+    for row in rows:
+        lifecycle_id = row['lifecycle_id'] or build_lifecycle_id(row['token_ca'], row['signal_ts'])
+        item = lifecycles.setdefault(lifecycle_id, {
+            'lifecycle_id': lifecycle_id,
+            'token_ca': row['token_ca'],
+            'symbol': row['symbol'],
+            'signal_ts': row['signal_ts'],
+            'first_peak_pct': 0.0,
+            'stage1_trade_id': None,
+            'stage2a_trade_id': None,
+            'stage3_trade_id': None,
+            'stage2a_attempted': False,
+            'stage3_attempted': False,
+            'stage1_stop_ts': None,
+            'rolling_low_after_stop': None,
+            'rolling_low_ts': None,
+        })
+        stage = row['strategy_stage'] or 'stage1'
+        if stage == 'stage1':
+            item['stage1_trade_id'] = row['id']
+            item['first_peak_pct'] = max(item['first_peak_pct'], float(row['peak_pnl'] or 0) * 100.0, float(row['first_peak_pct'] or 0) or 0.0)
+            if row['exit_reason'] == 'sl':
+                item['stage1_stop_ts'] = row['exit_ts']
+        elif stage == 'stage2A':
+            item['stage2a_trade_id'] = row['id']
+            item['stage2a_attempted'] = True
+        elif stage == 'stage3':
+            item['stage3_trade_id'] = row['id']
+            item['stage3_attempted'] = True
+        if row['rolling_low_price'] is not None:
+            item['rolling_low_after_stop'] = row['rolling_low_price']
+            item['rolling_low_ts'] = row['rolling_low_ts']
+    return lifecycles
+
+
+def count_open_positions_for_lifecycle(positions, lifecycle_id):
+    return sum(1 for pos in positions.values() if pos.lifecycle_id == lifecycle_id)
 
 
 # === Daily Report ===
@@ -602,7 +756,8 @@ def print_daily_report(db, date_str=None):
         date_str = datetime.utcnow().strftime('%Y-%m-%d')
 
     rows = db.execute("""
-        SELECT pnl_pct, exit_reason, market_regime, replay_source, bars_held
+        SELECT pnl_pct, exit_reason, market_regime, replay_source, bars_held,
+               strategy_stage, stage_outcome, reentry_source, lifecycle_id
         FROM paper_trades
         WHERE exit_reason IS NOT NULL
           AND date(exit_ts, 'unixepoch') = ?
@@ -613,16 +768,21 @@ def print_daily_report(db, date_str=None):
         return
 
     real_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'real_kline_replay']
-    synthetic_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'synthetic_replay']
     live_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'live_monitor']
 
     by_reason = defaultdict(list)
+    by_stage = defaultdict(list)
+    by_stage_outcome = defaultdict(list)
+    by_reentry_source = defaultdict(list)
+    by_regime = defaultdict(list)
+    lifecycle_stage_counts = defaultdict(set)
     for r in rows:
         by_reason[r['exit_reason']].append(r['pnl_pct'])
-
-    by_regime = defaultdict(list)
-    for r in rows:
+        by_stage[r['strategy_stage'] or 'stage1'].append(r['pnl_pct'])
+        by_stage_outcome[r['stage_outcome'] or 'unknown'].append(r['pnl_pct'])
+        by_reentry_source[r['reentry_source'] or 'none'].append(r['pnl_pct'])
         by_regime[r['market_regime'] or 'unknown'].append(r['pnl_pct'])
+        lifecycle_stage_counts[r['lifecycle_id'] or 'unknown'].add(r['strategy_stage'] or 'stage1')
 
     log.info(f"{'='*60}")
     log.info(f"  Daily Report: {date_str}")
@@ -630,12 +790,26 @@ def print_daily_report(db, date_str=None):
     print_summary_block('All trades', rows)
     print_summary_block('Live monitor', live_rows)
     print_summary_block('Real K-line replay', real_rows)
-    print_summary_block('Synthetic replay', synthetic_rows)
     log.info(f"")
     log.info(f"  By Exit Reason:")
     for reason, ps in sorted(by_reason.items()):
         r_ev = sum(ps) / len(ps)
         log.info(f"    {reason:10s}  n={len(ps):3d}  EV={r_ev*100:+.2f}%")
+    log.info(f"")
+    log.info(f"  By Strategy Stage:")
+    for stage, ps in sorted(by_stage.items()):
+        s_ev = sum(ps) / len(ps)
+        log.info(f"    {stage:10s}  n={len(ps):3d}  EV={s_ev*100:+.2f}%")
+    log.info(f"")
+    log.info(f"  By Stage Outcome:")
+    for outcome, ps in sorted(by_stage_outcome.items()):
+        o_ev = sum(ps) / len(ps)
+        log.info(f"    {outcome:18s}  n={len(ps):3d}  EV={o_ev*100:+.2f}%")
+    log.info(f"")
+    log.info(f"  By Reentry Source:")
+    for source, ps in sorted(by_reentry_source.items()):
+        s_ev = sum(ps) / len(ps)
+        log.info(f"    {source:18s}  n={len(ps):3d}  EV={s_ev*100:+.2f}%")
     log.info(f"")
     log.info(f"  By Market Regime:")
     for regime, ps in sorted(by_regime.items()):
@@ -651,6 +825,14 @@ def print_daily_report(db, date_str=None):
     for source, ps in sorted(by_source.items()):
         s_ev = sum(ps) / len(ps)
         log.info(f"    {source:16s}  n={len(ps):3d}  EV={s_ev*100:+.2f}%")
+
+    lifecycle_counts = defaultdict(int)
+    for stages in lifecycle_stage_counts.values():
+        lifecycle_counts[len(stages)] += 1
+    log.info(f"")
+    log.info(f"  Lifecycle Stage Counts:")
+    for stage_count, lifecycle_count in sorted(lifecycle_counts.items()):
+        log.info(f"    {stage_count} stage(s): {lifecycle_count}")
     log.info(f"{'='*60}")
 
 
@@ -658,6 +840,7 @@ def print_all_stats(db):
     """Print cumulative stats across all dates."""
     rows = db.execute("""
         SELECT pnl_pct, exit_reason, market_regime, replay_source, bars_held,
+               strategy_stage, stage_outcome, reentry_source, lifecycle_id,
                date(exit_ts, 'unixepoch') as exit_date
         FROM paper_trades
         WHERE exit_reason IS NOT NULL
@@ -669,7 +852,6 @@ def print_all_stats(db):
         return
 
     real_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'real_kline_replay']
-    synthetic_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'synthetic_replay']
     live_rows = [r for r in rows if (r['replay_source'] or 'live_monitor') == 'live_monitor']
 
     log.info(f"{'='*60}")
@@ -678,12 +860,21 @@ def print_all_stats(db):
     print_summary_block('All trades', rows)
     print_summary_block('Live monitor', live_rows)
     print_summary_block('Real K-line replay', real_rows)
-    print_summary_block('Synthetic replay', synthetic_rows)
 
     # By date
     by_date = defaultdict(list)
+    by_stage = defaultdict(list)
+    by_stage_outcome = defaultdict(list)
+    by_reentry_source = defaultdict(list)
+    by_regime = defaultdict(list)
+    lifecycle_stage_counts = defaultdict(set)
     for r in rows:
         by_date[r['exit_date']].append(r['pnl_pct'])
+        by_stage[r['strategy_stage'] or 'stage1'].append(r['pnl_pct'])
+        by_stage_outcome[r['stage_outcome'] or 'unknown'].append(r['pnl_pct'])
+        by_reentry_source[r['reentry_source'] or 'none'].append(r['pnl_pct'])
+        by_regime[r['market_regime'] or 'unknown'].append(r['pnl_pct'])
+        lifecycle_stage_counts[r['lifecycle_id'] or 'unknown'].add(r['strategy_stage'] or 'stage1')
 
     log.info(f"")
     log.info(f"  By Date:")
@@ -692,10 +883,26 @@ def print_all_stats(db):
         d_wr = sum(1 for p in ps if p > 0) / len(ps)
         log.info(f"    {date}  n={len(ps):3d}  EV={d_ev*100:+.2f}%  WR={d_wr*100:.1f}%")
 
-    # By regime
-    by_regime = defaultdict(list)
-    for r in rows:
-        by_regime[r['market_regime'] or 'unknown'].append(r['pnl_pct'])
+    log.info(f"")
+    log.info(f"  By Strategy Stage:")
+    for stage, ps in sorted(by_stage.items()):
+        s_ev = sum(ps) / len(ps)
+        s_wr = sum(1 for p in ps if p > 0) / len(ps)
+        log.info(f"    {stage:10s}  n={len(ps):3d}  EV={s_ev*100:+.2f}%  WR={s_wr*100:.1f}%")
+
+    log.info(f"")
+    log.info(f"  By Stage Outcome:")
+    for outcome, ps in sorted(by_stage_outcome.items()):
+        o_ev = sum(ps) / len(ps)
+        o_wr = sum(1 for p in ps if p > 0) / len(ps)
+        log.info(f"    {outcome:18s}  n={len(ps):3d}  EV={o_ev*100:+.2f}%  WR={o_wr*100:.1f}%")
+
+    log.info(f"")
+    log.info(f"  By Reentry Source:")
+    for source, ps in sorted(by_reentry_source.items()):
+        s_ev = sum(ps) / len(ps)
+        s_wr = sum(1 for p in ps if p > 0) / len(ps)
+        log.info(f"    {source:18s}  n={len(ps):3d}  EV={s_ev*100:+.2f}%  WR={s_wr*100:.1f}%")
 
     log.info(f"")
     log.info(f"  By Market Regime:")
@@ -703,6 +910,14 @@ def print_all_stats(db):
         r_ev = sum(ps) / len(ps)
         r_wr = sum(1 for p in ps if p > 0) / len(ps)
         log.info(f"    {regime:10s}  n={len(ps):3d}  EV={r_ev*100:+.2f}%  WR={r_wr*100:.1f}%")
+
+    lifecycle_counts = defaultdict(int)
+    for stages in lifecycle_stage_counts.values():
+        lifecycle_counts[len(stages)] += 1
+    log.info(f"")
+    log.info(f"  Lifecycle Stage Counts:")
+    for stage_count, lifecycle_count in sorted(lifecycle_counts.items()):
+        log.info(f"    {stage_count} stage(s): {lifecycle_count}")
 
     # Open positions
     open_count = db.execute("SELECT COUNT(*) as c FROM paper_trades WHERE exit_reason IS NULL").fetchone()['c']
@@ -748,189 +963,248 @@ def get_kline_bars(kline_db, token_ca, start_ts, limit=120):
 # === Dry Run Mode ===
 
 def dry_run(db):
-    """Simulate paper trading on recent signals using REAL K-line data.
-
-    Fetches historical K-line bars from kline_cache.db and replays price
-    action starting from each signal. Falls back to synthetic walk if
-    no K-line data available.
-    """
-    import random
+    """Simulate staged paper trading on recent signals using real K-line data."""
 
     log.info("=== DRY RUN MODE (REAL K-LINE REPLAY) ===")
-    log.info(f"Synthetic fallback: {'ENABLED' if ALLOW_SYNTHETIC_REPLAY else 'DISABLED'}")
+    strategy_config = load_active_strategy_config()
+    stage_rules = strategy_config.get('stageRules') or {}
+    stage1_exit = get_exit_rules_for_stage(strategy_config, 'stage1')
+    stage2a_rules = get_exit_rules_for_stage(strategy_config, 'stage2A')
+    stage3_rules = get_exit_rules_for_stage(strategy_config, 'stage3')
+    min_super_index = int(((strategy_config.get('entryTimingFilters') or {}).get('minSuperIndex')) or 80)
+    strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
+    strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
 
-    # Open K-line DB
     try:
         kline_db = init_kline_db()
     except Exception as e:
         log.error(f"Failed to open kline_cache.db: {e}")
         return
 
-    # Check K-line DB stats
     kline_count = kline_db.execute("SELECT COUNT(*) FROM kline_1m").fetchone()[0]
     log.info(f"K-line DB: {kline_count:,} bars available")
 
-    signals = get_recent_signals(limit=500)  # Process more signals
+    signals = get_recent_signals(limit=500)
     if not signals:
         log.warning("No recent signals found in premium_signals")
         return
 
     log.info(f"Found {len(signals)} recent signals")
 
-    # Track stats
     real_klines_used = 0
-    synthetic_used = 0
     completed = []
+    stage_counts = defaultdict(int)
+    duplicate_prevented = 0
 
     for sig in signals:
         token_ca = sig['token_ca']
+        if not token_ca:
+            continue
         symbol = sig['symbol'] or token_ca[:8]
         signal_ts_ms = sig['timestamp']
-        # Convert ms to seconds
         signal_ts = signal_ts_ms // 1000 if signal_ts_ms > 1e12 else signal_ts_ms
+        lifecycle_id = build_lifecycle_id(token_ca, signal_ts_ms)
+        super_idx = parse_super_index(sig.get('description') or '')
+        if super_idx is None or super_idx <= min_super_index:
+            stage_counts['stage1_rejected'] += 1
+            continue
 
-        # Try to get real K-line bars
-        bars = get_kline_bars(kline_db, token_ca, signal_ts, limit=TIMEOUT_MIN)
+        bars = get_kline_bars(kline_db, token_ca, signal_ts, limit=max(stage1_exit['timeoutMinutes'], stage3_rules.get('waitBarsFromSignal', 30) + stage3_rules.get('timeoutMinutes', 120), 240))
+        if len(bars) < 5:
+            log.info(f"  [{symbol}] insufficient K-line bars ({len(bars)}), skipping")
+            continue
 
-        if len(bars) >= 5:
-            # REAL K-LINE REPLAY
-            real_klines_used += 1
-            entry_price = bars[0]['close']
-            if entry_price <= 0:
-                entry_price = bars[0]['open']
-            if entry_price <= 0:
-                continue
+        real_klines_used += 1
+        existing_stages = set()
+        lifecycle = {
+            'lifecycle_id': lifecycle_id,
+            'token_ca': token_ca,
+            'symbol': symbol,
+            'signal_ts': int(signal_ts_ms),
+            'first_peak_pct': 0.0,
+            'stage1_trade_id': None,
+            'stage2a_trade_id': None,
+            'stage3_trade_id': None,
+            'stage2a_attempted': False,
+            'stage3_attempted': False,
+            'stage1_stop_ts': None,
+            'rolling_low_after_stop': None,
+            'rolling_low_ts': None,
+        }
 
+        def replay_trade(stage_name, start_index, exit_rules):
+            entry_bar = bars[start_index]
+            entry_price = entry_bar['close'] or entry_bar['open']
+            if not entry_price or entry_price <= 0:
+                return None
             peak_pnl = 0.0
             trailing_active = False
             exit_reason = 'timeout'
             exit_pnl = 0.0
-            bars_held = 0
             exit_price = entry_price
-
-            for i, bar in enumerate(bars):
-                price = bar['close']
-                if price <= 0:
-                    price = bar.get('open', entry_price)
-                if price <= 0:
+            bars_held = 0
+            for offset, bar in enumerate(bars[start_index:], start=1):
+                price = bar['close'] or bar.get('open') or entry_price
+                if not price or price <= 0:
                     continue
-
                 pnl = (price - entry_price) / entry_price
                 peak_pnl = max(peak_pnl, pnl)
-                bars_held = i + 1
-
-                # Trail activation
-                if not trailing_active and peak_pnl >= TRAIL_START:
+                bars_held = offset
+                if not trailing_active and peak_pnl >= pct_to_decimal(exit_rules['trailStartPct']):
                     trailing_active = True
-
-                # Stop loss
-                if not trailing_active and pnl <= SL_PCT:
+                if not trailing_active and pnl <= -pct_to_decimal(exit_rules['stopLossPct']):
                     exit_reason = 'sl'
-                    exit_pnl = SL_PCT
+                    exit_pnl = -pct_to_decimal(exit_rules['stopLossPct'])
                     exit_price = entry_price * (1 + exit_pnl)
                     break
-
-                # Trailing stop
                 if trailing_active:
-                    trail_level = peak_pnl * TRAIL_FACTOR
+                    trail_level = peak_pnl * float(exit_rules['trailFactor'])
                     if pnl <= trail_level:
                         exit_reason = 'trail'
                         exit_pnl = max(pnl, trail_level)
                         exit_price = entry_price * (1 + exit_pnl)
                         break
-
                 exit_pnl = pnl
                 exit_price = price
-
-            exit_ts = int(signal_ts + bars_held * 60)
-            regime = 'real_kline'
-            replay_source = 'real_kline_replay'
-
-            log.info(
-                f"  [{symbol}] REAL  bars={len(bars)}  "
-                f"pnl={exit_pnl*100:+.1f}%  peak={peak_pnl*100:+.1f}%  "
-                f"reason={exit_reason}  bars_held={bars_held}"
-            )
-        else:
-            # SYNTHETIC FALLBACK (insufficient K-line data)
-            if not ALLOW_SYNTHETIC_REPLAY:
-                log.info(f"  [{symbol}] insufficient K-line bars ({len(bars)}), skipping synthetic fallback")
-                continue
-
-            synthetic_used += 1
-            entry_price = random.uniform(0.00001, 0.01)
-            entry_ts = int(signal_ts)
-
-            log.info(f"  Signal: {symbol} ({token_ca[:12]}...) entry=${entry_price:.8f}")
-
-            peak_pnl = 0.0
-            trailing_active = False
-            exit_reason = 'timeout'
-            exit_pnl = 0.0
-            bars_held = 0
-
-            random.seed(hash(token_ca))  # reproducible per token
-            price = entry_price
-
-            for minute in range(1, TIMEOUT_MIN + 1):
-                shock = random.gauss(0.002, 0.03)
-                price = price * (1 + shock)
-                if price <= 0:
-                    price = entry_price * 0.01
-
-                pnl = (price - entry_price) / entry_price
-                peak_pnl = max(peak_pnl, pnl)
-                bars_held = minute
-
-                if not trailing_active and peak_pnl >= TRAIL_START:
-                    trailing_active = True
-
-                if not trailing_active and pnl <= SL_PCT:
-                    exit_reason = 'sl'
-                    exit_pnl = SL_PCT
+                if offset >= int(exit_rules['timeoutMinutes']):
+                    exit_reason = 'timeout'
                     break
+            exit_bar = bars[min(start_index + max(bars_held - 1, 0), len(bars) - 1)]
+            return {
+                'entry_price': entry_price,
+                'entry_ts': int(entry_bar['timestamp']),
+                'exit_price': exit_price,
+                'exit_ts': int(exit_bar['timestamp']),
+                'exit_reason': exit_reason,
+                'exit_pnl': exit_pnl,
+                'bars_held': bars_held,
+                'peak_pnl': peak_pnl,
+                'trailing_active': trailing_active,
+            }
 
-                if trailing_active:
-                    trail_level = peak_pnl * TRAIL_FACTOR
-                    if pnl <= trail_level:
-                        exit_reason = 'trail'
-                        exit_pnl = max(pnl, trail_level)
-                        break
-
-                exit_pnl = pnl
-
-            exit_price = entry_price * (1 + exit_pnl)
-            exit_ts = entry_ts + bars_held * 60
-            regime = 'synthetic'
-            replay_source = 'synthetic_replay'
-
-            log.info(
-                f"    -> {exit_reason:7s}  pnl={exit_pnl*100:+.1f}%  "
-                f"peak={peak_pnl*100:+.1f}%  bars={bars_held}  [SYNTHETIC]"
-            )
-
-        # Write to DB
+        if 'stage1' in existing_stages:
+            duplicate_prevented += 1
+            continue
+        stage1_result = replay_trade('stage1', 0, stage1_exit)
+        if not stage1_result:
+            continue
+        lifecycle['first_peak_pct'] = max(lifecycle['first_peak_pct'], stage1_result['peak_pnl'] * 100.0)
         db.execute("""
             INSERT INTO paper_trades
-                (token_ca, symbol, signal_ts, entry_price, entry_ts,
+                (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                 token_ca, symbol, signal_ts, entry_price, entry_ts,
                  exit_price, exit_ts, exit_reason, pnl_pct, bars_held,
-                 market_regime, replay_source, peak_pnl, trailing_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 market_regime, replay_source, peak_pnl, trailing_active,
+                 lifecycle_id, stage_seq, trigger_ts, trigger_price, first_peak_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            token_ca, symbol, int(signal_ts_ms), entry_price, int(signal_ts),
-            exit_price, exit_ts, exit_reason, exit_pnl, bars_held,
-            regime, replay_source, peak_pnl, int(trailing_active),
+            strategy_id, strategy_role, 'stage1', f"stage1_{stage1_result['exit_reason']}",
+            token_ca, symbol, int(signal_ts_ms), stage1_result['entry_price'], stage1_result['entry_ts'],
+            stage1_result['exit_price'], stage1_result['exit_ts'], stage1_result['exit_reason'], stage1_result['exit_pnl'], stage1_result['bars_held'],
+            'real_kline', 'real_kline_replay', stage1_result['peak_pnl'], int(stage1_result['trailing_active']),
+            lifecycle_id, stage_seq('stage1'), stage1_result['entry_ts'], stage1_result['entry_price'], lifecycle['first_peak_pct']
         ))
+        stage1_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
         db.commit()
+        existing_stages.add('stage1')
+        lifecycle['stage1_trade_id'] = stage1_trade_id
+        stage_counts['stage1_entered'] += 1
+        stage_counts[f"stage1_exit_{stage1_result['exit_reason']}"] += 1
+        completed.append(stage1_result['exit_pnl'])
 
-        completed.append(exit_pnl)
+        if stage1_result['exit_reason'] == 'sl' and stage_rules.get('stage2A', {}).get('enabled') and 'stage2A' not in existing_stages:
+            lifecycle['stage1_stop_ts'] = stage1_result['exit_ts']
+            wait_bars = int(stage_rules['stage2A'].get('waitBarsAfterStop', 3))
+            rolling_low = None
+            rolling_low_ts = None
+            stage2_start_index = None
+            for idx in range(stage1_result['bars_held'] + wait_bars, len(bars)):
+                close_price = bars[idx]['close'] or bars[idx]['open']
+                if not close_price or close_price <= 0:
+                    continue
+                if rolling_low is None or close_price < rolling_low:
+                    rolling_low = close_price
+                    rolling_low_ts = int(bars[idx]['timestamp'])
+                rebound_target = rolling_low * (1 + pct_to_decimal(stage_rules['stage2A'].get('reboundFromRollingLowPct', 18)))
+                if close_price >= rebound_target:
+                    stage2_start_index = idx
+                    lifecycle['rolling_low_after_stop'] = rolling_low
+                    lifecycle['rolling_low_ts'] = rolling_low_ts
+                    break
+            stage_counts['stage2A_armed'] += 1
+            lifecycle['stage2a_attempted'] = True
+            if stage2_start_index is not None:
+                stage2_result = replay_trade('stage2A', stage2_start_index, stage2a_rules)
+                if stage2_result:
+                    db.execute("""
+                        INSERT INTO paper_trades
+                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                             token_ca, symbol, signal_ts, entry_price, entry_ts,
+                             exit_price, exit_ts, exit_reason, pnl_pct, bars_held,
+                             market_regime, replay_source, peak_pnl, trailing_active,
+                             lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
+                             armed_ts, rolling_low_price, rolling_low_ts, reentry_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        strategy_id, strategy_role, 'stage2A', f"stage2A_{stage2_result['exit_reason']}",
+                        token_ca, symbol, int(signal_ts_ms), stage2_result['entry_price'], stage2_result['entry_ts'],
+                        stage2_result['exit_price'], stage2_result['exit_ts'], stage2_result['exit_reason'], stage2_result['exit_pnl'], stage2_result['bars_held'],
+                        'real_kline', 'real_kline_replay', stage2_result['peak_pnl'], int(stage2_result['trailing_active']),
+                        lifecycle_id, stage1_trade_id, stage_seq('stage2A'), stage2_result['entry_ts'], stage2_result['entry_price'],
+                        lifecycle['stage1_stop_ts'], lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound'
+                    ))
+                    stage2_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                    db.commit()
+                    existing_stages.add('stage2A')
+                    lifecycle['stage2a_trade_id'] = stage2_trade_id
+                    stage_counts['stage2A_entered'] += 1
+                    stage_counts[f"stage2A_exit_{stage2_result['exit_reason']}"] += 1
+                    completed.append(stage2_result['exit_pnl'])
+            else:
+                stage_counts['stage2A_expired'] += 1
+
+        if stage_rules.get('stage3', {}).get('enabled') and 'stage3' not in existing_stages:
+            lifecycle['stage3_attempted'] = True
+            wait_bars = int(stage_rules['stage3'].get('waitBarsFromSignal', 30))
+            first_peak_min = float(stage_rules['stage3'].get('firstPeakMinPct', 10))
+            if lifecycle['first_peak_pct'] >= first_peak_min and len(bars) > wait_bars:
+                stage3_result = replay_trade('stage3', wait_bars, stage3_rules)
+                stage_counts['stage3_eligible'] += 1
+                if stage3_result:
+                    db.execute("""
+                        INSERT INTO paper_trades
+                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                             token_ca, symbol, signal_ts, entry_price, entry_ts,
+                             exit_price, exit_ts, exit_reason, pnl_pct, bars_held,
+                             market_regime, replay_source, peak_pnl, trailing_active,
+                             lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
+                             reentry_source, first_peak_pct)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        strategy_id, strategy_role, 'stage3', f"stage3_{stage3_result['exit_reason']}",
+                        token_ca, symbol, int(signal_ts_ms), stage3_result['entry_price'], stage3_result['entry_ts'],
+                        stage3_result['exit_price'], stage3_result['exit_ts'], stage3_result['exit_reason'], stage3_result['exit_pnl'], stage3_result['bars_held'],
+                        'real_kline', 'real_kline_replay', stage3_result['peak_pnl'], int(stage3_result['trailing_active']),
+                        lifecycle_id, stage1_trade_id, stage_seq('stage3'), stage3_result['entry_ts'], stage3_result['entry_price'],
+                        'continuation_reentry', lifecycle['first_peak_pct']
+                    ))
+                    db.commit()
+                    existing_stages.add('stage3')
+                    stage_counts['stage3_entered'] += 1
+                    stage_counts[f"stage3_exit_{stage3_result['exit_reason']}"] += 1
+                    completed.append(stage3_result['exit_pnl'])
+            else:
+                stage_counts['stage3_skipped'] += 1
 
     kline_db.close()
 
-    # Summary
     log.info(f"\n=== DRY RUN COMPLETE ===")
     log.info(f"Real K-line replays: {real_klines_used}")
-    log.info(f"Synthetic fallbacks: {synthetic_used}")
+    log.info(f"Stage 1 entered / rejected: {stage_counts['stage1_entered']} / {stage_counts['stage1_rejected']}")
+    log.info(f"Stage 1 exit breakdown: sl={stage_counts['stage1_exit_sl']} trail={stage_counts['stage1_exit_trail']} timeout={stage_counts['stage1_exit_timeout']}")
+    log.info(f"Stage 2A armed / entered / expired: {stage_counts['stage2A_armed']} / {stage_counts['stage2A_entered']} / {stage_counts['stage2A_expired']}")
+    log.info(f"Stage 3 eligible / entered / skipped: {stage_counts['stage3_eligible']} / {stage_counts['stage3_entered']} / {stage_counts['stage3_skipped']}")
+    log.info(f"Duplicate prevented: {duplicate_prevented}")
 
     if completed:
         n = len(completed)
@@ -940,14 +1214,12 @@ def dry_run(db):
         total_pnl = sum(completed)
         std = (sum((p - ev) ** 2 for p in completed) / n) ** 0.5
         sharpe = ev / std if std > 0 else 0
-
         log.info(f"\n  Trades: {n}")
         log.info(f"  EV: {ev*100:+.3f}%")
         log.info(f"  WR: {wr*100:.1f}% ({wins} wins)")
         log.info(f"  Sharpe: {sharpe:.3f}")
         log.info(f"  Total PnL: {total_pnl*100:+.2f}%")
 
-    # Print from DB to verify persistence
     log.info(f"")
     print_all_stats(db)
 
@@ -961,9 +1233,20 @@ def get_signal_minute_ts(signal_ts):
 
 def run_monitor(db):
     """Main monitoring loop."""
+    strategy_config = load_active_strategy_config()
+    stage_rules = strategy_config.get('stageRules') or {}
+    stage1_exit = get_exit_rules_for_stage(strategy_config, 'stage1')
+    stage2a_rules = get_exit_rules_for_stage(strategy_config, 'stage2A')
+    stage3_rules = get_exit_rules_for_stage(strategy_config, 'stage3')
+    min_super_index = int(((strategy_config.get('entryTimingFilters') or {}).get('minSuperIndex')) or 80)
+    strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
+    strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
+
     log.info("=== Paper Trade Monitor Started ===")
-    log.info(f"  SL={SL_PCT*100:.0f}%  Trail Start={TRAIL_START*100:.0f}%  "
-             f"Trail Factor={TRAIL_FACTOR*100:.0f}%  Timeout={TIMEOUT_MIN}min")
+    log.info(f"  strategy={strategy_id} role={strategy_role}")
+    log.info(f"  stage1 exit: SL={stage1_exit['stopLossPct']}% Trail Start={stage1_exit['trailStartPct']}% Trail Factor={stage1_exit['trailFactor']*100:.0f}% Timeout={stage1_exit['timeoutMinutes']}min")
+    log.info(f"  stage2A exit: SL={stage2a_rules['stopLossPct']}% Trail Start={stage2a_rules['trailStartPct']}% Timeout={stage2a_rules['timeoutMinutes']}min")
+    log.info(f"  stage3 exit: SL={stage3_rules['stopLossPct']}% Trail Start={stage3_rules['trailStartPct']}% Timeout={stage3_rules['timeoutMinutes']}min")
     log.info(f"  Signal poll: {SIGNAL_POLL_INTERVAL}s  Position poll: {POSITION_POLL_INTERVAL}s")
     if REMOTE_SIGNAL_URL:
         log.info(f"  Signal Source: remote export {REMOTE_SIGNAL_URL}")
@@ -980,34 +1263,32 @@ def run_monitor(db):
     else:
         log.warning(f"  premium_signals has no rows from {freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process")
 
-    # Track open positions
-    positions = {}  # token_ca -> Position
-    pending_entries = {}  # token_ca -> pending signal waiting for signal-minute close
+    positions = {}
+    pending_entries = {}
+    lifecycles = restore_lifecycles(db)
 
-    # Restore open positions from DB
     open_rows = db.execute("""
-        SELECT token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held
+        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
+               strategy_stage, lifecycle_id
         FROM paper_trades
         WHERE exit_reason IS NULL
     """).fetchall()
     for r in open_rows:
         pool = get_pool_address(r['token_ca'])
-        pos = Position(r['token_ca'], r['symbol'], r['signal_ts'],
-                       r['entry_price'], r['entry_ts'], pool)
+        pos = Position(r['id'], r['token_ca'], r['symbol'], r['signal_ts'], r['entry_price'], r['entry_ts'], pool,
+                       r['strategy_stage'] or 'stage1', r['lifecycle_id'] or build_lifecycle_id(r['token_ca'], r['signal_ts']),
+                       get_exit_rules_for_stage(strategy_config, r['strategy_stage'] or 'stage1'))
         pos.peak_pnl = r['peak_pnl'] or 0
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
         pos.last_bar_ts = int(r['entry_ts']) + max((r['bars_held'] or 0) - 1, 0) * 60
-        positions[r['token_ca']] = pos
-        time.sleep(0.3)
+        positions[pos.trade_id] = pos
+        time.sleep(0.2)
 
     if positions:
         log.info(f"  Restored {len(positions)} open positions")
 
-    # Find last processed signal ID
-    last_id_row = db.execute("""
-        SELECT MAX(signal_ts) as max_ts FROM paper_trades
-    """).fetchone()
+    last_id_row = db.execute("SELECT MAX(signal_ts) as max_ts FROM paper_trades").fetchone()
     last_signal_id = 0
     if last_id_row and last_id_row['max_ts']:
         try:
@@ -1029,204 +1310,266 @@ def run_monitor(db):
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
 
-        # === 1. Check for new signals ===
         try:
             new_signals = get_new_signals(last_signal_id)
             for sig in new_signals:
                 token_ca = sig['token_ca']
                 last_signal_id = sig['id']
+                signal_ts = sig['timestamp']
+                lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
 
-                # Skip if already tracking
-                if token_ca in positions or token_ca in pending_entries:
+                if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
                     continue
 
-                # Skip if already traded
                 existing = db.execute(
-                    "SELECT id FROM paper_trades WHERE token_ca = ? AND signal_ts = ?",
-                    (token_ca, sig['timestamp'])
+                    "SELECT id FROM paper_trades WHERE lifecycle_id = ? OR (token_ca = ? AND signal_ts = ? AND strategy_stage = 'stage1')",
+                    (lifecycle_id, token_ca, signal_ts)
                 ).fetchone()
                 if existing:
                     continue
 
                 symbol = sig['symbol'] or token_ca[:8]
-                log.info(f"New signal: {symbol} ({token_ca[:12]}...)")
-
-                # Parse Super Index from description, skip if < 80
                 super_idx = parse_super_index(sig['description'] or '')
-                if super_idx is None:
-                    log.info(f"  Super Index not found in description, skipping")
-                    continue
-                if super_idx < 80:
-                    log.info(f"  Super Index={super_idx}<80, skipping")
+                if super_idx is None or super_idx <= min_super_index:
                     continue
 
-                # Score on recent bars, but stage entry until signal-minute close is available
                 pool = get_pool_address(token_ca)
                 if not pool:
                     log.warning(f"  Could not find pool for {symbol}, skipping")
                     continue
-                time.sleep(0.4)
+                time.sleep(0.3)
 
-                bars = get_notath_bars(pool, limit=6)
-                if not bars or len(bars) < 4:
-                    log.warning(f"  Not enough K-line bars for {symbol}, skipping")
-                    continue
-
-                score_result = compute_notath_score(bars[:4])
-                if not score_result['passed']:
-                    log.info(f"  NOT_ATH score={score_result['score']} < 3 (RED={score_result['is_red']}, lowVol={score_result['low_volume']}, active={score_result['is_active']}), skipping")
-                    continue
-
-                signal_ts = sig['timestamp']
                 signal_minute_ts = get_signal_minute_ts(signal_ts)
-                pending_entries[token_ca] = {
+                pending_entries[lifecycle_id] = {
                     'token_ca': token_ca,
                     'symbol': symbol,
                     'signal_ts': signal_ts,
                     'signal_minute_ts': signal_minute_ts,
                     'pool': pool,
-                    'score_result': score_result,
+                    'lifecycle_id': lifecycle_id,
+                    'super_idx': super_idx,
                 }
-                log.info(
-                    f"  NOT_ATH score={score_result['score']} ✅ (RED={score_result['is_red']}, "
-                    f"lowVol={score_result['low_volume']}, active={score_result['is_active']}, "
-                    f"mom={score_result['mom']:+.1f}%) | staged for signal-minute close @ {signal_minute_ts}"
-                )
-
-                time.sleep(0.5)  # rate limit between signals
-
+                lifecycles.setdefault(lifecycle_id, {
+                    'lifecycle_id': lifecycle_id,
+                    'token_ca': token_ca,
+                    'symbol': symbol,
+                    'signal_ts': signal_ts,
+                    'first_peak_pct': 0.0,
+                    'stage1_trade_id': None,
+                    'stage2a_trade_id': None,
+                    'stage3_trade_id': None,
+                    'stage2a_attempted': False,
+                    'stage3_attempted': False,
+                    'stage1_stop_ts': None,
+                    'rolling_low_after_stop': None,
+                    'rolling_low_ts': None,
+                })
+                log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 close @ {signal_minute_ts}")
+                time.sleep(0.2)
         except Exception as e:
             log.error(f"Signal check error: {e}")
 
-        # === 2. Convert staged signals into entries at signal-minute close ===
         if pending_entries:
-            for token_ca, pending in list(pending_entries.items()):
+            for lifecycle_id, pending in list(pending_entries.items()):
                 try:
                     bars = get_notath_bars(pending['pool'], limit=8)
                     if not bars:
                         continue
-
                     signal_bar = next((b for b in bars if int(b['ts']) == pending['signal_minute_ts']), None)
                     if signal_bar is None:
                         continue
-
                     price = signal_bar['close']
                     if not price or price <= 0:
-                        log.warning(f"  Could not get signal-minute close for {pending['symbol']}, skipping staged entry")
-                        pending_entries.pop(token_ca, None)
+                        pending_entries.pop(lifecycle_id, None)
                         continue
-
                     entry_ts = int(signal_bar['ts'])
-                    signal_ts = pending['signal_ts']
                     if sol_price is None:
                         sol_price = get_sol_price()
-                        time.sleep(0.3)
+                        time.sleep(0.2)
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
-
                     db.execute("""
                         INSERT INTO paper_trades
-                            (token_ca, symbol, signal_ts, entry_price, entry_ts,
-                             market_regime, replay_source, peak_pnl, trailing_active)
-                        VALUES (?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0)
-                    """, (token_ca, pending['symbol'], signal_ts, price, entry_ts, regime))
+                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                             token_ca, symbol, signal_ts, entry_price, entry_ts,
+                             market_regime, replay_source, peak_pnl, trailing_active,
+                             lifecycle_id, stage_seq, trigger_ts, trigger_price)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?)
+                    """, (
+                        strategy_id, strategy_role, 'stage1', 'stage1_entered',
+                        pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
+                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price
+                    ))
+                    trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
-
-                    pos = Position(token_ca, pending['symbol'], signal_ts, price, entry_ts, pending['pool'])
-                    pos.last_bar_ts = entry_ts
-                    positions[token_ca] = pos
-                    pending_entries.pop(token_ca, None)
-                    delay_min = (entry_ts - (signal_ts // 1000 if signal_ts > 1e12 else signal_ts)) / 60
-                    log.info(
-                        f"  Entered {pending['symbol']} @ ${price:.10f}  regime={regime}  "
-                        f"signal_bar_ts={entry_ts}  delay={delay_min:+.1f}min"
-                    )
-                    time.sleep(0.4)
+                    pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
+                                   'stage1', lifecycle_id, stage1_exit)
+                    positions[pos.trade_id] = pos
+                    lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
+                    pending_entries.pop(lifecycle_id, None)
+                    log.info(f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} lifecycle={lifecycle_id}")
+                    time.sleep(0.2)
                 except Exception as e:
-                    log.error(f"  Pending entry error for {pending['symbol']}: {e}")
+                    log.error(f"  Pending entry error for {pending.get('symbol', lifecycle_id)}: {e}")
 
-        # === 3. Update open positions ===
-        if now - last_position_check >= POSITION_POLL_INTERVAL and positions:
+        if now - last_position_check >= POSITION_POLL_INTERVAL:
             last_position_check = now
             to_close = []
-
-            # Refresh SOL price for regime
             try:
                 new_sol = get_sol_price()
                 if new_sol:
                     sol_price = new_sol
-                time.sleep(0.3)
+                time.sleep(0.2)
             except Exception:
                 pass
 
-            for token_ca, pos in list(positions.items()):
+            for trade_id, pos in list(positions.items()):
                 try:
-                    current_bar = get_current_bar(token_ca, pos.pool_address)
+                    current_bar = get_current_bar(pos.token_ca, pos.pool_address)
                     if not current_bar:
-                        log.debug(f"  Current bar fetch failed for {pos.symbol}, skipping update")
                         continue
-
                     bar_ts = int(current_bar['ts'])
-                    price = current_bar['close']
-                    if not price or price <= 0:
-                        price = current_bar.get('open')
+                    price = current_bar['close'] or current_bar.get('open')
                     if price is None or price <= 0:
-                        log.debug(f"  Invalid current bar for {pos.symbol}, skipping update")
                         continue
-
                     should_exit, reason, pnl = pos.check_exit(price, bar_ts)
-
-                    # Update peak/trailing in DB
+                    lifecycle = lifecycles.setdefault(pos.lifecycle_id, {
+                        'lifecycle_id': pos.lifecycle_id,
+                        'token_ca': pos.token_ca,
+                        'symbol': pos.symbol,
+                        'signal_ts': pos.signal_ts,
+                        'first_peak_pct': 0.0,
+                        'stage1_trade_id': None,
+                        'stage2a_trade_id': None,
+                        'stage3_trade_id': None,
+                        'stage2a_attempted': False,
+                        'stage3_attempted': False,
+                        'stage1_stop_ts': None,
+                        'rolling_low_after_stop': None,
+                        'rolling_low_ts': None,
+                    })
+                    lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
                     db.execute("""
                         UPDATE paper_trades
-                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?
-                        WHERE token_ca = ? AND exit_reason IS NULL
-                    """, (pos.peak_pnl, int(pos.trailing_active), pos.bars_held,
-                          token_ca))
+                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?, first_peak_pct = ?
+                        WHERE id = ?
+                    """, (pos.peak_pnl, int(pos.trailing_active), pos.bars_held, f"{pos.strategy_stage}_open", lifecycle['first_peak_pct'], pos.trade_id))
                     db.commit()
-
                     if should_exit:
-                        to_close.append((token_ca, reason, pnl, price, bar_ts))
-
-                    time.sleep(0.4)  # rate limit
-
+                        to_close.append((trade_id, reason, pnl, price, bar_ts))
+                    time.sleep(0.2)
                 except Exception as e:
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
-            # Close positions
-            for token_ca, reason, pnl, exit_price, exit_ts in to_close:
-                pos = positions.pop(token_ca)
-
+            for trade_id, reason, pnl, exit_price, exit_ts in to_close:
+                pos = positions.pop(trade_id)
+                lifecycle = lifecycles[pos.lifecycle_id]
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
-
+                stage_outcome = f"{pos.strategy_stage}_{reason}"
                 db.execute("""
                     UPDATE paper_trades
                     SET exit_price = ?, exit_ts = ?, exit_reason = ?,
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
-                        peak_pnl = ?, trailing_active = ?
-                    WHERE token_ca = ? AND exit_reason IS NULL
+                        peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?
+                    WHERE id = ?
                 """, (
                     exit_price, exit_ts, reason, pnl, pos.bars_held,
-                    regime, pos.peak_pnl, int(pos.trailing_active), token_ca
+                    regime, pos.peak_pnl, int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0, pos.trade_id
                 ))
                 db.commit()
+                if pos.strategy_stage == 'stage1' and reason == 'sl':
+                    lifecycle['stage1_stop_ts'] = exit_ts
+                    lifecycle['rolling_low_after_stop'] = None
+                    lifecycle['rolling_low_ts'] = None
+                log.info(f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} lifecycle={pos.lifecycle_id}")
 
-                log.info(
-                    f"  CLOSED {pos.symbol}: {reason}  pnl={pnl*100:+.1f}%  "
-                    f"peak={pos.peak_pnl*100:+.1f}%  bars={pos.bars_held}  regime={regime}  exit_bar_ts={exit_ts}"
-                )
+            for lifecycle_id, lifecycle in list(lifecycles.items()):
+                if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
+                    continue
+                pool = get_pool_address(lifecycle['token_ca'])
+                if not pool:
+                    continue
+                current_bar = get_current_bar(lifecycle['token_ca'], pool)
+                if not current_bar:
+                    continue
+                bar_ts = int(current_bar['ts'])
+                close_price = current_bar['close'] or current_bar.get('open')
+                if close_price is None or close_price <= 0:
+                    continue
+
+                if stage_rules.get('stage2A', {}).get('enabled') and lifecycle.get('stage1_stop_ts') and not lifecycle.get('stage2a_attempted'):
+                    wait_bars = int(stage_rules['stage2A'].get('waitBarsAfterStop', 3))
+                    wait_seconds = wait_bars * 60
+                    if bar_ts >= int(lifecycle['stage1_stop_ts']) + wait_seconds:
+                        rolling_low = lifecycle.get('rolling_low_after_stop')
+                        if rolling_low is None or close_price < rolling_low:
+                            lifecycle['rolling_low_after_stop'] = close_price
+                            lifecycle['rolling_low_ts'] = bar_ts
+                        rolling_low = lifecycle.get('rolling_low_after_stop')
+                        rebound_target = rolling_low * (1 + pct_to_decimal(stage_rules['stage2A'].get('reboundFromRollingLowPct', 18)))
+                        if close_price >= rebound_target:
+                            regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                            db.execute("""
+                                INSERT INTO paper_trades
+                                    (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                                     token_ca, symbol, signal_ts, entry_price, entry_ts,
+                                     market_regime, replay_source, peak_pnl, trailing_active,
+                                     lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
+                                     armed_ts, rolling_low_price, rolling_low_ts, reentry_source)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                strategy_id, strategy_role, 'stage2A', 'stage2A_entered',
+                                lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], close_price, bar_ts,
+                                regime, lifecycle_id, lifecycle.get('stage1_trade_id'), stage_seq('stage2A'), bar_ts, close_price,
+                                lifecycle.get('stage1_stop_ts'), lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound'
+                            ))
+                            trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                            db.commit()
+                            pos = Position(trade_id, lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], close_price, bar_ts, pool,
+                                           'stage2A', lifecycle_id, stage2a_rules)
+                            positions[pos.trade_id] = pos
+                            lifecycle['stage2a_trade_id'] = trade_id
+                            lifecycle['stage2a_attempted'] = True
+                            log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${close_price:.10f} lifecycle={lifecycle_id}")
+                            continue
+
+                if stage_rules.get('stage3', {}).get('enabled') and not lifecycle.get('stage3_attempted'):
+                    signal_ts_sec = lifecycle['signal_ts'] // 1000 if lifecycle['signal_ts'] > 1e12 else lifecycle['signal_ts']
+                    wait_bars = int(stage_rules['stage3'].get('waitBarsFromSignal', 30))
+                    first_peak_min = float(stage_rules['stage3'].get('firstPeakMinPct', 10))
+                    if bar_ts >= int(signal_ts_sec) + wait_bars * 60 and (lifecycle.get('first_peak_pct') or 0.0) >= first_peak_min:
+                        regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                        db.execute("""
+                            INSERT INTO paper_trades
+                                (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                                 token_ca, symbol, signal_ts, entry_price, entry_ts,
+                                 market_regime, replay_source, peak_pnl, trailing_active,
+                                 lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
+                                 reentry_source, first_peak_pct)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            strategy_id, strategy_role, 'stage3', 'stage3_entered',
+                            lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], close_price, bar_ts,
+                            regime, lifecycle_id, lifecycle.get('stage1_trade_id'), stage_seq('stage3'), bar_ts, close_price,
+                            'continuation_reentry', lifecycle.get('first_peak_pct') or 0.0
+                        ))
+                        trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                        db.commit()
+                        pos = Position(trade_id, lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], close_price, bar_ts, pool,
+                                       'stage3', lifecycle_id, stage3_rules)
+                        positions[pos.trade_id] = pos
+                        lifecycle['stage3_trade_id'] = trade_id
+                        lifecycle['stage3_attempted'] = True
+                        log.info(f"  Entered {lifecycle['symbol']}/stage3 @ ${close_price:.10f} lifecycle={lifecycle_id}")
 
             if positions:
-                log.info(f"  Open positions: {len(positions)}  "
-                         f"[{', '.join(p.symbol for p in positions.values())}]")
+                log.info(f"  Open positions: {len(positions)}  [{', '.join(f'{p.symbol}/{p.strategy_stage}' for p in positions.values())}]")
 
-        # === 3. Daily report ===
         today_str = now_utc.strftime('%Y-%m-%d')
         if now_utc.hour == DAILY_REPORT_HOUR and last_daily_report != today_str:
             yesterday = (now_utc - timedelta(days=1)).strftime('%Y-%m-%d')
             print_daily_report(db, yesterday)
             last_daily_report = today_str
 
-        # === 4. Sleep ===
         time.sleep(SIGNAL_POLL_INTERVAL)
 
 
