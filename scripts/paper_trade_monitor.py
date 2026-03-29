@@ -1302,9 +1302,35 @@ def run_monitor(db):
 
     log.info(f"  Starting from signal ID > {last_signal_id}")
 
+    # Startup: audit recent signal status distribution to diagnose gate health
+    try:
+        audit_rows = get_recent_signals(limit=100)
+        if not REMOTE_SIGNAL_URL:
+            try:
+                sdb = sqlite3.connect(SENTIMENT_DB)
+                sdb.row_factory = sqlite3.Row
+                audit_raw = sdb.execute(
+                    "SELECT hard_gate_status, COUNT(*) as n FROM premium_signals "
+                    "GROUP BY hard_gate_status ORDER BY n DESC LIMIT 10"
+                ).fetchall()
+                sdb.close()
+                audit_summary = ', '.join(f"{r['hard_gate_status'] or 'NULL'}={r['n']}" for r in audit_raw)
+                log.info(f"  Signal gate audit (all-time): {audit_summary}")
+                recent_pass = sum(1 for r in audit_rows if (r.get('hard_gate_status') or '').upper() in ('PASS', 'RISK_BLOCKED'))
+                recent_super = sum(1 for r in audit_rows if (r.get('hard_gate_status') or '').upper() in ('PASS', 'RISK_BLOCKED') and (parse_super_index(r.get('description') or '') or 0) > min_super_index)
+                log.info(f"  Recent 100 signals: {recent_pass} PASS/RISK_BLOCKED, {recent_super} with super>{min_super_index}")
+            except Exception as ae:
+                log.warning(f"  Signal gate audit failed: {ae}")
+    except Exception:
+        pass
+
     last_position_check = 0
     last_daily_report = None
+    last_signal_cycle_log = 0
     sol_price = None
+
+    # Pending entry TTL: discard entries that can't find their signal bar after this many seconds
+    PENDING_TTL_SECONDS = 300  # 5 minutes
 
     while True:
         now = time.time()
@@ -1312,13 +1338,20 @@ def run_monitor(db):
 
         try:
             new_signals = get_new_signals(last_signal_id)
+            cycle_seen = 0
+            cycle_dup = 0
+            cycle_low_super = 0
+            cycle_no_pool = 0
+            cycle_queued = 0
             for sig in new_signals:
                 token_ca = sig['token_ca']
                 last_signal_id = sig['id']
                 signal_ts = sig['timestamp']
                 lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
+                cycle_seen += 1
 
                 if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
+                    cycle_dup += 1
                     continue
 
                 existing = db.execute(
@@ -1326,16 +1359,20 @@ def run_monitor(db):
                     (lifecycle_id, token_ca, signal_ts)
                 ).fetchone()
                 if existing:
+                    cycle_dup += 1
                     continue
 
                 symbol = sig['symbol'] or token_ca[:8]
                 super_idx = parse_super_index(sig['description'] or '')
                 if super_idx is None or super_idx <= min_super_index:
+                    log.info(f"  [{symbol}] super={super_idx} (need >{min_super_index}), skip stage1")
+                    cycle_low_super += 1
                     continue
 
                 pool = get_pool_address(token_ca)
                 if not pool:
-                    log.warning(f"  Could not find pool for {symbol}, skipping")
+                    log.warning(f"  Could not find pool for {symbol} (super={super_idx}), skipping")
+                    cycle_no_pool += 1
                     continue
                 time.sleep(0.3)
 
@@ -1348,6 +1385,7 @@ def run_monitor(db):
                     'pool': pool,
                     'lifecycle_id': lifecycle_id,
                     'super_idx': super_idx,
+                    'queued_at': now,
                 }
                 lifecycles.setdefault(lifecycle_id, {
                     'lifecycle_id': lifecycle_id,
@@ -1364,13 +1402,25 @@ def run_monitor(db):
                     'rolling_low_after_stop': None,
                     'rolling_low_ts': None,
                 })
+                cycle_queued += 1
                 log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 close @ {signal_minute_ts}")
                 time.sleep(0.2)
+
+            if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
+                log.info(f"Signal cycle: seen={cycle_seen} dup={cycle_dup} low_super={cycle_low_super} no_pool={cycle_no_pool} queued={cycle_queued} pending={len(pending_entries)}")
+                last_signal_cycle_log = now
         except Exception as e:
             log.error(f"Signal check error: {e}")
 
         if pending_entries:
             for lifecycle_id, pending in list(pending_entries.items()):
+                # TTL check: discard stale pending entries whose signal bar is unreachable
+                queued_at = pending.get('queued_at', now)
+                if now - queued_at > PENDING_TTL_SECONDS:
+                    log.warning(f"  Pending entry TTL expired for {pending.get('symbol', lifecycle_id)} "
+                                f"(queued {int(now - queued_at)}s ago, signal_minute_ts={pending['signal_minute_ts']}), discarding")
+                    pending_entries.pop(lifecycle_id, None)
+                    continue
                 try:
                     bars = get_notath_bars(pending['pool'], limit=8)
                     if not bars:
