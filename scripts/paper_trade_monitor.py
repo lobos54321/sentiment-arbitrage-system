@@ -50,16 +50,15 @@ DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingL
 DEFAULT_STAGE3 = {
     'enabled': True,
     # V1 legacy (kept for dry-run compat)
-    'waitBarsFromSignal': 30, 'firstPeakMinPct': 10,
+    'waitBarsFromSignal': 30,
     'entryPriceMode': 'close',
     # Exit rules
     'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120,
-    # V2.0 high-confidence entry rules
+    # Ultimate entry rules (pure state-machine, no time lock)
     'requireProfitableExit': True,        # Only enter after stage1/2A trail-exit
-    'cooldownBars': 30,                   # Bars of forced cooldown after profitable exit
     'awakeningMinSuperIndex': 100,        # New signal must have Super Index > this
-    'cooldownPriceFloor': 0.70,           # min_price during cooldown >= peak_price * floor
-    'maxCooldownDataMisses': 5,           # Plan B: disqualify after N consecutive price misses
+    'priceFloor': 0.50,                   # Awakening price >= stage3_peak_price * floor
+    'firstPeakMinPct': 10,               # Stage1 first peak must have been >= 10%
 }
 
 # Backward-compatible defaults for code paths that still use legacy constants.
@@ -196,6 +195,7 @@ def init_paper_db(db_path=None):
         "ALTER TABLE paper_trades ADD COLUMN rolling_low_price REAL",
         "ALTER TABLE paper_trades ADD COLUMN rolling_low_ts INTEGER",
         "ALTER TABLE paper_trades ADD COLUMN reentry_source TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN stage3_peak_price REAL",
     ]:
         try:
             db.execute(column_sql)
@@ -855,7 +855,8 @@ def restore_lifecycles(db):
     rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, strategy_stage, exit_reason, pnl_pct,
                peak_pnl, entry_ts, exit_ts, lifecycle_id, parent_trade_id, bars_held,
-               first_peak_pct, rolling_low_price, rolling_low_ts, reentry_source
+               first_peak_pct, rolling_low_price, rolling_low_ts, reentry_source,
+               entry_price, stage3_peak_price
         FROM paper_trades
         ORDER BY signal_ts ASC, id ASC
     """).fetchall()
@@ -881,11 +882,9 @@ def restore_lifecycles(db):
             'stage1_stop_ts': None,
             'rolling_low_after_stop': None,
             'rolling_low_ts': None,
-            # Stage 3 V2.0 ambush fields
+            # Stage 3 ambush fields
             'stage3_v2_exit_ts': None,    # timestamp of profitable stage1/2A exit
             'stage3_v2_peak_price': None, # absolute peak price at that exit
-            'stage3_v2_min_price': None,  # min price tracked since exit (in-memory only)
-            'stage3_v2_data_miss': 0,     # Plan B: consecutive price-data misses during cooldown
         })
         stage = row['strategy_stage'] or 'stage1'
         if stage == 'stage1':
@@ -893,20 +892,22 @@ def restore_lifecycles(db):
             item['first_peak_pct'] = max(item['first_peak_pct'], float(row['peak_pnl'] or 0) * 100.0, float(row['first_peak_pct'] or 0) or 0.0)
             if row['exit_reason'] == 'sl':
                 item['stage1_stop_ts'] = row['exit_ts']
-            elif row['exit_reason'] == 'trail' and not is_stale and row['exit_ts'] and row['entry_price'] and row['peak_pnl'] is not None:
-                # Profitable stage1 → eligible for Stage 3 V2.0 ambush
+            elif row['exit_reason'] == 'trail' and not is_stale and row['exit_ts'] and row['peak_pnl'] is not None:
+                # Profitable stage1 → eligible for Stage 3 ambush
+                persisted = row['stage3_peak_price']
+                peak_price_val = float(persisted) if persisted else (float(row['entry_price'] or 0) * (1.0 + float(row['peak_pnl'])))
                 item['stage3_v2_exit_ts'] = row['exit_ts']
-                item['stage3_v2_peak_price'] = float(row['entry_price']) * (1.0 + float(row['peak_pnl']))
-                item['stage3_v2_min_price'] = None  # restart: re-track from current price
-                item['stage3_attempted'] = False    # allow V2.0 attempt
+                item['stage3_v2_peak_price'] = peak_price_val
+                item['stage3_attempted'] = False    # allow stage3 attempt
         elif stage == 'stage2A':
             item['stage2a_trade_id'] = row['id']
             item['stage2a_attempted'] = True
-            if row['exit_reason'] == 'trail' and not is_stale and row['exit_ts'] and row['entry_price'] and row['peak_pnl'] is not None:
-                # Profitable stage2A → also eligible for Stage 3 V2.0
+            if row['exit_reason'] == 'trail' and not is_stale and row['exit_ts'] and row['peak_pnl'] is not None:
+                # Profitable stage2A → also eligible for Stage 3
+                persisted = row['stage3_peak_price']
+                peak_price_val = float(persisted) if persisted else (float(row['entry_price'] or 0) * (1.0 + float(row['peak_pnl'])))
                 item['stage3_v2_exit_ts'] = row['exit_ts']
-                item['stage3_v2_peak_price'] = float(row['entry_price']) * (1.0 + float(row['peak_pnl']))
-                item['stage3_v2_min_price'] = None
+                item['stage3_v2_peak_price'] = peak_price_val
                 item['stage3_attempted'] = False
         elif stage == 'stage3':
             item['stage3_trade_id'] = row['id']
@@ -1236,11 +1237,9 @@ def dry_run(db):
             'stage1_stop_ts': None,
             'rolling_low_after_stop': None,
             'rolling_low_ts': None,
-            # Stage 3 V2.0
+            # Stage 3 ambush
             'stage3_v2_exit_ts': None,
             'stage3_v2_peak_price': None,
-            'stage3_v2_min_price': None,
-            'stage3_v2_data_miss': 0,     # Plan B: consecutive price-data misses during cooldown
         }
 
         def replay_trade(stage_name, start_index, exit_rules):
@@ -1374,15 +1373,15 @@ def dry_run(db):
             else:
                 stage_counts['stage2A_expired'] += 1
 
-        # Stage 3 V2.0 (dry-run): require profitable stage1 OR stage2A exit, then
-        # 30-bar cooldown from that exit, then price structure + super index checks.
+        # Stage 3 Ultimate (dry-run): require profitable stage1 OR stage2A exit,
+        # no cooldown, then check: price >= peak*0.50 + first_peak >= 10%.
         if stage_rules.get('stage3', {}).get('enabled') and 'stage3' not in existing_stages:
             lifecycle['stage3_attempted'] = True
             s3cfg = stage_rules.get('stage3', {})
             require_profit = s3cfg.get('requireProfitableExit', True)
-            cooldown_bars = int(s3cfg.get('cooldownBars', 30))
-            price_floor = float(s3cfg.get('cooldownPriceFloor', 0.70))
+            price_floor = float(s3cfg.get('priceFloor', 0.50))
             s3_super_min = int(s3cfg.get('awakeningMinSuperIndex', 100))
+            first_peak_min = float(s3cfg.get('firstPeakMinPct', 10.0))
 
             # Determine which result triggered stage3 eligibility
             profit_result = None
@@ -1397,33 +1396,31 @@ def dry_run(db):
             if require_profit and profit_result is None:
                 stage_counts['stage3_skipped'] += 1
             else:
-                # Entry bar: cooldown_bars after profitable exit (or after signal for legacy mode)
-                if profit_exit_bar_idx is not None:
-                    stage3_start_idx = profit_exit_bar_idx + cooldown_bars
-                    peak_price = profit_result['entry_price'] * (1.0 + profit_result['peak_pnl'])
-                else:
-                    stage3_start_idx = cooldown_bars  # legacy: count from signal
-                    peak_price = None
+                # No cooldown — enter at the first bar after profitable exit
+                stage3_start_idx = (profit_exit_bar_idx + 1) if profit_exit_bar_idx is not None else 1
+                peak_price = profit_result['entry_price'] * (1.0 + profit_result['peak_pnl']) if profit_result else None
 
                 if len(bars) <= stage3_start_idx:
                     stage_counts['stage3_skipped'] += 1
                 else:
-                    # Price structure check: min price in cooldown window >= peak_price * floor
+                    # Check: first_peak_pct >= firstPeakMinPct
+                    first_peak_ok = lifecycle.get('first_peak_pct', 0.0) >= first_peak_min
+
+                    # Check: entry price >= peak_price * priceFloor
                     price_ok = True
-                    if peak_price and profit_exit_bar_idx is not None:
-                        cooldown_slice = bars[profit_exit_bar_idx:stage3_start_idx]
-                        prices = [b['close'] or b['open'] for b in cooldown_slice if b['close'] or b['open']]
-                        if prices:
-                            cooldown_min = min(prices)
+                    if peak_price and peak_price > 0:
+                        entry_bar = bars[stage3_start_idx]
+                        entry_close = entry_bar['close'] or entry_bar.get('open') or 0
+                        if entry_close > 0:
                             floor_val = peak_price * price_floor
-                            price_ok = cooldown_min >= floor_val
+                            price_ok = entry_close >= floor_val
                             if not price_ok:
-                                log.info(f"  [{symbol}] stage3_v2 price floor fail in dry-run: min={cooldown_min:.8f} < floor={floor_val:.8f}")
+                                log.info(f"  [{symbol}] stage3 price floor fail in dry-run: entry={entry_close:.8f} < floor={floor_val:.8f}")
 
                     # Super index check (use signal-time super index as proxy)
-                    super_ok = (super_idx is None) or (super_idx > s3_super_min)  # None = unknown, allow through
+                    super_ok = (super_idx is None) or (super_idx > s3_super_min)
 
-                    if price_ok and super_ok:
+                    if price_ok and super_ok and first_peak_ok:
                         stage3_result = replay_trade('stage3', stage3_start_idx, stage3_rules)
                         stage_counts['stage3_eligible'] += 1
                         if stage3_result:
@@ -1442,7 +1439,7 @@ def dry_run(db):
                                 stage3_result['exit_price'], stage3_result['exit_ts'], stage3_result['exit_reason'], stage3_result['exit_pnl'], stage3_result['bars_held'],
                                 'real_kline', 'real_kline_replay', stage3_result['peak_pnl'], int(stage3_result['trailing_active']),
                                 lifecycle_id, stage1_trade_id, stage_seq('stage3'), stage3_result['entry_ts'], stage3_result['entry_price'],
-                                'v2_signal_awakening', lifecycle['first_peak_pct']
+                                'v2_event_awakening', lifecycle['first_peak_pct']
                             ))
                             db.commit()
                             existing_stages.add('stage3')
@@ -1631,96 +1628,51 @@ def run_monitor(db):
                 )
                 if ambush_lc is not None:
                     s3cfg = stage_rules.get('stage3', DEFAULT_STAGE3)
-                    cooldown_bars = int(s3cfg.get('cooldownBars', 30))
                     s3_super_min = int(s3cfg.get('awakeningMinSuperIndex', 100))
-                    price_floor = float(s3cfg.get('cooldownPriceFloor', 0.70))
-                    v2_exit_ts = ambush_lc['stage3_v2_exit_ts']
+                    price_floor = float(s3cfg.get('priceFloor', 0.50))
+                    first_peak_min = float(s3cfg.get('firstPeakMinPct', 10.0))
 
-                    # Check 1: 30-bar cooldown has elapsed since profitable exit
-                    if signal_ts_sec < v2_exit_ts + cooldown_bars * 60:
-                        remaining = (v2_exit_ts + cooldown_bars * 60 - signal_ts_sec) // 60
-                        log.info(f"  [{symbol}] stage3_v2 still in cooldown ({remaining:.0f} min left), skip")
-                        cycle_dup += 1
-                        continue
-
-                    # Check 2: Super Index of new signal > threshold
+                    # Check 1: Super Index of new signal > threshold
                     if super_idx is None or super_idx <= s3_super_min:
-                        log.info(f"  [{symbol}] stage3_v2 awakening super={super_idx} (need >{s3_super_min}), skip")
+                        log.info(f"  [{symbol}] stage3 awakening super={super_idx} (need >{s3_super_min}), skip")
                         cycle_dup += 1
                         continue
 
-                    # Check 3: Price structure — min price during cooldown >= peak_price * floor
-                    # Plan A: Real-time OHLCV fetch gives exact cooldown-window low.
-                    # Fallback to background-tracked min_price if OHLCV unavailable.
-                    peak_price = ambush_lc.get('stage3_v2_peak_price') or 0.0
+                    # Get live price (needed for check 2 and as entry price)
                     pool = get_pool_address(token_ca) or ''
-                    price_check_passed = True
-                    if peak_price > 0 and pool:
-                        floor_val = peak_price * price_floor
-                        v2_exit_ts = ambush_lc['stage3_v2_exit_ts']
-                        cooldown_end_ts = v2_exit_ts + cooldown_bars * 60
-                        # Fetch enough bars to cover the cooldown window (at least 35 bars)
-                        bars_to_fetch = max(35, int((now - v2_exit_ts) / 60) + 5)
-                        ohlcv = get_notath_bars(pool, limit=min(bars_to_fetch, 120))
-                        if ohlcv:
-                            # Filter to bars inside the cooldown window
-                            cooldown_lows = [
-                                b['low'] or b['close']
-                                for b in ohlcv
-                                if v2_exit_ts <= b['ts'] <= cooldown_end_ts
-                                   and (b['low'] or b['close'])
-                            ]
-                            if cooldown_lows:
-                                ohlcv_min = min(cooldown_lows)
-                                if ohlcv_min < floor_val:
-                                    pct_drop = (peak_price - ohlcv_min) / peak_price * 100
-                                    log.info(
-                                        f"  [{symbol}] stage3_v2 OHLCV price floor FAIL "
-                                        f"(Plan A): dropped {pct_drop:.1f}% in cooldown "
-                                        f"(floor={price_floor*100:.0f}% of peak), skip"
-                                    )
-                                    ambush_lc['stage3_attempted'] = True
-                                    price_check_passed = False
-                                else:
-                                    log.info(
-                                        f"  [{symbol}] stage3_v2 OHLCV price floor OK "
-                                        f"({len(cooldown_lows)} bars, min={ohlcv_min:.8f})"
-                                    )
-                            else:
-                                # No bars in cooldown window — window too far in the past.
-                                # Fall back to background-tracked min_price.
-                                min_price = ambush_lc.get('stage3_v2_min_price')
-                                if min_price is not None and min_price < floor_val:
-                                    pct_drop = (peak_price - min_price) / peak_price * 100
-                                    log.info(
-                                        f"  [{symbol}] stage3_v2 tracked min price FAIL "
-                                        f"(fallback): dropped {pct_drop:.1f}%, skip"
-                                    )
-                                    ambush_lc['stage3_attempted'] = True
-                                    price_check_passed = False
-                        else:
-                            # OHLCV completely unavailable — Plan B: check miss count
-                            miss_count = ambush_lc.get('stage3_v2_data_miss', 0)
-                            log.warning(
-                                f"  [{symbol}] stage3_v2 OHLCV unavailable at awakening "
-                                f"(pool={pool[:8]}, misses={miss_count}). "
-                                f"{'Disqualifying — token appears dead.' if miss_count >= 3 else 'Allowing entry (insufficient miss history).'}"
-                            )
-                            if miss_count >= 3:
-                                ambush_lc['stage3_attempted'] = True
-                                price_check_passed = False
-
-                    if not price_check_passed:
-                        cycle_dup += 1
-                        continue
-
-                    # All checks pass — enter Stage 3 V2.0
                     price = get_jupiter_price(token_ca) or get_current_price(token_ca, pool or None)
                     if not price or price <= 0:
-                        log.warning(f"  [{symbol}] stage3_v2 no price, skip")
+                        log.warning(f"  [{symbol}] stage3 awakening no price, skip")
                         cycle_no_pool += 1
                         continue
 
+                    # Check 2: Awakening price >= stage3_peak_price * floor (50%)
+                    peak_price = ambush_lc.get('stage3_v2_peak_price') or 0.0
+                    if peak_price > 0:
+                        floor_val = peak_price * price_floor
+                        if price < floor_val:
+                            pct_drop = (peak_price - price) / peak_price * 100
+                            log.info(
+                                f"  [{symbol}] stage3 price floor FAIL: "
+                                f"current={price:.8f} < floor={floor_val:.8f} "
+                                f"(dropped {pct_drop:.1f}% from peak), disqualify"
+                            )
+                            ambush_lc['stage3_attempted'] = True
+                            cycle_dup += 1
+                            continue
+
+                    # Check 3: Stage1 first peak >= firstPeakMinPct (10%)
+                    first_peak_pct = ambush_lc.get('first_peak_pct') or 0.0
+                    if first_peak_pct < first_peak_min:
+                        log.info(
+                            f"  [{symbol}] stage3 first_peak_pct FAIL: "
+                            f"{first_peak_pct:.1f}% < {first_peak_min:.1f}% required, disqualify"
+                        )
+                        ambush_lc['stage3_attempted'] = True
+                        cycle_dup += 1
+                        continue
+
+                    # All checks pass — enter Stage 3 Ultimate
                     entry_ts = int(now)
                     if sol_price is None:
                         sol_price = get_sol_price()
@@ -1736,16 +1688,16 @@ def run_monitor(db):
                                  reentry_source, first_peak_pct)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?)
                         """, (
-                            strategy_id, strategy_role, 'stage3', 'stage3_v2_entered',
+                            strategy_id, strategy_role, 'stage3', 'stage3_ultimate_entered',
                             token_ca, symbol, ambush_lc['signal_ts'], price, entry_ts,
                             regime, lc_id, ambush_lc.get('stage1_trade_id'),
                             stage_seq('stage3'), entry_ts, price,
-                            'v2_signal_awakening', peak_price
+                            'v2_event_awakening', ambush_lc.get('first_peak_pct') or 0.0
                         ))
                         s3_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                         db.commit()
                     except Exception as e:
-                        log.error(f"  Stage3 V2.0 DB insert error for {symbol}: {e}")
+                        log.error(f"  Stage3 DB insert error for {symbol}: {e}")
                         continue
 
                     s3_pos = Position(s3_trade_id, token_ca, symbol, ambush_lc['signal_ts'], price, entry_ts, pool,
@@ -1755,12 +1707,12 @@ def run_monitor(db):
                     ambush_lc['stage3_attempted'] = True
                     cycle_queued += 1
                     log.info(
-                        f"  🎯 Entered {symbol}/stage3_v2 @ ${price:.10f} "
+                        f"  🎯 Entered {symbol}/stage3 @ ${price:.10f} "
                         f"super={super_idx} peak=${peak_price:.8f} "
-                        f"min=${min_price:.8f if min_price else 'n/a'} lifecycle={lc_id}"
+                        f"first_peak={first_peak_pct:.1f}% lifecycle={lc_id}"
                     )
-                    continue  # signal consumed by V2.0 — do NOT create a new stage1
-                # ── End Stage 3 V2.0 awakening ──────────────────────────────────────
+                    continue  # signal consumed by stage3 — do NOT create a new stage1
+                # ── End Stage 3 awakening ────────────────────────────────────────────
 
                 if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()):
                     cycle_dup += 1
@@ -1826,11 +1778,9 @@ def run_monitor(db):
                     'stage1_stop_ts': None,
                     'rolling_low_after_stop': None,
                     'rolling_low_ts': None,
-                    # Stage 3 V2.0
+                    # Stage 3 ambush
                     'stage3_v2_exit_ts': None,
                     'stage3_v2_peak_price': None,
-                    'stage3_v2_min_price': None,
-                    'stage3_v2_data_miss': 0,
                 })
                 lc['stage1_trade_id'] = trade_id
                 pos = Position(trade_id, token_ca, symbol, signal_ts, price, entry_ts, pool,
@@ -1932,8 +1882,6 @@ def run_monitor(db):
                         'rolling_low_ts': None,
                         'stage3_v2_exit_ts': None,
                         'stage3_v2_peak_price': None,
-                        'stage3_v2_min_price': None,
-                        'stage3_v2_data_miss': 0,
                     })
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
                     db.execute("""
@@ -1973,17 +1921,22 @@ def run_monitor(db):
                         lifecycle['rolling_low_after_stop'] = None
                         lifecycle['rolling_low_ts'] = None
 
-                    # Stage 3 V2.0: track profitable exits for ambush re-entry
+                    # Stage 3: track profitable exits for ambush re-entry
                     if pos.strategy_stage in ('stage1', 'stage2A') and reason == 'trail' and pnl > 0:
-                        # Profitable exit → arm Stage 3 V2.0 ambush mode
+                        # Profitable exit → arm Stage 3 ambush mode
+                        peak_price_val = pos.entry_price * (1.0 + pos.peak_pnl)
                         lifecycle['stage3_v2_exit_ts'] = exit_ts
-                        lifecycle['stage3_v2_peak_price'] = pos.entry_price * (1.0 + pos.peak_pnl)
-                        lifecycle['stage3_v2_min_price'] = exit_price  # start tracking from exit price
-                        lifecycle['stage3_attempted'] = False  # allow V2.0 stage3 attempt
+                        lifecycle['stage3_v2_peak_price'] = peak_price_val
+                        lifecycle['stage3_attempted'] = False  # allow stage3 attempt
+                        # Persist peak price anchor to DB for crash recovery
+                        db.execute(
+                            "UPDATE paper_trades SET stage3_peak_price = ? WHERE id = ?",
+                            (peak_price_val, pos.trade_id)
+                        )
+                        db.commit()
                         log.info(
-                            f"  [{pos.symbol}/{pos.strategy_stage}] trail exit → Stage3 V2.0 armed. "
-                            f"peak_price=${lifecycle['stage3_v2_peak_price']:.8f} "
-                            f"cooldown=30 bars from {exit_ts}"
+                            f"  [{pos.symbol}/{pos.strategy_stage}] trail exit → Stage3 armed. "
+                            f"peak_price=${peak_price_val:.8f} awaiting next signal"
                         )
                     elif pos.strategy_stage in ('stage1', 'stage2A') and reason in ('sl', 'timeout', 'timeout_no_data', 'timeout_no_data_trail'):
                         # Non-profitable exit → stage3 not eligible
@@ -2013,24 +1966,7 @@ def run_monitor(db):
                         continue
                     current_bar = get_current_bar(lifecycle['token_ca'], pool)
                     if not current_bar:
-                        # Plan B: count consecutive price-data misses during V2.0 cooldown.
-                        # If a token goes dark inside the cooldown window, we can't verify
-                        # the wash-out pattern — disqualify it before it becomes a zombie.
-                        if (lifecycle.get('stage3_v2_exit_ts') is not None
-                                and not lifecycle.get('stage3_attempted')):
-                            s3cfg = stage_rules.get('stage3', DEFAULT_STAGE3)
-                            max_misses = int(s3cfg.get('maxCooldownDataMisses', 5))
-                            lifecycle['stage3_v2_data_miss'] = lifecycle.get('stage3_v2_data_miss', 0) + 1
-                            if lifecycle['stage3_v2_data_miss'] >= max_misses:
-                                log.warning(
-                                    f"  [{lifecycle.get('symbol')}] stage3_v2 disqualified (Plan B): "
-                                    f"{lifecycle['stage3_v2_data_miss']} consecutive price misses "
-                                    f"during cooldown — token likely dead, no re-entry"
-                                )
-                                lifecycle['stage3_attempted'] = True
                         continue
-                    # Successful price fetch — reset miss counter
-                    lifecycle['stage3_v2_data_miss'] = 0
                     bar_ts = int(current_bar['ts'])
                     close_price = current_bar['close'] or current_bar.get('open')
                     if close_price is None or close_price <= 0:
@@ -2072,21 +2008,14 @@ def run_monitor(db):
                                 log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${close_price:.10f} lifecycle={lifecycle_id}")
                                 continue
 
-                    # Stage 3 V2.0: track cooldown min price during waiting window.
-                    # Actual entry is triggered by a new signal (signal loop), not here.
+                    # Stage 3: expire stale ambush if no new signal arrived within LIFECYCLE_STALE_HOURS
                     if (stage_rules.get('stage3', {}).get('enabled')
                             and lifecycle.get('stage3_v2_exit_ts') is not None
                             and not lifecycle.get('stage3_attempted')):
                         v2_exit_ts = lifecycle['stage3_v2_exit_ts']
-                        cooldown_bars = int(stage_rules.get('stage3', {}).get('cooldownBars', 30))
-                        # Update rolling minimum price observed since the profitable exit
-                        if bar_ts >= v2_exit_ts and bar_ts <= v2_exit_ts + cooldown_bars * 60:
-                            prev_min = lifecycle.get('stage3_v2_min_price')
-                            lifecycle['stage3_v2_min_price'] = min(prev_min, close_price) if prev_min is not None else close_price
-                        # Stale V2.0 ambush: if cooldown expired long ago with no new signal, give up
                         stale_v2_cutoff = v2_exit_ts + LIFECYCLE_STALE_HOURS * 3600
                         if bar_ts > stale_v2_cutoff:
-                            log.info(f"  [{lifecycle.get('symbol')}] stage3_v2 ambush expired (no signal within {LIFECYCLE_STALE_HOURS}h), marking done")
+                            log.info(f"  [{lifecycle.get('symbol')}] stage3 ambush expired (no signal within {LIFECYCLE_STALE_HOURS}h), marking done")
                             lifecycle['stage3_attempted'] = True
                 except Exception as e:
                     log.error(f"  Lifecycle check error for {lifecycle.get('symbol', lifecycle_id)}: {e}", exc_info=True)
