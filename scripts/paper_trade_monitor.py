@@ -1457,15 +1457,14 @@ def run_monitor(db):
                     cycle_low_super += 1
                     continue
 
-                # Enter immediately at current Jupiter price — no queue, no GeckoTerminal bar lookup
-                price = get_jupiter_price(token_ca)
+                # Enter at current price: Jupiter primary, GeckoTerminal fallback.
+                # Jupiter misses pump.fun tokens still on bonding curve — GeckoTerminal catches them.
+                pool = get_pool_address(token_ca) or ''
+                price = get_jupiter_price(token_ca) or get_current_price(token_ca, pool or None)
                 if not price or price <= 0:
-                    log.warning(f"  [{symbol}] no Jupiter price, skipping")
+                    log.warning(f"  [{symbol}] no price (Jupiter+GeckoTerminal), skipping")
                     cycle_no_pool += 1
                     continue
-
-                # Pool address kept for GeckoTerminal fallback during position monitoring
-                pool = get_pool_address(token_ca) or ''
                 time.sleep(0.3)
 
                 entry_ts = int(now)
