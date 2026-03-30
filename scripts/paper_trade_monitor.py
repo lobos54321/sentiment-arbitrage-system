@@ -59,6 +59,7 @@ DEFAULT_STAGE3 = {
     'cooldownBars': 30,                   # Bars of forced cooldown after profitable exit
     'awakeningMinSuperIndex': 100,        # New signal must have Super Index > this
     'cooldownPriceFloor': 0.70,           # min_price during cooldown >= peak_price * floor
+    'maxCooldownDataMisses': 5,           # Plan B: disqualify after N consecutive price misses
 }
 
 # Backward-compatible defaults for code paths that still use legacy constants.
@@ -787,6 +788,7 @@ def restore_lifecycles(db):
             'stage3_v2_exit_ts': None,    # timestamp of profitable stage1/2A exit
             'stage3_v2_peak_price': None, # absolute peak price at that exit
             'stage3_v2_min_price': None,  # min price tracked since exit (in-memory only)
+            'stage3_v2_data_miss': 0,     # Plan B: consecutive price-data misses during cooldown
         })
         stage = row['strategy_stage'] or 'stage1'
         if stage == 'stage1':
@@ -1141,6 +1143,7 @@ def dry_run(db):
             'stage3_v2_exit_ts': None,
             'stage3_v2_peak_price': None,
             'stage3_v2_min_price': None,
+            'stage3_v2_data_miss': 0,     # Plan B: consecutive price-data misses during cooldown
         }
 
         def replay_trade(stage_name, start_index, exit_rules):
@@ -1550,22 +1553,71 @@ def run_monitor(db):
                         continue
 
                     # Check 3: Price structure — min price during cooldown >= peak_price * floor
+                    # Plan A: Real-time OHLCV fetch gives exact cooldown-window low.
+                    # Fallback to background-tracked min_price if OHLCV unavailable.
                     peak_price = ambush_lc.get('stage3_v2_peak_price') or 0.0
-                    min_price = ambush_lc.get('stage3_v2_min_price')
-                    if peak_price > 0 and min_price is not None:
+                    pool = get_pool_address(token_ca) or ''
+                    price_check_passed = True
+                    if peak_price > 0 and pool:
                         floor_val = peak_price * price_floor
-                        if min_price < floor_val:
-                            pct_drop = (peak_price - min_price) / peak_price * 100
-                            log.info(
-                                f"  [{symbol}] stage3_v2 price floor fail: min dropped {pct_drop:.1f}% "
-                                f"(floor={price_floor*100:.0f}% of peak), skip"
+                        v2_exit_ts = ambush_lc['stage3_v2_exit_ts']
+                        cooldown_end_ts = v2_exit_ts + cooldown_bars * 60
+                        # Fetch enough bars to cover the cooldown window (at least 35 bars)
+                        bars_to_fetch = max(35, int((now - v2_exit_ts) / 60) + 5)
+                        ohlcv = get_notath_bars(pool, limit=min(bars_to_fetch, 120))
+                        if ohlcv:
+                            # Filter to bars inside the cooldown window
+                            cooldown_lows = [
+                                b['low'] or b['close']
+                                for b in ohlcv
+                                if v2_exit_ts <= b['ts'] <= cooldown_end_ts
+                                   and (b['low'] or b['close'])
+                            ]
+                            if cooldown_lows:
+                                ohlcv_min = min(cooldown_lows)
+                                if ohlcv_min < floor_val:
+                                    pct_drop = (peak_price - ohlcv_min) / peak_price * 100
+                                    log.info(
+                                        f"  [{symbol}] stage3_v2 OHLCV price floor FAIL "
+                                        f"(Plan A): dropped {pct_drop:.1f}% in cooldown "
+                                        f"(floor={price_floor*100:.0f}% of peak), skip"
+                                    )
+                                    ambush_lc['stage3_attempted'] = True
+                                    price_check_passed = False
+                                else:
+                                    log.info(
+                                        f"  [{symbol}] stage3_v2 OHLCV price floor OK "
+                                        f"({len(cooldown_lows)} bars, min={ohlcv_min:.8f})"
+                                    )
+                            else:
+                                # No bars in cooldown window — window too far in the past.
+                                # Fall back to background-tracked min_price.
+                                min_price = ambush_lc.get('stage3_v2_min_price')
+                                if min_price is not None and min_price < floor_val:
+                                    pct_drop = (peak_price - min_price) / peak_price * 100
+                                    log.info(
+                                        f"  [{symbol}] stage3_v2 tracked min price FAIL "
+                                        f"(fallback): dropped {pct_drop:.1f}%, skip"
+                                    )
+                                    ambush_lc['stage3_attempted'] = True
+                                    price_check_passed = False
+                        else:
+                            # OHLCV completely unavailable — Plan B: check miss count
+                            miss_count = ambush_lc.get('stage3_v2_data_miss', 0)
+                            log.warning(
+                                f"  [{symbol}] stage3_v2 OHLCV unavailable at awakening "
+                                f"(pool={pool[:8]}, misses={miss_count}). "
+                                f"{'Disqualifying — token appears dead.' if miss_count >= 3 else 'Allowing entry (insufficient miss history).'}"
                             )
-                            ambush_lc['stage3_attempted'] = True  # permanently failed, stop watching
-                            cycle_dup += 1
-                            continue
+                            if miss_count >= 3:
+                                ambush_lc['stage3_attempted'] = True
+                                price_check_passed = False
+
+                    if not price_check_passed:
+                        cycle_dup += 1
+                        continue
 
                     # All checks pass — enter Stage 3 V2.0
-                    pool = get_pool_address(token_ca) or ''
                     price = get_jupiter_price(token_ca) or get_current_price(token_ca, pool or None)
                     if not price or price <= 0:
                         log.warning(f"  [{symbol}] stage3_v2 no price, skip")
@@ -1681,6 +1733,7 @@ def run_monitor(db):
                     'stage3_v2_exit_ts': None,
                     'stage3_v2_peak_price': None,
                     'stage3_v2_min_price': None,
+                    'stage3_v2_data_miss': 0,
                 })
                 lc['stage1_trade_id'] = trade_id
                 pos = Position(trade_id, token_ca, symbol, signal_ts, price, entry_ts, pool,
@@ -1760,6 +1813,7 @@ def run_monitor(db):
                         'stage3_v2_exit_ts': None,
                         'stage3_v2_peak_price': None,
                         'stage3_v2_min_price': None,
+                        'stage3_v2_data_miss': 0,
                     })
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
                     db.execute("""
@@ -1839,7 +1893,24 @@ def run_monitor(db):
                         continue
                     current_bar = get_current_bar(lifecycle['token_ca'], pool)
                     if not current_bar:
+                        # Plan B: count consecutive price-data misses during V2.0 cooldown.
+                        # If a token goes dark inside the cooldown window, we can't verify
+                        # the wash-out pattern — disqualify it before it becomes a zombie.
+                        if (lifecycle.get('stage3_v2_exit_ts') is not None
+                                and not lifecycle.get('stage3_attempted')):
+                            s3cfg = stage_rules.get('stage3', DEFAULT_STAGE3)
+                            max_misses = int(s3cfg.get('maxCooldownDataMisses', 5))
+                            lifecycle['stage3_v2_data_miss'] = lifecycle.get('stage3_v2_data_miss', 0) + 1
+                            if lifecycle['stage3_v2_data_miss'] >= max_misses:
+                                log.warning(
+                                    f"  [{lifecycle.get('symbol')}] stage3_v2 disqualified (Plan B): "
+                                    f"{lifecycle['stage3_v2_data_miss']} consecutive price misses "
+                                    f"during cooldown — token likely dead, no re-entry"
+                                )
+                                lifecycle['stage3_attempted'] = True
                         continue
+                    # Successful price fetch — reset miss counter
+                    lifecycle['stage3_v2_data_miss'] = 0
                     bar_ts = int(current_bar['ts'])
                     close_price = current_bar['close'] or current_bar.get('open')
                     if close_price is None or close_price <= 0:
