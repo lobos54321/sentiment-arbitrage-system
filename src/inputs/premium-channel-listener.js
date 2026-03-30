@@ -12,6 +12,8 @@ import { NewMessage } from 'telegram/events/index.js';
 import { Api } from 'telegram';
 import https from 'https';
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
 
 const DEFAULT_CHANNEL_ID = 3636518327;
 const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
@@ -24,6 +26,9 @@ const FALSE_POSITIVE_RE = /^(https?|discord|telegram|dexscreener|twitter|solscan
 
 const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;   // check every 2 minutes
 const WATCHDOG_DEAD_THRESHOLD_MS = 5 * 60 * 1000; // treat as dead if no ping for 5 min
+// Path to persist channel access_hash so GetDialogs is never needed after first run
+const CHANNEL_CACHE_PATH = process.env.CHANNEL_CACHE_PATH ||
+  path.join(process.env.DATA_DIR || '/app/data', 'tg-channel-cache.json');
 
 export class PremiumChannelListener {
   constructor(config = {}) {
@@ -79,7 +84,17 @@ export class PremiumChannelListener {
       await this.client.connect();
       console.log('✅ Connected to Telegram User API (Premium)');
 
-      // Reuse cached entity on reconnect to avoid GetDialogs during server issues
+      // Resolution priority:
+      //   1. In-memory entity (reconnect within same process)
+      //   2. Persistent disk cache (survives container restarts)
+      //   3. GetDialogs API call (first-ever start only)
+      if (!this.channelEntity) {
+        this.channelEntity = this._loadChannelCache(channelId);
+        if (this.channelEntity) {
+          console.log(`✅ Loaded channel entity from cache: ${channelId}`);
+        }
+      }
+
       if (!this.channelEntity) {
         this.channelEntity = await this._findChannelById(channelId);
         if (!this.channelEntity) {
@@ -89,6 +104,7 @@ export class PremiumChannelListener {
           return false;
         }
         console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
+        this._saveChannelCache(channelId, this.channelEntity);
       } else {
         console.log(`✅ Reusing cached channel entity: ${this.channelEntity.title || channelId}`);
       }
@@ -172,10 +188,10 @@ export class PremiumChannelListener {
 
   /**
    * Find channel entity by numeric ID using getDialogs.
-   * Retries with exponential backoff on server errors (-500, TIMEOUT).
+   * Retries with exponential backoff on server errors.
    */
   async _findChannelById(channelId) {
-    const delays = [0, 5000, 15000, 30000]; // 0s, 5s, 15s, 30s
+    const delays = [0, 8000, 20000, 40000]; // 0s, 8s, 20s, 40s
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt] > 0) {
         console.log(`🔄 [FindChannel] Retry ${attempt}/${delays.length - 1} in ${delays[attempt] / 1000}s...`);
@@ -193,13 +209,48 @@ export class PremiumChannelListener {
         }
         return null; // connected fine but channel not found
       } catch (error) {
-        const isServerError = error.code === -500 || /TIMEOUT|workers/i.test(error.message);
+        // Match telegram.js internal retry exhaustion, -500, TIMEOUT, etc.
+        const isServerError = error.code === -500 ||
+          /TIMEOUT|workers|unsuccessful/i.test(error.message);
         console.error(`❌ Error finding channel (attempt ${attempt + 1}): ${error.message}`);
         if (!isServerError || attempt === delays.length - 1) return null;
         // otherwise loop to retry
       }
     }
     return null;
+  }
+
+  /** Persist channel entity's access_hash to disk for future restarts */
+  _saveChannelCache(channelId, entity) {
+    try {
+      const accessHash = entity.accessHash?.value !== undefined
+        ? String(entity.accessHash.value)
+        : String(entity.accessHash || '0');
+      const data = { channelId, accessHash, title: entity.title || '', savedAt: Date.now() };
+      fs.mkdirSync(path.dirname(CHANNEL_CACHE_PATH), { recursive: true });
+      fs.writeFileSync(CHANNEL_CACHE_PATH, JSON.stringify(data), 'utf8');
+      console.log(`💾 Channel entity cached to ${CHANNEL_CACHE_PATH}`);
+    } catch (err) {
+      console.warn(`⚠️ Could not save channel cache: ${err.message}`);
+    }
+  }
+
+  /** Load persisted channel entity; returns reconstructed InputPeerChannel or null */
+  _loadChannelCache(channelId) {
+    try {
+      if (!fs.existsSync(CHANNEL_CACHE_PATH)) return null;
+      const data = JSON.parse(fs.readFileSync(CHANNEL_CACHE_PATH, 'utf8'));
+      if (data.channelId !== channelId) return null;
+      return new Api.Channel({
+        id: BigInt(channelId),
+        accessHash: BigInt(data.accessHash),
+        title: data.title || '',
+        megagroup: false,
+      });
+    } catch (err) {
+      console.warn(`⚠️ Could not load channel cache: ${err.message}`);
+      return null;
+    }
   }
 
   /**
