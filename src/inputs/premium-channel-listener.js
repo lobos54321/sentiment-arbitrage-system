@@ -79,16 +79,19 @@ export class PremiumChannelListener {
       await this.client.connect();
       console.log('✅ Connected to Telegram User API (Premium)');
 
-      // Find the private channel by numeric ID via dialogs
-      this.channelEntity = await this._findChannelById(channelId);
+      // Reuse cached entity on reconnect to avoid GetDialogs during server issues
       if (!this.channelEntity) {
-        console.error(`❌ Could not find premium channel with ID ${channelId}`);
-        console.error('   Make sure the account has joined the channel');
-        this.isRunning = false;
-        return false;
+        this.channelEntity = await this._findChannelById(channelId);
+        if (!this.channelEntity) {
+          console.error(`❌ Could not find premium channel with ID ${channelId}`);
+          console.error('   Make sure the account has joined the channel');
+          this.isRunning = false;
+          return false;
+        }
+        console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
+      } else {
+        console.log(`✅ Reusing cached channel entity: ${this.channelEntity.title || channelId}`);
       }
-
-      console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
 
       // Register message handler
       this.client.addEventHandler(
@@ -142,13 +145,16 @@ export class PremiumChannelListener {
     if (this._reconnecting) return;
     this._reconnecting = true;
     console.log('🔄 [Watchdog] Reconnecting Telegram client...');
+    // Preserve cached channelEntity so we don't need getDialogs on reconnect
+    const cachedEntity = this.channelEntity;
     try {
       if (this.client) {
         try { await this.client.disconnect(); } catch (_) {}
       }
       this.client = null;
-      this.channelEntity = null;
       this.isRunning = false;
+      // Restore cached entity before start() so _findChannelById is skipped
+      this.channelEntity = cachedEntity;
 
       // Re-run full start sequence
       const ok = await this.start();
@@ -165,31 +171,35 @@ export class PremiumChannelListener {
   }
 
   /**
-   * Find channel entity by numeric ID using getDialogs
+   * Find channel entity by numeric ID using getDialogs.
+   * Retries with exponential backoff on server errors (-500, TIMEOUT).
    */
   async _findChannelById(channelId) {
-    try {
-      const dialogs = await this.client.getDialogs({ limit: 200 });
-
-      for (const dialog of dialogs) {
-        const entity = dialog.entity;
-        if (!entity) continue;
-
-        // Match by channel ID (could be stored as id or as -100 prefixed)
-        const entityId = entity.id?.value !== undefined
-          ? Number(entity.id.value)
-          : Number(entity.id);
-
-        if (entityId === channelId) {
-          return entity;
-        }
+    const delays = [0, 5000, 15000, 30000]; // 0s, 5s, 15s, 30s
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt] > 0) {
+        console.log(`🔄 [FindChannel] Retry ${attempt}/${delays.length - 1} in ${delays[attempt] / 1000}s...`);
+        await new Promise(r => setTimeout(r, delays[attempt]));
       }
-
-      return null;
-    } catch (error) {
-      console.error('❌ Error finding channel:', error.message);
-      return null;
+      try {
+        const dialogs = await this.client.getDialogs({ limit: 200 });
+        for (const dialog of dialogs) {
+          const entity = dialog.entity;
+          if (!entity) continue;
+          const entityId = entity.id?.value !== undefined
+            ? Number(entity.id.value)
+            : Number(entity.id);
+          if (entityId === channelId) return entity;
+        }
+        return null; // connected fine but channel not found
+      } catch (error) {
+        const isServerError = error.code === -500 || /TIMEOUT|workers/i.test(error.message);
+        console.error(`❌ Error finding channel (attempt ${attempt + 1}): ${error.message}`);
+        if (!isServerError || attempt === delays.length - 1) return null;
+        // otherwise loop to retry
+      }
     }
+    return null;
   }
 
   /**
