@@ -22,6 +22,9 @@ const SOL_ADDRESS_RE = /\b([1-9A-HJ-NP-Za-km-z]{32,44})\b/g;
 // Known false-positive patterns (URLs, common words that match base58)
 const FALSE_POSITIVE_RE = /^(https?|discord|telegram|dexscreener|twitter|solscan)/i;
 
+const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;   // check every 2 minutes
+const WATCHDOG_DEAD_THRESHOLD_MS = 5 * 60 * 1000; // treat as dead if no ping for 5 min
+
 export class PremiumChannelListener {
   constructor(config = {}) {
     this.config = config;
@@ -30,6 +33,9 @@ export class PremiumChannelListener {
     this.channelEntity = null;
     this.signalCallbacks = [];
     this.recentTokens = new Map(); // token_ca -> timestamp for dedup
+    this._watchdogTimer = null;
+    this._lastPingTs = Date.now();
+    this._reconnecting = false;
     // Webhook URLs for real-time signal forwarding (comma-separated in env)
     this.webhookUrls = (process.env.SIGNAL_WEBHOOK_URLS || '')
       .split(',')
@@ -91,6 +97,8 @@ export class PremiumChannelListener {
       );
 
       this.isRunning = true;
+      this._lastPingTs = Date.now();
+      this._startWatchdog();
       console.log('✅ Premium channel listener started');
       return true;
 
@@ -98,6 +106,61 @@ export class PremiumChannelListener {
       this.isRunning = false;
       console.error('❌ Failed to start premium channel listener:', error.message);
       return false;
+    }
+  }
+
+  /**
+   * Start watchdog timer — detects dead Telegram connection and reconnects
+   */
+  _startWatchdog() {
+    if (this._watchdogTimer) clearInterval(this._watchdogTimer);
+    this._watchdogTimer = setInterval(() => this._watchdogTick(), WATCHDOG_INTERVAL_MS);
+  }
+
+  async _watchdogTick() {
+    if (this._reconnecting) return;
+
+    const connected = this.client?.connected === true;
+    const stale = Date.now() - this._lastPingTs > WATCHDOG_DEAD_THRESHOLD_MS;
+
+    if (connected) {
+      // Send a lightweight ping to confirm the server is reachable
+      try {
+        await this.client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
+        this._lastPingTs = Date.now();
+      } catch (err) {
+        console.warn(`⚠️ [Watchdog] Telegram ping failed: ${err.message} — triggering reconnect`);
+        await this._doReconnect();
+      }
+    } else if (!connected || stale) {
+      console.warn(`⚠️ [Watchdog] Telegram connection dead (connected=${connected}, stale=${stale}) — triggering reconnect`);
+      await this._doReconnect();
+    }
+  }
+
+  async _doReconnect() {
+    if (this._reconnecting) return;
+    this._reconnecting = true;
+    console.log('🔄 [Watchdog] Reconnecting Telegram client...');
+    try {
+      if (this.client) {
+        try { await this.client.disconnect(); } catch (_) {}
+      }
+      this.client = null;
+      this.channelEntity = null;
+      this.isRunning = false;
+
+      // Re-run full start sequence
+      const ok = await this.start();
+      if (ok) {
+        console.log('✅ [Watchdog] Telegram reconnect successful');
+      } else {
+        console.error('❌ [Watchdog] Telegram reconnect failed — will retry next cycle');
+      }
+    } catch (err) {
+      console.error(`❌ [Watchdog] Reconnect error: ${err.message}`);
+    } finally {
+      this._reconnecting = false;
     }
   }
 
@@ -134,6 +197,7 @@ export class PremiumChannelListener {
    */
   async _handleMessage(event) {
     try {
+      this._lastPingTs = Date.now(); // any message = connection is alive
       const message = event.message;
       if (!message || !message.peerId) return;
 
@@ -490,6 +554,10 @@ export class PremiumChannelListener {
    * Stop listener
    */
   async stop() {
+    if (this._watchdogTimer) {
+      clearInterval(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
     if (this.client && this.isRunning) {
       await this.client.disconnect();
       this.isRunning = false;
