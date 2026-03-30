@@ -1181,51 +1181,7 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'already_in_position' };
     }
 
-    // K线评分检查（先回填信号前 5 根，再判断）
-    const signalTsSec = Math.floor((signal.timestamp || Date.now()) / 1000);
-    const backfillResult = await this._backfillPrebuyKlines(ca, signalTsSec, 5);
-    const prebarsCount = backfillResult.totalBefore || 0;
-    const prebuyEnough = backfillResult.enough === true;
-
-    if (!prebuyEnough) {
-      console.log(`⚠️ [NOT_ATH] $${symbol} pre-buy K线不足: ${prebarsCount}/5${backfillResult.reason ? ` | ${backfillResult.reason}` : ''}`);
-      this.saveSignalRecord(signal, 'INSUFFICIENT_KLINE', null);
-      return { action: 'SKIP', reason: 'insufficient_kline', prebarsCount, backfillResult };
-    }
-
-    const klineResult = await this._checkKline(ca, { isATH: false });
-    const klineBypassed = !klineResult.passed && (klineResult.reason === 'rate_limited' || klineResult.reason === 'error_skip');
-    if (!klineResult.passed) {
-      if (klineBypassed) {
-        console.log(`⚠️ [NOT_ATH] $${symbol} K线检查暂不可用，跳过K线拦截: ${klineResult.reason}`);
-      } else {
-        const reasonMap = {
-          no_pool: '无流动性池',
-          no_bars: 'K线数据缺失',
-          no_history: '历史K线不足(<3根)',
-          not_red_bar: '非红色K线',
-          high_vol_calm: '高成交量+低波动',
-          high_vol: '成交量偏高',
-          inactive: '动量不足(不活跃)',
-          rate_limited: 'K线接口限流',
-          error_skip: 'K线查询异常'
-        };
-        const detail = klineResult.score !== undefined ? `score=${klineResult.score}` : '';
-        console.log(`🚫 [NOT_ATH] $${symbol} K线过滤失败: ${reasonMap[klineResult.reason] || klineResult.reason}${detail ? ` (${detail})` : ''}`);
-        this.saveSignalRecord(signal, 'RED_K_FAIL', null);
-        return { action: 'SKIP', reason: `red_k_${klineResult.reason}` };
-      }
-    }
-
-    // 打印评分详情
-    if (klineBypassed) {
-      console.log(`📊 [NOT_ATH] $${symbol} K线限流/异常，按新币兜底逻辑继续`);
-    } else if (klineResult.score !== undefined) {
-      const { score, isRed, lowVolume, isActive, momFromLag1, avgVol3 } = klineResult;
-      console.log(`📊 [NOT_ATH] $${symbol} 评分: ${score}分 | RED:${isRed} | lowVol:${lowVolume} | active:${isActive} | mom:${momFromLag1?.toFixed(1) ?? 'N/A'}%`);
-    } else {
-      console.log(`📊 [NOT_ATH] $${symbol} 新币逻辑通过`);
-    }
+    console.log(`⏭️ [NOT_ATH] $${symbol} 跳过 pre-buy K线回填/检查，直接继续执行`);
 
     // 执行 Shadow Buy
     const finalSize = 0.06;
@@ -1299,12 +1255,12 @@ export class PremiumSignalEngine {
       if (tradeResult.success) {
         this.stats.buy_success++;
         console.log(`✅ [成交] $${symbol} 买入成功`);
-        this.saveSignalRecord(signal, 'BOUGHT', null, false);
+        this.saveSignalRecord(signal, 'PASS', null, true);
         return { action: 'BUY', size: finalSize };
       } else {
         this.stats.buy_failed++;
         console.log(`❌ [买入失败] $${symbol}: ${tradeResult.reason}`);
-        this.saveSignalRecord(signal, 'BUY_FAIL', null, false);
+        this.saveSignalRecord(signal, 'PASS', null, false);
         return { action: 'BUY_FAILED', reason: tradeResult.reason };
       }
     } catch (error) {
