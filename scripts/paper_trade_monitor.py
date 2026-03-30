@@ -68,6 +68,14 @@ TRAIL_START = 0.02
 TRAIL_FACTOR = 0.90
 TIMEOUT_MIN = 120
 
+# ── Price cache ──────────────────────────────────────────────────────────────
+# Keyed by token_ca → (price: float, fetched_at: float)
+# FRESH_PRICE_TTL: used for batch pre-fetch results (treated as authoritative)
+# STALE_PRICE_TTL: emergency fallback when ALL live APIs fail — prevents zombies
+_price_cache: dict = {}
+FRESH_PRICE_TTL = 90    # seconds — batch Jupiter result stays authoritative
+STALE_PRICE_TTL = 300   # seconds — 5-min stale price prevents zombie creation
+
 # Polling intervals (seconds)
 SIGNAL_POLL_INTERVAL = 30       # check for new signals
 POSITION_POLL_INTERVAL = 60     # update open positions
@@ -218,7 +226,10 @@ def curl_json(url, timeout=15):
 
 
 def get_pool_address(token_ca, cache={}):
-    """Get pool address from DexScreener, with in-memory cache."""
+    """Get pool address from DexScreener, with in-memory cache.
+    As a free side-effect, also warms the price cache from the same response
+    so subsequent get_current_bar() calls don't need a separate API hit.
+    """
     if token_ca in cache:
         return cache[token_ca]
 
@@ -238,6 +249,15 @@ def get_pool_address(token_ca, cache={}):
     pool = pair.get('pairAddress', '')
     if pool:
         cache[token_ca] = pool
+
+    # Warm price cache from this response at zero extra cost
+    try:
+        p = float(pair.get('priceUsd') or 0)
+        if p > 0:
+            _cache_price(token_ca, p)
+    except (TypeError, ValueError):
+        pass
+
     return pool or None
 
 
@@ -258,57 +278,134 @@ def get_jupiter_price(token_ca):
         return None
 
 
-def get_current_bar(token_ca, pool_address=None):
-    """Get current price as a synthetic bar, using Jupiter Price API (primary)
-    with GeckoTerminal 1m OHLCV as fallback.
+def get_jupiter_prices_batch(token_cas: list) -> dict:
+    """Fetch prices for multiple tokens in ONE Jupiter API call.
 
-    Position updates, Stage2A and Stage3 entries only need current price + timestamp,
-    so Jupiter is faster and avoids GeckoTerminal rate limits.
-    GeckoTerminal OHLCV is only needed for Stage1 signal-bar entry lookup.
+    Returns {token_ca: price_float}.  Missing tokens are simply absent.
+    Calling this once per position-loop cycle replaces N individual calls
+    and is the primary defence against Jupiter rate limiting.
+    """
+    if not token_cas:
+        return {}
+    ids = ','.join(token_cas)
+    url = f"https://api.jup.ag/price/v2?ids={ids}"
+    data = curl_json(url, timeout=20)
+    if not data:
+        return {}
+    result = {}
+    for ca, info in (data.get('data') or {}).items():
+        try:
+            p = float(info.get('price') or 0)
+            if p > 0:
+                result[ca] = p
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def get_dexscreener_price(token_ca: str) -> float | None:
+    """Get token price from DexScreener — zero-cost fallback since we already
+    query DexScreener for pool addresses.  No API key required.
+    """
+    data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}", timeout=15)
+    if not data:
+        return None
+    sol_pairs = [p for p in (data.get('pairs') or []) if p.get('chainId') == 'solana']
+    if not sol_pairs:
+        return None
+    best = max(sol_pairs, key=lambda p: (p.get('liquidity', {}).get('usd') or 0))
+    try:
+        p = float(best.get('priceUsd') or 0)
+        return p if p > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cache_price(token_ca: str, price: float) -> None:
+    if price and price > 0:
+        _price_cache[token_ca] = (price, time.time())
+
+
+def _get_stale_price(token_ca: str, max_age: float = STALE_PRICE_TTL):
+    """Return cached price if within max_age seconds, else None."""
+    entry = _price_cache.get(token_ca)
+    if entry and (time.time() - entry[1]) <= max_age:
+        return entry[0], time.time() - entry[1]   # (price, age_seconds)
+    return None, None
+
+
+def get_current_bar(token_ca, pool_address=None):
+    """Get current price as a synthetic bar with a 4-tier fallback chain.
+
+    Tier 1 — Batch cache (populated by prefetch_prices() once per cycle):
+        A single Jupiter batch call covers all open positions.  If the cache
+        is fresh (< FRESH_PRICE_TTL seconds), return immediately without any
+        individual API call.
+    Tier 2 — Individual Jupiter Price API:
+        Fast, real-time.  Used when batch cache is stale or token was missed.
+    Tier 3 — DexScreener price:
+        Free, no API key, already used for pool lookups.  Activates if Jupiter
+        is rate-limited or returns no data for this token (pump.fun bonding-
+        curve tokens often missing from Jupiter).
+    Tier 4 — GeckoTerminal 1m OHLCV:
+        Highest latency / most rate-limit-prone — last resort.
+    Emergency — stale price cache:
+        If ALL live APIs fail but we have a recent price (< STALE_PRICE_TTL),
+        return it with a warning.  Prevents position zombification from brief
+        API outages.  Caller still sees a valid bar and can make exit decisions.
     """
     now_sec = int(time.time())
 
-    # Primary: Jupiter Price API (no rate limit issues, real-time)
+    def _make_bar(price, source):
+        _cache_price(token_ca, price)
+        return {'ts': now_sec, 'open': price, 'high': price,
+                'low': price, 'close': price, 'volume': 0.0, 'source': source}
+
+    # ── Tier 1: Batch cache (populated by prefetch_prices each cycle) ────────
+    cached_price, cache_age = _get_stale_price(token_ca, max_age=FRESH_PRICE_TTL)
+    if cached_price:
+        return _make_bar(cached_price, f'batch_cache_{cache_age:.0f}s')
+
+    # ── Tier 2: Individual Jupiter call ─────────────────────────────────────
     price = get_jupiter_price(token_ca)
     if price and price > 0:
-        return {
-            'ts': now_sec,
-            'open': price,
-            'high': price,
-            'low': price,
-            'close': price,
-            'volume': 0.0,
-            'source': 'jupiter',
-        }
+        return _make_bar(price, 'jupiter')
 
-    # Fallback: GeckoTerminal 1m OHLCV
+    # ── Tier 3: DexScreener ──────────────────────────────────────────────────
+    price = get_dexscreener_price(token_ca)
+    if price and price > 0:
+        return _make_bar(price, 'dexscreener')
+
+    # ── Tier 4: GeckoTerminal 1m OHLCV ──────────────────────────────────────
     if not pool_address:
         pool_address = get_pool_address(token_ca)
-    if not pool_address:
-        return None
+    if pool_address:
+        url = (
+            f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
+            f"{pool_address}/ohlcv/minute?aggregate=1&limit=1"
+        )
+        data = curl_json(url)
+        if data:
+            ohlcv = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
+            if ohlcv:
+                row = ohlcv[0]
+                price = float(row[4])  # close
+                if price > 0:
+                    return _make_bar(price, 'gecko')
 
-    url = (
-        f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
-        f"{pool_address}/ohlcv/minute?aggregate=1&limit=1"
-    )
-    data = curl_json(url)
-    if not data:
-        return None
+    # ── Emergency: stale price cache ─────────────────────────────────────────
+    stale_price, stale_age = _get_stale_price(token_ca, max_age=STALE_PRICE_TTL)
+    if stale_price:
+        log.warning(
+            f"  [{token_ca[:8]}] all live APIs failed — using stale price "
+            f"${stale_price:.8f} (age={stale_age:.0f}s). "
+            f"Position still alive; will re-evaluate next cycle."
+        )
+        return {'ts': now_sec, 'open': stale_price, 'high': stale_price,
+                'low': stale_price, 'close': stale_price,
+                'volume': 0.0, 'source': f'stale_{stale_age:.0f}s'}
 
-    ohlcv = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-    if not ohlcv:
-        return None
-
-    row = ohlcv[0]
-    return {
-        'ts': int(row[0]),
-        'open': float(row[1]),
-        'high': float(row[2]),
-        'low': float(row[3]),
-        'close': float(row[4]),
-        'volume': float(row[5]),
-        'source': 'gecko',
-    }
+    return None
 
 
 def get_current_price(token_ca, pool_address=None):
@@ -1759,6 +1856,29 @@ def run_monitor(db):
                 time.sleep(0.2)
             except Exception:
                 pass
+
+            # ── Batch price prefetch ──────────────────────────────────────────
+            # One Jupiter call for ALL open positions instead of N individual
+            # calls.  Results are stored in _price_cache and consumed by
+            # get_current_bar() (Tier 1) during the loop below.
+            # This is the primary defence against Jupiter rate-limiting.
+            if positions:
+                active_cas = list({pos.token_ca for pos in positions.values()})
+                try:
+                    batch = get_jupiter_prices_batch(active_cas)
+                    hit = 0
+                    for ca, price in batch.items():
+                        _cache_price(ca, price)
+                        hit += 1
+                    miss = len(active_cas) - hit
+                    if miss > 0:
+                        log.info(
+                            f"  Batch price prefetch: {hit}/{len(active_cas)} hit "
+                            f"({miss} miss — will fallback individually)"
+                        )
+                except Exception as e:
+                    log.warning(f"  Batch price prefetch failed: {e} — falling back to individual calls")
+            # ─────────────────────────────────────────────────────────────────
 
             for trade_id, pos in list(positions.items()):
                 try:
