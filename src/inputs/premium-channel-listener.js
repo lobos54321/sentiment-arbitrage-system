@@ -97,14 +97,25 @@ export class PremiumChannelListener {
 
       if (!this.channelEntity) {
         this.channelEntity = await this._findChannelById(channelId);
-        if (!this.channelEntity) {
-          console.error(`❌ Could not find premium channel with ID ${channelId}`);
-          console.error('   Make sure the account has joined the channel');
-          this.isRunning = false;
-          return false;
+        if (this.channelEntity) {
+          console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
+          this._saveChannelCache(channelId, this.channelEntity);
+        } else {
+          // Telegram server issues — register handler now so we catch messages once
+          // the server recovers, and keep retrying GetDialogs in the background.
+          console.warn(`⚠️ Could not resolve channel ${channelId} right now (Telegram server issues)`);
+          console.warn('   Messages will be received but channel-filter is relaxed until resolved.');
+          console.warn('   Background retry every 2 min until channel entity is found...');
+          this.client.addEventHandler(
+            (event) => this._handleMessage(event),
+            new NewMessage({})
+          );
+          this.isRunning = true;
+          this._lastPingTs = Date.now();
+          this._startWatchdog();
+          this._scheduleChannelRetry(channelId);
+          return true;
         }
-        console.log(`✅ Found premium channel: ${this.channelEntity.title || channelId}`);
-        this._saveChannelCache(channelId, this.channelEntity);
       } else {
         console.log(`✅ Reusing cached channel entity: ${this.channelEntity.title || channelId}`);
       }
@@ -126,6 +137,32 @@ export class PremiumChannelListener {
       console.error('❌ Failed to start premium channel listener:', error.message);
       return false;
     }
+  }
+
+  /**
+   * Background retry: keep calling GetDialogs every 2 min until we get the entity.
+   * Once resolved, saves cache — _handleMessage will then filter correctly.
+   */
+  _scheduleChannelRetry(channelId) {
+    const RETRY_MS = 2 * 60 * 1000;
+    const attempt = async () => {
+      if (this.channelEntity || !this.isRunning) return; // already resolved or stopped
+      console.log(`🔄 [ChannelRetry] Attempting GetDialogs for channel ${channelId}...`);
+      try {
+        const entity = await this._findChannelById(channelId);
+        if (entity) {
+          this.channelEntity = entity;
+          this._saveChannelCache(channelId, entity);
+          console.log(`✅ [ChannelRetry] Channel entity resolved: ${entity.title || channelId}`);
+          return; // done
+        }
+      } catch (err) {
+        console.warn(`⚠️ [ChannelRetry] Error: ${err.message}`);
+      }
+      // Still not resolved — try again after delay
+      setTimeout(attempt, RETRY_MS);
+    };
+    setTimeout(attempt, RETRY_MS);
   }
 
   /**
@@ -268,11 +305,16 @@ export class PremiumChannelListener {
         ? Number(peerId.channelId.value)
         : Number(peerId.channelId || 0);
 
-      const targetId = this.channelEntity.id?.value !== undefined
-        ? Number(this.channelEntity.id.value)
-        : Number(this.channelEntity.id);
-
-      if (msgChannelId !== targetId) return;
+      if (this.channelEntity) {
+        const targetId = this.channelEntity.id?.value !== undefined
+          ? Number(this.channelEntity.id.value)
+          : Number(this.channelEntity.id);
+        if (msgChannelId !== targetId) return;
+      } else {
+        // Entity not yet resolved — only pass through obvious signal messages
+        const text0 = message.text || message.message || '';
+        if (!text0.includes('New Trending') && !text0.includes('ATH')) return;
+      }
 
       const text = message.text || message.message || '';
       if (!text) return;
