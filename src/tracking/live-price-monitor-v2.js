@@ -281,7 +281,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
 
     void this._publishRedisPrice(tokenCA, {
       price_sol: entry.price,
-      price_usd: entry.usdPrice || null,
+      price_usd: entry.usdPrice || cached?.usdPrice || null,
       source: 'jupiter-quote',
       timestamp: entry.timestamp,
       mc: entry.mc || null
