@@ -29,7 +29,6 @@ import { PermanentBlacklistService } from './database/permanent-blacklist.js';
 import { PremiumChannelListener } from './inputs/premium-channel-listener.js';
 import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
-import { LivePriceMonitor } from './tracking/live-price-monitor.js';
 import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
@@ -758,32 +757,24 @@ class PremiumChannelSystem {
 
   async start() {
     const isLive = process.env.SHADOW_MODE === 'false';
-    const usePriceV2 = process.env.USE_PRICE_MONITOR_V2 === 'true';  // 新增配置开关
 
-    // 实盘模式：额外初始化 Jupiter Executor + LivePositionMonitor
-    if (isLive) {
-      try {
+    try {
+      if (isLive) {
         this.jupiterExecutor = new JupiterUltraExecutor();
         this.jupiterExecutor.initialize();
+      }
 
-        // 选择价格监控器版本
-        if (usePriceV2 && process.env.JUPITER_API_KEY) {
-          console.log('📡 [价格监控] 使用 V2 版本 (Jupiter Swap Quote)');
-          this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor);
-        } else if (process.env.JUPITER_API_KEY) {
-          console.log('📡 [价格监控] 使用 V1 版本 (Jupiter Price API)');
-          this.livePriceMonitor = new LivePriceMonitor();
-        }
+      console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'SHADOW'})`);
+      this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor);
+      this.livePriceMonitor.start();
+      this.engine.setLivePriceMonitor(this.livePriceMonitor);
 
-        if (this.livePriceMonitor) {
-          this.livePriceMonitor.start();
-          this.engine.setLivePriceMonitor(this.livePriceMonitor);
+      // K 线收集器：持续记录价格到 SQLite 供回测使用
+      this.klineCollector = new KlineCollector();
+      this.klineCollector.attach(this.livePriceMonitor);
 
-          // K 线收集器：持续记录价格到 SQLite 供回测使用
-          this.klineCollector = new KlineCollector();
-          this.klineCollector.attach(this.livePriceMonitor);
-        }
-
+      // 实盘模式：额外初始化 LivePositionMonitor + Jupiter 执行器
+      if (isLive) {
         this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor, this.engine.riskManager);
         await this.livePositionMonitor.start();
 
@@ -799,11 +790,20 @@ class PremiumChannelSystem {
 
         const solBalance = await this.jupiterExecutor.getSolBalance();
         console.log(`💰 [实盘] 钱包余额: ${solBalance.toFixed(4)} SOL`);
-      } catch (error) {
-        console.error(`❌ [实盘] 初始化失败: ${error.message}`);
-        console.log('⚠️  降级为 SHADOW 模式');
-        this.jupiterExecutor = null;
-        this.livePositionMonitor = null;
+      }
+    } catch (error) {
+      console.error(`❌ [Premium] 价格/执行组件初始化失败: ${error.message}`);
+      if (isLive) {
+        console.log('⚠️  降级为 SHADOW 模式价格监控');
+      }
+      this.jupiterExecutor = null;
+      this.livePositionMonitor = null;
+      if (!this.livePriceMonitor) {
+        this.livePriceMonitor = new LivePriceMonitorV2(null);
+        this.livePriceMonitor.start();
+        this.engine.setLivePriceMonitor(this.livePriceMonitor);
+        this.klineCollector = new KlineCollector();
+        this.klineCollector.attach(this.livePriceMonitor);
       }
     }
 
