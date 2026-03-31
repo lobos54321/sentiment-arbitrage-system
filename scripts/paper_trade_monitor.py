@@ -100,6 +100,8 @@ LIVE_PRICE_MAX_AGE_MS = int(os.environ.get('LIVE_PRICE_MAX_AGE_MS', '90000'))
 
 _REDIS_CLIENT = None
 _REDIS_INIT_ATTEMPTED = False
+_REDIS_LAST_FAILED_AT = 0.0
+_REDIS_RETRY_INTERVAL = 30.0  # retry failed Redis connection every 30s
 
 # Logging
 logging.basicConfig(
@@ -305,16 +307,22 @@ def get_jupiter_price(token_ca):
 
 
 def get_redis_client():
-    """Return a Redis client if redis-py is installed and configured."""
-    global _REDIS_CLIENT, _REDIS_INIT_ATTEMPTED
+    """Return a Redis client if redis-py is installed and reachable.
+    Retries every _REDIS_RETRY_INTERVAL seconds after a failed attempt
+    so a slow Redis startup doesn't permanently disable the bridge.
+    """
+    global _REDIS_CLIENT, _REDIS_INIT_ATTEMPTED, _REDIS_LAST_FAILED_AT
     if _REDIS_CLIENT is not None:
         return _REDIS_CLIENT
-    if _REDIS_INIT_ATTEMPTED:
+    if redis is None:
+        if not _REDIS_INIT_ATTEMPTED:
+            _REDIS_INIT_ATTEMPTED = True
+            log.info("redis package not available; live price checks will use direct fetch fallback")
+        return None
+    # Allow retry after cooldown
+    if _REDIS_INIT_ATTEMPTED and (time.time() - _REDIS_LAST_FAILED_AT) < _REDIS_RETRY_INTERVAL:
         return None
     _REDIS_INIT_ATTEMPTED = True
-    if redis is None:
-        log.info("redis package not available; live price checks will use direct fetch fallback")
-        return None
     try:
         if REDIS_URL:
             client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -331,7 +339,8 @@ def get_redis_client():
         log.info("Redis live price reader enabled")
         return _REDIS_CLIENT
     except Exception as e:
-        log.warning(f"Redis unavailable, using direct fetch fallback: {e}")
+        _REDIS_LAST_FAILED_AT = time.time()
+        log.warning(f"Redis unavailable (will retry in {int(_REDIS_RETRY_INTERVAL)}s): {e}")
         return None
 
 
