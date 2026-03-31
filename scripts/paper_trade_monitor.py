@@ -97,11 +97,16 @@ REDIS_DB = int(os.environ.get('REDIS_DB', '0'))
 REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', '').strip() or None
 REDIS_KEY_PREFIX = os.environ.get('PRICE_REDIS_KEY_PREFIX', 'live_price:').strip() or 'live_price:'
 LIVE_PRICE_MAX_AGE_MS = int(os.environ.get('LIVE_PRICE_MAX_AGE_MS', '90000'))
+DEX_RATE_LIMIT_COOLDOWN_SEC = int(os.environ.get('DEX_RATE_LIMIT_COOLDOWN_SEC', '60'))
+SOL_PRICE_TTL_SEC = int(os.environ.get('SOL_PRICE_TTL_SEC', '30'))
 
 _REDIS_CLIENT = None
 _REDIS_INIT_ATTEMPTED = False
 _REDIS_LAST_FAILED_AT = 0.0
 _REDIS_RETRY_INTERVAL = 30.0  # retry failed Redis connection every 30s
+_DEX_RATE_LIMIT_UNTIL = 0.0
+_DEX_LAST_WARN_AT = 0.0
+_SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
 
 # Logging
 logging.basicConfig(
@@ -230,8 +235,29 @@ def init_paper_db(db_path=None):
 
 # === Price Fetching ===
 
+def _is_dexscreener_url(url):
+    return 'api.dexscreener.com' in (url or '')
+
+
+def _dex_rate_limited():
+    return time.time() < _DEX_RATE_LIMIT_UNTIL
+
+
+def _mark_dex_rate_limited(source, detail=''):
+    global _DEX_RATE_LIMIT_UNTIL, _DEX_LAST_WARN_AT
+    now = time.time()
+    _DEX_RATE_LIMIT_UNTIL = now + DEX_RATE_LIMIT_COOLDOWN_SEC
+    if now - _DEX_LAST_WARN_AT >= 15:
+        suffix = f": {detail}" if detail else ''
+        log.warning(f"DexScreener rate-limited; cooling down for {DEX_RATE_LIMIT_COOLDOWN_SEC}s ({source}){suffix}")
+        _DEX_LAST_WARN_AT = now
+
+
 def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
+    if _is_dexscreener_url(url) and _dex_rate_limited():
+        return None
+
     try:
         result = subprocess.run(
             [
@@ -255,6 +281,9 @@ def curl_json(url, timeout=15):
 
         if body[0] not in '{[':
             preview = body[:160].replace('\n', ' ')
+            if _is_dexscreener_url(url) and '1015' in preview:
+                _mark_dex_rate_limited(url, preview)
+                return None
             log.warning(f"Non-JSON response from {url}: {preview}")
             return None
 
@@ -262,6 +291,9 @@ def curl_json(url, timeout=15):
             return json.loads(body)
         except json.JSONDecodeError as e:
             preview = body[:160].replace('\n', ' ')
+            if _is_dexscreener_url(url) and '1015' in preview:
+                _mark_dex_rate_limited(url, preview)
+                return None
             log.warning(f"JSON parse failed for {url}: {e}; preview={preview}")
             return None
     except Exception as e:
@@ -822,22 +854,32 @@ def get_entry_bar_ohlcv(pool_address):
 
 def get_sol_price():
     """Get current SOL/USD price from DexScreener (SOL wrapped token)."""
+    now = time.time()
+    cached_price = _SOL_PRICE_CACHE.get('price')
+    fetched_at = _SOL_PRICE_CACHE.get('fetched_at') or 0.0
+    if cached_price and (now - fetched_at) < SOL_PRICE_TTL_SEC:
+        return cached_price
+
     data = curl_json("https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112")
     if not data:
-        return None
+        return cached_price
     pairs = data.get('pairs', [])
     if not pairs:
-        return None
-    # Pick USDC pair with highest liquidity
+        return cached_price
     usdc_pairs = [p for p in pairs if 'USD' in (p.get('quoteToken', {}).get('symbol', '') or '').upper()]
     if usdc_pairs:
         pair = max(usdc_pairs, key=lambda p: (p.get('liquidity', {}).get('usd', 0) or 0))
     else:
         pair = pairs[0]
     try:
-        return float(pair.get('priceUsd', 0))
+        price = float(pair.get('priceUsd', 0))
+        if price > 0:
+            _SOL_PRICE_CACHE['price'] = price
+            _SOL_PRICE_CACHE['fetched_at'] = now
+            return price
     except (TypeError, ValueError):
-        return None
+        pass
+    return cached_price
 
 
 def determine_market_regime(sol_price_now, sol_price_cache={}):

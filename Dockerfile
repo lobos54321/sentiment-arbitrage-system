@@ -37,31 +37,31 @@ echo '[STARTUP] Waiting for Redis...' && \
 until redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q PONG; do sleep 0.2; done && \
 echo '[STARTUP] Redis ready.' && \
 echo '[STARTUP] Starting Node.js...' && \
-SENTIMENT_DB=/app/data/sentiment_arb.db \
+(SENTIMENT_DB=/app/data/sentiment_arb.db \
 LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
 KLINE_DB=/app/data/kline_cache.db \
 SHADOW_MODE=false \
 AUTO_BUY_ENABLED=true \
 PYTHONUNBUFFERED=1 \
-node src/index.js --premium > /app/logs/node.out.log 2> /app/logs/node.err.log & \
+node src/index.js --premium 2>&1 | tee -a /app/data/node.log) & \
 NODE_PID=$! && \
 echo '[STARTUP] Starting lifecycle-tracker...' && \
-SENTIMENT_DB=/app/data/sentiment_arb.db \
+(SENTIMENT_DB=/app/data/sentiment_arb.db \
 LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
 KLINE_DB=/app/data/kline_cache.db \
 PYTHONUNBUFFERED=1 \
-python3 scripts/lifecycle_24h_tracker.py --track >> /app/data/lifecycle.log 2>&1 & \
+python3 scripts/lifecycle_24h_tracker.py --track 2>&1 | tee -a /app/data/lifecycle.log) & \
 LIFECYCLE_PID=$! && \
 echo '[STARTUP] Starting paper-trader (with auto-restart)...' && \
 ( while true; do \
-    echo \"[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting\"; \
+    echo \"[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting\" | tee -a /app/data/paper-trader.log; \
     PAPER_DB=/app/data/paper_trades.db \
     KLINE_DB=/app/data/kline_cache.db \
     SENTIMENT_DB=/app/data/sentiment_arb.db \
     PYTHONUNBUFFERED=1 \
-    python3 scripts/paper_trade_monitor.py >> /app/data/paper-trader.log 2>&1; \
+    python3 scripts/paper_trade_monitor.py 2>&1 | tee -a /app/data/paper-trader.log; \
     EXIT_CODE=$$?; \
-    echo \"[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), restarting in 15s\"; \
+    echo \"[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), restarting in 15s\" | tee -a /app/data/paper-trader.log; \
     sleep 15; \
   done ) & \
 PAPER_PID=$! && \
