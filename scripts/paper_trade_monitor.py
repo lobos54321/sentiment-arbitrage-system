@@ -2121,6 +2121,7 @@ def run_monitor(db):
     consecutive_errors = 0
     last_heartbeat = 0.0
     last_progress = time.time()
+    pending_entries = {}
 
     while True:
         now = time.time()
