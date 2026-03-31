@@ -19,7 +19,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production && pip3 install --no-cache-dir redis
+RUN npm ci --only=production && pip3 install --no-cache-dir --break-system-packages redis
 
 # Copy application code
 COPY . .
