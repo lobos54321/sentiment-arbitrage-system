@@ -234,7 +234,12 @@ def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
     try:
         result = subprocess.run(
-            ['curl', '-sS', '-m', str(timeout), url],
+            [
+                'curl', '-sS', '-L', '-m', str(timeout),
+                '-H', 'Accept: application/json',
+                '-H', 'User-Agent: sentiment-arbitrage-system/1.0',
+                url,
+            ],
             capture_output=True, text=True, timeout=timeout + 5
         )
         if result.returncode != 0:
@@ -242,10 +247,23 @@ def curl_json(url, timeout=15):
             if stderr:
                 log.warning(f"Fetch failed for {url}: {stderr}")
             return None
-        if not result.stdout.strip():
+
+        body = (result.stdout or '').strip()
+        if not body:
             log.warning(f"Empty response from {url}")
             return None
-        return json.loads(result.stdout)
+
+        if body[0] not in '{[':
+            preview = body[:160].replace('\n', ' ')
+            log.warning(f"Non-JSON response from {url}: {preview}")
+            return None
+
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as e:
+            preview = body[:160].replace('\n', ' ')
+            log.warning(f"JSON parse failed for {url}: {e}; preview={preview}")
+            return None
     except Exception as e:
         log.warning(f"Fetch exception for {url}: {e}")
         return None
