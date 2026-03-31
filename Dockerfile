@@ -18,8 +18,11 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production && pip3 install --no-cache-dir --break-system-packages redis
+# Install Node.js dependencies
+RUN npm ci --only=production
+
+# Install Python dependencies (--break-system-packages required on Debian Bookworm / PEP 668)
+RUN pip3 install --no-cache-dir --break-system-packages redis
 
 # Copy application code
 COPY . .
