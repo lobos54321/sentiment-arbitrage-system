@@ -32,6 +32,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
 
+try:
+    import redis
+except Exception:
+    redis = None
+
 # === Configuration ===
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
@@ -83,6 +88,18 @@ HEARTBEAT_INTERVAL = 300        # log "alive" message every N seconds
 
 # Lifecycle staleness: don't trigger Stage2A/3 re-entries for signals older than this
 LIFECYCLE_STALE_HOURS = 48
+HEARTBEAT_INTERVAL_SEC = 300
+
+REDIS_URL = os.environ.get('REDIS_URL', '').strip()
+REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
+REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+REDIS_DB = int(os.environ.get('REDIS_DB', '0'))
+REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', '').strip() or None
+REDIS_KEY_PREFIX = os.environ.get('PRICE_REDIS_KEY_PREFIX', 'live_price:').strip() or 'live_price:'
+LIVE_PRICE_MAX_AGE_MS = int(os.environ.get('LIVE_PRICE_MAX_AGE_MS', '90000'))
+
+_REDIS_CLIENT = None
+_REDIS_INIT_ATTEMPTED = False
 
 # Logging
 logging.basicConfig(
@@ -215,13 +232,20 @@ def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
     try:
         result = subprocess.run(
-            ['curl', '-s', '-m', str(timeout), url],
+            ['curl', '-sS', '-m', str(timeout), url],
             capture_output=True, text=True, timeout=timeout + 5
         )
         if result.returncode != 0:
+            stderr = (result.stderr or '').strip()
+            if stderr:
+                log.warning(f"Fetch failed for {url}: {stderr}")
+            return None
+        if not result.stdout.strip():
+            log.warning(f"Empty response from {url}")
             return None
         return json.loads(result.stdout)
-    except Exception:
+    except Exception as e:
+        log.warning(f"Fetch exception for {url}: {e}")
         return None
 
 
@@ -276,6 +300,102 @@ def get_jupiter_price(token_ca):
         return float(price_str)
     except (TypeError, ValueError):
         return None
+
+
+def get_redis_client():
+    """Return a Redis client if redis-py is installed and configured."""
+    global _REDIS_CLIENT, _REDIS_INIT_ATTEMPTED
+    if _REDIS_CLIENT is not None:
+        return _REDIS_CLIENT
+    if _REDIS_INIT_ATTEMPTED:
+        return None
+    _REDIS_INIT_ATTEMPTED = True
+    if redis is None:
+        log.info("redis package not available; live price checks will use direct fetch fallback")
+        return None
+    try:
+        if REDIS_URL:
+            client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        else:
+            client = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                password=REDIS_PASSWORD,
+                decode_responses=True,
+            )
+        client.ping()
+        _REDIS_CLIENT = client
+        log.info("Redis live price reader enabled")
+        return _REDIS_CLIENT
+    except Exception as e:
+        log.warning(f"Redis unavailable, using direct fetch fallback: {e}")
+        return None
+
+
+def read_redis_payload(token_ca):
+    """Read and parse raw live-price payload for a token from Redis."""
+    client = get_redis_client()
+    if not client or not token_ca:
+        return None
+    keys = [
+        f"{REDIS_KEY_PREFIX}{token_ca}",
+        f"live_price:{token_ca}",
+        token_ca,
+    ]
+    for key in keys:
+        try:
+            raw = client.get(key)
+        except Exception as e:
+            log.warning(f"Redis read failed for {token_ca[:8]} key={key}: {e}")
+            return None
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            log.warning(f"Redis payload parse failed for {token_ca[:8]} key={key}")
+            continue
+        if isinstance(payload, dict):
+            payload['_redis_key'] = key
+            return payload
+    return None
+
+
+def _coerce_timestamp_ms(payload):
+    for key in ('timestamp_ms', 'timestamp', 'ts', 'updated_at_ms'):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            ts = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if ts < 10**11:
+            ts *= 1000
+        return ts
+    return None
+
+
+def is_redis_payload_fresh(payload, max_age_ms=LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=None):
+    """Validate Redis price payload freshness and monotonicity."""
+    if not isinstance(payload, dict):
+        return False
+    try:
+        price = float(payload.get('price_usd') or 0)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0:
+        return False
+    timestamp_ms = _coerce_timestamp_ms(payload)
+    if not timestamp_ms:
+        return False
+    age_ms = int(time.time() * 1000) - timestamp_ms
+    if age_ms < 0 or age_ms > max_age_ms:
+        return False
+    if min_timestamp_ms is not None and timestamp_ms < int(min_timestamp_ms):
+        return False
+    return True
 
 
 def _build_synthetic_bar(price, source, ts=None):
@@ -465,8 +585,6 @@ def get_current_bar(token_ca, pool_address=None):
     if price and price > 0:
         return _make_bar(price, 'dexscreener')
 
-    # Tier 4 continues below
-
     if not pool_address:
         pool_address = get_pool_address(token_ca)
     if pool_address:
@@ -479,11 +597,10 @@ def get_current_bar(token_ca, pool_address=None):
             ohlcv = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
             if ohlcv:
                 row = ohlcv[0]
-                price = float(row[4])  # close
+                price = float(row[4])
                 if price > 0:
                     return _make_bar(price, 'gecko')
 
-    # ── Emergency: stale price cache ─────────────────────────────────────────
     stale_price, stale_age = _get_stale_price(token_ca, max_age=STALE_PRICE_TTL)
     if stale_price:
         log.warning(
@@ -498,12 +615,48 @@ def get_current_bar(token_ca, pool_address=None):
     return None
 
 
-def get_current_price(token_ca, pool_address=None):
-    """Get latest price (Jupiter primary, DexScreener batch fallback, GeckoTerminal last resort)."""
+def get_current_price_direct(token_ca, pool_address=None):
+    """Get latest price from the current direct live-price path."""
     bar = get_current_bar(token_ca, pool_address)
     if not bar:
         return None
-    return bar['close']
+    price = bar['close'] or bar.get('open')
+    if price is None or price <= 0:
+        return None
+    return {
+        'price': price,
+        'ts': int(bar['ts']),
+        'source': bar.get('source') or 'direct_live',
+        'bar': bar,
+    }
+
+
+def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
+    """Get Redis-first live price snapshot with direct live-price fallback."""
+    payload = read_redis_payload(token_ca)
+    if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
+        timestamp_ms = _coerce_timestamp_ms(payload)
+        return {
+            'price': float(payload['price_usd']),
+            'ts': int(timestamp_ms // 1000),
+            'timestamp_ms': timestamp_ms,
+            'source': 'redis',
+            'payload': payload,
+        }
+
+    direct = get_current_price_direct(token_ca, pool_address)
+    if not direct:
+        return None
+    direct['timestamp_ms'] = int(direct['ts']) * 1000
+    return direct
+
+
+def get_current_price(token_ca, pool_address=None):
+    """Get latest price (Jupiter primary, DexScreener batch fallback, GeckoTerminal last resort)."""
+    snapshot = get_current_price_direct(token_ca, pool_address)
+    if not snapshot:
+        return None
+    return snapshot['price']
 
 
 # === NOT_ATH Scoring ===
@@ -847,6 +1000,33 @@ def get_last_processed_id(db):
     """Get the highest signal_ts in paper_trades to avoid re-processing."""
     row = db.execute("SELECT MAX(signal_ts) as max_ts FROM paper_trades").fetchone()
     return row['max_ts'] or 0
+
+
+def wait_for_local_signal_source():
+    """Wait until the local sentiment DB and premium_signals table are available."""
+    if REMOTE_SIGNAL_URL:
+        return
+
+    attempts = 0
+    while True:
+        try:
+            if os.path.exists(SENTIMENT_DB):
+                sdb = sqlite3.connect(SENTIMENT_DB)
+                try:
+                    row = sdb.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='premium_signals'"
+                    ).fetchone()
+                    if row:
+                        return
+                finally:
+                    sdb.close()
+        except Exception as e:
+            if attempts % 12 == 0:
+                log.warning(f"Waiting for local signal DB readiness: {e}")
+        if attempts % 12 == 0:
+            log.warning(f"Waiting for local signal DB/table: {SENTIMENT_DB} (attempt {attempts + 1})")
+        attempts += 1
+        time.sleep(5)
 
 
 # === Position Tracking ===
@@ -1676,9 +1856,26 @@ def run_monitor(db):
     PENDING_TTL_SECONDS = 300  # 5 minutes
 
     consecutive_errors = 0
+    last_heartbeat = 0.0
+    last_progress = time.time()
+
     while True:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
+
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+            freshness = get_signal_freshness()
+            log.info(
+                f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
+                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)} pending={len(pending_entries)}"
+            )
+            last_heartbeat = now
+
+        if now - last_progress >= HEARTBEAT_INTERVAL_SEC * 2:
+            log.warning(
+                f"No trading progress for {int(now - last_progress)}s; likely stalled on source freshness, pool lookup, or rate limiting"
+            )
+            last_progress = now
 
         try:
             new_signals = get_new_signals(last_signal_id)
@@ -1908,42 +2105,45 @@ def run_monitor(db):
 
             for trade_id, pos in list(positions.items()):
                 try:
-                    price = position_prices.get(pos.token_ca)
-                    source = position_sources.get(pos.token_ca)
-                    if price and price > 0:
-                        current_bar = _build_synthetic_bar(price, source or 'jupiter')
+                    prefetched_price = position_prices.get(pos.token_ca)
+                    prefetched_source = position_sources.get(pos.token_ca)
+                    min_timestamp_ms = (int(pos.last_bar_ts) * 1000) if pos.last_bar_ts else None
+                    snapshot = get_live_price_snapshot(pos.token_ca, pos.pool_address, min_timestamp_ms=min_timestamp_ms)
+
+                    if snapshot:
+                        bar_ts = int(snapshot['ts'])
+                        price = snapshot['price']
+                    elif prefetched_price and prefetched_price > 0:
+                        current_bar = _build_synthetic_bar(prefetched_price, prefetched_source or 'jupiter')
+                        bar_ts = int(current_bar['ts'])
+                        price = current_bar['close'] or current_bar.get('open')
                     else:
                         current_bar = get_current_bar(pos.token_ca, pos.pool_address)
-                    if not current_bar:
-                        # No price data — check if position has exceeded timeout by a
-                        # grace period. If so, force-close at entry price (pnl=0) to
-                        # prevent zombie positions accumulating indefinitely.
-                        timeout_min = int(pos.exit_rules.get('timeoutMinutes', DEFAULT_STAGE1_EXIT['timeoutMinutes']))
-                        grace_min = 30
-                        elapsed_min = (now - pos.entry_ts) / 60
-                        if elapsed_min >= timeout_min + grace_min:
-                            # If trailing was already active, estimate exit at peak * trail_factor
-                            # (token likely crashed after pump, trail stop would have fired).
-                            # Otherwise record as breakeven (we genuinely don't know exit price).
-                            if pos.trailing_active and pos.peak_pnl > 0:
-                                trail_factor = float(pos.exit_rules.get('trailFactor', TRAIL_FACTOR))
-                                zombie_pnl = pos.peak_pnl * trail_factor
-                                zombie_exit_price = pos.entry_price * (1 + zombie_pnl)
-                                reason_str = 'timeout_no_data_trail'
-                            else:
-                                zombie_pnl = 0.0
-                                zombie_exit_price = pos.entry_price
-                                reason_str = 'timeout_no_data'
-                            log.warning(
-                                f"  Force-closing zombie {pos.symbol}/{pos.strategy_stage} "
-                                f"(no price data for {elapsed_min:.0f}min, timeout={timeout_min}min, "
-                                f"trailing={pos.trailing_active}, peak={pos.peak_pnl*100:+.1f}%, "
-                                f"zombie_pnl={zombie_pnl*100:+.1f}%)"
-                            )
-                            to_close.append((trade_id, reason_str, zombie_pnl, zombie_exit_price, int(now)))
-                        continue
-                    bar_ts = int(current_bar['ts'])
-                    price = current_bar['close'] or current_bar.get('open')
+                        if not current_bar:
+                            timeout_min = int(pos.exit_rules.get('timeoutMinutes', DEFAULT_STAGE1_EXIT['timeoutMinutes']))
+                            grace_min = 30
+                            elapsed_min = (now - pos.entry_ts) / 60
+                            if elapsed_min >= timeout_min + grace_min:
+                                if pos.trailing_active and pos.peak_pnl > 0:
+                                    trail_factor = float(pos.exit_rules.get('trailFactor', TRAIL_FACTOR))
+                                    zombie_pnl = pos.peak_pnl * trail_factor
+                                    zombie_exit_price = pos.entry_price * (1 + zombie_pnl)
+                                    reason_str = 'timeout_no_data_trail'
+                                else:
+                                    zombie_pnl = 0.0
+                                    zombie_exit_price = pos.entry_price
+                                    reason_str = 'timeout_no_data'
+                                log.warning(
+                                    f"  Force-closing zombie {pos.symbol}/{pos.strategy_stage} "
+                                    f"(no price data for {elapsed_min:.0f}min, timeout={timeout_min}min, "
+                                    f"trailing={pos.trailing_active}, peak={pos.peak_pnl*100:+.1f}%, "
+                                    f"zombie_pnl={zombie_pnl*100:+.1f}%)"
+                                )
+                                to_close.append((trade_id, reason_str, zombie_pnl, zombie_exit_price, int(now)))
+                            continue
+                        bar_ts = int(current_bar['ts'])
+                        price = current_bar['close'] or current_bar.get('open')
+
                     if price is None or price <= 0:
                         continue
                     should_exit, reason, pnl = pos.check_exit(price, bar_ts)
@@ -2002,14 +2202,11 @@ def run_monitor(db):
                         lifecycle['rolling_low_after_stop'] = None
                         lifecycle['rolling_low_ts'] = None
 
-                    # Stage 3: track profitable exits for ambush re-entry
                     if pos.strategy_stage in ('stage1', 'stage2A') and reason == 'trail' and pnl > 0:
-                        # Profitable exit → arm Stage 3 ambush mode
                         peak_price_val = pos.entry_price * (1.0 + pos.peak_pnl)
                         lifecycle['stage3_v2_exit_ts'] = exit_ts
                         lifecycle['stage3_v2_peak_price'] = peak_price_val
-                        lifecycle['stage3_attempted'] = False  # allow stage3 attempt
-                        # Persist peak price anchor to DB for crash recovery
+                        lifecycle['stage3_attempted'] = False
                         db.execute(
                             "UPDATE paper_trades SET stage3_peak_price = ? WHERE id = ?",
                             (peak_price_val, pos.trade_id)
@@ -2020,7 +2217,6 @@ def run_monitor(db):
                             f"peak_price=${peak_price_val:.8f} awaiting next signal"
                         )
                     elif pos.strategy_stage in ('stage1', 'stage2A') and reason in ('sl', 'timeout', 'timeout_no_data', 'timeout_no_data_trail'):
-                        # Non-profitable exit → stage3 not eligible
                         lifecycle['stage3_attempted'] = True
 
                     log.info(f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} lifecycle={pos.lifecycle_id}")
@@ -2030,7 +2226,6 @@ def run_monitor(db):
             stale_cutoff_sec = int(time.time()) - LIFECYCLE_STALE_HOURS * 3600
             for lifecycle_id, lifecycle in list(lifecycles.items()):
                 try:
-                    # Skip lifecycles that are too old to warrant Stage2A/3 re-entry
                     raw_ts = lifecycle.get('signal_ts') or 0
                     lc_signal_sec = raw_ts // 1000 if raw_ts > 1e12 else raw_ts
                     if lc_signal_sec < stale_cutoff_sec:
@@ -2045,11 +2240,21 @@ def run_monitor(db):
                     pool = get_pool_address(lifecycle['token_ca'])
                     if not pool:
                         continue
-                    current_bar = get_current_bar(lifecycle['token_ca'], pool)
-                    if not current_bar:
-                        continue
-                    bar_ts = int(current_bar['ts'])
-                    close_price = current_bar['close'] or current_bar.get('open')
+                    min_bar_ts = max(
+                        int(lifecycle.get('rolling_low_ts') or 0),
+                        int((lifecycle.get('stage1_stop_ts') or 0) // 1000 if (lifecycle.get('stage1_stop_ts') or 0) > 1e12 else (lifecycle.get('stage1_stop_ts') or 0)),
+                        int((lifecycle.get('signal_ts') or 0) // 1000 if (lifecycle.get('signal_ts') or 0) > 1e12 else (lifecycle.get('signal_ts') or 0)),
+                    )
+                    snapshot = get_live_price_snapshot(lifecycle['token_ca'], pool, min_timestamp_ms=min_bar_ts * 1000 if min_bar_ts else None)
+                    if snapshot:
+                        bar_ts = int(snapshot['ts'])
+                        close_price = snapshot['price']
+                    else:
+                        current_bar = get_current_bar(lifecycle['token_ca'], pool)
+                        if not current_bar:
+                            continue
+                        bar_ts = int(current_bar['ts'])
+                        close_price = current_bar['close'] or current_bar.get('open')
                     if close_price is None or close_price <= 0:
                         continue
 
@@ -2089,7 +2294,6 @@ def run_monitor(db):
                                 log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${close_price:.10f} lifecycle={lifecycle_id}")
                                 continue
 
-                    # Stage 3: expire stale ambush if no new signal arrived within LIFECYCLE_STALE_HOURS
                     if (stage_rules.get('stage3', {}).get('enabled')
                             and lifecycle.get('stage3_v2_exit_ts') is not None
                             and not lifecycle.get('stage3_attempted')):
@@ -2138,10 +2342,8 @@ def main():
 
     db = init_paper_db()
 
-    if not REMOTE_SIGNAL_URL and not os.path.exists(SENTIMENT_DB):
-        log.error(f"Signal DB not found: {SENTIMENT_DB}")
-        log.error("Set SENTIMENT_DB or ensure data/sentiment_arb.db exists, or configure REMOTE_SIGNAL_URL.")
-        sys.exit(1)
+    if '--dry-run' not in sys.argv and '--stats' not in sys.argv and '--daily' not in sys.argv:
+        wait_for_local_signal_source()
 
     if '--dry-run' in sys.argv:
         dry_run(db)

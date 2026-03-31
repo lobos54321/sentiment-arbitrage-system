@@ -10,6 +10,7 @@
 
 import { EventEmitter } from 'events';
 import axios from 'axios';
+import { createClient } from 'redis';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -37,6 +38,11 @@ export class LivePriceMonitorV2 extends EventEmitter {
     this.cacheStaleMs = 30000;
     this.querySpacingMs = 100;
     this.rateLimitCooldownMs = 5000;
+    this.redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+    this.redisEnabled = process.env.REDIS_ENABLED !== 'false';
+    this.redisClient = null;
+    this.redisConnectPromise = null;
+    this.redisFailed = false;
     this.isRunning = false;
 
     // 统计
@@ -101,6 +107,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
     if (this.isRunning) return;
     this.isRunning = true;
 
+    this._ensureRedisClient();
     this.priceInterval = setInterval(() => this._queryAllPrices(), this.priceIntervalMs);
     this.dexInterval = setInterval(() => this._queryDexScreener(), this.dexIntervalMs);
 
@@ -110,7 +117,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
   /**
    * 停止
    */
-  stop() {
+  async stop() {
     this.isRunning = false;
     if (this.priceInterval) {
       clearInterval(this.priceInterval);
@@ -120,6 +127,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
       clearInterval(this.dexInterval);
       this.dexInterval = null;
     }
+    await this._closeRedisClient();
     console.log(`⏹️  [LivePriceMonitorV2] 已停止 | 统计: ${JSON.stringify(this.getStats())}`);
   }
 
@@ -269,6 +277,14 @@ export class LivePriceMonitorV2 extends EventEmitter {
       mc: entry.mc,
       timestamp,
       source: 'jupiter-quote'
+    });
+
+    void this._publishRedisPrice(tokenCA, {
+      price_sol: entry.price,
+      price_usd: entry.usdPrice || null,
+      source: 'jupiter-quote',
+      timestamp: entry.timestamp,
+      mc: entry.mc || null
     });
   }
 
@@ -435,6 +451,14 @@ export class LivePriceMonitorV2 extends EventEmitter {
       source: 'dex-fallback'
     });
 
+    void this._publishRedisPrice(tokenCA, {
+      price_sol: priceNative > 0 ? priceNative : null,
+      price_usd: priceUsd > 0 ? priceUsd : null,
+      source: 'dex-fallback',
+      timestamp: entry.timestamp,
+      mc: entry.mc || null
+    });
+
     return entry;
   }
 
@@ -517,6 +541,73 @@ export class LivePriceMonitorV2 extends EventEmitter {
       if (this.stats.errors <= 10 || this.stats.errors % 20 === 0) {
         console.warn(`⚠️  [LivePriceMonitorV2] DexScreener 查询失败: ${error.message}`);
       }
+    }
+  }
+
+  async _ensureRedisClient() {
+    if (!this.redisEnabled || this.redisFailed) {
+      return null;
+    }
+
+    if (this.redisClient?.isOpen) {
+      return this.redisClient;
+    }
+
+    if (!this.redisClient) {
+      this.redisClient = createClient({ url: this.redisUrl });
+      this.redisClient.on('error', (error) => {
+        if (!this.redisFailed) {
+          console.warn(`⚠️  [LivePriceMonitorV2] Redis 不可用，跳过发布: ${error.message}`);
+        }
+        this.redisFailed = true;
+      });
+    }
+
+    if (!this.redisConnectPromise) {
+      this.redisConnectPromise = this.redisClient.connect()
+        .then(() => {
+          this.redisFailed = false;
+          return this.redisClient;
+        })
+        .catch((error) => {
+          this.redisFailed = true;
+          console.warn(`⚠️  [LivePriceMonitorV2] Redis 连接失败，跳过发布: ${error.message}`);
+          return null;
+        })
+        .finally(() => {
+          this.redisConnectPromise = null;
+        });
+    }
+
+    return this.redisConnectPromise;
+  }
+
+  async _publishRedisPrice(tokenCA, payload) {
+    const client = await this._ensureRedisClient();
+    if (!client?.isOpen) {
+      return;
+    }
+
+    try {
+      await client.set(`live_price:${tokenCA}`, JSON.stringify(payload));
+    } catch (error) {
+      this.redisFailed = true;
+      console.warn(`⚠️  [LivePriceMonitorV2] Redis 发布失败 ${tokenCA.substring(0, 8)}...: ${error.message}`);
+    }
+  }
+
+  async _closeRedisClient() {
+    const client = this.redisClient;
+    this.redisConnectPromise = null;
+    this.redisClient = null;
+    if (!client?.isOpen) {
+      return;
+    }
+
+    try {
+      await client.quit();
+    } catch (error) {
+      console.warn(`⚠️  [LivePriceMonitorV2] Redis 关闭失败: ${error.message}`);
     }
   }
 
