@@ -245,30 +245,150 @@ def get_jupiter_price(token_ca):
         return None
 
 
-def get_current_bar(token_ca, pool_address=None):
-    """Get current price as a synthetic bar, using Jupiter Price API (primary)
-    with GeckoTerminal 1m OHLCV as fallback.
+def _build_synthetic_bar(price, source, ts=None):
+    ts = int(ts or time.time())
+    return {
+        'ts': ts,
+        'open': price,
+        'high': price,
+        'low': price,
+        'close': price,
+        'volume': 0.0,
+        'source': source,
+    }
 
-    Position updates, Stage2A and Stage3 entries only need current price + timestamp,
-    so Jupiter is faster and avoids GeckoTerminal rate limits.
-    GeckoTerminal OHLCV is only needed for Stage1 signal-bar entry lookup.
-    """
-    now_sec = int(time.time())
 
-    # Primary: Jupiter Price API (no rate limit issues, real-time)
-    price = get_jupiter_price(token_ca)
-    if price and price > 0:
-        return {
-            'ts': now_sec,
-            'open': price,
-            'high': price,
-            'low': price,
-            'close': price,
-            'volume': 0.0,
-            'source': 'jupiter',
+def _select_best_dex_pair(token_ca, pairs):
+    sol_pairs = []
+    fallback_pairs = []
+    for pair in pairs or []:
+        base_addr = ((pair.get('baseToken') or {}).get('address') or '').strip()
+        if base_addr and base_addr != token_ca:
+            continue
+        if pair.get('chainId') == 'solana':
+            sol_pairs.append(pair)
+        else:
+            fallback_pairs.append(pair)
+    candidates = sol_pairs or fallback_pairs
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.get('liquidity', {}).get('usd', 0) or 0))
+
+
+def get_jupiter_prices_batch(token_cas, batch_size=50):
+    prices = {}
+    stats = {
+        'jupiter_queries': 0,
+        'jupiter_hits': 0,
+        'jupiter_misses': 0,
+    }
+    unique_cas = [ca for ca in dict.fromkeys(token_cas or []) if ca]
+    for i in range(0, len(unique_cas), batch_size):
+        batch = unique_cas[i:i + batch_size]
+        if not batch:
+            continue
+        stats['jupiter_queries'] += 1
+        ids = ','.join(batch)
+        data = curl_json(f"https://api.jup.ag/price/v2?ids={ids}")
+        payload = (data or {}).get('data') or {}
+        for token_ca in batch:
+            price_str = (payload.get(token_ca) or {}).get('price')
+            if price_str is None:
+                stats['jupiter_misses'] += 1
+                continue
+            try:
+                price = float(price_str)
+            except (TypeError, ValueError):
+                stats['jupiter_misses'] += 1
+                continue
+            if price > 0:
+                prices[token_ca] = price
+                stats['jupiter_hits'] += 1
+            else:
+                stats['jupiter_misses'] += 1
+    return prices, stats
+
+
+def get_dexscreener_prices_batch(token_cas, batch_size=30):
+    prices = {}
+    stats = {
+        'dex_batch_queries': 0,
+        'dex_batch_hits': 0,
+        'dex_batch_misses': 0,
+    }
+    unique_cas = [ca for ca in dict.fromkeys(token_cas or []) if ca]
+    for i in range(0, len(unique_cas), batch_size):
+        batch = unique_cas[i:i + batch_size]
+        if not batch:
+            continue
+        stats['dex_batch_queries'] += 1
+        data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{','.join(batch)}")
+        pairs = (data or {}).get('pairs') or []
+        pairs_by_token = defaultdict(list)
+        for pair in pairs:
+            base_addr = ((pair.get('baseToken') or {}).get('address') or '').strip()
+            if base_addr in batch:
+                pairs_by_token[base_addr].append(pair)
+        for token_ca in batch:
+            best_pair = _select_best_dex_pair(token_ca, pairs_by_token.get(token_ca))
+            if not best_pair:
+                stats['dex_batch_misses'] += 1
+                continue
+            try:
+                price = float(best_pair.get('priceUsd', 0) or 0)
+            except (TypeError, ValueError):
+                stats['dex_batch_misses'] += 1
+                continue
+            if price > 0:
+                prices[token_ca] = price
+                stats['dex_batch_hits'] += 1
+            else:
+                stats['dex_batch_misses'] += 1
+    return prices, stats
+
+
+def get_current_prices_batch(token_cas):
+    unique_cas = [ca for ca in dict.fromkeys(token_cas or []) if ca]
+    if not unique_cas:
+        return {}, {}, {
+            'jupiter_queries': 0,
+            'jupiter_hits': 0,
+            'jupiter_misses': 0,
+            'dex_batch_queries': 0,
+            'dex_batch_hits': 0,
+            'dex_batch_misses': 0,
         }
 
-    # Fallback: GeckoTerminal 1m OHLCV
+    prices, stats = get_jupiter_prices_batch(unique_cas)
+    sources = {token_ca: 'jupiter' for token_ca in prices.keys()}
+
+    misses = [token_ca for token_ca in unique_cas if token_ca not in prices]
+    if misses:
+        dex_prices, dex_stats = get_dexscreener_prices_batch(misses)
+        prices.update(dex_prices)
+        for token_ca in dex_prices.keys():
+            sources[token_ca] = 'dexscreener'
+        stats.update(dex_stats)
+    else:
+        stats.update({
+            'dex_batch_queries': 0,
+            'dex_batch_hits': 0,
+            'dex_batch_misses': 0,
+        })
+
+    return prices, sources, stats
+
+
+def get_current_bar(token_ca, pool_address=None):
+    """Get current price as a synthetic bar, using Jupiter primary,
+    DexScreener batch-compatible USD fallback, then GeckoTerminal OHLCV as last resort.
+    """
+    prices, sources, _stats = get_current_prices_batch([token_ca])
+    price = prices.get(token_ca)
+    if price and price > 0:
+        return _build_synthetic_bar(price, sources.get(token_ca, 'jupiter'))
+
+    # Last-resort fallback: GeckoTerminal 1m OHLCV
     if not pool_address:
         pool_address = get_pool_address(token_ca)
     if not pool_address:
@@ -299,7 +419,7 @@ def get_current_bar(token_ca, pool_address=None):
 
 
 def get_current_price(token_ca, pool_address=None):
-    """Get latest price (Jupiter primary, GeckoTerminal fallback)."""
+    """Get latest price (Jupiter primary, DexScreener batch fallback, GeckoTerminal last resort)."""
     bar = get_current_bar(token_ca, pool_address)
     if not bar:
         return None
@@ -1531,9 +1651,22 @@ def run_monitor(db):
             except Exception:
                 pass
 
+            position_prices, position_sources, position_price_stats = get_current_prices_batch([pos.token_ca for pos in positions.values()])
+            if positions:
+                log.info(
+                    f"Price cycle: jupiter_hits={position_price_stats['jupiter_hits']}/{position_price_stats['jupiter_hits'] + position_price_stats['jupiter_misses']} "
+                    f"dex_hits={position_price_stats['dex_batch_hits']}/{position_price_stats['dex_batch_hits'] + position_price_stats['dex_batch_misses']} "
+                    f"covered={len(position_prices)}/{len(positions)}"
+                )
+
             for trade_id, pos in list(positions.items()):
                 try:
-                    current_bar = get_current_bar(pos.token_ca, pos.pool_address)
+                    price = position_prices.get(pos.token_ca)
+                    source = position_sources.get(pos.token_ca)
+                    if price and price > 0:
+                        current_bar = _build_synthetic_bar(price, source or 'jupiter')
+                    else:
+                        current_bar = get_current_bar(pos.token_ca, pos.pool_address)
                     if not current_bar:
                         # No price data — check if position has exceeded timeout by a
                         # grace period. If so, force-close at entry price (pnl=0) to
