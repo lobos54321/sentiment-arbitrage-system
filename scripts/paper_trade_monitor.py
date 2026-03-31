@@ -1867,7 +1867,7 @@ def run_monitor(db):
             freshness = get_signal_freshness()
             log.info(
                 f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
-                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)} pending={len(pending_entries)}"
+                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)}"
             )
             last_heartbeat = now
 
