@@ -259,10 +259,12 @@ def get_pool_address(token_ca, cache={}):
 
     data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}")
     if not data:
+        cache[token_ca] = None  # cache miss to avoid re-querying dead tokens
         return None
 
     pairs = data.get('pairs', [])
     if not pairs:
+        cache[token_ca] = None  # cache miss to avoid re-querying dead tokens
         return None
 
     sol_pairs = [p for p in pairs if p.get('chainId') == 'solana']
@@ -2238,6 +2240,9 @@ def run_monitor(db):
                         continue
 
                     if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
+                        continue
+                    # Skip if both re-entries already disqualified — no point fetching price
+                    if lifecycle.get('stage2a_attempted') and lifecycle.get('stage3_attempted'):
                         continue
                     pool = get_pool_address(lifecycle['token_ca'])
                     if not pool:
