@@ -30,6 +30,9 @@ CMD bash -lc "mkdir -p /app/data /app/logs && \
 echo '[STARTUP] Starting redis-server...' && \
 redis-server --bind 127.0.0.1 --port 6379 --save '' --appendonly no --dir /app/data --logfile /app/logs/redis.log --daemonize no & \
 REDIS_PID=$! && \
+echo '[STARTUP] Waiting for Redis...' && \
+until redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q PONG; do sleep 0.2; done && \
+echo '[STARTUP] Redis ready.' && \
 echo '[STARTUP] Starting Node.js...' && \
 SENTIMENT_DB=/app/data/sentiment_arb.db \
 LIFECYCLE_DB=/app/data/lifecycle_tracks.db \

@@ -2075,6 +2075,7 @@ def run_monitor(db):
                 positions[pos.trade_id] = pos
                 cycle_queued += 1
                 log.info(f"  Entered {symbol}/stage1 @ ${price:.10f} super={super_idx} lifecycle={lifecycle_id}")
+                last_progress = now
                 time.sleep(0.2)
 
             if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
@@ -2220,6 +2221,7 @@ def run_monitor(db):
                         lifecycle['stage3_attempted'] = True
 
                     log.info(f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} lifecycle={pos.lifecycle_id}")
+                    last_progress = now
                 except Exception as e:
                     log.error(f"  Error closing trade_id={trade_id}: {e}", exc_info=True)
 
