@@ -72,8 +72,9 @@ TRAIL_FACTOR = 0.90
 TIMEOUT_MIN = 120
 
 # Polling intervals (seconds)
-SIGNAL_POLL_INTERVAL = 30       # check for new signals
-POSITION_POLL_INTERVAL = 60     # update open positions
+SIGNAL_POLL_INTERVAL = max(1, int(os.environ.get('SIGNAL_POLL_INTERVAL_SEC', '5')))        # check for new signals
+POSITION_POLL_INTERVAL = max(1, int(os.environ.get('POSITION_POLL_INTERVAL_SEC', '2')))    # update open positions
+MAIN_LOOP_TICK_SEC = max(0.5, float(os.environ.get('MAIN_LOOP_TICK_SEC', '1.0')))
 DAILY_REPORT_HOUR = 0           # UTC hour for daily report
 HEARTBEAT_INTERVAL_SEC = 300
 PENDING_ENTRY_BAR_LOOKBACK = max(8, int(os.environ.get('PENDING_ENTRY_BAR_LOOKBACK', '30')))
@@ -2151,6 +2152,7 @@ def run_monitor(db):
 
     log.info(f"  Starting from signal ID > {last_signal_id} ({cursor_source})")
 
+    last_signal_check = 0
     last_position_check = 0
     last_daily_report = None
     sol_price = None
@@ -2176,67 +2178,69 @@ def run_monitor(db):
             )
             last_progress = now
 
-        try:
-            new_signals = get_new_signals(last_signal_id)
-            for sig in new_signals:
-                token_ca = sig['token_ca']
-                last_signal_id = sig['id']
-                signal_ts = sig['timestamp']
-                lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
+        if now - last_signal_check >= SIGNAL_POLL_INTERVAL:
+            last_signal_check = now
+            try:
+                new_signals = get_new_signals(last_signal_id)
+                for sig in new_signals:
+                    token_ca = sig['token_ca']
+                    last_signal_id = sig['id']
+                    signal_ts = sig['timestamp']
+                    lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
 
-                if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
-                    continue
+                    if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
+                        continue
 
-                if len(positions) + len(pending_entries) >= max_positions:
-                    continue
+                    if len(positions) + len(pending_entries) >= max_positions:
+                        continue
 
-                existing = db.execute(
-                    "SELECT id FROM paper_trades WHERE lifecycle_id = ? OR (token_ca = ? AND signal_ts = ? AND strategy_stage = 'stage1')",
-                    (lifecycle_id, token_ca, signal_ts)
-                ).fetchone()
-                if existing:
-                    continue
+                    existing = db.execute(
+                        "SELECT id FROM paper_trades WHERE lifecycle_id = ? OR (token_ca = ? AND signal_ts = ? AND strategy_stage = 'stage1')",
+                        (lifecycle_id, token_ca, signal_ts)
+                    ).fetchone()
+                    if existing:
+                        continue
 
-                symbol = sig['symbol'] or token_ca[:8]
-                super_idx = parse_super_index(sig['description'] or '')
+                    symbol = sig['symbol'] or token_ca[:8]
+                    super_idx = parse_super_index(sig['description'] or '')
 
-                consumed, sol_price = try_awaken_stage3_from_signal(
-                    db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
-                    token_ca, symbol, signal_ts, super_idx, position_size_sol,
-                    max_positions=max_positions, pending_count=len(pending_entries)
-                )
-                if consumed:
+                    consumed, sol_price = try_awaken_stage3_from_signal(
+                        db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
+                        token_ca, symbol, signal_ts, super_idx, position_size_sol,
+                        max_positions=max_positions, pending_count=len(pending_entries)
+                    )
+                    if consumed:
+                        last_progress = time.time()
+                        continue
+
+                    if super_idx is None or super_idx <= min_super_index:
+                        continue
+
+                    pool = get_pool_address(token_ca)
+                    if not pool:
+                        log.warning(f"  Could not find pool for {symbol}, skipping")
+                        continue
+                    time.sleep(0.1)
+
+                    signal_minute_ts = get_signal_minute_ts(signal_ts)
+                    pending_entries[lifecycle_id] = {
+                        'token_ca': token_ca,
+                        'symbol': symbol,
+                        'signal_ts': signal_ts,
+                        'signal_minute_ts': signal_minute_ts,
+                        'pool': pool,
+                        'lifecycle_id': lifecycle_id,
+                        'super_idx': super_idx,
+                        'staged_at': time.time(),
+                        'attempts': 0,
+                        'last_debug_at': 0,
+                    }
+                    lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts))
+                    log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 execution")
                     last_progress = time.time()
-                    continue
-
-                if super_idx is None or super_idx <= min_super_index:
-                    continue
-
-                pool = get_pool_address(token_ca)
-                if not pool:
-                    log.warning(f"  Could not find pool for {symbol}, skipping")
-                    continue
-                time.sleep(0.3)
-
-                signal_minute_ts = get_signal_minute_ts(signal_ts)
-                pending_entries[lifecycle_id] = {
-                    'token_ca': token_ca,
-                    'symbol': symbol,
-                    'signal_ts': signal_ts,
-                    'signal_minute_ts': signal_minute_ts,
-                    'pool': pool,
-                    'lifecycle_id': lifecycle_id,
-                    'super_idx': super_idx,
-                    'staged_at': time.time(),
-                    'attempts': 0,
-                    'last_debug_at': 0,
-                }
-                lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts))
-                log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 execution")
-                last_progress = time.time()
-                time.sleep(0.2)
-        except Exception as e:
-            log.error(f"Signal check error: {e}")
+                    time.sleep(0.05)
+            except Exception as e:
+                log.error(f"Signal check error: {e}")
 
         if pending_entries:
             for lifecycle_id, pending in list(pending_entries.items()):
@@ -2562,7 +2566,7 @@ def run_monitor(db):
             print_daily_report(db, yesterday)
             last_daily_report = today_str
 
-        time.sleep(SIGNAL_POLL_INTERVAL)
+        time.sleep(MAIN_LOOP_TICK_SEC)
 
 
 # === Main ===
