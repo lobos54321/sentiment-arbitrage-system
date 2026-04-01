@@ -158,6 +158,42 @@ export class JupiterUltraExecutor {
     }
   }
 
+  async getPublicSellQuote(tokenCA, tokenAmount, opts = {}) {
+    const rawAmount = Math.floor(Number(tokenAmount || 0));
+    if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
+      return this._buildFailureResult('sell', 'quote_failed', {
+        tokenCA,
+        inputMint: tokenCA,
+        outputMint: SOL_MINT,
+        inputAmount: opts.inputAmount ?? null,
+        inputAmountRaw: null,
+        quoteTs: Date.now()
+      });
+    }
+
+    try {
+      const order = await this._getPublicOrder(tokenCA, SOL_MINT, rawAmount);
+      return await this._normalizeQuoteResult('sell', order, {
+        tokenCA,
+        inputMint: tokenCA,
+        outputMint: SOL_MINT,
+        inputAmount: opts.inputAmount ?? null,
+        inputAmountRaw: rawAmount,
+        opts
+      });
+    } catch (error) {
+      return this._buildFailureResult('sell', this._classifyFailureReason(error?.message || 'quote_failed'), {
+        tokenCA,
+        inputMint: tokenCA,
+        outputMint: SOL_MINT,
+        inputAmount: opts.inputAmount ?? null,
+        inputAmountRaw: rawAmount,
+        quoteTs: Date.now(),
+        error
+      });
+    }
+  }
+
   async executeQuotedBuy(quote, opts = {}) {
     return this._executeQuotedTrade('buy', quote, opts);
   }
@@ -343,6 +379,30 @@ export class JupiterUltraExecutor {
     } catch (error) {
       const errMsg = error.response?.data?.error || error.response?.data?.message || error.message;
       console.error(`⚠️  [JupiterUltra] Order 失败: ${errMsg}`);
+      return null;
+    }
+  }
+
+  async _getPublicOrder(inputMint, outputMint, amount) {
+    try {
+      const headers = {};
+      if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
+
+      const params = new URLSearchParams({
+        inputMint,
+        outputMint,
+        amount: amount.toString(),
+      });
+
+      const res = await axios.get(`${this.ultraApiBase}/order?${params.toString()}`, {
+        headers,
+        timeout: 5000
+      });
+
+      return res.data;
+    } catch (error) {
+      const errMsg = error.response?.data?.error || error.response?.data?.message || error.message;
+      console.error(`⚠️  [JupiterUltra] Public Order 失败: ${errMsg}`);
       return null;
     }
   }
