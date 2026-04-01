@@ -575,7 +575,9 @@ export class JupiterUltraExecutor {
 
   async _normalizeQuoteResult(side, order, meta = {}) {
     const quoteTs = Date.now();
-    const routeAvailable = Boolean(order?.transaction);
+    const isUltraOrder = Boolean(order?.transaction);
+    const isLiteQuote = order?.outAmount != null && Array.isArray(order?.routePlan);
+    const routeAvailable = isUltraOrder || isLiteQuote;
     if (!routeAvailable) {
       return this._buildFailureResult(side, this._classifyFailureReason(order?.error || order?.message || 'no_route'), {
         ...meta,
@@ -609,7 +611,7 @@ export class JupiterUltraExecutor {
       quotedOutAmount,
       quotedOutAmountRaw: outputAmountRaw,
       effectivePrice,
-      slippageBps: order?.slippageBps != null ? Number(order.slippageBps) : null,
+      slippageBps: order?.slippageBps != null ? Number(order.slippageBps) : (meta?.opts?.slippageBps != null ? Number(meta.opts.slippageBps) : null),
       quoteTs,
       feeEstimate: this._extractFeeEstimate(order),
       failureReason: null,
