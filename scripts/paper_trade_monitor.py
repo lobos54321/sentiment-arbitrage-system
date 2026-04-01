@@ -87,6 +87,10 @@ HEARTBEAT_INTERVAL = 300        # log "alive" message every N seconds
 # Lifecycle staleness: don't trigger Stage2A/3 re-entries for signals older than this
 LIFECYCLE_STALE_HOURS = 48
 HEARTBEAT_INTERVAL_SEC = 300
+PENDING_ENTRY_BAR_LOOKBACK = max(8, int(os.environ.get('PENDING_ENTRY_BAR_LOOKBACK', '30')))
+PENDING_ENTRY_DEBUG_INTERVAL_SEC = max(30, int(os.environ.get('PENDING_ENTRY_DEBUG_INTERVAL_SEC', '120')))
+PENDING_ENTRY_BAR_TOLERANCE_SEC = max(30, int(os.environ.get('PENDING_ENTRY_BAR_TOLERANCE_SEC', '90')))
+PENDING_ENTRY_NEAREST_PAST_MAX_SEC = max(60, int(os.environ.get('PENDING_ENTRY_NEAREST_PAST_MAX_SEC', '180')))
 
 REDIS_URL = os.environ.get('REDIS_URL', '').strip()
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
@@ -1069,8 +1073,16 @@ def get_signal_freshness():
 
 
 def get_last_processed_id(db):
-    """Get the highest signal_ts in paper_trades to avoid re-processing."""
-    row = db.execute("SELECT MAX(signal_ts) as max_ts FROM paper_trades").fetchone()
+    """Get the highest effective signal timestamp in paper_trades to avoid re-processing."""
+    row = db.execute("""
+        SELECT MAX(
+            CASE
+                WHEN reentry_source = 'v2_event_awakening' AND trigger_ts IS NOT NULL THEN trigger_ts
+                ELSE signal_ts
+            END
+        ) AS max_ts
+        FROM paper_trades
+    """).fetchone()
     return row['max_ts'] or 0
 
 
@@ -2015,6 +2027,87 @@ def get_signal_minute_ts(signal_ts):
     return int(signal_sec // 60 * 60)
 
 
+def _format_ts_utc(ts):
+    ts = normalize_epoch_ts(ts)
+    if ts is None:
+        return 'n/a'
+    return datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S UTC')
+
+
+def _normalize_bar_series(bars):
+    normalized = []
+    for bar in bars or []:
+        ts = normalize_epoch_ts(bar.get('ts'))
+        if ts is None:
+            continue
+        row = dict(bar)
+        row['ts'] = ts
+        normalized.append(row)
+    return normalized
+
+
+def select_signal_entry_bar(bars, signal_ts, signal_minute_ts):
+    normalized = _normalize_bar_series(bars)
+    if not normalized:
+        return None, 'no_bars', {'count': 0}
+
+    signal_sec = normalize_epoch_ts(signal_ts)
+    target_minute = normalize_epoch_ts(signal_minute_ts)
+    if signal_sec is None or target_minute is None:
+        return None, 'invalid_signal_ts', {'count': len(normalized)}
+
+    exact = next((bar for bar in normalized if bar['ts'] == target_minute), None)
+    if exact is not None:
+        return exact, 'exact_minute', {'count': len(normalized)}
+
+    nearby = [bar for bar in normalized if abs(bar['ts'] - target_minute) <= PENDING_ENTRY_BAR_TOLERANCE_SEC]
+    if nearby:
+        nearby.sort(key=lambda bar: (abs(bar['ts'] - target_minute), abs(bar['ts'] - signal_sec), -bar['ts']))
+        return nearby[0], 'tolerant_minute', {
+            'count': len(normalized),
+            'delta_sec': nearby[0]['ts'] - target_minute,
+        }
+
+    past = [bar for bar in normalized if bar['ts'] <= signal_sec]
+    if past:
+        past.sort(key=lambda bar: (signal_sec - bar['ts'], -bar['ts']))
+        nearest_past = past[0]
+        age_sec = signal_sec - nearest_past['ts']
+        if age_sec <= PENDING_ENTRY_NEAREST_PAST_MAX_SEC:
+            return nearest_past, 'nearest_past', {
+                'count': len(normalized),
+                'age_sec': age_sec,
+            }
+
+    ts_values = [bar['ts'] for bar in normalized]
+    return None, 'missing_signal_bar', {
+        'count': len(normalized),
+        'oldest_ts': min(ts_values),
+        'newest_ts': max(ts_values),
+        'target_ts': target_minute,
+        'signal_ts': signal_sec,
+    }
+
+
+def log_pending_entry_issue(pending, message, level='info', force=False):
+    now = time.time()
+    last_debug_at = pending.get('last_debug_at') or 0
+    if not force and (now - last_debug_at) < PENDING_ENTRY_DEBUG_INTERVAL_SEC:
+        return
+    pending['last_debug_at'] = now
+    stage_age_sec = int(max(0, now - (pending.get('staged_at') or now)))
+    prefix = (
+        f"  Pending {pending.get('symbol', pending.get('token_ca', 'UNKNOWN')[:8])}/stage1 "
+        f"age={stage_age_sec}s attempts={pending.get('attempts', 0)}"
+    )
+    if level == 'warning':
+        log.warning(f"{prefix} {message}")
+    elif level == 'error':
+        log.error(f"{prefix} {message}")
+    else:
+        log.info(f"{prefix} {message}")
+
+
 # === Live Monitor Loop ===
 
 def run_monitor(db):
@@ -2050,6 +2143,7 @@ def run_monitor(db):
         log.warning(f"  premium_signals has no rows from {freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process")
 
     positions = {}
+    pending_entries = {}
     lifecycles = restore_lifecycles(db)
 
     open_rows = db.execute("""
@@ -2073,7 +2167,15 @@ def run_monitor(db):
     if positions:
         log.info(f"  Restored {len(positions)} open positions")
 
-    last_id_row = db.execute("SELECT MAX(signal_ts) as max_ts FROM paper_trades").fetchone()
+    last_id_row = db.execute("""
+        SELECT MAX(
+            CASE
+                WHEN reentry_source = 'v2_event_awakening' AND trigger_ts IS NOT NULL THEN trigger_ts
+                ELSE signal_ts
+            END
+        ) AS max_ts
+        FROM paper_trades
+    """).fetchone()
     last_signal_id = 0
     if last_id_row and last_id_row['max_ts']:
         try:
@@ -2130,7 +2232,7 @@ def run_monitor(db):
             freshness = get_signal_freshness()
             log.info(
                 f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
-                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)}"
+                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)} pending={len(pending_entries)}"
             )
             last_heartbeat = now
 
@@ -2162,6 +2264,10 @@ def run_monitor(db):
                     cycle_old += 1
                     continue
 
+                if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
+                    cycle_dup += 1
+                    continue
+
                 symbol = sig['symbol'] or token_ca[:8]
                 super_idx = parse_super_index(sig['description'] or '')
 
@@ -2170,10 +2276,7 @@ def run_monitor(db):
                     token_ca, symbol, signal_ts, super_idx
                 )
                 if consumed:
-                    continue
-
-                if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()):
-                    cycle_dup += 1
+                    last_progress = time.time()
                     continue
 
                 existing = db.execute(
@@ -2189,12 +2292,9 @@ def run_monitor(db):
                     cycle_low_super += 1
                     continue
 
-                # Enter at current price: Jupiter primary, GeckoTerminal fallback.
-                # Jupiter misses pump.fun tokens still on bonding curve — GeckoTerminal catches them.
-                pool = get_pool_address(token_ca) or ''
-                price = get_jupiter_price(token_ca) or get_current_price(token_ca, pool or None)
-                if not price or price <= 0:
-                    log.warning(f"  [{symbol}] no price (Jupiter+GeckoTerminal), skipping")
+                pool = get_pool_address(token_ca)
+                if not pool:
+                    log.warning(f"  Could not find pool for {symbol}, skipping")
                     cycle_no_pool += 1
                     continue
                 time.sleep(0.3)
@@ -2208,9 +2308,14 @@ def run_monitor(db):
                     'pool': pool,
                     'lifecycle_id': lifecycle_id,
                     'super_idx': super_idx,
+                    'staged_at': time.time(),
+                    'attempts': 0,
+                    'last_debug_at': 0,
                 }
+                cycle_queued += 1
                 lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts))
                 log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 close @ {signal_minute_ts}")
+                last_progress = time.time()
                 time.sleep(0.2)
 
             if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
@@ -2218,6 +2323,87 @@ def run_monitor(db):
                 last_signal_cycle_log = now
         except Exception as e:
             log.error(f"Signal check error: {e}")
+
+        if pending_entries:
+            for lifecycle_id, pending in list(pending_entries.items()):
+                try:
+                    pending['attempts'] = int(pending.get('attempts') or 0) + 1
+                    bars = get_notath_bars(pending['pool'], limit=PENDING_ENTRY_BAR_LOOKBACK)
+                    if not bars:
+                        log_pending_entry_issue(
+                            pending,
+                            f"ohlcv unavailable for pool={pending.get('pool')} lookback={PENDING_ENTRY_BAR_LOOKBACK}",
+                            level='warning'
+                        )
+                        continue
+                    signal_bar, match_mode, match_meta = select_signal_entry_bar(
+                        bars,
+                        pending['signal_ts'],
+                        pending['signal_minute_ts']
+                    )
+                    if signal_bar is None:
+                        if match_mode == 'missing_signal_bar':
+                            log_pending_entry_issue(
+                                pending,
+                                (
+                                    f"signal bar missing target={_format_ts_utc(match_meta.get('target_ts'))} "
+                                    f"signal={_format_ts_utc(match_meta.get('signal_ts'))} "
+                                    f"bars={match_meta.get('count', 0)} "
+                                    f"range=[{_format_ts_utc(match_meta.get('oldest_ts'))} → {_format_ts_utc(match_meta.get('newest_ts'))}]"
+                                ),
+                                level='warning'
+                            )
+                        else:
+                            log_pending_entry_issue(
+                                pending,
+                                f"entry bar unresolved mode={match_mode} meta={match_meta}",
+                                level='warning'
+                            )
+                        continue
+                    price = signal_bar['close']
+                    if not price or price <= 0:
+                        log_pending_entry_issue(
+                            pending,
+                            f"invalid close price={price} bar_ts={_format_ts_utc(signal_bar.get('ts'))}",
+                            level='warning',
+                            force=True
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+                    if match_mode != 'exact_minute':
+                        log.info(
+                            f"  Using {match_mode} bar for {pending['symbol']}/stage1 "
+                            f"target={_format_ts_utc(pending['signal_minute_ts'])} actual={_format_ts_utc(signal_bar.get('ts'))}"
+                        )
+                    entry_ts = int(signal_bar['ts'])
+                    if sol_price is None:
+                        sol_price = get_sol_price()
+                        time.sleep(0.2)
+                    regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                    db.execute("""
+                        INSERT INTO paper_trades
+                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                             token_ca, symbol, signal_ts, entry_price, entry_ts,
+                             market_regime, replay_source, peak_pnl, trailing_active,
+                             lifecycle_id, stage_seq, trigger_ts, trigger_price)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?)
+                    """, (
+                        strategy_id, strategy_role, 'stage1', 'stage1_entered',
+                        pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
+                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price
+                    ))
+                    trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                    db.commit()
+                    pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
+                                   'stage1', lifecycle_id, stage1_exit)
+                    positions[pos.trade_id] = pos
+                    lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
+                    pending_entries.pop(lifecycle_id, None)
+                    log.info(f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} lifecycle={lifecycle_id}")
+                    last_progress = time.time()
+                    time.sleep(0.2)
+                except Exception as e:
+                    log.error(f"  Pending entry error for {pending.get('symbol', lifecycle_id)}: {e}")
 
         if now - last_position_check >= POSITION_POLL_INTERVAL:
             last_position_check = now
@@ -2314,16 +2500,18 @@ def run_monitor(db):
                     regime, pos.peak_pnl, int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0, pos.trade_id
                 ))
                 db.commit()
+                last_progress = time.time()
                 if pos.strategy_stage == 'stage1' and reason == 'sl':
                     lifecycle['stage1_stop_ts'] = exit_ts
                     lifecycle['rolling_low_after_stop'] = None
                     lifecycle['rolling_low_ts'] = None
 
                 if pos.strategy_stage in ('stage1', 'stage2A') and not lifecycle.get('stage3_attempted') and not lifecycle.get('stage3_dormant') and not lifecycle.get('stage3_blacklisted'):
+                    first_peak_min_pct = float(stage3_rules.get('firstPeakMinPct', 10))
                     qualifies = (
                         reason == 'trail'
                         and pnl > 0
-                        and (lifecycle.get('first_peak_pct') or 0.0) >= float(stage_rules['stage3'].get('firstPeakMinPct', 10))
+                        and (lifecycle.get('first_peak_pct') or 0.0) >= first_peak_min_pct
                         and stage3_peak_price
                         and stage3_peak_price > 0
                     )
@@ -2342,7 +2530,7 @@ def run_monitor(db):
                             (stage3_peak_price, exit_ts, pos.trade_id)
                         )
                         db.commit()
-                    elif reason in ('sl', 'timeout') or pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < float(stage_rules['stage3'].get('firstPeakMinPct', 10)):
+                    elif reason in ('sl', 'timeout', 'timeout_no_data', 'timeout_no_data_trail') or pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < first_peak_min_pct:
                         lifecycle['stage3_peak_price'] = stage3_peak_price or lifecycle.get('stage3_peak_price')
                         lifecycle['stage3_dormant'] = False
                         lifecycle['stage3_blacklisted'] = True
@@ -2424,6 +2612,7 @@ def run_monitor(db):
                             lifecycle['stage2a_trade_id'] = trade_id
                             lifecycle['stage2a_attempted'] = True
                             log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${close_price:.10f} lifecycle={lifecycle_id}")
+                            last_progress = time.time()
                             continue
 
             if positions:
@@ -2437,12 +2626,6 @@ def run_monitor(db):
                 last_daily_report = today_str
         except Exception as e:
             log.error(f"Daily report error: {e}", exc_info=True)
-
-        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-            last_heartbeat = now
-            log.info(
-                f"[heartbeat] positions={len(positions)} lifecycles={len(lifecycles)} last_signal_id={last_signal_id}"
-            )
 
         time.sleep(SIGNAL_POLL_INTERVAL)
 
