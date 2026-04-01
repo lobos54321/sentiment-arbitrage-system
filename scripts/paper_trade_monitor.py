@@ -1994,6 +1994,7 @@ def run_monitor(db):
     min_super_index = int(((strategy_config.get('entryTimingFilters') or {}).get('minSuperIndex')) or 80)
     strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
     strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
+    position_size_sol = get_paper_position_size_sol(strategy_config)
 
     log.info("=== Paper Trade Monitor Started ===")
     log.info(f"  strategy={strategy_id} role={strategy_role}")
