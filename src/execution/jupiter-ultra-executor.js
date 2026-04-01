@@ -561,15 +561,22 @@ export class JupiterUltraExecutor {
     if (mint === SOL_MINT) return 9;
     if (this.decimalsCache.has(mint)) return this.decimalsCache.get(mint);
 
+    const fallbackDecimals = 6;
+
     try {
       const info = await this.connection.getParsedAccountInfo(new PublicKey(mint));
       const decimals = info?.value?.data?.parsed?.info?.decimals;
-      const normalized = Number.isFinite(Number(decimals)) ? Number(decimals) : 0;
-      this.decimalsCache.set(mint, normalized);
-      return normalized;
+      const normalized = Number.isFinite(Number(decimals)) ? Number(decimals) : fallbackDecimals;
+      const finalDecimals = normalized > 0 ? normalized : fallbackDecimals;
+      if (finalDecimals !== normalized) {
+        console.warn(`⚠️  [JupiterUltra] decimals=0 fallback→${fallbackDecimals} for ${mint.substring(0, 8)}...`);
+      }
+      this.decimalsCache.set(mint, finalDecimals);
+      return finalDecimals;
     } catch (error) {
-      console.warn(`⚠️  [JupiterUltra] 读取 decimals 失败 ${mint.substring(0, 8)}...: ${error.message}`);
-      return 0;
+      console.warn(`⚠️  [JupiterUltra] 读取 decimals 失败 ${mint.substring(0, 8)}...: ${error.message} | fallback=${fallbackDecimals}`);
+      this.decimalsCache.set(mint, fallbackDecimals);
+      return fallbackDecimals;
     }
   }
 

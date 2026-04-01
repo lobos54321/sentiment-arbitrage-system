@@ -169,6 +169,15 @@ def get_paper_position_size_sol(strategy_config):
     return size if size > 0 else 0.06
 
 
+def get_paper_max_positions(strategy_config):
+    caps = (strategy_config or {}).get('paperRiskCaps') or {}
+    try:
+        max_positions = int(caps.get('maxPositions', 5))
+    except Exception:
+        max_positions = 5
+    return max(1, max_positions)
+
+
 def call_execution_bridge(command, payload, timeout=25):
     try:
         result = subprocess.run(
@@ -1272,7 +1281,10 @@ def count_open_positions_for_lifecycle(positions, lifecycle_id):
     return sum(1 for pos in positions.values() if pos.lifecycle_id == lifecycle_id)
 
 
-def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price, token_ca, symbol, signal_ts, super_idx, position_size_sol=0.06):
+def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price, token_ca, symbol, signal_ts, super_idx, position_size_sol=0.06, max_positions=None, pending_count=0):
+    if max_positions and (len(positions) + int(pending_count or 0)) >= max_positions:
+        return False, sol_price
+
     candidate = next(
         (
             lc for lc in lifecycles.values()
@@ -1369,7 +1381,11 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
     candidate['stage3_trade_id'] = trade_id
     candidate['stage3_attempted'] = True
     candidate['stage3_dormant'] = False
-    log.info(f"  Entered {symbol}/stage3 @ ${entry_price:.10f} lifecycle={candidate['lifecycle_id']} via awakening quote")
+    log.info(
+        f"  Entered {symbol}/stage3 @ ${entry_price:.10f} "
+        f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals}) "
+        f"lifecycle={candidate['lifecycle_id']} via awakening quote"
+    )
     return True, sol_price
 
 
@@ -2041,10 +2057,12 @@ def run_monitor(db):
     strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
     strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
     position_size_sol = get_paper_position_size_sol(strategy_config)
+    max_positions = get_paper_max_positions(strategy_config)
 
     log.info("=== Paper Trade Monitor Started ===")
     log.info(f"  strategy={strategy_id} role={strategy_role}")
     log.info(f"  paper execution size: {position_size_sol} SOL")
+    log.info(f"  max open positions: {max_positions}")
     log.info(f"  stage1 exit: SL={stage1_exit['stopLossPct']}% Trail Start={stage1_exit['trailStartPct']}% Trail Factor={stage1_exit['trailFactor']*100:.0f}% Timeout={stage1_exit['timeoutMinutes']}min")
     log.info(f"  stage2A exit: SL={stage2a_rules['stopLossPct']}% Trail Start={stage2a_rules['trailStartPct']}% Timeout={stage2a_rules['timeoutMinutes']}min")
     log.info(f"  stage3 exit: SL={stage3_rules['stopLossPct']}% Trail Start={stage3_rules['trailStartPct']}% Timeout={stage3_rules['timeoutMinutes']}min")
@@ -2105,17 +2123,27 @@ def run_monitor(db):
         FROM paper_trades
     """).fetchone()
     last_signal_id = 0
-    if last_id_row and last_id_row['max_ts']:
+    cursor_source = 'empty_source'
+
+    try:
+        recent_rows = get_recent_signals(limit=REMOTE_SIGNAL_LOOKBACK)
+        if recent_rows:
+            last_signal_id = max((r.get('id') or 0) for r in recent_rows)
+            cursor_source = 'latest_source_snapshot'
+    except Exception:
+        recent_rows = []
+
+    if last_signal_id <= 0 and last_id_row and last_id_row['max_ts']:
         try:
             signal_ts_cutoff = last_id_row['max_ts']
-            recent_rows = get_recent_signals(limit=REMOTE_SIGNAL_LOOKBACK)
             eligible = [r for r in recent_rows if (r.get('timestamp') or 0) <= signal_ts_cutoff]
             if eligible:
                 last_signal_id = max((r.get('id') or 0) for r in eligible)
+                cursor_source = 'trade_timestamp_cutoff'
         except Exception:
             pass
 
-    log.info(f"  Starting from signal ID > {last_signal_id}")
+    log.info(f"  Starting from signal ID > {last_signal_id} ({cursor_source})")
 
     last_position_check = 0
     last_daily_report = None
@@ -2153,6 +2181,9 @@ def run_monitor(db):
                 if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
                     continue
 
+                if len(positions) + len(pending_entries) >= max_positions:
+                    continue
+
                 existing = db.execute(
                     "SELECT id FROM paper_trades WHERE lifecycle_id = ? OR (token_ca = ? AND signal_ts = ? AND strategy_stage = 'stage1')",
                     (lifecycle_id, token_ca, signal_ts)
@@ -2165,7 +2196,8 @@ def run_monitor(db):
 
                 consumed, sol_price = try_awaken_stage3_from_signal(
                     db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
-                    token_ca, symbol, signal_ts, super_idx, position_size_sol
+                    token_ca, symbol, signal_ts, super_idx, position_size_sol,
+                    max_positions=max_positions, pending_count=len(pending_entries)
                 )
                 if consumed:
                     last_progress = time.time()
@@ -2266,7 +2298,11 @@ def run_monitor(db):
                     positions[pos.trade_id] = pos
                     lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
                     pending_entries.pop(lifecycle_id, None)
-                    log.info(f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} lifecycle={lifecycle_id} via quoted execution")
+                    log.info(
+                        f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} "
+                        f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
+                        f"lifecycle={lifecycle_id} via quoted execution"
+                    )
                     last_progress = time.time()
                     time.sleep(0.2)
                 except Exception as e:
@@ -2502,7 +2538,11 @@ def run_monitor(db):
                             positions[pos.trade_id] = pos
                             lifecycle['stage2a_trade_id'] = trade_id
                             lifecycle['stage2a_attempted'] = True
-                            log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${entry_price:.10f} lifecycle={lifecycle_id} via quote")
+                            log.info(
+                                f"  Entered {lifecycle['symbol']}/stage2A @ ${entry_price:.10f} "
+                                f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals}) "
+                                f"lifecycle={lifecycle_id} via quote"
+                            )
                             last_progress = time.time()
                             continue
 
