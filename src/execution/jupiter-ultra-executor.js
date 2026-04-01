@@ -27,6 +27,7 @@ import axios from 'axios';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const DEFAULT_PAPER_QUOTE_TAKER = '11111111111111111111111111111111';
+const JUPITER_LITE_QUOTE_URL = 'https://lite-api.jup.ag/swap/v1/quote';
 
 export class JupiterUltraExecutor {
   constructor() {
@@ -137,10 +138,8 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const order = await this._getPublicOrder(SOL_MINT, tokenCA, amountLamports, {
-        taker: opts.taker || process.env.PAPER_QUOTE_TAKER || DEFAULT_PAPER_QUOTE_TAKER,
-      });
-      return await this._normalizeQuoteResult('buy', order, {
+      const quote = await this._getLiteSwapQuote(SOL_MINT, tokenCA, amountLamports, opts);
+      return await this._normalizeQuoteResult('buy', quote, {
         tokenCA,
         inputMint: SOL_MINT,
         outputMint: tokenCA,
@@ -211,8 +210,8 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const order = await this._getPublicOrder(tokenCA, SOL_MINT, rawAmount);
-      return await this._normalizeQuoteResult('sell', order, {
+      const quote = await this._getLiteSwapQuote(tokenCA, SOL_MINT, rawAmount, opts);
+      return await this._normalizeQuoteResult('sell', quote, {
         tokenCA,
         inputMint: tokenCA,
         outputMint: SOL_MINT,
@@ -447,6 +446,34 @@ export class JupiterUltraExecutor {
     } catch (error) {
       const errMsg = error.response?.data?.error || error.response?.data?.message || error.message;
       console.error(`⚠️  [JupiterUltra] Public Order 失败: ${errMsg}`);
+      return {
+        error: errMsg,
+        statusCode: error.response?.status || null,
+        errorCode: error.response?.data?.errorCode || null,
+        message: errMsg,
+      };
+    }
+  }
+
+  async _getLiteSwapQuote(inputMint, outputMint, amount, options = {}) {
+    try {
+      const headers = { Accept: 'application/json' };
+      const params = new URLSearchParams({
+        inputMint,
+        outputMint,
+        amount: amount.toString(),
+        slippageBps: String(options.slippageBps || 500),
+      });
+
+      const res = await axios.get(`${JUPITER_LITE_QUOTE_URL}?${params.toString()}`, {
+        headers,
+        timeout: 5000,
+      });
+
+      return res.data;
+    } catch (error) {
+      const errMsg = error.response?.data?.error || error.response?.data?.message || error.message;
+      console.error(`⚠️  [JupiterUltra] Lite Quote 失败: ${errMsg}`);
       return {
         error: errMsg,
         statusCode: error.response?.status || null,

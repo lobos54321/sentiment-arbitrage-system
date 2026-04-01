@@ -20,7 +20,7 @@ export class ParityExecutor {
   }
 
   initialize() {
-    if (this.executor?.initialize && !this.executor.walletAddress) {
+    if (this.mode === 'live' && this.executor?.initialize && !this.executor.walletAddress) {
       this.executor.initialize();
     }
     return this;
