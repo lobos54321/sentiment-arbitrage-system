@@ -80,6 +80,9 @@ PENDING_ENTRY_BAR_LOOKBACK = max(8, int(os.environ.get('PENDING_ENTRY_BAR_LOOKBA
 PENDING_ENTRY_DEBUG_INTERVAL_SEC = max(30, int(os.environ.get('PENDING_ENTRY_DEBUG_INTERVAL_SEC', '120')))
 PENDING_ENTRY_BAR_TOLERANCE_SEC = max(30, int(os.environ.get('PENDING_ENTRY_BAR_TOLERANCE_SEC', '90')))
 PENDING_ENTRY_NEAREST_PAST_MAX_SEC = max(60, int(os.environ.get('PENDING_ENTRY_NEAREST_PAST_MAX_SEC', '180')))
+NO_ROUTE_TRAP_FAILURES = max(1, int(os.environ.get('NO_ROUTE_TRAP_FAILURES', '3')))
+NO_ROUTE_TRAP_MINUTES = max(1, int(os.environ.get('NO_ROUTE_TRAP_MINUTES', '15')))
+TRAPPED_NO_ROUTE_PNL_PCT = float(os.environ.get('TRAPPED_NO_ROUTE_PNL_PCT', '-1.0'))
 
 REDIS_URL = os.environ.get('REDIS_URL', '').strip()
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
@@ -261,6 +264,8 @@ def init_paper_db(db_path=None):
             token_decimals INTEGER DEFAULT 0,
             entry_execution_json TEXT,
             exit_execution_json TEXT,
+            exit_quote_failures INTEGER DEFAULT 0,
+            last_exit_quote_failure TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -292,6 +297,8 @@ def init_paper_db(db_path=None):
         "ALTER TABLE paper_trades ADD COLUMN token_decimals INTEGER DEFAULT 0",
         "ALTER TABLE paper_trades ADD COLUMN entry_execution_json TEXT",
         "ALTER TABLE paper_trades ADD COLUMN exit_execution_json TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN exit_quote_failures INTEGER DEFAULT 0",
+        "ALTER TABLE paper_trades ADD COLUMN last_exit_quote_failure TEXT",
     ]:
         try:
             db.execute(column_sql)
@@ -937,10 +944,10 @@ class Position:
         'trade_id', 'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
         'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
         'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
-        'token_amount_raw', 'token_decimals',
+        'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure',
     ]
 
-    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0):
+    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None):
         self.trade_id = trade_id
         self.token_ca = token_ca
         self.symbol = symbol
@@ -957,6 +964,8 @@ class Position:
         if not token_amount_raw and self.entry_price and self.entry_price > 0:
             estimated_amount = int((self.position_size_sol / self.entry_price) * (10 ** self.token_decimals))
         self.token_amount_raw = int(token_amount_raw or estimated_amount or 0)
+        self.exit_quote_failures = int(exit_quote_failures or 0)
+        self.last_exit_quote_failure = last_exit_quote_failure or None
         self.peak_pnl = 0.0
         self.trailing_active = False
         self.bars_held = 0
@@ -1982,6 +1991,39 @@ def log_pending_entry_issue(pending, message, level='info', force=False):
         log.info(f"{prefix} {message}")
 
 
+def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_route', pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT):
+    exit_ts = int(time.time())
+    stage_outcome = f"{pos.strategy_stage}_{reason}"
+    db.execute(
+        """
+        UPDATE paper_trades
+        SET exit_price = ?, exit_ts = ?, exit_reason = ?, pnl_pct = ?,
+            bars_held = ?, stage_outcome = ?, exit_quote_failures = ?, last_exit_quote_failure = ?
+        WHERE id = ?
+        """,
+        (
+            0,
+            exit_ts,
+            reason,
+            float(pnl_pct),
+            pos.bars_held,
+            stage_outcome,
+            pos.exit_quote_failures,
+            pos.last_exit_quote_failure,
+            pos.trade_id,
+        )
+    )
+    db.commit()
+    if lifecycle is not None:
+        lifecycle['stage3_dormant'] = False
+        lifecycle['stage3_blacklisted'] = True
+        lifecycle['stage3_attempted'] = True
+    log.warning(
+        f"  TRAPPED {pos.symbol}/{pos.strategy_stage}: no_route failures={pos.exit_quote_failures} "
+        f"→ close as {reason} pnl={float(pnl_pct) * 100:+.1f}%"
+    )
+
+
 # === Live Monitor Loop ===
 
 def run_monitor(db):
@@ -2024,7 +2066,8 @@ def run_monitor(db):
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
-               strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals
+               strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
+               exit_quote_failures, last_exit_quote_failure
         FROM paper_trades
         WHERE exit_reason IS NULL
     """).fetchall()
@@ -2035,7 +2078,9 @@ def run_monitor(db):
                        get_exit_rules_for_stage(strategy_config, r['strategy_stage'] or 'stage1'),
                        r['position_size_sol'] or get_paper_position_size_sol(strategy_config),
                        r['token_amount_raw'] or 0,
-                       r['token_decimals'] or 0)
+                       r['token_decimals'] or 0,
+                       r['exit_quote_failures'] or 0,
+                       r['last_exit_quote_failure'])
         pos.peak_pnl = r['peak_pnl'] or 0
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
@@ -2266,13 +2311,29 @@ def run_monitor(db):
                     lifecycle_id=pos.lifecycle_id,
                 )
                 if not exit_execution.get('success'):
+                    failure_reason = exit_execution.get('failureReason') or 'exit_quote_failed'
+                    pos.last_exit_quote_failure = failure_reason
+                    if failure_reason == 'no_route':
+                        pos.exit_quote_failures += 1
+                    else:
+                        pos.exit_quote_failures = 0
                     db.execute(
-                        "UPDATE paper_trades SET exit_execution_json = ? WHERE id = ?",
-                        (json.dumps(exit_execution), pos.trade_id)
+                        "UPDATE paper_trades SET exit_execution_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ? WHERE id = ?",
+                        (json.dumps(exit_execution), pos.exit_quote_failures, pos.last_exit_quote_failure, pos.trade_id)
                     )
                     db.commit()
-                    log.warning(f"  Exit quote failed for {pos.symbol}/{pos.strategy_stage}: {exit_execution.get('failureReason')}")
+                    if failure_reason == 'no_route':
+                        held_minutes = max(0, int((time.time() - pos.entry_ts) / 60))
+                        if pos.exit_quote_failures >= NO_ROUTE_TRAP_FAILURES or held_minutes >= NO_ROUTE_TRAP_MINUTES:
+                            positions.pop(trade_id, None)
+                            close_position_as_trapped_no_route(db, pos, lifecycle, pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT)
+                            last_progress = time.time()
+                            continue
+                    log.warning(f"  Exit quote failed for {pos.symbol}/{pos.strategy_stage}: {failure_reason}")
                     continue
+
+                pos.exit_quote_failures = 0
+                pos.last_exit_quote_failure = None
 
                 positions.pop(trade_id, None)
                 lifecycle = lifecycles[pos.lifecycle_id]
@@ -2290,7 +2351,7 @@ def run_monitor(db):
                     SET exit_price = ?, exit_ts = ?, exit_reason = ?,
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
                         peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
-                        exit_execution_json = ?
+                        exit_execution_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL
                     WHERE id = ?
                 """, (
                     effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
