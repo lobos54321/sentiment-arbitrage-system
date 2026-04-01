@@ -83,6 +83,8 @@ PENDING_ENTRY_NEAREST_PAST_MAX_SEC = max(60, int(os.environ.get('PENDING_ENTRY_N
 NO_ROUTE_TRAP_FAILURES = max(1, int(os.environ.get('NO_ROUTE_TRAP_FAILURES', '3')))
 NO_ROUTE_TRAP_MINUTES = max(1, int(os.environ.get('NO_ROUTE_TRAP_MINUTES', '15')))
 TRAPPED_NO_ROUTE_PNL_PCT = float(os.environ.get('TRAPPED_NO_ROUTE_PNL_PCT', '-1.0'))
+ENTRY_QUOTE_MAX_ATTEMPTS = max(1, int(os.environ.get('ENTRY_QUOTE_MAX_ATTEMPTS', '5')))
+ENTRY_QUOTE_MAX_AGE_SEC = max(30, int(os.environ.get('ENTRY_QUOTE_MAX_AGE_SEC', '180')))
 
 REDIS_URL = os.environ.get('REDIS_URL', '').strip()
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
@@ -2210,11 +2212,17 @@ def run_monitor(db):
                         lifecycle_id=lifecycle_id,
                     )
                     if not execution.get('success'):
+                        failure_reason = execution.get('failureReason') or 'entry_quote_failed'
                         log_pending_entry_issue(
                             pending,
-                            f"entry quote failed reason={execution.get('failureReason')} route={execution.get('routeAvailable')}",
+                            f"entry quote failed reason={failure_reason} route={execution.get('routeAvailable')}",
                             level='warning'
                         )
+                        staged_age_sec = int(max(0, time.time() - (pending.get('staged_at') or time.time())))
+                        if failure_reason in {'rate_limited_429', 'quote_failed', 'no_route', 'missing_taker', 'unknown'} \
+                                and pending['attempts'] < ENTRY_QUOTE_MAX_ATTEMPTS \
+                                and staged_age_sec < ENTRY_QUOTE_MAX_AGE_SEC:
+                            continue
                         pending_entries.pop(lifecycle_id, None)
                         continue
 

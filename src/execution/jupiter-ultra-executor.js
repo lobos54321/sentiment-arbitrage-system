@@ -26,6 +26,7 @@ import bs58 from 'bs58';
 import axios from 'axios';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const DEFAULT_PAPER_QUOTE_TAKER = '11111111111111111111111111111111';
 
 export class JupiterUltraExecutor {
   constructor() {
@@ -136,7 +137,9 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const order = await this._getPublicOrder(SOL_MINT, tokenCA, amountLamports);
+      const order = await this._getPublicOrder(SOL_MINT, tokenCA, amountLamports, {
+        taker: opts.taker || process.env.PAPER_QUOTE_TAKER || DEFAULT_PAPER_QUOTE_TAKER,
+      });
       return await this._normalizeQuoteResult('buy', order, {
         tokenCA,
         inputMint: SOL_MINT,
@@ -419,7 +422,7 @@ export class JupiterUltraExecutor {
     }
   }
 
-  async _getPublicOrder(inputMint, outputMint, amount) {
+  async _getPublicOrder(inputMint, outputMint, amount, options = {}) {
     try {
       const headers = {};
       if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
@@ -430,6 +433,11 @@ export class JupiterUltraExecutor {
         amount: amount.toString(),
       });
 
+      const taker = options?.taker;
+      if (taker) {
+        params.set('taker', taker);
+      }
+
       const res = await axios.get(`${this.ultraApiBase}/order?${params.toString()}`, {
         headers,
         timeout: 5000
@@ -439,7 +447,12 @@ export class JupiterUltraExecutor {
     } catch (error) {
       const errMsg = error.response?.data?.error || error.response?.data?.message || error.message;
       console.error(`⚠️  [JupiterUltra] Public Order 失败: ${errMsg}`);
-      return null;
+      return {
+        error: errMsg,
+        statusCode: error.response?.status || null,
+        errorCode: error.response?.data?.errorCode || null,
+        message: errMsg,
+      };
     }
   }
 
@@ -661,8 +674,10 @@ export class JupiterUltraExecutor {
   _classifyFailureReason(message = '') {
     const text = String(message || '').toLowerCase();
     if (!text) return 'unknown';
+    if (text.includes('429') || text.includes('rate limit')) return 'rate_limited_429';
     if (text.includes('insufficient')) return 'insufficient_balance';
     if (text.includes('slippage')) return 'slippage';
+    if (text.includes('taker')) return 'missing_taker';
     if (text.includes('route') || text.includes('no route') || text.includes('could not find')) return 'no_route';
     if (text.includes('quote')) return 'quote_failed';
     if (text.includes('execute') || text.includes('failed')) return 'execute_failed';
