@@ -47,6 +47,7 @@ REGISTRY_JSON = os.environ.get('PAPER_STRATEGY_REGISTRY', str(DATA_DIR / 'paper-
 REMOTE_SIGNAL_URL = os.environ.get('REMOTE_SIGNAL_URL', '').strip()
 REMOTE_SIGNAL_TOKEN = os.environ.get('REMOTE_SIGNAL_TOKEN', '').strip()
 REMOTE_SIGNAL_LOOKBACK = max(50, int(os.environ.get('REMOTE_SIGNAL_LOOKBACK', '500')))
+EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
 
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
@@ -70,22 +71,10 @@ TRAIL_START = 0.02
 TRAIL_FACTOR = 0.90
 TIMEOUT_MIN = 120
 
-# ── Price cache ──────────────────────────────────────────────────────────────
-# Keyed by token_ca → (price: float, fetched_at: float)
-# FRESH_PRICE_TTL: used for batch pre-fetch results (treated as authoritative)
-# STALE_PRICE_TTL: emergency fallback when ALL live APIs fail — prevents zombies
-_price_cache: dict = {}
-FRESH_PRICE_TTL = 90    # seconds — batch Jupiter result stays authoritative
-STALE_PRICE_TTL = 300   # seconds — 5-min stale price prevents zombie creation
-
 # Polling intervals (seconds)
 SIGNAL_POLL_INTERVAL = 30       # check for new signals
 POSITION_POLL_INTERVAL = 60     # update open positions
 DAILY_REPORT_HOUR = 0           # UTC hour for daily report
-HEARTBEAT_INTERVAL = 300        # log "alive" message every N seconds
-
-# Lifecycle staleness: don't trigger Stage2A/3 re-entries for signals older than this
-LIFECYCLE_STALE_HOURS = 48
 HEARTBEAT_INTERVAL_SEC = 300
 PENDING_ENTRY_BAR_LOOKBACK = max(8, int(os.environ.get('PENDING_ENTRY_BAR_LOOKBACK', '30')))
 PENDING_ENTRY_DEBUG_INTERVAL_SEC = max(30, int(os.environ.get('PENDING_ENTRY_DEBUG_INTERVAL_SEC', '120')))
@@ -104,8 +93,6 @@ SOL_PRICE_TTL_SEC = int(os.environ.get('SOL_PRICE_TTL_SEC', '30'))
 
 _REDIS_CLIENT = None
 _REDIS_INIT_ATTEMPTED = False
-_REDIS_LAST_FAILED_AT = 0.0
-_REDIS_RETRY_INTERVAL = 30.0  # retry failed Redis connection every 30s
 _DEX_RATE_LIMIT_UNTIL = 0.0
 _DEX_LAST_WARN_AT = 0.0
 _SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
@@ -136,6 +123,7 @@ def load_active_strategy_config():
         'strategyId': DEFAULT_STRATEGY_ID,
         'strategyRole': DEFAULT_STRATEGY_ROLE,
         'entryTimingFilters': {'minSuperIndex': 80},
+        'paperRiskCaps': {'maxPositions': 5, 'positionSizeSol': 0.06},
         'stageRules': {
             'stage1Exit': dict(DEFAULT_STAGE1_EXIT),
             'stage2A': dict(DEFAULT_STAGE2A),
@@ -167,17 +155,86 @@ def pct_to_decimal(value):
         return 0.0
 
 
+def get_paper_position_size_sol(strategy_config):
+    caps = (strategy_config or {}).get('paperRiskCaps') or {}
+    try:
+        size = float(caps.get('positionSizeSol', 0.06))
+    except Exception:
+        size = 0.06
+    return size if size > 0 else 0.06
+
+
+def call_execution_bridge(command, payload, timeout=25):
+    try:
+        result = subprocess.run(
+            ['node', str(EXECUTION_BRIDGE), command],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(PROJECT_ROOT),
+        )
+    except Exception as e:
+        return {'success': False, 'failureReason': f'bridge_exec_failed:{e}'}
+
+    stdout = (result.stdout or '').strip()
+    stderr = (result.stderr or '').strip()
+
+    if result.returncode != 0:
+        failure = {'success': False, 'failureReason': 'bridge_failed'}
+        if stderr:
+            try:
+                parsed = json.loads(stderr)
+                failure.update(parsed if isinstance(parsed, dict) else {})
+            except Exception:
+                failure['failureReason'] = stderr[:300]
+        return failure
+
+    if not stdout:
+        return {'success': False, 'failureReason': 'bridge_empty_response'}
+
+    try:
+        parsed = json.loads(stdout)
+        return parsed if isinstance(parsed, dict) else {'success': False, 'failureReason': 'bridge_invalid_json'}
+    except Exception as e:
+        return {'success': False, 'failureReason': f'bridge_parse_failed:{e}'}
+
+
+def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None, lifecycle_id=None):
+    return call_execution_bridge('simulate-buy', {
+        'mode': 'paper',
+        'tokenCA': token_ca,
+        'amountSol': amount_sol,
+        'options': {
+            'stage': stage_name,
+            'strategyId': strategy_id,
+            'lifecycleId': lifecycle_id,
+        }
+    })
+
+
+def simulate_exit_execution(token_ca, token_amount_raw, token_decimals, stage_name, strategy_id=None, lifecycle_id=None):
+    return call_execution_bridge('simulate-sell', {
+        'mode': 'paper',
+        'tokenCA': token_ca,
+        'tokenAmountRaw': int(token_amount_raw),
+        'options': {
+            'stage': stage_name,
+            'strategyId': strategy_id,
+            'lifecycleId': lifecycle_id,
+            'inputAmount': (int(token_amount_raw) / (10 ** int(token_decimals or 0))) if token_decimals is not None else None,
+        }
+    })
+
+
 # === Database Setup ===
 
 def init_paper_db(db_path=None):
     """Create paper_trades table if not exists."""
     path = db_path or PAPER_DB
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    db = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=NORMAL")
-    db.execute("PRAGMA busy_timeout=10000")
     db.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,6 +256,11 @@ def init_paper_db(db_path=None):
             replay_source TEXT DEFAULT 'live_monitor',
             peak_pnl REAL DEFAULT 0,
             trailing_active INTEGER DEFAULT 0,
+            position_size_sol REAL,
+            token_amount_raw TEXT,
+            token_decimals INTEGER DEFAULT 0,
+            entry_execution_json TEXT,
+            exit_execution_json TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -225,6 +287,11 @@ def init_paper_db(db_path=None):
         "ALTER TABLE paper_trades ADD COLUMN stage3_qualifying_exit_ts INTEGER",
         "ALTER TABLE paper_trades ADD COLUMN stage3_dormant INTEGER DEFAULT 0",
         "ALTER TABLE paper_trades ADD COLUMN stage3_blacklisted INTEGER DEFAULT 0",
+        "ALTER TABLE paper_trades ADD COLUMN position_size_sol REAL",
+        "ALTER TABLE paper_trades ADD COLUMN token_amount_raw TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN token_decimals INTEGER DEFAULT 0",
+        "ALTER TABLE paper_trades ADD COLUMN entry_execution_json TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN exit_execution_json TEXT",
     ]:
         try:
             db.execute(column_sql)
@@ -307,21 +374,16 @@ def curl_json(url, timeout=15):
 
 
 def get_pool_address(token_ca, cache={}):
-    """Get pool address from DexScreener, with in-memory cache.
-    As a free side-effect, also warms the price cache from the same response
-    so subsequent get_current_bar() calls don't need a separate API hit.
-    """
+    """Get pool address from DexScreener, with in-memory cache."""
     if token_ca in cache:
         return cache[token_ca]
 
     data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}")
     if not data:
-        cache[token_ca] = None  # cache miss to avoid re-querying dead tokens
         return None
 
     pairs = data.get('pairs', [])
     if not pairs:
-        cache[token_ca] = None  # cache miss to avoid re-querying dead tokens
         return None
 
     sol_pairs = [p for p in pairs if p.get('chainId') == 'solana']
@@ -332,52 +394,20 @@ def get_pool_address(token_ca, cache={}):
     pool = pair.get('pairAddress', '')
     if pool:
         cache[token_ca] = pool
-
-    # Warm price cache from this response at zero extra cost
-    try:
-        p = float(pair.get('priceUsd') or 0)
-        if p > 0:
-            _cache_price(token_ca, p)
-    except (TypeError, ValueError):
-        pass
-
     return pool or None
 
 
-def get_jupiter_price(token_ca):
-    """Get current price from Jupiter Price API v2.
-    Returns float price or None.
-    """
-    url = f"https://api.jup.ag/price/v2?ids={token_ca}"
-    data = curl_json(url)
-    if not data:
-        return None
-    price_str = (data.get('data') or {}).get(token_ca, {}).get('price')
-    if price_str is None:
-        return None
-    try:
-        return float(price_str)
-    except (TypeError, ValueError):
-        return None
-
-
 def get_redis_client():
-    """Return a Redis client if redis-py is installed and reachable.
-    Retries every _REDIS_RETRY_INTERVAL seconds after a failed attempt
-    so a slow Redis startup doesn't permanently disable the bridge.
-    """
-    global _REDIS_CLIENT, _REDIS_INIT_ATTEMPTED, _REDIS_LAST_FAILED_AT
+    """Return a Redis client if redis-py is installed and configured."""
+    global _REDIS_CLIENT, _REDIS_INIT_ATTEMPTED
     if _REDIS_CLIENT is not None:
         return _REDIS_CLIENT
-    if redis is None:
-        if not _REDIS_INIT_ATTEMPTED:
-            _REDIS_INIT_ATTEMPTED = True
-            log.info("redis package not available; live price checks will use direct fetch fallback")
-        return None
-    # Allow retry after cooldown
-    if _REDIS_INIT_ATTEMPTED and (time.time() - _REDIS_LAST_FAILED_AT) < _REDIS_RETRY_INTERVAL:
+    if _REDIS_INIT_ATTEMPTED:
         return None
     _REDIS_INIT_ATTEMPTED = True
+    if redis is None:
+        log.info("redis package not available; live price checks will use direct fetch fallback")
+        return None
     try:
         if REDIS_URL:
             client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -394,8 +424,7 @@ def get_redis_client():
         log.info("Redis live price reader enabled")
         return _REDIS_CLIENT
     except Exception as e:
-        _REDIS_LAST_FAILED_AT = time.time()
-        log.warning(f"Redis unavailable (will retry in {int(_REDIS_RETRY_INTERVAL)}s): {e}")
+        log.warning(f"Redis unavailable, using direct fetch fallback: {e}")
         return None
 
 
@@ -464,225 +493,38 @@ def is_redis_payload_fresh(payload, max_age_ms=LIVE_PRICE_MAX_AGE_MS, min_timest
     return True
 
 
-def _build_synthetic_bar(price, source, ts=None):
-    ts = int(ts or time.time())
-    return {
-        'ts': ts,
-        'open': price,
-        'high': price,
-        'low': price,
-        'close': price,
-        'volume': 0.0,
-        'source': source,
-    }
-
-
-def _select_best_dex_pair(token_ca, pairs):
-    sol_pairs = []
-    fallback_pairs = []
-    for pair in pairs or []:
-        base_addr = ((pair.get('baseToken') or {}).get('address') or '').strip()
-        if base_addr and base_addr != token_ca:
-            continue
-        if pair.get('chainId') == 'solana':
-            sol_pairs.append(pair)
-        else:
-            fallback_pairs.append(pair)
-    candidates = sol_pairs or fallback_pairs
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: (p.get('liquidity', {}).get('usd', 0) or 0))
-
-
-def get_jupiter_prices_batch(token_cas: list, batch_size: int = 50):
-    """Fetch prices for multiple tokens in one or more Jupiter API calls.
-
-    Returns (prices, stats) where prices is {token_ca: price_float} and stats
-    tracks hit/miss counts for observability.
-    """
-    prices = {}
-    stats = {
-        'jupiter_queries': 0,
-        'jupiter_hits': 0,
-        'jupiter_misses': 0,
-    }
-    unique_cas = [ca for ca in dict.fromkeys(token_cas or []) if ca]
-    for i in range(0, len(unique_cas), batch_size):
-        batch = unique_cas[i:i + batch_size]
-        if not batch:
-            continue
-        stats['jupiter_queries'] += 1
-        ids = ','.join(batch)
-        data = curl_json(f"https://api.jup.ag/price/v2?ids={ids}", timeout=20)
-        payload = (data or {}).get('data') or {}
-        for token_ca in batch:
-            try:
-                price_str = (payload.get(token_ca) or {}).get('price')
-                if price_str is None:
-                    stats['jupiter_misses'] += 1
-                    continue
-                price = float(price_str)
-                if price > 0:
-                    prices[token_ca] = price
-                    stats['jupiter_hits'] += 1
-                else:
-                    stats['jupiter_misses'] += 1
-            except (TypeError, ValueError):
-                stats['jupiter_misses'] += 1
-    return prices, stats
-
-
-def get_dexscreener_price(token_ca: str) -> float | None:
-    """Single-token DexScreener fallback for individual lookups."""
-    prices, _stats = get_dexscreener_prices_batch([token_ca])
-    return prices.get(token_ca)
-
-
-def get_dexscreener_prices_batch(token_cas, batch_size=30):
-    prices = {}
-    stats = {
-        'dex_batch_queries': 0,
-        'dex_batch_hits': 0,
-        'dex_batch_misses': 0,
-    }
-    unique_cas = [ca for ca in dict.fromkeys(token_cas or []) if ca]
-    for i in range(0, len(unique_cas), batch_size):
-        batch = unique_cas[i:i + batch_size]
-        if not batch:
-            continue
-        stats['dex_batch_queries'] += 1
-        data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{','.join(batch)}", timeout=20)
-        pairs = (data or {}).get('pairs') or []
-        pairs_by_token = defaultdict(list)
-        for pair in pairs:
-            base_addr = ((pair.get('baseToken') or {}).get('address') or '').strip()
-            if base_addr in batch:
-                pairs_by_token[base_addr].append(pair)
-        for token_ca in batch:
-            best_pair = _select_best_dex_pair(token_ca, pairs_by_token.get(token_ca))
-            if not best_pair:
-                stats['dex_batch_misses'] += 1
-                continue
-            try:
-                price = float(best_pair.get('priceUsd') or 0)
-                if price > 0:
-                    prices[token_ca] = price
-                    stats['dex_batch_hits'] += 1
-                else:
-                    stats['dex_batch_misses'] += 1
-            except (TypeError, ValueError):
-                stats['dex_batch_misses'] += 1
-    return prices, stats
-
-
-def _cache_price(token_ca: str, price: float) -> None:
-    if token_ca and price and price > 0:
-        _price_cache[token_ca] = (price, time.time())
-
-
-def _get_stale_price(token_ca: str, max_age: float = STALE_PRICE_TTL):
-    """Return cached price if within max_age seconds, else None."""
-    entry = _price_cache.get(token_ca)
-    if entry and (time.time() - entry[1]) <= max_age:
-        return entry[0], time.time() - entry[1]
-    return None, None
-
-
-def get_current_prices_batch(token_cas):
-    unique_cas = [ca for ca in dict.fromkeys(token_cas or []) if ca]
-    if not unique_cas:
-        return {}, {}, {
-            'jupiter_queries': 0,
-            'jupiter_hits': 0,
-            'jupiter_misses': 0,
-            'dex_batch_queries': 0,
-            'dex_batch_hits': 0,
-            'dex_batch_misses': 0,
-        }
-
-    prices, stats = get_jupiter_prices_batch(unique_cas)
-    sources = {token_ca: 'jupiter' for token_ca in prices.keys()}
-
-    misses = [token_ca for token_ca in unique_cas if token_ca not in prices]
-    if misses:
-        dex_prices, dex_stats = get_dexscreener_prices_batch(misses)
-        for token_ca, price in dex_prices.items():
-            prices[token_ca] = price
-            sources[token_ca] = 'dexscreener'
-        stats.update(dex_stats)
-    else:
-        stats.update({
-            'dex_batch_queries': 0,
-            'dex_batch_hits': 0,
-            'dex_batch_misses': 0,
-        })
-
-    for token_ca, price in prices.items():
-        _cache_price(token_ca, price)
-
-    return prices, sources, stats
-
-
 def get_current_bar(token_ca, pool_address=None):
-    """Get current price as a synthetic bar with a 4-tier fallback chain.
-
-    Tier 1 — Batch cache
-    Tier 2 — Individual Jupiter Price API
-    Tier 3 — DexScreener price
-    Tier 4 — GeckoTerminal 1m OHLCV
-    Emergency — stale cache
-    """
-    now_sec = int(time.time())
-
-    def _make_bar(price, source):
-        _cache_price(token_ca, price)
-        return {'ts': now_sec, 'open': price, 'high': price,
-                'low': price, 'close': price, 'volume': 0.0, 'source': source}
-
-    cached_price, cache_age = _get_stale_price(token_ca, max_age=FRESH_PRICE_TTL)
-    if cached_price:
-        return _make_bar(cached_price, f'batch_cache_{cache_age:.0f}s')
-
-    price = get_jupiter_price(token_ca)
-    if price and price > 0:
-        return _make_bar(price, 'jupiter')
-
-    price = get_dexscreener_price(token_ca)
-    if price and price > 0:
-        return _make_bar(price, 'dexscreener')
-
+    """Get latest GeckoTerminal 1m bar."""
     if not pool_address:
         pool_address = get_pool_address(token_ca)
-    if pool_address:
-        url = (
-            f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
-            f"{pool_address}/ohlcv/minute?aggregate=1&limit=1"
-        )
-        data = curl_json(url)
-        if data:
-            ohlcv = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-            if ohlcv:
-                row = ohlcv[0]
-                price = float(row[4])
-                if price > 0:
-                    return _make_bar(price, 'gecko')
+    if not pool_address:
+        return None
 
-    stale_price, stale_age = _get_stale_price(token_ca, max_age=STALE_PRICE_TTL)
-    if stale_price:
-        log.warning(
-            f"  [{token_ca[:8]}] all live APIs failed — using stale price "
-            f"${stale_price:.8f} (age={stale_age:.0f}s). "
-            f"Position still alive; will re-evaluate next cycle."
-        )
-        return {'ts': now_sec, 'open': stale_price, 'high': stale_price,
-                'low': stale_price, 'close': stale_price,
-                'volume': 0.0, 'source': f'stale_{stale_age:.0f}s'}
+    url = (
+        f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
+        f"{pool_address}/ohlcv/minute?aggregate=1&limit=1"
+    )
+    data = curl_json(url)
+    if not data:
+        return None
 
-    return None
+    ohlcv = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
+    if not ohlcv:
+        return None
+
+    row = ohlcv[0]
+    return {
+        'ts': int(row[0]),
+        'open': float(row[1]),
+        'high': float(row[2]),
+        'low': float(row[3]),
+        'close': float(row[4]),
+        'volume': float(row[5]),
+    }
 
 
 def get_current_price_direct(token_ca, pool_address=None):
-    """Get latest price from the current direct live-price path."""
+    """Get latest price from GeckoTerminal (latest 1m candle close)."""
     bar = get_current_bar(token_ca, pool_address)
     if not bar:
         return None
@@ -692,13 +534,13 @@ def get_current_price_direct(token_ca, pool_address=None):
     return {
         'price': price,
         'ts': int(bar['ts']),
-        'source': bar.get('source') or 'direct_live',
+        'source': 'geckoterminal_direct',
         'bar': bar,
     }
 
 
 def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
-    """Get Redis-first live price snapshot with direct live-price fallback."""
+    """Get Redis-first live price snapshot with direct GeckoTerminal fallback."""
     payload = read_redis_payload(token_ca)
     if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
         timestamp_ms = _coerce_timestamp_ms(payload)
@@ -718,7 +560,7 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
 
 
 def get_current_price(token_ca, pool_address=None):
-    """Get latest price (Jupiter primary, DexScreener batch fallback, GeckoTerminal last resort)."""
+    """Get latest price from GeckoTerminal (latest 1m candle close)."""
     snapshot = get_current_price_direct(token_ca, pool_address)
     if not snapshot:
         return None
@@ -730,30 +572,21 @@ def get_current_price(token_ca, pool_address=None):
 def parse_super_index(description):
     """
     Parse Super Index from NOT_ATH description.
-    Supports formats (raw Telegram markdown may contain ** markers):
+    Supports formats:
       ✡ Super Index： 119🔮
-      ✡ **Super Index：** 119🔮   (Telegram bold markdown)
       ✡ Super Index： ✡ x 82
     Returns int or None.
     """
     if not description:
         return None
-    # Strip Telegram markdown bold markers and invisible unicode (matching Node.js normalization)
-    text = description.replace('**', '').replace('\r', '')
-    # Strip zero-width chars
-    text = re.sub(r'[\u200B-\u200D\uFEFF]', '', text)
-    # Try format: "Super Index： 119🔮" or "Super Index：119🔮"
-    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮?', text)
+    # Try format: " 119🔮"
+    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮', description)
     if m:
         return int(m.group(1))
-    # Try format: "Super Index： ✡ x 82"
-    m = re.search(r'Super\s+Index[：:]\s*✡?\s*x\s*(\d+)', text, re.IGNORECASE)
+    # Try format: "✡ x 82"
+    m = re.search(r'Super\s+Index[：:]\s*✡\s*x\s*(\d+)', description, re.IGNORECASE)
     if m:
         return int(m.group(1))
-    # ATH format: "Super Index：(signal)116🔮 --> 124🔮" → return current value (124)
-    m = re.search(r'Super\s+Index[：:]\s*\(?signal\)?\s*x?(\d+)[🔮]?\s*-->\s*x?(\d+)', text, re.IGNORECASE)
-    if m:
-        return int(m.group(2))  # return the CURRENT (post-signal) value
     return None
 
 
@@ -967,29 +800,20 @@ def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
     return _normalize_signal_rows(rows)
 
 
-# Statuses the paper trader will read from premium_signals.
-# INSUFFICIENT_KLINE is included because the paper trader does NOT need
-# pre-buy K-line history — it only needs the signal-minute close price
-# from GeckoTerminal, which is fetched independently.  Excluding these
-# was the primary reason Stage 1 stopped firing.
-_PAPER_TRADE_STATUSES = ('PASS', 'RISK_BLOCKED', 'INSUFFICIENT_KLINE')
-_PAPER_TRADE_STATUSES_SQL = ','.join(f"'{s}'" for s in _PAPER_TRADE_STATUSES)
-
-
 def _is_paper_trade_signal(record):
     status = (record.get('hard_gate_status') or '').upper()
     description = record.get('description') or ''
-    return status in set(_PAPER_TRADE_STATUSES) and 'New Trending' in description
+    return status in {'PASS', 'RISK_BLOCKED'} and 'New Trending' in description
 
 
 def _query_local_new_signals(last_signal_id):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
-    rows = sdb.execute(f"""
+    rows = sdb.execute("""
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
         FROM premium_signals
         WHERE id > ?
-          AND hard_gate_status IN ({_PAPER_TRADE_STATUSES_SQL})
+          AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
           AND description LIKE '%New Trending%'
         ORDER BY id ASC
     """, (last_signal_id,)).fetchall()
@@ -1000,10 +824,10 @@ def _query_local_new_signals(last_signal_id):
 def _query_local_recent_signals(limit=20):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
-    rows = sdb.execute(f"""
+    rows = sdb.execute("""
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
         FROM premium_signals
-        WHERE hard_gate_status IN ({_PAPER_TRADE_STATUSES_SQL})
+        WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
           AND description LIKE '%New Trending%'
         ORDER BY id DESC
         LIMIT ?
@@ -1073,16 +897,8 @@ def get_signal_freshness():
 
 
 def get_last_processed_id(db):
-    """Get the highest effective signal timestamp in paper_trades to avoid re-processing."""
-    row = db.execute("""
-        SELECT MAX(
-            CASE
-                WHEN reentry_source = 'v2_event_awakening' AND trigger_ts IS NOT NULL THEN trigger_ts
-                ELSE signal_ts
-            END
-        ) AS max_ts
-        FROM paper_trades
-    """).fetchone()
+    """Get the highest signal_ts in paper_trades to avoid re-processing."""
+    row = db.execute("SELECT MAX(signal_ts) as max_ts FROM paper_trades").fetchone()
     return row['max_ts'] or 0
 
 
@@ -1120,10 +936,11 @@ class Position:
     __slots__ = [
         'trade_id', 'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
         'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
-        'strategy_stage', 'lifecycle_id', 'exit_rules',
+        'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
+        'token_amount_raw', 'token_decimals',
     ]
 
-    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules):
+    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0):
         self.trade_id = trade_id
         self.token_ca = token_ca
         self.symbol = symbol
@@ -1134,6 +951,12 @@ class Position:
         self.strategy_stage = strategy_stage
         self.lifecycle_id = lifecycle_id
         self.exit_rules = exit_rules or {}
+        self.position_size_sol = float(position_size_sol or 0.06)
+        self.token_decimals = int(token_decimals or 6)
+        estimated_amount = 0
+        if not token_amount_raw and self.entry_price and self.entry_price > 0:
+            estimated_amount = int((self.position_size_sol / self.entry_price) * (10 ** self.token_decimals))
+        self.token_amount_raw = int(token_amount_raw or estimated_amount or 0)
         self.peak_pnl = 0.0
         self.trailing_active = False
         self.bars_held = 0
@@ -1379,12 +1202,6 @@ def build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts):
 
 
 def restore_lifecycles(db):
-    """Rebuild lifecycle state from DB on startup.
-
-    Lifecycles older than LIFECYCLE_STALE_HOURS are loaded as fully-attempted
-    so they won't trigger new Stage2A/3 re-entries at stale prices.
-    """
-    stale_cutoff_sec = int(time.time()) - LIFECYCLE_STALE_HOURS * 3600
     lifecycles = {}
     rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, strategy_stage, exit_reason, pnl_pct,
@@ -1442,7 +1259,7 @@ def count_open_positions_for_lifecycle(positions, lifecycle_id):
     return sum(1 for pos in positions.values() if pos.lifecycle_id == lifecycle_id)
 
 
-def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price, token_ca, symbol, signal_ts, super_idx):
+def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price, token_ca, symbol, signal_ts, super_idx, position_size_sol=0.06):
     candidate = next(
         (
             lc for lc in lifecycles.values()
@@ -1491,7 +1308,29 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
     if sol_price is None:
         sol_price = get_sol_price()
         time.sleep(0.2)
+    execution = simulate_entry_execution(
+        token_ca,
+        position_size_sol,
+        'stage3',
+        strategy_id=strategy_id,
+        lifecycle_id=candidate['lifecycle_id'],
+    )
+    if not execution.get('success'):
+        candidate['stage3_attempted'] = True
+        candidate['stage3_dormant'] = False
+        candidate['stage3_blacklisted'] = True
+        log.warning(f"  Stage3 awakening quote failed for {symbol}: {execution.get('failureReason')}")
+        return True, sol_price
+
     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+    quote_price_sol = execution.get('effectivePrice')
+    if quote_price_sol is None or quote_price_sol <= 0:
+        log.warning(f"  Stage3 awakening invalid execution price for {symbol}")
+        return True, sol_price
+    token_amount_raw = execution.get('quotedOutAmountRaw')
+    token_decimals = execution.get('outputDecimals') or 0
+    entry_ts = int((execution.get('quoteTs') or (entry_ts * 1000)) / 1000)
+    entry_price = quote_price_sol * sol_price if sol_price else quote_price_sol
     db.execute("""
         INSERT INTO paper_trades
             (strategy_id, strategy_role, strategy_stage, stage_outcome,
@@ -1499,24 +1338,25 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
              market_regime, replay_source, peak_pnl, trailing_active,
              lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
              reentry_source, first_peak_pct, stage3_peak_price, stage3_qualifying_exit_ts,
-             stage3_dormant, stage3_blacklisted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+             stage3_dormant, stage3_blacklisted, position_size_sol, token_amount_raw, token_decimals, entry_execution_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
     """, (
         strategy_id, strategy_role, 'stage3', 'stage3_entered',
-        token_ca, symbol, candidate['signal_ts'], current_price, entry_ts,
+        token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts,
         regime, candidate['lifecycle_id'], candidate.get('stage1_trade_id'), stage_seq('stage3'), signal_ts, current_price,
         'v2_event_awakening', candidate.get('first_peak_pct') or 0.0,
-        candidate.get('stage3_peak_price'), candidate.get('stage3_qualifying_exit_ts')
+        candidate.get('stage3_peak_price'), candidate.get('stage3_qualifying_exit_ts'),
+        position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution)
     ))
     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
     db.commit()
-    pos = Position(trade_id, token_ca, symbol, candidate['signal_ts'], current_price, entry_ts, pool,
-                   'stage3', candidate['lifecycle_id'], stage3_rules)
+    pos = Position(trade_id, token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts, pool,
+                   'stage3', candidate['lifecycle_id'], stage3_rules, position_size_sol, token_amount_raw, token_decimals)
     positions[pos.trade_id] = pos
     candidate['stage3_trade_id'] = trade_id
     candidate['stage3_attempted'] = True
     candidate['stage3_dormant'] = False
-    log.info(f"  Entered {symbol}/stage3 @ ${current_price:.10f} lifecycle={candidate['lifecycle_id']} via awakening")
+    log.info(f"  Entered {symbol}/stage3 @ ${entry_price:.10f} lifecycle={candidate['lifecycle_id']} via awakening quote")
     return True, sol_price
 
 
@@ -1777,6 +1617,7 @@ def dry_run(db):
     min_super_index = int(((strategy_config.get('entryTimingFilters') or {}).get('minSuperIndex')) or 80)
     strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
     strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
+    position_size_sol = get_paper_position_size_sol(strategy_config)
 
     try:
         kline_db = init_kline_db()
@@ -1965,34 +1806,67 @@ def dry_run(db):
             else:
                 stage_counts['stage2A_expired'] += 1
 
-        stage3_peak_price = None
-        stage3_qualifies = False
-        for candidate_result in (stage2_result, stage1_result):
-            if not candidate_result:
-                continue
-            peak_price_val = candidate_result['entry_price'] * (1.0 + candidate_result['peak_pnl'])
-            if peak_price_val > 0:
-                stage3_peak_price = peak_price_val
-            if (
-                candidate_result['exit_reason'] == 'trail'
-                and candidate_result['exit_pnl'] > 0
-                and (candidate_result['peak_pnl'] * 100.0) >= float(stage_rules['stage3'].get('firstPeakMinPct', 10))
-            ):
-                stage3_qualifies = True
-                lifecycle['stage3_qualifying_exit_ts'] = candidate_result['exit_ts']
-                break
-
         if stage_rules.get('stage3', {}).get('enabled'):
-            lifecycle['stage3_peak_price'] = stage3_peak_price
-            if stage3_qualifies and stage3_peak_price:
-                lifecycle['stage3_dormant'] = True
-                lifecycle['stage3_blacklisted'] = False
-                stage_counts['stage3_dormant'] += 1
-            else:
-                lifecycle['stage3_dormant'] = False
-                lifecycle['stage3_blacklisted'] = True
-                lifecycle['stage3_attempted'] = True
-                stage_counts['stage3_blacklisted'] += 1
+            first_peak_min_pct = float(stage_rules['stage3'].get('firstPeakMinPct', 10))
+            for candidate_result, candidate_trade_id in (
+                (stage1_result, stage1_trade_id),
+                (stage2_result, lifecycle.get('stage2a_trade_id')),
+            ):
+                if not candidate_result:
+                    continue
+                if lifecycle.get('stage3_attempted') or lifecycle.get('stage3_dormant') or lifecycle.get('stage3_blacklisted'):
+                    break
+
+                stage3_peak_price = None
+                if candidate_result.get('entry_price'):
+                    stage3_peak_price = candidate_result['entry_price'] * (1.0 + max(candidate_result['peak_pnl'], 0.0))
+                if stage3_peak_price and stage3_peak_price > 0:
+                    lifecycle['stage3_peak_price'] = stage3_peak_price
+
+                qualifies = (
+                    candidate_result['exit_reason'] == 'trail'
+                    and candidate_result['exit_pnl'] > 0
+                    and (candidate_result['peak_pnl'] * 100.0) >= first_peak_min_pct
+                    and stage3_peak_price
+                    and stage3_peak_price > 0
+                )
+                if qualifies:
+                    lifecycle['stage3_qualifying_exit_ts'] = candidate_result['exit_ts']
+                    lifecycle['stage3_dormant'] = True
+                    lifecycle['stage3_blacklisted'] = False
+                    db.execute(
+                        """
+                        UPDATE paper_trades
+                        SET stage3_peak_price = ?, stage3_qualifying_exit_ts = ?,
+                            stage3_dormant = 1, stage3_blacklisted = 0
+                        WHERE id = ?
+                        """,
+                        (stage3_peak_price, candidate_result['exit_ts'], candidate_trade_id)
+                    )
+                    db.commit()
+                    stage_counts['stage3_dormant'] += 1
+                    break
+
+                if (
+                    candidate_result['exit_reason'] in ('sl', 'timeout')
+                    or candidate_result['exit_pnl'] <= 0
+                    or (candidate_result['peak_pnl'] * 100.0) < first_peak_min_pct
+                ):
+                    lifecycle['stage3_dormant'] = False
+                    lifecycle['stage3_blacklisted'] = True
+                    lifecycle['stage3_attempted'] = True
+                    db.execute(
+                        """
+                        UPDATE paper_trades
+                        SET stage3_peak_price = COALESCE(?, stage3_peak_price),
+                            stage3_dormant = 0, stage3_blacklisted = 1
+                        WHERE id = ?
+                        """,
+                        (stage3_peak_price, candidate_trade_id)
+                    )
+                    db.commit()
+                    stage_counts['stage3_blacklisted'] += 1
+                    break
 
     kline_db.close()
 
@@ -2123,6 +1997,7 @@ def run_monitor(db):
 
     log.info("=== Paper Trade Monitor Started ===")
     log.info(f"  strategy={strategy_id} role={strategy_role}")
+    log.info(f"  paper execution size: {position_size_sol} SOL")
     log.info(f"  stage1 exit: SL={stage1_exit['stopLossPct']}% Trail Start={stage1_exit['trailStartPct']}% Trail Factor={stage1_exit['trailFactor']*100:.0f}% Timeout={stage1_exit['timeoutMinutes']}min")
     log.info(f"  stage2A exit: SL={stage2a_rules['stopLossPct']}% Trail Start={stage2a_rules['trailStartPct']}% Timeout={stage2a_rules['timeoutMinutes']}min")
     log.info(f"  stage3 exit: SL={stage3_rules['stopLossPct']}% Trail Start={stage3_rules['trailStartPct']}% Timeout={stage3_rules['timeoutMinutes']}min")
@@ -2148,7 +2023,7 @@ def run_monitor(db):
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
-               strategy_stage, lifecycle_id
+               strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals
         FROM paper_trades
         WHERE exit_reason IS NULL
     """).fetchall()
@@ -2156,7 +2031,10 @@ def run_monitor(db):
         pool = get_pool_address(r['token_ca'])
         pos = Position(r['id'], r['token_ca'], r['symbol'], r['signal_ts'], r['entry_price'], r['entry_ts'], pool,
                        r['strategy_stage'] or 'stage1', r['lifecycle_id'] or build_lifecycle_id(r['token_ca'], r['signal_ts']),
-                       get_exit_rules_for_stage(strategy_config, r['strategy_stage'] or 'stage1'))
+                       get_exit_rules_for_stage(strategy_config, r['strategy_stage'] or 'stage1'),
+                       r['position_size_sol'] or get_paper_position_size_sol(strategy_config),
+                       r['token_amount_raw'] or 0,
+                       r['token_decimals'] or 0)
         pos.peak_pnl = r['peak_pnl'] or 0
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
@@ -2189,41 +2067,12 @@ def run_monitor(db):
 
     log.info(f"  Starting from signal ID > {last_signal_id}")
 
-    # Startup: audit recent signal status distribution to diagnose gate health
-    try:
-        audit_rows = get_recent_signals(limit=100)
-        if not REMOTE_SIGNAL_URL:
-            try:
-                sdb = sqlite3.connect(SENTIMENT_DB)
-                sdb.row_factory = sqlite3.Row
-                audit_raw = sdb.execute(
-                    "SELECT hard_gate_status, COUNT(*) as n FROM premium_signals "
-                    "GROUP BY hard_gate_status ORDER BY n DESC LIMIT 10"
-                ).fetchall()
-                sdb.close()
-                audit_summary = ', '.join(f"{r['hard_gate_status'] or 'NULL'}={r['n']}" for r in audit_raw)
-                log.info(f"  Signal gate audit (all-time): {audit_summary}")
-                recent_pass = sum(1 for r in audit_rows if (r.get('hard_gate_status') or '').upper() in ('PASS', 'RISK_BLOCKED'))
-                recent_super = sum(1 for r in audit_rows if (r.get('hard_gate_status') or '').upper() in ('PASS', 'RISK_BLOCKED') and (parse_super_index(r.get('description') or '') or 0) > min_super_index)
-                log.info(f"  Recent 100 signals: {recent_pass} PASS/RISK_BLOCKED, {recent_super} with super>{min_super_index}")
-            except Exception as ae:
-                log.warning(f"  Signal gate audit failed: {ae}")
-    except Exception:
-        pass
-
     last_position_check = 0
     last_daily_report = None
-    last_signal_cycle_log = 0
-    last_heartbeat = 0
     sol_price = None
 
-    # Pending entry TTL: discard entries that can't find their signal bar after this many seconds
-    PENDING_TTL_SECONDS = 300  # 5 minutes
-
-    consecutive_errors = 0
     last_heartbeat = 0.0
     last_progress = time.time()
-    pending_entries = {}
 
     while True:
         now = time.time()
@@ -2245,39 +2094,13 @@ def run_monitor(db):
 
         try:
             new_signals = get_new_signals(last_signal_id)
-            cycle_seen = 0
-            cycle_dup = 0
-            cycle_low_super = 0
-            cycle_no_pool = 0
-            cycle_queued = 0
-            cycle_old = 0
             for sig in new_signals:
                 token_ca = sig['token_ca']
                 last_signal_id = sig['id']
                 signal_ts = sig['timestamp']
                 lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
-                cycle_seen += 1
-
-                # Skip signals older than PENDING_TTL_SECONDS — they can never find
-                # their signal bar in GeckoTerminal's recent window anyway.
-                signal_ts_sec = signal_ts // 1000 if signal_ts > 1e12 else signal_ts
-                if now - signal_ts_sec > PENDING_TTL_SECONDS:
-                    cycle_old += 1
-                    continue
 
                 if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
-                    cycle_dup += 1
-                    continue
-
-                symbol = sig['symbol'] or token_ca[:8]
-                super_idx = parse_super_index(sig['description'] or '')
-
-                consumed, sol_price = try_awaken_stage3_from_signal(
-                    db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
-                    token_ca, symbol, signal_ts, super_idx
-                )
-                if consumed:
-                    last_progress = time.time()
                     continue
 
                 existing = db.execute(
@@ -2285,18 +2108,25 @@ def run_monitor(db):
                     (lifecycle_id, token_ca, signal_ts)
                 ).fetchone()
                 if existing:
-                    cycle_dup += 1
+                    continue
+
+                symbol = sig['symbol'] or token_ca[:8]
+                super_idx = parse_super_index(sig['description'] or '')
+
+                consumed, sol_price = try_awaken_stage3_from_signal(
+                    db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
+                    token_ca, symbol, signal_ts, super_idx, position_size_sol
+                )
+                if consumed:
+                    last_progress = time.time()
                     continue
 
                 if super_idx is None or super_idx <= min_super_index:
-                    log.info(f"  [{symbol}] super={super_idx} (need >{min_super_index}), skip stage1")
-                    cycle_low_super += 1
                     continue
 
                 pool = get_pool_address(token_ca)
                 if not pool:
                     log.warning(f"  Could not find pool for {symbol}, skipping")
-                    cycle_no_pool += 1
                     continue
                 time.sleep(0.3)
 
@@ -2313,15 +2143,10 @@ def run_monitor(db):
                     'attempts': 0,
                     'last_debug_at': 0,
                 }
-                cycle_queued += 1
                 lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts))
-                log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 close @ {signal_minute_ts}")
+                log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 execution")
                 last_progress = time.time()
                 time.sleep(0.2)
-
-            if cycle_seen > 0 or (now - last_signal_cycle_log > 600):
-                log.info(f"Signal cycle: seen={cycle_seen} old={cycle_old} dup={cycle_dup} low_super={cycle_low_super} no_price={cycle_no_pool} entered={cycle_queued}")
-                last_signal_cycle_log = now
         except Exception as e:
             log.error(f"Signal check error: {e}")
 
@@ -2329,78 +2154,63 @@ def run_monitor(db):
             for lifecycle_id, pending in list(pending_entries.items()):
                 try:
                     pending['attempts'] = int(pending.get('attempts') or 0) + 1
-                    bars = get_notath_bars(pending['pool'], limit=PENDING_ENTRY_BAR_LOOKBACK)
-                    if not bars:
+                    execution = simulate_entry_execution(
+                        pending['token_ca'],
+                        position_size_sol,
+                        'stage1',
+                        strategy_id=strategy_id,
+                        lifecycle_id=lifecycle_id,
+                    )
+                    if not execution.get('success'):
                         log_pending_entry_issue(
                             pending,
-                            f"ohlcv unavailable for pool={pending.get('pool')} lookback={PENDING_ENTRY_BAR_LOOKBACK}",
+                            f"entry quote failed reason={execution.get('failureReason')} route={execution.get('routeAvailable')}",
                             level='warning'
                         )
+                        pending_entries.pop(lifecycle_id, None)
                         continue
-                    signal_bar, match_mode, match_meta = select_signal_entry_bar(
-                        bars,
-                        pending['signal_ts'],
-                        pending['signal_minute_ts']
-                    )
-                    if signal_bar is None:
-                        if match_mode == 'missing_signal_bar':
-                            log_pending_entry_issue(
-                                pending,
-                                (
-                                    f"signal bar missing target={_format_ts_utc(match_meta.get('target_ts'))} "
-                                    f"signal={_format_ts_utc(match_meta.get('signal_ts'))} "
-                                    f"bars={match_meta.get('count', 0)} "
-                                    f"range=[{_format_ts_utc(match_meta.get('oldest_ts'))} → {_format_ts_utc(match_meta.get('newest_ts'))}]"
-                                ),
-                                level='warning'
-                            )
-                        else:
-                            log_pending_entry_issue(
-                                pending,
-                                f"entry bar unresolved mode={match_mode} meta={match_meta}",
-                                level='warning'
-                            )
-                        continue
-                    price = signal_bar['close']
-                    if not price or price <= 0:
+
+                    quote_price_sol = execution.get('effectivePrice')
+                    token_amount_raw = execution.get('quotedOutAmountRaw')
+                    token_decimals = execution.get('outputDecimals')
+                    if quote_price_sol is None or quote_price_sol <= 0 or not token_amount_raw:
                         log_pending_entry_issue(
                             pending,
-                            f"invalid close price={price} bar_ts={_format_ts_utc(signal_bar.get('ts'))}",
+                            f"invalid entry execution price={quote_price_sol} out={token_amount_raw}",
                             level='warning',
                             force=True
                         )
                         pending_entries.pop(lifecycle_id, None)
                         continue
-                    if match_mode != 'exact_minute':
-                        log.info(
-                            f"  Using {match_mode} bar for {pending['symbol']}/stage1 "
-                            f"target={_format_ts_utc(pending['signal_minute_ts'])} actual={_format_ts_utc(signal_bar.get('ts'))}"
-                        )
-                    entry_ts = int(signal_bar['ts'])
+
+                    entry_ts = int((execution.get('quoteTs') or time.time() * 1000) / 1000)
                     if sol_price is None:
                         sol_price = get_sol_price()
                         time.sleep(0.2)
+                    price = quote_price_sol * sol_price if sol_price else quote_price_sol
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades
                             (strategy_id, strategy_role, strategy_stage, stage_outcome,
                              token_ca, symbol, signal_ts, entry_price, entry_ts,
                              market_regime, replay_source, peak_pnl, trailing_active,
-                             lifecycle_id, stage_seq, trigger_ts, trigger_price)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?)
+                             lifecycle_id, stage_seq, trigger_ts, trigger_price,
+                             position_size_sol, token_amount_raw, token_decimals, entry_execution_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         strategy_id, strategy_role, 'stage1', 'stage1_entered',
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
-                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price
+                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price,
+                        position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution)
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
                     pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
-                                   'stage1', lifecycle_id, stage1_exit)
+                                   'stage1', lifecycle_id, stage1_exit, position_size_sol, token_amount_raw, token_decimals or 0)
                     positions[pos.trade_id] = pos
                     lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
                     pending_entries.pop(lifecycle_id, None)
-                    log.info(f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} lifecycle={lifecycle_id}")
+                    log.info(f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} lifecycle={lifecycle_id} via quoted execution")
                     last_progress = time.time()
                     time.sleep(0.2)
                 except Exception as e:
@@ -2417,56 +2227,14 @@ def run_monitor(db):
             except Exception:
                 pass
 
-            position_prices, position_sources, position_price_stats = get_current_prices_batch([pos.token_ca for pos in positions.values()])
-            if positions:
-                active_cas = list({pos.token_ca for pos in positions.values()})
-                log.info(
-                    f"  Batch price prefetch: jupiter_hits={position_price_stats['jupiter_hits']}/{position_price_stats['jupiter_hits'] + position_price_stats['jupiter_misses']} "
-                    f"dex_hits={position_price_stats['dex_batch_hits']}/{position_price_stats['dex_batch_hits'] + position_price_stats['dex_batch_misses']} "
-                    f"covered={len(position_prices)}/{len(active_cas)}"
-                )
-
             for trade_id, pos in list(positions.items()):
                 try:
-                    prefetched_price = position_prices.get(pos.token_ca)
-                    prefetched_source = position_sources.get(pos.token_ca)
                     min_timestamp_ms = (int(pos.last_bar_ts) * 1000) if pos.last_bar_ts else None
                     snapshot = get_live_price_snapshot(pos.token_ca, pos.pool_address, min_timestamp_ms=min_timestamp_ms)
-
-                    if snapshot:
-                        bar_ts = int(snapshot['ts'])
-                        price = snapshot['price']
-                    elif prefetched_price and prefetched_price > 0:
-                        current_bar = _build_synthetic_bar(prefetched_price, prefetched_source or 'jupiter')
-                        bar_ts = int(current_bar['ts'])
-                        price = current_bar['close'] or current_bar.get('open')
-                    else:
-                        current_bar = get_current_bar(pos.token_ca, pos.pool_address)
-                        if not current_bar:
-                            timeout_min = int(pos.exit_rules.get('timeoutMinutes', DEFAULT_STAGE1_EXIT['timeoutMinutes']))
-                            grace_min = 30
-                            elapsed_min = (now - pos.entry_ts) / 60
-                            if elapsed_min >= timeout_min + grace_min:
-                                if pos.trailing_active and pos.peak_pnl > 0:
-                                    trail_factor = float(pos.exit_rules.get('trailFactor', TRAIL_FACTOR))
-                                    zombie_pnl = pos.peak_pnl * trail_factor
-                                    zombie_exit_price = pos.entry_price * (1 + zombie_pnl)
-                                    reason_str = 'timeout_no_data_trail'
-                                else:
-                                    zombie_pnl = 0.0
-                                    zombie_exit_price = pos.entry_price
-                                    reason_str = 'timeout_no_data'
-                                log.warning(
-                                    f"  Force-closing zombie {pos.symbol}/{pos.strategy_stage} "
-                                    f"(no price data for {elapsed_min:.0f}min, timeout={timeout_min}min, "
-                                    f"trailing={pos.trailing_active}, peak={pos.peak_pnl*100:+.1f}%, "
-                                    f"zombie_pnl={zombie_pnl*100:+.1f}%)"
-                                )
-                                to_close.append((trade_id, reason_str, zombie_pnl, zombie_exit_price, int(now)))
-                            continue
-                        bar_ts = int(current_bar['ts'])
-                        price = current_bar['close'] or current_bar.get('open')
-
+                    if not snapshot:
+                        continue
+                    bar_ts = int(snapshot['ts'])
+                    price = snapshot['price']
                     if price is None or price <= 0:
                         continue
                     should_exit, reason, pnl = pos.check_exit(price, bar_ts)
@@ -2485,20 +2253,48 @@ def run_monitor(db):
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
             for trade_id, reason, pnl, exit_price, exit_ts in to_close:
-                pos = positions.pop(trade_id)
+                pos = positions.get(trade_id)
+                if pos is None:
+                    continue
+                exit_execution = simulate_exit_execution(
+                    pos.token_ca,
+                    pos.token_amount_raw,
+                    pos.token_decimals,
+                    pos.strategy_stage,
+                    strategy_id=strategy_id,
+                    lifecycle_id=pos.lifecycle_id,
+                )
+                if not exit_execution.get('success'):
+                    db.execute(
+                        "UPDATE paper_trades SET exit_execution_json = ? WHERE id = ?",
+                        (json.dumps(exit_execution), pos.trade_id)
+                    )
+                    db.commit()
+                    log.warning(f"  Exit quote failed for {pos.symbol}/{pos.strategy_stage}: {exit_execution.get('failureReason')}")
+                    continue
+
+                positions.pop(trade_id, None)
                 lifecycle = lifecycles[pos.lifecycle_id]
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
                 stage3_peak_price = pos.entry_price * (1.0 + max(pos.peak_pnl, 0.0)) if pos.entry_price else None
+                quoted_exit_price = exit_execution.get('effectivePrice')
+                effective_exit_price = (quoted_exit_price * sol_price) if (quoted_exit_price is not None and sol_price) else (quoted_exit_price or exit_price)
+                realized_pnl = pnl
+                actual_out = exit_execution.get('quotedOutAmount')
+                if actual_out is not None and pos.position_size_sol:
+                    realized_pnl = (float(actual_out) - float(pos.position_size_sol)) / float(pos.position_size_sol)
                 db.execute("""
                     UPDATE paper_trades
                     SET exit_price = ?, exit_ts = ?, exit_reason = ?,
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
-                        peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?
+                        peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
+                        exit_execution_json = ?
                     WHERE id = ?
                 """, (
-                    exit_price, exit_ts, reason, pnl, pos.bars_held,
-                    regime, pos.peak_pnl, int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0, pos.trade_id
+                    effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
+                    regime, pos.peak_pnl, int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0,
+                    json.dumps(exit_execution), pos.trade_id
                 ))
                 db.commit()
                 last_progress = time.time()
@@ -2531,7 +2327,7 @@ def run_monitor(db):
                             (stage3_peak_price, exit_ts, pos.trade_id)
                         )
                         db.commit()
-                    elif reason in ('sl', 'timeout', 'timeout_no_data', 'timeout_no_data_trail') or pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < first_peak_min_pct:
+                    elif reason in ('sl', 'timeout') or pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < first_peak_min_pct:
                         lifecycle['stage3_peak_price'] = stage3_peak_price or lifecycle.get('stage3_peak_price')
                         lifecycle['stage3_dormant'] = False
                         lifecycle['stage3_blacklisted'] = True
@@ -2546,7 +2342,7 @@ def run_monitor(db):
                             (stage3_peak_price, pos.trade_id)
                         )
                         db.commit()
-                log.info(f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} lifecycle={pos.lifecycle_id}")
+                log.info(f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={realized_pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} lifecycle={pos.lifecycle_id}")
 
             for lifecycle_id, lifecycle in list(lifecycles.items()):
                 if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
@@ -2591,42 +2387,62 @@ def run_monitor(db):
                             lifecycle['stage1_trade_id'] = validation_summary['canonical_stage1_id']
                             lifecycle['stage1_stop_ts'] = validation_summary['stage1_stop_ts']
                             regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                            execution = simulate_entry_execution(
+                                lifecycle['token_ca'],
+                                position_size_sol,
+                                'stage2A',
+                                strategy_id=strategy_id,
+                                lifecycle_id=lifecycle_id,
+                            )
+                            if not execution.get('success'):
+                                lifecycle['stage2a_attempted'] = True
+                                log.warning(f"  Stage2A quote failed for {lifecycle['symbol']} lifecycle={lifecycle_id}: {execution.get('failureReason')}")
+                                continue
+                            quote_price_sol = execution.get('effectivePrice')
+                            token_amount_raw = execution.get('quotedOutAmountRaw')
+                            token_decimals = execution.get('outputDecimals') or 0
+                            if quote_price_sol is None or quote_price_sol <= 0 or not token_amount_raw:
+                                lifecycle['stage2a_attempted'] = True
+                                log.warning(f"  Stage2A invalid execution payload for {lifecycle['symbol']} lifecycle={lifecycle_id}")
+                                continue
+                            entry_ts = int((execution.get('quoteTs') or (bar_ts * 1000)) / 1000)
+                            entry_price = quote_price_sol * sol_price if sol_price else quote_price_sol
                             db.execute("""
                                 INSERT INTO paper_trades
                                     (strategy_id, strategy_role, strategy_stage, stage_outcome,
                                      token_ca, symbol, signal_ts, entry_price, entry_ts,
                                      market_regime, replay_source, peak_pnl, trailing_active,
                                      lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
-                                     armed_ts, rolling_low_price, rolling_low_ts, reentry_source)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
+                                     position_size_sol, token_amount_raw, token_decimals, entry_execution_json)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
                                 strategy_id, strategy_role, 'stage2A', 'stage2A_entered',
-                                lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], close_price, bar_ts,
+                                lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts,
                                 regime, lifecycle_id, lifecycle.get('stage1_trade_id'), stage_seq('stage2A'), bar_ts, close_price,
-                                lifecycle.get('stage1_stop_ts'), lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound'
+                                lifecycle.get('stage1_stop_ts'), lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound',
+                                position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution)
                             ))
                             trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                             db.commit()
-                            pos = Position(trade_id, lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], close_price, bar_ts, pool,
-                                           'stage2A', lifecycle_id, stage2a_rules)
+                            pos = Position(trade_id, lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts, pool,
+                                           'stage2A', lifecycle_id, stage2a_rules, position_size_sol, token_amount_raw, token_decimals)
                             positions[pos.trade_id] = pos
                             lifecycle['stage2a_trade_id'] = trade_id
                             lifecycle['stage2a_attempted'] = True
-                            log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${close_price:.10f} lifecycle={lifecycle_id}")
+                            log.info(f"  Entered {lifecycle['symbol']}/stage2A @ ${entry_price:.10f} lifecycle={lifecycle_id} via quote")
                             last_progress = time.time()
                             continue
+
 
             if positions:
                 log.info(f"  Open positions: {len(positions)}  [{', '.join(f'{p.symbol}/{p.strategy_stage}' for p in positions.values())}]")
 
-        try:
-            today_str = now_utc.strftime('%Y-%m-%d')
-            if now_utc.hour == DAILY_REPORT_HOUR and last_daily_report != today_str:
-                yesterday = (now_utc - timedelta(days=1)).strftime('%Y-%m-%d')
-                print_daily_report(db, yesterday)
-                last_daily_report = today_str
-        except Exception as e:
-            log.error(f"Daily report error: {e}", exc_info=True)
+        today_str = now_utc.strftime('%Y-%m-%d')
+        if now_utc.hour == DAILY_REPORT_HOUR and last_daily_report != today_str:
+            yesterday = (now_utc - timedelta(days=1)).strftime('%Y-%m-%d')
+            print_daily_report(db, yesterday)
+            last_daily_report = today_str
 
         time.sleep(SIGNAL_POLL_INTERVAL)
 
