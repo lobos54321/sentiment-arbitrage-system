@@ -52,6 +52,7 @@ export class JupiterUltraExecutor {
     // Jupiter Ultra API
     this.ultraApiBase = 'https://api.jup.ag/ultra/v1';
     this.jupiterApiKey = process.env.JUPITER_API_KEY || '';  // 免费 API Key: portal.jup.ag（有 key 比无 key 快 0.5-1s）
+    this.decimalsCache = new Map();
 
     // 统计
     this.stats = {
@@ -85,6 +86,86 @@ export class JupiterUltraExecutor {
     console.log('⚡ [JupiterUltra] Ultra V3 就绪（内置 MEV 保护 + 自动滑点 + Beam 发送）');
   }
 
+  async getBuyQuote(tokenCA, amountSol, opts = {}) {
+    const amountLamports = Math.floor(Number(amountSol || 0) * LAMPORTS_PER_SOL);
+    if (!Number.isFinite(amountLamports) || amountLamports <= 0) {
+      return this._buildFailureResult('buy', 'quote_failed', {
+        tokenCA,
+        inputMint: SOL_MINT,
+        outputMint: tokenCA,
+        inputAmount: Number(amountSol || 0),
+        inputAmountRaw: null,
+        quoteTs: Date.now()
+      });
+    }
+
+    try {
+      const order = await this._getOrder(SOL_MINT, tokenCA, amountLamports);
+      return await this._normalizeQuoteResult('buy', order, {
+        tokenCA,
+        inputMint: SOL_MINT,
+        outputMint: tokenCA,
+        inputAmount: Number(amountSol || 0),
+        inputAmountRaw: amountLamports,
+        opts
+      });
+    } catch (error) {
+      return this._buildFailureResult('buy', this._classifyFailureReason(error?.message || 'quote_failed'), {
+        tokenCA,
+        inputMint: SOL_MINT,
+        outputMint: tokenCA,
+        inputAmount: Number(amountSol || 0),
+        inputAmountRaw: amountLamports,
+        quoteTs: Date.now(),
+        error
+      });
+    }
+  }
+
+  async getSellQuote(tokenCA, tokenAmount, opts = {}) {
+    const rawAmount = Math.floor(Number(tokenAmount || 0));
+    if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
+      return this._buildFailureResult('sell', 'quote_failed', {
+        tokenCA,
+        inputMint: tokenCA,
+        outputMint: SOL_MINT,
+        inputAmount: opts.inputAmount ?? null,
+        inputAmountRaw: null,
+        quoteTs: Date.now()
+      });
+    }
+
+    try {
+      const order = await this._getOrder(tokenCA, SOL_MINT, rawAmount);
+      return await this._normalizeQuoteResult('sell', order, {
+        tokenCA,
+        inputMint: tokenCA,
+        outputMint: SOL_MINT,
+        inputAmount: opts.inputAmount ?? null,
+        inputAmountRaw: rawAmount,
+        opts
+      });
+    } catch (error) {
+      return this._buildFailureResult('sell', this._classifyFailureReason(error?.message || 'quote_failed'), {
+        tokenCA,
+        inputMint: tokenCA,
+        outputMint: SOL_MINT,
+        inputAmount: opts.inputAmount ?? null,
+        inputAmountRaw: rawAmount,
+        quoteTs: Date.now(),
+        error
+      });
+    }
+  }
+
+  async executeQuotedBuy(quote, opts = {}) {
+    return this._executeQuotedTrade('buy', quote, opts);
+  }
+
+  async executeQuotedSell(quote, opts = {}) {
+    return this._executeQuotedTrade('sell', quote, opts);
+  }
+
   /**
    * 买入 Token（SOL → Token）
    * Ultra 自动滑点(RTSE)对高波动 meme coin 可能偏保守，需要重试
@@ -92,41 +173,35 @@ export class JupiterUltraExecutor {
   async buy(tokenCA, amountSol, opts = {}) {
     this._checkSafety(amountSol);
 
-    const amountLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     const maxRetries = 3;  // Ultra 滑点失败时重试（每次重新获取 order = 新报价 + 新滑点）
     console.log(`🪐 [JupiterUltra] 买入 ${amountSol} SOL → ${tokenCA.substring(0, 8)}...`);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // 1. 获取 Ultra Order（每次重新获取 = 最新价格 + 最新 RTSE 滑点）
-        const order = await this._getOrder(SOL_MINT, tokenCA, amountLamports);
-        if (!order || !order.transaction) {
-          throw new Error('获取 Ultra Order 失败');
+        const quote = await this.getBuyQuote(tokenCA, amountSol, opts);
+        if (!quote.success) {
+          throw new Error(quote.failureReason || '获取 Ultra Order 失败');
         }
 
-        console.log(`   报价: ${amountSol} SOL → ${order.outAmount || '?'} tokens | slippage: ${order.slippageBps || '?'}bps | requestId: ${order.requestId?.substring(0, 8)}...`);
+        console.log(`   报价: ${amountSol} SOL → ${quote.quotedOutAmountRaw || '?'} tokens | slippage: ${quote.slippageBps || '?'}bps | requestId: ${quote.requestId?.substring(0, 8)}...`);
+        const result = await this.executeQuotedBuy(quote, opts);
 
-        // 2. 签名
-        const signedTx = this._signTransaction(order.transaction);
-
-        // 3. 执行
-        const result = await this._executeOrder(signedTx, order.requestId);
-
-        if (result.status === 'Success') {
+        if (result.success) {
           this.stats.buys++;
           this.stats.total_sol_spent += amountSol;
-          console.log(`✅ [JupiterUltra] 买入成功: ${result.signature}`);
+          console.log(`✅ [JupiterUltra] 买入成功: ${result.txHash}`);
 
           return {
+            ...result,
             success: true,
-            txHash: result.signature,
+            txHash: result.txHash,
             amountIn: amountSol,
-            amountOut: parseInt(order.outAmount || 0),
+            amountOut: Number(result.actualAmountOutRaw || result.quotedOutAmountRaw || 0),
             tokenCA
           };
-        } else {
-          throw new Error(`Ultra 执行失败: ${result.status || 'Unknown'} ${result.error || ''}`);
         }
+
+        throw new Error(result.failureReason || 'Ultra 执行失败');
       } catch (error) {
         const isSlippage = error.message.includes('Slippage') || error.message.includes('slippage');
         console.error(`❌ [JupiterUltra] 买入失败 (${attempt}/${maxRetries}): ${error.message}`);
@@ -160,43 +235,32 @@ export class JupiterUltraExecutor {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // 1. 获取 Ultra Order（Token → SOL）
-        const order = await this._getOrder(tokenCA, SOL_MINT, tokenAmount);
-        if (!order || !order.transaction) {
-          throw new Error('获取卖出 Ultra Order 失败');
+        const quote = await this.getSellQuote(tokenCA, tokenAmount, options);
+        if (!quote.success) {
+          throw new Error(quote.failureReason || '获取卖出 Ultra Order 失败');
         }
 
-        const outLamports = parseInt(order.outAmount || 0);
-        const quotedSol = outLamports / LAMPORTS_PER_SOL;
-        console.log(`   报价: ${tokenAmount} tokens → ${quotedSol.toFixed(6)} SOL | slippage: ${order.slippageBps || '?'}bps`);
+        const quotedSol = Number(quote.quotedOutAmount || 0);
+        console.log(`   报价: ${tokenAmount} tokens → ${quotedSol.toFixed(6)} SOL | slippage: ${quote.slippageBps || '?'}bps`);
+        const result = await this.executeQuotedSell(quote, options);
 
-        // 2. 签名
-        const signedTx = this._signTransaction(order.transaction);
-
-        // 3. 执行（Ultra 内置确认，无需手动 confirm）
-        const result = await this._executeOrder(signedTx, order.requestId);
-
-        if (result.status === 'Success') {
-          // Jupiter Ultra 几乎必然返回 outputAmount，直接使用
-          // fallback 用报价值（误差在滑点范围内，无需额外 RPC 查余额）
-          const outSol = result.outputAmount
-            ? parseFloat(result.outputAmount) / LAMPORTS_PER_SOL
-            : quotedSol;
-
+        if (result.success) {
+          const outSol = Number(result.actualAmountOut || result.quotedOutAmount || 0);
           this.stats.sells++;
           this.stats.total_sol_received += outSol;
-          console.log(`✅ [JupiterUltra] 卖出成功: ${result.signature} | 实际到账: ${outSol.toFixed(6)} SOL (报价: ${quotedSol.toFixed(6)})`);
+          console.log(`✅ [JupiterUltra] 卖出成功: ${result.txHash} | 实际到账: ${outSol.toFixed(6)} SOL (报价: ${quotedSol.toFixed(6)})`);
 
           return {
+            ...result,
             success: true,
-            txHash: result.signature,
+            txHash: result.txHash,
             amountIn: tokenAmount,
             amountOut: outSol,
             tokenCA
           };
-        } else {
-          throw new Error(`Ultra 卖出执行失败: ${result.status || 'Unknown'} ${result.error || ''}`);
         }
+
+        throw new Error(result.failureReason || 'Ultra 卖出执行失败');
       } catch (error) {
         const isSlippage = error.message.includes('Slippage') || error.message.includes('slippage');
         console.error(`❌ [JupiterUltra] 卖出失败 (${attempt}/${maxRetries}): ${error.message}`);
@@ -355,6 +419,187 @@ export class JupiterUltraExecutor {
   }
 
   // ==================== 安全 ====================
+
+  async _resolveMintDecimals(mint) {
+    if (!mint) return 0;
+    if (mint === SOL_MINT) return 9;
+    if (this.decimalsCache.has(mint)) return this.decimalsCache.get(mint);
+
+    try {
+      const info = await this.connection.getParsedAccountInfo(new PublicKey(mint));
+      const decimals = info?.value?.data?.parsed?.info?.decimals;
+      const normalized = Number.isFinite(Number(decimals)) ? Number(decimals) : 0;
+      this.decimalsCache.set(mint, normalized);
+      return normalized;
+    } catch (error) {
+      console.warn(`⚠️  [JupiterUltra] 读取 decimals 失败 ${mint.substring(0, 8)}...: ${error.message}`);
+      return 0;
+    }
+  }
+
+  async _normalizeQuoteResult(side, order, meta = {}) {
+    const quoteTs = Date.now();
+    const routeAvailable = Boolean(order?.transaction);
+    if (!routeAvailable) {
+      return this._buildFailureResult(side, this._classifyFailureReason(order?.error || order?.message || 'no_route'), {
+        ...meta,
+        quoteTs,
+        requestId: order?.requestId || null
+      });
+    }
+
+    const inputMint = meta.inputMint;
+    const outputMint = meta.outputMint;
+    const inputDecimals = inputMint === SOL_MINT ? 9 : await this._resolveMintDecimals(inputMint);
+    const outputDecimals = outputMint === SOL_MINT ? 9 : await this._resolveMintDecimals(outputMint);
+    const inputAmountRaw = meta.inputAmountRaw != null ? String(meta.inputAmountRaw) : null;
+    const outputAmountRaw = order?.outAmount != null ? String(order.outAmount) : null;
+    const inputAmount = meta.inputAmount != null
+      ? Number(meta.inputAmount)
+      : (inputAmountRaw != null ? Number(inputAmountRaw) / Math.pow(10, inputDecimals || 0) : null);
+    const quotedOutAmount = outputAmountRaw != null
+      ? Number(outputAmountRaw) / Math.pow(10, outputDecimals || 0)
+      : null;
+    const effectivePrice = (inputAmount && quotedOutAmount)
+      ? (side === 'buy' ? inputAmount / quotedOutAmount : quotedOutAmount / inputAmount)
+      : null;
+
+    return {
+      mode: 'quote',
+      side,
+      success: true,
+      routeAvailable: true,
+      requestId: order?.requestId || null,
+      quotedOutAmount,
+      quotedOutAmountRaw: outputAmountRaw,
+      effectivePrice,
+      slippageBps: order?.slippageBps != null ? Number(order.slippageBps) : null,
+      quoteTs,
+      feeEstimate: this._extractFeeEstimate(order),
+      failureReason: null,
+      txHash: null,
+      actualAmountOut: null,
+      actualAmountOutRaw: null,
+      inputAmount,
+      inputAmountRaw,
+      inputMint,
+      outputMint,
+      inputDecimals,
+      outputDecimals,
+      tokenCA: meta.tokenCA || null,
+      _rawOrder: order
+    };
+  }
+
+  async _executeQuotedTrade(side, quote, opts = {}) {
+    if (!quote?.success || !quote?._rawOrder?.transaction || !quote?.requestId) {
+      return this._buildFailureResult(side, quote?.failureReason || 'no_route', {
+        tokenCA: quote?.tokenCA || null,
+        inputMint: quote?.inputMint,
+        outputMint: quote?.outputMint,
+        inputAmount: quote?.inputAmount,
+        inputAmountRaw: quote?.inputAmountRaw,
+        quoteTs: quote?.quoteTs || Date.now(),
+        requestId: quote?.requestId || null
+      });
+    }
+
+    try {
+      const signedTx = this._signTransaction(quote._rawOrder.transaction);
+      const result = await this._executeOrder(signedTx, quote.requestId);
+      if (result.status !== 'Success') {
+        return this._buildFailureResult(side, this._classifyFailureReason(result.error || result.status || 'execute_failed'), {
+          tokenCA: quote.tokenCA,
+          inputMint: quote.inputMint,
+          outputMint: quote.outputMint,
+          inputAmount: quote.inputAmount,
+          inputAmountRaw: quote.inputAmountRaw,
+          quoteTs: quote.quoteTs,
+          requestId: quote.requestId,
+          routeAvailable: true
+        });
+      }
+
+      const actualAmountOutRaw = result.outputAmount != null
+        ? String(result.outputAmount)
+        : quote.quotedOutAmountRaw;
+      const actualAmountOut = actualAmountOutRaw != null
+        ? Number(actualAmountOutRaw) / Math.pow(10, quote.outputDecimals || 0)
+        : quote.quotedOutAmount;
+
+      return {
+        ...quote,
+        mode: 'live',
+        success: true,
+        txHash: result.signature,
+        actualAmountOut,
+        actualAmountOutRaw,
+        failureReason: null,
+        routeAvailable: true
+      };
+    } catch (error) {
+      return this._buildFailureResult(side, this._classifyFailureReason(error?.message || 'execute_failed'), {
+        tokenCA: quote.tokenCA,
+        inputMint: quote.inputMint,
+        outputMint: quote.outputMint,
+        inputAmount: quote.inputAmount,
+        inputAmountRaw: quote.inputAmountRaw,
+        quoteTs: quote.quoteTs,
+        requestId: quote.requestId,
+        routeAvailable: true,
+        error
+      });
+    }
+  }
+
+  _extractFeeEstimate(order = {}) {
+    const lamports = Number(
+      order.prioritizationFeeLamports
+      || order.signatureFeeLamports
+      || order.totalFeeLamports
+      || 0
+    );
+    return Number.isFinite(lamports) && lamports > 0 ? lamports / LAMPORTS_PER_SOL : null;
+  }
+
+  _classifyFailureReason(message = '') {
+    const text = String(message || '').toLowerCase();
+    if (!text) return 'unknown';
+    if (text.includes('insufficient')) return 'insufficient_balance';
+    if (text.includes('slippage')) return 'slippage';
+    if (text.includes('route') || text.includes('no route') || text.includes('could not find')) return 'no_route';
+    if (text.includes('quote')) return 'quote_failed';
+    if (text.includes('execute') || text.includes('failed')) return 'execute_failed';
+    return 'unknown';
+  }
+
+  _buildFailureResult(side, failureReason, meta = {}) {
+    return {
+      mode: 'quote',
+      side,
+      success: false,
+      routeAvailable: meta.routeAvailable === true,
+      requestId: meta.requestId || null,
+      quotedOutAmount: null,
+      quotedOutAmountRaw: null,
+      effectivePrice: null,
+      slippageBps: null,
+      quoteTs: meta.quoteTs || Date.now(),
+      feeEstimate: null,
+      failureReason,
+      txHash: null,
+      actualAmountOut: null,
+      actualAmountOutRaw: null,
+      inputAmount: meta.inputAmount ?? null,
+      inputAmountRaw: meta.inputAmountRaw != null ? String(meta.inputAmountRaw) : null,
+      inputMint: meta.inputMint || null,
+      outputMint: meta.outputMint || null,
+      inputDecimals: null,
+      outputDecimals: null,
+      tokenCA: meta.tokenCA || null,
+      error: meta.error ? String(meta.error.message || meta.error) : null
+    };
+  }
 
   _checkSafety(amountSol) {
     this._resetDailyLoss();

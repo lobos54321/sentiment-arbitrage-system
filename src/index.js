@@ -29,6 +29,7 @@ import { PermanentBlacklistService } from './database/permanent-blacklist.js';
 import { PremiumChannelListener } from './inputs/premium-channel-listener.js';
 import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
+import { ParityExecutor } from './execution/parity-executor.js';
 import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
@@ -700,6 +701,7 @@ class PremiumChannelSystem {
 
     // 实盘组件（SHADOW_MODE=false 时启用）
     this.jupiterExecutor = null;
+    this.liveExecutionExecutor = null;
     this.livePriceMonitor = null;
     this.livePositionMonitor = null;
 
@@ -762,6 +764,7 @@ class PremiumChannelSystem {
       if (isLive) {
         this.jupiterExecutor = new JupiterUltraExecutor();
         this.jupiterExecutor.initialize();
+        this.liveExecutionExecutor = new ParityExecutor({ mode: 'live', executor: this.jupiterExecutor });
       }
 
       console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'SHADOW'})`);
@@ -775,11 +778,11 @@ class PremiumChannelSystem {
 
       // 实盘模式：额外初始化 LivePositionMonitor + Jupiter 执行器
       if (isLive) {
-        this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.jupiterExecutor, this.engine.riskManager);
+        this.livePositionMonitor = new LivePositionMonitor(this.livePriceMonitor, this.liveExecutionExecutor, this.engine.riskManager);
         await this.livePositionMonitor.start();
 
         // 注入到 engine
-        this.engine.setLiveComponents(this.jupiterExecutor, this.livePositionMonitor);
+        this.engine.setLiveComponents(this.liveExecutionExecutor, this.livePositionMonitor);
 
         // 🔧 注册退出回调：退出后触发信号引擎冷却
         this.livePositionMonitor.onExit((symbol, tokenCA, pnl) => {
@@ -788,7 +791,7 @@ class PremiumChannelSystem {
           }
         });
 
-        const solBalance = await this.jupiterExecutor.getSolBalance();
+        const solBalance = await this.liveExecutionExecutor.getSolBalance();
         console.log(`💰 [实盘] 钱包余额: ${solBalance.toFixed(4)} SOL`);
       }
     } catch (error) {
@@ -797,6 +800,7 @@ class PremiumChannelSystem {
         console.log('⚠️  降级为 SHADOW 模式价格监控');
       }
       this.jupiterExecutor = null;
+      this.liveExecutionExecutor = null;
       this.livePositionMonitor = null;
       if (!this.livePriceMonitor) {
         this.livePriceMonitor = new LivePriceMonitorV2(null);
@@ -843,7 +847,7 @@ class PremiumChannelSystem {
     global.__riskManager = this.engine.riskManager;
     global.__premiumEngine = this.engine;
     global.__autonomySidecar = this.autonomySidecar;
-    if (this.jupiterExecutor) global.__executor = this.jupiterExecutor;
+    if (this.liveExecutionExecutor) global.__executor = this.liveExecutionExecutor;
 
     if (this.autonomySidecar) {
       this.autonomySidecar.start();
