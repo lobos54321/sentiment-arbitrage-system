@@ -82,6 +82,12 @@ module.exports = {
                 SENTIMENT_DB: '/app/data/sentiment.db',
                 PAPER_DB: '/app/data/paper_trades.db',
                 KLINE_DB: '/app/data/kline_cache.db',
+                PAPER_EXECUTION_PENALTY_ENABLED: 'true',
+                PAPER_BUY_SLIPPAGE_BPS: '35',
+                PAPER_SELL_SLIPPAGE_BPS: '50',
+                PAPER_BUY_DELAY_BPS: '15',
+                PAPER_SELL_DELAY_BPS: '25',
+                PAPER_FEE_BPS: '8',
             },
             kill_timeout: 30000
         },

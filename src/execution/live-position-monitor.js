@@ -21,9 +21,9 @@
 import Database from 'better-sqlite3';
 
 export class LivePositionMonitor {
-  constructor(priceMonitor, executor, riskManager = null) {
+  constructor(priceMonitor, liveExecution, riskManager = null) {
     this.priceMonitor = priceMonitor;
-    this.executor = executor;
+    this.liveExecution = liveExecution;
     this.riskManager = riskManager;
 
     // 持仓 Map<tokenCA, position>
@@ -173,11 +173,11 @@ export class LivePositionMonitor {
     new Promise(async (resolve) => {
       try {
         await new Promise(r => setTimeout(r, 3000)); // 等链上确认
-        const postSellBalance = await this.executor.getTokenBalance(pos.tokenCA);
+        const postSellBalance = await this.liveExecution.getTokenBalance(pos.tokenCA);
         if (postSellBalance.amount > 0) {
           console.log(`   ⚠️  卖出后仍有残余 ${postSellBalance.amount} tokens，尝试清理...`);
           try {
-            const cleanupResult = await this.executor.sell(pos.tokenCA, postSellBalance.amount);
+            const cleanupResult = await this.liveExecution.sell(pos.tokenCA, postSellBalance.amount);
             if (cleanupResult.success) {
               const cleanupSol = cleanupResult.amountOut || 0;
               pos.totalSolReceived += cleanupSol;
@@ -217,7 +217,7 @@ export class LivePositionMonitor {
       if (failedSells.length === 0) return;
 
       // 🔧 BUG FIX: 检查 SOL 余额是否足够
-      const solBalance = await this.executor.getSolBalance();
+      const solBalance = await this.liveExecution.getSolBalance();
       if (solBalance < 0.02) {
         console.log(`\n🔍 [钱包扫描] SOL 余额不足 (${solBalance.toFixed(4)})，跳过扫描`);
         return;
@@ -234,7 +234,7 @@ export class LivePositionMonitor {
           `).run(currentRetry, row.id);
 
           // 查询实际钱包余额
-          const balance = await this.executor.getTokenBalance(row.token_ca);
+          const balance = await this.liveExecution.getTokenBalance(row.token_ca);
           if (balance.amount <= 0) {
             // token 已经不在钱包里了（可能手动卖了或转走了）
             console.log(`   ✓ $${row.symbol} 已不在钱包中，标记为手动处理`);
@@ -251,12 +251,12 @@ export class LivePositionMonitor {
           console.log(`   🚨 紧急卖出 $${row.symbol} | ${balance.uiAmount} tokens | 重试: ${currentRetry}/${this.maxWalletScanRetries}`);
 
           // 使用紧急卖出模式
-          const result = await this.executor.emergencySell(row.token_ca, balance.amount);
+          const result = await this.liveExecution.emergencySell(row.token_ca, balance.amount);
 
           if (result.success) {
             // 再次检查余额确认卖出成功
             await new Promise(r => setTimeout(r, 2000));
-            const balanceAfter = await this.executor.getTokenBalance(row.token_ca);
+            const balanceAfter = await this.liveExecution.getTokenBalance(row.token_ca);
 
             if (balanceAfter.amount <= 0) {
               // 获取实际收到的 SOL（通过查询 SOL 余额变化估算）
@@ -919,7 +919,7 @@ export class LivePositionMonitor {
       }
 
       // 执行卖出
-      const result = await this.executor.sell(pos.tokenCA, sellAmount);
+      const result = await this.liveExecution.sell(pos.tokenCA, sellAmount);
 
       if (!result.success) {
         throw new Error(result.error || 'Partial sell failed');
@@ -943,7 +943,7 @@ export class LivePositionMonitor {
       new Promise(async (resolve) => {
         try {
           await new Promise(r => setTimeout(r, 3000));
-          const realBalance = await this.executor.getTokenBalance(pos.tokenCA);
+          const realBalance = await this.liveExecution.getTokenBalance(pos.tokenCA);
           if (realBalance.amount > 0 && realBalance.amount !== pos.tokenAmount) {
             console.log(`   🔄 余额同步: 跟踪=${pos.tokenAmount} 链上=${realBalance.amount} → 使用链上值`);
             pos.tokenAmount = realBalance.amount;
@@ -1009,7 +1009,7 @@ export class LivePositionMonitor {
     let sellSuccess = false;
     try {
       // 先检查余额，避免无效卖出
-      const balance = await this.executor.getTokenBalance(pos.tokenCA);
+      const balance = await this.liveExecution.getTokenBalance(pos.tokenCA);
       if (balance.amount <= 0) {
         console.log(`   ⚠️  余额为0，可能已被卖出`);
         pos.closed = true;
@@ -1030,7 +1030,7 @@ export class LivePositionMonitor {
       const sellAmount = sellPct >= 100 ? actualBalance : Math.floor(actualBalance * (sellPct / 100));
 
       if (sellAmount > 0) {
-        const result = await this.executor.sell(pos.tokenCA, sellAmount);
+        const result = await this.liveExecution.sell(pos.tokenCA, sellAmount);
 
         if (!result.success) {
           throw new Error(result.error || 'Sell failed');
@@ -1061,7 +1061,7 @@ export class LivePositionMonitor {
         // 记录亏损
         if (pos.totalSolReceived < pos.entrySol) {
           const loss = pos.entrySol - pos.totalSolReceived;
-          this.executor.recordLoss(loss);
+          this.liveExecution.recordLoss(loss);
         }
       }
     } catch (error) {
@@ -1100,10 +1100,10 @@ export class LivePositionMonitor {
         
         // 🔧 v14.6 FIX: 尝试用链上余额做最后一次紧急卖出
         try {
-          const emergBalance = await this.executor.getTokenBalance(pos.tokenCA);
+          const emergBalance = await this.liveExecution.getTokenBalance(pos.tokenCA);
           if (emergBalance.amount > 0) {
             console.log(`   🚨 钱包仍有 ${emergBalance.amount} tokens，尝试紧急清理...`);
-            const emergResult = await this.executor.emergencySell(pos.tokenCA, emergBalance.amount);
+            const emergResult = await this.liveExecution.emergencySell(pos.tokenCA, emergBalance.amount);
             if (emergResult.success) {
               console.log(`   ✅ 紧急清理成功`);
             } else {
@@ -1231,9 +1231,9 @@ export class LivePositionMonitor {
 
       for (const row of rows) {
         // 先检查链上余额，如果为 0 说明已手动卖出（包括 status='selling' 时崩溃后实际已卖出的情况）
-        if (this.executor) {
+        if (this.liveExecution) {
           try {
-            const balance = await this.executor.getTokenBalance(row.token_ca);
+            const balance = await this.liveExecution.getTokenBalance(row.token_ca);
             if (balance.amount <= 0) {
               const exitReason = row.status === 'selling' ? 'SELL_COMPLETED_BEFORE_CRASH' : 'MANUAL_SELL';
               const solReceived = row.total_sol_received || 0;

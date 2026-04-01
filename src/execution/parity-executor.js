@@ -127,6 +127,13 @@ export class ParityExecutor {
     return this.executor.getSolBalance();
   }
 
+  recordLoss(lossSol) {
+    if (typeof this.executor?.recordLoss === 'function') {
+      return this.executor.recordLoss(lossSol);
+    }
+    return undefined;
+  }
+
   _applyPaperPenalty(side, quote, opts = {}) {
     if (!quote?.success) {
       return {

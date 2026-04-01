@@ -20,7 +20,6 @@ import { HardGateFilter } from '../gates/hard-gates.js';
 import { ExitGateFilter } from '../gates/exit-gates.js';
 import { PositionSizer } from '../decision/position-sizer.js';
 import { GMGNTelegramExecutor } from '../execution/gmgn-telegram-executor.js';
-import { JupiterUltraExecutor } from '../execution/jupiter-ultra-executor.js';
 import ClaudeAnalyst from '../utils/claude-analyst.js';
 import { generatePremiumBuyPrompt } from '../prompts/premium-signal-prompts.js';
 import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
@@ -47,7 +46,7 @@ export class PremiumSignalEngine {
     this.exitGateFilter = new ExitGateFilter(config);
     this.positionSizer = new PositionSizer(config, db);
     this.executor = new GMGNTelegramExecutor(config, db);
-    this.jupiterExecutor = null; // 实盘模式下初始化
+    this.liveExecution = null; // 实盘模式下注入共享执行器
     this.livePositionMonitor = null; // 外部注入
     this.livePriceMonitor = null; // 外部注入（shadow 也可用）
     this.buzzScanner = null; // 需要 setTelegramClient 初始化
@@ -115,10 +114,10 @@ export class PremiumSignalEngine {
   /**
    * 设置 Jupiter 执行器和实盘仓位监控（由外部注入）
    */
-  setLiveComponents(jupiterExecutor, livePositionMonitor) {
-    this.jupiterExecutor = jupiterExecutor;
+  setLiveComponents(liveExecution, livePositionMonitor) {
+    this.liveExecution = liveExecution;
     this.livePositionMonitor = livePositionMonitor;
-    console.log('✅ [Premium Engine] Jupiter + LivePositionMonitor 已注入');
+    console.log('✅ [Premium Engine] LiveExecution + LivePositionMonitor 已注入');
   }
 
   _checkEntryRisk(symbol, context = 'ENTRY') {
@@ -154,7 +153,7 @@ export class PremiumSignalEngine {
       // 初始化执行器（非 shadow 模式）
       if (!this.shadowMode && this.autoBuyEnabled) {
         // 优先用 Jupiter，fallback 到 GMGN Telegram
-        if (this.jupiterExecutor) {
+        if (this.liveExecution) {
           console.log('✅ [Premium Engine] 使用 Jupiter Swap 执行器');
         } else {
           await this.executor.initialize();
@@ -570,9 +569,9 @@ export class PremiumSignalEngine {
       }
 
       // SOL 余额检查
-      if (this.jupiterExecutor) {
+      if (this.liveExecution) {
         try {
-          const solBalance = await this.jupiterExecutor.getSolBalance();
+          const solBalance = await this.liveExecution.getSolBalance();
           const minRequired = finalSize + 0.025;
           if (solBalance < minRequired) {
             console.log(`⛔ [余额不足] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)} → 跳过`);
@@ -589,13 +588,13 @@ export class PremiumSignalEngine {
 
       try {
         let tradeResult;
-        if (this.jupiterExecutor) {
-          tradeResult = await this.jupiterExecutor.buy(ca, finalSize, { mc: mc || 0 });
+        if (this.liveExecution) {
+          tradeResult = await this.liveExecution.buy(ca, finalSize, { mc: mc || 0 });
 
           if (tradeResult.success && this.livePositionMonitor) {
             // 等待余额更新
             await new Promise(r => setTimeout(r, 3000));
-            const balance = await this.jupiterExecutor.getTokenBalance(ca);
+            const balance = await this.liveExecution.getTokenBalance(ca);
 
             if (balance.amount <= 0) {
               console.error(`❌ [验证失败] 买入后余额为0，交易可能失败`);
@@ -1142,7 +1141,7 @@ export class PremiumSignalEngine {
     if (this.livePositionMonitor) {
       this.livePositionMonitor.stop();
     }
-    if (!this.shadowMode && !this.jupiterExecutor) {
+    if (!this.shadowMode && !this.liveExecution) {
       await this.executor.disconnect();
     }
     console.log('⏹️  [Premium Engine] 已停止');
@@ -1201,9 +1200,9 @@ export class PremiumSignalEngine {
     }
 
     // SOL 余额检查
-    if (this.jupiterExecutor) {
+    if (this.liveExecution) {
       try {
-        const solBalance = await this.jupiterExecutor.getSolBalance();
+        const solBalance = await this.liveExecution.getSolBalance();
         const minRequired = finalSize + 0.025;
         if (solBalance < minRequired) {
           console.log(`💤 [LIVE未就绪] SOL余额: ${solBalance.toFixed(4)} < 需要: ${minRequired.toFixed(4)}，本次仅保留 paper 结果`);
@@ -1225,11 +1224,11 @@ export class PremiumSignalEngine {
 
     try {
       let tradeResult;
-      if (this.jupiterExecutor) {
-        tradeResult = await this.jupiterExecutor.buy(ca, finalSize, { mc: signal.market_cap || 0 });
+      if (this.liveExecution) {
+        tradeResult = await this.liveExecution.buy(ca, finalSize, { mc: signal.market_cap || 0 });
         if (tradeResult.success && this.livePositionMonitor) {
           await new Promise(r => setTimeout(r, 3000));
-          const balance = await this.jupiterExecutor.getTokenBalance(ca);
+          const balance = await this.liveExecution.getTokenBalance(ca);
           if (balance.amount <= 0) {
             console.error(`❌ [验证失败] 买入后余额为0，交易可能失败`);
             this.stats.errors++;
