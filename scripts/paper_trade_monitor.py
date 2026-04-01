@@ -128,7 +128,7 @@ def load_active_strategy_config():
         'strategyId': DEFAULT_STRATEGY_ID,
         'strategyRole': DEFAULT_STRATEGY_ROLE,
         'entryTimingFilters': {'minSuperIndex': 80},
-        'paperRiskCaps': {'maxPositions': 5, 'positionSizeSol': 0.06},
+        'paperRiskCaps': {'maxPositions': 50, 'positionSizeSol': 0.06},
         'stageRules': {
             'stage1Exit': dict(DEFAULT_STAGE1_EXIT),
             'stage2A': dict(DEFAULT_STAGE2A),
@@ -170,11 +170,17 @@ def get_paper_position_size_sol(strategy_config):
 
 
 def get_paper_max_positions(strategy_config):
+    override = os.environ.get('PAPER_MAX_POSITIONS_OVERRIDE')
+    if override is not None and str(override).strip() != '':
+        try:
+            return max(1, int(override))
+        except Exception:
+            pass
     caps = (strategy_config or {}).get('paperRiskCaps') or {}
     try:
-        max_positions = int(caps.get('maxPositions', 5))
+        max_positions = int(caps.get('maxPositions', 50))
     except Exception:
-        max_positions = 5
+        max_positions = 50
     return max(1, max_positions)
 
 
