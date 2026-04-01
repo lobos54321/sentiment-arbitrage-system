@@ -2331,14 +2331,38 @@ def run_monitor(db):
 
             for trade_id, pos in list(positions.items()):
                 try:
-                    min_timestamp_ms = (int(pos.last_bar_ts) * 1000) if pos.last_bar_ts else None
-                    snapshot = get_live_price_snapshot(pos.token_ca, pos.pool_address, min_timestamp_ms=min_timestamp_ms)
-                    if not snapshot:
-                        continue
-                    bar_ts = int(snapshot['ts'])
-                    price = snapshot['price']
-                    if price is None or price <= 0:
-                        continue
+                    mark_execution = simulate_exit_execution(
+                        pos.token_ca,
+                        pos.token_amount_raw,
+                        pos.token_decimals,
+                        pos.strategy_stage,
+                        strategy_id=strategy_id,
+                        lifecycle_id=pos.lifecycle_id,
+                    )
+                    mark_quote_reason = mark_execution.get('failureReason')
+                    mark_quote_route = mark_execution.get('routeAvailable')
+                    mark_quote_price = mark_execution.get('effectivePrice')
+                    mark_quote_out = mark_execution.get('quotedOutAmount')
+
+                    bar_ts = None
+                    price = None
+                    mark_source = 'quote'
+                    if mark_execution.get('success'):
+                        if mark_quote_price is not None and mark_quote_price > 0:
+                            price = (mark_quote_price * sol_price) if sol_price else mark_quote_price
+                            bar_ts = int((mark_execution.get('quoteTs') or time.time() * 1000) / 1000)
+                    if price is None or price <= 0 or bar_ts is None:
+                        min_timestamp_ms = (int(pos.last_bar_ts) * 1000) if pos.last_bar_ts else None
+                        snapshot = get_live_price_snapshot(pos.token_ca, pos.pool_address, min_timestamp_ms=min_timestamp_ms)
+                        if not snapshot:
+                            continue
+                        bar_ts = int(snapshot['ts'])
+                        price = snapshot['price']
+                        if price is None or price <= 0:
+                            continue
+                        snapshot_source = snapshot.get('source') or 'snapshot'
+                        mark_source = f"{snapshot_source}|quote:{mark_quote_reason or 'unavailable'}"
+
                     should_exit, reason, pnl = pos.check_exit(price, bar_ts)
                     lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts))
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
@@ -2349,16 +2373,29 @@ def run_monitor(db):
                     """, (pos.peak_pnl, int(pos.trailing_active), pos.bars_held, f"{pos.strategy_stage}_open", lifecycle['first_peak_pct'], pos.trade_id))
                     db.commit()
                     if should_exit:
-                        to_close.append((trade_id, reason, pnl, price, bar_ts))
-                    time.sleep(0.2)
+                        trigger_price_text = f"{price:.10f}" if price is not None else 'na'
+                        quote_price_text = 'na'
+                        if mark_quote_price is not None and mark_quote_price > 0:
+                            quote_price_value = (mark_quote_price * sol_price) if sol_price else mark_quote_price
+                            quote_price_text = f"{quote_price_value:.10f}"
+                        quote_out_text = f"{float(mark_quote_out):.6f}" if mark_quote_out is not None else 'na'
+                        log.info(
+                            f"  Exit trigger {pos.symbol}/{pos.strategy_stage}: reason={reason} "
+                            f"trigger_pnl={pnl*100:+.1f}% trigger_price=${trigger_price_text} "
+                            f"source={mark_source} quote_route={mark_quote_route} "
+                            f"quote_reason={mark_quote_reason or '-'} quote_price=${quote_price_text} "
+                            f"quote_out={quote_out_text}"
+                        )
+                        to_close.append((trade_id, reason, pnl, price, bar_ts, mark_execution if mark_execution.get('success') else None, mark_source))
+                    time.sleep(0.05)
                 except Exception as e:
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
-            for trade_id, reason, pnl, exit_price, exit_ts in to_close:
+            for trade_id, reason, pnl, exit_price, exit_ts, precomputed_exit_execution, mark_source in to_close:
                 pos = positions.get(trade_id)
                 if pos is None:
                     continue
-                exit_execution = simulate_exit_execution(
+                exit_execution = precomputed_exit_execution or simulate_exit_execution(
                     pos.token_ca,
                     pos.token_amount_raw,
                     pos.token_decimals,
@@ -2460,7 +2497,15 @@ def run_monitor(db):
                             (stage3_peak_price, pos.trade_id)
                         )
                         db.commit()
-                log.info(f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={realized_pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} lifecycle={pos.lifecycle_id}")
+                trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'
+                quoted_price_text = f"{effective_exit_price:.10f}" if effective_exit_price is not None else 'na'
+                quote_out_text = f"{float(actual_out):.6f}" if actual_out is not None else 'na'
+                log.info(
+                    f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={realized_pnl*100:+.1f}% "
+                    f"trigger_pnl={pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} "
+                    f"trigger_price=${trigger_price_text} quoted_price=${quoted_price_text} "
+                    f"quote_out={quote_out_text} source={mark_source} lifecycle={pos.lifecycle_id}"
+                )
 
             for lifecycle_id, lifecycle in list(lifecycles.items()):
                 if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
