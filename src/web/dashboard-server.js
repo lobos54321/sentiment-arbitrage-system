@@ -106,6 +106,94 @@ function getDb() {
   return db;
 }
 
+function getPaperDbPath() {
+  const paperDbPath = process.env.PAPER_DB || './data/paper_trades.db';
+  return isAbsolute(paperDbPath) ? paperDbPath : join(projectRoot, paperDbPath);
+}
+
+function getTableColumns(database, tableName) {
+  return new Set(database.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
+}
+
+function cleanupOpenPaperPositions({ reason = 'manual_cleanup', pnlPct = 0 } = {}) {
+  const paperDbPath = getPaperDbPath();
+  if (!fs.existsSync(paperDbPath)) {
+    const error = new Error(`Paper trades database not found at ${paperDbPath}`);
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const paperDb = new Database(paperDbPath);
+  try {
+    const tableExists = paperDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='paper_trades'`).get();
+    if (!tableExists) {
+      const error = new Error('paper_trades table not found');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const columns = getTableColumns(paperDb, 'paper_trades');
+    const openRows = paperDb.prepare(
+      `SELECT id, symbol, strategy_stage FROM paper_trades WHERE exit_reason IS NULL ORDER BY id ASC`
+    ).all();
+
+    if (!openRows.length) {
+      return {
+        dbPath: paperDbPath,
+        updated: 0,
+        reason,
+        pnlPct,
+        openBefore: 0,
+        symbols: [],
+      };
+    }
+
+    const assignments = [
+      `exit_price = COALESCE(exit_price, 0)`,
+      `exit_ts = ?`,
+      `exit_reason = ?`,
+      `pnl_pct = ?`,
+    ];
+    const includeStageOutcome = columns.has('stage_outcome');
+    if (includeStageOutcome) assignments.push(`stage_outcome = ?`);
+    if (columns.has('trailing_active')) assignments.push(`trailing_active = 0`);
+    if (columns.has('exit_execution_json')) assignments.push(`exit_execution_json = NULL`);
+    if (columns.has('exit_quote_failures')) assignments.push(`exit_quote_failures = 0`);
+    if (columns.has('last_exit_quote_failure')) assignments.push(`last_exit_quote_failure = NULL`);
+
+    const exitTs = Math.floor(Date.now() / 1000);
+    const updateStmt = paperDb.prepare(`
+      UPDATE paper_trades
+      SET ${assignments.join(',\n          ')}
+      WHERE id = ?
+    `);
+
+    const updateTxn = paperDb.transaction((rows) => {
+      for (const row of rows) {
+        const stage = row.strategy_stage || 'stage1';
+        const params = [exitTs, reason, pnlPct];
+        if (includeStageOutcome) {
+          params.push(`${stage}_${reason}`);
+        }
+        params.push(row.id);
+        updateStmt.run(...params);
+      }
+    });
+    updateTxn(openRows);
+
+    return {
+      dbPath: paperDbPath,
+      updated: openRows.length,
+      reason,
+      pnlPct,
+      openBefore: openRows.length,
+      symbols: openRows.slice(0, 20).map(row => row.symbol || `id:${row.id}`),
+    };
+  } finally {
+    paperDb.close();
+  }
+}
+
 /**
  * HTML 模板
  */
@@ -1906,6 +1994,31 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (url.pathname === '/api/paper-trades/cleanup') {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Use POST' }));
+      return;
+    }
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const reason = (url.searchParams.get('reason') || 'manual_cleanup').trim() || 'manual_cleanup';
+      const pnlPctRaw = url.searchParams.get('pnl_pct') || '0';
+      const pnlPct = Number(pnlPctRaw);
+      if (!Number.isFinite(pnlPct)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'pnl_pct must be a valid number' }));
+        return;
+      }
+      const result = cleanupOpenPaperPositions({ reason, pnlPct });
+      console.log(`🧹 Cleaned ${result.updated} open paper positions reason=${reason} pnlPct=${pnlPct} db=${result.dbPath}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, ...result }));
+    } catch (e) {
+      res.writeHead(e.statusCode || 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
   } else if (url.pathname === '/api/download/database') {
     // 数据库下载端点 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
