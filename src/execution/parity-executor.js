@@ -37,7 +37,9 @@ export class ParityExecutor {
   }
 
   async simulateBuy(tokenCA, amountSol, opts = {}) {
-    const quote = await this.executor.getBuyQuote(tokenCA, amountSol, opts);
+    const quote = this.executor.getPublicBuyQuote
+      ? await this.executor.getPublicBuyQuote(tokenCA, amountSol, opts)
+      : await this.executor.getBuyQuote(tokenCA, amountSol, opts);
     const adjusted = this._applyPaperPenalty('buy', quote, opts);
     return stripInternalFields({ ...adjusted, mode: 'paper' });
   }

@@ -122,6 +122,42 @@ export class JupiterUltraExecutor {
     }
   }
 
+  async getPublicBuyQuote(tokenCA, amountSol, opts = {}) {
+    const amountLamports = Math.floor(Number(amountSol || 0) * LAMPORTS_PER_SOL);
+    if (!Number.isFinite(amountLamports) || amountLamports <= 0) {
+      return this._buildFailureResult('buy', 'quote_failed', {
+        tokenCA,
+        inputMint: SOL_MINT,
+        outputMint: tokenCA,
+        inputAmount: Number(amountSol || 0),
+        inputAmountRaw: null,
+        quoteTs: Date.now()
+      });
+    }
+
+    try {
+      const order = await this._getPublicOrder(SOL_MINT, tokenCA, amountLamports);
+      return await this._normalizeQuoteResult('buy', order, {
+        tokenCA,
+        inputMint: SOL_MINT,
+        outputMint: tokenCA,
+        inputAmount: Number(amountSol || 0),
+        inputAmountRaw: amountLamports,
+        opts
+      });
+    } catch (error) {
+      return this._buildFailureResult('buy', this._classifyFailureReason(error?.message || 'quote_failed'), {
+        tokenCA,
+        inputMint: SOL_MINT,
+        outputMint: tokenCA,
+        inputAmount: Number(amountSol || 0),
+        inputAmountRaw: amountLamports,
+        quoteTs: Date.now(),
+        error
+      });
+    }
+  }
+
   async getSellQuote(tokenCA, tokenAmount, opts = {}) {
     const rawAmount = Math.floor(Number(tokenAmount || 0));
     if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
