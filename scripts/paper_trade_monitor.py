@@ -581,17 +581,19 @@ def parse_super_index(description):
     Parse Super Index from NOT_ATH description.
     Supports formats:
       ✡ Super Index： 119🔮
+      ✡ **Super Index**： 119🔮
       ✡ Super Index： ✡ x 82
     Returns int or None.
     """
     if not description:
         return None
+    normalized = str(description).replace('**', '').replace('\r', '')
     # Try format: " 119🔮"
-    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮', description)
+    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮', normalized)
     if m:
         return int(m.group(1))
     # Try format: "✡ x 82"
-    m = re.search(r'Super\s+Index[：:]\s*✡\s*x\s*(\d+)', description, re.IGNORECASE)
+    m = re.search(r'Super\s+Index[：:]\s*✡\s*x\s*(\d+)', normalized, re.IGNORECASE)
     if m:
         return int(m.group(1))
     return None
