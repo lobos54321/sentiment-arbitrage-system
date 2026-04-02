@@ -368,6 +368,17 @@ def sync_position_from_monitor_state(pos, allow_token_amount_override=False):
         state['tokenDecimals'] = int(pos.token_decimals or state.get('tokenDecimals') or 0)
 
 
+def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, final_exit_sol=None):
+    monitor_state = state if isinstance(state, dict) else {}
+    entry_sol = _safe_float(monitor_state.get('entrySol'), fallback_position_size_sol)
+    total_sol_received = _safe_float(monitor_state.get('totalSolReceived'), None)
+    if total_sol_received is None and final_exit_sol is not None:
+        total_sol_received = _safe_float(final_exit_sol, None)
+    if total_sol_received is None or entry_sol <= 0:
+        return None, total_sol_received, entry_sol
+    return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol
+
+
 # === Database Setup ===
 
 def init_paper_db(db_path=None):
@@ -2861,7 +2872,14 @@ def run_monitor(db):
                 effective_exit_price = (quoted_exit_price * sol_price) if (quoted_exit_price is not None and sol_price) else (quoted_exit_price or exit_price)
                 realized_pnl = pnl
                 actual_out = exit_execution.get('quotedOutAmount')
-                if actual_out is not None and pos.position_size_sol:
+                lifecycle_realized_pnl, total_realized_sol, lifecycle_entry_sol = lifecycle_realized_pnl_from_state(
+                    pos.monitor_state,
+                    fallback_position_size_sol=pos.position_size_sol,
+                    final_exit_sol=actual_out,
+                )
+                if lifecycle_realized_pnl is not None:
+                    realized_pnl = lifecycle_realized_pnl
+                elif actual_out is not None and pos.position_size_sol:
                     realized_pnl = (float(actual_out) - float(pos.position_size_sol)) / float(pos.position_size_sol)
                 db.execute("""
                     UPDATE paper_trades
@@ -2882,6 +2900,8 @@ def run_monitor(db):
                         'markSource': mark_source,
                         'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
                         'realizedPnlPct': _safe_float(realized_pnl * 100.0, None),
+                        'totalRealizedSol': _safe_float(total_realized_sol, None),
+                        'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
                         'triggerPriceUsd': _safe_float(exit_price, None),
                         'effectiveExitPriceUsd': _safe_float(effective_exit_price, None),
                     })), pos.trade_id
@@ -2935,11 +2955,12 @@ def run_monitor(db):
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'
                 quoted_price_text = f"{effective_exit_price:.10f}" if effective_exit_price is not None else 'na'
                 quote_out_text = f"{float(actual_out):.6f}" if actual_out is not None else 'na'
+                total_realized_text = f"{float(total_realized_sol):.6f}" if total_realized_sol is not None else 'na'
                 log.info(
                     f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={realized_pnl*100:+.1f}% "
                     f"trigger_pnl={trigger_pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} "
                     f"trigger_price=${trigger_price_text} quoted_price=${quoted_price_text} "
-                    f"quote_out={quote_out_text} source={mark_source} lifecycle={pos.lifecycle_id}"
+                    f"quote_out={quote_out_text} total_realized_sol={total_realized_text} source={mark_source} lifecycle={pos.lifecycle_id}"
                 )
 
             for lifecycle_id, lifecycle in list(lifecycles.items()):
