@@ -1117,6 +1117,19 @@ def normalize_monitor_state_json(monitor_state):
     return json.dumps(monitor_state or {}, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
 
+def has_partial_state_gap(token_amount_raw, entry_execution, monitor_state):
+    execution = entry_execution if isinstance(entry_execution, dict) else {}
+    state = monitor_state if isinstance(monitor_state, dict) else {}
+    original_token_amount_raw = _safe_int(execution.get('quotedOutAmountRaw'), 0)
+    remaining_token_amount_raw = _safe_int(token_amount_raw, 0)
+    if original_token_amount_raw <= 0 or remaining_token_amount_raw <= 0:
+        return False
+    if remaining_token_amount_raw >= original_token_amount_raw:
+        return False
+    partial_state_fields = ('tp1', 'tp2', 'tp3', 'tp4', 'soldPct', 'totalSolReceived', 'lockedPnl', 'moonbag')
+    return not any(state.get(field) not in (None, False, 0, 0.0, '') for field in partial_state_fields)
+
+
 def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entry_ts, position_size_sol, token_amount_raw, token_decimals, peak_pnl=0.0, trailing_active=False, bars_held=0, last_mark_ts=None):
     sanitized = dict(monitor_state or {})
     sanitized['tokenCA'] = token_ca or sanitized.get('tokenCA') or None
@@ -2221,9 +2234,19 @@ def log_pending_entry_issue(pending, message, level='info', force=False):
         log.info(f"{prefix} {message}")
 
 
-def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_route', pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT, failure_count_field='noRouteFailureCount'):
+def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decision_type='guard_close', audit_extra=None, log_prefix='GUARD'):
     exit_ts = int(time.time())
     stage_outcome = f"{pos.strategy_stage}_{reason}"
+    audit_payload = {
+        'auditVersion': 1,
+        'stage': pos.strategy_stage,
+        'lifecycleId': pos.lifecycle_id,
+        'decisionType': decision_type,
+        'failureReason': pos.last_exit_quote_failure,
+        'triggerPnlPct': _safe_float(float(pnl_pct) * 100.0, None),
+    }
+    if isinstance(audit_extra, dict):
+        audit_payload.update(audit_extra)
     db.execute(
         """
         UPDATE paper_trades
@@ -2241,15 +2264,7 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
             stage_outcome,
             pos.exit_quote_failures,
             pos.last_exit_quote_failure,
-            json.dumps(build_execution_audit(None, {
-                'auditVersion': 1,
-                'stage': pos.strategy_stage,
-                'lifecycleId': pos.lifecycle_id,
-                'decisionType': 'trap_close',
-                'failureReason': pos.last_exit_quote_failure,
-                'triggerPnlPct': _safe_float(float(pnl_pct) * 100.0, None),
-                failure_count_field: pos.exit_quote_failures,
-            })),
+            json.dumps(build_execution_audit(None, audit_payload)),
             pos.trade_id,
         )
     )
@@ -2259,8 +2274,21 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
         lifecycle['stage3_blacklisted'] = True
         lifecycle['stage3_attempted'] = True
     log.warning(
-        f"  TRAPPED {pos.symbol}/{pos.strategy_stage}: {pos.last_exit_quote_failure} failures={pos.exit_quote_failures} "
-        f"→ close as {reason} pnl={float(pnl_pct) * 100:+.1f}%"
+        f"  {log_prefix} {pos.symbol}/{pos.strategy_stage}: reason={reason} pnl={float(pnl_pct) * 100:+.1f}% "
+        f"lifecycle={pos.lifecycle_id}"
+    )
+
+
+def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_route', pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT, failure_count_field='noRouteFailureCount'):
+    close_position_with_guard_reason(
+        db,
+        pos,
+        lifecycle,
+        reason=reason,
+        pnl_pct=pnl_pct,
+        decision_type='trap_close',
+        audit_extra={failure_count_field: pos.exit_quote_failures},
+        log_prefix='TRAPPED',
     )
 
 
@@ -2354,6 +2382,22 @@ def run_monitor(db):
                 f"  Restored {pos.symbol}/{pos.strategy_stage} without token_amount_raw; exit quote parity may be unreliable "
                 f"lifecycle={pos.lifecycle_id}"
             )
+        if has_partial_state_gap(recovered['token_amount_raw'], parse_entry_execution(r['entry_execution_json']), raw_monitor_state):
+            lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts))
+            close_position_with_guard_reason(
+                db,
+                pos,
+                lifecycle,
+                reason='legacy_missing_partial_state',
+                pnl_pct=0.0,
+                decision_type='legacy_partial_guard',
+                audit_extra={
+                    'originalTokenAmountRaw': _safe_int((parse_entry_execution(r['entry_execution_json']) or {}).get('quotedOutAmountRaw'), 0),
+                    'remainingTokenAmountRaw': recovered['token_amount_raw'],
+                },
+                log_prefix='LEGACY-GUARD',
+            )
+            continue
         pos.peak_pnl = r['peak_pnl'] or 0
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
