@@ -1579,7 +1579,6 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     });
     routeAvailable = managedMark?.routeAvailable ?? null;
     quoteFailureReason = managedMark?.quoteFailureReason || null;
-    quotedOutAmount = managedMark?.quotedOutAmount ?? null;
 
     if (managedMark?.ok) {
       const markUsd = Number(managedMark.currentPrice || 0);

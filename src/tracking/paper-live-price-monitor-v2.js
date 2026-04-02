@@ -13,6 +13,26 @@ import axios from 'axios';
 import { createClient } from 'redis';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const PAPER_MARK_QUOTE_FRACTION = 0.02;
+
+function getPaperMarkQuoteAmount(tokenAmountRaw, tokenDecimals = 6) {
+  const normalizedAmount = Math.trunc(Number(tokenAmountRaw || 0));
+  const normalizedDecimals = Math.max(0, Math.trunc(Number(tokenDecimals || 0)));
+
+  if (!(normalizedAmount > 0)) {
+    return 0;
+  }
+
+  const minQuoteAmount = Math.max(1, Math.trunc(10 ** normalizedDecimals));
+  if (normalizedAmount <= minQuoteAmount) {
+    return normalizedAmount;
+  }
+
+  return Math.min(
+    normalizedAmount,
+    Math.max(minQuoteAmount, Math.ceil(normalizedAmount * PAPER_MARK_QUOTE_FRACTION))
+  );
+}
 
 export class LivePriceMonitorV2 extends EventEmitter {
   constructor(jupiterExecutor, options = {}) {
@@ -677,8 +697,9 @@ export async function getPaperManagedMark({ tokenCA, tokenAmountRaw, tokenDecima
   const monitor = new LivePriceMonitorV2(executor, { redisEnabled: false });
   const normalizedAmount = Number(tokenAmountRaw || 0);
   const normalizedDecimals = Number(tokenDecimals || 6);
+  const markQuoteAmount = getPaperMarkQuoteAmount(normalizedAmount, normalizedDecimals);
 
-  if (!(tokenCA && normalizedAmount > 0)) {
+  if (!(tokenCA && normalizedAmount > 0 && markQuoteAmount > 0)) {
     return {
       ok: false,
       failureReason: 'missing_mark_inputs',
@@ -689,10 +710,9 @@ export async function getPaperManagedMark({ tokenCA, tokenAmountRaw, tokenDecima
     };
   }
 
-
   let quoteResult;
   try {
-    quoteResult = await monitor._getSwapQuote(tokenCA, normalizedAmount);
+    quoteResult = await monitor._getSwapQuote(tokenCA, markQuoteAmount);
   } catch (error) {
     quoteResult = {
       ok: false,
@@ -703,17 +723,17 @@ export async function getPaperManagedMark({ tokenCA, tokenAmountRaw, tokenDecima
   }
 
   if (quoteResult.ok && quoteResult.quote?.outAmount) {
-    monitor._storeUltraQuote(tokenCA, quoteResult.quote, normalizedAmount, normalizedDecimals);
+    monitor._storeUltraQuote(tokenCA, quoteResult.quote, markQuoteAmount, normalizedDecimals);
     const cached = monitor.priceCache.get(tokenCA);
     return {
       ok: true,
-      source: 'jupiter-quote',
+      source: markQuoteAmount < normalizedAmount ? 'jupiter-quote-mark' : 'jupiter-quote',
       currentPrice: cached?.usdPrice || null,
       currentPriceSol: cached?.nativePrice ?? cached?.price ?? null,
       quoteTsSec: cached?.timestamp ? Math.floor(cached.timestamp / 1000) : Math.floor(Date.now() / 1000),
       routeAvailable: true,
       quoteFailureReason: null,
-      quotedOutAmount: parseInt(quoteResult.quote.outAmount, 10) / 1e9,
+      quotedOutAmount: null,
     };
   }
 
