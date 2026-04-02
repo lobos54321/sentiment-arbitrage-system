@@ -727,7 +727,7 @@ export async function getPaperManagedMark({ tokenCA, tokenAmountRaw, tokenDecima
     const cached = monitor.priceCache.get(tokenCA);
     return {
       ok: true,
-      source: markQuoteAmount < normalizedAmount ? 'jupiter-quote-mark' : 'jupiter-quote',
+      source: 'jupiter-quote-full',
       currentPrice: cached?.usdPrice || null,
       currentPriceSol: cached?.nativePrice ?? cached?.price ?? null,
       quoteTsSec: cached?.timestamp ? Math.floor(cached.timestamp / 1000) : Math.floor(Date.now() / 1000),
