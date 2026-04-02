@@ -21,11 +21,7 @@
 import Database from 'better-sqlite3';
 import {
   hydrateMonitorState,
-  advanceMonitorStateWithPrice,
-  decideNotAthAction,
-  applyPartialSellToState,
   applyExitToState,
-  classifyLifecycleReason,
 } from './notath-monitor-core.js';
 import { getPaperManagedMark } from '../tracking/paper-live-price-monitor-v2.js';
 
@@ -1482,6 +1478,70 @@ function finalizeUpdatedState(state, position = {}, quoteTsSec = 0) {
   };
 }
 
+function evaluateSimpleStageExit(state, exitRules = {}, currentPrice, quoteTsSec) {
+  const entryPrice = toNumber(state.entryPrice, 0);
+  const entryTsMs = Math.max(0, Math.trunc(toNumber(state.entryTime, 0)));
+  const nowTsMs = normalizeTimestampMs(quoteTsSec, entryTsMs);
+  const entryTsSec = Math.floor(entryTsMs / 1000);
+  const nowTsSec = Math.floor(nowTsMs / 1000);
+
+  if (!(entryPrice > 0) || !(currentPrice > 0)) {
+    return {
+      ok: false,
+      triggerPnlPct: null,
+      updatedState: finalizeUpdatedState(state, { entryTs: entryTsSec }, nowTsSec),
+      shouldExit: false,
+      exitReason: null,
+      holdTimeMin: null,
+      justActivatedTrailing: false,
+    };
+  }
+
+  const triggerPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+  const nextHighPnl = Math.max(toNumber(state.highPnl, 0), triggerPnlPct);
+  const trailStartPct = toNumber(exitRules.trailStartPct, 2);
+  const stopLossPct = -Math.abs(toNumber(exitRules.stopLossPct, 3));
+  const trailFactor = toNumber(exitRules.trailFactor, 0.9);
+  const timeoutMin = toNumber(exitRules.timeoutMinutes, 120);
+  const trailingActive = Boolean(state.trailingActive) || nextHighPnl >= trailStartPct;
+  const justActivatedTrailing = !Boolean(state.trailingActive) && trailingActive;
+  const holdTimeMin = Math.max(0, (nowTsMs - entryTsMs) / 60000);
+
+  let shouldExit = false;
+  let exitReason = null;
+  if (!trailingActive && triggerPnlPct <= stopLossPct) {
+    shouldExit = true;
+    exitReason = 'sl';
+  } else if (trailingActive) {
+    const trailFloorPct = nextHighPnl * trailFactor;
+    if (triggerPnlPct <= trailFloorPct) {
+      shouldExit = true;
+      exitReason = 'trail';
+    }
+  }
+  if (!shouldExit && holdTimeMin >= timeoutMin) {
+    shouldExit = true;
+    exitReason = 'timeout';
+  }
+
+  const updatedState = finalizeUpdatedState({
+    ...state,
+    highPnl: nextHighPnl,
+    trailingActive,
+    barsHeld: Math.max(toNumber(state.barsHeld, 0), Math.floor(Math.max(0, nowTsSec - entryTsSec) / 60) + 1),
+  }, { entryTs: entryTsSec }, nowTsSec);
+
+  return {
+    ok: true,
+    triggerPnlPct,
+    updatedState,
+    shouldExit,
+    exitReason,
+    holdTimeMin,
+    justActivatedTrailing,
+  };
+}
+
 export function evaluatePaperLiveManagedExit({ position = {}, mark = {} } = {}) {
   const currentPrice = Number(mark.currentPrice || 0);
   const quoteTsSec = Number(mark.quoteTsSec || 0);
@@ -1614,19 +1674,13 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
   }
 
   const state = buildMonitorState(position);
-  const quoteTsMs = normalizeTimestampMs(quoteTsSec, Date.now());
+  const simpleEval = evaluateSimpleStageExit(state, position.exitRules || {}, currentPrice, quoteTsSec);
 
-  const advanced = advanceMonitorStateWithPrice(state, {
-    price: currentPrice,
-    mc: mark.currentMc,
-    timestamp: quoteTsMs,
-  });
-
-  if (!advanced.valid) {
+  if (!simpleEval.ok) {
     return {
       ok: false,
       action: 'invalid',
-      failureReason: advanced.reason || 'invalid_mark',
+      failureReason: 'invalid_mark',
       updatedState: finalizeUpdatedState(state, position, quoteTsSec),
       markSource,
       currentPrice,
@@ -1637,19 +1691,17 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     };
   }
 
-  const updatedState = finalizeUpdatedState(advanced.state, position, quoteTsSec);
-  const triggerPnlPct = toNumber(advanced.pnl, 0);
+  const updatedState = simpleEval.updatedState;
+  const triggerPnlPct = toNumber(simpleEval.triggerPnlPct, 0);
   const triggerPnl = triggerPnlPct / 100;
 
-  if (advanced.skip) {
+  if (!simpleEval.shouldExit) {
     return {
       ok: true,
       action: 'hold',
-      skip: true,
-      skipReason: advanced.skipReason || 'first_price_wait',
       triggerPnl,
       triggerPnlPct,
-      holdTimeMin: advanced.holdTimeMin,
+      holdTimeMin: simpleEval.holdTimeMin,
       updatedState,
       shouldExit: false,
       markSource,
@@ -1659,38 +1711,12 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
       quoteFailureReason,
       quotedOutAmount,
       execution: preQuote,
-    };
-  }
-
-  const decision = decideNotAthAction(updatedState, {
-    pnl: triggerPnlPct,
-    holdTimeMin: advanced.holdTimeMin,
-    now: quoteTsMs,
-  });
-
-  if (!decision || decision.type === 'hold') {
-    return {
-      ok: true,
-      action: 'hold',
-      triggerPnl,
-      triggerPnlPct,
-      holdTimeMin: advanced.holdTimeMin,
-      updatedState,
-      shouldExit: false,
-      markSource,
-      currentPrice,
-      quoteTsSec,
-      routeAvailable,
-      quoteFailureReason,
-      quotedOutAmount,
-      execution: preQuote,
+      justActivatedTrailing: simpleEval.justActivatedTrailing,
     };
   }
 
   const currentTokenAmount = Math.max(0, Math.trunc(toNumber(updatedState.tokenAmount, 0)));
-  const sellAmount = decision.type === 'partial_sell'
-    ? Math.floor(currentTokenAmount * (toNumber(decision.sellPct, 0) / 100))
-    : currentTokenAmount;
+  const sellAmount = currentTokenAmount;
 
   if (!(sellAmount > 0)) {
     return {
@@ -1700,7 +1726,7 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
       skipReason: 'zero_sell_amount',
       triggerPnl,
       triggerPnlPct,
-      holdTimeMin: advanced.holdTimeMin,
+      holdTimeMin: simpleEval.holdTimeMin,
       updatedState,
       shouldExit: false,
       markSource,
@@ -1728,7 +1754,7 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
   }
 
   let execution = null;
-  if (terminalQuoteFailureReason && decision.type === 'exit' && sellAmount === currentTokenAmount) {
+  if (terminalQuoteFailureReason && sellAmount === currentTokenAmount) {
     execution = {
       ...buildPaperQuoteFailureExecution(
         position,
@@ -1738,13 +1764,12 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
         quoteTsSec,
       ),
       sellAmount,
-      decisionType: decision.type,
-      actionReason: decision.reason,
+      decisionType: 'exit',
+      actionReason: simpleEval.exitReason,
     };
   }
 
   const canReusePreQuote = !execution
-    && decision.type === 'exit'
     && preQuote?.success
     && sellAmount === currentTokenAmount;
 
@@ -1752,8 +1777,8 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     execution = {
       ...preQuote,
       sellAmount,
-      decisionType: decision.type,
-      actionReason: decision.reason,
+      decisionType: 'exit',
+      actionReason: simpleEval.exitReason,
     };
   }
 
@@ -1779,11 +1804,11 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
       action: 'execution_failed',
       triggerPnl,
       triggerPnlPct,
-      holdTimeMin: advanced.holdTimeMin,
+      holdTimeMin: simpleEval.holdTimeMin,
       updatedState,
       shouldExit: false,
-      decisionType: decision.type,
-      actionReason: decision.reason,
+      decisionType: 'exit',
+      actionReason: simpleEval.exitReason,
       execution: {
         ...failureExecution,
         failureReason: effectiveFailureReason,
@@ -1801,47 +1826,15 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
   const executionResult = {
     ...execution,
     sellAmount,
-    decisionType: decision.type,
-    actionReason: decision.reason,
+    decisionType: 'exit',
+    actionReason: simpleEval.exitReason,
   };
-
-  if (decision.type === 'partial_sell') {
-    applyPartialSellToState(updatedState, {
-      tpName: decision.tpName,
-      sellPct: toNumber(decision.sellPct, 0),
-      sellAmount,
-      solReceived,
-      currentPnl: triggerPnlPct,
-    });
-    return {
-      ok: true,
-      action: 'partial_sell',
-      triggerPnl,
-      triggerPnlPct,
-      holdTimeMin: advanced.holdTimeMin,
-      updatedState,
-      shouldExit: false,
-      tpName: decision.tpName,
-      sellPct: toNumber(decision.sellPct, 0),
-      actionReason: decision.reason,
-      execution: executionResult,
-      markSource,
-      currentPrice,
-      quoteTsSec,
-      routeAvailable: execution?.routeAvailable ?? routeAvailable,
-      quoteFailureReason: execution?.failureReason || quoteFailureReason,
-      quotedOutAmount: execution?.quotedOutAmount ?? quotedOutAmount,
-    };
-  }
 
   applyExitToState(updatedState, { solReceived });
   const realizedPnl = updatedState.entrySol > 0
     ? (updatedState.totalSolReceived - updatedState.entrySol) / updatedState.entrySol
     : triggerPnl;
-  const lifecycleReason = classifyLifecycleReason(decision.reason, {
-    tp1: updatedState.tp1,
-    finalPnlPct: realizedPnl * 100,
-  });
+  const lifecycleReason = simpleEval.exitReason;
 
   return {
     ok: true,
@@ -1849,11 +1842,11 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     shouldExit: true,
     triggerPnl,
     triggerPnlPct,
-    holdTimeMin: advanced.holdTimeMin,
+    holdTimeMin: simpleEval.holdTimeMin,
     updatedState,
     lifecycleReason,
     exitReason: lifecycleReason,
-    actionReason: decision.reason,
+    actionReason: lifecycleReason,
     realizedPnl,
     execution: executionResult,
     markSource,
@@ -1862,5 +1855,6 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     routeAvailable: execution?.routeAvailable ?? routeAvailable,
     quoteFailureReason: execution?.failureReason || quoteFailureReason,
     quotedOutAmount: execution?.quotedOutAmount ?? quotedOutAmount,
+    justActivatedTrailing: simpleEval.justActivatedTrailing,
   };
 }
