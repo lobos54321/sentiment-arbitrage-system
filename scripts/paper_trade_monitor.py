@@ -40,10 +40,11 @@ except Exception:
 # === Configuration ===
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
+CONFIG_DIR = PROJECT_ROOT / 'config'
 SENTIMENT_DB = os.environ.get('SENTIMENT_DB', str(DATA_DIR / 'sentiment_arb.db'))
 PAPER_DB = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
 KLINE_DB = os.environ.get('KLINE_DB', str(DATA_DIR / 'kline_cache.db'))
-REGISTRY_JSON = os.environ.get('PAPER_STRATEGY_REGISTRY', str(DATA_DIR / 'paper-strategy-registry.json'))
+REGISTRY_JSON = os.environ.get('PAPER_STRATEGY_REGISTRY', str(CONFIG_DIR / 'paper-strategy-registry.json'))
 REMOTE_SIGNAL_URL = os.environ.get('REMOTE_SIGNAL_URL', '').strip()
 REMOTE_SIGNAL_TOKEN = os.environ.get('REMOTE_SIGNAL_TOKEN', '').strip()
 REMOTE_SIGNAL_LOOKBACK = max(50, int(os.environ.get('REMOTE_SIGNAL_LOOKBACK', '500')))
@@ -51,17 +52,17 @@ EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
 
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
-DEFAULT_STAGE1_EXIT = {'stopLossPct': 20, 'trailStartPct': 35, 'trailFactor': 0.0, 'timeoutMinutes': 20}
-DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'stopLossPct': 20, 'trailStartPct': 35, 'trailFactor': 0.0, 'timeoutMinutes': 20}
+DEFAULT_STAGE1_EXIT = {'stopLossPct': 3, 'trailStartPct': 2, 'trailFactor': 0.9, 'timeoutMinutes': 120}
+DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120}
 DEFAULT_STAGE3 = {
     'enabled': True,
     'firstPeakMinPct': 10,
     'awakeningMinSuperIndex': 100,
     'priceFloor': 0.50,
-    'stopLossPct': 20,
-    'trailStartPct': 35,
-    'trailFactor': 0.0,
-    'timeoutMinutes': 20,
+    'stopLossPct': 4,
+    'trailStartPct': 3,
+    'trailFactor': 0.9,
+    'timeoutMinutes': 120,
 }
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -142,7 +143,7 @@ def load_active_strategy_config():
         'strategyId': DEFAULT_STRATEGY_ID,
         'strategyRole': DEFAULT_STRATEGY_ROLE,
         'entryTimingFilters': {'minSuperIndex': 80},
-        'paperRiskCaps': {'maxPositions': 50, 'positionSizeSol': 0.06},
+        'paperRiskCaps': {'maxPositions': 5, 'positionSizeSol': 0.06},
         'paperExecution': dict(DEFAULT_PAPER_EXECUTION),
         'stageRules': {
             'stage1Exit': dict(DEFAULT_STAGE1_EXIT),
@@ -193,9 +194,9 @@ def get_paper_max_positions(strategy_config):
             pass
     caps = (strategy_config or {}).get('paperRiskCaps') or {}
     try:
-        max_positions = int(caps.get('maxPositions', 50))
+        max_positions = int(caps.get('maxPositions', 5))
     except Exception:
-        max_positions = 50
+        max_positions = 5
     return max(1, max_positions)
 
 
@@ -2249,6 +2250,7 @@ def run_monitor(db):
 
     log.info("=== Paper Trade Monitor Started ===")
     log.info(f"  strategy={strategy_id} role={strategy_role}")
+    log.info(f"  strategy registry: {REGISTRY_JSON}")
     log.info(f"  paper execution size: {position_size_sol} SOL")
     log.info(f"  max open positions: {max_positions}")
     log.info(

@@ -96,8 +96,9 @@ export const strategyConfigSchema = z.object({
     }).default({}),
     stage3: z.object({
       enabled: z.boolean().default(true),
-      waitBarsFromSignal: z.number().min(0).max(500).default(30),
       firstPeakMinPct: z.number().min(0).max(500).default(10),
+      awakeningMinSuperIndex: z.number().min(0).max(1000).default(100),
+      priceFloor: z.number().min(0).max(1).default(0.5),
       stopLossPct: z.number().min(0).max(100).default(4),
       trailStartPct: z.number().min(0).max(100).default(3),
       trailFactor: z.number().min(0).max(1).default(0.9),

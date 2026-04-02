@@ -3,7 +3,7 @@ import path from 'path';
 import { atomicWriteJSON } from '../utils/atomic-write.js';
 import { strategyConfigSchema, validateCandidate } from './strategy-candidate-schema.js';
 
-const registryPath = path.join(process.cwd(), 'data', 'paper-strategy-registry.json');
+const registryPath = path.join(process.cwd(), 'config', 'paper-strategy-registry.json');
 
 const defaultStrategyConfig = strategyConfigSchema.parse({
   sourceWeights: { telegram: 0.35, twitter: 0.1, smartMoney: 0.35, narrative: 0.2 },
@@ -79,22 +79,7 @@ function makeSelectiveNotAthCandidate() {
     createdBy: 'system',
     configVersion: 2,
     mutationSet: [
-      { path: 'signalFilters.aiConfidenceMin', previousValue: 0, nextValue: 60, reason: 'tighten selection to higher-confidence NOT_ATH signals' },
-      { path: 'signalFilters.holdersMin', previousValue: 0, nextValue: 100, reason: 'prefer stronger holder base' },
-      { path: 'signalFilters.top10PctPrimaryMin', previousValue: 0, nextValue: 20, reason: 'select the stronger top10 concentration band' },
-      { path: 'signalFilters.top10PctPrimaryMax', previousValue: 100, nextValue: 25, reason: 'target the strongest observed top10 range' },
-      { path: 'signalFilters.top10PctSecondaryMin', previousValue: 0, nextValue: 25, reason: 'permit a secondary band below the primary band' },
-      { path: 'signalFilters.top10PctSecondaryMax', previousValue: 100, nextValue: 30, reason: 'allow the secondary band as a lower-ranked fallback' },
-      { path: 'signalFilters.excludeTop10PctAtOrBelow', previousValue: 0, nextValue: 20, reason: 'exclude materially weaker concentration cases' },
       { path: 'sourceToggles.allowATH', previousValue: true, nextValue: false, reason: 'keep the new candidate NOT_ATH-only' },
-      { path: 'stageRules.stage1.aiConfidenceMin', previousValue: 0, nextValue: 60, reason: 'stage 1 entry floor' },
-      { path: 'stageRules.stage1.holdersMin', previousValue: 0, nextValue: 100, reason: 'stage 1 holder floor' },
-      { path: 'stageRules.stage1.top10PctPrimaryMin', previousValue: 0, nextValue: 20, reason: 'stage 1 primary band lower bound' },
-      { path: 'stageRules.stage1.top10PctPrimaryMax', previousValue: 100, nextValue: 25, reason: 'stage 1 primary band upper bound' },
-      { path: 'stageRules.stage1.top10PctSecondaryMin', previousValue: 0, nextValue: 25, reason: 'stage 1 secondary band lower bound' },
-      { path: 'stageRules.stage1.top10PctSecondaryMax', previousValue: 100, nextValue: 30, reason: 'stage 1 secondary band upper bound' },
-      { path: 'stageRules.stage1.excludeTop10PctAtOrBelow', previousValue: 0, nextValue: 20, reason: 'stage 1 exclude weak top10 buckets' },
-      { path: 'stageRules.stage1.allowAthOverride', previousValue: false, nextValue: false, reason: 'explicitly keep ATH override disabled' },
       { path: 'stageRules.stage1Exit.stopLossPct', previousValue: 35, nextValue: 3, reason: 'stage 1 exit stop-loss' },
       { path: 'stageRules.stage1Exit.trailStartPct', previousValue: 3, nextValue: 2, reason: 'stage 1 trailing activation' },
       { path: 'stageRules.stage1Exit.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'keep trail factor unchanged' },
@@ -108,8 +93,9 @@ function makeSelectiveNotAthCandidate() {
       { path: 'stageRules.stage2A.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'stage 2A trailing factor' },
       { path: 'stageRules.stage2A.timeoutMinutes', previousValue: 120, nextValue: 120, reason: 'stage 2A timeout' },
       { path: 'stageRules.stage3.enabled', previousValue: false, nextValue: true, reason: 'enable continuation re-entry' },
-      { path: 'stageRules.stage3.waitBarsFromSignal', previousValue: 0, nextValue: 30, reason: 'wait 30 bars from original signal' },
       { path: 'stageRules.stage3.firstPeakMinPct', previousValue: 0, nextValue: 10, reason: 'require initial +10% peak before stage 3' },
+      { path: 'stageRules.stage3.awakeningMinSuperIndex', previousValue: 100, nextValue: 100, reason: 'require awakening super index above 100' },
+      { path: 'stageRules.stage3.priceFloor', previousValue: 0.5, nextValue: 0.5, reason: 'require price to hold at least 50% of first peak' },
       { path: 'stageRules.stage3.stopLossPct', previousValue: 4, nextValue: 4, reason: 'stage 3 stop-loss' },
       { path: 'stageRules.stage3.trailStartPct', previousValue: 3, nextValue: 3, reason: 'stage 3 trailing activation' },
       { path: 'stageRules.stage3.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'stage 3 trailing factor' },
@@ -137,33 +123,33 @@ function makeSelectiveNotAthCandidate() {
       comparatorScore: 0
     },
     guardrailResults: {},
-    notes: 'Selective NOT_ATH candidate with two-stage loser recovery',
+    notes: 'Selective NOT_ATH candidate with Stage2A loser recovery and event-awakened Stage3 continuation',
     strategyConfig: strategyConfigSchema.parse({
       ...defaultStrategyConfig,
       sourceToggles: { ...defaultStrategyConfig.sourceToggles, allowATH: false, allowNotAth: true },
       signalFilters: {
-        aiConfidenceMin: 60,
-        holdersMin: 100,
-        top10PctPrimaryMin: 20,
-        top10PctPrimaryMax: 25,
-        top10PctSecondaryMin: 25,
-        top10PctSecondaryMax: 30,
-        excludeTop10PctAtOrBelow: 20,
+        aiConfidenceMin: 0,
+        holdersMin: 0,
+        top10PctPrimaryMin: 0,
+        top10PctPrimaryMax: 100,
+        top10PctSecondaryMin: 0,
+        top10PctSecondaryMax: 100,
+        excludeTop10PctAtOrBelow: 0,
         allowAthOverride: false,
-        primaryBandBonus: 10,
-        secondaryBandBonus: 4
+        primaryBandBonus: 0,
+        secondaryBandBonus: 0
       },
       stageRules: {
         stage1: {
           enabled: true,
           universe: 'NOT_ATH',
-          aiConfidenceMin: 60,
-          holdersMin: 100,
-          top10PctPrimaryMin: 20,
-          top10PctPrimaryMax: 25,
-          top10PctSecondaryMin: 25,
-          top10PctSecondaryMax: 30,
-          excludeTop10PctAtOrBelow: 20,
+          aiConfidenceMin: 0,
+          holdersMin: 0,
+          top10PctPrimaryMin: 0,
+          top10PctPrimaryMax: 100,
+          top10PctSecondaryMin: 0,
+          top10PctSecondaryMax: 100,
+          excludeTop10PctAtOrBelow: 0,
           allowAthOverride: false
         },
         stage1Exit: {
@@ -184,8 +170,9 @@ function makeSelectiveNotAthCandidate() {
         },
         stage3: {
           enabled: true,
-          waitBarsFromSignal: 30,
           firstPeakMinPct: 10,
+          awakeningMinSuperIndex: 100,
+          priceFloor: 0.5,
           stopLossPct: 4,
           trailStartPct: 3,
           trailFactor: 0.9,
@@ -342,14 +329,21 @@ export class PaperStrategyRegistry {
       const initial = {
         version: 1,
         updatedAt: new Date().toISOString(),
-        activeBaselineId: 'baseline-v1',
+        activeBaselineId: 'notath-selective-v1',
         activeChallengerId: null,
-        promotedIds: ['baseline-v1'],
+        promotedIds: ['baseline-v1', 'notath-selective-v1'],
         candidates: {
           'baseline-v1': makeBaselineCandidate(),
-          'notath-selective-v1': makeSelectiveNotAthCandidate()
+          'notath-selective-v1': {
+            ...makeSelectiveNotAthCandidate(),
+            status: 'promoted'
+          }
         },
-        history: []
+        history: [
+          { action: 'register', candidateId: 'baseline-v1', status: 'promoted', createdAt: new Date().toISOString() },
+          { action: 'register', candidateId: 'notath-selective-v1', status: 'promoted', createdAt: new Date().toISOString() },
+          { action: 'promote', candidateId: 'notath-selective-v1', reason: 'initial_default', createdAt: new Date().toISOString() }
+        ]
       };
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       fs.writeFileSync(this.filePath, JSON.stringify(initial, null, 2));
