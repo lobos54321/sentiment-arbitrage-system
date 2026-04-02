@@ -354,14 +354,18 @@ def monitor_peak_pnl_decimal(monitor_state, fallback=0.0):
     return float(fallback or 0.0)
 
 
-def sync_position_from_monitor_state(pos):
+def sync_position_from_monitor_state(pos, allow_token_amount_override=False):
     state = pos.monitor_state or {}
     pos.peak_pnl = monitor_peak_pnl_decimal(state, pos.peak_pnl)
     pos.trailing_active = bool(state.get('breakeven', state.get('trailingActive', pos.trailing_active)))
     pos.bars_held = int(state.get('barsHeld', pos.bars_held) or pos.bars_held)
     pos.last_mark_ts = int(state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
     pos.last_bar_ts = pos.last_mark_ts or pos.last_bar_ts
-    pos.token_amount_raw = int(state.get('tokenAmount', pos.token_amount_raw) or pos.token_amount_raw)
+    if allow_token_amount_override:
+        pos.token_amount_raw = int(state.get('tokenAmount', pos.token_amount_raw) or pos.token_amount_raw)
+    elif pos.token_amount_raw:
+        state['tokenAmount'] = int(pos.token_amount_raw)
+        state['tokenDecimals'] = int(pos.token_decimals or state.get('tokenDecimals') or 0)
 
 
 # === Database Setup ===
@@ -1107,6 +1111,34 @@ def parse_entry_execution(entry_execution_json):
         return json.loads(entry_execution_json)
     except Exception:
         return None
+
+
+def normalize_monitor_state_json(monitor_state):
+    return json.dumps(monitor_state or {}, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entry_ts, position_size_sol, token_amount_raw, token_decimals, peak_pnl=0.0, trailing_active=False, bars_held=0, last_mark_ts=None):
+    sanitized = dict(monitor_state or {})
+    sanitized['tokenCA'] = token_ca or sanitized.get('tokenCA') or None
+    sanitized['symbol'] = symbol or sanitized.get('symbol') or 'UNKNOWN'
+    sanitized['entryPrice'] = _safe_float(entry_price, 0.0)
+    sanitized['entrySol'] = _safe_float(position_size_sol, 0.0)
+    sanitized['tokenAmount'] = _safe_int(token_amount_raw, 0)
+    sanitized['tokenDecimals'] = _safe_int(token_decimals, 0)
+    sanitized['entryTime'] = _safe_int(entry_ts, 0) * 1000
+    sanitized['highPnl'] = round(_safe_float(peak_pnl, 0.0) * 100.0, 6)
+    sanitized['peakPnl'] = _safe_float(peak_pnl, 0.0)
+    sanitized['breakeven'] = bool(trailing_active)
+    sanitized['trailingActive'] = bool(trailing_active)
+    sanitized['barsHeld'] = max(0, _safe_int(bars_held, 0))
+    sanitized['lastMarkTs'] = _safe_int(last_mark_ts, _safe_int(entry_ts, 0))
+    sanitized['closed'] = False
+    sanitized['exitReason'] = None
+    sanitized['partialSellInProgress'] = False
+    sanitized['exitInProgress'] = False
+    sanitized['pendingSell'] = False
+    sanitized['pendingSellReason'] = None
+    return sanitized
 
 
 def recover_position_state(position_size_sol, token_amount_raw, token_decimals, entry_execution_json=None, fallback_position_size_sol=0.06):
@@ -2280,6 +2312,7 @@ def run_monitor(db):
     positions = {}
     pending_entries = {}
     lifecycles = restore_lifecycles(db)
+    sanitized_monitor_states = 0
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
@@ -2290,6 +2323,7 @@ def run_monitor(db):
     """).fetchall()
     for r in open_rows:
         pool = get_pool_address(r['token_ca'])
+        raw_monitor_state = parse_monitor_state(r['monitor_state_json'])
         recovered = recover_position_state(
             r['position_size_sol'],
             r['token_amount_raw'],
@@ -2305,7 +2339,7 @@ def run_monitor(db):
                        recovered['token_decimals'],
                        r['exit_quote_failures'] or 0,
                        r['last_exit_quote_failure'],
-                       parse_monitor_state(r['monitor_state_json']))
+                       raw_monitor_state)
         if recovered['recovery_source'] == 'entry_execution':
             db.execute(
                 "UPDATE paper_trades SET position_size_sol = ?, token_amount_raw = ?, token_decimals = ? WHERE id = ?",
@@ -2332,12 +2366,34 @@ def run_monitor(db):
             pos.bars_held = int(pos.monitor_state.get('barsHeld', pos.bars_held) or pos.bars_held)
             pos.last_mark_ts = int(pos.monitor_state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
             pos.last_bar_ts = pos.last_mark_ts or pos.last_bar_ts
+        pos.monitor_state = sanitize_monitor_state(
+            pos.monitor_state,
+            token_ca=pos.token_ca,
+            symbol=pos.symbol,
+            entry_price=pos.entry_price,
+            entry_ts=pos.entry_ts,
+            position_size_sol=pos.position_size_sol,
+            token_amount_raw=pos.token_amount_raw,
+            token_decimals=pos.token_decimals,
+            peak_pnl=pos.peak_pnl,
+            trailing_active=pos.trailing_active,
+            bars_held=pos.bars_held,
+            last_mark_ts=pos.last_mark_ts,
+        )
+        if normalize_monitor_state_json(raw_monitor_state) != normalize_monitor_state_json(pos.monitor_state):
+            db.execute(
+                "UPDATE paper_trades SET monitor_state_json = ? WHERE id = ?",
+                (json.dumps(pos.monitor_state, ensure_ascii=False), pos.trade_id)
+            )
+            sanitized_monitor_states += 1
         positions[pos.trade_id] = pos
         time.sleep(0.2)
     db.commit()
 
     if positions:
         log.info(f"  Restored {len(positions)} open positions")
+    if sanitized_monitor_states:
+        log.info(f"  Sanitized {sanitized_monitor_states} open monitor_state rows")
 
     last_id_row = db.execute("""
         SELECT MAX(
@@ -2608,11 +2664,10 @@ def run_monitor(db):
                     mark_source = exit_eval.get('markSource') or 'fallback'
                     if price is None or price <= 0 or not bar_ts:
                         continue
-                    pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
-                    sync_position_from_monitor_state(pos)
-
                     action = exit_eval.get('action') or 'hold'
                     should_exit = bool(exit_eval.get('shouldExit'))
+                    pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
+                    sync_position_from_monitor_state(pos, allow_token_amount_override=(action == 'partial_sell'))
                     reason = exit_eval.get('exitReason') or exit_eval.get('lifecycleReason')
                     pnl = float(exit_eval.get('realizedPnl') if exit_eval.get('realizedPnl') is not None else (exit_eval.get('triggerPnl') or 0.0))
                     trigger_pnl = float(exit_eval.get('triggerPnl') or 0.0)
@@ -2666,7 +2721,7 @@ def run_monitor(db):
                     continue
                 if exit_eval.get('action') == 'partial_sell':
                     pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
-                    sync_position_from_monitor_state(pos)
+                    sync_position_from_monitor_state(pos, allow_token_amount_override=True)
                     db.execute(
                         """
                         UPDATE paper_trades

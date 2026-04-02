@@ -1410,7 +1410,7 @@ function normalizeTimestampSec(value, fallback = Math.floor(Date.now() / 1000)) 
 }
 
 function buildMonitorState(position = {}) {
-  return hydrateMonitorState(position.monitorState || {}, {
+  const fallback = {
     tokenCA: position.tokenCA,
     symbol: position.symbol,
     entryPrice: toNumber(position.entryPrice, 0),
@@ -1420,7 +1420,12 @@ function buildMonitorState(position = {}) {
     tokenDecimals: Math.max(0, Math.trunc(toNumber(position.tokenDecimals, 0))),
     entryTime: normalizeTimestampMs(position.entryTs),
     exitStrategy: 'NOT_ATH',
-  });
+  };
+  const state = hydrateMonitorState(position.monitorState || {}, fallback);
+  if (fallback.entrySol > 0) state.entrySol = fallback.entrySol;
+  if (fallback.tokenAmount > 0) state.tokenAmount = fallback.tokenAmount;
+  if (fallback.tokenDecimals >= 0) state.tokenDecimals = fallback.tokenDecimals;
+  return state;
 }
 
 function buildSellOptions(position = {}, sellAmount = 0) {
