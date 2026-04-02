@@ -2836,7 +2836,7 @@ def run_monitor(db):
                 quote_out_text = f"{float(actual_out):.6f}" if actual_out is not None else 'na'
                 log.info(
                     f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={realized_pnl*100:+.1f}% "
-                    f"trigger_pnl={pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} "
+                    f"trigger_pnl={trigger_pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} "
                     f"trigger_price=${trigger_price_text} quoted_price=${quoted_price_text} "
                     f"quote_out={quote_out_text} source={mark_source} lifecycle={pos.lifecycle_id}"
                 )

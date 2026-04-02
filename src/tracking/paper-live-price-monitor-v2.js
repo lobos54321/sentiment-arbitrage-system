@@ -257,6 +257,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
 
     const entry = {
       ...cached,
+      nativePrice: solPrice,
       price: solPrice,
       outSol,
       timestamp,
@@ -439,6 +440,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
 
     const entry = {
       ...cached,
+      nativePrice: priceNative > 0 ? priceNative : null,
       price,
       usdPrice: priceUsd > 0 ? priceUsd : cached?.usdPrice,
       mc,
@@ -706,8 +708,8 @@ export async function getPaperManagedMark({ tokenCA, tokenAmountRaw, tokenDecima
     return {
       ok: true,
       source: 'jupiter-quote',
-      currentPrice: cached?.usdPrice || cached?.price || null,
-      currentPriceSol: cached?.price || null,
+      currentPrice: cached?.usdPrice || null,
+      currentPriceSol: cached?.nativePrice ?? cached?.price ?? null,
       quoteTsSec: cached?.timestamp ? Math.floor(cached.timestamp / 1000) : Math.floor(Date.now() / 1000),
       routeAvailable: true,
       quoteFailureReason: null,
@@ -729,8 +731,8 @@ export async function getPaperManagedMark({ tokenCA, tokenAmountRaw, tokenDecima
     return {
       ok: true,
       source: 'dex-fallback',
-      currentPrice: fallback.usdPrice || fallback.price || null,
-      currentPriceSol: fallback.price || null,
+      currentPrice: fallback.usdPrice || null,
+      currentPriceSol: fallback.nativePrice ?? (fallback.usdPrice ? null : (fallback.price || null)),
       quoteTsSec: fallback.timestamp ? Math.floor(fallback.timestamp / 1000) : Math.floor(Date.now() / 1000),
       routeAvailable: terminalSellFailure ? false : null,
       quoteFailureReason: terminalSellFailure || quoteResult.reason || null,
