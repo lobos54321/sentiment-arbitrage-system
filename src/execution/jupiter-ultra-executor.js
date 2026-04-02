@@ -232,6 +232,7 @@ export class JupiterUltraExecutor {
     }
   }
 
+
   async executeQuotedBuy(quote, opts = {}) {
     return this._executeQuotedTrade('buy', quote, opts);
   }

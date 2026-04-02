@@ -51,18 +51,31 @@ EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
 
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
-DEFAULT_STAGE1_EXIT = {'stopLossPct': 3, 'trailStartPct': 2, 'trailFactor': 0.9, 'timeoutMinutes': 120}
-DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'entryPriceMode': 'close', 'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120}
+DEFAULT_STAGE1_EXIT = {'stopLossPct': 20, 'trailStartPct': 35, 'trailFactor': 0.0, 'timeoutMinutes': 20}
+DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'stopLossPct': 20, 'trailStartPct': 35, 'trailFactor': 0.0, 'timeoutMinutes': 20}
 DEFAULT_STAGE3 = {
     'enabled': True,
     'firstPeakMinPct': 10,
     'awakeningMinSuperIndex': 100,
     'priceFloor': 0.50,
-    'entryPriceMode': 'close',
-    'stopLossPct': 4,
-    'trailStartPct': 3,
-    'trailFactor': 0.9,
-    'timeoutMinutes': 120,
+    'stopLossPct': 20,
+    'trailStartPct': 35,
+    'trailFactor': 0.0,
+    'timeoutMinutes': 20,
+}
+DEFAULT_PAPER_EXECUTION = {
+    'executionMode': 'parity',
+    'entryPriceSource': 'quote',
+    'exitPriceSource': 'quote',
+    'paperUsesQuoteOnly': True,
+    'applyPaperPenalty': True,
+    'quoteTimeoutMs': 25000,
+    'quoteRetries': 5,
+    'maxQuoteAgeSec': 180,
+    'noRouteFailureThreshold': 3,
+    'noRouteTrapMinutes': 15,
+    'tokenNotTradableFailureThreshold': 1,
+    'tokenNotTradableTrapMinutes': 1,
 }
 
 # Backward-compatible defaults for code paths that still use legacy constants.
@@ -130,6 +143,7 @@ def load_active_strategy_config():
         'strategyRole': DEFAULT_STRATEGY_ROLE,
         'entryTimingFilters': {'minSuperIndex': 80},
         'paperRiskCaps': {'maxPositions': 50, 'positionSizeSol': 0.06},
+        'paperExecution': dict(DEFAULT_PAPER_EXECUTION),
         'stageRules': {
             'stage1Exit': dict(DEFAULT_STAGE1_EXIT),
             'stage2A': dict(DEFAULT_STAGE2A),
@@ -183,6 +197,63 @@ def get_paper_max_positions(strategy_config):
     except Exception:
         max_positions = 50
     return max(1, max_positions)
+
+
+def get_paper_execution_config(strategy_config):
+    execution = dict(DEFAULT_PAPER_EXECUTION)
+    execution.update(((strategy_config or {}).get('paperExecution') or {}))
+    execution['quoteRetries'] = max(1, _safe_int(execution.get('quoteRetries'), DEFAULT_PAPER_EXECUTION['quoteRetries']))
+    execution['quoteTimeoutMs'] = max(1000, _safe_int(execution.get('quoteTimeoutMs'), DEFAULT_PAPER_EXECUTION['quoteTimeoutMs']))
+    execution['maxQuoteAgeSec'] = max(1, _safe_int(execution.get('maxQuoteAgeSec'), DEFAULT_PAPER_EXECUTION['maxQuoteAgeSec']))
+    execution['noRouteFailureThreshold'] = max(1, _safe_int(execution.get('noRouteFailureThreshold'), DEFAULT_PAPER_EXECUTION['noRouteFailureThreshold']))
+    execution['noRouteTrapMinutes'] = max(1, _safe_int(execution.get('noRouteTrapMinutes'), DEFAULT_PAPER_EXECUTION['noRouteTrapMinutes']))
+    execution['tokenNotTradableFailureThreshold'] = max(1, _safe_int(execution.get('tokenNotTradableFailureThreshold'), DEFAULT_PAPER_EXECUTION['tokenNotTradableFailureThreshold']))
+    execution['tokenNotTradableTrapMinutes'] = max(1, _safe_int(execution.get('tokenNotTradableTrapMinutes'), DEFAULT_PAPER_EXECUTION['tokenNotTradableTrapMinutes']))
+    execution['applyPaperPenalty'] = bool(execution.get('applyPaperPenalty', True))
+    execution['paperUsesQuoteOnly'] = bool(execution.get('paperUsesQuoteOnly', True))
+    execution['executionMode'] = str(execution.get('executionMode') or 'parity')
+    execution['entryPriceSource'] = str(execution.get('entryPriceSource') or 'quote')
+    execution['exitPriceSource'] = str(execution.get('exitPriceSource') or 'quote')
+    return execution
+
+
+def build_execution_audit(execution=None, extra=None):
+    payload = execution if isinstance(execution, dict) else {}
+    audit = {
+        'mode': payload.get('mode'),
+        'side': payload.get('side'),
+        'success': payload.get('success'),
+        'routeAvailable': payload.get('routeAvailable'),
+        'requestId': payload.get('requestId'),
+        'quotedOutAmount': _safe_float(payload.get('quotedOutAmount'), None),
+        'quotedOutAmountRaw': payload.get('quotedOutAmountRaw'),
+        'effectivePrice': _safe_float(payload.get('effectivePrice'), None),
+        'slippageBps': _safe_float(payload.get('slippageBps'), None),
+        'quoteTs': _safe_int(payload.get('quoteTs'), None),
+        'feeEstimate': _safe_float(payload.get('feeEstimate'), None),
+        'failureReason': payload.get('failureReason'),
+        'txHash': payload.get('txHash'),
+        'actualAmountOut': _safe_float(payload.get('actualAmountOut'), None),
+        'actualAmountOutRaw': payload.get('actualAmountOutRaw'),
+        'inputAmount': _safe_float(payload.get('inputAmount'), None),
+        'inputAmountRaw': payload.get('inputAmountRaw'),
+        'inputMint': payload.get('inputMint'),
+        'outputMint': payload.get('outputMint'),
+        'inputDecimals': _safe_int(payload.get('inputDecimals'), None),
+        'outputDecimals': _safe_int(payload.get('outputDecimals'), None),
+        'tokenCA': payload.get('tokenCA'),
+        'penaltyApplied': payload.get('penaltyApplied'),
+        'penaltyBps': _safe_int(payload.get('penaltyBps'), None),
+        'penaltyBreakdown': payload.get('penaltyBreakdown') if isinstance(payload.get('penaltyBreakdown'), dict) else None,
+        'rawQuotedOutAmount': _safe_float(payload.get('rawQuotedOutAmount'), None),
+        'rawQuotedOutAmountRaw': payload.get('rawQuotedOutAmountRaw'),
+        'rawEffectivePrice': _safe_float(payload.get('rawEffectivePrice'), None),
+        'rawFeeEstimate': _safe_float(payload.get('rawFeeEstimate'), None),
+    }
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            audit[key] = value
+    return {key: value for key, value in audit.items() if value is not None}
 
 
 def call_execution_bridge(command, payload, timeout=25):
@@ -248,6 +319,50 @@ def simulate_exit_execution(token_ca, token_amount_raw, token_decimals, stage_na
     })
 
 
+def evaluate_paper_exit(position_payload, mark_payload):
+    return call_execution_bridge('evaluate-paper-exit', {
+        'position': position_payload,
+        'mark': mark_payload,
+    })
+
+
+def parse_monitor_state(monitor_state_json):
+    if isinstance(monitor_state_json, dict):
+        return monitor_state_json
+    if not monitor_state_json:
+        return None
+    try:
+        return json.loads(monitor_state_json)
+    except Exception:
+        return None
+
+
+def monitor_peak_pnl_decimal(monitor_state, fallback=0.0):
+    if not isinstance(monitor_state, dict):
+        return float(fallback or 0.0)
+    if monitor_state.get('highPnl') is not None:
+        try:
+            return float(monitor_state.get('highPnl')) / 100.0
+        except Exception:
+            pass
+    if monitor_state.get('peakPnl') is not None:
+        try:
+            return float(monitor_state.get('peakPnl'))
+        except Exception:
+            pass
+    return float(fallback or 0.0)
+
+
+def sync_position_from_monitor_state(pos):
+    state = pos.monitor_state or {}
+    pos.peak_pnl = monitor_peak_pnl_decimal(state, pos.peak_pnl)
+    pos.trailing_active = bool(state.get('breakeven', state.get('trailingActive', pos.trailing_active)))
+    pos.bars_held = int(state.get('barsHeld', pos.bars_held) or pos.bars_held)
+    pos.last_mark_ts = int(state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
+    pos.last_bar_ts = pos.last_mark_ts or pos.last_bar_ts
+    pos.token_amount_raw = int(state.get('tokenAmount', pos.token_amount_raw) or pos.token_amount_raw)
+
+
 # === Database Setup ===
 
 def init_paper_db(db_path=None):
@@ -282,6 +397,9 @@ def init_paper_db(db_path=None):
             token_decimals INTEGER DEFAULT 0,
             entry_execution_json TEXT,
             exit_execution_json TEXT,
+            monitor_state_json TEXT,
+            entry_execution_audit_json TEXT,
+            exit_execution_audit_json TEXT,
             exit_quote_failures INTEGER DEFAULT 0,
             last_exit_quote_failure TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -315,6 +433,9 @@ def init_paper_db(db_path=None):
         "ALTER TABLE paper_trades ADD COLUMN token_decimals INTEGER DEFAULT 0",
         "ALTER TABLE paper_trades ADD COLUMN entry_execution_json TEXT",
         "ALTER TABLE paper_trades ADD COLUMN exit_execution_json TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN monitor_state_json TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN entry_execution_audit_json TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN exit_execution_audit_json TEXT",
         "ALTER TABLE paper_trades ADD COLUMN exit_quote_failures INTEGER DEFAULT 0",
         "ALTER TABLE paper_trades ADD COLUMN last_exit_quote_failure TEXT",
     ]:
@@ -958,16 +1079,76 @@ def wait_for_local_signal_source():
 
 # === Position Tracking ===
 
+def _safe_int(value, default=0):
+    try:
+        if value in (None, ''):
+            return default
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default=0.0):
+    try:
+        if value in (None, ''):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_entry_execution(entry_execution_json):
+    if isinstance(entry_execution_json, dict):
+        return entry_execution_json
+    if not entry_execution_json:
+        return None
+    try:
+        return json.loads(entry_execution_json)
+    except Exception:
+        return None
+
+
+def recover_position_state(position_size_sol, token_amount_raw, token_decimals, entry_execution_json=None, fallback_position_size_sol=0.06):
+    execution = parse_entry_execution(entry_execution_json)
+
+    recovered_position_size_sol = _safe_float(position_size_sol, 0.0)
+    if recovered_position_size_sol <= 0:
+        recovered_position_size_sol = _safe_float(execution.get('inputAmount') if execution else None, 0.0)
+    if recovered_position_size_sol <= 0:
+        recovered_position_size_sol = _safe_float(fallback_position_size_sol, 0.06)
+
+    recovered_token_decimals = _safe_int(token_decimals, 6)
+    recovered_token_amount_raw = _safe_int(token_amount_raw, 0)
+    recovery_source = 'stored'
+
+    if recovered_token_amount_raw <= 0 and execution:
+        recovered_token_amount_raw = _safe_int(execution.get('quotedOutAmountRaw'), 0)
+        recovered_token_decimals = _safe_int(execution.get('outputDecimals'), recovered_token_decimals)
+        if recovered_token_amount_raw > 0:
+            recovery_source = 'entry_execution'
+
+    if recovered_token_amount_raw <= 0:
+        recovery_source = 'missing'
+
+    return {
+        'position_size_sol': recovered_position_size_sol,
+        'token_amount_raw': recovered_token_amount_raw,
+        'token_decimals': recovered_token_decimals,
+        'recovery_source': recovery_source,
+    }
+
+
 class Position:
     """Tracks an open paper trade position."""
     __slots__ = [
         'trade_id', 'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
         'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
         'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
-        'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure',
+        'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
+        'monitor_state',
     ]
 
-    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None):
+    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None):
         self.trade_id = trade_id
         self.token_ca = token_ca
         self.symbol = symbol
@@ -990,45 +1171,8 @@ class Position:
         self.trailing_active = False
         self.bars_held = 0
         self.last_bar_ts = int(entry_ts)
-
-    def check_exit(self, current_price, bar_ts):
-        """Apply exit logic on a specific 1m bar. Returns (should_exit, exit_reason, pnl_pct) or (False, None, None)."""
-        if current_price is None or current_price <= 0 or bar_ts is None:
-            return False, None, None
-
-        stop_loss = -pct_to_decimal(self.exit_rules.get('stopLossPct', DEFAULT_STAGE1_EXIT['stopLossPct']))
-        trail_start = pct_to_decimal(self.exit_rules.get('trailStartPct', DEFAULT_STAGE1_EXIT['trailStartPct']))
-        trail_factor = float(self.exit_rules.get('trailFactor', DEFAULT_STAGE1_EXIT['trailFactor']))
-        timeout_min = int(self.exit_rules.get('timeoutMinutes', DEFAULT_STAGE1_EXIT['timeoutMinutes']))
-
-        bar_ts = int(bar_ts)
-        if bar_ts <= self.last_bar_ts:
-            pnl = (current_price - self.entry_price) / self.entry_price
-            return False, None, pnl
-
-        self.last_bar_ts = bar_ts
-        self.bars_held = max(self.bars_held + 1, int((bar_ts - self.entry_ts) / 60) + 1)
-        pnl = (current_price - self.entry_price) / self.entry_price
-        self.peak_pnl = max(self.peak_pnl, pnl)
-
-        if not self.trailing_active and self.peak_pnl >= trail_start:
-            self.trailing_active = True
-            log.info(f"  [{self.symbol}/{self.strategy_stage}] Trailing activated at peak={self.peak_pnl*100:+.1f}%")
-
-        if not self.trailing_active and pnl <= stop_loss:
-            return True, 'sl', stop_loss
-
-        if self.trailing_active:
-            trail_level = self.peak_pnl * trail_factor
-            if pnl <= trail_level:
-                exit_pnl = max(pnl, trail_level)
-                return True, 'trail', exit_pnl
-
-        elapsed_min = (bar_ts - self.entry_ts) / 60
-        if elapsed_min >= timeout_min:
-            return True, 'timeout', pnl
-
-        return False, None, pnl
+        self.last_mark_ts = int(entry_ts)
+        self.monitor_state = monitor_state or {}
 
 
 def build_lifecycle_id(token_ca, signal_ts):
@@ -1370,20 +1514,46 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
              market_regime, replay_source, peak_pnl, trailing_active,
              lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
              reentry_source, first_peak_pct, stage3_peak_price, stage3_qualifying_exit_ts,
-             stage3_dormant, stage3_blacklisted, position_size_sol, token_amount_raw, token_decimals, entry_execution_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+             stage3_dormant, stage3_blacklisted, position_size_sol, token_amount_raw, token_decimals,
+             entry_execution_json, entry_execution_audit_json, monitor_state_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
     """, (
         strategy_id, strategy_role, 'stage3', 'stage3_entered',
         token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts,
         regime, candidate['lifecycle_id'], candidate.get('stage1_trade_id'), stage_seq('stage3'), signal_ts, current_price,
         'v2_event_awakening', candidate.get('first_peak_pct') or 0.0,
         candidate.get('stage3_peak_price'), candidate.get('stage3_qualifying_exit_ts'),
-        position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution)
+        position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution), json.dumps(build_execution_audit(execution, {
+            'auditVersion': 1,
+            'stage': 'stage3',
+            'lifecycleId': candidate['lifecycle_id'],
+            'entryPriceUsd': entry_price,
+            'positionSizeSol': position_size_sol,
+        })), json.dumps({
+            'tokenCA': token_ca,
+            'symbol': symbol,
+            'entryPrice': entry_price,
+            'entrySol': position_size_sol,
+            'tokenAmount': int(token_amount_raw),
+            'tokenDecimals': int(token_decimals or 0),
+            'entryTime': int(entry_ts) * 1000,
+            'exitStrategy': 'NOT_ATH',
+        })
     ))
     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
     db.commit()
     pos = Position(trade_id, token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts, pool,
-                   'stage3', candidate['lifecycle_id'], stage3_rules, position_size_sol, token_amount_raw, token_decimals)
+                   'stage3', candidate['lifecycle_id'], stage3_rules, position_size_sol, token_amount_raw, token_decimals,
+                   monitor_state={
+                       'tokenCA': token_ca,
+                       'symbol': symbol,
+                       'entryPrice': entry_price,
+                       'entrySol': position_size_sol,
+                       'tokenAmount': int(token_amount_raw),
+                       'tokenDecimals': int(token_decimals or 0),
+                       'entryTime': int(entry_ts) * 1000,
+                       'exitStrategy': 'NOT_ATH',
+                   })
     positions[pos.trade_id] = pos
     candidate['stage3_trade_id'] = trade_id
     candidate['stage3_attempted'] = True
@@ -2018,14 +2188,15 @@ def log_pending_entry_issue(pending, message, level='info', force=False):
         log.info(f"{prefix} {message}")
 
 
-def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_route', pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT):
+def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_route', pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT, failure_count_field='noRouteFailureCount'):
     exit_ts = int(time.time())
     stage_outcome = f"{pos.strategy_stage}_{reason}"
     db.execute(
         """
         UPDATE paper_trades
         SET exit_price = ?, exit_ts = ?, exit_reason = ?, pnl_pct = ?,
-            bars_held = ?, stage_outcome = ?, exit_quote_failures = ?, last_exit_quote_failure = ?
+            bars_held = ?, stage_outcome = ?, exit_quote_failures = ?, last_exit_quote_failure = ?,
+            exit_execution_audit_json = ?
         WHERE id = ?
         """,
         (
@@ -2037,6 +2208,15 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
             stage_outcome,
             pos.exit_quote_failures,
             pos.last_exit_quote_failure,
+            json.dumps(build_execution_audit(None, {
+                'auditVersion': 1,
+                'stage': pos.strategy_stage,
+                'lifecycleId': pos.lifecycle_id,
+                'decisionType': 'trap_close',
+                'failureReason': pos.last_exit_quote_failure,
+                'triggerPnlPct': _safe_float(float(pnl_pct) * 100.0, None),
+                failure_count_field: pos.exit_quote_failures,
+            })),
             pos.trade_id,
         )
     )
@@ -2046,7 +2226,7 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
         lifecycle['stage3_blacklisted'] = True
         lifecycle['stage3_attempted'] = True
     log.warning(
-        f"  TRAPPED {pos.symbol}/{pos.strategy_stage}: no_route failures={pos.exit_quote_failures} "
+        f"  TRAPPED {pos.symbol}/{pos.strategy_stage}: {pos.last_exit_quote_failure} failures={pos.exit_quote_failures} "
         f"→ close as {reason} pnl={float(pnl_pct) * 100:+.1f}%"
     )
 
@@ -2057,6 +2237,7 @@ def run_monitor(db):
     """Main monitoring loop."""
     strategy_config = load_active_strategy_config()
     stage_rules = strategy_config.get('stageRules') or {}
+    paper_execution = get_paper_execution_config(strategy_config)
     stage1_exit = get_exit_rules_for_stage(strategy_config, 'stage1')
     stage2a_rules = get_exit_rules_for_stage(strategy_config, 'stage2A')
     stage3_rules = get_exit_rules_for_stage(strategy_config, 'stage3')
@@ -2070,6 +2251,11 @@ def run_monitor(db):
     log.info(f"  strategy={strategy_id} role={strategy_role}")
     log.info(f"  paper execution size: {position_size_sol} SOL")
     log.info(f"  max open positions: {max_positions}")
+    log.info(
+        f"  paper execution: mode={paper_execution['executionMode']} entry={paper_execution['entryPriceSource']} "
+        f"exit={paper_execution['exitPriceSource']} retries={paper_execution['quoteRetries']} "
+        f"timeout_ms={paper_execution['quoteTimeoutMs']} penalty={paper_execution['applyPaperPenalty']}"
+    )
     log.info(f"  stage1 exit: SL={stage1_exit['stopLossPct']}% Trail Start={stage1_exit['trailStartPct']}% Trail Factor={stage1_exit['trailFactor']*100:.0f}% Timeout={stage1_exit['timeoutMinutes']}min")
     log.info(f"  stage2A exit: SL={stage2a_rules['stopLossPct']}% Trail Start={stage2a_rules['trailStartPct']}% Timeout={stage2a_rules['timeoutMinutes']}min")
     log.info(f"  stage3 exit: SL={stage3_rules['stopLossPct']}% Trail Start={stage3_rules['trailStartPct']}% Timeout={stage3_rules['timeoutMinutes']}min")
@@ -2096,26 +2282,57 @@ def run_monitor(db):
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
                strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
-               exit_quote_failures, last_exit_quote_failure
+               entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure
         FROM paper_trades
         WHERE exit_reason IS NULL
     """).fetchall()
     for r in open_rows:
         pool = get_pool_address(r['token_ca'])
+        recovered = recover_position_state(
+            r['position_size_sol'],
+            r['token_amount_raw'],
+            r['token_decimals'],
+            r['entry_execution_json'],
+            get_paper_position_size_sol(strategy_config),
+        )
         pos = Position(r['id'], r['token_ca'], r['symbol'], r['signal_ts'], r['entry_price'], r['entry_ts'], pool,
                        r['strategy_stage'] or 'stage1', r['lifecycle_id'] or build_lifecycle_id(r['token_ca'], r['signal_ts']),
                        get_exit_rules_for_stage(strategy_config, r['strategy_stage'] or 'stage1'),
-                       r['position_size_sol'] or get_paper_position_size_sol(strategy_config),
-                       r['token_amount_raw'] or 0,
-                       r['token_decimals'] or 0,
+                       recovered['position_size_sol'],
+                       recovered['token_amount_raw'],
+                       recovered['token_decimals'],
                        r['exit_quote_failures'] or 0,
-                       r['last_exit_quote_failure'])
+                       r['last_exit_quote_failure'],
+                       parse_monitor_state(r['monitor_state_json']))
+        if recovered['recovery_source'] == 'entry_execution':
+            db.execute(
+                "UPDATE paper_trades SET position_size_sol = ?, token_amount_raw = ?, token_decimals = ? WHERE id = ?",
+                (recovered['position_size_sol'], str(recovered['token_amount_raw']), recovered['token_decimals'], r['id'])
+            )
+            log.warning(
+                f"  Recovered {pos.symbol}/{pos.strategy_stage} position size from entry_execution_json "
+                f"lifecycle={pos.lifecycle_id}"
+            )
+        elif recovered['recovery_source'] == 'missing':
+            log.warning(
+                f"  Restored {pos.symbol}/{pos.strategy_stage} without token_amount_raw; exit quote parity may be unreliable "
+                f"lifecycle={pos.lifecycle_id}"
+            )
         pos.peak_pnl = r['peak_pnl'] or 0
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
         pos.last_bar_ts = int(r['entry_ts']) + max((r['bars_held'] or 0) - 1, 0) * 60
+        pos.last_mark_ts = pos.last_bar_ts
+        if pos.monitor_state:
+            sync_position_from_monitor_state(pos)
+            pos.peak_pnl = monitor_peak_pnl_decimal(pos.monitor_state, pos.peak_pnl)
+            pos.trailing_active = bool(pos.monitor_state.get('breakeven', pos.monitor_state.get('trailingActive', pos.trailing_active)))
+            pos.bars_held = int(pos.monitor_state.get('barsHeld', pos.bars_held) or pos.bars_held)
+            pos.last_mark_ts = int(pos.monitor_state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
+            pos.last_bar_ts = pos.last_mark_ts or pos.last_bar_ts
         positions[pos.trade_id] = pos
         time.sleep(0.2)
+    db.commit()
 
     if positions:
         log.info(f"  Restored {len(positions)} open positions")
@@ -2262,8 +2479,8 @@ def run_monitor(db):
                         )
                         staged_age_sec = int(max(0, time.time() - (pending.get('staged_at') or time.time())))
                         if failure_reason in {'rate_limited_429', 'quote_failed', 'no_route', 'missing_taker', 'unknown'} \
-                                and pending['attempts'] < ENTRY_QUOTE_MAX_ATTEMPTS \
-                                and staged_age_sec < ENTRY_QUOTE_MAX_AGE_SEC:
+                                and pending['attempts'] < paper_execution['quoteRetries'] \
+                                and staged_age_sec < paper_execution['maxQuoteAgeSec']:
                             continue
                         pending_entries.pop(lifecycle_id, None)
                         continue
@@ -2293,18 +2510,44 @@ def run_monitor(db):
                              token_ca, symbol, signal_ts, entry_price, entry_ts,
                              market_regime, replay_source, peak_pnl, trailing_active,
                              lifecycle_id, stage_seq, trigger_ts, trigger_price,
-                             position_size_sol, token_amount_raw, token_decimals, entry_execution_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                             position_size_sol, token_amount_raw, token_decimals,
+                             entry_execution_json, entry_execution_audit_json, monitor_state_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         strategy_id, strategy_role, 'stage1', 'stage1_entered',
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
                         regime, lifecycle_id, stage_seq('stage1'), entry_ts, price,
-                        position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution)
+                        position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
+                            'auditVersion': 1,
+                            'stage': 'stage1',
+                            'lifecycleId': lifecycle_id,
+                            'entryPriceUsd': price,
+                            'positionSizeSol': position_size_sol,
+                        })), json.dumps({
+                            'tokenCA': pending['token_ca'],
+                            'symbol': pending['symbol'],
+                            'entryPrice': price,
+                            'entrySol': position_size_sol,
+                            'tokenAmount': int(token_amount_raw),
+                            'tokenDecimals': int(token_decimals or 0),
+                            'entryTime': int(entry_ts) * 1000,
+                            'exitStrategy': 'NOT_ATH',
+                        })
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
                     pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
-                                   'stage1', lifecycle_id, stage1_exit, position_size_sol, token_amount_raw, token_decimals or 0)
+                                   'stage1', lifecycle_id, stage1_exit, position_size_sol, token_amount_raw, token_decimals or 0,
+                                   monitor_state={
+                                       'tokenCA': pending['token_ca'],
+                                       'symbol': pending['symbol'],
+                                       'entryPrice': price,
+                                       'entrySol': position_size_sol,
+                                       'tokenAmount': int(token_amount_raw),
+                                       'tokenDecimals': int(token_decimals or 0),
+                                       'entryTime': int(entry_ts) * 1000,
+                                       'exitStrategy': 'NOT_ATH',
+                                   })
                     positions[pos.trade_id] = pos
                     lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
                     pending_entries.pop(lifecycle_id, None)
@@ -2331,48 +2574,55 @@ def run_monitor(db):
 
             for trade_id, pos in list(positions.items()):
                 try:
-                    mark_execution = simulate_exit_execution(
-                        pos.token_ca,
-                        pos.token_amount_raw,
-                        pos.token_decimals,
-                        pos.strategy_stage,
-                        strategy_id=strategy_id,
-                        lifecycle_id=pos.lifecycle_id,
+                    exit_eval = evaluate_paper_exit(
+                        {
+                            'tokenCA': pos.token_ca,
+                            'symbol': pos.symbol,
+                            'entryPrice': pos.entry_price,
+                            'entryTs': pos.entry_ts,
+                            'positionSizeSol': pos.position_size_sol,
+                            'tokenAmountRaw': pos.token_amount_raw,
+                            'tokenDecimals': pos.token_decimals,
+                            'strategyStage': pos.strategy_stage,
+                            'strategyId': strategy_id,
+                            'lifecycleId': pos.lifecycle_id,
+                            'monitorState': pos.monitor_state,
+                        },
+                        {
+                            'solPriceUsd': sol_price,
+                            'currentPrice': None,
+                            'quoteTsSec': None,
+                        }
                     )
-                    mark_quote_reason = mark_execution.get('failureReason')
-                    mark_quote_route = mark_execution.get('routeAvailable')
+                    if not exit_eval.get('ok'):
+                        continue
+                    mark_execution = exit_eval.get('execution') or {}
+                    mark_quote_reason = exit_eval.get('quoteFailureReason')
+                    mark_quote_route = exit_eval.get('routeAvailable')
                     mark_quote_price = mark_execution.get('effectivePrice')
-                    mark_quote_out = mark_execution.get('quotedOutAmount')
+                    mark_quote_out = exit_eval.get('quotedOutAmount')
+                    price = exit_eval.get('currentPrice')
+                    bar_ts = int(exit_eval.get('quoteTsSec') or 0)
+                    mark_source = exit_eval.get('markSource') or 'fallback'
+                    if price is None or price <= 0 or not bar_ts:
+                        continue
+                    pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
+                    sync_position_from_monitor_state(pos)
 
-                    bar_ts = None
-                    price = None
-                    mark_source = 'quote'
-                    if mark_execution.get('success'):
-                        if mark_quote_price is not None and mark_quote_price > 0:
-                            price = (mark_quote_price * sol_price) if sol_price else mark_quote_price
-                            bar_ts = int((mark_execution.get('quoteTs') or time.time() * 1000) / 1000)
-                    if price is None or price <= 0 or bar_ts is None:
-                        min_timestamp_ms = (int(pos.last_bar_ts) * 1000) if pos.last_bar_ts else None
-                        snapshot = get_live_price_snapshot(pos.token_ca, pos.pool_address, min_timestamp_ms=min_timestamp_ms)
-                        if not snapshot:
-                            continue
-                        bar_ts = int(snapshot['ts'])
-                        price = snapshot['price']
-                        if price is None or price <= 0:
-                            continue
-                        snapshot_source = snapshot.get('source') or 'snapshot'
-                        mark_source = f"{snapshot_source}|quote:{mark_quote_reason or 'unavailable'}"
-
-                    should_exit, reason, pnl = pos.check_exit(price, bar_ts)
+                    action = exit_eval.get('action') or 'hold'
+                    should_exit = bool(exit_eval.get('shouldExit'))
+                    reason = exit_eval.get('exitReason') or exit_eval.get('lifecycleReason')
+                    pnl = float(exit_eval.get('realizedPnl') if exit_eval.get('realizedPnl') is not None else (exit_eval.get('triggerPnl') or 0.0))
+                    trigger_pnl = float(exit_eval.get('triggerPnl') or 0.0)
                     lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts))
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
                     db.execute("""
                         UPDATE paper_trades
-                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?, first_peak_pct = ?
+                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?, first_peak_pct = ?, monitor_state_json = ?
                         WHERE id = ?
-                    """, (pos.peak_pnl, int(pos.trailing_active), pos.bars_held, f"{pos.strategy_stage}_open", lifecycle['first_peak_pct'], pos.trade_id))
+                    """, (pos.peak_pnl, int(pos.trailing_active), pos.bars_held, f"{pos.strategy_stage}_open", lifecycle['first_peak_pct'], json.dumps(pos.monitor_state), pos.trade_id))
                     db.commit()
-                    if should_exit:
+                    if action in ('partial_sell', 'exit') or should_exit:
                         trigger_price_text = f"{price:.10f}" if price is not None else 'na'
                         quote_price_text = 'na'
                         if mark_quote_price is not None and mark_quote_price > 0:
@@ -2380,46 +2630,119 @@ def run_monitor(db):
                             quote_price_text = f"{quote_price_value:.10f}"
                         quote_out_text = f"{float(mark_quote_out):.6f}" if mark_quote_out is not None else 'na'
                         log.info(
-                            f"  Exit trigger {pos.symbol}/{pos.strategy_stage}: reason={reason} "
-                            f"trigger_pnl={pnl*100:+.1f}% trigger_price=${trigger_price_text} "
+                            f"  Exit trigger {pos.symbol}/{pos.strategy_stage}: action={action} reason={reason} "
+                            f"trigger_pnl={trigger_pnl*100:+.1f}% trigger_price=${trigger_price_text} "
                             f"source={mark_source} quote_route={mark_quote_route} "
                             f"quote_reason={mark_quote_reason or '-'} quote_price=${quote_price_text} "
                             f"quote_out={quote_out_text}"
                         )
-                        to_close.append((trade_id, reason, pnl, price, bar_ts, mark_execution if mark_execution.get('success') else None, mark_source))
+                        to_close.append({
+                            'trade_id': trade_id,
+                            'reason': reason,
+                            'pnl': pnl,
+                            'trigger_pnl': trigger_pnl,
+                            'exit_price': price,
+                            'exit_ts': bar_ts,
+                            'mark_source': mark_source,
+                            'exit_eval': exit_eval,
+                        })
                     time.sleep(0.05)
                 except Exception as e:
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
-            for trade_id, reason, pnl, exit_price, exit_ts, precomputed_exit_execution, mark_source in to_close:
+            for close_event in to_close:
+                trade_id = close_event['trade_id']
+                reason = close_event['reason']
+                pnl = close_event['pnl']
+                trigger_pnl = close_event.get('trigger_pnl', pnl)
+                exit_price = close_event['exit_price']
+                exit_ts = close_event['exit_ts']
+                mark_source = close_event['mark_source']
+                exit_eval = close_event.get('exit_eval') or {}
                 pos = positions.get(trade_id)
                 if pos is None:
                     continue
-                exit_execution = precomputed_exit_execution or simulate_exit_execution(
-                    pos.token_ca,
-                    pos.token_amount_raw,
-                    pos.token_decimals,
-                    pos.strategy_stage,
-                    strategy_id=strategy_id,
-                    lifecycle_id=pos.lifecycle_id,
-                )
+                if exit_eval.get('action') == 'partial_sell':
+                    pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
+                    sync_position_from_monitor_state(pos)
+                    db.execute(
+                        """
+                        UPDATE paper_trades
+                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?,
+                            token_amount_raw = ?, exit_execution_json = ?, exit_execution_audit_json = ?, monitor_state_json = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            pos.peak_pnl,
+                            int(pos.trailing_active),
+                            pos.bars_held,
+                            f"{pos.strategy_stage}_partial_{(exit_eval.get('tpName') or 'TP').lower()}",
+                            str(pos.token_amount_raw),
+                            json.dumps(exit_eval.get('execution')),
+                            json.dumps(build_execution_audit(exit_eval.get('execution'), {
+                                'auditVersion': 1,
+                                'stage': pos.strategy_stage,
+                                'lifecycleId': pos.lifecycle_id,
+                                'decisionType': exit_eval.get('action'),
+                                'tpName': exit_eval.get('tpName'),
+                                'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                                'markSource': mark_source,
+                            })),
+                            json.dumps(pos.monitor_state),
+                            pos.trade_id,
+                        )
+                    )
+                    db.commit()
+                    log.info(
+                        f"  PARTIAL {pos.symbol}/{pos.strategy_stage}: {exit_eval.get('tpName')} "
+                        f"trigger_pnl={trigger_pnl*100:+.1f}% remaining_raw={pos.token_amount_raw} lifecycle={pos.lifecycle_id}"
+                    )
+                    last_progress = time.time()
+                    continue
+
+                exit_execution = exit_eval.get('execution') or {}
                 if not exit_execution.get('success'):
                     failure_reason = exit_execution.get('failureReason') or 'exit_quote_failed'
                     pos.last_exit_quote_failure = failure_reason
-                    if failure_reason == 'no_route':
+                    trap_failure_reason = failure_reason if failure_reason in {'no_route', 'token_not_tradable'} else None
+                    if trap_failure_reason:
                         pos.exit_quote_failures += 1
                     else:
                         pos.exit_quote_failures = 0
                     db.execute(
-                        "UPDATE paper_trades SET exit_execution_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ? WHERE id = ?",
-                        (json.dumps(exit_execution), pos.exit_quote_failures, pos.last_exit_quote_failure, pos.trade_id)
+                        "UPDATE paper_trades SET exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ? WHERE id = ?",
+                        (
+                            json.dumps(exit_execution),
+                            json.dumps(build_execution_audit(exit_execution, {
+                                'auditVersion': 1,
+                                'stage': pos.strategy_stage,
+                                'lifecycleId': pos.lifecycle_id,
+                                'decisionType': exit_eval.get('action'),
+                                'markSource': mark_source,
+                                'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                            })),
+                            pos.exit_quote_failures,
+                            pos.last_exit_quote_failure,
+                            pos.trade_id,
+                        )
                     )
                     db.commit()
-                    if failure_reason == 'no_route':
+                    if trap_failure_reason:
                         held_minutes = max(0, int((time.time() - pos.entry_ts) / 60))
-                        if pos.exit_quote_failures >= NO_ROUTE_TRAP_FAILURES or held_minutes >= NO_ROUTE_TRAP_MINUTES:
+                        threshold_key = 'noRouteFailureThreshold' if trap_failure_reason == 'no_route' else 'tokenNotTradableFailureThreshold'
+                        trap_minutes_key = 'noRouteTrapMinutes' if trap_failure_reason == 'no_route' else 'tokenNotTradableTrapMinutes'
+                        trap_reason = 'trapped_no_route' if trap_failure_reason == 'no_route' else 'trapped_token_not_tradable'
+                        failure_count_field = 'noRouteFailureCount' if trap_failure_reason == 'no_route' else 'tokenNotTradableFailureCount'
+                        if pos.exit_quote_failures >= paper_execution[threshold_key] or held_minutes >= paper_execution[trap_minutes_key]:
                             positions.pop(trade_id, None)
-                            close_position_as_trapped_no_route(db, pos, lifecycle, pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT)
+                            close_position_as_trapped_no_route(
+                                db,
+                                pos,
+                                lifecycle,
+                                reason=trap_reason,
+                                pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT,
+                                failure_count_field=failure_count_field,
+                            )
                             last_progress = time.time()
                             continue
                     log.warning(f"  Exit quote failed for {pos.symbol}/{pos.strategy_stage}: {failure_reason}")
@@ -2444,12 +2767,23 @@ def run_monitor(db):
                     SET exit_price = ?, exit_ts = ?, exit_reason = ?,
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
                         peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
-                        exit_execution_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL
+                        exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL
                     WHERE id = ?
                 """, (
                     effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
                     regime, pos.peak_pnl, int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0,
-                    json.dumps(exit_execution), pos.trade_id
+                    json.dumps(exit_execution), json.dumps(build_execution_audit(exit_execution, {
+                        'auditVersion': 1,
+                        'stage': pos.strategy_stage,
+                        'lifecycleId': pos.lifecycle_id,
+                        'decisionType': exit_eval.get('action'),
+                        'actionReason': exit_eval.get('actionReason'),
+                        'markSource': mark_source,
+                        'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                        'realizedPnlPct': _safe_float(realized_pnl * 100.0, None),
+                        'triggerPriceUsd': _safe_float(exit_price, None),
+                        'effectiveExitPriceUsd': _safe_float(effective_exit_price, None),
+                    })), pos.trade_id
                 ))
                 db.commit()
                 last_progress = time.time()
@@ -2462,7 +2796,7 @@ def run_monitor(db):
                     first_peak_min_pct = float(stage3_rules.get('firstPeakMinPct', 10))
                     qualifies = (
                         reason == 'trail'
-                        and pnl > 0
+                        and realized_pnl > 0
                         and (lifecycle.get('first_peak_pct') or 0.0) >= first_peak_min_pct
                         and stage3_peak_price
                         and stage3_peak_price > 0
@@ -2482,7 +2816,7 @@ def run_monitor(db):
                             (stage3_peak_price, exit_ts, pos.trade_id)
                         )
                         db.commit()
-                    elif reason in ('sl', 'timeout') or pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < first_peak_min_pct:
+                    elif reason in ('sl', 'timeout') or realized_pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < first_peak_min_pct:
                         lifecycle['stage3_peak_price'] = stage3_peak_price or lifecycle.get('stage3_peak_price')
                         lifecycle['stage3_dormant'] = False
                         lifecycle['stage3_blacklisted'] = True
@@ -2577,19 +2911,46 @@ def run_monitor(db):
                                      market_regime, replay_source, peak_pnl, trailing_active,
                                      lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
                                      armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
-                                     position_size_sol, token_amount_raw, token_decimals, entry_execution_json)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     position_size_sol, token_amount_raw, token_decimals,
+                                     entry_execution_json, entry_execution_audit_json, monitor_state_json)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
                                 strategy_id, strategy_role, 'stage2A', 'stage2A_entered',
                                 lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts,
                                 regime, lifecycle_id, lifecycle.get('stage1_trade_id'), stage_seq('stage2A'), bar_ts, close_price,
                                 lifecycle.get('stage1_stop_ts'), lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound',
-                                position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution)
+                                position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution), json.dumps(build_execution_audit(execution, {
+                                    'auditVersion': 1,
+                                    'stage': 'stage2A',
+                                    'lifecycleId': lifecycle_id,
+                                    'entryPriceUsd': entry_price,
+                                    'positionSizeSol': position_size_sol,
+                                    'reentrySource': 'stage1_sl_rebound',
+                                })), json.dumps({
+                                    'tokenCA': lifecycle['token_ca'],
+                                    'symbol': lifecycle['symbol'],
+                                    'entryPrice': entry_price,
+                                    'entrySol': position_size_sol,
+                                    'tokenAmount': int(token_amount_raw),
+                                    'tokenDecimals': int(token_decimals or 0),
+                                    'entryTime': int(entry_ts) * 1000,
+                                    'exitStrategy': 'NOT_ATH',
+                                })
                             ))
                             trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                             db.commit()
                             pos = Position(trade_id, lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts, pool,
-                                           'stage2A', lifecycle_id, stage2a_rules, position_size_sol, token_amount_raw, token_decimals)
+                                           'stage2A', lifecycle_id, stage2a_rules, position_size_sol, token_amount_raw, token_decimals,
+                                           monitor_state={
+                                               'tokenCA': lifecycle['token_ca'],
+                                               'symbol': lifecycle['symbol'],
+                                               'entryPrice': entry_price,
+                                               'entrySol': position_size_sol,
+                                               'tokenAmount': int(token_amount_raw),
+                                               'tokenDecimals': int(token_decimals or 0),
+                                               'entryTime': int(entry_ts) * 1000,
+                                               'exitStrategy': 'NOT_ATH',
+                                           })
                             positions[pos.trade_id] = pos
                             lifecycle['stage2a_trade_id'] = trade_id
                             lifecycle['stage2a_attempted'] = True

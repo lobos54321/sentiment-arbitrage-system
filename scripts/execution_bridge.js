@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import ParityExecutor from '../src/execution/parity-executor.js';
+import { evaluatePaperLiveManagedPosition } from '../src/execution/paper-live-position-monitor.js';
 
 function redirectConsoleToStderr() {
   const write = (args) => {
@@ -58,6 +59,9 @@ async function main() {
       break;
     case 'simulate-sell':
       result = await executor.simulateSell(payload.tokenCA, payload.tokenAmountRaw, payload.options || {});
+      break;
+    case 'evaluate-paper-exit':
+      result = await evaluatePaperLiveManagedPosition({ ...payload, executor });
       break;
     default:
       throw new Error(`unsupported command: ${command}`);

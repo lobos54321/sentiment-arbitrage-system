@@ -25,7 +25,19 @@ const defaultStrategyConfig = strategyConfigSchema.parse({
     primaryBandBonus: 0,
     secondaryBandBonus: 0
   },
-  paperRiskCaps: { maxPositions: 5, positionSizeSol: 0.06 }
+  paperRiskCaps: { maxPositions: 5, positionSizeSol: 0.06 },
+  paperExecution: {
+    executionMode: 'parity',
+    entryPriceSource: 'quote',
+    exitPriceSource: 'quote',
+    paperUsesQuoteOnly: true,
+    applyPaperPenalty: true,
+    quoteTimeoutMs: 25000,
+    quoteRetries: 5,
+    maxQuoteAgeSec: 180,
+    noRouteFailureThreshold: 3,
+    noRouteTrapMinutes: 15
+  }
 });
 
 function makeBaselineCandidate() {
@@ -91,7 +103,6 @@ function makeSelectiveNotAthCandidate() {
       { path: 'stageRules.stage2A.waitBarsAfterStop', previousValue: 3, nextValue: 3, reason: 'wait 3 bars after stop-loss' },
       { path: 'stageRules.stage2A.reboundFromRollingLowPct', previousValue: 18, nextValue: 18, reason: 'require +18% rebound from rolling low' },
       { path: 'stageRules.stage2A.rollingLowBars', previousValue: 3, nextValue: 3, reason: 'use post-stop rolling low window' },
-      { path: 'stageRules.stage2A.entryPriceMode', previousValue: 'close', nextValue: 'close', reason: 'enter stage 2A on candle close' },
       { path: 'stageRules.stage2A.stopLossPct', previousValue: 4, nextValue: 4, reason: 'stage 2A stop-loss' },
       { path: 'stageRules.stage2A.trailStartPct', previousValue: 3, nextValue: 3, reason: 'stage 2A trailing activation' },
       { path: 'stageRules.stage2A.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'stage 2A trailing factor' },
@@ -99,11 +110,13 @@ function makeSelectiveNotAthCandidate() {
       { path: 'stageRules.stage3.enabled', previousValue: false, nextValue: true, reason: 'enable continuation re-entry' },
       { path: 'stageRules.stage3.waitBarsFromSignal', previousValue: 0, nextValue: 30, reason: 'wait 30 bars from original signal' },
       { path: 'stageRules.stage3.firstPeakMinPct', previousValue: 0, nextValue: 10, reason: 'require initial +10% peak before stage 3' },
-      { path: 'stageRules.stage3.entryPriceMode', previousValue: 'close', nextValue: 'close', reason: 'enter stage 3 on candle close' },
       { path: 'stageRules.stage3.stopLossPct', previousValue: 4, nextValue: 4, reason: 'stage 3 stop-loss' },
       { path: 'stageRules.stage3.trailStartPct', previousValue: 3, nextValue: 3, reason: 'stage 3 trailing activation' },
       { path: 'stageRules.stage3.trailFactor', previousValue: 0.9, nextValue: 0.9, reason: 'stage 3 trailing factor' },
-      { path: 'stageRules.stage3.timeoutMinutes', previousValue: 120, nextValue: 120, reason: 'stage 3 timeout' }
+      { path: 'stageRules.stage3.timeoutMinutes', previousValue: 120, nextValue: 120, reason: 'stage 3 timeout' },
+      { path: 'paperExecution.executionMode', previousValue: 'close', nextValue: 'parity', reason: 'paper execution uses shared parity quote semantics' },
+      { path: 'paperExecution.entryPriceSource', previousValue: 'close', nextValue: 'quote', reason: 'stage entries are filled from execution quotes' },
+      { path: 'paperExecution.exitPriceSource', previousValue: 'snapshot', nextValue: 'quote', reason: 'stage exits are priced from simulated sell quotes' }
     ],
     status: 'draft',
     datasetRefs: [],
@@ -164,7 +177,6 @@ function makeSelectiveNotAthCandidate() {
           waitBarsAfterStop: 3,
           reboundFromRollingLowPct: 18,
           rollingLowBars: 3,
-          entryPriceMode: 'close',
           stopLossPct: 4,
           trailStartPct: 3,
           trailFactor: 0.9,
@@ -174,14 +186,25 @@ function makeSelectiveNotAthCandidate() {
           enabled: true,
           waitBarsFromSignal: 30,
           firstPeakMinPct: 10,
-          entryPriceMode: 'close',
           stopLossPct: 4,
           trailStartPct: 3,
           trailFactor: 0.9,
           timeoutMinutes: 120
         }
       },
-      paperExitRules: { stopLossPct: 3, trailStartPct: 2, trailFactor: 0.9, takeProfitPct: [50, 100, 200], timeoutMinutes: 120 }
+      paperExitRules: { stopLossPct: 3, trailStartPct: 2, trailFactor: 0.9, takeProfitPct: [50, 100, 200], timeoutMinutes: 120 },
+      paperExecution: {
+        executionMode: 'parity',
+        entryPriceSource: 'quote',
+        exitPriceSource: 'quote',
+        paperUsesQuoteOnly: true,
+        applyPaperPenalty: true,
+        quoteTimeoutMs: 25000,
+        quoteRetries: 5,
+        maxQuoteAgeSec: 180,
+        noRouteFailureThreshold: 3,
+        noRouteTrapMinutes: 15
+      }
     })
   };
 }

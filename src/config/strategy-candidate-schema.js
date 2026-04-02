@@ -1,6 +1,19 @@
 import { z } from 'zod';
 import autonomyConfig from './autonomy-config.js';
 
+const paperExecutionSchema = z.object({
+  executionMode: z.enum(['parity']).default('parity'),
+  entryPriceSource: z.enum(['quote']).default('quote'),
+  exitPriceSource: z.enum(['quote']).default('quote'),
+  paperUsesQuoteOnly: z.boolean().default(true),
+  applyPaperPenalty: z.boolean().default(true),
+  quoteTimeoutMs: z.number().int().min(1000).max(120000).default(25000),
+  quoteRetries: z.number().int().min(1).max(20).default(5),
+  maxQuoteAgeSec: z.number().int().min(1).max(3600).default(180),
+  noRouteFailureThreshold: z.number().int().min(1).max(20).default(3),
+  noRouteTrapMinutes: z.number().int().min(1).max(1440).default(15)
+}).default({});
+
 export const strategyConfigSchema = z.object({
   sourceWeights: z.object({
     telegram: z.number().min(0).max(1).default(0.35),
@@ -76,7 +89,6 @@ export const strategyConfigSchema = z.object({
       waitBarsAfterStop: z.number().min(0).max(20).default(3),
       reboundFromRollingLowPct: z.number().min(0).max(100).default(18),
       rollingLowBars: z.number().min(1).max(20).default(3),
-      entryPriceMode: z.enum(['close']).default('close'),
       stopLossPct: z.number().min(0).max(100).default(4),
       trailStartPct: z.number().min(0).max(100).default(3),
       trailFactor: z.number().min(0).max(1).default(0.9),
@@ -86,7 +98,6 @@ export const strategyConfigSchema = z.object({
       enabled: z.boolean().default(true),
       waitBarsFromSignal: z.number().min(0).max(500).default(30),
       firstPeakMinPct: z.number().min(0).max(500).default(10),
-      entryPriceMode: z.enum(['close']).default('close'),
       stopLossPct: z.number().min(0).max(100).default(4),
       trailStartPct: z.number().min(0).max(100).default(3),
       trailFactor: z.number().min(0).max(1).default(0.9),
@@ -96,7 +107,8 @@ export const strategyConfigSchema = z.object({
   paperRiskCaps: z.object({
     maxPositions: z.number().min(1).max(20).default(5),
     positionSizeSol: z.number().min(0.01).max(5).default(0.06)
-  }).default({})
+  }).default({}),
+  paperExecution: paperExecutionSchema
 });
 
 export const strategyCandidateSchema = z.object({

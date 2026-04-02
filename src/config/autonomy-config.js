@@ -40,7 +40,8 @@ export const autonomyConfig = {
       'cooldownWindows',
       'paperExitRules',
       'sourceToggles',
-      'paperRiskCaps'
+      'paperRiskCaps',
+      'paperExecution'
     ],
     forbiddenPaths: [
       'execution',
