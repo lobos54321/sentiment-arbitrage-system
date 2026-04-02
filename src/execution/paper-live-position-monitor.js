@@ -1513,7 +1513,8 @@ function evaluateSimpleStageExit(state, exitRules = {}, currentPrice, quoteTsSec
     shouldExit = true;
     exitReason = 'sl';
   } else if (trailingActive) {
-    const trailFloorPct = nextHighPnl * trailFactor;
+    const baseFloor = nextHighPnl * trailFactor;
+ const trailFloorPct = Math.max(0, baseFloor);
     if (triggerPnlPct <= trailFloorPct) {
       shouldExit = true;
       exitReason = 'trail';
