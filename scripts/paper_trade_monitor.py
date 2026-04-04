@@ -129,6 +129,24 @@ _SHARED_MARKET_DATA_RUNTIME = None
 _SHARED_POOL_CACHE = {}
 _SHARED_SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
 
+
+def get_kline_db():
+    global _KLINE_DB_CONN, _KLINE_DB_FAILED
+    if _KLINE_DB_CONN is not None:
+        return _KLINE_DB_CONN
+    if _KLINE_DB_FAILED:
+        return None
+    init_fn = globals().get('init_kline_db')
+    if not callable(init_fn):
+        return None
+    try:
+        _KLINE_DB_CONN = init_fn()
+        return _KLINE_DB_CONN
+    except Exception as e:
+        _KLINE_DB_FAILED = True
+        logging.getLogger('paper_trade').warning(f"Failed to open kline cache DB: {e}")
+        return None
+
 # Logging
 logging.basicConfig(
     level=logging.INFO,
