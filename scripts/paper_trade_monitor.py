@@ -1469,8 +1469,9 @@ def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entr
     return sanitized
 
 
-def recover_position_state(position_size_sol, token_amount_raw, token_decimals, entry_execution_json=None, fallback_position_size_sol=0.06):
+def recover_position_state(position_size_sol, token_amount_raw, token_decimals, entry_execution_json=None, raw_monitor_state=None, fallback_position_size_sol=0.06):
     execution = parse_entry_execution(entry_execution_json)
+    monitor_state = raw_monitor_state if isinstance(raw_monitor_state, dict) else {}
 
     recovered_position_size_sol = _safe_float(position_size_sol, 0.0)
     if recovered_position_size_sol <= 0:
@@ -1478,9 +1479,17 @@ def recover_position_state(position_size_sol, token_amount_raw, token_decimals, 
     if recovered_position_size_sol <= 0:
         recovered_position_size_sol = _safe_float(fallback_position_size_sol, 0.06)
 
-    recovered_token_decimals = _safe_int(token_decimals, 6)
-    recovered_token_amount_raw = _safe_int(token_amount_raw, 0)
+    stored_token_amount_raw = _safe_int(token_amount_raw, 0)
+    stored_token_decimals = _safe_int(token_decimals, 6)
+    recovered_token_amount_raw = stored_token_amount_raw
+    recovered_token_decimals = stored_token_decimals
     recovery_source = 'stored'
+
+    if recovered_token_amount_raw <= 0:
+        recovered_token_amount_raw = _safe_int(monitor_state.get('tokenAmount'), 0)
+        recovered_token_decimals = _safe_int(monitor_state.get('tokenDecimals'), recovered_token_decimals)
+        if recovered_token_amount_raw > 0:
+            recovery_source = 'monitor_state'
 
     if recovered_token_amount_raw <= 0 and execution:
         recovered_token_amount_raw = _safe_int(execution.get('quotedOutAmountRaw'), 0)
@@ -2698,6 +2707,7 @@ def run_monitor(db):
             r['token_amount_raw'],
             r['token_decimals'],
             r['entry_execution_json'],
+            raw_monitor_state,
             get_paper_position_size_sol(strategy_config),
         )
         pos = Position(r['id'], r['token_ca'], r['symbol'], r['signal_ts'], r['entry_price'], r['entry_ts'], pool,
@@ -2719,6 +2729,15 @@ def run_monitor(db):
             )
             log.warning(
                 f"  Recovered {pos.symbol}/{pos.strategy_stage} position size from entry_execution_json "
+                f"lifecycle={pos.lifecycle_id}"
+            )
+        elif recovered['recovery_source'] == 'monitor_state':
+            db.execute(
+                "UPDATE paper_trades SET token_amount_raw = ?, token_decimals = ? WHERE id = ?",
+                (str(recovered['token_amount_raw']), recovered['token_decimals'], r['id'])
+            )
+            log.info(
+                f"  Recovered {pos.symbol}/{pos.strategy_stage} token amount from monitor_state_json "
                 f"lifecycle={pos.lifecycle_id}"
             )
         elif recovered['recovery_source'] == 'missing':
