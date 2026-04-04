@@ -10,19 +10,61 @@ export class SharedMarketDataClient {
   }
 
   async resolvePool(tokenCa, options = {}) {
-    return this.poolOhlcvClient.resolvePool(tokenCa, options);
+    const result = await this.poolOhlcvClient.resolvePool(tokenCa, options);
+    return {
+      ...result,
+      provenance: {
+        capability: 'pool-resolution',
+        provider: result.provider || null,
+        source: result.source || 'shared-market-data-client',
+        reason: result.error || null,
+        poolAddress: result.poolAddress || null,
+      },
+    };
   }
 
   async fetchOhlcvWindow(params = {}, options = {}) {
-    return this.poolOhlcvClient.fetchOhlcvWindow(params, options);
+    const result = await this.poolOhlcvClient.fetchOhlcvWindow(params, options);
+    return {
+      ...result,
+      provenance: {
+        capability: 'ohlcv',
+        provider: result.provider || null,
+        source: result.source || 'shared-market-data-client',
+        reason: result.error || null,
+        poolAddress: result.poolAddress || null,
+        barCount: Array.isArray(result.bars) ? result.bars.length : 0,
+      },
+    };
   }
 
   async fetchRecentOhlcvByPool(tokenCa, poolAddress, options = {}) {
-    return this.poolOhlcvClient.fetchRecentOhlcvByPool(tokenCa, poolAddress, options);
+    const result = await this.poolOhlcvClient.fetchRecentOhlcvByPool(tokenCa, poolAddress, options);
+    return {
+      ...result,
+      provenance: {
+        capability: 'ohlcv-recent',
+        provider: result.provider || null,
+        source: result.source || 'shared-market-data-client',
+        reason: result.error || null,
+        poolAddress: result.poolAddress || poolAddress || null,
+        barCount: Array.isArray(result.bars) ? result.bars.length : 0,
+      },
+    };
   }
 
   async getQuoteWithDexFallback(params = {}, options = {}) {
-    return this.quoteClient.getQuoteWithDexFallback(params, options);
+    const result = await this.quoteClient.getQuoteWithDexFallback(params, options);
+    return {
+      ...result,
+      provenance: {
+        capability: 'quote',
+        provider: result.provider || null,
+        source: result.source || 'shared-market-data-client',
+        reason: result.reason || result.error || null,
+        usedDexFallback: result.provider === 'dex-fallback',
+      },
+    };
   }
 
   async getLivePriceSnapshot({ tokenCA, amount, outputMint, includeDexPair = true } = {}, options = {}) {

@@ -1201,30 +1201,26 @@ function getDashboardData() {
     // 最近信号记录 — 从 premium_signals 表获取真实数据
     try {
       const recentSignals = database.prepare(`
-        SELECT symbol, market_cap, hard_gate_status, ai_narrative_tier, executed, timestamp
+        SELECT symbol, market_cap, hard_gate_status, signal_type, is_ath, parse_status, executed, gate_result, timestamp
         FROM premium_signals ORDER BY id DESC LIMIT 15
       `).all();
       data.recent_scores = recentSignals.map(s => {
-        const passed = s.hard_gate_status === 'PASS';
+        const gateResult = (() => {
+          try { return s.gate_result ? JSON.parse(s.gate_result) : null; } catch { return null; }
+        })();
         const mc = s.market_cap ? `$${(s.market_cap / 1000).toFixed(1)}K` : '?';
-        // 尝试从 narrative_reason 解析指标值
-        let superCurrent = '-', superDelta = '-', tradeCurrent = '-';
-        if (s.ai_narrative_tier) {
-          const superMatch = s.ai_narrative_tier.match(/Super_cur=(\d+)/);
-          const supDeltaMatch = s.ai_narrative_tier.match(/SupΔ=(\d+)/);
-          const tradeMatch = s.ai_narrative_tier.match(/TΔ=(\d+)/);
-          if (superMatch) superCurrent = superMatch[1];
-          if (supDeltaMatch) superDelta = supDeltaMatch[1];
-          if (tradeMatch) tradeCurrent = tradeMatch[1];
-        }
+        const signalLabel = (s.signal_type || (s.is_ath ? 'ATH' : 'NEW_TRENDING') || '').toUpperCase();
+        const passed = (gateResult?.status || '').toUpperCase() === 'PASS' || s.hard_gate_status === 'PASS';
         return {
           symbol: s.symbol || '?',
           mc,
-          superCurrent,
-          superDelta,
-          tradeCurrent,
+          superCurrent: signalLabel === 'ATH' ? 'ATH' : 'NT',
+          superDelta: s.parse_status || '-',
+          tradeCurrent: signalLabel,
           passed,
-          status: passed ? (s.executed ? 'BUY' : 'PASS') : s.hard_gate_status?.replace('V18_', '').replace('V17_', '') || 'SKIP'
+          status: passed
+            ? (s.executed ? 'BUY' : 'PASS')
+            : (gateResult?.status || s.hard_gate_status || 'SKIP').replace('NOT_ATH_PREBUY_KLINE_', '')
         };
       });
     } catch (e) {

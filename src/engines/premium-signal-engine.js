@@ -1623,6 +1623,7 @@ export class PremiumSignalEngine {
             gateStatus: 'UNKNOWN_DATA',
             reason: resolvedPool.error || 'no_pool',
             provider: resolvedPool.provider || 'shared_market_data',
+            provenance: resolvedPool.provenance || null,
           });
         }
         this._poolCache.set(tokenCA, resolvedPool.poolAddress);
@@ -1642,6 +1643,7 @@ export class PremiumSignalEngine {
           reason: ohlcvResult.error || 'no_bars',
           provider: ohlcvResult.provider || 'shared_market_data',
           poolAddress,
+          provenance: ohlcvResult.provenance || null,
         });
       }
 

@@ -1,3 +1,9 @@
+/**
+ * Legacy/stale path note:
+ * Canonical paper active path is scripts/paper_trade_monitor.py -> scripts/execution_bridge.js
+ * -> src/execution/paper-live-position-monitor.js.
+ * Keep this file out of new fixes unless the canonical path is explicitly being migrated.
+ */
 import {
   hydrateMonitorState,
   advanceMonitorStateWithPrice,

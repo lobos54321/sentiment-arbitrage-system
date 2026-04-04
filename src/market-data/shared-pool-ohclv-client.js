@@ -223,6 +223,11 @@ export class SharedPoolOhlcvClient {
         this.repository.upsertBars(tokenCa, resolvedPool, normalized.bars, normalized.provider || 'geckoterminal');
         this.repository.upsertPoolMapping(tokenCa, resolvedPool, normalized.provider || 'geckoterminal');
         await this.runtime.setCache(cacheKey, normalized, ttlMs);
+        await this.runtime.setCache(
+          `ohlcv-latest:${tokenCa}`,
+          [...normalized.bars].sort((a, b) => b.timestamp - a.timestamp).slice(0, 20),
+          ttlMs
+        );
       }
 
       return normalized;
