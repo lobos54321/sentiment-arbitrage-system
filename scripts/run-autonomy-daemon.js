@@ -144,20 +144,21 @@ function buildMemoryContext() {
 }
 
 function updateStatus(patch = {}) {
-  const previous = fs.existsSync(STATUS_PATH) ? readJson(STATUS_PATH) : {};
+  const previous = fs.existsSync(STATUS_PATH) ? readJson(STATUS_PATH) : null;
+  const now = new Date().toISOString();
   const baseline = registry.getBaseline();
   const challenger = registry.getChallenger();
   const recentRun = runStore.getLatest(1)[0] || null;
   const recentEvents = eventStore.listRecent(8);
   const status = {
-    ...previous,
     pid: process.pid,
-    state: patch.state ?? previous.state ?? 'starting',
-    currentStep: patch.currentStep ?? previous.currentStep ?? null,
-    currentEvent: patch.currentEvent ?? previous.currentEvent ?? null,
-    lastError: patch.lastError ?? previous.lastError ?? null,
-    lastHeartbeatAt: new Date().toISOString(),
-    startedAt: previous.startedAt || patch.startedAt || new Date().toISOString(),
+    state: patch.state ?? 'starting',
+    currentStep: patch.currentStep ?? null,
+    currentEvent: patch.currentEvent ?? null,
+    lastError: patch.lastError ?? null,
+    lastHeartbeatAt: now,
+    startedAt: patch.startedAt ?? now,
+    nextRetryAt: patch.nextRetryAt ?? null,
     lockPath: LOCK_PATH,
     logPath: LOG_PATH,
     contextPath: CONTEXT_PATH,
@@ -172,9 +173,16 @@ function updateStatus(patch = {}) {
     pauseState,
     latestRun: recentRun,
     recentEvents,
-    ...patch
+    previousSession: previous ? {
+      pid: previous.pid || null,
+      state: previous.state || null,
+      pauseState: previous.pauseState || null,
+      startedAt: previous.startedAt || null,
+      lastHeartbeatAt: previous.lastHeartbeatAt || null
+    } : null,
+    rawPreviousStatus: previous
   };
-  writeJson(STATUS_PATH, status);
+  writeJson(STATUS_PATH, { ...status, ...patch, rawPreviousStatus: previous, previousSession: status.previousSession });
   return status;
 }
 
@@ -346,9 +354,10 @@ async function handlePromotionReview(payload, event) {
     if (hit) {
       recordPauseHit(candidateId, metrics, guardrailResults);
       if (getPauseHitCount() >= autonomyConfig.pauseTargets.consecutiveHitsRequired) {
-        candidate.status = 'paused_target_reached';
-        candidate.pausedAt = new Date().toISOString();
-        await registry.registerCandidate(candidate);
+        await registry.markCandidateStatus(candidateId, 'paused_target_reached', {
+          previousStatus: candidate.status,
+          reason: 'autonomy_pause_target_reached'
+        });
         pauseState = {
           state: 'paused_target_reached',
           candidateId,
@@ -592,7 +601,18 @@ async function main() {
   acquireLock();
   installSignalHandlers();
   appendLog('Autonomy daemon started (event-driven mode)');
-  updateStatus({ state: 'starting', currentStep: null, processedEvents, consecutiveFailures, lastSuccessAt: null, pauseState: null });
+  updateStatus({
+    state: 'starting',
+    currentStep: null,
+    currentEvent: null,
+    lastError: null,
+    pauseState: null,
+    processedEvents: 0,
+    consecutiveFailures: 0,
+    startedAt: new Date().toISOString(),
+    lastSuccessAt: null,
+    nextRetryAt: null
+  });
   buildMemoryContext();
 
   if (DASHBOARD_TOKEN_REQUIRED && !process.env.DASHBOARD_TOKEN) {
