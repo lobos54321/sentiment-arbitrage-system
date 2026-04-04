@@ -121,10 +121,14 @@ export const autonomyConfig = {
     stage3PriorityRecentCursorPenalty: parseInt(process.env.HELIUS_STAGE3_PRIORITY_RECENT_CURSOR_PENALTY || '20', 10)
   },
   marketData: {
+    unifiedRollout: process.env.MARKET_DATA_UNIFIED_ROLLOUT !== 'false',
     sharedPoolResolution: process.env.MARKET_DATA_SHARED_POOL_RESOLUTION !== 'false',
     sharedOhlcv: process.env.MARKET_DATA_SHARED_OHLCV !== 'false',
     sharedQuotes: process.env.MARKET_DATA_SHARED_QUOTES !== 'false',
-    sharedRedisCache: process.env.MARKET_DATA_SHARED_REDIS_CACHE === 'true'
+    sharedRedisCache: process.env.MARKET_DATA_SHARED_REDIS_CACHE === 'true',
+    unifiedPremium: process.env.MARKET_DATA_UNIFIED_PREMIUM !== 'false',
+    unifiedPaperMonitor: process.env.MARKET_DATA_UNIFIED_PAPER_MONITOR !== 'false',
+    unifiedAutonomy: process.env.MARKET_DATA_UNIFIED_AUTONOMY !== 'false'
   }
 };
 

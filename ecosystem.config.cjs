@@ -21,7 +21,9 @@ module.exports = {
             merge_logs: true,
 
             env: {
-                NODE_ENV: 'production'
+                NODE_ENV: 'production',
+                MARKET_DATA_UNIFIED_ROLLOUT: 'true',
+                MARKET_DATA_UNIFIED_PREMIUM: 'true',
             },
             kill_timeout: 10000,
             listen_timeout: 5000
@@ -88,6 +90,8 @@ module.exports = {
                 PAPER_BUY_DELAY_BPS: '15',
                 PAPER_SELL_DELAY_BPS: '25',
                 PAPER_FEE_BPS: '8',
+                MARKET_DATA_UNIFIED_ROLLOUT: 'true',
+                MARKET_DATA_UNIFIED_PAPER_MONITOR: 'true',
             },
             kill_timeout: 30000
         },

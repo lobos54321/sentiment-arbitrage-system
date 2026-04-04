@@ -9,6 +9,7 @@ import StrategyResearchMemoryStore from '../src/database/strategy-research-memor
 import AutonomyEventStore from '../src/database/autonomy-event-store.js';
 import AutonomyRunStore from '../src/database/autonomy-run-store.js';
 import { PaperStrategyRegistry } from '../src/config/paper-strategy-registry.js';
+import { applyMarketDataProcessOverride } from '../src/market-data/shared-market-runtime.js';
 
 const ROOT = autonomyConfig.projectRoot;
 const DATA_DIR = autonomyConfig.dataDir;
@@ -37,6 +38,7 @@ const autoresearchScript = path.join(ROOT, 'scripts', 'run-autoresearch-loop.js'
 
 const args = process.argv.slice(2);
 const runOnce = args.includes('--once');
+const autonomyMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_AUTONOMY');
 
 let shuttingDown = false;
 let currentChild = null;
@@ -62,6 +64,8 @@ function appendLog(message) {
   ensureDirs();
   fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
 }
+
+appendLog(`market-data unified autonomy=${autonomyMarketDataEnabled}`);
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));

@@ -6,7 +6,9 @@
       "cwd": "/Users/boliu/sentiment-arbitrage-system",
       "interpreter": "node",
       "env": {
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "MARKET_DATA_UNIFIED_ROLLOUT": "true",
+        "MARKET_DATA_UNIFIED_PREMIUM": "true"
       },
       "watch": false,
       "max_memory_restart": "1G",
@@ -31,7 +33,9 @@
         "AUTONOMY_COVERED_ONLY_EVAL": "false",
         "AUTONOMY_CACHE_ONLY_EVAL": "true",
         "AUTONOMY_EVAL_DATASET_LIMIT": "1000",
-        "AUTONOMY_DEEP_EVAL_DATASET_LIMIT": "1000"
+        "AUTONOMY_DEEP_EVAL_DATASET_LIMIT": "1000",
+        "MARKET_DATA_UNIFIED_ROLLOUT": "true",
+        "MARKET_DATA_UNIFIED_AUTONOMY": "true"
       },
       "watch": false,
       "max_memory_restart": "1G",

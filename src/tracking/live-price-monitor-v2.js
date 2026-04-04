@@ -15,7 +15,7 @@ import { SharedQuoteClient } from '../market-data/shared-quote-client.js';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 export class LivePriceMonitorV2 extends EventEmitter {
-  constructor(jupiterExecutor) {
+  constructor(jupiterExecutor, options = {}) {
     super();
 
     this.jupiterExecutor = jupiterExecutor;

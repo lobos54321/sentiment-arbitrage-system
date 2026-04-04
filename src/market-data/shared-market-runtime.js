@@ -276,4 +276,23 @@ export function isMarketDataFlagEnabled(name, defaultValue = false) {
   return envBool(name, defaultValue);
 }
 
+export function isMarketDataUnifiedRolloutEnabled(defaultValue = true) {
+  return envBool('MARKET_DATA_UNIFIED_ROLLOUT', defaultValue);
+}
+
+export function isMarketDataProcessEnabled(processFlagName, defaultValue = true) {
+  return isMarketDataUnifiedRolloutEnabled(defaultValue) && envBool(processFlagName, defaultValue);
+}
+
+export function applyMarketDataProcessOverride(processFlagName, defaultValue = true) {
+  const enabled = isMarketDataProcessEnabled(processFlagName, defaultValue);
+  if (!enabled) {
+    process.env.MARKET_DATA_SHARED_POOL_RESOLUTION = 'false';
+    process.env.MARKET_DATA_SHARED_OHLCV = 'false';
+    process.env.MARKET_DATA_SHARED_QUOTES = 'false';
+    process.env.MARKET_DATA_SHARED_REDIS_CACHE = 'false';
+  }
+  return enabled;
+}
+
 export default SharedMarketRuntime;

@@ -32,6 +32,7 @@ import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
 import { ParityExecutor } from './execution/parity-executor.js';
 import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
 import { SharedQuoteClient } from './market-data/shared-quote-client.js';
+import { applyMarketDataProcessOverride, isMarketDataProcessEnabled } from './market-data/shared-market-runtime.js';
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
@@ -761,6 +762,7 @@ class PremiumChannelSystem {
 
   async start() {
     const isLive = process.env.SHADOW_MODE === 'false';
+    const premiumMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_PREMIUM');
 
     try {
       if (isLive) {
@@ -769,9 +771,10 @@ class PremiumChannelSystem {
         this.liveExecutionExecutor = new ParityExecutor({ mode: 'live', executor: this.jupiterExecutor });
       }
 
-      console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'SHADOW'})`);
+      console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'SHADOW'}) | unified=${premiumMarketDataEnabled}`);
       this.quoteClient = new SharedQuoteClient(undefined, {
-        jupiterApiKey: process.env.JUPITER_API_KEY || ''
+        jupiterApiKey: process.env.JUPITER_API_KEY || '',
+        sharedQuotesEnabled: premiumMarketDataEnabled && isMarketDataProcessEnabled('MARKET_DATA_UNIFIED_PREMIUM')
       });
       this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor, { quoteClient: this.quoteClient });
       this.livePriceMonitor.start();
@@ -809,7 +812,8 @@ class PremiumChannelSystem {
       this.livePositionMonitor = null;
       if (!this.livePriceMonitor) {
         this.quoteClient = this.quoteClient || new SharedQuoteClient(undefined, {
-          jupiterApiKey: process.env.JUPITER_API_KEY || ''
+          jupiterApiKey: process.env.JUPITER_API_KEY || '',
+          sharedQuotesEnabled: premiumMarketDataEnabled && isMarketDataProcessEnabled('MARKET_DATA_UNIFIED_PREMIUM')
         });
         this.livePriceMonitor = new LivePriceMonitorV2(null, { quoteClient: this.quoteClient });
         this.livePriceMonitor.start();

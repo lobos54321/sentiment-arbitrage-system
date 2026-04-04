@@ -5,7 +5,7 @@ import autonomyConfig from '../config/autonomy-config.js';
 import { PaperStrategyRegistry } from '../config/paper-strategy-registry.js';
 import signalDatabase from '../database/signal-database.js';
 import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
-import { SharedPoolOhlcvClient } from '../market-data/shared-pool-ohclv-client.js';
+import { SharedMarketDataClient } from '../market-data/shared-market-data-client.js';
 
 function median(values) {
   if (!values.length) return 0;
@@ -47,7 +47,7 @@ export class FixedEvaluator {
     this.klineDb = new Database(this.config.evaluator.klineCacheDbPath);
     this.readOnlyKlineDbs = this.#openReadOnlyKlineDbs();
     this.marketDataBackfill = new MarketDataBackfillService(this.config);
-    this.sharedMarketData = new SharedPoolOhlcvClient(this.config, {
+    this.sharedMarketData = new SharedMarketDataClient(this.config, {
       repository: this.marketDataBackfill.repository,
       poolResolver: this.marketDataBackfill.poolResolver,
       backfillService: this.marketDataBackfill,

@@ -231,6 +231,32 @@ export class SharedPoolOhlcvClient {
     return providerResult;
   }
 
+  async fetchRecentOhlcvByPool(tokenCa, poolAddress, options = {}) {
+    const signalTsSec = Number(options.signalTsSec || Math.floor(Date.now() / 1000));
+    const bars = Number(options.bars || this.config.evaluator.maxHistoricalBars);
+    const beforeTimestamps = Array.isArray(options.beforeTimestamps) && options.beforeTimestamps.length
+      ? options.beforeTimestamps
+      : (Array.isArray(options.windows) && options.windows.length ? options.windows : [signalTsSec + bars * 60]);
+
+    const normalizedWindows = beforeTimestamps
+      .map((value) => (value == null ? signalTsSec + bars * 60 : Number(value)))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    return this.fetchOhlcvWindow({
+      tokenCa,
+      poolAddress,
+      signalTsSec,
+      bars,
+      startTs: signalTsSec,
+      endTs: signalTsSec + bars * 60,
+    }, {
+      minBars: options.minBars ?? 1,
+      windows: normalizedWindows.length ? normalizedWindows : [signalTsSec + bars * 60],
+      limit: options.limit,
+      cacheTtlMs: options.cacheTtlMs,
+    });
+  }
+
   async close() {
     await this.runtime.close();
   }

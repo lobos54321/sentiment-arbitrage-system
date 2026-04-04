@@ -112,12 +112,22 @@ REDIS_KEY_PREFIX = os.environ.get('PRICE_REDIS_KEY_PREFIX', 'live_price:').strip
 LIVE_PRICE_MAX_AGE_MS = int(os.environ.get('LIVE_PRICE_MAX_AGE_MS', '90000'))
 DEX_RATE_LIMIT_COOLDOWN_SEC = int(os.environ.get('DEX_RATE_LIMIT_COOLDOWN_SEC', '60'))
 SOL_PRICE_TTL_SEC = int(os.environ.get('SOL_PRICE_TTL_SEC', '30'))
+MARKET_DATA_UNIFIED_ROLLOUT = os.environ.get('MARKET_DATA_UNIFIED_ROLLOUT', 'true').lower() != 'false'
+MARKET_DATA_UNIFIED_PAPER_MONITOR = os.environ.get('MARKET_DATA_UNIFIED_PAPER_MONITOR', 'true').lower() != 'false'
+MARKET_DATA_SHARED_POOL_RESOLUTION = os.environ.get('MARKET_DATA_SHARED_POOL_RESOLUTION', 'true').lower() != 'false'
+MARKET_DATA_SHARED_OHLCV = os.environ.get('MARKET_DATA_SHARED_OHLCV', 'true').lower() != 'false'
+MARKET_DATA_SHARED_REDIS_CACHE = os.environ.get('MARKET_DATA_SHARED_REDIS_CACHE', 'false').lower() == 'true'
 
 _REDIS_CLIENT = None
 _REDIS_INIT_ATTEMPTED = False
 _DEX_RATE_LIMIT_UNTIL = 0.0
 _DEX_LAST_WARN_AT = 0.0
 _SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
+_KLINE_DB_CONN = None
+_KLINE_DB_FAILED = False
+_SHARED_MARKET_DATA_RUNTIME = None
+_SHARED_POOL_CACHE = {}
+_SHARED_SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
 
 # Logging
 logging.basicConfig(
@@ -531,6 +541,83 @@ def _mark_dex_rate_limited(source, detail=''):
         _DEX_LAST_WARN_AT = now
 
 
+def market_data_unified_enabled():
+    return MARKET_DATA_UNIFIED_ROLLOUT and MARKET_DATA_UNIFIED_PAPER_MONITOR
+
+
+def shared_truth_source_enabled(feature_name):
+    if not market_data_unified_enabled():
+        return False
+    if feature_name == 'pool':
+        return MARKET_DATA_SHARED_POOL_RESOLUTION
+    if feature_name == 'ohlcv':
+        return MARKET_DATA_SHARED_OHLCV
+    if feature_name == 'redis':
+        return MARKET_DATA_SHARED_REDIS_CACHE
+    return False
+
+
+def get_shared_market_runtime():
+    global _SHARED_MARKET_DATA_RUNTIME
+    if _SHARED_MARKET_DATA_RUNTIME is not None:
+        return _SHARED_MARKET_DATA_RUNTIME
+    runtime_path = PROJECT_ROOT / 'src' / 'market-data' / 'shared-market-runtime.js'
+    script = (
+        "import { SharedMarketRuntime } from '" + str(runtime_path).replace("'", "\\'") + "';"
+        "const runtime = new SharedMarketRuntime({ namespace: 'paper-monitor:bridge' });"
+        "const [method, payloadRaw] = process.argv.slice(2);"
+        "const payload = payloadRaw ? JSON.parse(payloadRaw) : {};"
+        "const handlers = {"
+        " getCache: async () => await runtime.getCache(payload.key),"
+        " setCache: async () => { await runtime.setCache(payload.key, payload.value, payload.ttlMs || 0); return true; },"
+        " close: async () => { await runtime.close(); return true; }"
+        "};"
+        "const handler = handlers[method];"
+        "if (!handler) throw new Error(`unknown_method:${method}`);"
+        "Promise.resolve(handler()).then((result) => { process.stdout.write(JSON.stringify({ ok: true, result })); return runtime.close(); }).catch(async (error) => { try { await runtime.close(); } catch {} process.stdout.write(JSON.stringify({ ok: false, error: error.message })); process.exit(1); });"
+    )
+    _SHARED_MARKET_DATA_RUNTIME = {'script': script}
+    return _SHARED_MARKET_DATA_RUNTIME
+
+
+def call_shared_runtime(method, payload=None, timeout=8):
+    runtime = get_shared_market_runtime()
+    try:
+        result = subprocess.run(
+            ['node', '--input-type=module', '-e', runtime['script'], method, json.dumps(payload or {})],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(PROJECT_ROOT),
+        )
+    except Exception:
+        return None
+
+    stdout = (result.stdout or '').strip()
+    if result.returncode != 0 or not stdout:
+        return None
+    try:
+        parsed = json.loads(stdout)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get('ok'):
+        return None
+    return parsed.get('result')
+
+
+def get_shared_cache_value(key):
+    if not shared_truth_source_enabled('redis'):
+        return None
+    return call_shared_runtime('getCache', {'key': key})
+
+
+def set_shared_cache_value(key, value, ttl_ms):
+    if not shared_truth_source_enabled('redis'):
+        return False
+    result = call_shared_runtime('setCache', {'key': key, 'value': value, 'ttlMs': int(ttl_ms or 0)})
+    return bool(result)
+
+
 def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
     if _is_dexscreener_url(url) and _dex_rate_limited():
@@ -580,9 +667,41 @@ def curl_json(url, timeout=15):
 
 
 def get_pool_address(token_ca, cache={}):
-    """Get pool address from DexScreener, with in-memory cache."""
+    """Get pool address from shared/local truth sources first, then DexScreener fallback."""
     if token_ca in cache:
         return cache[token_ca]
+    if token_ca in _SHARED_POOL_CACHE:
+        return _SHARED_POOL_CACHE[token_ca]
+
+    if shared_truth_source_enabled('pool'):
+        shared_cached = get_shared_cache_value(f'pool:{token_ca}')
+        if isinstance(shared_cached, dict):
+            pool = str(shared_cached.get('poolAddress') or '').replace('solana_', '').strip()
+            if pool:
+                cache[token_ca] = pool
+                _SHARED_POOL_CACHE[token_ca] = pool
+                return pool
+
+    kline_db = get_kline_db()
+    if kline_db is not None:
+        try:
+            row = kline_db.execute("SELECT pool_address FROM pool_mapping WHERE token_ca = ? AND pool_address IS NOT NULL AND TRIM(pool_address) != ''", (token_ca,)).fetchone()
+            if row and row['pool_address']:
+                pool = str(row['pool_address']).replace('solana_', '').strip()
+                if pool:
+                    cache[token_ca] = pool
+                    return pool
+        except Exception:
+            pass
+        try:
+            row = kline_db.execute("SELECT pool_address FROM kline_1m WHERE token_ca = ? AND pool_address IS NOT NULL AND TRIM(pool_address) != '' ORDER BY fetched_at DESC, timestamp DESC LIMIT 1", (token_ca,)).fetchone()
+            if row and row['pool_address']:
+                pool = str(row['pool_address']).replace('solana_', '').strip()
+                if pool:
+                    cache[token_ca] = pool
+                    return pool
+        except Exception:
+            pass
 
     data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}")
     if not data:
@@ -600,6 +719,8 @@ def get_pool_address(token_ca, cache={}):
     pool = pair.get('pairAddress', '')
     if pool:
         cache[token_ca] = pool
+        _SHARED_POOL_CACHE[token_ca] = pool
+        set_shared_cache_value(f'pool:{token_ca}', {'poolAddress': pool, 'provider': 'paper-monitor:dexscreener'}, 15 * 60 * 1000)
     return pool or None
 
 
@@ -700,7 +821,39 @@ def is_redis_payload_fresh(payload, max_age_ms=LIVE_PRICE_MAX_AGE_MS, min_timest
 
 
 def get_current_bar(token_ca, pool_address=None):
-    """Get latest GeckoTerminal 1m bar."""
+    """Get latest 1m bar from shared/local truth sources first, then GeckoTerminal fallback."""
+    if shared_truth_source_enabled('ohlcv'):
+        shared_latest_bars = get_shared_cache_value(f'ohlcv-latest:{token_ca}')
+        if isinstance(shared_latest_bars, list) and shared_latest_bars:
+            bar = shared_latest_bars[0]
+            try:
+                return {
+                    'ts': int(bar['timestamp']),
+                    'open': float(bar['open']),
+                    'high': float(bar['high']),
+                    'low': float(bar['low']),
+                    'close': float(bar['close']),
+                    'volume': float(bar.get('volume', 0)),
+                }
+            except Exception:
+                pass
+
+    kline_db = get_kline_db()
+    if kline_db is not None:
+        try:
+            row = kline_db.execute("SELECT timestamp, open, high, low, close, volume FROM kline_1m WHERE token_ca = ? ORDER BY timestamp DESC LIMIT 1", (token_ca,)).fetchone()
+            if row:
+                return {
+                    'ts': int(row['timestamp']),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume']),
+                }
+        except Exception:
+            pass
+
     if not pool_address:
         pool_address = get_pool_address(token_ca)
     if not pool_address:
@@ -746,7 +899,7 @@ def get_current_price_direct(token_ca, pool_address=None):
 
 
 def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
-    """Get Redis-first live price snapshot with direct GeckoTerminal fallback."""
+    """Get Redis/shared-cache first live price snapshot with direct fallback only when needed."""
     payload = read_redis_payload(token_ca)
     if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
         timestamp_ms = _coerce_timestamp_ms(payload)
@@ -757,6 +910,25 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
             'source': 'redis',
             'payload': payload,
         }
+
+    if shared_truth_source_enabled('redis'):
+        shared_quote = get_shared_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
+        if isinstance(shared_quote, dict):
+            quote = shared_quote.get('quote') or {}
+            out_amount = quote.get('outAmount')
+            try:
+                out_amount = float(out_amount)
+            except Exception:
+                out_amount = 0
+            if out_amount > 0:
+                timestamp_ms = int((shared_quote.get('fetchedAt') or time.time()) * 1000)
+                return {
+                    'price': out_amount / 1e9,
+                    'ts': int(timestamp_ms // 1000),
+                    'timestamp_ms': timestamp_ms,
+                    'source': 'shared-quote-cache',
+                    'payload': shared_quote,
+                }
 
     direct = get_current_price_direct(token_ca, pool_address)
     if not direct:
@@ -801,9 +973,28 @@ def parse_super_index(description):
 def get_notath_bars(pool_address, limit=5):
     """
     Get recent 1-minute bars for NOT_ATH scoring.
+    Prefer local kline cache for the pool, fall back to GeckoTerminal.
     Returns list of bars (newest first), or None.
-    Each bar: {ts, open, high, low, close, volume}
     """
+    kline_db = get_kline_db()
+    if kline_db is not None:
+        try:
+            rows = kline_db.execute(
+                "SELECT timestamp, open, high, low, close, volume FROM kline_1m WHERE pool_address = ? ORDER BY timestamp DESC LIMIT ?",
+                (pool_address, limit)
+            ).fetchall()
+            if rows and len(rows) >= min(4, limit):
+                return [{
+                    'ts': int(row['timestamp']),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume']),
+                } for row in rows]
+        except Exception:
+            pass
+
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
         f"{pool_address}/ohlcv/minute?aggregate=1&limit={limit}"
@@ -876,6 +1067,25 @@ def compute_notath_score(bars):
 
 def get_entry_bar_ohlcv(pool_address):
     """Get the most recent completed 1-minute OHLCV bar for FBR check."""
+    if shared_truth_source_enabled('ohlcv'):
+        kline_db = get_kline_db()
+        if kline_db is not None:
+            try:
+                row = kline_db.execute(
+                    "SELECT timestamp, open, high, low, close, volume FROM kline_1m WHERE pool_address = ? ORDER BY timestamp DESC LIMIT 1",
+                    (pool_address,)
+                ).fetchone()
+                if row:
+                    return {
+                        'ts': int(row['timestamp']),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row['volume']),
+                    }
+            except Exception:
+                pass
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
         f"{pool_address}/ohlcv/minute?aggregate=1&limit=2"
@@ -899,8 +1109,26 @@ def get_entry_bar_ohlcv(pool_address):
 
 
 def get_sol_price():
-    """Get current SOL/USD price from DexScreener (SOL wrapped token)."""
+    """Get current SOL/USD price from shared cache first, then DexScreener."""
     now = time.time()
+    shared_cached_price = _SHARED_SOL_PRICE_CACHE.get('price')
+    shared_fetched_at = _SHARED_SOL_PRICE_CACHE.get('fetched_at') or 0.0
+    if shared_cached_price and (now - shared_fetched_at) < SOL_PRICE_TTL_SEC:
+        return shared_cached_price
+
+    if shared_truth_source_enabled('redis'):
+        shared_snapshot = get_shared_cache_value('dex-pair:So11111111111111111111111111111111111111112')
+        if isinstance(shared_snapshot, dict):
+            pair = shared_snapshot.get('pair') or {}
+            try:
+                price = float(pair.get('priceUsd') or 0)
+            except (TypeError, ValueError):
+                price = 0
+            if price > 0:
+                _SHARED_SOL_PRICE_CACHE['price'] = price
+                _SHARED_SOL_PRICE_CACHE['fetched_at'] = now
+                return price
+
     cached_price = _SOL_PRICE_CACHE.get('price')
     fetched_at = _SOL_PRICE_CACHE.get('fetched_at') or 0.0
     if cached_price and (now - fetched_at) < SOL_PRICE_TTL_SEC:

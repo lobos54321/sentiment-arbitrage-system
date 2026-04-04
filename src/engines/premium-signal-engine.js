@@ -26,7 +26,7 @@ import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
 import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
 import { RiskManager } from '../risk/risk-manager.js';
 import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
-import { SharedPoolOhlcvClient } from '../market-data/shared-pool-ohclv-client.js';
+import { SharedMarketDataClient } from '../market-data/shared-market-data-client.js';
 import axios from 'axios';
 
 export class PremiumSignalEngine {
@@ -55,7 +55,7 @@ export class PremiumSignalEngine {
     this.paperStrategyRegistry = null;
     this.paperTradeRecorder = null;
     this.marketDataBackfill = new MarketDataBackfillService();
-    this.sharedMarketData = new SharedPoolOhlcvClient(config, {
+    this.sharedMarketData = new SharedMarketDataClient(config, {
       repository: this.marketDataBackfill.repository,
       poolResolver: this.marketDataBackfill.poolResolver,
       backfillService: this.marketDataBackfill,
