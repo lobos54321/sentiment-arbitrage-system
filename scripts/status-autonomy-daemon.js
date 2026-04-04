@@ -21,23 +21,36 @@ const lock = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, 'utf
 const lockPidRunning = pidAlive(lock?.pid);
 const statusPidRunning = pidAlive(status?.pid);
 const staleStatus = Boolean(status && !statusPidRunning && !lockPidRunning);
+const daemonState = staleStatus
+  ? {
+      pid: status?.pid || null,
+      state: status ? 'stale' : null,
+      currentStep: null,
+      queueDepth: status?.queueDepth ?? null,
+      processedEvents: status?.processedEvents ?? null,
+      consecutiveFailures: status?.consecutiveFailures ?? null,
+      lastSuccessAt: status?.lastSuccessAt || null,
+      nextRetryAt: null,
+      pauseState: null
+    }
+  : (status ? {
+      pid: status.pid || null,
+      state: status.state || null,
+      currentStep: status.currentStep || null,
+      queueDepth: status.queueDepth ?? null,
+      processedEvents: status.processedEvents ?? null,
+      consecutiveFailures: status.consecutiveFailures ?? null,
+      lastSuccessAt: status.lastSuccessAt || null,
+      nextRetryAt: status.nextRetryAt || null,
+      pauseState: status.pauseState || null
+    } : null);
 
 console.log(JSON.stringify({
   hasStatus: Boolean(status),
   hasLock: Boolean(lock),
   pidRunning: lockPidRunning || statusPidRunning,
   staleStatus,
-  daemon: status ? {
-    pid: status.pid || null,
-    state: status.state || null,
-    currentStep: status.currentStep || null,
-    queueDepth: status.queueDepth ?? null,
-    processedEvents: status.processedEvents ?? null,
-    consecutiveFailures: status.consecutiveFailures ?? null,
-    lastSuccessAt: status.lastSuccessAt || null,
-    nextRetryAt: status.nextRetryAt || null,
-    pauseState: status.pauseState || null
-  } : null,
+  daemon: daemonState,
   strategy: status ? {
     baseline: status.baseline || null,
     challenger: status.challenger || null,
