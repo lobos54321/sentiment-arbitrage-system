@@ -119,6 +119,12 @@ export const autonomyConfig = {
     stage3PriorityGreylistBonus: parseInt(process.env.HELIUS_STAGE3_PRIORITY_GREYLIST_BONUS || '15', 10),
     stage3PriorityOpenTradeBonus: parseInt(process.env.HELIUS_STAGE3_PRIORITY_OPEN_TRADE_BONUS || '40', 10),
     stage3PriorityRecentCursorPenalty: parseInt(process.env.HELIUS_STAGE3_PRIORITY_RECENT_CURSOR_PENALTY || '20', 10)
+  },
+  marketData: {
+    sharedPoolResolution: process.env.MARKET_DATA_SHARED_POOL_RESOLUTION !== 'false',
+    sharedOhlcv: process.env.MARKET_DATA_SHARED_OHLCV !== 'false',
+    sharedQuotes: process.env.MARKET_DATA_SHARED_QUOTES !== 'false',
+    sharedRedisCache: process.env.MARKET_DATA_SHARED_REDIS_CACHE === 'true'
   }
 };
 

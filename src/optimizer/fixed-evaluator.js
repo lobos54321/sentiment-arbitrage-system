@@ -5,8 +5,7 @@ import autonomyConfig from '../config/autonomy-config.js';
 import { PaperStrategyRegistry } from '../config/paper-strategy-registry.js';
 import signalDatabase from '../database/signal-database.js';
 import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
-import { fetchWithRetry } from '../utils/fetch-with-retry.js';
-import { RateLimiter } from '../utils/rate-limiter.js';
+import { SharedPoolOhlcvClient } from '../market-data/shared-pool-ohclv-client.js';
 
 function median(values) {
   if (!values.length) return 0;
@@ -48,9 +47,11 @@ export class FixedEvaluator {
     this.klineDb = new Database(this.config.evaluator.klineCacheDbPath);
     this.readOnlyKlineDbs = this.#openReadOnlyKlineDbs();
     this.marketDataBackfill = new MarketDataBackfillService(this.config);
-    this.geckoLimiter = new RateLimiter(0.2, 1);
-    this.dexLimiter = new RateLimiter(0.75, 1);
-    this.geckoCooldownUntil = 0;
+    this.sharedMarketData = new SharedPoolOhlcvClient(this.config, {
+      repository: this.marketDataBackfill.repository,
+      poolResolver: this.marketDataBackfill.poolResolver,
+      backfillService: this.marketDataBackfill,
+    });
     this.#initKlineTables();
   }
 
@@ -66,110 +67,66 @@ export class FixedEvaluator {
     return this.#loadLocalDataset();
   }
 
-  async #throttledFetchJson(url, { provider, timeout = 20000 } = {}) {
-    const isDex = provider === 'dexscreener';
-    const limiter = isDex ? this.dexLimiter : this.geckoLimiter;
-
-    if (!isDex && this.geckoCooldownUntil > Date.now()) {
-      await new Promise((resolve) => setTimeout(resolve, this.geckoCooldownUntil - Date.now()));
-    }
-
-    await limiter.throttle();
-
-    const response = await fetchWithRetry(url, {
-      source: isDex ? 'DEXSCREENER' : 'GECKOTERMINAL',
-      timeout,
-      maxRetries: isDex ? 3 : 2,
-      initialDelay: isDex ? 1200 : 2500,
-      maxDelay: isDex ? 8000 : 20000,
-      silent: true,
-      headers: { accept: 'application/json' }
-    });
-
-    if (response?.error) {
-      if (!isDex && /HTTP 429/.test(response.error)) {
-        this.geckoCooldownUntil = Date.now() + 30000;
-      }
-      throw new Error(response.error);
-    }
-
-    if (!isDex) {
-      this.geckoCooldownUntil = 0;
-    }
-
-    return response;
-  }
-
   async fetchTokenPool(ca) {
-    try {
-      const url = `https://api.geckoterminal.com/api/v2/networks/solana/tokens/${ca}/pools?page=1`;
-      const response = await this.#throttledFetchJson(url, { provider: 'geckoterminal', timeout: 15000 });
-      const pool = response?.data?.[0];
-      const poolId = pool?.id || null;
-      const poolAddress = pool?.attributes?.address || (poolId?.startsWith('solana_') ? poolId.replace(/^solana_/, '') : poolId);
-      return { poolId, poolAddress };
-    } catch (error) {
-      return { poolId: null, poolAddress: null, error: error.message };
-    }
+    const result = await this.sharedMarketData.resolvePool(ca);
+    return {
+      poolId: result.poolAddress ? `solana_${result.poolAddress}` : null,
+      poolAddress: result.poolAddress || null,
+      provider: result.provider || null,
+      error: result.error || null,
+    };
   }
 
   async fetchDexScreenerPair(tokenCa) {
-    try {
-      const dsUrl = `https://api.dexscreener.com/latest/dex/tokens/${tokenCa}`;
-      const response = await this.#throttledFetchJson(dsUrl, { provider: 'dexscreener', timeout: 15000 });
-      const pairs = (response?.pairs || []).filter((pair) => pair.chainId === 'solana');
-      const pair = pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
-      return pair;
-    } catch (error) {
-      return { error: error.message };
+    const result = await this.sharedMarketData.resolvePool(tokenCa);
+    if (!result.poolAddress) {
+      return { error: result.error || 'no_pair' };
     }
+    return {
+      pairAddress: result.poolAddress,
+      provider: result.provider,
+    };
   }
 
   async fetchGeckoBars(poolId, bars) {
-    const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolId}/ohlcv/minute?aggregate=1&limit=${bars}&token=base`;
-    const response = await this.#throttledFetchJson(url, { provider: 'geckoterminal', timeout: 20000 });
-    const list = response?.data?.attributes?.ohlcv_list || [];
-    return list.map(([timestamp, open, high, low, close, volume]) => ({ timestamp, open, high, low, close, volume }));
+    const normalizedPool = String(poolId || '').replace(/^solana_/, '');
+    const endTs = Math.floor(Date.now() / 1000);
+    const startTs = endTs - bars * 60;
+    const result = await this.sharedMarketData.fetchOhlcvWindow({
+      tokenCa: 'shared-evaluator',
+      poolAddress: normalizedPool,
+      signalTsSec: startTs,
+      startTs,
+      endTs,
+      bars,
+    }, {
+      minBars: 1,
+      windows: [endTs],
+      limit: bars,
+    });
+    if (result.error && !result.bars.length) {
+      throw new Error(result.error);
+    }
+    return result.bars;
   }
 
   async fetchDexBackfilledBars(tokenCa, entryTsSec, bars) {
-    const pair = await this.fetchDexScreenerPair(tokenCa);
-    if (!pair?.pairAddress) {
-      return { provider: null, poolId: pair?.pairAddress || null, bars: [], error: pair?.error || 'no_pair' };
-    }
-
-    const windows = [entryTsSec + 600, entryTsSec + 3600];
-    const byTs = new Map();
-    let geckoError = null;
-
-    for (const windowEnd of windows) {
-      try {
-        const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pair.pairAddress}/ohlcv/minute?aggregate=1&limit=${Math.min(200, bars)}&before_timestamp=${windowEnd}&token=base`;
-        const response = await this.#throttledFetchJson(url, { provider: 'geckoterminal', timeout: 20000 });
-        const list = response?.data?.attributes?.ohlcv_list || [];
-        for (const row of list) {
-          const ts = Number(row[0]);
-          if (!byTs.has(ts)) {
-            byTs.set(ts, {
-              timestamp: ts,
-              open: Number(row[1]),
-              high: Number(row[2]),
-              low: Number(row[3]),
-              close: Number(row[4]),
-              volume: Number(row[5])
-            });
-          }
-        }
-      } catch (error) {
-        geckoError = error.message;
-      }
-    }
-
+    const result = await this.sharedMarketData.fetchOhlcvWindow({
+      tokenCa,
+      signalTsSec: entryTsSec,
+      startTs: entryTsSec,
+      endTs: entryTsSec + bars * 60,
+      bars,
+    }, {
+      minBars: 1,
+      windows: [entryTsSec + 600, entryTsSec + 3600],
+      limit: Math.min(200, bars),
+    });
     return {
-      provider: byTs.size ? 'dexscreener+geckoterminal' : null,
-      poolId: pair.pairAddress,
-      bars: [...byTs.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-bars),
-      error: byTs.size ? null : geckoError || 'no_ohlcv'
+      provider: result.provider,
+      poolId: result.poolAddress,
+      bars: result.bars,
+      error: result.error,
     };
   }
 
@@ -182,6 +139,9 @@ export class FixedEvaluator {
       const poolResult = await this.fetchTokenPool(tokenCa);
       resolvedPoolId = poolResult.poolId || poolResult.poolAddress;
       resolvedPoolAddress = poolResult.poolAddress;
+      if (poolResult.provider) {
+        out.provider = poolResult.provider;
+      }
       if (poolResult.error) {
         out.error = `token-pools:${poolResult.error}`;
       }
@@ -241,7 +201,7 @@ export class FixedEvaluator {
     }
 
     const premiumSignals = this.sourceDb.prepare(`
-      SELECT id, token_ca, symbol, market_cap, description, timestamp, hard_gate_status, ai_action, ai_confidence, ai_narrative_tier
+      SELECT id, token_ca, symbol, market_cap, description, timestamp, hard_gate_status, gate_result, signal_type, is_ath, ai_action, ai_confidence, ai_narrative_tier
       FROM premium_signals
       ORDER BY timestamp DESC
       LIMIT 1000
@@ -469,7 +429,7 @@ export class FixedEvaluator {
       const normalizedSignal = {
         ...signal,
         token_ca: signal.token_ca || signal.tokenCa,
-        is_ath: signal.description?.includes('ATH') || signal.is_ath === 1 || signal.is_ath === true,
+        is_ath: (signal.signal_type || '').toUpperCase() === 'ATH' || signal.is_ath === 1 || signal.is_ath === true,
         ai_confidence: signal.ai_confidence || 0,
         indices: signal.indices || this.#extractIndices(signal.description)
       };

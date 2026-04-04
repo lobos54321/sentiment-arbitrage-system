@@ -9,8 +9,8 @@
  */
 
 import { EventEmitter } from 'events';
-import axios from 'axios';
 import { createClient } from 'redis';
+import { SharedQuoteClient } from '../market-data/shared-quote-client.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -40,6 +40,9 @@ export class LivePriceMonitorV2 extends EventEmitter {
     this.rateLimitCooldownMs = 5000;
     this.redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
     this.redisEnabled = process.env.REDIS_ENABLED !== 'false';
+    this.quoteClient = options.quoteClient || new SharedQuoteClient(undefined, {
+      jupiterApiKey: this.jupiterApiKey,
+    });
     this.redisClient = null;
     this.redisConnectPromise = null;
     this.redisFailed = false;
@@ -349,62 +352,25 @@ export class LivePriceMonitorV2 extends EventEmitter {
    * 使用 Ultra /order 获取报价，并显式区分失败类型
    */
   async _getSwapQuote(inputMint, amount) {
-    try {
-      const headers = {};
-      if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
-
-      const params = new URLSearchParams({
-        inputMint,
-        outputMint: SOL_MINT,
-        amount: amount.toString()
-      });
-
-      const res = await axios.get(`https://api.jup.ag/ultra/v1/order?${params.toString()}`, {
-        headers,
-        timeout: 5000
-      });
-
-      const data = res.data;
-      if (!data) {
-        return { ok: false, reason: 'null_response', quote: null };
-      }
-
-      if (data.errorCode === 'ROUTE_NOT_FOUND' || data.errorCode === 'COULD_NOT_FIND_ANY_ROUTE') {
-        return { ok: false, reason: 'no_route', quote: data };
-      }
-
-      if (!data.outAmount) {
-        return { ok: false, reason: 'null_response', quote: data };
-      }
-
-      return { ok: true, reason: null, quote: data };
-    } catch (error) {
-      if (error.response?.status === 429) {
-        return { ok: false, reason: 'rate_limited_429', quote: null };
-      }
-
-      if (error.response?.status === 400) {
-        const errorCode = error.response?.data?.errorCode;
-        if (errorCode === 'ROUTE_NOT_FOUND' || errorCode === 'COULD_NOT_FIND_ANY_ROUTE') {
-          return { ok: false, reason: 'no_route', quote: error.response?.data || null };
-        }
-        return { ok: false, reason: 'null_response', quote: error.response?.data || null };
-      }
-
-      const networkError = new Error(error.message || 'Ultra quote request failed');
-      networkError.cause = error;
-      throw networkError;
+    const result = await this.quoteClient.getSwapQuote({ inputMint, amount, outputMint: SOL_MINT });
+    if (result.rateLimited) {
+      return { ok: false, reason: 'rate_limited_429', quote: null };
     }
+    if (result.ok) {
+      return { ok: true, reason: null, quote: result.quote };
+    }
+    return { ok: false, reason: result.reason || 'null_response', quote: result.quote || null };
   }
 
   async _tryDexFallback(tokenCA, context = {}) {
     this.stats.dex_fallback_queries++;
 
     try {
-      const pair = await this._fetchBestDexPair(tokenCA);
+      const result = await this.quoteClient.getBestDexPair(tokenCA);
+      const pair = result.pair || null;
       if (!pair) {
         this.stats.dex_fallback_failures++;
-        this._recordFailure(tokenCA, context.reason || 'dex_fallback_miss', 'Dex fallback pair not found');
+        this._recordFailure(tokenCA, context.reason || 'dex_fallback_miss', result.error || 'Dex fallback pair not found');
         return null;
       }
 
@@ -463,22 +429,8 @@ export class LivePriceMonitorV2 extends EventEmitter {
   }
 
   async _fetchBestDexPair(tokenCA) {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`, {
-      timeout: 10000
-    });
-
-    const pairs = res.data?.pairs || [];
-    let bestPair = null;
-
-    for (const pair of pairs) {
-      const addr = pair.baseToken?.address;
-      if (addr !== tokenCA) continue;
-      if (!bestPair || (pair.liquidity?.usd || 0) > (bestPair.liquidity?.usd || 0)) {
-        bestPair = pair;
-      }
-    }
-
-    return bestPair;
+    const result = await this.quoteClient.getBestDexPair(tokenCA);
+    return result.pair || null;
   }
 
   /**
@@ -491,50 +443,34 @@ export class LivePriceMonitorV2 extends EventEmitter {
     this.stats.dex_queries++;
 
     try {
-      const batchSize = 30;
-      for (let i = 0; i < tokens.length; i += batchSize) {
-        const batch = tokens.slice(i, i + batchSize);
-        const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, {
-          timeout: 10000
-        });
+      for (const tokenCA of tokens) {
+        const result = await this.quoteClient.getBestDexPair(tokenCA, { cacheTtlMs: this.dexIntervalMs });
+        const pair = result.pair || null;
+        if (!pair) {
+          await this._sleep(this.querySpacingMs);
+          continue;
+        }
 
-        const pairs = res.data?.pairs || [];
-        const bestPairs = new Map();
+        const cached = this.priceCache.get(tokenCA);
+        const now = Date.now();
+        const mc = pair.marketCap || cached?.mc || null;
 
-        for (const pair of pairs) {
-          const addr = pair.baseToken?.address;
-          if (!addr) continue;
-          const existing = bestPairs.get(addr);
-          if (!existing || (pair.liquidity?.usd || 0) > (existing.liquidity?.usd || 0)) {
-            bestPairs.set(addr, pair);
+        if (cached) {
+          const nextCached = {
+            ...cached,
+            mc,
+            cacheState: (now - cached.timestamp) < this.cacheStaleMs ? 'fresh' : 'stale'
+          };
+          this.priceCache.set(tokenCA, nextCached);
+
+          if (cached.source === 'jupiter-quote' && (now - cached.timestamp) < this.cacheFreshMs) {
+            await this._sleep(this.querySpacingMs);
+            continue;
           }
         }
 
-        for (const tokenCA of batch) {
-          const pair = bestPairs.get(tokenCA);
-          if (!pair) continue;
-
-          const cached = this.priceCache.get(tokenCA);
-          const now = Date.now();
-          const mc = pair.marketCap || cached?.mc || null;
-
-          if (cached) {
-            const nextCached = {
-              ...cached,
-              mc,
-              cacheState: (now - cached.timestamp) < this.cacheStaleMs ? 'fresh' : 'stale'
-            };
-            this.priceCache.set(tokenCA, nextCached);
-
-            // 如果已有 fresh Ultra 数据，只补 MC 不覆盖价格
-            if (cached.source === 'jupiter-quote' && (now - cached.timestamp) < this.cacheFreshMs) {
-              continue;
-            }
-          }
-
-          // 没缓存或缓存过旧时，用 Dex 继续兜底价格
-          this._storeDexFallback(tokenCA, pair, 'dex_periodic_refresh');
-        }
+        this._storeDexFallback(tokenCA, pair, 'dex_periodic_refresh');
+        await this._sleep(this.querySpacingMs);
       }
     } catch (error) {
       this.stats.errors++;

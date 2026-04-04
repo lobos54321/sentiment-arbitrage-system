@@ -1,4 +1,4 @@
-import { fetchWithRetry } from '../utils/fetch-with-retry.js';
+import { SharedMarketRuntime } from './shared-market-runtime.js';
 
 function normalizePoolAddress(poolAddress) {
   if (!poolAddress) return null;
@@ -6,10 +6,11 @@ function normalizePoolAddress(poolAddress) {
 }
 
 export class PoolResolver {
-  constructor({ repository, timeoutMs = 15000 } = {}) {
+  constructor({ repository, timeoutMs = 15000, runtime = null } = {}) {
     this.repository = repository;
     this.timeoutMs = timeoutMs;
     this.memoryCache = new Map();
+    this.runtime = runtime || new SharedMarketRuntime({ namespace: 'market-data:pool-resolver' });
   }
 
   #remember(tokenCa, poolAddress, provider) {
@@ -24,8 +25,13 @@ export class PoolResolver {
   }
 
   async #fetchGeckoTerminalPool(tokenCa) {
-    const response = await fetchWithRetry(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${tokenCa}/pools?page=1`, {
+    const response = await this.runtime.fetchJson(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${tokenCa}/pools?page=1`, {
+      provider: 'geckoterminal',
       source: 'GECKOTERMINAL',
+      requestKey: `pool:gecko:${tokenCa}`,
+      cacheTtlMs: 15 * 60 * 1000,
+      cooldownMs: 30000,
+      limiter: { requestsPerSecond: 0.2, burstCapacity: 1 },
       timeout: this.timeoutMs,
       maxRetries: 2,
       initialDelay: 2500,
@@ -34,11 +40,11 @@ export class PoolResolver {
       headers: { accept: 'application/json' }
     });
 
-    if (response?.error) {
-      return { poolAddress: null, provider: null, error: response.error };
+    if (!response?.ok) {
+      return { poolAddress: null, provider: null, error: response?.error || 'request_failed' };
     }
 
-    const pool = response?.data?.[0] || null;
+    const pool = response?.data?.data?.[0] || response?.data?.[0] || null;
     const poolAddress = normalizePoolAddress(pool?.attributes?.address || pool?.id);
     if (!poolAddress) {
       return { poolAddress: null, provider: null, error: 'no_pool' };
@@ -48,8 +54,13 @@ export class PoolResolver {
   }
 
   async #fetchDexScreenerPool(tokenCa) {
-    const response = await fetchWithRetry(`https://api.dexscreener.com/latest/dex/tokens/${tokenCa}`, {
+    const response = await this.runtime.fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${tokenCa}`, {
+      provider: 'dexscreener',
       source: 'DEXSCREENER',
+      requestKey: `pool:dex:${tokenCa}`,
+      cacheTtlMs: 5 * 60 * 1000,
+      cooldownMs: 5000,
+      limiter: { requestsPerSecond: 0.75, burstCapacity: 1 },
       timeout: this.timeoutMs,
       maxRetries: 3,
       initialDelay: 1000,
@@ -57,11 +68,11 @@ export class PoolResolver {
       headers: { accept: 'application/json' }
     });
 
-    if (response?.error) {
-      return { poolAddress: null, provider: null, error: response.error };
+    if (!response?.ok) {
+      return { poolAddress: null, provider: null, error: response?.error || 'request_failed' };
     }
 
-    const pairs = response?.pairs || [];
+    const pairs = response?.data?.pairs || [];
     const solPairs = pairs.filter((pair) => pair.chainId === 'solana');
     const bestPair = (solPairs.length ? solPairs : pairs)
       .sort((a, b) => (Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0)))[0] || null;

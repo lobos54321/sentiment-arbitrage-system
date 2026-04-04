@@ -26,6 +26,7 @@ import { TelegramBuzzScanner } from '../social/telegram-buzz.js';
 import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
 import { RiskManager } from '../risk/risk-manager.js';
 import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
+import { SharedPoolOhlcvClient } from '../market-data/shared-pool-ohclv-client.js';
 import axios from 'axios';
 
 export class PremiumSignalEngine {
@@ -54,6 +55,11 @@ export class PremiumSignalEngine {
     this.paperStrategyRegistry = null;
     this.paperTradeRecorder = null;
     this.marketDataBackfill = new MarketDataBackfillService();
+    this.sharedMarketData = new SharedPoolOhlcvClient(config, {
+      repository: this.marketDataBackfill.repository,
+      poolResolver: this.marketDataBackfill.poolResolver,
+      backfillService: this.marketDataBackfill,
+    });
     this._poolCache = new Map();
     this._klineResultCache = new Map();
     this._klineApiCooldownUntil = 0;
@@ -782,58 +788,57 @@ export class PremiumSignalEngine {
 
     let poolAddress = heliusResult.poolAddress || this._poolCache?.get(tokenCA) || null;
     if (!poolAddress) {
-      try {
-        const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`, { timeout: 5000 });
-        const pairs = dexRes.data?.pairs || [];
-        const solPairs = pairs.filter(p => p.chainId === 'solana');
-        const pool = solPairs?.length
-          ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
-          : pairs[0];
-        poolAddress = pool?.pairAddress || null;
-        if (poolAddress) this._poolCache.set(tokenCA, poolAddress);
-      } catch (error) {
-        if (error?.response?.status === 429) {
+      const resolvedPool = await this.sharedMarketData.resolvePool(tokenCA);
+      poolAddress = resolvedPool.poolAddress || null;
+      if (poolAddress) {
+        this._poolCache.set(tokenCA, poolAddress);
+      } else {
+        if (resolvedPool.error === 'rate_limited') {
           this._klinePrimeCooldownUntil = Date.now() + 120_000;
         }
-        return { fetched: 0, existingBefore, totalBefore: heliusBarsBefore, enough: false, provider: heliusResult.provider || null, reason: error.message };
+        return {
+          fetched: 0,
+          existingBefore,
+          totalBefore: heliusBarsBefore,
+          enough: false,
+          provider: resolvedPool.provider || heliusResult.provider || null,
+          reason: resolvedPool.error || heliusResult.error || 'no_pool',
+        };
       }
     }
 
-    if (!poolAddress) {
-      return { fetched: 0, existingBefore, totalBefore: heliusBarsBefore, enough: false, provider: heliusResult.provider || null, reason: heliusResult.error || 'no_pool' };
+    const ohlcvResult = await this.sharedMarketData.fetchRecentOhlcvByPool(tokenCA, poolAddress, {
+      signalTsSec,
+      bars: Math.max(20, targetBars * 4),
+      beforeTimestamps: [signalTsSec + 600, signalTsSec + 3600],
+      allowDexFallback: false,
+    });
+
+    if (ohlcvResult.rateLimited) {
+      this._klineApiCooldownUntil = Date.now() + 120_000;
+      this._klinePrimeCooldownUntil = Date.now() + 120_000;
+      return {
+        fetched: 0,
+        existingBefore,
+        totalBefore: heliusBarsBefore,
+        enough: heliusBarsBefore >= targetBars,
+        provider: ohlcvResult.provider || heliusResult.provider || null,
+        poolAddress,
+        reason: 'rate_limited',
+      };
     }
 
-    const windows = [signalTsSec + 600, signalTsSec + 3600];
-    const byTs = new Map();
-    const limit = Math.max(20, targetBars * 4);
+    const bars = (ohlcvResult.bars || [])
+      .filter((bar) => Number.isFinite(bar.timestamp) && bar.timestamp < signalTsSec)
+      .map((bar) => ({
+        ts: bar.timestamp,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+      }));
 
-    for (const windowEnd of windows) {
-      try {
-        const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=${limit}&before_timestamp=${windowEnd}&token=base`;
-        const geckoRes = await axios.get(url, { timeout: 20000 });
-        const list = geckoRes.data?.data?.attributes?.ohlcv_list || [];
-        for (const row of list) {
-          const ts = Number(row[0]);
-          if (!Number.isFinite(ts) || ts >= signalTsSec || byTs.has(ts)) continue;
-          byTs.set(ts, {
-            ts,
-            open: Number(row[1]),
-            high: Number(row[2]),
-            low: Number(row[3]),
-            close: Number(row[4]),
-            volume: Number(row[5])
-          });
-        }
-      } catch (error) {
-        if (error?.response?.status === 429) {
-          this._klineApiCooldownUntil = Date.now() + 120_000;
-          this._klinePrimeCooldownUntil = Date.now() + 120_000;
-          return { fetched: byTs.size, existingBefore, totalBefore: heliusBarsBefore + byTs.size, enough: heliusBarsBefore + byTs.size >= targetBars, provider: 'geckoterminal', poolAddress, reason: 'rate_limited' };
-        }
-      }
-    }
-
-    const bars = [...byTs.values()].sort((a, b) => a.ts - b.ts);
     if (bars.length) {
       this._saveKlineBars(tokenCA, poolAddress, bars, {});
     }
@@ -844,9 +849,10 @@ export class PremiumSignalEngine {
       existingBefore,
       totalBefore,
       enough: totalBefore >= targetBars,
-      provider: bars.length ? 'geckoterminal' : heliusResult.provider,
+      provider: bars.length ? (ohlcvResult.provider || 'geckoterminal') : heliusResult.provider,
       poolAddress,
-      metrics: heliusResult
+      metrics: heliusResult,
+      reason: bars.length ? null : (ohlcvResult.error || null),
     };
   }
 
@@ -1607,42 +1613,52 @@ export class PremiumSignalEngine {
         return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'rate_limited', provider: 'external_api' });
       }
 
-      // 4) 从外部接口获取 pool 地址
+      // 4) 从共享 client 获取 pool 地址与 provider bars
       let poolAddress = this._poolCache?.get(tokenCA);
       if (!poolAddress) {
-        const dexRes = await axios.get(
-          `https://api.dexscreener.com/latest/dex/tokens/${tokenCA}`,
-          { timeout: 5000 }
-        );
-        const pairs = dexRes.data?.pairs;
-        if (!pairs?.length) return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_pool', provider: 'dexscreener' });
-        const solPairs = pairs.filter(p => p.chainId === 'solana');
-        const pool = solPairs?.length
-          ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
-          : pairs[0];
-        if (!pool?.pairAddress) return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_pool', provider: 'dexscreener' });
-        this._poolCache.set(tokenCA, pool.pairAddress);
-        poolAddress = pool.pairAddress;
+        const resolvedPool = await this.sharedMarketData.resolvePool(tokenCA);
+        if (!resolvedPool.poolAddress) {
+          return persistKlineResult({
+            passed: false,
+            gateStatus: 'UNKNOWN_DATA',
+            reason: resolvedPool.error || 'no_pool',
+            provider: resolvedPool.provider || 'shared_market_data',
+          });
+        }
+        this._poolCache.set(tokenCA, resolvedPool.poolAddress);
+        poolAddress = resolvedPool.poolAddress;
       }
 
-      // 5) 获取6根K线（仅在本地缓存不可用时）
-      const geckoRes = await axios.get(
-        `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=1&limit=6`,
-        { timeout: 5000 }
-      );
-      const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
-      if (!ohlcv?.length) return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_bars', provider: 'geckoterminal', poolAddress });
+      const ohlcvResult = await this.sharedMarketData.fetchRecentOhlcvByPool(tokenCA, poolAddress, {
+        signalTsSec,
+        bars: 6,
+        beforeTimestamps: [null],
+        allowDexFallback: false,
+      });
+      if (!ohlcvResult.bars?.length) {
+        return persistKlineResult({
+          passed: false,
+          gateStatus: 'UNKNOWN_DATA',
+          reason: ohlcvResult.error || 'no_bars',
+          provider: ohlcvResult.provider || 'shared_market_data',
+          poolAddress,
+        });
+      }
 
-      const bars = ohlcv.map(row => ({
-        ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
-        low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
+      const bars = ohlcvResult.bars.map((bar) => ({
+        ts: Number(bar.timestamp),
+        open: Number(bar.open),
+        high: Number(bar.high),
+        low: Number(bar.low),
+        close: Number(bar.close),
+        volume: Number(bar.volume),
       }));
       const freshnessSec = Math.max(0, signalTsSec - Number(bars[0]?.ts || 0));
       if (freshnessSec > 180) {
-        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_provider_bars', provider: 'geckoterminal', poolAddress, freshnessSec });
+        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_provider_bars', provider: ohlcvResult.provider || 'shared_market_data', poolAddress, freshnessSec });
       }
 
-      return persistKlineResult(scoreBars(bars, poolAddress, { provider: 'geckoterminal', poolAddress, freshnessSec }));
+      return persistKlineResult(scoreBars(bars, poolAddress, { provider: ohlcvResult.provider || 'shared_market_data', poolAddress, freshnessSec }));
     } catch (error) {
       const status = error?.response?.status;
       if (status === 429) {

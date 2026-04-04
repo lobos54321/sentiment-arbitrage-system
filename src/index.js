@@ -31,6 +31,7 @@ import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
 import { ParityExecutor } from './execution/parity-executor.js';
 import { LivePriceMonitorV2 } from './tracking/live-price-monitor-v2.js';
+import { SharedQuoteClient } from './market-data/shared-quote-client.js';
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
@@ -704,6 +705,7 @@ class PremiumChannelSystem {
     this.liveExecutionExecutor = null;
     this.livePriceMonitor = null;
     this.livePositionMonitor = null;
+    this.quoteClient = null;
 
     const isLive = process.env.SHADOW_MODE === 'false';
 
@@ -768,7 +770,10 @@ class PremiumChannelSystem {
       }
 
       console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'SHADOW'})`);
-      this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor);
+      this.quoteClient = new SharedQuoteClient(undefined, {
+        jupiterApiKey: process.env.JUPITER_API_KEY || ''
+      });
+      this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor, { quoteClient: this.quoteClient });
       this.livePriceMonitor.start();
       this.engine.setLivePriceMonitor(this.livePriceMonitor);
 
@@ -803,7 +808,10 @@ class PremiumChannelSystem {
       this.liveExecutionExecutor = null;
       this.livePositionMonitor = null;
       if (!this.livePriceMonitor) {
-        this.livePriceMonitor = new LivePriceMonitorV2(null);
+        this.quoteClient = this.quoteClient || new SharedQuoteClient(undefined, {
+          jupiterApiKey: process.env.JUPITER_API_KEY || ''
+        });
+        this.livePriceMonitor = new LivePriceMonitorV2(null, { quoteClient: this.quoteClient });
         this.livePriceMonitor.start();
         this.engine.setLivePriceMonitor(this.livePriceMonitor);
         this.klineCollector = new KlineCollector();

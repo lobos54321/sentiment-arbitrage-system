@@ -152,7 +152,7 @@ export class KlineRepository {
 
   getBars(tokenCa, startTs, endTs) {
     return this.db.prepare(`
-      SELECT timestamp, open, high, low, close, volume, provider, pool_address
+      SELECT timestamp, open, high, low, close, volume, provider, pool_address, fetched_at
       FROM kline_1m
       WHERE token_ca = ? AND timestamp >= ? AND timestamp <= ?
       ORDER BY timestamp ASC
@@ -161,12 +161,22 @@ export class KlineRepository {
 
   getBarsBefore(tokenCa, signalTsSec, limit) {
     return this.db.prepare(`
-      SELECT timestamp, open, high, low, close, volume, provider, pool_address
+      SELECT timestamp, open, high, low, close, volume, provider, pool_address, fetched_at
       FROM kline_1m
       WHERE token_ca = ? AND timestamp < ?
       ORDER BY timestamp DESC
       LIMIT ?
     `).all(tokenCa, signalTsSec, limit);
+  }
+
+  getLatestBars(tokenCa, limit = 20) {
+    return this.db.prepare(`
+      SELECT timestamp, open, high, low, close, volume, provider, pool_address, fetched_at
+      FROM kline_1m
+      WHERE token_ca = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(tokenCa, limit);
   }
 
   upsertBars(tokenCa, poolAddress, bars = [], provider = 'helius') {
