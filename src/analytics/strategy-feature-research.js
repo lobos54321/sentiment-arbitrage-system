@@ -97,8 +97,12 @@ function parseDescriptionFeatures(description = '', signal = {}, enrichment = nu
     if (unit === 'D') return count * 60 * 24;
     return null;
   })();
-  const isAth = Boolean(signal.is_ath) || (/\bATH\b/i.test(normalizedText) && !/NOT_ATH/i.test(normalizedText)) || String(signal.hard_gate_status || '').toUpperCase().includes('ATH');
-  const sourceType = String(enriched.metadataSource || '').includes('remote-log') || String(enrichment?.source || '').includes('remote-log') || String(signal.hard_gate_status || '').toUpperCase().includes('REMOTE_LOG_IMPORT')
+  const signalType = String(signal.signal_type || '').toUpperCase();
+  const gateResult = (() => {
+    try { return signal.gate_result ? JSON.parse(signal.gate_result) : null; } catch { return null; }
+  })();
+  const isAth = signalType === 'ATH' || Boolean(signal.is_ath) || (/\bATH\b/i.test(normalizedText) && !/NOT_ATH/i.test(normalizedText));
+  const sourceType = String(enriched.metadataSource || '').includes('remote-log') || String(enrichment?.source || '').includes('remote-log') || String(gateResult?.status || '').toUpperCase().includes('REMOTE_LOG_IMPORT')
     ? 'remote-log'
     : 'local-premium';
   const hasIndices = [superIndex, tradeIndex, securityIndex, addressIndex].some((v) => Number.isFinite(v) && v > 0);
@@ -124,7 +128,7 @@ function parseDescriptionFeatures(description = '', signal = {}, enrichment = nu
     aiConfidence: toNum(signal.ai_confidence || enriched.aiConfidence, derivedConfidence),
     aiAction,
     narrativeTier,
-    hardGateStatus: signal.hard_gate_status || enriched.hardGateStatus || null,
+    hardGateStatus: gateResult?.status || signal.hard_gate_status || enriched.hardGateStatus || null,
     top10Pct,
     holders,
     marketCap,
@@ -313,6 +317,10 @@ export class StrategyFeatureResearch {
             p.description,
             p.timestamp,
             p.hard_gate_status,
+            p.gate_result,
+            p.signal_type,
+            p.is_ath,
+            p.parse_status,
             p.ai_action,
             p.ai_confidence,
             p.ai_narrative_tier,
@@ -403,6 +411,7 @@ export class StrategyFeatureResearch {
         maxGainPercent: outcome.maxGainPercent,
         maxDrawdownPercent: outcome.maxDrawdownPercent,
         outcomeSource: outcome.source,
+        signalType: row.signal_type,
         features
       };
       const labels = classifySample(base);

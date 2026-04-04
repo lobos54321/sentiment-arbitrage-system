@@ -19,6 +19,10 @@
  */
 
 import Database from 'better-sqlite3';
+/**
+ * Canonical paper exit evaluator used by the active paper path:
+ * scripts/paper_trade_monitor.py -> scripts/execution_bridge.js -> this module.
+ */
 import {
   hydrateMonitorState,
   applyExitToState,
@@ -1452,6 +1456,10 @@ function buildPaperQuoteFailureExecution(position = {}, sellAmount = 0, failureR
     quoteTs: normalizeTimestampMs(quoteTsSec, Date.now()),
     feeEstimate: null,
     failureReason,
+    failureClass: 'execution_availability',
+    accountingOutcome: 'open',
+    strategyOutcome: 'blocked_by_infra',
+    syntheticClose: false,
     txHash: null,
     actualAmountOut: null,
     actualAmountOutRaw: null,
@@ -1810,9 +1818,16 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
       shouldExit: false,
       decisionType: 'exit',
       actionReason: simpleEval.exitReason,
+      strategyOutcome: 'blocked_by_infra',
+      executionAvailability: 'unavailable',
+      accountingOutcome: 'open',
       execution: {
         ...failureExecution,
         failureReason: effectiveFailureReason,
+        failureClass: 'execution_availability',
+        accountingOutcome: 'open',
+        strategyOutcome: 'blocked_by_infra',
+        syntheticClose: false,
       },
       markSource,
       currentPrice,
@@ -1848,8 +1863,18 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     lifecycleReason,
     exitReason: lifecycleReason,
     actionReason: lifecycleReason,
+    strategyOutcome: lifecycleReason,
+    executionAvailability: 'available',
+    accountingOutcome: 'closed_real',
+    syntheticClose: false,
     realizedPnl,
-    execution: executionResult,
+    execution: {
+      ...executionResult,
+      failureClass: null,
+      accountingOutcome: 'closed_real',
+      strategyOutcome: lifecycleReason,
+      syntheticClose: false,
+    },
     markSource,
     currentPrice,
     quoteTsSec,

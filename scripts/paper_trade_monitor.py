@@ -117,6 +117,7 @@ MARKET_DATA_UNIFIED_PAPER_MONITOR = os.environ.get('MARKET_DATA_UNIFIED_PAPER_MO
 MARKET_DATA_SHARED_POOL_RESOLUTION = os.environ.get('MARKET_DATA_SHARED_POOL_RESOLUTION', 'true').lower() != 'false'
 MARKET_DATA_SHARED_OHLCV = os.environ.get('MARKET_DATA_SHARED_OHLCV', 'true').lower() != 'false'
 MARKET_DATA_SHARED_REDIS_CACHE = os.environ.get('MARKET_DATA_SHARED_REDIS_CACHE', 'false').lower() == 'true'
+MARKET_DATA_PAPER_DIRECT_FALLBACK = os.environ.get('MARKET_DATA_PAPER_DIRECT_FALLBACK', 'true').lower() != 'false'
 
 _REDIS_CLIENT = None
 _REDIS_INIT_ATTEMPTED = False
@@ -575,6 +576,10 @@ def shared_truth_source_enabled(feature_name):
     return False
 
 
+def direct_provider_fallback_allowed():
+    return (not market_data_unified_enabled()) or MARKET_DATA_PAPER_DIRECT_FALLBACK
+
+
 def get_shared_market_runtime():
     global _SHARED_MARKET_DATA_RUNTIME
     if _SHARED_MARKET_DATA_RUNTIME is not None:
@@ -720,6 +725,9 @@ def get_pool_address(token_ca, cache={}):
                     return pool
         except Exception:
             pass
+
+    if not direct_provider_fallback_allowed():
+        return None
 
     data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}")
     if not data:
@@ -876,6 +884,8 @@ def get_current_bar(token_ca, pool_address=None):
         pool_address = get_pool_address(token_ca)
     if not pool_address:
         return None
+    if not direct_provider_fallback_allowed():
+        return None
 
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
@@ -1013,6 +1023,9 @@ def get_notath_bars(pool_address, limit=5):
         except Exception:
             pass
 
+    if not direct_provider_fallback_allowed():
+        return None
+
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
         f"{pool_address}/ohlcv/minute?aggregate=1&limit={limit}"
@@ -1104,6 +1117,9 @@ def get_entry_bar_ohlcv(pool_address):
                     }
             except Exception:
                 pass
+    if not direct_provider_fallback_allowed():
+        return None
+
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
         f"{pool_address}/ohlcv/minute?aggregate=1&limit=2"
@@ -1150,6 +1166,9 @@ def get_sol_price():
     cached_price = _SOL_PRICE_CACHE.get('price')
     fetched_at = _SOL_PRICE_CACHE.get('fetched_at') or 0.0
     if cached_price and (now - fetched_at) < SOL_PRICE_TTL_SEC:
+        return cached_price
+
+    if not direct_provider_fallback_allowed():
         return cached_price
 
     data = curl_json("https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112")

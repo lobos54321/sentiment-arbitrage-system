@@ -318,12 +318,14 @@ export class PremiumChannelListener {
 
       const text = message.text || message.message || '';
       if (!text) return;
+      const sourceMessageTs = message.date ? Number(message.date) * 1000 : null;
 
       // Process 🔥 New Trending OR 📈 ATH messages
       if (text.includes('🔥') && text.includes('New Trending')) {
         console.log(`🔥 [NOT_ATH原文] ${text.substring(0, 500)}`);
         const signal = this._parseSignal(text);
         if (!signal) return;
+        signal.source_message_ts = sourceMessageTs;
         const superIdx = signal.indices?.super_index?.value ?? signal.indices?.super_index ?? 0;
         console.log(`🔥 [NOT_ATH解析] $${signal.symbol||'?'} MC=${signal.market_cap} super=${superIdx}`);
         if (this._isDuplicate('NT_' + signal.token_ca)) return;
@@ -335,6 +337,7 @@ export class PremiumChannelListener {
           console.log(`⚠️ [ATH] 解析失败: ${text.substring(0, 100)}`);
           return;
         }
+        signal.source_message_ts = sourceMessageTs;
         console.log(`📈 [ATH解析] $${signal.symbol} gain=${signal.gain_pct}% MC=${signal.market_cap_from}→${signal.market_cap} is_ath=${signal.is_ath}`);
         // ATH 用独立 key，不被同 CA 的 New Trending 信号误拦截
         if (this._isDuplicate('ATH_' + signal.token_ca)) return;
@@ -390,6 +393,7 @@ export class PremiumChannelListener {
     // Extract Egeye AI Index data (7 indices)
     const indices = this._parseIndices(text);
 
+    const receivedTs = Date.now();
     return {
       token_ca,
       chain: 'SOL',
@@ -403,8 +407,20 @@ export class PremiumChannelListener {
       age,
       indices,  // { super_index, ai_index, trade_index, security_index, address_index, viral_index, media_index }
       description: text,
+      raw_message: text,
       channel: 'Egeye AI Gems 100X Vip',
-      timestamp: Date.now(),
+      timestamp: receivedTs,
+      source_message_ts: null,
+      receive_ts: receivedTs,
+      signal_type: 'NEW_TRENDING',
+      is_ath: false,
+      parse_status: 'parsed',
+      parse_missing_fields: [
+        symbol ? null : 'symbol',
+        market_cap > 0 ? null : 'market_cap',
+        holders > 0 ? null : 'holders',
+        top10_pct > 0 ? null : 'top10_pct'
+      ].filter(Boolean),
       source: 'premium_channel',
     };
   }
@@ -443,6 +459,7 @@ export class PremiumChannelListener {
     }
     const mc = mcTo || mcFrom || 0;
 
+    const receivedTs = Date.now();
     return {
       token_ca,
       chain: 'SOL',
@@ -459,8 +476,17 @@ export class PremiumChannelListener {
       age: '',
       indices,
       description: text,
+      raw_message: text,
       channel: 'Egeye AI Gems 100X Vip',
-      timestamp: Date.now(),
+      timestamp: receivedTs,
+      source_message_ts: null,
+      receive_ts: receivedTs,
+      signal_type: 'ATH',
+      parse_status: 'parsed',
+      parse_missing_fields: [
+        symbol ? null : 'symbol',
+        mc > 0 ? null : 'market_cap'
+      ].filter(Boolean),
       source: 'premium_channel_ath',
     };
   }

@@ -74,6 +74,7 @@ export class FixedEvaluator {
       poolAddress: result.poolAddress || null,
       provider: result.provider || null,
       error: result.error || null,
+      provenance: result.provenance || null,
     };
   }
 
@@ -127,6 +128,7 @@ export class FixedEvaluator {
       poolId: result.poolAddress,
       bars: result.bars,
       error: result.error,
+      provenance: result.provenance || null,
     };
   }
 

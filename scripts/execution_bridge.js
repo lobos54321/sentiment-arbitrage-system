@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+// Canonical paper bridge path: paper_trade_monitor.py -> execution_bridge.js -> paper-live-position-monitor.js
 import ParityExecutor from '../src/execution/parity-executor.js';
 import { evaluatePaperLiveManagedPosition } from '../src/execution/paper-live-position-monitor.js';
+import { applyMarketDataProcessOverride } from '../src/market-data/shared-market-runtime.js';
 
 function redirectConsoleToStderr() {
   const write = (args) => {
@@ -44,6 +46,8 @@ async function main() {
 
   const raw = await readStdin();
   const payload = raw ? JSON.parse(raw) : {};
+  const processFlag = payload.mode === 'paper' ? 'MARKET_DATA_UNIFIED_PAPER_MONITOR' : 'MARKET_DATA_UNIFIED_PREMIUM';
+  applyMarketDataProcessOverride(processFlag);
   const executor = new ParityExecutor({ mode: payload.mode || 'paper' }).initialize();
 
   let result;
