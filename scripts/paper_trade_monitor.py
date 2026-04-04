@@ -1506,7 +1506,7 @@ class Position:
         'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
         'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
         'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
-        'monitor_state', 'entry_execution_json',
+        'monitor_state', 'entry_execution_json', 'premium_signal_id', 'signal_type',
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
@@ -1535,6 +1535,8 @@ class Position:
         self.last_mark_ts = int(entry_ts)
         self.monitor_state = monitor_state or {}
         self.entry_execution_json = entry_execution_json
+        self.premium_signal_id = None
+        self.signal_type = None
 
 
 def build_lifecycle_id(token_ca, signal_ts):
