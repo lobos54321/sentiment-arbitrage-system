@@ -379,6 +379,23 @@ def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, fin
     return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol
 
 
+def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
+    trigger_pct = _safe_float(trigger_pnl * 100.0, None)
+    peak_pct = _safe_float(pos.peak_pnl * 100.0, None)
+    stop_loss_pct = -abs(_safe_float(exit_rules.get('stopLossPct'), 0.0))
+    trail_active = bool(pos.trailing_active)
+    trail_floor_pct = None
+    if trail_active and peak_pct is not None:
+        trail_floor_pct = max(0.0, peak_pct * _safe_float(exit_rules.get('trailFactor'), 0.9))
+    return {
+        'trigger_pct': trigger_pct,
+        'peak_pct': peak_pct,
+        'stop_loss_pct': stop_loss_pct,
+        'trail_active': trail_active,
+        'trail_floor_pct': trail_floor_pct,
+    }
+
+
 # === Database Setup ===
 
 def init_paper_db(db_path=None):
@@ -2503,8 +2520,18 @@ def run_monitor(db):
             last_heartbeat = now
 
         if now - last_progress >= HEARTBEAT_INTERVAL_SEC * 2:
+            freshness = get_signal_freshness()
+            source_age_min = freshness.get('age_minutes')
+            progress_cause = 'awaiting_new_work'
+            if source_age_min is None or (isinstance(source_age_min, (int, float)) and source_age_min > 10):
+                progress_cause = 'source_freshness'
+            elif pending_entries:
+                progress_cause = 'entry_backlog_or_pool_lookup'
+            elif positions:
+                progress_cause = 'open_positions_waiting_exit'
             log.warning(
-                f"No trading progress for {int(now - last_progress)}s; likely stalled on source freshness, pool lookup, or rate limiting"
+                f"No trading progress for {int(now - last_progress)}s; likely stalled on {progress_cause} "
+                f"(source_age_min={source_age_min}, pending={len(pending_entries)}, active_positions={len(positions)})"
             )
             last_progress = now
 
@@ -2741,12 +2768,18 @@ def run_monitor(db):
                             quote_price_value = (mark_quote_price * sol_price) if sol_price else mark_quote_price
                             quote_price_text = f"{quote_price_value:.10f}"
                         quote_out_text = f"{float(mark_quote_out):.6f}" if mark_quote_out is not None else 'na'
+                        debug_fields = compute_exit_debug_fields(exit_rules, pos, trigger_pnl)
+                        trail_floor_text = (
+                            f"{debug_fields['trail_floor_pct']:+.1f}%"
+                            if debug_fields['trail_floor_pct'] is not None else 'na'
+                        )
                         log.info(
                             f"  Exit trigger {pos.symbol}/{pos.strategy_stage}: action={action} reason={reason} "
                             f"trigger_pnl={trigger_pnl*100:+.1f}% trigger_price=${trigger_price_text} "
                             f"source={mark_source} quote_route={mark_quote_route} "
                             f"quote_reason={mark_quote_reason or '-'} quote_price=${quote_price_text} "
-                            f"quote_out={quote_out_text}"
+                            f"quote_out={quote_out_text} trail_active={str(debug_fields['trail_active']).lower()} "
+                            f"trail_floor_pct={trail_floor_text} stop_loss_pct={debug_fields['stop_loss_pct']:+.1f}%"
                         )
                         to_close.append({
                             'trade_id': trade_id,
