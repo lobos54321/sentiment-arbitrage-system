@@ -25,7 +25,7 @@ export function hydrateMonitorState(rawState = {}, fallback = {}) {
     highPnl: toNumber(rawState.highPnl ?? rawState.peakPnl, 0),
     lowPnl: toNumber(rawState.lowPnl, 0),
     lastPnl: toNumber(rawState.lastPnl, 0),
-    totalSolReceived: toNumber(rawState.totalSolReceived, 0),
+    totalSolReceived: Math.max(0, toNumber(rawState.totalSolReceived, 0)),
     entryTime,
     closed: Boolean(rawState.closed),
     exitReason: rawState.exitReason || null,
@@ -240,7 +240,7 @@ export function applyPartialSellToState(state, { tpName, sellPct, sellAmount, so
   const remainingBeforeSell = 100 - (state.soldPct || 0);
   const actualSoldFraction = (sellPct / 100) * remainingBeforeSell;
   state.tokenAmount = Math.max(0, Math.trunc(state.tokenAmount - sellAmount));
-  state.totalSolReceived = toNumber(state.totalSolReceived, 0) + toNumber(solReceived, 0);
+  state.totalSolReceived = Math.max(0, toNumber(state.totalSolReceived, 0) + toNumber(solReceived, 0));
   state.soldPct = toNumber(state.soldPct, 0) + actualSoldFraction;
   state.lockedPnl = toNumber(state.lockedPnl, 0) + (toNumber(currentPnl, 0) * (actualSoldFraction / 100));
   state[tpName.toLowerCase()] = true;
@@ -252,7 +252,7 @@ export function applyPartialSellToState(state, { tpName, sellPct, sellAmount, so
 }
 
 export function applyExitToState(state, { solReceived }) {
-  state.totalSolReceived = toNumber(state.totalSolReceived, 0) + toNumber(solReceived, 0);
+  state.totalSolReceived = Math.max(0, toNumber(state.totalSolReceived, 0) + toNumber(solReceived, 0));
   state.closed = true;
   return state;
 }

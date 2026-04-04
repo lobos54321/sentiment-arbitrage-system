@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Canonical paper active path owner: this monitor orchestrates paper lifecycle state and delegates exit evaluation
+# through scripts/execution_bridge.js -> src/execution/paper-live-position-monitor.js.
 """
 Paper Trade Monitor — forward-test NOT_ATH signals with staged lifecycle execution.
 
@@ -368,15 +370,28 @@ def sync_position_from_monitor_state(pos, allow_token_amount_override=False):
         state['tokenDecimals'] = int(pos.token_decimals or state.get('tokenDecimals') or 0)
 
 
-def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, final_exit_sol=None):
+def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, final_exit_sol=None, has_partial_history=False):
     monitor_state = state if isinstance(state, dict) else {}
     entry_sol = _safe_float(monitor_state.get('entrySol'), fallback_position_size_sol)
     total_sol_received = _safe_float(monitor_state.get('totalSolReceived'), None)
-    if total_sol_received is None and final_exit_sol is not None:
-        total_sol_received = _safe_float(final_exit_sol, None)
-    if total_sol_received is None or entry_sol <= 0:
-        return None, total_sol_received, entry_sol
-    return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol
+    final_exit_total_sol = _safe_float(final_exit_sol, None)
+
+    if entry_sol <= 0:
+        accounting_source = 'monitor_state_total_sol_received' if has_partial_history else 'final_exit_only'
+        return None, total_sol_received if has_partial_history else final_exit_total_sol, entry_sol, accounting_source
+
+    if has_partial_history:
+        if total_sol_received is None and final_exit_total_sol is not None:
+            total_sol_received = final_exit_total_sol
+        if total_sol_received is None:
+            return None, total_sol_received, entry_sol, 'monitor_state_total_sol_received'
+        return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol, 'monitor_state_total_sol_received'
+
+    if final_exit_total_sol is not None:
+        return ((final_exit_total_sol - entry_sol) / entry_sol), final_exit_total_sol, entry_sol, 'final_exit_only'
+    if total_sol_received is not None:
+        return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol, 'monitor_state_total_sol_received'
+    return None, final_exit_total_sol, entry_sol, 'final_exit_only'
 
 
 def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
@@ -435,6 +450,12 @@ def init_paper_db(db_path=None):
             exit_execution_audit_json TEXT,
             exit_quote_failures INTEGER DEFAULT 0,
             last_exit_quote_failure TEXT,
+            premium_signal_id INTEGER,
+            signal_type TEXT,
+            strategy_outcome TEXT,
+            execution_availability TEXT,
+            accounting_outcome TEXT,
+            synthetic_close INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -471,6 +492,12 @@ def init_paper_db(db_path=None):
         "ALTER TABLE paper_trades ADD COLUMN exit_execution_audit_json TEXT",
         "ALTER TABLE paper_trades ADD COLUMN exit_quote_failures INTEGER DEFAULT 0",
         "ALTER TABLE paper_trades ADD COLUMN last_exit_quote_failure TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN premium_signal_id INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN signal_type TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN strategy_outcome TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN execution_availability TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN accounting_outcome TEXT",
+        "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
     ]:
         try:
             db.execute(column_sql)
@@ -936,6 +963,7 @@ def _normalize_signal_rows(rows):
         record.setdefault('timestamp', None)
         record.setdefault('description', '')
         record.setdefault('hard_gate_status', None)
+        record.setdefault('signal_type', None)
         normalized.append(record)
     return normalized
 
@@ -984,14 +1012,15 @@ def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
 def _is_paper_trade_signal(record):
     status = (record.get('hard_gate_status') or '').upper()
     description = record.get('description') or ''
-    return status in {'PASS', 'RISK_BLOCKED'} and 'New Trending' in description
+    signal_type = (record.get('signal_type') or '').upper()
+    return status in {'PASS', 'RISK_BLOCKED'} and (signal_type == 'NEW_TRENDING' or 'New Trending' in description)
 
 
 def _query_local_new_signals(last_signal_id):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
     rows = sdb.execute("""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, signal_type
         FROM premium_signals
         WHERE id > ?
           AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
@@ -1006,7 +1035,7 @@ def _query_local_recent_signals(limit=20):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
     rows = sdb.execute("""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, signal_type
         FROM premium_signals
         WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
           AND description LIKE '%New Trending%'
@@ -1154,7 +1183,7 @@ def has_partial_state_gap(token_amount_raw, entry_execution, monitor_state):
         return False
     if remaining_token_amount_raw >= original_token_amount_raw:
         return False
-    partial_state_fields = ('tp1', 'tp2', 'tp3', 'tp4', 'soldPct', 'totalSolReceived', 'lockedPnl', 'moonbag')
+    partial_state_fields = ('tp1', 'tp2', 'tp3', 'tp4', 'soldPct', 'lockedPnl', 'moonbag')
     return not any(state.get(field) not in (None, False, 0, 0.0, '') for field in partial_state_fields)
 
 
@@ -1219,10 +1248,10 @@ class Position:
         'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
         'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
         'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
-        'monitor_state',
+        'monitor_state', 'entry_execution_json',
     ]
 
-    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None):
+    def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
         self.trade_id = trade_id
         self.token_ca = token_ca
         self.symbol = symbol
@@ -1247,6 +1276,7 @@ class Position:
         self.last_bar_ts = int(entry_ts)
         self.last_mark_ts = int(entry_ts)
         self.monitor_state = monitor_state or {}
+        self.entry_execution_json = entry_execution_json
 
 
 def build_lifecycle_id(token_ca, signal_ts):
@@ -1426,12 +1456,14 @@ def get_exit_rules_for_stage(strategy_config, stage_name):
     return dict(DEFAULT_STAGE1_EXIT)
 
 
-def build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts):
+def build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts, premium_signal_id=None, signal_type=None):
     return {
         'lifecycle_id': lifecycle_id,
         'token_ca': token_ca,
         'symbol': symbol,
         'signal_ts': signal_ts,
+        'premium_signal_id': premium_signal_id,
+        'signal_type': signal_type,
         'first_peak_pct': 0.0,
         'stage1_trade_id': None,
         'stage2a_trade_id': None,
@@ -1454,7 +1486,8 @@ def restore_lifecycles(db):
         SELECT id, token_ca, symbol, signal_ts, strategy_stage, exit_reason, pnl_pct,
                peak_pnl, entry_ts, exit_ts, lifecycle_id, parent_trade_id, bars_held,
                first_peak_pct, rolling_low_price, rolling_low_ts, reentry_source, armed_ts,
-               stage3_peak_price, stage3_qualifying_exit_ts, stage3_dormant, stage3_blacklisted
+               stage3_peak_price, stage3_qualifying_exit_ts, stage3_dormant, stage3_blacklisted,
+               premium_signal_id, signal_type
         FROM paper_trades
         ORDER BY signal_ts ASC, id ASC
     """).fetchall()
@@ -1467,7 +1500,7 @@ def restore_lifecycles(db):
         summary = summarize_lifecycle_rows(lifecycle_rows)
         valid_stage2a_row = summary['valid_stage2a_row']
         valid_stage3_row = summary['valid_stage3_row']
-        item = build_lifecycle_state(lifecycle_id, first_row['token_ca'], first_row['symbol'], first_row['signal_ts'])
+        item = build_lifecycle_state(lifecycle_id, first_row['token_ca'], first_row['symbol'], first_row['signal_ts'], first_row['premium_signal_id'] if 'premium_signal_id' in first_row.keys() else None, first_row['signal_type'] if 'signal_type' in first_row.keys() else None)
         item['first_peak_pct'] = summary['first_peak_pct']
         item['stage1_trade_id'] = summary['canonical_stage1_id']
         item['stage2a_trade_id'] = valid_stage2a_row['id'] if valid_stage2a_row else None
@@ -1589,8 +1622,9 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
              lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
              reentry_source, first_peak_pct, stage3_peak_price, stage3_qualifying_exit_ts,
              stage3_dormant, stage3_blacklisted, position_size_sol, token_amount_raw, token_decimals,
-             entry_execution_json, entry_execution_audit_json, monitor_state_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
+             entry_execution_json, entry_execution_audit_json, monitor_state_json,
+             premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     """, (
         strategy_id, strategy_role, 'stage3', 'stage3_entered',
         token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts,
@@ -1612,7 +1646,8 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
             'tokenDecimals': int(token_decimals or 0),
             'entryTime': int(entry_ts) * 1000,
             'exitStrategy': 'NOT_ATH',
-        })
+        }),
+        candidate.get('premium_signal_id'), candidate.get('signal_type') or 'NEW_TRENDING', 'entered', 'available', 'open'
     ))
     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
     db.commit()
@@ -1628,6 +1663,8 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
                        'entryTime': int(entry_ts) * 1000,
                        'exitStrategy': 'NOT_ATH',
                    })
+    pos.premium_signal_id = candidate.get('premium_signal_id')
+    pos.signal_type = candidate.get('signal_type') or 'NEW_TRENDING'
     positions[pos.trade_id] = pos
     candidate['stage3_trade_id'] = trade_id
     candidate['stage3_attempted'] = True
@@ -2066,15 +2103,17 @@ def dry_run(db):
                                  exit_price, exit_ts, exit_reason, pnl_pct, bars_held,
                                  market_regime, replay_source, peak_pnl, trailing_active,
                                  lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
-                                 armed_ts, rolling_low_price, rolling_low_ts, reentry_source)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
+                                 premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                         """, (
                             strategy_id, strategy_role, 'stage2A', f"stage2A_{stage2_result['exit_reason']}",
                             token_ca, symbol, int(signal_ts_ms), stage2_result['entry_price'], stage2_result['entry_ts'],
                             stage2_result['exit_price'], stage2_result['exit_ts'], stage2_result['exit_reason'], stage2_result['exit_pnl'], stage2_result['bars_held'],
                             'real_kline', 'real_kline_replay', stage2_result['peak_pnl'], int(stage2_result['trailing_active']),
                             lifecycle_id, lifecycle['stage1_trade_id'], stage_seq('stage2A'), stage2_result['entry_ts'], stage2_result['entry_price'],
-                            lifecycle['stage1_stop_ts'], lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound'
+                            lifecycle['stage1_stop_ts'], lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound',
+                            lifecycle.get('premium_signal_id'), lifecycle.get('signal_type') or 'NEW_TRENDING', stage2_result['exit_reason'], 'available', 'closed_real'
                         ))
                         stage2_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                         db.commit()
@@ -2280,7 +2319,7 @@ def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decisi
         UPDATE paper_trades
         SET exit_price = ?, exit_ts = ?, exit_reason = ?, pnl_pct = ?,
             bars_held = ?, stage_outcome = ?, exit_quote_failures = ?, last_exit_quote_failure = ?,
-            exit_execution_audit_json = ?
+            exit_execution_audit_json = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?
         WHERE id = ?
         """,
         (
@@ -2293,6 +2332,10 @@ def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decisi
             pos.exit_quote_failures,
             pos.last_exit_quote_failure,
             json.dumps(build_execution_audit(None, audit_payload)),
+            'blocked_by_infra',
+            'unavailable',
+            'closed_synthetic',
+            1,
             pos.trade_id,
         )
     )
@@ -2318,6 +2361,15 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
         audit_extra={failure_count_field: pos.exit_quote_failures},
         log_prefix='TRAPPED',
     )
+    db.execute(
+        """
+        UPDATE paper_trades
+        SET strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 1
+        WHERE id = ?
+        """,
+        ('blocked_by_infra', 'unavailable', 'closed_synthetic', pos.trade_id)
+    )
+    db.commit()
 
 
 # === Live Monitor Loop ===
@@ -2373,7 +2425,8 @@ def run_monitor(db):
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
                strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
-               entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure
+               entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure,
+               premium_signal_id, signal_type
         FROM paper_trades
         WHERE exit_reason IS NULL
     """).fetchall()
@@ -2395,7 +2448,10 @@ def run_monitor(db):
                        recovered['token_decimals'],
                        r['exit_quote_failures'] or 0,
                        r['last_exit_quote_failure'],
-                       raw_monitor_state)
+                       raw_monitor_state,
+                       r['entry_execution_json'])
+        pos.premium_signal_id = r['premium_signal_id'] if 'premium_signal_id' in r.keys() else None
+        pos.signal_type = r['signal_type'] if 'signal_type' in r.keys() else None
         if recovered['recovery_source'] == 'entry_execution':
             db.execute(
                 "UPDATE paper_trades SET position_size_sol = ?, token_amount_raw = ?, token_decimals = ? WHERE id = ?",
@@ -2411,7 +2467,7 @@ def run_monitor(db):
                 f"lifecycle={pos.lifecycle_id}"
             )
         if has_partial_state_gap(recovered['token_amount_raw'], parse_entry_execution(r['entry_execution_json']), raw_monitor_state):
-            lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts))
+            lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
             close_position_with_guard_reason(
                 db,
                 pos,
@@ -2543,6 +2599,8 @@ def run_monitor(db):
                     token_ca = sig['token_ca']
                     last_signal_id = sig['id']
                     signal_ts = sig['timestamp']
+                    premium_signal_id = sig.get('id')
+                    signal_type = sig.get('signal_type') or 'NEW_TRENDING'
                     lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
 
                     if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
@@ -2584,6 +2642,8 @@ def run_monitor(db):
                         'token_ca': token_ca,
                         'symbol': symbol,
                         'signal_ts': signal_ts,
+                        'premium_signal_id': premium_signal_id,
+                        'signal_type': signal_type,
                         'signal_minute_ts': signal_minute_ts,
                         'pool': pool,
                         'lifecycle_id': lifecycle_id,
@@ -2592,7 +2652,7 @@ def run_monitor(db):
                         'attempts': 0,
                         'last_debug_at': 0,
                     }
-                    lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts))
+                    lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts, premium_signal_id, signal_type))
                     log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 execution")
                     last_progress = time.time()
                     time.sleep(0.05)
@@ -2651,8 +2711,9 @@ def run_monitor(db):
                              market_regime, replay_source, peak_pnl, trailing_active,
                              lifecycle_id, stage_seq, trigger_ts, trigger_price,
                              position_size_sol, token_amount_raw, token_decimals,
-                             entry_execution_json, entry_execution_audit_json, monitor_state_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             entry_execution_json, entry_execution_audit_json, monitor_state_json,
+                             premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """, (
                         strategy_id, strategy_role, 'stage1', 'stage1_entered',
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
@@ -2672,7 +2733,8 @@ def run_monitor(db):
                             'tokenDecimals': int(token_decimals or 0),
                             'entryTime': int(entry_ts) * 1000,
                             'exitStrategy': 'NOT_ATH',
-                        })
+                        }),
+                        pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING', 'entered', 'available', 'open'
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
@@ -2753,7 +2815,7 @@ def run_monitor(db):
                     reason = exit_eval.get('exitReason') or exit_eval.get('lifecycleReason')
                     pnl = float(exit_eval.get('realizedPnl') if exit_eval.get('realizedPnl') is not None else (exit_eval.get('triggerPnl') or 0.0))
                     trigger_pnl = float(exit_eval.get('triggerPnl') or 0.0)
-                    lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts))
+                    lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
                     db.execute("""
                         UPDATE paper_trades
@@ -2855,7 +2917,7 @@ def run_monitor(db):
                     else:
                         pos.exit_quote_failures = 0
                     db.execute(
-                        "UPDATE paper_trades SET exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ? WHERE id = ?",
+                        "UPDATE paper_trades SET exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0 WHERE id = ?",
                         (
                             json.dumps(exit_execution),
                             json.dumps(build_execution_audit(exit_execution, {
@@ -2868,6 +2930,9 @@ def run_monitor(db):
                             })),
                             pos.exit_quote_failures,
                             pos.last_exit_quote_failure,
+                            'blocked_by_infra',
+                            'unavailable',
+                            'open',
                             pos.trade_id,
                         )
                     )
@@ -2905,21 +2970,35 @@ def run_monitor(db):
                 effective_exit_price = (quoted_exit_price * sol_price) if (quoted_exit_price is not None and sol_price) else (quoted_exit_price or exit_price)
                 realized_pnl = pnl
                 actual_out = exit_execution.get('quotedOutAmount')
-                lifecycle_realized_pnl, total_realized_sol, lifecycle_entry_sol = lifecycle_realized_pnl_from_state(
+                has_partial_history = not has_partial_state_gap(
+                    pos.token_amount_raw,
+                    parse_entry_execution(pos.entry_execution_json),
+                    pos.monitor_state,
+                )
+                lifecycle_realized_pnl, total_realized_sol, lifecycle_entry_sol, accounting_source = lifecycle_realized_pnl_from_state(
                     pos.monitor_state,
                     fallback_position_size_sol=pos.position_size_sol,
                     final_exit_sol=actual_out,
+                    has_partial_history=has_partial_history,
                 )
                 if lifecycle_realized_pnl is not None:
                     realized_pnl = lifecycle_realized_pnl
                 elif actual_out is not None and pos.position_size_sol:
                     realized_pnl = (float(actual_out) - float(pos.position_size_sol)) / float(pos.position_size_sol)
+                    accounting_source = 'final_exit_only'
+                log.info(
+                    f"ACCOUNTING_SOURCE trade_id={pos.trade_id} lifecycle={pos.lifecycle_id} stage={pos.strategy_stage} "
+                    f"source={accounting_source} partialHistory={1 if has_partial_history else 0} "
+                    f"entrySol={_safe_float(lifecycle_entry_sol, None)} finalExitSol={_safe_float(actual_out, None)} "
+                    f"totalRealizedSol={_safe_float(total_realized_sol, None)} realizedPnlPct={_safe_float(realized_pnl * 100.0, None)}"
+                )
                 db.execute("""
                     UPDATE paper_trades
                     SET exit_price = ?, exit_ts = ?, exit_reason = ?,
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
                         peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
-                        exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL
+                        exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
+                        strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0
                     WHERE id = ?
                 """, (
                     effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
@@ -2935,9 +3014,10 @@ def run_monitor(db):
                         'realizedPnlPct': _safe_float(realized_pnl * 100.0, None),
                         'totalRealizedSol': _safe_float(total_realized_sol, None),
                         'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
+                        'accountingSource': accounting_source,
                         'triggerPriceUsd': _safe_float(exit_price, None),
                         'effectiveExitPriceUsd': _safe_float(effective_exit_price, None),
-                    })), pos.trade_id
+                    })), reason, 'available', 'closed_real', pos.trade_id
                 ))
                 db.commit()
                 last_progress = time.time()
@@ -3067,8 +3147,9 @@ def run_monitor(db):
                                      lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
                                      armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
                                      position_size_sol, token_amount_raw, token_decimals,
-                                     entry_execution_json, entry_execution_audit_json, monitor_state_json)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     entry_execution_json, entry_execution_audit_json, monitor_state_json,
+                                     premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                             """, (
                                 strategy_id, strategy_role, 'stage2A', 'stage2A_entered',
                                 lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts,
@@ -3090,7 +3171,8 @@ def run_monitor(db):
                                     'tokenDecimals': int(token_decimals or 0),
                                     'entryTime': int(entry_ts) * 1000,
                                     'exitStrategy': 'NOT_ATH',
-                                })
+                                }),
+                                lifecycle.get('premium_signal_id'), lifecycle.get('signal_type') or 'NEW_TRENDING', 'entered', 'available', 'open'
                             ))
                             trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                             db.commit()
@@ -3106,6 +3188,8 @@ def run_monitor(db):
                                                'entryTime': int(entry_ts) * 1000,
                                                'exitStrategy': 'NOT_ATH',
                                            })
+                            pos.premium_signal_id = lifecycle.get('premium_signal_id')
+                            pos.signal_type = lifecycle.get('signal_type') or 'NEW_TRENDING'
                             positions[pos.trade_id] = pos
                             lifecycle['stage2a_trade_id'] = trade_id
                             lifecycle['stage2a_attempted'] = True

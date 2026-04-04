@@ -100,6 +100,7 @@ export class PremiumSignalEngine {
       executed: 0,
       shadow_logged: 0,
       not_ath_prebuy_kline_pass: 0,
+      not_ath_prebuy_kline_unknown_data: 0,
       not_ath_prebuy_kline_block: 0,
       errors: 0
     };
@@ -211,13 +212,23 @@ export class PremiumSignalEngine {
         top10_pct REAL,
         age TEXT,
         description TEXT,
+        raw_message TEXT,
         timestamp INTEGER NOT NULL,
+        source_message_ts INTEGER,
+        receive_ts INTEGER,
+        signal_type TEXT,
+        is_ath INTEGER DEFAULT 0,
+        parse_status TEXT,
+        parse_missing_fields TEXT,
         hard_gate_status TEXT,
+        gate_result TEXT,
         ai_action TEXT,
         ai_confidence INTEGER,
         ai_narrative_tier TEXT,
         executed INTEGER DEFAULT 0,
         trade_result TEXT,
+        downstream_trade_id INTEGER,
+        downstream_lifecycle_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -243,6 +254,7 @@ export class PremiumSignalEngine {
       CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         token_ca TEXT NOT NULL,
+        premium_signal_id INTEGER,
         chain TEXT NOT NULL,
         entry_time INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
         entry_price REAL NOT NULL DEFAULT 0,
@@ -325,6 +337,20 @@ export class PremiumSignalEngine {
       INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, score, pullback, vol_ratio, wick_ratio, ema21, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'geckoterminal')
     `);
+    const addSqlColumn = (sql) => {
+      try { this.db.exec(sql); } catch {}
+    };
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN raw_message TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN source_message_ts INTEGER`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN receive_ts INTEGER`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN signal_type TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN is_ath INTEGER DEFAULT 0`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN parse_status TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN parse_missing_fields TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN gate_result TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_trade_id INTEGER`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_lifecycle_id TEXT`);
+    addSqlColumn(`ALTER TABLE trades ADD COLUMN premium_signal_id INTEGER`);
   }
 
   /**
@@ -893,14 +919,34 @@ export class PremiumSignalEngine {
   /**
    * 保存信号记录到数据库
    */
-  saveSignalRecord(signal, gateStatus, aiResult, executed = false) {
+  saveSignalRecord(signal, gateStatus, aiResult, executed = false, linkage = {}) {
     try {
-      this.db.prepare(`
+      const parseMissingFields = Array.isArray(signal.parse_missing_fields)
+        ? signal.parse_missing_fields.filter(Boolean)
+        : [];
+      const receiveTs = Number(signal.receive_ts || signal.timestamp || Date.now());
+      const sourceMessageTs = Number(signal.source_message_ts || 0) || null;
+      const signalType = signal.signal_type || (signal.is_ath ? 'ATH' : 'NEW_TRENDING');
+      const parseStatus = signal.parse_status || (parseMissingFields.length ? 'partial' : 'parsed');
+      const inheritedGateResult = linkage.gateResult && typeof linkage.gateResult === 'object'
+        ? linkage.gateResult
+        : (signal._prebuyGateResult && typeof signal._prebuyGateResult === 'object' ? signal._prebuyGateResult : null);
+      const gatePayload = {
+        status: gateStatus,
+        executed: executed ? 1 : 0,
+        aiAction: aiResult?.action || null,
+        aiConfidence: aiResult?.confidence || null,
+        ...(inheritedGateResult || {}),
+      };
+      const result = this.db.prepare(`
         INSERT INTO premium_signals (
           token_ca, symbol, market_cap, holders, volume_24h, top10_pct,
-          age, description, timestamp, hard_gate_status,
-          ai_action, ai_confidence, ai_narrative_tier, executed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          age, description, raw_message, timestamp, source_message_ts, receive_ts,
+          signal_type, is_ath, parse_status, parse_missing_fields,
+          hard_gate_status, gate_result,
+          ai_action, ai_confidence, ai_narrative_tier, executed,
+          downstream_trade_id, downstream_lifecycle_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         signal.token_ca,
         signal.symbol || null,
@@ -910,15 +956,28 @@ export class PremiumSignalEngine {
         signal.top10_pct || null,
         signal.age || null,
         signal.description || null,
-        signal.timestamp || Date.now(),
+        signal.raw_message || signal.description || null,
+        signal.timestamp || receiveTs,
+        sourceMessageTs,
+        receiveTs,
+        signalType,
+        signal.is_ath ? 1 : 0,
+        parseStatus,
+        parseMissingFields.length ? JSON.stringify(parseMissingFields) : null,
         gateStatus,
+        JSON.stringify(gatePayload),
         aiResult?.action || null,
         aiResult?.confidence || null,
         aiResult?.narrative_tier || null,
-        executed ? 1 : 0
+        executed ? 1 : 0,
+        linkage.tradeId || null,
+        linkage.lifecycleId || null,
       );
+      signal._premiumSignalId = Number(result.lastInsertRowid || 0) || null;
+      return signal._premiumSignalId;
     } catch (error) {
       console.error('❌ [DB] 保存信号记录失败:', error.message);
+      return null;
     }
   }
 
@@ -936,11 +995,12 @@ export class PremiumSignalEngine {
       const poolAddress = signal.pool_address || this._poolCache?.get(signal.token_ca) || null;
       this.db.prepare(`
         INSERT INTO trades (
-          token_ca, chain, action, position_size, entry_time, entry_price, pool_address, timestamp,
+          token_ca, premium_signal_id, chain, action, position_size, entry_time, entry_price, pool_address, timestamp,
           symbol, narrative, rating, status, is_simulation
-        ) VALUES (?, 'SOL', 'BUY', ?, ?, 0, ?, ?, ?, ?, ?, 'OPEN', 1)
+        ) VALUES (?, ?, 'SOL', 'BUY', ?, ?, 0, ?, ?, ?, ?, ?, 'OPEN', 1)
       `).run(
         signal.token_ca,
+        signal._premiumSignalId || null,
         positionSize,
         Math.floor(now / 1000),  // entry_time (seconds)
         poolAddress,
@@ -1186,38 +1246,110 @@ export class PremiumSignalEngine {
 
     try {
       const backfill = await this._backfillPrebuyKlines(ca, signalTsSec, 5);
-      if (backfill?.enough === false && backfill?.reason === 'no_pool') {
-        console.warn(`⚠️ [NOT_ATH_PREBUY_KLINE_PASS] $${symbol} pre-buy K线继续放行: no_pool`);
-      }
-
       if (backfill?.enough) {
         await this._waitForFreshLocalKlines(ca, 4, 1200);
       }
 
-      const klineCheck = await this._checkKline(ca, { isATH: false });
+      const klineCheck = await this._checkKline(ca, { isATH: false, signalTsSec });
       const structuralFailures = new Set(['not_red_bar', 'support_break', 'high_vol', 'high_vol_calm', 'inactive']);
-      const status = klineCheck?.passed ? 'NOT_ATH_PREBUY_KLINE_PASS' : 'NOT_ATH_PREBUY_KLINE_BLOCK';
-      const detail = [
-        `reason=${klineCheck?.reason || 'unknown'}`,
-        klineCheck?.currentClose != null ? `close=${klineCheck.currentClose}` : null,
-        klineCheck?.minPrevLow != null ? `support=${klineCheck.minPrevLow}` : null,
-        klineCheck?.supportBreakPct != null ? `supportBreakPct=${klineCheck.supportBreakPct.toFixed(2)}` : null,
-        klineCheck?.avgVol3 != null ? `avgVol3=${klineCheck.avgVol3.toFixed(2)}` : null,
-        klineCheck?.momFromLag1 != null ? `momFromLag1=${klineCheck.momFromLag1.toFixed(2)}` : null
+      const gateDecision = klineCheck?.gateStatus || (klineCheck?.passed ? 'PASS' : 'UNKNOWN_DATA');
+      const blockedStructural = gateDecision === 'BLOCK' && structuralFailures.has(klineCheck?.reason);
+      const decisionContinuedToBuy = gateDecision !== 'BLOCK';
+      const prebuyGateResult = {
+        gateName: 'NOT_ATH_PREBUY_KLINE',
+        gateDecision,
+        gateReason: klineCheck?.reason || 'unknown',
+        provider: klineCheck?.provider || backfill?.provider || null,
+        poolAddress: klineCheck?.poolAddress || backfill?.poolAddress || null,
+        freshnessSec: Number.isFinite(klineCheck?.freshnessSec) ? klineCheck.freshnessSec : null,
+        barCountSeen: Number.isFinite(klineCheck?.barCountSeen)
+          ? klineCheck.barCountSeen
+          : (Number.isFinite(backfill?.totalBefore) ? backfill.totalBefore : null),
+        signalTsSec,
+        supportBreakPct: Number.isFinite(klineCheck?.supportBreakPct) ? klineCheck.supportBreakPct : null,
+        avgVol3: Number.isFinite(klineCheck?.avgVol3) ? klineCheck.avgVol3 : null,
+        momFromLag1: Number.isFinite(klineCheck?.momFromLag1) ? klineCheck.momFromLag1 : null,
+        decisionContinuedToBuy,
+        blockedStructural,
+        backfill: backfill ? {
+          fetched: Number.isFinite(backfill.fetched) ? backfill.fetched : null,
+          existingBefore: Number.isFinite(backfill.existingBefore) ? backfill.existingBefore : null,
+          totalBefore: Number.isFinite(backfill.totalBefore) ? backfill.totalBefore : null,
+          enough: Boolean(backfill.enough),
+          provider: backfill.provider || null,
+          poolAddress: backfill.poolAddress || null,
+          reason: backfill.reason || null,
+        } : null,
+      };
+      signal._prebuyGateResult = prebuyGateResult;
+      const logParts = [
+        'NOT_ATH_PREBUY_KLINE',
+        `symbol=${symbol}`,
+        `token=${ca}`,
+        `decision=${gateDecision}`,
+        `reason=${prebuyGateResult.gateReason}`,
+        `continue=${decisionContinuedToBuy ? 1 : 0}`,
+        `blockedStructural=${blockedStructural ? 1 : 0}`,
+        prebuyGateResult.provider ? `provider=${prebuyGateResult.provider}` : null,
+        prebuyGateResult.poolAddress ? `poolAddress=${prebuyGateResult.poolAddress}` : null,
+        Number.isFinite(prebuyGateResult.freshnessSec) ? `freshnessSec=${prebuyGateResult.freshnessSec}` : null,
+        Number.isFinite(prebuyGateResult.barCountSeen) ? `barCountSeen=${prebuyGateResult.barCountSeen}` : null,
+        Number.isFinite(prebuyGateResult.signalTsSec) ? `signalTsSec=${prebuyGateResult.signalTsSec}` : null,
+        Number.isFinite(prebuyGateResult.supportBreakPct) ? `supportBreakPct=${prebuyGateResult.supportBreakPct.toFixed(2)}` : null,
+        Number.isFinite(prebuyGateResult.avgVol3) ? `avgVol3=${prebuyGateResult.avgVol3.toFixed(2)}` : null,
+        Number.isFinite(prebuyGateResult.momFromLag1) ? `momFromLag1=${prebuyGateResult.momFromLag1.toFixed(2)}` : null,
+        prebuyGateResult.backfill?.provider ? `backfillProvider=${prebuyGateResult.backfill.provider}` : null,
+        Number.isFinite(prebuyGateResult.backfill?.totalBefore) ? `backfillBars=${prebuyGateResult.backfill.totalBefore}` : null,
+        prebuyGateResult.backfill?.reason ? `backfillReason=${prebuyGateResult.backfill.reason}` : null,
       ].filter(Boolean).join(' ');
 
-      if (klineCheck?.passed || !structuralFailures.has(klineCheck?.reason)) {
+      if (gateDecision === 'PASS') {
         this.stats.not_ath_prebuy_kline_pass++;
-        console.log(`✅ [${status}] $${symbol} ${detail}`);
-      } else {
+      } else if (gateDecision === 'UNKNOWN_DATA') {
+        this.stats.not_ath_prebuy_kline_unknown_data++;
+      }
+
+      if (blockedStructural) {
         this.stats.not_ath_prebuy_kline_block++;
-        console.log(`🚫 [${status}] $${symbol} ${detail}`);
-        this.saveSignalRecord(signal, status, null, false);
+        console.log(logParts);
+        this.saveSignalRecord(signal, `NOT_ATH_PREBUY_KLINE_${gateDecision}`, null, false, { gateResult: prebuyGateResult });
         return { action: 'SKIP', reason: klineCheck.reason };
       }
+
+      console.log(logParts);
     } catch (error) {
-      this.stats.not_ath_prebuy_kline_pass++;
-      console.warn(`⚠️ [NOT_ATH_PREBUY_KLINE_PASS] $${symbol} pre-buy K线检查失败，继续执行: ${error.message}`);
+      this.stats.not_ath_prebuy_kline_unknown_data++;
+      const prebuyGateResult = {
+        gateName: 'NOT_ATH_PREBUY_KLINE',
+        gateDecision: 'UNKNOWN_DATA',
+        gateReason: 'prebuy_exception',
+        provider: null,
+        poolAddress: null,
+        freshnessSec: null,
+        barCountSeen: null,
+        signalTsSec,
+        supportBreakPct: null,
+        avgVol3: null,
+        momFromLag1: null,
+        decisionContinuedToBuy: true,
+        blockedStructural: false,
+        backfill: null,
+        error: error.message,
+      };
+      signal._prebuyGateResult = prebuyGateResult;
+      console.warn([
+        'NOT_ATH_PREBUY_KLINE',
+        `symbol=${symbol}`,
+        `token=${ca}`,
+        'decision=UNKNOWN_DATA',
+        'reason=prebuy_exception',
+        'continue=1',
+        'blockedStructural=0',
+        `signalTsSec=${signalTsSec}`,
+        `error=${JSON.stringify(error.message)}`,
+      ].join(' '));
+      this.saveSignalRecord(signal, 'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA', null, false, { gateResult: prebuyGateResult });
+      return { action: 'SKIP', reason: 'kline_unknown_data' };
     }
 
     // 执行 Shadow Buy
@@ -1315,7 +1447,7 @@ export class PremiumSignalEngine {
    * @returns {Promise<{passed, close, open, fbr, volume, reason, score?, trendOk?, holdsSupport?, volIncreasing?, greenCount?, minLow?}>}
    */
   async _checkKline(tokenCA, options = {}) {
-    const { isATH = true } = options;
+    const { isATH = true, signalTsSec = Math.floor(Date.now() / 1000) } = options;
     const cacheKey = `${tokenCA}:${isATH ? 'ath' : 'notath'}`;
     const nowMs = Date.now();
     const cachedResult = this._klineResultCache.get(cacheKey);
@@ -1324,12 +1456,19 @@ export class PremiumSignalEngine {
     }
 
     const persistKlineResult = (result) => {
-      this._klineResultCache.set(cacheKey, { at: nowMs, result });
-      return result;
+      const normalized = {
+        gateStatus: result?.gateStatus || (result?.passed ? 'PASS' : 'UNKNOWN_DATA'),
+        provider: result?.provider || null,
+        poolAddress: result?.poolAddress || null,
+        freshnessSec: result?.freshnessSec ?? null,
+        ...result,
+      };
+      this._klineResultCache.set(cacheKey, { at: nowMs, result: normalized });
+      return normalized;
     };
 
-    const scoreBars = (bars, poolAddress = '') => {
-      if (!bars?.length) return { passed: false, reason: 'no_bars' };
+    const scoreBars = (bars, poolAddress = '', metadata = {}) => {
+      if (!bars?.length) return { passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_bars', barCountSeen: 0, ...metadata };
 
       const current = bars[0];
       const prev = bars[1] || null;
@@ -1338,14 +1477,14 @@ export class PremiumSignalEngine {
       if (isATH) {
         const passed = current.close > current.open;
         this._saveKlineBars(tokenCA, poolAddress, bars, {});
-        return { passed, close: current.close, open: current.open, fbr, volume: current.volume,
-                 reason: passed ? 'pass' : 'not_green_bar' };
+        return { passed, gateStatus: passed ? 'PASS' : 'BLOCK', close: current.close, open: current.open, fbr, volume: current.volume,
+                 reason: passed ? 'pass' : 'not_green_bar', barCountSeen: bars.length, ...metadata };
       }
 
-      if (!prev || bars.length < 3) return { passed: false, reason: 'no_history' };
+      if (!prev || bars.length < 3) return { passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_history', barCountSeen: bars.length, ...metadata };
 
       const isRed = current.close < current.open;
-      if (!isRed) return { passed: false, reason: 'not_red_bar', currentClose: current.close };
+      if (!isRed) return { passed: false, gateStatus: 'BLOCK', reason: 'not_red_bar', currentClose: current.close, barCountSeen: bars.length, ...metadata };
 
       const prev3 = bars.slice(1, 4);
       const minPrevLow = Math.min(...prev3.map(bar => Number(bar.low)));
@@ -1385,11 +1524,11 @@ export class PremiumSignalEngine {
         momFromLag1, avgVol3
       });
 
-      return { passed, close: current.close, open: current.open, fbr,
+      return { passed, gateStatus: passed ? 'PASS' : 'BLOCK', close: current.close, open: current.open, fbr,
                volume: current.volume, reason, score,
                isRed, lowVolume, isActive, supportBreak,
                currentClose: current.close, minPrevLow, supportBreakPct,
-               momFromLag1, avgVol3 };
+               momFromLag1, avgVol3, barCountSeen: bars.length, ...metadata };
     };
 
     try {
@@ -1411,10 +1550,16 @@ export class PremiumSignalEngine {
             close: Number(row.close),
             volume: Number(row.volume)
           }));
-          const freshEnough = nowMs - (bars[0].ts * 1000) < 10 * 60_000;
+          const freshnessSec = Math.max(0, signalTsSec - Number(bars[0].ts));
+          const freshEnough = freshnessSec <= 180;
           if (freshEnough) {
-            return persistKlineResult(scoreBars(bars, cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || ''));
+            return persistKlineResult(scoreBars(bars, cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || '', {
+              provider: 'local_cache',
+              poolAddress: cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null,
+              freshnessSec,
+            }));
           }
+          return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_local_bars', provider: 'local_cache', poolAddress: cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null, freshnessSec });
         }
       } catch (dbError) {
         console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 读取本地缓存失败: ${dbError.message}`);
@@ -1443,17 +1588,23 @@ export class PremiumSignalEngine {
               close: Number(row.close),
               volume: Number(row.volume)
             }));
-            const freshEnough = nowMs - (bars[0].ts * 1000) < 10 * 60_000;
+            const freshnessSec = Math.max(0, signalTsSec - Number(bars[0].ts));
+            const freshEnough = freshnessSec <= 180;
             if (freshEnough) {
-              return persistKlineResult(scoreBars(bars, primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || ''));
+              return persistKlineResult(scoreBars(bars, primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || '', {
+                provider: 'local_primed',
+                poolAddress: primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null,
+                freshnessSec,
+              }));
             }
+            return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_primed_bars', provider: 'local_primed', poolAddress: primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null, freshnessSec });
           }
         } catch {}
       }
 
       // 3) 如果刚被限流过，短时间内不再继续打外部接口
       if (nowMs < this._klineApiCooldownUntil) {
-        return persistKlineResult({ passed: false, reason: 'rate_limited' });
+        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'rate_limited', provider: 'external_api' });
       }
 
       // 4) 从外部接口获取 pool 地址
@@ -1464,12 +1615,12 @@ export class PremiumSignalEngine {
           { timeout: 5000 }
         );
         const pairs = dexRes.data?.pairs;
-        if (!pairs?.length) return persistKlineResult({ passed: false, reason: 'no_pool' });
+        if (!pairs?.length) return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_pool', provider: 'dexscreener' });
         const solPairs = pairs.filter(p => p.chainId === 'solana');
         const pool = solPairs?.length
           ? solPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
           : pairs[0];
-        if (!pool?.pairAddress) return persistKlineResult({ passed: false, reason: 'no_pool' });
+        if (!pool?.pairAddress) return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_pool', provider: 'dexscreener' });
         this._poolCache.set(tokenCA, pool.pairAddress);
         poolAddress = pool.pairAddress;
       }
@@ -1480,14 +1631,18 @@ export class PremiumSignalEngine {
         { timeout: 5000 }
       );
       const ohlcv = geckoRes.data?.data?.attributes?.ohlcv_list;
-      if (!ohlcv?.length) return persistKlineResult({ passed: false, reason: 'no_bars' });
+      if (!ohlcv?.length) return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'no_bars', provider: 'geckoterminal', poolAddress });
 
       const bars = ohlcv.map(row => ({
         ts: Number(row[0]), open: Number(row[1]), high: Number(row[2]),
         low: Number(row[3]), close: Number(row[4]), volume: Number(row[5])
       }));
+      const freshnessSec = Math.max(0, signalTsSec - Number(bars[0]?.ts || 0));
+      if (freshnessSec > 180) {
+        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_provider_bars', provider: 'geckoterminal', poolAddress, freshnessSec });
+      }
 
-      return persistKlineResult(scoreBars(bars, poolAddress));
+      return persistKlineResult(scoreBars(bars, poolAddress, { provider: 'geckoterminal', poolAddress, freshnessSec }));
     } catch (error) {
       const status = error?.response?.status;
       if (status === 429) {
@@ -1497,10 +1652,10 @@ export class PremiumSignalEngine {
           console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message} | 120s 内复用缓存/跳过外部查询`);
           this._lastKlineRateLimitLogAt = Date.now();
         }
-        return persistKlineResult({ passed: false, reason: 'rate_limited' });
+        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'rate_limited', provider: 'external_api' });
       }
       console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
-      return persistKlineResult({ passed: false, reason: 'error_skip' });
+      return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'error_skip', provider: 'external_api' });
     }
   }
 
