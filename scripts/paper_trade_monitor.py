@@ -1946,13 +1946,13 @@ def dry_run(db):
                 bars_held = offset
                 if not trailing_active and peak_pnl >= pct_to_decimal(exit_rules['trailStartPct']):
                     trailing_active = True
-                if not trailing_active and pnl <= -pct_to_decimal(exit_rules['stopLossPct']):
+                if pnl <= -pct_to_decimal(exit_rules['stopLossPct']):
                     exit_reason = 'sl'
                     exit_pnl = -pct_to_decimal(exit_rules['stopLossPct'])
                     exit_price = entry_price * (1 + exit_pnl)
                     break
                 if trailing_active:
-                    trail_level = peak_pnl * float(exit_rules['trailFactor'])
+                    trail_level = max(0.0, peak_pnl * float(exit_rules['trailFactor']))
                     if pnl <= trail_level:
                         exit_reason = 'trail'
                         exit_pnl = max(pnl, trail_level)

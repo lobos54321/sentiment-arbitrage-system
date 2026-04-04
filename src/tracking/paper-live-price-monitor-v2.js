@@ -13,25 +13,12 @@ import axios from 'axios';
 import { createClient } from 'redis';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
-const PAPER_MARK_QUOTE_FRACTION = 0.02;
-
 function getPaperMarkQuoteAmount(tokenAmountRaw, tokenDecimals = 6) {
   const normalizedAmount = Math.trunc(Number(tokenAmountRaw || 0));
-  const normalizedDecimals = Math.max(0, Math.trunc(Number(tokenDecimals || 0)));
-
   if (!(normalizedAmount > 0)) {
     return 0;
   }
-
-  const minQuoteAmount = Math.max(1, Math.trunc(10 ** normalizedDecimals));
-  if (normalizedAmount <= minQuoteAmount) {
-    return normalizedAmount;
-  }
-
-  return Math.min(
-    normalizedAmount,
-    Math.max(minQuoteAmount, Math.ceil(normalizedAmount * PAPER_MARK_QUOTE_FRACTION))
-  );
+  return normalizedAmount;
 }
 
 export class LivePriceMonitorV2 extends EventEmitter {
