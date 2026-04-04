@@ -2768,7 +2768,7 @@ def run_monitor(db):
                             quote_price_value = (mark_quote_price * sol_price) if sol_price else mark_quote_price
                             quote_price_text = f"{quote_price_value:.10f}"
                         quote_out_text = f"{float(mark_quote_out):.6f}" if mark_quote_out is not None else 'na'
-                        debug_fields = compute_exit_debug_fields(exit_rules, pos, trigger_pnl)
+                        debug_fields = compute_exit_debug_fields(pos.exit_rules, pos, trigger_pnl)
                         trail_floor_text = (
                             f"{debug_fields['trail_floor_pct']:+.1f}%"
                             if debug_fields['trail_floor_pct'] is not None else 'na'

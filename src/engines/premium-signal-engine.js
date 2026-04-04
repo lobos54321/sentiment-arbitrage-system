@@ -99,6 +99,8 @@ export class PremiumSignalEngine {
       exit_gate_rejected: 0,
       executed: 0,
       shadow_logged: 0,
+      not_ath_prebuy_kline_pass: 0,
+      not_ath_prebuy_kline_block: 0,
       errors: 0
     };
 
@@ -1180,7 +1182,43 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'already_in_position' };
     }
 
-    console.log(`⏭️ [NOT_ATH] $${symbol} 跳过 pre-buy K线回填/检查，直接继续执行`);
+    const signalTsSec = Number(signal.signal_ts || signal.timestamp || Math.floor(Date.now() / 1000));
+
+    try {
+      const backfill = await this._backfillPrebuyKlines(ca, signalTsSec, 5);
+      if (backfill?.enough === false && backfill?.reason === 'no_pool') {
+        console.warn(`⚠️ [NOT_ATH_PREBUY_KLINE_PASS] $${symbol} pre-buy K线继续放行: no_pool`);
+      }
+
+      if (backfill?.enough) {
+        await this._waitForFreshLocalKlines(ca, 4, 1200);
+      }
+
+      const klineCheck = await this._checkKline(ca, { isATH: false });
+      const structuralFailures = new Set(['not_red_bar', 'support_break', 'high_vol', 'high_vol_calm', 'inactive']);
+      const status = klineCheck?.passed ? 'NOT_ATH_PREBUY_KLINE_PASS' : 'NOT_ATH_PREBUY_KLINE_BLOCK';
+      const detail = [
+        `reason=${klineCheck?.reason || 'unknown'}`,
+        klineCheck?.currentClose != null ? `close=${klineCheck.currentClose}` : null,
+        klineCheck?.minPrevLow != null ? `support=${klineCheck.minPrevLow}` : null,
+        klineCheck?.supportBreakPct != null ? `supportBreakPct=${klineCheck.supportBreakPct.toFixed(2)}` : null,
+        klineCheck?.avgVol3 != null ? `avgVol3=${klineCheck.avgVol3.toFixed(2)}` : null,
+        klineCheck?.momFromLag1 != null ? `momFromLag1=${klineCheck.momFromLag1.toFixed(2)}` : null
+      ].filter(Boolean).join(' ');
+
+      if (klineCheck?.passed || !structuralFailures.has(klineCheck?.reason)) {
+        this.stats.not_ath_prebuy_kline_pass++;
+        console.log(`✅ [${status}] $${symbol} ${detail}`);
+      } else {
+        this.stats.not_ath_prebuy_kline_block++;
+        console.log(`🚫 [${status}] $${symbol} ${detail}`);
+        this.saveSignalRecord(signal, status, null, false);
+        return { action: 'SKIP', reason: klineCheck.reason };
+      }
+    } catch (error) {
+      this.stats.not_ath_prebuy_kline_pass++;
+      console.warn(`⚠️ [NOT_ATH_PREBUY_KLINE_PASS] $${symbol} pre-buy K线检查失败，继续执行: ${error.message}`);
+    }
 
     // 执行 Shadow Buy
     const finalSize = 0.06;
@@ -1307,9 +1345,14 @@ export class PremiumSignalEngine {
       if (!prev || bars.length < 3) return { passed: false, reason: 'no_history' };
 
       const isRed = current.close < current.open;
-      if (!isRed) return { passed: false, reason: 'not_red_bar' };
+      if (!isRed) return { passed: false, reason: 'not_red_bar', currentClose: current.close };
 
       const prev3 = bars.slice(1, 4);
+      const minPrevLow = Math.min(...prev3.map(bar => Number(bar.low)));
+      const supportBreak = current.close < minPrevLow;
+      const supportBreakPct = minPrevLow > 0
+        ? ((current.close - minPrevLow) / minPrevLow) * 100
+        : 0;
       const avgVol3 = prev3.reduce((sum, b) => sum + b.volume, 0) / 3;
       const lowVolume = current.volume <= avgVol3;
       const momFromLag1 = prev3[0].close > 0
@@ -1318,14 +1361,17 @@ export class PremiumSignalEngine {
       const isActive = Math.abs(momFromLag1) > 30;
 
       let score = 2;
+      if (!supportBreak) score += 1;
       if (lowVolume) score += 1;
       if (isActive) score += 1;
 
-      const passed = score >= 3;
+      const passed = score >= 4;
 
       let reason;
       if (passed) {
         reason = 'pass';
+      } else if (supportBreak) {
+        reason = 'support_break';
       } else if (!lowVolume && !isActive) {
         reason = 'high_vol_calm';
       } else if (!lowVolume) {
@@ -1341,7 +1387,8 @@ export class PremiumSignalEngine {
 
       return { passed, close: current.close, open: current.open, fbr,
                volume: current.volume, reason, score,
-               isRed, lowVolume, isActive,
+               isRed, lowVolume, isActive, supportBreak,
+               currentClose: current.close, minPrevLow, supportBreakPct,
                momFromLag1, avgVol3 };
     };
 
