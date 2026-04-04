@@ -1016,11 +1016,21 @@ def _is_paper_trade_signal(record):
     return status in {'PASS', 'RISK_BLOCKED'} and (signal_type == 'NEW_TRENDING' or 'New Trending' in description)
 
 
+def _premium_signal_has_column(sdb, column_name):
+    try:
+        columns = sdb.execute("PRAGMA table_info(premium_signals)").fetchall()
+        return any(str(row[1]) == column_name for row in columns)
+    except Exception:
+        return False
+
+
 def _query_local_new_signals(last_signal_id):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
-    rows = sdb.execute("""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, signal_type
+    has_signal_type = _premium_signal_has_column(sdb, 'signal_type')
+    signal_type_expr = 'signal_type' if has_signal_type else 'NULL AS signal_type'
+    rows = sdb.execute(f"""
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}
         FROM premium_signals
         WHERE id > ?
           AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
@@ -1034,8 +1044,10 @@ def _query_local_new_signals(last_signal_id):
 def _query_local_recent_signals(limit=20):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
-    rows = sdb.execute("""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, signal_type
+    has_signal_type = _premium_signal_has_column(sdb, 'signal_type')
+    signal_type_expr = 'signal_type' if has_signal_type else 'NULL AS signal_type'
+    rows = sdb.execute(f"""
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}
         FROM premium_signals
         WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
           AND description LIKE '%New Trending%'
@@ -2713,7 +2725,7 @@ def run_monitor(db):
                              position_size_sol, token_amount_raw, token_decimals,
                              entry_execution_json, entry_execution_audit_json, monitor_state_json,
                              premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """, (
                         strategy_id, strategy_role, 'stage1', 'stage1_entered',
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
