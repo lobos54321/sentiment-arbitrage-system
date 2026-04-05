@@ -69,7 +69,7 @@ function inferPaperOutcome(row) {
   if (!exitReason) {
     if (row.last_exit_quote_failure) {
       return {
-        strategyOutcome: 'blocked_by_infra',
+        strategyOutcome: 'infra_exit_unavailable',
         executionAvailability: 'unavailable',
         accountingOutcome: 'open',
         syntheticClose: 0,
@@ -85,7 +85,7 @@ function inferPaperOutcome(row) {
 
   if (exitReason.startsWith('trapped_') || exitReason.startsWith('legacy_missing_')) {
     return {
-      strategyOutcome: 'blocked_by_infra',
+      strategyOutcome: 'infra_forced_close',
       executionAvailability: 'unavailable',
       accountingOutcome: 'closed_synthetic',
       syntheticClose: 1,

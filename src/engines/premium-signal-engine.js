@@ -68,6 +68,8 @@ export class PremiumSignalEngine {
     this._klinePrimeCooldownUntil = 0;
     this._lastKlinePrimeLogAt = 0;
     this._klinePrimeMinGapMs = parseInt(process.env.KLINE_PRIME_MIN_GAP_MS || '30000', 10);
+    this._klineLocalFreshnessSec = parseInt(process.env.KLINE_LOCAL_FRESHNESS_SEC || '120', 10);
+    this._klineProviderFreshnessSec = parseInt(process.env.KLINE_PROVIDER_FRESHNESS_SEC || '120', 10);
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -224,6 +226,8 @@ export class PremiumSignalEngine {
         receive_ts INTEGER,
         signal_type TEXT,
         is_ath INTEGER DEFAULT 0,
+        signal_source TEXT,
+        source_event_id TEXT,
         parse_status TEXT,
         parse_missing_fields TEXT,
         hard_gate_status TEXT,
@@ -351,6 +355,8 @@ export class PremiumSignalEngine {
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN receive_ts INTEGER`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN signal_type TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN is_ath INTEGER DEFAULT 0`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN signal_source TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN source_event_id TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN parse_status TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN parse_missing_fields TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN gate_result TEXT`);
@@ -951,6 +957,9 @@ export class PremiumSignalEngine {
       const receiveTs = Number(signal.receive_ts || signal.timestamp || Date.now());
       const sourceMessageTs = Number(signal.source_message_ts || 0) || null;
       const signalType = signal.signal_type || (signal.is_ath ? 'ATH' : 'NEW_TRENDING');
+      const signalSource = signal.signal_source || signal.source || (signal.is_ath ? 'premium_channel_ath' : 'premium_channel');
+      const sourceEventId = signal.source_event_id
+        || [signalSource, signal.token_ca, sourceMessageTs || receiveTs, signalType].filter(Boolean).join(':');
       const parseStatus = signal.parse_status || (parseMissingFields.length ? 'partial' : 'parsed');
       const inheritedGateResult = linkage.gateResult && typeof linkage.gateResult === 'object'
         ? linkage.gateResult
@@ -971,11 +980,11 @@ export class PremiumSignalEngine {
         INSERT INTO premium_signals (
           token_ca, symbol, market_cap, holders, volume_24h, top10_pct,
           age, description, raw_message, timestamp, source_message_ts, receive_ts,
-          signal_type, is_ath, parse_status, parse_missing_fields,
+          signal_type, is_ath, signal_source, source_event_id, parse_status, parse_missing_fields,
           hard_gate_status, gate_result,
           ai_action, ai_confidence, ai_narrative_tier, executed,
           downstream_trade_id, downstream_lifecycle_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         signal.token_ca,
         signal.symbol || null,
@@ -991,6 +1000,8 @@ export class PremiumSignalEngine {
         receiveTs,
         signalType,
         signal.is_ath ? 1 : 0,
+        signalSource,
+        sourceEventId,
         parseStatus,
         parseMissingFields.length ? JSON.stringify(parseMissingFields) : null,
         gateStatus,
@@ -1324,6 +1335,8 @@ export class PremiumSignalEngine {
           localWaitTimedOut: Boolean(waitResult?.timedOut),
           localWaitError: waitResult?.error || null,
           dataSource: klineCheck?.provider || backfill?.provider || null,
+          truthSource: klineCheck?.truthSource || null,
+          failOpenPrevented: Boolean(klineCheck?.failOpenPrevented),
           providerDataState: gateDecision === 'UNKNOWN_DATA' ? normalizedUnknownReason : 'scored',
         },
         backfill: backfill ? {
@@ -1606,15 +1619,23 @@ export class PremiumSignalEngine {
     };
 
     try {
-      // 1) 优先尝试本地 K 线缓存，避免重复打外部接口
-      try {
-        const cachedBars = this.db.prepare(`
-          SELECT pool_address, timestamp, open, high, low, close, volume
+      const repository = this.marketDataBackfill?.repository;
+      const readLocalBars = (limit = 20) => {
+        if (repository?.getLatestBars) {
+          return repository.getLatestBars(tokenCA, limit) || [];
+        }
+        return this.db.prepare(`
+          SELECT pool_address, timestamp, open, high, low, close, volume, provider, fetched_at
           FROM kline_1m
           WHERE token_ca = ?
           ORDER BY timestamp DESC
-          LIMIT 20
-        `).all(tokenCA);
+          LIMIT ?
+        `).all(tokenCA, limit);
+      };
+
+      // 1) 优先尝试本地 K 线 truth source（repository/kline_1m），避免重复打外部接口
+      try {
+        const cachedBars = readLocalBars(20);
         if (cachedBars?.length >= (isATH ? 1 : 4)) {
           const bars = cachedBars.map(row => ({
             ts: Number(row.timestamp),
@@ -1625,15 +1646,16 @@ export class PremiumSignalEngine {
             volume: Number(row.volume)
           }));
           const freshnessSec = Math.max(0, signalTsSec - Number(bars[0].ts));
-          const freshEnough = freshnessSec <= 180;
+          const freshEnough = freshnessSec <= this._klineLocalFreshnessSec;
           if (freshEnough) {
             return persistKlineResult(scoreBars(bars, cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || '', {
               provider: 'local_cache',
               poolAddress: cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null,
               freshnessSec,
+              truthSource: 'kline_1m',
             }));
           }
-          return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_local_bars', provider: 'local_cache', poolAddress: cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null, freshnessSec });
+          return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_local_bars', provider: 'local_cache', poolAddress: cachedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null, freshnessSec, truthSource: 'kline_1m' });
         }
       } catch (dbError) {
         console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 读取本地缓存失败: ${dbError.message}`);
@@ -1646,13 +1668,7 @@ export class PremiumSignalEngine {
           new Promise(resolve => setTimeout(resolve, 1200))
         ]);
         try {
-          const primedBars = this.db.prepare(`
-            SELECT pool_address, timestamp, open, high, low, close, volume
-            FROM kline_1m
-            WHERE token_ca = ?
-            ORDER BY timestamp DESC
-            LIMIT 20
-          `).all(tokenCA);
+          const primedBars = readLocalBars(20);
           if (primedBars?.length >= 4) {
             const bars = primedBars.map(row => ({
               ts: Number(row.timestamp),
@@ -1663,22 +1679,30 @@ export class PremiumSignalEngine {
               volume: Number(row.volume)
             }));
             const freshnessSec = Math.max(0, signalTsSec - Number(bars[0].ts));
-            const freshEnough = freshnessSec <= 180;
+            const freshEnough = freshnessSec <= this._klineLocalFreshnessSec;
             if (freshEnough) {
               return persistKlineResult(scoreBars(bars, primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || '', {
                 provider: 'local_primed',
                 poolAddress: primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null,
                 freshnessSec,
+                truthSource: 'kline_1m',
               }));
             }
-            return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_primed_bars', provider: 'local_primed', poolAddress: primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null, freshnessSec });
+            return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_primed_bars', provider: 'local_primed', poolAddress: primedBars[0]?.pool_address || this._poolCache.get(tokenCA) || null, freshnessSec, truthSource: 'kline_1m' });
           }
         } catch {}
       }
 
       // 3) 如果刚被限流过，短时间内不再继续打外部接口
       if (nowMs < this._klineApiCooldownUntil) {
-        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'RATE_LIMITED', provider: 'external_api' });
+        return persistKlineResult({
+          passed: false,
+          gateStatus: 'UNKNOWN_DATA',
+          reason: 'RATE_LIMITED',
+          provider: 'external_api',
+          truthSource: 'kline_1m',
+          failOpenPrevented: true,
+        });
       }
 
       // 4) 从共享 client 获取 pool 地址与 provider bars
@@ -1692,6 +1716,8 @@ export class PremiumSignalEngine {
             reason: resolvedPool.error || 'no_pool',
             provider: resolvedPool.provider || 'shared_market_data',
             provenance: resolvedPool.provenance || null,
+            truthSource: 'shared_market_data',
+            failOpenPrevented: true,
           });
         }
         this._poolCache.set(tokenCA, resolvedPool.poolAddress);
@@ -1712,6 +1738,8 @@ export class PremiumSignalEngine {
           provider: ohlcvResult.provider || 'shared_market_data',
           poolAddress,
           provenance: ohlcvResult.provenance || null,
+          truthSource: 'shared_market_data',
+          failOpenPrevented: true,
         });
       }
 
@@ -1724,11 +1752,25 @@ export class PremiumSignalEngine {
         volume: Number(bar.volume),
       }));
       const freshnessSec = Math.max(0, signalTsSec - Number(bars[0]?.ts || 0));
-      if (freshnessSec > 180) {
-        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'stale_provider_bars', provider: ohlcvResult.provider || 'shared_market_data', poolAddress, freshnessSec });
+      if (freshnessSec > this._klineProviderFreshnessSec) {
+        return persistKlineResult({
+          passed: false,
+          gateStatus: 'UNKNOWN_DATA',
+          reason: 'stale_provider_bars',
+          provider: ohlcvResult.provider || 'shared_market_data',
+          poolAddress,
+          freshnessSec,
+          truthSource: 'shared_market_data',
+          failOpenPrevented: true,
+        });
       }
 
-      return persistKlineResult(scoreBars(bars, poolAddress, { provider: ohlcvResult.provider || 'shared_market_data', poolAddress, freshnessSec }));
+      return persistKlineResult(scoreBars(bars, poolAddress, {
+        provider: ohlcvResult.provider || 'shared_market_data',
+        poolAddress,
+        freshnessSec,
+        truthSource: 'shared_market_data',
+      }));
     } catch (error) {
       const status = error?.response?.status;
       if (status === 429) {
