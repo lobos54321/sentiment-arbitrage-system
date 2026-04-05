@@ -326,6 +326,9 @@ export class PremiumChannelListener {
         const signal = this._parseSignal(text);
         if (!signal) return;
         signal.source_message_ts = sourceMessageTs;
+        signal.signal_source = signal.signal_source || signal.source || 'premium_channel';
+        signal.source_event_id = signal.source_event_id
+          || ['premium_channel', signal.token_ca, sourceMessageTs || signal.receive_ts || signal.timestamp, 'NEW_TRENDING'].join(':');
         const superIdx = signal.indices?.super_index?.value ?? signal.indices?.super_index ?? 0;
         console.log(`🔥 [NOT_ATH解析] $${signal.symbol||'?'} MC=${signal.market_cap} super=${superIdx}`);
         if (this._isDuplicate('NT_' + signal.token_ca)) return;
@@ -338,6 +341,9 @@ export class PremiumChannelListener {
           return;
         }
         signal.source_message_ts = sourceMessageTs;
+        signal.signal_source = signal.signal_source || signal.source || 'premium_channel_ath';
+        signal.source_event_id = signal.source_event_id
+          || ['premium_channel_ath', signal.token_ca, sourceMessageTs || signal.receive_ts || signal.timestamp, 'ATH'].join(':');
         console.log(`📈 [ATH解析] $${signal.symbol} gain=${signal.gain_pct}% MC=${signal.market_cap_from}→${signal.market_cap} is_ath=${signal.is_ath}`);
         // ATH 用独立 key，不被同 CA 的 New Trending 信号误拦截
         if (this._isDuplicate('ATH_' + signal.token_ca)) return;

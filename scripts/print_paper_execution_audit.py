@@ -189,17 +189,34 @@ def detect_anomalies(row_dict, entry_audit, exit_audit, monitor_state):
 
     gate_decision = None
     gate_payload = None
+    gate_reason = None
     if isinstance((row_dict.get('signal_context') or {}).get('gate_result'), dict):
         gate_payload = row_dict['signal_context']['gate_result']
         gate_decision = gate_payload.get('gateDecision') or gate_payload.get('status')
+        gate_reason = gate_payload.get('gateReason')
     if gate_decision == 'UNKNOWN_DATA':
         anomalies.append('prebuy_unknown_data')
+        if gate_reason:
+            normalized_gate_reason = str(gate_reason).strip().lower().replace(' ', '_')
+            anomalies.append(f'prebuy_unknown_data:{normalized_gate_reason}')
 
     total_sol_received = safe_float((monitor_state or {}).get('totalSolReceived'))
     final_exit_sol = safe_float((exit_audit or {}).get('quotedOutAmount'))
+    accounting_source = (exit_audit or {}).get('accountingSource')
+    pre_exit_total = safe_float((exit_audit or {}).get('preExitTotalSolReceived'))
+    exit_sol_received = safe_float((exit_audit or {}).get('exitSolReceived'))
+    post_exit_total = safe_float((exit_audit or {}).get('postExitTotalSolReceived'))
     if total_sol_received is not None and final_exit_sol is not None and total_sol_received > 0 and final_exit_sol >= 0:
-        if total_sol_received > final_exit_sol and (exit_audit or {}).get('accountingSource') == 'final_exit_only':
+        if total_sol_received > final_exit_sol and accounting_source == 'final_exit_only':
             anomalies.append('monitor_total_exceeds_final_exit')
+    if row_dict.get('accounting_outcome') == 'closed_real' and not accounting_source:
+        anomalies.append('missing_accounting_source')
+    if pre_exit_total is not None and post_exit_total is not None and post_exit_total < pre_exit_total:
+        anomalies.append('post_exit_less_than_pre_exit')
+    if pre_exit_total is not None and exit_sol_received is not None and post_exit_total is not None:
+        expected_post = pre_exit_total + exit_sol_received
+        if abs(post_exit_total - expected_post) > 1e-9:
+            anomalies.append('post_exit_mismatch')
 
     return anomalies
 
@@ -249,6 +266,10 @@ def print_row(row_dict):
     monitor_state = load_json(row_dict.get('monitor_state_json'))
     signal_context = row_dict.get('signal_context')
     anomalies = detect_anomalies(row_dict, entry_audit, exit_audit, monitor_state)
+    accounting_source = (exit_audit or {}).get('accountingSource') or '-'
+    pre_exit_total = safe_float((exit_audit or {}).get('preExitTotalSolReceived'))
+    exit_sol_received = safe_float((exit_audit or {}).get('exitSolReceived'))
+    post_exit_total = safe_float((exit_audit or {}).get('postExitTotalSolReceived'))
 
     summary_parts = [
         'AUDIT_SUMMARY',
@@ -260,6 +281,10 @@ def print_row(row_dict):
         f"strategyOutcome={row_dict.get('strategy_outcome') or '-'}",
         f"executionAvailability={row_dict.get('execution_availability') or '-'}",
         f"accountingOutcome={row_dict.get('accounting_outcome') or '-'}",
+        f"accountingSource={accounting_source}",
+        f"preExitTotalSolReceived={pre_exit_total if pre_exit_total is not None else '-'}",
+        f"exitSolReceived={exit_sol_received if exit_sol_received is not None else '-'}",
+        f"postExitTotalSolReceived={post_exit_total if post_exit_total is not None else '-'}",
         f"syntheticClose={int(bool(row_dict.get('synthetic_close')))}",
         f"premiumSignalId={row_dict.get('premium_signal_id') if row_dict.get('premium_signal_id') is not None else '-'}",
         f"signalType={row_dict.get('signal_type') or '-'}",
@@ -270,6 +295,7 @@ def print_row(row_dict):
 
     if signal_context:
         gate_payload = signal_context.get('gate_result') if isinstance(signal_context.get('gate_result'), dict) else None
+        observability = (gate_payload or {}).get('observability') if isinstance((gate_payload or {}).get('observability'), dict) else {}
         signal_summary = [
             'SIGNAL_SUMMARY',
             f"paperTradeId={row_dict.get('id')}",
@@ -283,6 +309,9 @@ def print_row(row_dict):
             f"poolAddress={(gate_payload or {}).get('poolAddress') or '-'}",
             f"freshnessSec={(gate_payload or {}).get('freshnessSec') if (gate_payload or {}).get('freshnessSec') is not None else '-'}",
             f"continuedToBuy={int(bool((gate_payload or {}).get('decisionContinuedToBuy')))}",
+            f"providerDataState={observability.get('providerDataState') or '-'}",
+            f"freshLocalBarsObserved={int(bool(observability.get('freshLocalBarsObserved')))}",
+            f"localWaitTimedOut={int(bool(observability.get('localWaitTimedOut')))}",
         ]
         print(' '.join(signal_summary))
 
@@ -298,6 +327,11 @@ def print_row(row_dict):
     print(
         f"premium_signal_id={row_dict.get('premium_signal_id')} | signal_type={row_dict.get('signal_type') or '-'} | "
         f"signal_ts={row_dict.get('signal_ts')} | entry_ts={row_dict.get('entry_ts')} | exit_ts={row_dict.get('exit_ts')}"
+    )
+    print(
+        f"accounting_source={accounting_source} | pre_exit_total_sol_received={pre_exit_total if pre_exit_total is not None else '-'} | "
+        f"exit_sol_received={exit_sol_received if exit_sol_received is not None else '-'} | "
+        f"post_exit_total_sol_received={post_exit_total if post_exit_total is not None else '-'}"
     )
     print(f"last_exit_quote_failure={row_dict.get('last_exit_quote_failure') or '-'} | pnl_pct={row_dict.get('pnl_pct')}")
     print(f"anomalies={anomalies if anomalies else []}")

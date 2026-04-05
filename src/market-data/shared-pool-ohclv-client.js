@@ -2,7 +2,7 @@ import autonomyConfig from '../config/autonomy-config.js';
 import { KlineRepository } from './kline-repository.js';
 import { PoolResolver } from './pool-resolver.js';
 import { MarketDataBackfillService } from './market-data-backfill-service.js';
-import { SharedMarketRuntime, isMarketDataFlagEnabled } from './shared-market-runtime.js';
+import { MARKET_DATA_REASON, SharedMarketRuntime, isMarketDataFlagEnabled, normalizeMarketDataReason } from './shared-market-runtime.js';
 
 function normalizePoolId(poolAddress) {
   if (!poolAddress) return null;
@@ -44,6 +44,7 @@ export class SharedPoolOhlcvClient {
         provider: null,
         poolAddress: null,
         error: 'missing_token',
+        reason: MARKET_DATA_REASON.MISSING_INPUTS,
         rateLimited: false,
         fetchedAt: Date.now(),
         source: 'shared-pool-client'
@@ -67,7 +68,11 @@ export class SharedPoolOhlcvClient {
         provider: resolved.provider || null,
         poolAddress: resolved.poolAddress || null,
         error: resolved.error || null,
-        rateLimited: resolved.error === 'cooldown_active',
+        reason: resolved.reason || normalizeMarketDataReason({
+          error: resolved.error || null,
+          rateLimited: resolved.rateLimited
+        }),
+        rateLimited: Boolean(resolved.rateLimited || resolved.error === 'cooldown_active'),
         fetchedAt: Date.now(),
         source: 'shared-pool-client',
         cacheHit: false
@@ -76,7 +81,7 @@ export class SharedPoolOhlcvClient {
         await this.runtime.setCache(cacheKey, normalized, ttlMs);
       }
       return normalized;
-    });
+    }, { distributed: true, cacheKey });
 
     return result;
   }
@@ -105,6 +110,7 @@ export class SharedPoolOhlcvClient {
       poolAddress: result.poolAddress || null,
       bars: result.bars || [],
       error: result.error || null,
+      reason: result.reason || normalizeMarketDataReason({ error: result.error || null, rateLimited: result.error === 'cooldown_active' }),
       rateLimited: result.error === 'cooldown_active',
       fetchedAt: Date.now(),
       cacheHit: Boolean(result.cacheHit),
@@ -152,6 +158,7 @@ export class SharedPoolOhlcvClient {
         poolAddress: null,
         bars: backfillResult.bars || [],
         error: backfillResult.error || 'no_pool',
+        reason: backfillResult.reason || normalizeMarketDataReason({ error: backfillResult.error || 'no_pool', rateLimited: false }) || MARKET_DATA_REASON.NO_POOL,
         rateLimited: false,
         fetchedAt: Date.now(),
         cacheHit: false,
@@ -208,12 +215,17 @@ export class SharedPoolOhlcvClient {
         }
       }
 
+      const rateLimited = lastError === 'cooldown_active' || /429/.test(String(lastError || ''));
       const normalized = {
         provider: byTs.size ? 'geckoterminal' : (backfillResult.provider || null),
         poolAddress: resolvedPool,
         bars: [...byTs.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-bars),
         error: byTs.size ? null : (lastError || backfillResult.error || 'no_ohlcv'),
-        rateLimited: lastError === 'cooldown_active' || /429/.test(String(lastError || '')),
+        reason: byTs.size ? null : (backfillResult.reason || normalizeMarketDataReason({
+          error: lastError || backfillResult.error || 'no_ohlcv',
+          rateLimited
+        }) || MARKET_DATA_REASON.UNKNOWN_DATA),
+        rateLimited,
         fetchedAt: Date.now(),
         cacheHit: false,
         source: 'shared-pool-client'
@@ -231,7 +243,7 @@ export class SharedPoolOhlcvClient {
       }
 
       return normalized;
-    });
+    }, { distributed: true, cacheKey });
 
     return providerResult;
   }

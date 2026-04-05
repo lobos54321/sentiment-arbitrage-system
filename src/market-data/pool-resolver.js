@@ -1,4 +1,4 @@
-import { SharedMarketRuntime } from './shared-market-runtime.js';
+import { MARKET_DATA_REASON, SharedMarketRuntime, normalizeMarketDataReason } from './shared-market-runtime.js';
 
 function normalizePoolAddress(poolAddress) {
   if (!poolAddress) return null;
@@ -41,13 +41,23 @@ export class PoolResolver {
     });
 
     if (!response?.ok) {
-      return { poolAddress: null, provider: null, error: response?.error || 'request_failed' };
+      return {
+        poolAddress: null,
+        provider: null,
+        error: response?.error || 'request_failed',
+        reason: response?.reason || normalizeMarketDataReason({
+          error: response?.error || 'request_failed',
+          status: response?.status,
+          rateLimited: response?.rateLimited
+        }) || MARKET_DATA_REASON.UPSTREAM_UNAVAILABLE,
+        rateLimited: Boolean(response?.rateLimited)
+      };
     }
 
     const pool = response?.data?.data?.[0] || response?.data?.[0] || null;
     const poolAddress = normalizePoolAddress(pool?.attributes?.address || pool?.id);
     if (!poolAddress) {
-      return { poolAddress: null, provider: null, error: 'no_pool' };
+      return { poolAddress: null, provider: null, error: 'no_pool', reason: MARKET_DATA_REASON.NO_POOL, rateLimited: false };
     }
 
     return this.#remember(tokenCa, poolAddress, 'geckoterminal');
@@ -78,7 +88,7 @@ export class PoolResolver {
       .sort((a, b) => (Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0)))[0] || null;
 
     if (!bestPair?.pairAddress) {
-      return { poolAddress: null, provider: null, error: 'no_pool' };
+      return { poolAddress: null, provider: null, error: 'no_pool', reason: MARKET_DATA_REASON.NO_POOL, rateLimited: false };
     }
 
     return this.#remember(tokenCa, bestPair.pairAddress, 'dexscreener');
@@ -86,7 +96,7 @@ export class PoolResolver {
 
   async resolvePool(tokenCa) {
     if (!tokenCa) {
-      return { poolAddress: null, provider: null, error: 'missing_token' };
+      return { poolAddress: null, provider: null, error: 'missing_token', reason: MARKET_DATA_REASON.MISSING_INPUTS, rateLimited: false };
     }
 
     const memoryHit = this.memoryCache.get(tokenCa);
