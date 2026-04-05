@@ -52,7 +52,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
     this.stats = {
       quote_queries: 0,
       quote_hits_ultra: 0,
-      quote_rate_limited_429: 0,
+      quote_RATE_LIMITED: 0,
       quote_no_route: 0,
       quote_null_response: 0,
       quote_network_errors: 0,
@@ -234,7 +234,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
         return true;
       }
 
-      if (quoteResult.reason === 'rate_limited_429') {
+      if (quoteResult.reason === 'RATE_LIMITED') {
         this._markRateLimited(tokenCA);
         return false;
       }
@@ -301,13 +301,13 @@ export class LivePriceMonitorV2 extends EventEmitter {
   }
 
   _markRateLimited(tokenCA) {
-    this.stats.quote_rate_limited_429++;
+    this.stats.quote_RATE_LIMITED++;
     this.stats.errors++;
     this._rateLimitCooldownUntil = Date.now() + this.rateLimitCooldownMs;
-    this._recordFailure(tokenCA, 'rate_limited_429', 'Jupiter Ultra API rate limited');
+    this._recordFailure(tokenCA, 'RATE_LIMITED', 'Jupiter Ultra API rate limited');
 
-    if (this.stats.quote_rate_limited_429 <= 10 || this.stats.quote_rate_limited_429 % 25 === 0) {
-      console.warn(`⚠️  [LivePriceMonitorV2] Ultra 429 限速，冷却 ${this.rateLimitCooldownMs}ms (累计 ${this.stats.quote_rate_limited_429} 次)`);
+    if (this.stats.quote_RATE_LIMITED <= 10 || this.stats.quote_RATE_LIMITED % 25 === 0) {
+      console.warn(`⚠️  [LivePriceMonitorV2] Ultra 429 限速，冷却 ${this.rateLimitCooldownMs}ms (累计 ${this.stats.quote_RATE_LIMITED} 次)`);
     }
   }
 
@@ -354,7 +354,7 @@ export class LivePriceMonitorV2 extends EventEmitter {
   async _getSwapQuote(inputMint, amount) {
     const result = await this.quoteClient.getSwapQuote({ inputMint, amount, outputMint: SOL_MINT });
     if (result.rateLimited) {
-      return { ok: false, reason: 'rate_limited_429', quote: null };
+      return { ok: false, reason: 'RATE_LIMITED', quote: null };
     }
     if (result.ok) {
       return { ok: true, reason: null, quote: result.quote };

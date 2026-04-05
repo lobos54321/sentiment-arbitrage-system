@@ -116,6 +116,7 @@ MARKET_DATA_UNIFIED_ROLLOUT = os.environ.get('MARKET_DATA_UNIFIED_ROLLOUT', 'tru
 MARKET_DATA_UNIFIED_PAPER_MONITOR = os.environ.get('MARKET_DATA_UNIFIED_PAPER_MONITOR', 'true').lower() != 'false'
 MARKET_DATA_SHARED_POOL_RESOLUTION = os.environ.get('MARKET_DATA_SHARED_POOL_RESOLUTION', 'true').lower() != 'false'
 MARKET_DATA_SHARED_OHLCV = os.environ.get('MARKET_DATA_SHARED_OHLCV', 'true').lower() != 'false'
+MARKET_DATA_SHARED_QUOTES = os.environ.get('MARKET_DATA_SHARED_QUOTES', 'true').lower() != 'false'
 MARKET_DATA_SHARED_REDIS_CACHE = os.environ.get('MARKET_DATA_SHARED_REDIS_CACHE', 'false').lower() == 'true'
 MARKET_DATA_PAPER_DIRECT_FALLBACK = os.environ.get('MARKET_DATA_PAPER_DIRECT_FALLBACK', 'true').lower() != 'false'
 
@@ -126,7 +127,7 @@ _DEX_LAST_WARN_AT = 0.0
 _SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
 _KLINE_DB_CONN = None
 _KLINE_DB_FAILED = False
-_SHARED_MARKET_DATA_RUNTIME = None
+_SHARED_MARKET_DATA_RUNTIME = {}
 _SHARED_POOL_CACHE = {}
 _SHARED_SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
 
@@ -571,6 +572,8 @@ def shared_truth_source_enabled(feature_name):
         return MARKET_DATA_SHARED_POOL_RESOLUTION
     if feature_name == 'ohlcv':
         return MARKET_DATA_SHARED_OHLCV
+    if feature_name == 'quotes':
+        return MARKET_DATA_SHARED_QUOTES
     if feature_name == 'redis':
         return MARKET_DATA_SHARED_REDIS_CACHE
     return False
@@ -580,34 +583,28 @@ def direct_provider_fallback_allowed():
     return (not market_data_unified_enabled()) or MARKET_DATA_PAPER_DIRECT_FALLBACK
 
 
-def get_shared_market_runtime():
+def get_shared_market_runtime(namespace='paper-monitor:bridge'):
     global _SHARED_MARKET_DATA_RUNTIME
-    if _SHARED_MARKET_DATA_RUNTIME is not None:
-        return _SHARED_MARKET_DATA_RUNTIME
-    runtime_path = PROJECT_ROOT / 'src' / 'market-data' / 'shared-market-runtime.js'
-    script = (
-        "import { SharedMarketRuntime } from '" + str(runtime_path).replace("'", "\\'") + "';"
-        "const runtime = new SharedMarketRuntime({ namespace: 'paper-monitor:bridge' });"
-        "const [method, payloadRaw] = process.argv.slice(2);"
-        "const payload = payloadRaw ? JSON.parse(payloadRaw) : {};"
-        "const handlers = {"
-        " getCache: async () => await runtime.getCache(payload.key),"
-        " setCache: async () => { await runtime.setCache(payload.key, payload.value, payload.ttlMs || 0); return true; },"
-        " close: async () => { await runtime.close(); return true; }"
-        "};"
-        "const handler = handlers[method];"
-        "if (!handler) throw new Error(`unknown_method:${method}`);"
-        "Promise.resolve(handler()).then((result) => { process.stdout.write(JSON.stringify({ ok: true, result })); return runtime.close(); }).catch(async (error) => { try { await runtime.close(); } catch {} process.stdout.write(JSON.stringify({ ok: false, error: error.message })); process.exit(1); });"
-    )
-    _SHARED_MARKET_DATA_RUNTIME = {'script': script}
-    return _SHARED_MARKET_DATA_RUNTIME
+    runtime = _SHARED_MARKET_DATA_RUNTIME.get(namespace)
+    if runtime is not None:
+        return runtime
+    runtime = {'namespace': namespace}
+    _SHARED_MARKET_DATA_RUNTIME[namespace] = runtime
+    return runtime
 
 
-def call_shared_runtime(method, payload=None, timeout=8):
-    runtime = get_shared_market_runtime()
+def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monitor:bridge'):
+    runtime = get_shared_market_runtime(namespace)
+    bridge_payload = {
+        'mode': 'paper',
+        'method': method,
+        'payload': payload or {},
+        'namespace': runtime['namespace'],
+    }
     try:
         result = subprocess.run(
-            ['node', '--input-type=module', '-e', runtime['script'], method, json.dumps(payload or {})],
+            ['node', str(EXECUTION_BRIDGE), 'shared-runtime'],
+            input=json.dumps(bridge_payload),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -620,31 +617,73 @@ def call_shared_runtime(method, payload=None, timeout=8):
     if result.returncode != 0 or not stdout:
         return None
     try:
-        parsed = json.loads(stdout)
+        return json.loads(stdout)
     except Exception:
         return None
-    if not isinstance(parsed, dict) or not parsed.get('ok'):
-        return None
-    return parsed.get('result')
 
 
-def get_shared_cache_value(key):
+def get_shared_cache_value(key, namespace='paper-monitor:bridge'):
     if not shared_truth_source_enabled('redis'):
         return None
-    return call_shared_runtime('getCache', {'key': key})
+    return call_shared_runtime('getCache', {'key': key}, namespace=namespace)
 
 
-def set_shared_cache_value(key, value, ttl_ms):
+def get_shared_quote_cache_value(key):
+    if not (shared_truth_source_enabled('quotes') and shared_truth_source_enabled('redis')):
+        return None
+    return call_shared_runtime('getCache', {'key': key}, namespace='market-data:quotes')
+
+
+def get_shared_cooldown_ms(provider, namespace='paper-monitor:bridge'):
+    if not shared_truth_source_enabled('redis'):
+        return 0
+    try:
+        return int(call_shared_runtime('getSharedCooldown', {'provider': provider}, namespace=namespace) or 0)
+    except Exception:
+        return 0
+
+
+def get_shared_pool_resolution(token_ca):
+    if not shared_truth_source_enabled('pool'):
+        return None
+    return call_shared_runtime('resolvePool', {'tokenCA': token_ca}, timeout=12)
+
+
+def get_shared_recent_ohlcv(token_ca, pool_address, options=None):
+    if not shared_truth_source_enabled('ohlcv'):
+        return None
+    return call_shared_runtime('fetchRecentOhlcvByPool', {
+        'tokenCA': token_ca,
+        'poolAddress': pool_address,
+        'options': options or {}
+    }, timeout=20)
+
+
+def get_shared_swap_quote(token_ca, amount_raw, output_mint='So11111111111111111111111111111111111111112', options=None):
+    if not shared_truth_source_enabled('quotes'):
+        return None
+    return call_shared_runtime('getSwapQuote', {
+        'inputMint': token_ca,
+        'amount': amount_raw,
+        'outputMint': output_mint,
+        'options': options or {}
+    }, timeout=15)
+
+
+def set_shared_cache_value(key, value, ttl_ms, namespace='paper-monitor:bridge'):
     if not shared_truth_source_enabled('redis'):
         return False
-    result = call_shared_runtime('setCache', {'key': key, 'value': value, 'ttlMs': int(ttl_ms or 0)})
+    result = call_shared_runtime('setCache', {'key': key, 'value': value, 'ttlMs': int(ttl_ms or 0)}, namespace=namespace)
     return bool(result)
 
 
 def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
-    if _is_dexscreener_url(url) and _dex_rate_limited():
-        return None
+    if _is_dexscreener_url(url):
+        if _dex_rate_limited():
+            return None
+        if get_shared_cooldown_ms('dexscreener', namespace='market-data:quotes') > 0:
+            return None
 
     try:
         result = subprocess.run(
@@ -704,6 +743,15 @@ def get_pool_address(token_ca, cache={}):
                 cache[token_ca] = pool
                 _SHARED_POOL_CACHE[token_ca] = pool
                 return pool
+        shared_resolved = get_shared_pool_resolution(token_ca)
+        if isinstance(shared_resolved, dict):
+            pool = str(shared_resolved.get('poolAddress') or '').replace('solana_', '').strip()
+            if pool:
+                cache[token_ca] = pool
+                _SHARED_POOL_CACHE[token_ca] = pool
+                return pool
+            if shared_resolved.get('rateLimited'):
+                return None
 
     kline_db = get_kline_db()
     if kline_db is not None:
@@ -727,6 +775,8 @@ def get_pool_address(token_ca, cache={}):
             pass
 
     if not direct_provider_fallback_allowed():
+        return None
+    if get_shared_cooldown_ms('dexscreener', namespace='market-data:quotes') > 0:
         return None
 
     data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}")
@@ -884,7 +934,35 @@ def get_current_bar(token_ca, pool_address=None):
         pool_address = get_pool_address(token_ca)
     if not pool_address:
         return None
+
+    if shared_truth_source_enabled('ohlcv'):
+        shared_result = get_shared_recent_ohlcv(token_ca, pool_address, {
+            'signalTsSec': int(time.time()),
+            'bars': 2,
+            'beforeTimestamps': [int(time.time()) + 60],
+            'allowDexFallback': False,
+        })
+        if isinstance(shared_result, dict):
+            bars = shared_result.get('bars') or []
+            if bars:
+                bar = bars[-1]
+                try:
+                    return {
+                        'ts': int(bar['timestamp']),
+                        'open': float(bar['open']),
+                        'high': float(bar['high']),
+                        'low': float(bar['low']),
+                        'close': float(bar['close']),
+                        'volume': float(bar.get('volume', 0)),
+                    }
+                except Exception:
+                    pass
+            if shared_result.get('rateLimited'):
+                return None
+
     if not direct_provider_fallback_allowed():
+        return None
+    if get_shared_cooldown_ms('geckoterminal', namespace='market-data:pool-ohclv') > 0:
         return None
 
     url = (
@@ -939,8 +1017,8 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
             'payload': payload,
         }
 
-    if shared_truth_source_enabled('redis'):
-        shared_quote = get_shared_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
+    if shared_truth_source_enabled('quotes'):
+        shared_quote = get_shared_quote_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
         if isinstance(shared_quote, dict):
             quote = shared_quote.get('quote') or {}
             out_amount = quote.get('outAmount')
@@ -949,7 +1027,12 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
             except Exception:
                 out_amount = 0
             if out_amount > 0:
-                timestamp_ms = int((shared_quote.get('fetchedAt') or time.time()) * 1000)
+                fetched_at = shared_quote.get('fetchedAt')
+                try:
+                    fetched_at = int(fetched_at)
+                except Exception:
+                    fetched_at = int(time.time() * 1000)
+                timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
                 return {
                     'price': out_amount / 1e9,
                     'ts': int(timestamp_ms // 1000),
@@ -957,6 +1040,30 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
                     'source': 'shared-quote-cache',
                     'payload': shared_quote,
                 }
+        shared_quote_result = get_shared_swap_quote(token_ca, 1000000)
+        if isinstance(shared_quote_result, dict):
+            quote = shared_quote_result.get('quote') or {}
+            out_amount = quote.get('outAmount')
+            try:
+                out_amount = float(out_amount)
+            except Exception:
+                out_amount = 0
+            if out_amount > 0:
+                fetched_at = shared_quote_result.get('fetchedAt')
+                try:
+                    fetched_at = int(fetched_at)
+                except Exception:
+                    fetched_at = int(time.time() * 1000)
+                timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
+                return {
+                    'price': out_amount / 1e9,
+                    'ts': int(timestamp_ms // 1000),
+                    'timestamp_ms': timestamp_ms,
+                    'source': 'shared-quote-runtime',
+                    'payload': shared_quote_result,
+                }
+            if shared_quote_result.get('rateLimited'):
+                return None
 
     direct = get_current_price_direct(token_ca, pool_address)
     if not direct:
@@ -1150,8 +1257,8 @@ def get_sol_price():
     if shared_cached_price and (now - shared_fetched_at) < SOL_PRICE_TTL_SEC:
         return shared_cached_price
 
-    if shared_truth_source_enabled('redis'):
-        shared_snapshot = get_shared_cache_value('dex-pair:So11111111111111111111111111111111111111112')
+    if shared_truth_source_enabled('quotes'):
+        shared_snapshot = get_shared_quote_cache_value('dex-pair:So11111111111111111111111111111111111111112')
         if isinstance(shared_snapshot, dict):
             pair = shared_snapshot.get('pair') or {}
             try:
@@ -3313,6 +3420,9 @@ def run_monitor(db):
                         'totalRealizedSol': _safe_float(total_realized_sol, None),
                         'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
                         'accountingSource': accounting_source,
+                        'preExitTotalSolReceived': _safe_float(exit_eval.get('preExitTotalSolReceived', exit_execution.get('preExitTotalSolReceived')), None),
+                        'exitSolReceived': _safe_float(exit_eval.get('exitSolReceived', exit_execution.get('exitSolReceived')), None),
+                        'postExitTotalSolReceived': _safe_float(exit_eval.get('postExitTotalSolReceived', exit_execution.get('postExitTotalSolReceived')), None),
                         'triggerPriceUsd': _safe_float(exit_price, None),
                         'effectiveExitPriceUsd': _safe_float(effective_exit_price, None),
                     })), reason, 'available', 'closed_real', pos.trade_id

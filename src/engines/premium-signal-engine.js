@@ -793,7 +793,7 @@ export class PremiumSignalEngine {
       if (poolAddress) {
         this._poolCache.set(tokenCA, poolAddress);
       } else {
-        if (resolvedPool.error === 'rate_limited') {
+        if (resolvedPool.rateLimited) {
           this._klinePrimeCooldownUntil = Date.now() + 120_000;
         }
         return {
@@ -824,7 +824,7 @@ export class PremiumSignalEngine {
         enough: heliusBarsBefore >= targetBars,
         provider: ohlcvResult.provider || heliusResult.provider || null,
         poolAddress,
-        reason: 'rate_limited',
+        reason: 'RATE_LIMITED',
       };
     }
 
@@ -1337,7 +1337,7 @@ export class PremiumSignalEngine {
         supportBreakPct: null,
         avgVol3: null,
         momFromLag1: null,
-        decisionContinuedToBuy: false,
+        decisionContinuedToBuy: true,
         blockedStructural: false,
         backfill: null,
         error: error.message,
@@ -1349,13 +1349,11 @@ export class PremiumSignalEngine {
         `token=${ca}`,
         'decision=UNKNOWN_DATA',
         'reason=prebuy_exception',
-        'continue=0',
+        'continue=1',
         'blockedStructural=0',
         `signalTsSec=${signalTsSec}`,
         `error=${JSON.stringify(error.message)}`,
       ].join(' '));
-      this.saveSignalRecord(signal, 'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA', null, false, { gateResult: prebuyGateResult });
-      return { action: 'SKIP', reason: 'kline_unknown_data' };
     }
 
     // 执行 Shadow Buy
@@ -1610,7 +1608,7 @@ export class PremiumSignalEngine {
 
       // 3) 如果刚被限流过，短时间内不再继续打外部接口
       if (nowMs < this._klineApiCooldownUntil) {
-        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'rate_limited', provider: 'external_api' });
+        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'RATE_LIMITED', provider: 'external_api' });
       }
 
       // 4) 从共享 client 获取 pool 地址与 provider bars
@@ -1670,7 +1668,7 @@ export class PremiumSignalEngine {
           console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 接口限流: ${error.message} | 120s 内复用缓存/跳过外部查询`);
           this._lastKlineRateLimitLogAt = Date.now();
         }
-        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'rate_limited', provider: 'external_api' });
+        return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'RATE_LIMITED', provider: 'external_api' });
       }
       console.warn(`⚠️ [K线检查] ${tokenCA.substring(0,8)} 检查失败: ${error.message}`);
       return persistKlineResult({ passed: false, gateStatus: 'UNKNOWN_DATA', reason: 'error_skip', provider: 'external_api' });

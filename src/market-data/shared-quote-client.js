@@ -1,5 +1,5 @@
 import autonomyConfig from '../config/autonomy-config.js';
-import { SharedMarketRuntime, isMarketDataFlagEnabled } from './shared-market-runtime.js';
+import { MARKET_DATA_REASON, SharedMarketRuntime, isMarketDataFlagEnabled, normalizeMarketDataReason } from './shared-market-runtime.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -17,15 +17,15 @@ function parseDexPairPrice(pair = {}) {
 function classifyQuoteResponse(data = {}) {
   const responseMessage = String(data.error || data.message || '');
   if (data.errorCode === 'ROUTE_NOT_FOUND' || data.errorCode === 'COULD_NOT_FIND_ANY_ROUTE' || /no route|could not find/i.test(responseMessage)) {
-    return 'no_route';
+    return { error: 'no_route', reason: MARKET_DATA_REASON.NO_ROUTE };
   }
   if (data.errorCode === 'TOKEN_NOT_TRADABLE' || /not tradable/i.test(responseMessage)) {
-    return 'token_not_tradable';
+    return { error: 'token_not_tradable', reason: MARKET_DATA_REASON.TOKEN_NOT_TRADABLE };
   }
   if (!data.outAmount) {
-    return 'null_response';
+    return { error: 'null_response', reason: MARKET_DATA_REASON.UNKNOWN_DATA };
   }
-  return null;
+  return { error: null, reason: null };
 }
 
 export class SharedQuoteClient {
@@ -43,7 +43,7 @@ export class SharedQuoteClient {
         provider: 'jupiter-ultra',
         quote: null,
         error: 'missing_quote_inputs',
-        reason: 'missing_quote_inputs',
+        reason: MARKET_DATA_REASON.MISSING_INPUTS,
         rateLimited: false,
         fetchedAt: Date.now(),
         source: 'shared-quote-client'
@@ -81,7 +81,11 @@ export class SharedQuoteClient {
     );
 
     if (!response.ok) {
-      const reason = response.rateLimited ? 'rate_limited_429' : (response.error || 'quote_request_failed');
+      const reason = response.reason || normalizeMarketDataReason({
+        error: response.error || 'quote_request_failed',
+        status: response.status,
+        rateLimited: response.rateLimited
+      }) || MARKET_DATA_REASON.UPSTREAM_UNAVAILABLE;
       return {
         ok: false,
         provider: 'jupiter-ultra',
@@ -95,13 +99,13 @@ export class SharedQuoteClient {
     }
 
     const quote = response.data;
-    const reason = classifyQuoteResponse(quote);
+    const classified = classifyQuoteResponse(quote);
     return {
-      ok: !reason,
+      ok: !classified.reason,
       provider: 'jupiter-ultra',
       quote,
-      error: reason,
-      reason,
+      error: classified.error,
+      reason: classified.reason,
       rateLimited: false,
       fetchedAt: response.fetchedAt || Date.now(),
       source: 'shared-quote-client',
@@ -116,6 +120,7 @@ export class SharedQuoteClient {
         provider: 'dexscreener',
         pair: null,
         error: 'missing_token',
+        reason: MARKET_DATA_REASON.MISSING_INPUTS,
         rateLimited: false,
         fetchedAt: Date.now(),
         source: 'shared-quote-client'
@@ -148,6 +153,11 @@ export class SharedQuoteClient {
         provider: 'dexscreener',
         pair: null,
         error: response.error || 'dex_request_failed',
+        reason: response.reason || normalizeMarketDataReason({
+          error: response.error || 'dex_request_failed',
+          status: response.status,
+          rateLimited: response.rateLimited
+        }) || MARKET_DATA_REASON.UPSTREAM_UNAVAILABLE,
         rateLimited: response.rateLimited,
         fetchedAt: response.fetchedAt || Date.now(),
         source: 'shared-quote-client'
@@ -165,6 +175,7 @@ export class SharedQuoteClient {
       provider: 'dexscreener',
       pair: bestPair,
       error: bestPair ? null : 'no_pair',
+      reason: bestPair ? null : MARKET_DATA_REASON.NO_POOL,
       rateLimited: false,
       fetchedAt: response.fetchedAt || Date.now(),
       source: 'shared-quote-client',
@@ -190,7 +201,7 @@ export class SharedQuoteClient {
       };
     }
 
-    if (quoteResult.reason === 'rate_limited_429') {
+    if (quoteResult.rateLimited) {
       return {
         provider: quoteResult.provider,
         quote: null,

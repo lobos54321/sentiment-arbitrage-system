@@ -711,7 +711,7 @@ export class JupiterUltraExecutor {
   _classifyFailureReason(message = '') {
     const text = String(message || '').toLowerCase();
     if (!text) return 'unknown';
-    if (text.includes('429') || text.includes('rate limit')) return 'rate_limited_429';
+    if (text.includes('429') || text.includes('rate limit')) return 'RATE_LIMITED';
     if (text.includes('insufficient')) return 'insufficient_balance';
     if (text.includes('slippage')) return 'slippage';
     if (text.includes('taker')) return 'missing_taker';
