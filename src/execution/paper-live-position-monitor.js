@@ -1839,6 +1839,7 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
   }
 
   const solReceived = toNumber(execution.quotedOutAmount, 0);
+  const preExitTotalSolReceived = toNumber(updatedState.totalSolReceived, 0);
   const executionResult = {
     ...execution,
     sellAmount,
@@ -1847,8 +1848,9 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
   };
 
   applyExitToState(updatedState, { solReceived });
+  const postExitTotalSolReceived = toNumber(updatedState.totalSolReceived, 0);
   const realizedPnl = updatedState.entrySol > 0
-    ? (updatedState.totalSolReceived - updatedState.entrySol) / updatedState.entrySol
+    ? (postExitTotalSolReceived - updatedState.entrySol) / updatedState.entrySol
     : triggerPnl;
   const lifecycleReason = simpleEval.exitReason;
 
@@ -1868,12 +1870,18 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
     accountingOutcome: 'closed_real',
     syntheticClose: false,
     realizedPnl,
+    preExitTotalSolReceived,
+    exitSolReceived: solReceived,
+    postExitTotalSolReceived,
     execution: {
       ...executionResult,
       failureClass: null,
       accountingOutcome: 'closed_real',
       strategyOutcome: lifecycleReason,
       syntheticClose: false,
+      preExitTotalSolReceived,
+      exitSolReceived: solReceived,
+      postExitTotalSolReceived,
     },
     markSource,
     currentPrice,
