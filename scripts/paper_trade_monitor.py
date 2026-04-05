@@ -1004,6 +1004,64 @@ def get_current_price_direct(token_ca, pool_address=None):
     }
 
 
+def _select_best_dex_pair(token_ca, pairs):
+    sol_pairs = []
+    fallback_pairs = []
+    for pair in pairs or []:
+        base_addr = ((pair.get('baseToken') or {}).get('address') or '').strip()
+        if base_addr and base_addr != token_ca:
+            continue
+        if pair.get('chainId') == 'solana':
+            sol_pairs.append(pair)
+        else:
+            fallback_pairs.append(pair)
+    candidates = sol_pairs or fallback_pairs
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.get('liquidity', {}).get('usd', 0) or 0))
+
+
+def get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=None):
+    """Get latest USD price snapshot from DexScreener when shared/live quotes are unavailable."""
+    if not token_ca or not direct_provider_fallback_allowed():
+        return None
+    if get_shared_cooldown_ms('dexscreener', namespace='market-data:quotes') > 0:
+        return None
+
+    data = curl_json(f"https://api.dexscreener.com/latest/dex/tokens/{token_ca}")
+    if not data:
+        return None
+
+    best_pair = _select_best_dex_pair(token_ca, (data or {}).get('pairs') or [])
+    if not best_pair:
+        return None
+
+    try:
+        price = float(best_pair.get('priceUsd') or 0)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+
+    pair_created_at = best_pair.get('pairCreatedAt')
+    try:
+        pair_created_at = int(pair_created_at) if pair_created_at is not None else None
+    except (TypeError, ValueError):
+        pair_created_at = None
+
+    timestamp_ms = int(time.time() * 1000)
+    if min_timestamp_ms is not None and pair_created_at is not None and pair_created_at < int(min_timestamp_ms):
+        return None
+
+    return {
+        'price': price,
+        'ts': int(timestamp_ms // 1000),
+        'timestamp_ms': timestamp_ms,
+        'source': 'dexscreener',
+        'payload': best_pair,
+    }
+
+
 def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
     """Get Redis/shared-cache first live price snapshot with direct fallback only when needed."""
     payload = read_redis_payload(token_ca)
@@ -1064,6 +1122,10 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
                 }
             if shared_quote_result.get('rateLimited'):
                 return None
+
+    dex_snapshot = get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=min_timestamp_ms)
+    if dex_snapshot:
+        return dex_snapshot
 
     direct = get_current_price_direct(token_ca, pool_address)
     if not direct:
