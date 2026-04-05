@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import sqlite3
 import sys
@@ -16,25 +17,40 @@ def get_table_columns(db, table_name):
     return {row['name'] for row in rows}
 
 
-def build_cleanup_update(columns, stage_outcome):
+def build_cleanup_update(columns, stage_outcome, audit_payload_json):
     assignments = [
         "exit_price = COALESCE(exit_price, 0)",
         "exit_ts = ?",
         "exit_reason = ?",
         "pnl_pct = ?",
     ]
+    params = []
     if 'stage_outcome' in columns:
         assignments.append("stage_outcome = ?")
+        params.append(stage_outcome)
     if 'trailing_active' in columns:
         assignments.append("trailing_active = 0")
     if 'exit_execution_json' in columns:
         assignments.append("exit_execution_json = NULL")
+    if 'exit_execution_audit_json' in columns:
+        assignments.append("exit_execution_audit_json = ?")
+        params.append(audit_payload_json)
     if 'exit_quote_failures' in columns:
         assignments.append("exit_quote_failures = 0")
     if 'last_exit_quote_failure' in columns:
         assignments.append("last_exit_quote_failure = NULL")
+    if 'strategy_outcome' in columns:
+        assignments.append("strategy_outcome = ?")
+        params.append('blocked_by_infra')
+    if 'execution_availability' in columns:
+        assignments.append("execution_availability = ?")
+        params.append('unavailable')
+    if 'accounting_outcome' in columns:
+        assignments.append("accounting_outcome = ?")
+        params.append('closed_synthetic')
+    if 'synthetic_close' in columns:
+        assignments.append("synthetic_close = 1")
 
-    params = [stage_outcome]
     return ",\n              ".join(assignments), params
 
 
@@ -65,7 +81,15 @@ def main():
     for row in rows:
         stage = row['strategy_stage'] or 'stage1'
         stage_outcome = f"{stage}_{reason}"
-        assignment_sql, extra_params = build_cleanup_update(columns, stage_outcome)
+        audit_payload_json = json.dumps({
+            'auditVersion': 1,
+            'decisionType': 'manual_cleanup',
+            'cleanupReason': reason,
+            'stage': stage,
+            'cleanupTs': exit_ts,
+            'accountingSource': None,
+        })
+        assignment_sql, extra_params = build_cleanup_update(columns, stage_outcome, audit_payload_json)
         db.execute(
             f"""
             UPDATE paper_trades
