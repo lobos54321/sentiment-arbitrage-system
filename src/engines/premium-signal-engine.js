@@ -867,18 +867,36 @@ export class PremiumSignalEngine {
           ORDER BY timestamp DESC
           LIMIT ?
         `).all(tokenCA, minBars);
-        if (rows?.length >= minBars) {
-          const newestTs = Number(rows[0].timestamp || 0);
-          if (Date.now() - newestTs * 1000 < 10 * 60_000) {
-            return true;
-          }
+        const newestTs = Number(rows?.[0]?.timestamp || 0);
+        const freshnessMs = newestTs > 0 ? (Date.now() - newestTs * 1000) : null;
+        if (rows?.length >= minBars && Number.isFinite(freshnessMs) && freshnessMs < 10 * 60_000) {
+          return {
+            ok: true,
+            rowCount: rows.length,
+            newestTs,
+            freshnessSec: Math.max(0, Math.round(freshnessMs / 1000)),
+            timedOut: false,
+          };
         }
-      } catch {
-        return false;
+      } catch (error) {
+        return {
+          ok: false,
+          rowCount: 0,
+          newestTs: null,
+          freshnessSec: null,
+          timedOut: false,
+          error: error.message,
+        };
       }
       await new Promise(r => setTimeout(r, 150));
     }
-    return false;
+    return {
+      ok: false,
+      rowCount: 0,
+      newestTs: null,
+      freshnessSec: null,
+      timedOut: true,
+    };
   }
 
   recordPaperComparisons(signal) {
@@ -944,6 +962,11 @@ export class PremiumSignalEngine {
         aiConfidence: aiResult?.confidence || null,
         ...(inheritedGateResult || {}),
       };
+      if (inheritedGateResult && typeof inheritedGateResult === 'object') {
+        gatePayload.auditVersion = inheritedGateResult.auditVersion || 2;
+        gatePayload.gateDecision = inheritedGateResult.gateDecision || gatePayload.gateDecision || null;
+        gatePayload.gateReason = inheritedGateResult.gateReason || gatePayload.gateReason || null;
+      }
       const result = this.db.prepare(`
         INSERT INTO premium_signals (
           token_ca, symbol, market_cap, holders, volume_24h, top10_pct,
@@ -1252,19 +1275,36 @@ export class PremiumSignalEngine {
 
     try {
       const backfill = await this._backfillPrebuyKlines(ca, signalTsSec, 5);
-      if (backfill?.enough) {
-        await this._waitForFreshLocalKlines(ca, 4, 1200);
-      }
+      const waitResult = backfill?.enough
+        ? await this._waitForFreshLocalKlines(ca, 4, 1200)
+        : null;
 
       const klineCheck = await this._checkKline(ca, { isATH: false, signalTsSec });
       const structuralFailures = new Set(['not_red_bar', 'support_break', 'high_vol', 'high_vol_calm', 'inactive']);
       const gateDecision = klineCheck?.gateStatus || (klineCheck?.passed ? 'PASS' : 'UNKNOWN_DATA');
       const blockedStructural = gateDecision === 'BLOCK' && structuralFailures.has(klineCheck?.reason);
       const decisionContinuedToBuy = gateDecision !== 'BLOCK';
+      const normalizeUnknownReason = (reason, check, backfillResult, waitState) => {
+        if (gateDecision !== 'UNKNOWN_DATA') return reason || 'unknown';
+        if (reason === 'RATE_LIMITED') return backfillResult?.reason === 'RATE_LIMITED' ? 'backfill_rate_limited' : 'provider_rate_limited';
+        if (reason === 'stale_local_bars' || reason === 'stale_primed_bars') return reason;
+        if (reason === 'no_history') return 'insufficient_bars';
+        if (reason === 'no_bars') {
+          if (backfillResult?.reason === 'no_pool') return 'no_pool';
+          return 'provider_no_bars';
+        }
+        if (reason === 'error_skip') return 'provider_error';
+        if (waitState && backfillResult?.enough && !waitState.ok) {
+          return waitState.error ? 'local_wait_error' : 'local_wait_timeout';
+        }
+        return reason || 'unknown_data';
+      };
+      const normalizedUnknownReason = normalizeUnknownReason(klineCheck?.reason, klineCheck, backfill, waitResult);
       const prebuyGateResult = {
+        auditVersion: 2,
         gateName: 'NOT_ATH_PREBUY_KLINE',
         gateDecision,
-        gateReason: klineCheck?.reason || 'unknown',
+        gateReason: gateDecision === 'UNKNOWN_DATA' ? normalizedUnknownReason : (klineCheck?.reason || 'unknown'),
         provider: klineCheck?.provider || backfill?.provider || null,
         poolAddress: klineCheck?.poolAddress || backfill?.poolAddress || null,
         freshnessSec: Number.isFinite(klineCheck?.freshnessSec) ? klineCheck.freshnessSec : null,
@@ -1277,6 +1317,15 @@ export class PremiumSignalEngine {
         momFromLag1: Number.isFinite(klineCheck?.momFromLag1) ? klineCheck.momFromLag1 : null,
         decisionContinuedToBuy,
         blockedStructural,
+        observability: {
+          backfillAttempted: Boolean(backfill),
+          backfillEnough: Boolean(backfill?.enough),
+          freshLocalBarsObserved: Boolean(waitResult?.ok),
+          localWaitTimedOut: Boolean(waitResult?.timedOut),
+          localWaitError: waitResult?.error || null,
+          dataSource: klineCheck?.provider || backfill?.provider || null,
+          providerDataState: gateDecision === 'UNKNOWN_DATA' ? normalizedUnknownReason : 'scored',
+        },
         backfill: backfill ? {
           fetched: Number.isFinite(backfill.fetched) ? backfill.fetched : null,
           existingBefore: Number.isFinite(backfill.existingBefore) ? backfill.existingBefore : null,
@@ -1285,6 +1334,14 @@ export class PremiumSignalEngine {
           provider: backfill.provider || null,
           poolAddress: backfill.poolAddress || null,
           reason: backfill.reason || null,
+        } : null,
+        localWait: waitResult ? {
+          ok: Boolean(waitResult.ok),
+          rowCount: Number.isFinite(waitResult.rowCount) ? waitResult.rowCount : null,
+          newestTs: Number.isFinite(waitResult.newestTs) ? waitResult.newestTs : null,
+          freshnessSec: Number.isFinite(waitResult.freshnessSec) ? waitResult.freshnessSec : null,
+          timedOut: Boolean(waitResult.timedOut),
+          error: waitResult.error || null,
         } : null,
       };
       signal._prebuyGateResult = prebuyGateResult;
@@ -1296,17 +1353,19 @@ export class PremiumSignalEngine {
         `reason=${prebuyGateResult.gateReason}`,
         `continue=${decisionContinuedToBuy ? 1 : 0}`,
         `blockedStructural=${blockedStructural ? 1 : 0}`,
-        prebuyGateResult.provider ? `provider=${prebuyGateResult.provider}` : null,
-        prebuyGateResult.poolAddress ? `poolAddress=${prebuyGateResult.poolAddress}` : null,
-        Number.isFinite(prebuyGateResult.freshnessSec) ? `freshnessSec=${prebuyGateResult.freshnessSec}` : null,
-        Number.isFinite(prebuyGateResult.barCountSeen) ? `barCountSeen=${prebuyGateResult.barCountSeen}` : null,
-        Number.isFinite(prebuyGateResult.signalTsSec) ? `signalTsSec=${prebuyGateResult.signalTsSec}` : null,
+        prebuyGateResult.provider ? `provider=${prebuyGateResult.provider}` : 'provider=-',
+        prebuyGateResult.poolAddress ? `poolAddress=${prebuyGateResult.poolAddress}` : 'poolAddress=-',
+        Number.isFinite(prebuyGateResult.freshnessSec) ? `freshnessSec=${prebuyGateResult.freshnessSec}` : 'freshnessSec=-',
+        Number.isFinite(prebuyGateResult.barCountSeen) ? `barCountSeen=${prebuyGateResult.barCountSeen}` : 'barCountSeen=-',
+        Number.isFinite(prebuyGateResult.signalTsSec) ? `signalTsSec=${prebuyGateResult.signalTsSec}` : 'signalTsSec=-',
         Number.isFinite(prebuyGateResult.supportBreakPct) ? `supportBreakPct=${prebuyGateResult.supportBreakPct.toFixed(2)}` : null,
         Number.isFinite(prebuyGateResult.avgVol3) ? `avgVol3=${prebuyGateResult.avgVol3.toFixed(2)}` : null,
         Number.isFinite(prebuyGateResult.momFromLag1) ? `momFromLag1=${prebuyGateResult.momFromLag1.toFixed(2)}` : null,
-        prebuyGateResult.backfill?.provider ? `backfillProvider=${prebuyGateResult.backfill.provider}` : null,
-        Number.isFinite(prebuyGateResult.backfill?.totalBefore) ? `backfillBars=${prebuyGateResult.backfill.totalBefore}` : null,
-        prebuyGateResult.backfill?.reason ? `backfillReason=${prebuyGateResult.backfill.reason}` : null,
+        prebuyGateResult.backfill?.provider ? `backfillProvider=${prebuyGateResult.backfill.provider}` : 'backfillProvider=-',
+        Number.isFinite(prebuyGateResult.backfill?.totalBefore) ? `backfillBars=${prebuyGateResult.backfill.totalBefore}` : 'backfillBars=-',
+        prebuyGateResult.backfill?.reason ? `backfillReason=${prebuyGateResult.backfill.reason}` : 'backfillReason=-',
+        prebuyGateResult.localWait ? `localWaitOk=${prebuyGateResult.localWait.ok ? 1 : 0}` : 'localWaitOk=-',
+        prebuyGateResult.localWait?.timedOut ? 'localWaitTimedOut=1' : null,
       ].filter(Boolean).join(' ');
 
       if (gateDecision === 'PASS') {
@@ -1339,8 +1398,19 @@ export class PremiumSignalEngine {
         momFromLag1: null,
         decisionContinuedToBuy: true,
         blockedStructural: false,
+        observability: {
+          backfillAttempted: false,
+          backfillEnough: false,
+          freshLocalBarsObserved: false,
+          localWaitTimedOut: false,
+          localWaitError: error.message,
+          dataSource: null,
+          providerDataState: 'prebuy_exception',
+        },
         backfill: null,
+        localWait: null,
         error: error.message,
+        auditVersion: 2,
       };
       signal._prebuyGateResult = prebuyGateResult;
       console.warn([

@@ -2499,8 +2499,9 @@ def dry_run(db):
                                  market_regime, replay_source, peak_pnl, trailing_active,
                                  lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
                                  armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
-                                 premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                                 premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close,
+                                 exit_execution_audit_json)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
                         """, (
                             strategy_id, strategy_role, 'stage2A', f"stage2A_{stage2_result['exit_reason']}",
                             token_ca, symbol, int(signal_ts_ms), stage2_result['entry_price'], stage2_result['entry_ts'],
@@ -2508,7 +2509,14 @@ def dry_run(db):
                             'real_kline', 'real_kline_replay', stage2_result['peak_pnl'], int(stage2_result['trailing_active']),
                             lifecycle_id, lifecycle['stage1_trade_id'], stage_seq('stage2A'), stage2_result['entry_ts'], stage2_result['entry_price'],
                             lifecycle['stage1_stop_ts'], lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound',
-                            lifecycle.get('premium_signal_id'), lifecycle.get('signal_type') or 'NEW_TRENDING', stage2_result['exit_reason'], 'available', 'closed_real'
+                            lifecycle.get('premium_signal_id'), lifecycle.get('signal_type') or 'NEW_TRENDING', stage2_result['exit_reason'], 'available', 'closed_real',
+                            json.dumps({
+                                'accountingSource': 'replay_exit_only',
+                                'preExitTotalSolReceived': None,
+                                'exitSolReceived': None,
+                                'postExitTotalSolReceived': None,
+                                'replaySource': 'real_kline_replay',
+                            })
                         ))
                         stage2_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                         db.commit()
