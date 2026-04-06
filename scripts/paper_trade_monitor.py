@@ -97,6 +97,7 @@ PENDING_ENTRY_BAR_LOOKBACK = max(8, int(os.environ.get('PENDING_ENTRY_BAR_LOOKBA
 PENDING_ENTRY_DEBUG_INTERVAL_SEC = max(30, int(os.environ.get('PENDING_ENTRY_DEBUG_INTERVAL_SEC', '120')))
 PENDING_ENTRY_BAR_TOLERANCE_SEC = max(30, int(os.environ.get('PENDING_ENTRY_BAR_TOLERANCE_SEC', '90')))
 PENDING_ENTRY_NEAREST_PAST_MAX_SEC = max(60, int(os.environ.get('PENDING_ENTRY_NEAREST_PAST_MAX_SEC', '180')))
+MAX_EVALS_PER_CYCLE = max(1, int(os.environ.get('MAX_EVALS_PER_CYCLE', '4')))
 NO_ROUTE_TRAP_FAILURES = max(1, int(os.environ.get('NO_ROUTE_TRAP_FAILURES', '3')))
 NO_ROUTE_TRAP_MINUTES = max(1, int(os.environ.get('NO_ROUTE_TRAP_MINUTES', '15')))
 TRAPPED_NO_ROUTE_PNL_PCT = float(os.environ.get('TRAPPED_NO_ROUTE_PNL_PCT', '-1.0'))
@@ -3048,6 +3049,7 @@ def run_monitor(db):
 
     last_heartbeat = 0.0
     last_progress = time.time()
+    _eval_rotation_offset = 0
 
     while True:
       try:
@@ -3282,7 +3284,17 @@ def run_monitor(db):
             except Exception:
                 pass
 
-            for trade_id, pos in list(positions.items()):
+            all_positions = list(positions.items())
+            if len(all_positions) > MAX_EVALS_PER_CYCLE:
+                start = _eval_rotation_offset % len(all_positions)
+                eval_batch = all_positions[start:start + MAX_EVALS_PER_CYCLE]
+                if len(eval_batch) < MAX_EVALS_PER_CYCLE:
+                    eval_batch += all_positions[:MAX_EVALS_PER_CYCLE - len(eval_batch)]
+                _eval_rotation_offset = (start + MAX_EVALS_PER_CYCLE) % len(all_positions)
+            else:
+                eval_batch = all_positions
+
+            for trade_id, pos in eval_batch:
                 try:
                     exit_eval = evaluate_paper_exit(
                         {
