@@ -3722,7 +3722,11 @@ def main():
             date = sys.argv[idx + 1]
         print_daily_report(db, date)
     else:
-        run_monitor(db)
+        try:
+            run_monitor(db)
+        except Exception as e:
+            log.error(f"CRITICAL ERROR: Paper trade monitor crashed: {e}", exc_info=True)
+            sys.exit(1)
 
     db.close()
 

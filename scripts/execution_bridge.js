@@ -1,32 +1,13 @@
 #!/usr/bin/env node
 // Canonical paper bridge path: paper_trade_monitor.py -> execution_bridge.js -> paper-live-position-monitor.js
+// IMPORTANT: suppress_stdout.js MUST be imported first to redirect console before
+// any other module-level code (e.g. SessionManager singleton) writes to stdout.
+import './suppress_stdout.js';
 import ParityExecutor from '../src/execution/parity-executor.js';
 import { evaluatePaperLiveManagedPosition } from '../src/execution/paper-live-position-monitor.js';
 import { SharedPoolOhlcvClient } from '../src/market-data/shared-pool-ohclv-client.js';
 import { SharedQuoteClient } from '../src/market-data/shared-quote-client.js';
 import { SharedMarketRuntime, applyMarketDataProcessOverride } from '../src/market-data/shared-market-runtime.js';
-
-function redirectConsoleToStderr() {
-  const write = (args) => {
-    try {
-      process.stderr.write(`${args.map((item) => {
-        if (typeof item === 'string') return item;
-        try {
-          return JSON.stringify(item);
-        } catch {
-          return String(item);
-        }
-      }).join(' ')}\n`);
-    } catch {
-      // noop
-    }
-  };
-
-  console.log = (...args) => write(args);
-  console.info = (...args) => write(args);
-  console.warn = (...args) => write(args);
-  console.error = (...args) => write(args);
-}
 
 async function readStdin() {
   return await new Promise((resolve, reject) => {
@@ -46,7 +27,6 @@ async function createMarketDataBridge() {
 }
 
 async function main() {
-  redirectConsoleToStderr();
 
   const command = process.argv[2];
   if (!command) {
