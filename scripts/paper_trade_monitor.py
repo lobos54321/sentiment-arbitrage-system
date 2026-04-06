@@ -789,13 +789,18 @@ ENTRY_TIMING_MIN_RISE_PCT = float(os.environ.get('ENTRY_TIMING_MIN_RISE_PCT', '3
 
 def evaluate_entry_timing(token_ca, symbol='?'):
     """
-    Micro-timing engine: takes price snapshots every 10 seconds.
+    Micro-timing engine: takes price snapshots every 5 seconds.
 
-    Two conditions must BOTH be met to enter:
-      1. At least 2 out of 3 consecutive snapshots show rising price (sustained momentum)
-      2. Total price change from first snapshot >= +3% (meaningful move, not noise)
+    Meme coins pump in spikes then consolidate: big jump → small dips.
+    So we look for: total rise >= 3% AND latest snapshot is bouncing
+    up from the low (not at the peak fading down).
 
-    Takes up to 6 snapshots at 10-second intervals (max 60 seconds).
+    Entry conditions (both must be met):
+      1. Total price change from first snapshot >= +3%
+      2. Latest snapshot is rising vs its previous (bouncing, not fading)
+         OR latest snapshot is within 1% of the highest seen (still near top)
+
+    Takes up to 6 snapshots at 5-second intervals (max 30 seconds).
 
     Returns: (should_enter: bool, reason: str, detail: str)
     """
@@ -803,7 +808,6 @@ def evaluate_entry_timing(token_ca, symbol='?'):
     max_snaps = ENTRY_TIMING_MAX_SNAPSHOTS
     min_rise_pct = ENTRY_TIMING_MIN_RISE_PCT
     snapshots = []
-    upticks = 0  # count of rising intervals
 
     for i in range(max_snaps):
         price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
@@ -813,23 +817,22 @@ def evaluate_entry_timing(token_ca, symbol='?'):
             break
         snapshots.append(price)
 
-        if len(snapshots) >= 2:
-            if snapshots[-1] > snapshots[-2]:
-                upticks += 1
-
-        # Check entry conditions after at least 3 snapshots
+        # Need at least 3 snapshots to judge
         if len(snapshots) >= 3:
             total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-            # Count upticks in the last 3 snapshots (2 intervals)
-            recent_ups = sum(1 for j in range(len(snapshots) - 2, len(snapshots))
-                            if snapshots[j] > snapshots[j - 1])
-            if recent_ups >= 2 and total_pct >= min_rise_pct:
+            high = max(snapshots)
+            latest_rising = snapshots[-1] > snapshots[-2]
+            near_high = high > 0 and ((high - snapshots[-1]) / high) * 100 < 1.0
+
+            if total_pct >= min_rise_pct and (latest_rising or near_high):
                 snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-                detail = (f'sustained rise: total={total_pct:+.2f}% '
-                          f'recent_ups={recent_ups}/2 total_ups={upticks}/{len(snapshots)-1} '
+                reason_tag = 'bouncing' if latest_rising else 'near_high'
+                detail = (f'{reason_tag}: total={total_pct:+.2f}% '
+                          f'latest_vs_prev={((snapshots[-1]-snapshots[-2])/snapshots[-2])*100:+.2f}% '
+                          f'from_high={((snapshots[-1]-high)/high)*100:+.2f}% '
                           f'[{snap_str}]')
                 log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-                return True, 'sustained_rise', detail
+                return True, reason_tag, detail
 
         if i < max_snaps - 1:
             time.sleep(interval)
@@ -838,9 +841,10 @@ def evaluate_entry_timing(token_ca, symbol='?'):
     snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
     if len(snapshots) >= 2:
         total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-        detail = (f'conditions not met: total={total_pct:+.2f}% '
-                  f'upticks={upticks}/{len(snapshots)-1} '
-                  f'need {min_rise_pct:+.1f}% and 2/3 rising [{snap_str}]')
+        high = max(snapshots)
+        from_high_pct = ((snapshots[-1] - high) / high) * 100 if high > 0 else 0
+        detail = (f'total={total_pct:+.2f}% from_high={from_high_pct:+.2f}% '
+                  f'need {min_rise_pct:+.1f}% and rising/near_high [{snap_str}]')
     else:
         detail = f'insufficient data: {len(snapshots)} snap(s) [{snap_str}]'
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
