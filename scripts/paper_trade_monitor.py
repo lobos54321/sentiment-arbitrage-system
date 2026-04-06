@@ -762,6 +762,26 @@ def fetch_dexscreener_price_usd(token_ca, timeout=5):
     return None, None
 
 
+def fetch_dexscreener_m5(token_ca, timeout=5):
+    """Fetch 5-minute price change % from DexScreener. Returns float or None."""
+    url = f'https://api.dexscreener.com/latest/dex/tokens/{token_ca}'
+    data = curl_json(url, timeout=timeout)
+    if not data or not isinstance(data, dict):
+        return None
+    pairs = data.get('pairs')
+    if not pairs or not isinstance(pairs, list):
+        return None
+    for pair in pairs[:3]:
+        price_change = pair.get('priceChange', {})
+        m5 = price_change.get('m5')
+        if m5 is not None:
+            try:
+                return float(m5)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 def get_pool_address(token_ca, cache={}):
     """Get pool address from shared/local truth sources first, then DexScreener fallback."""
     if token_ca in cache:
@@ -1299,48 +1319,6 @@ def compute_notath_score(bars):
     }
 
 
-def _fbr_dexscreener_fallback(token_ca):
-    """Use DexScreener 5-min price change as FBR fallback when OHLCV is unavailable.
-    Synthesizes a pseudo-bar: if priceChange.m5 < 0, close < open (dropping)."""
-    if not token_ca:
-        return None
-    try:
-        url = f'https://api.dexscreener.com/latest/dex/tokens/{token_ca}'
-        data = curl_json(url, timeout=5)
-        if not data or not isinstance(data, dict):
-            log.warning(f"  [FBR_SOURCE] DexScreener fallback: no data for {token_ca[:12]}...")
-            return None
-        pairs = data.get('pairs')
-        if not pairs or not isinstance(pairs, list):
-            return None
-        pair = pairs[0]
-        price_str = pair.get('priceUsd')
-        price_change = pair.get('priceChange', {})
-        m5 = price_change.get('m5')
-        if price_str and m5 is not None:
-            price = float(price_str)
-            m5_pct = float(m5)
-            if price > 0:
-                # Synthesize open from current price and 5-min change
-                open_price = price / (1 + m5_pct / 100) if m5_pct != -100 else price
-                log.info(
-                    f"  [FBR_SOURCE] DexScreener fallback hit: price=${price:.10f} "
-                    f"m5={m5_pct:+.1f}% synth_open=${open_price:.10f}"
-                )
-                return {
-                    'ts': int(time.time()),
-                    'open': open_price,
-                    'high': price if m5_pct >= 0 else open_price,
-                    'low': price if m5_pct < 0 else open_price,
-                    'close': price,
-                    'volume': 0,
-                }
-        log.warning(f"  [FBR_SOURCE] DexScreener fallback: no price/m5 for {token_ca[:12]}...")
-    except Exception as e:
-        log.warning(f"  [FBR_SOURCE] DexScreener fallback error: {e}")
-    return None
-
-
 def get_entry_bar_ohlcv(pool_address, token_ca=None):
     """Get the most recent completed 1-minute OHLCV bar for FBR check."""
     if shared_truth_source_enabled('ohlcv'):
@@ -1381,11 +1359,11 @@ def get_entry_bar_ohlcv(pool_address, token_ca=None):
     data = curl_json(url, timeout=5)
     if not data:
         log.warning(f"  [FBR_SOURCE] GeckoTerminal returned no data for pool={pool_address[:12]}...")
-        return _fbr_dexscreener_fallback(token_ca)
+        return None
     ohlcv_list = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
     if not ohlcv_list or len(ohlcv_list[0]) < 6:
         log.warning(f"  [FBR_SOURCE] GeckoTerminal empty ohlcv_list for pool={pool_address[:12]}...")
-        return _fbr_dexscreener_fallback(token_ca)
+        return None
     # Return the most recent completed bar
     row = ohlcv_list[0]
     log.info(f"  [FBR_SOURCE] GeckoTerminal hit for pool={pool_address[:12]}... o={row[1]} c={row[4]}")
@@ -3222,26 +3200,20 @@ def run_monitor(db):
                                 f"bar_age={bar_age_sec}s)"
                             )
                     else:
-                        # No OHLCV data: take two price snapshots 3s apart to detect immediate drop
-                        p1, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
-                        if p1 and p1 > 0:
-                            time.sleep(3)
-                            p2, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
-                            if p2 and p2 > 0:
-                                delta_pct = ((p2 - p1) / p1) * 100
-                                if delta_pct < 0:
-                                    log.info(
-                                        f"  [PREBUY_FILTER] {symbol} BLOCKED: snapshot delta={delta_pct:+.2f}% "
-                                        f"(p1=${p1:.10f} → p2=${p2:.10f} over 3s) — dropping, skipping"
-                                    )
-                                    continue
-                                else:
-                                    log.info(
-                                        f"  [PREBUY_FILTER] {symbol} PASS: snapshot delta={delta_pct:+.2f}% "
-                                        f"(p1=${p1:.10f} → p2=${p2:.10f} over 3s)"
-                                    )
+                        # No OHLCV data: use DexScreener m5 (5-min price change) as trend filter
+                        m5_pct = fetch_dexscreener_m5(token_ca, timeout=5)
+                        if m5_pct is not None:
+                            if m5_pct < 0:
+                                log.info(
+                                    f"  [PREBUY_FILTER] {symbol} BLOCKED: m5={m5_pct:+.1f}% "
+                                    f"— 5min trend negative, skipping"
+                                )
+                                continue
                             else:
-                                log.warning(f"  [PREBUY_FILTER] {symbol} second snapshot failed, allowing entry (fail-open)")
+                                log.info(
+                                    f"  [PREBUY_FILTER] {symbol} PASS: m5={m5_pct:+.1f}% "
+                                    f"— 5min trend positive"
+                                )
                         else:
                             log.warning(f"  [PREBUY_FILTER] {symbol} no price data available, allowing entry (fail-open)")
 
