@@ -72,7 +72,7 @@ DEFAULT_PAPER_EXECUTION = {
     'exitPriceSource': 'quote',
     'paperUsesQuoteOnly': True,
     'applyPaperPenalty': True,
-    'quoteTimeoutMs': 25000,
+    'quoteTimeoutMs': 10000,
     'quoteRetries': 5,
     'maxQuoteAgeSec': 180,
     'noRouteFailureThreshold': 3,
@@ -290,7 +290,7 @@ def build_execution_audit(execution=None, extra=None):
     return {key: value for key, value in audit.items() if value is not None}
 
 
-def call_execution_bridge(command, payload, timeout=25):
+def call_execution_bridge(command, payload, timeout=10):
     try:
         result = subprocess.run(
             ['node', str(EXECUTION_BRIDGE), command],
@@ -3602,8 +3602,11 @@ def run_monitor(db):
               except Exception as e:
                 log.error(f"  Close event error for trade_id={close_event.get('trade_id')}: {e}", exc_info=True)
 
+            _lifecycle_evals_this_cycle = 0
             for lifecycle_id, lifecycle in list(lifecycles.items()):
               try:
+                if _lifecycle_evals_this_cycle >= MAX_EVALS_PER_CYCLE:
+                    break
                 if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
                     continue
                 pool = get_pool_address(lifecycle['token_ca'])
@@ -3614,6 +3617,7 @@ def run_monitor(db):
                     int((lifecycle.get('stage1_stop_ts') or 0) // 1000 if (lifecycle.get('stage1_stop_ts') or 0) > 1e12 else (lifecycle.get('stage1_stop_ts') or 0)),
                     int((lifecycle.get('signal_ts') or 0) // 1000 if (lifecycle.get('signal_ts') or 0) > 1e12 else (lifecycle.get('signal_ts') or 0)),
                 )
+                _lifecycle_evals_this_cycle += 1
                 snapshot = get_live_price_snapshot(lifecycle['token_ca'], pool, min_timestamp_ms=min_bar_ts * 1000 if min_bar_ts else None)
                 if not snapshot:
                     continue
