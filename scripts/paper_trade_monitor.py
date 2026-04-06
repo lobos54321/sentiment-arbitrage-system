@@ -3514,7 +3514,7 @@ def run_monitor(db):
                 pos.last_exit_quote_failure = None
 
                 positions.pop(trade_id, None)
-                lifecycle = lifecycles[pos.lifecycle_id]
+                lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
                 stage3_peak_price = pos.entry_price * (1.0 + max(pos.peak_pnl, 0.0)) if pos.entry_price else None
