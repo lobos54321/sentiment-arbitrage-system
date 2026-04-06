@@ -3459,7 +3459,8 @@ def run_monitor(db):
                     continue
 
                 exit_execution = exit_eval.get('execution') or {}
-                if not exit_execution.get('success'):
+                is_force_timeout = (mark_source == 'force_timeout')
+                if not exit_execution.get('success') and not is_force_timeout:
                     failure_reason = exit_execution.get('failureReason') or 'exit_quote_failed'
                     pos.last_exit_quote_failure = failure_reason
                     trap_failure_reason = failure_reason if failure_reason in {'no_route', 'token_not_tradable'} else None
@@ -3571,7 +3572,11 @@ def run_monitor(db):
                         'postExitTotalSolReceived': _safe_float(exit_eval.get('postExitTotalSolReceived', exit_execution.get('postExitTotalSolReceived')), None),
                         'triggerPriceUsd': _safe_float(exit_price, None),
                         'effectiveExitPriceUsd': _safe_float(effective_exit_price, None),
-                    })), reason, 'available', 'closed_real', pos.trade_id
+                    })),
+                    'force_timeout' if is_force_timeout else reason,
+                    'unavailable' if is_force_timeout else 'available',
+                    'closed_force_timeout' if is_force_timeout else 'closed_real',
+                    pos.trade_id,
                 ))
                 db.commit()
                 last_progress = time.time()
