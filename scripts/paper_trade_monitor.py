@@ -783,26 +783,27 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
 
 
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '10'))
-ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '4'))
+ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '6'))
+ENTRY_TIMING_MIN_RISE_PCT = float(os.environ.get('ENTRY_TIMING_MIN_RISE_PCT', '3.0'))
 
 
 def evaluate_entry_timing(token_ca, symbol='?'):
     """
     Micro-timing engine: takes price snapshots every 10 seconds.
-    Only enters when price is actively rising (uptick detected).
-    With a 3% stop-loss, we must be precise — no flat/stable entries.
 
-    Logic:
-      - Take up to 4 snapshots at 10-second intervals (max 40 seconds)
-      - On each snapshot, check if price > previous snapshot (uptick)
-      - If uptick detected: price is rising → ENTER immediately
-      - Any other outcome (flat, dropping, fading): SKIP
+    Two conditions must BOTH be met to enter:
+      1. At least 2 out of 3 consecutive snapshots show rising price (sustained momentum)
+      2. Total price change from first snapshot >= +3% (meaningful move, not noise)
+
+    Takes up to 6 snapshots at 10-second intervals (max 60 seconds).
 
     Returns: (should_enter: bool, reason: str, detail: str)
     """
     interval = ENTRY_TIMING_INTERVAL_SEC
     max_snaps = ENTRY_TIMING_MAX_SNAPSHOTS
+    min_rise_pct = ENTRY_TIMING_MIN_RISE_PCT
     snapshots = []
+    upticks = 0  # count of rising intervals
 
     for i in range(max_snaps):
         price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
@@ -813,30 +814,37 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         snapshots.append(price)
 
         if len(snapshots) >= 2:
-            prev = snapshots[-2]
-            curr = snapshots[-1]
-            delta_pct = ((curr - prev) / prev) * 100
-            if curr > prev:
-                # Uptick: price is actively rising — enter now
+            if snapshots[-1] > snapshots[-2]:
+                upticks += 1
+
+        # Check entry conditions after at least 3 snapshots
+        if len(snapshots) >= 3:
+            total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
+            # Count upticks in the last 3 snapshots (2 intervals)
+            recent_ups = sum(1 for j in range(len(snapshots) - 2, len(snapshots))
+                            if snapshots[j] > snapshots[j - 1])
+            if recent_ups >= 2 and total_pct >= min_rise_pct:
                 snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-                detail = f'uptick {delta_pct:+.2f}% on snap#{len(snapshots)} [{snap_str}]'
+                detail = (f'sustained rise: total={total_pct:+.2f}% '
+                          f'recent_ups={recent_ups}/2 total_ups={upticks}/{len(snapshots)-1} '
+                          f'[{snap_str}]')
                 log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-                return True, 'uptick', detail
+                return True, 'sustained_rise', detail
 
         if i < max_snaps - 1:
             time.sleep(interval)
 
-    # No uptick detected after all snapshots — do not enter
+    # Did not meet entry conditions
     snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
     if len(snapshots) >= 2:
         total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-        detail = f'no uptick detected: {total_pct:+.2f}% over {len(snapshots)} snaps [{snap_str}]'
+        detail = (f'conditions not met: total={total_pct:+.2f}% '
+                  f'upticks={upticks}/{len(snapshots)-1} '
+                  f'need {min_rise_pct:+.1f}% and 2/3 rising [{snap_str}]')
     else:
         detail = f'insufficient data: {len(snapshots)} snap(s) [{snap_str}]'
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-    return False, 'no_uptick', detail
-
-    return True, 'insufficient_data', f'only {len(snapshots)} snapshot(s)'
+    return False, 'conditions_not_met', detail
 
 
 def get_pool_address(token_ca, cache={}):
