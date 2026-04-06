@@ -3317,6 +3317,36 @@ def run_monitor(db):
                         }
                     )
                     if not exit_eval.get('ok'):
+                        failure_info = exit_eval.get('failureReason') or exit_eval.get('action') or 'unknown'
+                        held_min = int(max(0, (time.time() - pos.entry_ts) / 60))
+                        log.warning(
+                            f"  [EXIT_EVAL_FAIL] {pos.symbol}/{pos.strategy_stage}: {failure_info} "
+                            f"held={held_min}min success={exit_eval.get('success')} "
+                            f"markSource={exit_eval.get('markSource')}"
+                        )
+                        # Force timeout exit if position held far beyond timeout limit
+                        timeout_min = int(pos.exit_rules.get('timeoutMinutes', 120))
+                        if held_min >= timeout_min * 2:
+                            log.warning(
+                                f"  [FORCE_TIMEOUT] {pos.symbol}/{pos.strategy_stage}: held {held_min}min "
+                                f"(2x timeout={timeout_min}min), force closing as timeout"
+                            )
+                            to_close.append({
+                                'trade_id': trade_id,
+                                'reason': 'timeout',
+                                'pnl': 0.0,
+                                'trigger_pnl': 0.0,
+                                'exit_price': pos.entry_price,
+                                'exit_ts': int(time.time()),
+                                'mark_source': 'force_timeout',
+                                'exit_eval': {
+                                    'action': 'exit',
+                                    'shouldExit': True,
+                                    'exitReason': 'timeout',
+                                    'execution': {'success': False, 'failureReason': 'force_timeout_no_quote'},
+                                    'updatedState': pos.monitor_state,
+                                },
+                            })
                         continue
                     mark_execution = exit_eval.get('execution') or {}
                     mark_quote_reason = exit_eval.get('quoteFailureReason')
