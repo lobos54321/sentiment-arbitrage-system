@@ -3112,6 +3112,27 @@ def run_monitor(db):
                         continue
                     time.sleep(0.1)
 
+                    # --- Pre-buy FBR filter: skip coins already dropping at signal time ---
+                    entry_bar = get_entry_bar_ohlcv(pool)
+                    if entry_bar and entry_bar['open'] > 0:
+                        fbr = ((entry_bar['close'] - entry_bar['open']) / entry_bar['open']) * 100
+                        bar_age_sec = int(time.time() - entry_bar['ts'])
+                        if fbr < 0:
+                            log.info(
+                                f"  [PREBUY_FILTER] {symbol} BLOCKED: FBR={fbr:+.2f}% "
+                                f"(open={entry_bar['open']:.10f} close={entry_bar['close']:.10f} "
+                                f"bar_age={bar_age_sec}s) — price dropping at entry, skipping"
+                            )
+                            continue
+                        else:
+                            log.info(
+                                f"  [PREBUY_FILTER] {symbol} PASS: FBR={fbr:+.2f}% "
+                                f"(open={entry_bar['open']:.10f} close={entry_bar['close']:.10f} "
+                                f"bar_age={bar_age_sec}s)"
+                            )
+                    else:
+                        log.warning(f"  [PREBUY_FILTER] {symbol} no bar data available, allowing entry (fail-open)")
+
                     signal_minute_ts = get_signal_minute_ts(signal_ts)
                     pending_entries[lifecycle_id] = {
                         'token_ca': token_ca,
