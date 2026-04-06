@@ -3202,7 +3202,8 @@ def run_monitor(db):
                         continue
                     time.sleep(0.1)
 
-                    # --- Pre-buy FBR filter: skip coins already dropping at signal time ---
+                    # --- Pre-buy FBR filter: check if price is dropping right now ---
+                    # Strategy: try 1-min OHLCV candle first, fallback to two quick DexScreener snapshots
                     entry_bar = get_entry_bar_ohlcv(pool, token_ca=token_ca)
                     if entry_bar and entry_bar['open'] > 0:
                         fbr = ((entry_bar['close'] - entry_bar['open']) / entry_bar['open']) * 100
@@ -3221,7 +3222,28 @@ def run_monitor(db):
                                 f"bar_age={bar_age_sec}s)"
                             )
                     else:
-                        log.warning(f"  [PREBUY_FILTER] {symbol} no bar data available, allowing entry (fail-open)")
+                        # No OHLCV data: take two price snapshots 3s apart to detect immediate drop
+                        p1, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
+                        if p1 and p1 > 0:
+                            time.sleep(3)
+                            p2, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
+                            if p2 and p2 > 0:
+                                delta_pct = ((p2 - p1) / p1) * 100
+                                if delta_pct < 0:
+                                    log.info(
+                                        f"  [PREBUY_FILTER] {symbol} BLOCKED: snapshot delta={delta_pct:+.2f}% "
+                                        f"(p1=${p1:.10f} → p2=${p2:.10f} over 3s) — dropping, skipping"
+                                    )
+                                    continue
+                                else:
+                                    log.info(
+                                        f"  [PREBUY_FILTER] {symbol} PASS: snapshot delta={delta_pct:+.2f}% "
+                                        f"(p1=${p1:.10f} → p2=${p2:.10f} over 3s)"
+                                    )
+                            else:
+                                log.warning(f"  [PREBUY_FILTER] {symbol} second snapshot failed, allowing entry (fail-open)")
+                        else:
+                            log.warning(f"  [PREBUY_FILTER] {symbol} no price data available, allowing entry (fail-open)")
 
                     signal_minute_ts = get_signal_minute_ts(signal_ts)
                     pending_entries[lifecycle_id] = {
