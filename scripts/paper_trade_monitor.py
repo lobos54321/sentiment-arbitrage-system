@@ -368,7 +368,7 @@ def evaluate_paper_exit(position_payload, mark_payload):
     return call_execution_bridge('evaluate-paper-exit', {
         'position': position_payload,
         'mark': mark_payload,
-    })
+    }, timeout=20)
 
 
 def parse_monitor_state(monitor_state_json):
