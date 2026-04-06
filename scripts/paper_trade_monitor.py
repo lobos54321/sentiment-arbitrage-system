@@ -791,16 +791,14 @@ def evaluate_entry_timing(token_ca, symbol='?'):
     """
     Micro-timing engine: takes price snapshots every 5 seconds.
 
-    Meme coins pump in spikes then consolidate: big jump → small dips.
-    So we look for: total rise >= 3% AND latest snapshot is bouncing
-    up from the low (not at the peak fading down).
-
-    Entry conditions (both must be met):
+    Requires a GENUINE dip-and-bounce pattern before entering:
       1. Total price change from first snapshot >= +3%
-      2. Latest snapshot is rising vs its previous (bouncing from a dip)
+      2. A real dip occurred (at least one snapshot dropped vs its previous)
+      3. Latest snapshot is rising from that dip (recovering)
+      4. NOT entering at the observed high (must be below peak by >= 1%)
 
-    Only enters on a bounce — never at or near the high. This way we
-    buy into a pullback recovery, not chase the top.
+    This prevents buying at spike tops when DexScreener returns delayed
+    prices (flat → flat → sudden jump = false "bounce" signal).
 
     Takes up to 6 snapshots at 5-second intervals (max 30 seconds).
 
@@ -810,6 +808,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
     max_snaps = ENTRY_TIMING_MAX_SNAPSHOTS
     min_rise_pct = ENTRY_TIMING_MIN_RISE_PCT
     snapshots = []
+    saw_dip = False  # Did we see at least one down-move?
 
     for i in range(max_snaps):
         price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
@@ -819,22 +818,26 @@ def evaluate_entry_timing(token_ca, symbol='?'):
             break
         snapshots.append(price)
 
-        # Need at least 3 snapshots: first establishes baseline,
-        # second shows a dip, third shows bounce from dip
-        if len(snapshots) >= 3:
+        if len(snapshots) >= 2:
+            if snapshots[-1] < snapshots[-2]:
+                saw_dip = True
+
+        # Need at least 4 snapshots for a genuine dip-and-bounce:
+        # snap1(baseline) → snap2(rise) → snap3(dip) → snap4(bounce)
+        if len(snapshots) >= 4 and saw_dip:
             total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
             latest_rising = snapshots[-1] > snapshots[-2]
             high = max(snapshots)
             from_high_pct = ((snapshots[-1] - high) / high) * 100 if high > 0 else 0
 
-            if total_pct >= min_rise_pct and latest_rising:
+            if total_pct >= min_rise_pct and latest_rising and from_high_pct < -1.0:
                 snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-                detail = (f'bounce: total={total_pct:+.2f}% '
+                detail = (f'dip_bounce: total={total_pct:+.2f}% '
                           f'latest_vs_prev={((snapshots[-1]-snapshots[-2])/snapshots[-2])*100:+.2f}% '
                           f'from_high={from_high_pct:+.2f}% '
-                          f'[{snap_str}]')
+                          f'dip_seen=true [{snap_str}]')
                 log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-                return True, 'bounce', detail
+                return True, 'dip_bounce', detail
 
         if i < max_snaps - 1:
             time.sleep(interval)
