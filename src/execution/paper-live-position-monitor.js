@@ -1639,7 +1639,12 @@ export async function evaluatePaperLiveManagedPosition({ position = {}, mark = {
   let quotedOutAmount = null;
   let terminalQuoteFailureReason = null;
 
-  if (executor && tokenCA && tokenAmountRaw > 0) {
+  // If Python pre-supplied a valid price, skip the expensive internal fetch
+  const hasPreSuppliedPrice = currentPrice > 0 && quoteTsSec > 0;
+
+  if (hasPreSuppliedPrice) {
+    markSource = 'pre_supplied';
+  } else if (executor && tokenCA && tokenAmountRaw > 0) {
     const managedMark = await getPaperManagedMark({
       tokenCA,
       tokenAmountRaw,

@@ -740,6 +740,28 @@ def curl_json(url, timeout=15):
         return None
 
 
+def fetch_dexscreener_price_usd(token_ca, timeout=5):
+    """Fetch current USD price from DexScreener. Returns (price_usd, timestamp_sec) or (None, None)."""
+    url = f'https://api.dexscreener.com/latest/dex/tokens/{token_ca}'
+    data = curl_json(url, timeout=timeout)
+    if not data or not isinstance(data, dict):
+        return None, None
+    pairs = data.get('pairs')
+    if not pairs or not isinstance(pairs, list):
+        return None, None
+    # Use the first pair with a valid priceUsd
+    for pair in pairs[:3]:
+        price_str = pair.get('priceUsd')
+        if price_str:
+            try:
+                price = float(price_str)
+                if price > 0:
+                    return price, int(time.time())
+            except (ValueError, TypeError):
+                continue
+    return None, None
+
+
 def get_pool_address(token_ca, cache={}):
     """Get pool address from shared/local truth sources first, then DexScreener fallback."""
     if token_ca in cache:
@@ -3296,6 +3318,10 @@ def run_monitor(db):
 
             for trade_id, pos in eval_batch:
                 try:
+                    # Pre-fetch price from DexScreener to avoid bridge timeout
+                    pre_price, pre_ts = fetch_dexscreener_price_usd(pos.token_ca, timeout=5)
+                    if pre_price and pre_price > 0:
+                        log.debug(f"  [PRE_PRICE] {pos.symbol}: ${pre_price:.10f} from DexScreener")
                     exit_eval = evaluate_paper_exit(
                         {
                             'tokenCA': pos.token_ca,
@@ -3312,8 +3338,8 @@ def run_monitor(db):
                         },
                         {
                             'solPriceUsd': sol_price,
-                            'currentPrice': None,
-                            'quoteTsSec': None,
+                            'currentPrice': pre_price,
+                            'quoteTsSec': pre_ts,
                         }
                     )
                     if not exit_eval.get('ok'):
