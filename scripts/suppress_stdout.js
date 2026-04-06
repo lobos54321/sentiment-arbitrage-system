@@ -22,3 +22,7 @@ console.log = (...args) => write(args);
 console.info = (...args) => write(args);
 console.warn = (...args) => write(args);
 console.error = (...args) => write(args);
+console.debug = (...args) => write(args);
+console.trace = (...args) => write(args);
+console.dir = (...args) => write(args);
+console.table = (...args) => write(args);

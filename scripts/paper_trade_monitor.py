@@ -321,8 +321,19 @@ def call_execution_bridge(command, payload, timeout=25):
     try:
         parsed = json.loads(stdout)
         return parsed if isinstance(parsed, dict) else {'success': False, 'failureReason': 'bridge_invalid_json'}
-    except Exception as e:
-        return {'success': False, 'failureReason': f'bridge_parse_failed:{e}'}
+    except Exception:
+        # stdout may contain non-JSON noise before/after the actual JSON payload;
+        # try to extract the JSON object from the output.
+        brace_start = stdout.find('{')
+        brace_end = stdout.rfind('}')
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                parsed = json.loads(stdout[brace_start:brace_end + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {'success': False, 'failureReason': f'bridge_parse_failed:{stdout[:200]}'}
 
 
 def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None, lifecycle_id=None):
@@ -3626,8 +3637,13 @@ def run_monitor(db):
                                 lifecycle_id=lifecycle_id,
                             )
                             if not execution.get('success'):
-                                lifecycle['stage2a_attempted'] = True
-                                log.warning(f"  Stage2A quote failed for {lifecycle['symbol']} lifecycle={lifecycle_id}: {execution.get('failureReason')}")
+                                lifecycle['stage2a_quote_failures'] = int(lifecycle.get('stage2a_quote_failures') or 0) + 1
+                                failure_reason = execution.get('failureReason') or 'unknown'
+                                if lifecycle['stage2a_quote_failures'] >= paper_execution['quoteRetries']:
+                                    lifecycle['stage2a_attempted'] = True
+                                    log.warning(f"  Stage2A quote permanently failed for {lifecycle['symbol']} lifecycle={lifecycle_id} after {lifecycle['stage2a_quote_failures']} attempts: {failure_reason}")
+                                else:
+                                    log.warning(f"  Stage2A quote failed for {lifecycle['symbol']} lifecycle={lifecycle_id} attempt={lifecycle['stage2a_quote_failures']}: {failure_reason} — will retry")
                                 continue
                             quote_price_sol = execution.get('effectivePrice')
                             token_amount_raw = execution.get('quotedOutAmountRaw')

@@ -85,7 +85,8 @@ async function main() {
       throw new Error(`unsupported command: ${command}`);
   }
 
-  process.stdout.write(JSON.stringify(result));
+  const json = JSON.stringify(result ?? { success: false, failureReason: 'bridge_undefined_result' });
+  process.stdout.write(json);
   await Promise.allSettled([
     marketDataBridge.runtime.close(),
     marketDataBridge.quoteClient.close(),
@@ -94,6 +95,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(JSON.stringify({ success: false, failureReason: error.message || 'bridge_failed' }));
+  const msg = JSON.stringify({ success: false, failureReason: error.message || 'bridge_failed' });
+  process.stderr.write(msg);
   process.exit(1);
 });
