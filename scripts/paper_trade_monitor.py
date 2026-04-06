@@ -782,7 +782,7 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
     return None
 
 
-ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '10'))
+ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '5'))
 ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '6'))
 ENTRY_TIMING_MIN_RISE_PCT = float(os.environ.get('ENTRY_TIMING_MIN_RISE_PCT', '3.0'))
 
