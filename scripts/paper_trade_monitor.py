@@ -788,15 +788,15 @@ ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '4
 
 def evaluate_entry_timing(token_ca, symbol='?'):
     """
-    Micro-timing engine: takes price snapshots every 10 seconds to find
-    a good entry point within a confirmed uptrend.
+    Micro-timing engine: takes price snapshots every 10 seconds.
+    Only enters when price is actively rising (uptick detected).
+    With a 3% stop-loss, we must be precise — no flat/stable entries.
 
     Logic:
       - Take up to 4 snapshots at 10-second intervals (max 40 seconds)
-      - On each snapshot, check if price is rising vs previous (uptick)
-      - If uptick detected: good entry timing, return immediately
-      - If all snapshots show declining price: momentum fading, skip
-      - If flat or ambiguous after all snapshots: allow entry
+      - On each snapshot, check if price > previous snapshot (uptick)
+      - If uptick detected: price is rising → ENTER immediately
+      - Any other outcome (flat, dropping, fading): SKIP
 
     Returns: (should_enter: bool, reason: str, detail: str)
     """
@@ -808,7 +808,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
         if not price or price <= 0:
             if not snapshots:
-                return True, 'no_price', 'fail-open: could not get price'
+                return False, 'no_price', 'could not get price'
             break
         snapshots.append(price)
 
@@ -817,7 +817,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
             curr = snapshots[-1]
             delta_pct = ((curr - prev) / prev) * 100
             if curr > prev:
-                # Uptick: price bouncing up — good entry point
+                # Uptick: price is actively rising — enter now
                 snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
                 detail = f'uptick {delta_pct:+.2f}% on snap#{len(snapshots)} [{snap_str}]'
                 log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
@@ -826,17 +826,15 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         if i < max_snaps - 1:
             time.sleep(interval)
 
+    # No uptick detected after all snapshots — do not enter
+    snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
     if len(snapshots) >= 2:
         total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-        if total_pct >= 0:
-            detail = f'stable {total_pct:+.2f}% over {len(snapshots)} snaps [{snap_str}]'
-            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'stable', detail
-        else:
-            detail = f'fading {total_pct:+.2f}% over {len(snapshots)} snaps [{snap_str}]'
-            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-            return False, 'fading', detail
+        detail = f'no uptick detected: {total_pct:+.2f}% over {len(snapshots)} snaps [{snap_str}]'
+    else:
+        detail = f'insufficient data: {len(snapshots)} snap(s) [{snap_str}]'
+    log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+    return False, 'no_uptick', detail
 
     return True, 'insufficient_data', f'only {len(snapshots)} snapshot(s)'
 
