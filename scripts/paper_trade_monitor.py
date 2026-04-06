@@ -782,6 +782,65 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
     return None
 
 
+ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '10'))
+ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '4'))
+
+
+def evaluate_entry_timing(token_ca, symbol='?'):
+    """
+    Micro-timing engine: takes price snapshots every 10 seconds to find
+    a good entry point within a confirmed uptrend.
+
+    Logic:
+      - Take up to 4 snapshots at 10-second intervals (max 40 seconds)
+      - On each snapshot, check if price is rising vs previous (uptick)
+      - If uptick detected: good entry timing, return immediately
+      - If all snapshots show declining price: momentum fading, skip
+      - If flat or ambiguous after all snapshots: allow entry
+
+    Returns: (should_enter: bool, reason: str, detail: str)
+    """
+    interval = ENTRY_TIMING_INTERVAL_SEC
+    max_snaps = ENTRY_TIMING_MAX_SNAPSHOTS
+    snapshots = []
+
+    for i in range(max_snaps):
+        price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
+        if not price or price <= 0:
+            if not snapshots:
+                return True, 'no_price', 'fail-open: could not get price'
+            break
+        snapshots.append(price)
+
+        if len(snapshots) >= 2:
+            prev = snapshots[-2]
+            curr = snapshots[-1]
+            delta_pct = ((curr - prev) / prev) * 100
+            if curr > prev:
+                # Uptick: price bouncing up — good entry point
+                snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+                detail = f'uptick {delta_pct:+.2f}% on snap#{len(snapshots)} [{snap_str}]'
+                log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
+                return True, 'uptick', detail
+
+        if i < max_snaps - 1:
+            time.sleep(interval)
+
+    if len(snapshots) >= 2:
+        total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
+        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+        if total_pct >= 0:
+            detail = f'stable {total_pct:+.2f}% over {len(snapshots)} snaps [{snap_str}]'
+            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
+            return True, 'stable', detail
+        else:
+            detail = f'fading {total_pct:+.2f}% over {len(snapshots)} snaps [{snap_str}]'
+            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+            return False, 'fading', detail
+
+    return True, 'insufficient_data', f'only {len(snapshots)} snapshot(s)'
+
+
 def get_pool_address(token_ca, cache={}):
     """Get pool address from shared/local truth sources first, then DexScreener fallback."""
     if token_ca in cache:
@@ -3180,8 +3239,15 @@ def run_monitor(db):
                         continue
                     time.sleep(0.1)
 
-                    # --- Pre-buy FBR filter: check if price is dropping right now ---
-                    # Strategy: try 1-min OHLCV candle first, fallback to two quick DexScreener snapshots
+                    # --- Pre-buy filter: two-layer check ---
+                    # Layer 1: Trend check (5-min direction)
+                    #   - OHLCV candle: close < open → dropping → BLOCKED
+                    #   - DexScreener m5 < 0 → 5min trend negative → BLOCKED
+                    # Layer 2: Entry timing (10-second snapshots to find good entry point)
+                    #   - Takes up to 4 snapshots at 10s intervals
+                    #   - Enters on uptick (price bouncing up) or stable price
+                    #   - Skips if price keeps fading through all snapshots
+                    trend_ok = True
                     entry_bar = get_entry_bar_ohlcv(pool, token_ca=token_ca)
                     if entry_bar and entry_bar['open'] > 0:
                         fbr = ((entry_bar['close'] - entry_bar['open']) / entry_bar['open']) * 100
@@ -3195,12 +3261,10 @@ def run_monitor(db):
                             continue
                         else:
                             log.info(
-                                f"  [PREBUY_FILTER] {symbol} PASS: FBR={fbr:+.2f}% "
-                                f"(open={entry_bar['open']:.10f} close={entry_bar['close']:.10f} "
-                                f"bar_age={bar_age_sec}s)"
+                                f"  [PREBUY_FILTER] {symbol} trend OK: FBR={fbr:+.2f}% "
+                                f"(bar_age={bar_age_sec}s)"
                             )
                     else:
-                        # No OHLCV data: use DexScreener m5 (5-min price change) as trend filter
                         m5_pct = fetch_dexscreener_m5(token_ca, timeout=5)
                         if m5_pct is not None:
                             if m5_pct < 0:
@@ -3211,11 +3275,21 @@ def run_monitor(db):
                                 continue
                             else:
                                 log.info(
-                                    f"  [PREBUY_FILTER] {symbol} PASS: m5={m5_pct:+.1f}% "
-                                    f"— 5min trend positive"
+                                    f"  [PREBUY_FILTER] {symbol} trend OK: m5={m5_pct:+.1f}%"
                                 )
                         else:
-                            log.warning(f"  [PREBUY_FILTER] {symbol} no price data available, allowing entry (fail-open)")
+                            log.warning(f"  [PREBUY_FILTER] {symbol} no trend data, allowing entry (fail-open)")
+                            trend_ok = False
+
+                    # Layer 2: Entry timing — find a good moment to enter
+                    if trend_ok:
+                        should_enter, timing_reason, timing_detail = evaluate_entry_timing(token_ca, symbol=symbol)
+                        if not should_enter:
+                            log.info(
+                                f"  [PREBUY_FILTER] {symbol} BLOCKED by timing: {timing_reason} — {timing_detail}"
+                            )
+                            continue
+                        log.info(f"  [PREBUY_FILTER] {symbol} PASS: trend+timing OK ({timing_reason})")
 
                     signal_minute_ts = get_signal_minute_ts(signal_ts)
                     pending_entries[lifecycle_id] = {
