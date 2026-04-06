@@ -1310,6 +1310,7 @@ def get_entry_bar_ohlcv(pool_address):
                     (pool_address,)
                 ).fetchone()
                 if row:
+                    log.info(f"  [FBR_SOURCE] kline_db hit for pool={pool_address[:12]}...")
                     return {
                         'ts': int(row['timestamp']),
                         'open': float(row['open']),
@@ -1318,23 +1319,34 @@ def get_entry_bar_ohlcv(pool_address):
                         'close': float(row['close']),
                         'volume': float(row['volume']),
                     }
-            except Exception:
-                pass
+                else:
+                    log.info(f"  [FBR_SOURCE] kline_db miss for pool={pool_address[:12]}...")
+            except Exception as e:
+                log.warning(f"  [FBR_SOURCE] kline_db error for pool={pool_address[:12]}...: {e}")
+        else:
+            log.info(f"  [FBR_SOURCE] kline_db not available")
+    else:
+        log.info(f"  [FBR_SOURCE] shared ohlcv not enabled, using direct fallback")
+
     if not direct_provider_fallback_allowed():
+        log.info(f"  [FBR_SOURCE] direct fallback not allowed, no bar data")
         return None
 
     url = (
         f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
         f"{pool_address}/ohlcv/minute?aggregate=1&limit=2"
     )
-    data = curl_json(url)
+    data = curl_json(url, timeout=5)
     if not data:
+        log.warning(f"  [FBR_SOURCE] GeckoTerminal returned no data for pool={pool_address[:12]}...")
         return None
-    ohlcv_list = data.get('data', {},).get('attributes', {}).get('ohlcv_list', [])
+    ohlcv_list = data.get('data', {}).get('attributes', {}).get('ohlcv_list', [])
     if not ohlcv_list or len(ohlcv_list[0]) < 6:
+        log.warning(f"  [FBR_SOURCE] GeckoTerminal empty ohlcv_list for pool={pool_address[:12]}...")
         return None
     # Return the most recent completed bar
     row = ohlcv_list[0]
+    log.info(f"  [FBR_SOURCE] GeckoTerminal hit for pool={pool_address[:12]}... o={row[1]} c={row[4]}")
     return {
         'ts': int(row[0]),
         'open': float(row[1]),
