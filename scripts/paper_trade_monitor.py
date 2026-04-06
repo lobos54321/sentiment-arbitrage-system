@@ -797,8 +797,10 @@ def evaluate_entry_timing(token_ca, symbol='?'):
 
     Entry conditions (both must be met):
       1. Total price change from first snapshot >= +3%
-      2. Latest snapshot is rising vs its previous (bouncing, not fading)
-         OR latest snapshot is within 1% of the highest seen (still near top)
+      2. Latest snapshot is rising vs its previous (bouncing from a dip)
+
+    Only enters on a bounce — never at or near the high. This way we
+    buy into a pullback recovery, not chase the top.
 
     Takes up to 6 snapshots at 5-second intervals (max 30 seconds).
 
@@ -817,22 +819,22 @@ def evaluate_entry_timing(token_ca, symbol='?'):
             break
         snapshots.append(price)
 
-        # Need at least 3 snapshots to judge
+        # Need at least 3 snapshots: first establishes baseline,
+        # second shows a dip, third shows bounce from dip
         if len(snapshots) >= 3:
             total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-            high = max(snapshots)
             latest_rising = snapshots[-1] > snapshots[-2]
-            near_high = high > 0 and ((high - snapshots[-1]) / high) * 100 < 1.0
+            high = max(snapshots)
+            from_high_pct = ((snapshots[-1] - high) / high) * 100 if high > 0 else 0
 
-            if total_pct >= min_rise_pct and (latest_rising or near_high):
+            if total_pct >= min_rise_pct and latest_rising:
                 snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-                reason_tag = 'bouncing' if latest_rising else 'near_high'
-                detail = (f'{reason_tag}: total={total_pct:+.2f}% '
+                detail = (f'bounce: total={total_pct:+.2f}% '
                           f'latest_vs_prev={((snapshots[-1]-snapshots[-2])/snapshots[-2])*100:+.2f}% '
-                          f'from_high={((snapshots[-1]-high)/high)*100:+.2f}% '
+                          f'from_high={from_high_pct:+.2f}% '
                           f'[{snap_str}]')
                 log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-                return True, reason_tag, detail
+                return True, 'bounce', detail
 
         if i < max_snaps - 1:
             time.sleep(interval)
