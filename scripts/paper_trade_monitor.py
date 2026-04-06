@@ -3050,6 +3050,7 @@ def run_monitor(db):
     last_progress = time.time()
 
     while True:
+      try:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
 
@@ -3365,6 +3366,7 @@ def run_monitor(db):
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
             for close_event in to_close:
+              try:
                 trade_id = close_event['trade_id']
                 reason = close_event['reason']
                 pnl = close_event['pnl']
@@ -3585,8 +3587,11 @@ def run_monitor(db):
                     f"trigger_price=${trigger_price_text} quoted_price=${quoted_price_text} "
                     f"quote_out={quote_out_text} total_realized_sol={total_realized_text} source={mark_source} lifecycle={pos.lifecycle_id}"
                 )
+              except Exception as e:
+                log.error(f"  Close event error for trade_id={close_event.get('trade_id')}: {e}", exc_info=True)
 
             for lifecycle_id, lifecycle in list(lifecycles.items()):
+              try:
                 if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
                     continue
                 pool = get_pool_address(lifecycle['token_ca'])
@@ -3715,7 +3720,8 @@ def run_monitor(db):
                             )
                             last_progress = time.time()
                             continue
-
+              except Exception as e:
+                log.error(f"  Lifecycle check error for {lifecycle_id}: {e}", exc_info=True)
 
             if positions:
                 log.info(f"  Open positions: {len(positions)}  [{', '.join(f'{p.symbol}/{p.strategy_stage}' for p in positions.values())}]")
@@ -3727,6 +3733,11 @@ def run_monitor(db):
             last_daily_report = today_str
 
         time.sleep(MAIN_LOOP_TICK_SEC)
+      except KeyboardInterrupt:
+        raise
+      except Exception as loop_err:
+        log.error(f"[MAIN_LOOP] Unhandled error in main loop iteration (recovering): {loop_err}", exc_info=True)
+        time.sleep(5)
 
 
 # === Main ===
