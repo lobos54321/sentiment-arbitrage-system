@@ -180,7 +180,7 @@
             "timeoutMinutes": 120
           }
         },
-        "paperRiskCaps": { "maxPositions": 8, "positionSizeSol": 0.06 },
+        "paperRiskCaps": { "maxPositions": 50, "positionSizeSol": 0.06 },
         "paperExecution": {
           "executionMode": "parity",
           "entryPriceSource": "quote",
