@@ -785,6 +785,11 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '5'))
 ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '6'))
 ENTRY_TIMING_MIN_RISE_PCT = float(os.environ.get('ENTRY_TIMING_MIN_RISE_PCT', '3.0'))
+# Short-circuit cap: m5 above this is almost certainly a blown-out top.
+# Empirically, every observed case of m5 > 300% fully faded in the 30s
+# timing window anyway, so we skip straight to BLOCKED and save API calls.
+# This is NOT a quality filter — the timing engine is still the source of truth.
+M5_EXTREME_PCT = float(os.environ.get('M5_EXTREME_PCT', '300'))
 
 
 def evaluate_entry_timing(token_ca, symbol='?'):
@@ -849,7 +854,9 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         high = max(snapshots)
         from_high_pct = ((snapshots[-1] - high) / high) * 100 if high > 0 else 0
         detail = (f'total={total_pct:+.2f}% from_high={from_high_pct:+.2f}% '
-                  f'need {min_rise_pct:+.1f}% and rising/near_high [{snap_str}]')
+                  f'saw_dip={saw_dip} snaps={len(snapshots)} '
+                  f'need dip+bounce with total>={min_rise_pct:+.1f}% '
+                  f'rising & from_high<-1% [{snap_str}]')
     else:
         detail = f'insufficient data: {len(snapshots)} snap(s) [{snap_str}]'
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
@@ -3286,6 +3293,12 @@ def run_monitor(db):
                                 log.info(
                                     f"  [PREBUY_FILTER] {symbol} BLOCKED: m5={m5_pct:+.1f}% "
                                     f"— 5min trend negative, skipping"
+                                )
+                                continue
+                            elif m5_pct > M5_EXTREME_PCT:
+                                log.info(
+                                    f"  [PREBUY_FILTER] {symbol} BLOCKED: m5={m5_pct:+.1f}% "
+                                    f"— extreme pump (>{M5_EXTREME_PCT:.0f}%), likely blown top, skipping"
                                 )
                                 continue
                             else:
