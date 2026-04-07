@@ -3520,10 +3520,23 @@ def run_monitor(db):
 
             for trade_id, pos in eval_batch:
                 try:
-                    # Pre-fetch price from DexScreener to avoid bridge timeout
-                    pre_price, pre_ts = fetch_dexscreener_price_usd(pos.token_ca, timeout=5)
+                    # Pre-fetch real-time price (Redis live / Jupiter quote /
+                    # DexScreener fallback) with relaxed 15s freshness. Using
+                    # DexScreener directly here caused ~30% divergence from
+                    # real market state (see LEELOO trigger_pnl=-2.9% vs
+                    # quote_pnl=+28.4%), producing false trail/stop triggers.
+                    pos_pool = get_pool_address(pos.token_ca)
+                    pre_price, pre_src, pre_age_ms = fetch_realtime_price(
+                        pos.token_ca, pos_pool, max_age_ms=15000
+                    )
                     if pre_price and pre_price > 0:
-                        log.debug(f"  [PRE_PRICE] {pos.symbol}: ${pre_price:.10f} from DexScreener")
+                        pre_ts = int(time.time() - (pre_age_ms or 0) / 1000)
+                        log.debug(
+                            f"  [PRE_PRICE] {pos.symbol}: ${pre_price:.10f} "
+                            f"src={pre_src} age_ms={pre_age_ms}"
+                        )
+                    else:
+                        pre_ts = None
                     exit_eval = evaluate_paper_exit(
                         {
                             'tokenCA': pos.token_ca,
