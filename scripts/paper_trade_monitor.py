@@ -801,17 +801,22 @@ _timing_executor = ThreadPoolExecutor(
 _timing_inflight = {}
 
 
-def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS):
+def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS, token_decimals=None):
     """
-    Fetch a real-time price for the timing engine.
+    Fetch a real-time USD price for the timing/exit engines.
 
     Uses get_live_price_snapshot (Redis → shared Jupiter quote → DexScreener
     → direct) but enforces a strict freshness check: any snapshot older than
     max_age_ms is rejected. Returns (price, source, age_ms) or (None, None, None).
+
+    Pass `token_decimals` when known (e.g. exit-monitor positions) so the
+    Jupiter shared-quote source can convert SOL lamports → USD per token
+    correctly. When unknown (entry timing on a brand-new signal), the helper
+    falls back to assuming decimals=6 (the pump.fun default).
     """
     now_ms = int(time.time() * 1000)
     min_ts_ms = now_ms - max_age_ms
-    snap = get_live_price_snapshot(token_ca, pool_address, min_timestamp_ms=min_ts_ms)
+    snap = get_live_price_snapshot(token_ca, pool_address, min_timestamp_ms=min_ts_ms, token_decimals=token_decimals)
     if not snap:
         return None, None, None
     price = snap.get('price')
@@ -1351,8 +1356,54 @@ def get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=None):
     }
 
 
-def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
-    """Get Redis/shared-cache first live price snapshot with direct fallback only when needed."""
+def _shared_quote_to_usd_price(out_amount_lamports, token_decimals):
+    """
+    Convert a Jupiter shared-quote outAmount (SOL lamports for an input of
+    1,000,000 raw token units) into USD per token.
+
+    For pump.fun-style tokens (decimals=6), 1,000,000 raw = 1 token, so the
+    conversion is simply (lamports / 1e9) * sol_price_usd. For other decimal
+    counts we adjust by 10^(decimals-6).
+
+    Returns None if sol_price is unavailable or inputs are invalid — the
+    caller should fall through to the next price source rather than emit a
+    SOL-denominated value (the bug behind the trigger_pnl≈-99% phantom SLs
+    on 2026-04-07).
+    """
+    try:
+        lamports = float(out_amount_lamports or 0)
+    except (TypeError, ValueError):
+        return None
+    if lamports <= 0:
+        return None
+    sol_usd = get_sol_price()
+    if not sol_usd or sol_usd <= 0:
+        log.warning(
+            "  [SHARED_QUOTE_USD] sol_price unavailable, dropping shared-quote "
+            "price (lamports=%s decimals=%s) — caller will fall through",
+            out_amount_lamports, token_decimals,
+        )
+        return None
+    decimals = int(token_decimals) if token_decimals is not None else 6
+    # USD per (1,000,000 raw token units) = (lamports / 1e9) * sol_usd
+    # tokens per (1,000,000 raw)            = 1e6 / 10^decimals
+    # USD per token                          = above / tokens_per_million_raw
+    tokens_per_million_raw = (10 ** 6) / (10 ** decimals) if decimals >= 0 else 1.0
+    if tokens_per_million_raw <= 0:
+        return None
+    usd_per_million_raw = (lamports / 1e9) * sol_usd
+    return usd_per_million_raw / tokens_per_million_raw
+
+
+def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, token_decimals=None):
+    """Get Redis/shared-cache first live price snapshot with direct fallback only when needed.
+
+    All returned `price` values are USD per token. The shared-quote sources
+    (Jupiter outAmount in SOL lamports) are converted via
+    `_shared_quote_to_usd_price` using the live SOL/USD price; pass
+    `token_decimals` when known so non-6-decimal tokens convert correctly,
+    otherwise we assume 6 (the pump.fun default).
+    """
     payload = read_redis_payload(token_ca)
     if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
         timestamp_ms = _coerce_timestamp_ms(payload)
@@ -1364,14 +1415,46 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
             'payload': payload,
         }
 
-    # NOTE: the shared swap-quote sources (getCache `quote:...:1000000` and
-    # the runtime getSwapQuote helper) return outAmount in SOL lamports for
-    # an unknown token-decimal input, so they cannot produce a reliable
-    # USD-per-token price. Callers compare this price against entry_price
-    # (USD), so SOL-denominated prices were producing trigger_pnl≈-99% phantom
-    # stop-loss exits (see DOODLE/INU/HOGE 2026-04-07). Skip them and let the
-    # request fall through to the Redis (price_usd) → DexScreener → direct
-    # (USD) sources which all return USD per token.
+    if shared_truth_source_enabled('quotes'):
+        shared_quote = get_shared_quote_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
+        if isinstance(shared_quote, dict):
+            quote = shared_quote.get('quote') or {}
+            usd_price = _shared_quote_to_usd_price(quote.get('outAmount'), token_decimals)
+            if usd_price and usd_price > 0:
+                fetched_at = shared_quote.get('fetchedAt')
+                try:
+                    fetched_at = int(fetched_at)
+                except Exception:
+                    fetched_at = int(time.time() * 1000)
+                timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
+                if min_timestamp_ms is None or timestamp_ms >= min_timestamp_ms:
+                    return {
+                        'price': usd_price,
+                        'ts': int(timestamp_ms // 1000),
+                        'timestamp_ms': timestamp_ms,
+                        'source': 'shared-quote-cache',
+                        'payload': shared_quote,
+                    }
+        shared_quote_result = get_shared_swap_quote(token_ca, 1000000)
+        if isinstance(shared_quote_result, dict):
+            quote = shared_quote_result.get('quote') or {}
+            usd_price = _shared_quote_to_usd_price(quote.get('outAmount'), token_decimals)
+            if usd_price and usd_price > 0:
+                fetched_at = shared_quote_result.get('fetchedAt')
+                try:
+                    fetched_at = int(fetched_at)
+                except Exception:
+                    fetched_at = int(time.time() * 1000)
+                timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
+                return {
+                    'price': usd_price,
+                    'ts': int(timestamp_ms // 1000),
+                    'timestamp_ms': timestamp_ms,
+                    'source': 'shared-quote-runtime',
+                    'payload': shared_quote_result,
+                }
+            if shared_quote_result.get('rateLimited'):
+                return None
 
     dex_snapshot = get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=min_timestamp_ms)
     if dex_snapshot:
@@ -1599,8 +1682,16 @@ def get_sol_price():
     if cached_price and (now - fetched_at) < SOL_PRICE_TTL_SEC:
         return cached_price
 
-    if not direct_provider_fallback_allowed():
-        return cached_price
+    # SOL/USD is infrastructure-level data — every USD-denominated comparison
+    # in the paper trader (entry price, trail/SL evals, and the Jupiter
+    # shared-quote SOL→USD conversion) depends on it. The unified-truth
+    # `direct_provider_fallback_allowed()` flag is meant to gate token-level
+    # direct hits, not this universal anchor. If we honour it here and the
+    # shared SOL cache happens to be empty (e.g. right after a deploy
+    # restart), get_sol_price returns None and every shared-quote price
+    # conversion silently fails — producing the `no_price (age_ms=None)`
+    # entry-timing storm we saw on 2026-04-07 12:xx after fb5e595. Always
+    # allow the direct DexScreener call as a last-resort anchor fetch.
 
     data = curl_json("https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112")
     if not data:
@@ -3586,7 +3677,8 @@ def run_monitor(db):
                     # quote_pnl=+28.4%), producing false trail/stop triggers.
                     pos_pool = get_pool_address(pos.token_ca)
                     pre_price, pre_src, pre_age_ms = fetch_realtime_price(
-                        pos.token_ca, pos_pool, max_age_ms=15000
+                        pos.token_ca, pos_pool, max_age_ms=15000,
+                        token_decimals=getattr(pos, 'token_decimals', None),
                     )
                     if pre_price and pre_price > 0:
                         pre_ts = int(time.time() - (pre_age_ms or 0) / 1000)
