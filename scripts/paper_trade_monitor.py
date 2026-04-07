@@ -785,9 +785,38 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '15'))
 ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '8'))
 ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
+# Max acceptable staleness for timing-engine snapshots in milliseconds.
+# Must be fresh enough that our decisions track real market state, not
+# DexScreener cache artifacts (observed 30%+ divergence between sources).
+ENTRY_TIMING_SNAP_MAX_AGE_MS = int(os.environ.get('ENTRY_TIMING_SNAP_MAX_AGE_MS', '5000'))
 
 
-def evaluate_entry_timing(token_ca, symbol='?'):
+def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS):
+    """
+    Fetch a real-time price for the timing engine.
+
+    Uses get_live_price_snapshot (Redis → shared Jupiter quote → DexScreener
+    → direct) but enforces a strict freshness check: any snapshot older than
+    max_age_ms is rejected. Returns (price, source, age_ms) or (None, None, None).
+    """
+    now_ms = int(time.time() * 1000)
+    min_ts_ms = now_ms - max_age_ms
+    snap = get_live_price_snapshot(token_ca, pool_address, min_timestamp_ms=min_ts_ms)
+    if not snap:
+        return None, None, None
+    price = snap.get('price')
+    ts_ms = snap.get('timestamp_ms') or 0
+    age_ms = now_ms - ts_ms if ts_ms else None
+    if not price or price <= 0:
+        return None, None, None
+    # Belt-and-suspenders: some sources (shared quote cache) don't honour
+    # min_timestamp_ms inside get_live_price_snapshot — re-check here.
+    if age_ms is not None and age_ms > max_age_ms:
+        return None, None, age_ms
+    return float(price), snap.get('source'), age_ms
+
+
+def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
     """
     Entry timing engine v4 (sliding 3-snapshot window).
 
@@ -795,6 +824,9 @@ def evaluate_entry_timing(token_ca, symbol='?'):
     Each round takes one snapshot. Once we have >= 3 snapshots, we
     evaluate the last 3 (a 30-second-spanning, 45-second-aged window)
     on every new snapshot. Total max wait = 8 rounds × 15s ≈ 120s.
+
+    Prices come from get_live_price_snapshot with strict freshness
+    (<= 5s) — Redis live price or Jupiter quote, NOT DexScreener cache.
 
     Let s1, s2, s3 = the most recent 3 snapshots (s3 = newest).
 
@@ -819,18 +851,22 @@ def evaluate_entry_timing(token_ca, symbol='?'):
     breakout_pct = ENTRY_TIMING_BREAKOUT_PCT
 
     snapshots = []
+    sources = []
     baseline = None
 
     for round_i in range(max_rounds):
         if round_i > 0:
             time.sleep(interval)
 
-        price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
+        price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
         if not price or price <= 0:
             if not snapshots:
-                return False, 'no_price', 'could not get price'
-            break
+                return False, 'no_price', f'no fresh price (age_ms={age_ms})'
+            # If we already have snapshots but this round failed, continue
+            # waiting — don't burn the run on a single stale read.
+            continue
         snapshots.append(price)
+        sources.append(src or '?')
 
         if baseline is None:
             baseline = snapshots[0]
@@ -842,6 +878,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         s1, s2, s3 = snapshots[-3], snapshots[-2], snapshots[-1]
         from_base_pct = ((s3 - baseline) / baseline) * 100
         snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+        src_str = ','.join(sources[-3:])
 
         # Trend break check
         # Not broken if rising (s3 >= s2) OR dropping but holding above 2-back (s3 >= s1)
@@ -850,7 +887,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
             window_pct = ((s3 - s1) / s1) * 100
             detail = (f'trend_broke: 30s window {window_pct:+.2f}% '
                       f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
-                      f'round={round_i+1} [{snap_str}]')
+                      f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
             return False, 'trend_broke', detail
 
@@ -858,7 +895,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         if s3 > s2 and s3 > s1:
             detail = (f'ascending_3: from_base={from_base_pct:+.2f}% '
                       f'(s1=${s1:.10f}<s2=${s2:.10f}<s3=${s3:.10f}) '
-                      f'round={round_i+1} [{snap_str}]')
+                      f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
             return True, 'ascending_3', detail
 
@@ -866,7 +903,7 @@ def evaluate_entry_timing(token_ca, symbol='?'):
         if s3 >= baseline * (1 + breakout_pct / 100):
             detail = (f'breakout: from_base={from_base_pct:+.2f}% '
                       f'(>=+{breakout_pct:.1f}%) '
-                      f'round={round_i+1} [{snap_str}]')
+                      f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
             return True, 'breakout', detail
 
@@ -3326,7 +3363,7 @@ def run_monitor(db):
 
                     # Layer 2: Entry timing — find a good moment to enter
                     if trend_ok:
-                        should_enter, timing_reason, timing_detail = evaluate_entry_timing(token_ca, symbol=symbol)
+                        should_enter, timing_reason, timing_detail = evaluate_entry_timing(token_ca, symbol=symbol, pool_address=pool)
                         if not should_enter:
                             log.info(
                                 f"  [PREBUY_FILTER] {symbol} BLOCKED by timing: {timing_reason} — {timing_detail}"
