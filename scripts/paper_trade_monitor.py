@@ -783,79 +783,127 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
 
 
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '5'))
-ENTRY_TIMING_MAX_SNAPSHOTS = int(os.environ.get('ENTRY_TIMING_MAX_SNAPSHOTS', '6'))
-ENTRY_TIMING_MIN_RISE_PCT = float(os.environ.get('ENTRY_TIMING_MIN_RISE_PCT', '3.0'))
+ENTRY_TIMING_M1_PRECHECK_SNAPS = int(os.environ.get('ENTRY_TIMING_M1_PRECHECK_SNAPS', '3'))
+ENTRY_TIMING_BUY_LOOP_ROUNDS = int(os.environ.get('ENTRY_TIMING_BUY_LOOP_ROUNDS', '12'))
+ENTRY_TIMING_TREND_BREAK_PCT = float(os.environ.get('ENTRY_TIMING_TREND_BREAK_PCT', '3.0'))
+ENTRY_TIMING_V_RECOVERY_PCT = float(os.environ.get('ENTRY_TIMING_V_RECOVERY_PCT', '3.0'))
 
 
 def evaluate_entry_timing(token_ca, symbol='?'):
     """
-    Micro-timing engine: takes price snapshots every 5 seconds.
+    Entry timing engine v3:
 
-    Requires a GENUINE dip-and-bounce pattern before entering:
-      1. Total price change from first snapshot >= +3%
-      2. A real dip occurred (at least one snapshot dropped vs its previous)
-      3. Latest snapshot is rising from that dip (recovering)
-      4. NOT entering at the observed high (must be below peak by >= 1%)
+    Step 1 — m1 trend pre-check (3 snapshots, 15 seconds):
+        Take 3 snapshots at 5s intervals. We treat this 15s window as the
+        equivalent of comparing two consecutive 1-min candles:
+          OK if snap[2] >= snap[0]                       (current "close" >= prev "close")
+          OK if snap[2] < snap[0] but snap[2]/snap[0] >= 0.97
+              (both bars dropping but current hasn't broken below prior up bar)
+          BROKEN otherwise → SKIP
 
-    This prevents buying at spike tops when DexScreener returns delayed
-    prices (flat → flat → sudden jump = false "bounce" signal).
+    Step 2 — Buy loop (up to 12 rounds × 5s = 60 seconds):
+        Each round take a new snapshot, then check (in order):
+          a) Trend-break (15s window): if snap[-1] < snap[-3] AND drop >= 3%
+             → SKIP, trend dead
+          b) Path A (any local uptick): snap[-1] > snap[-2] → BUY
+          c) Path B (V-recovery): if previously dropped below baseline AND
+             snap[-1] >= baseline * 1.03 → BUY
+        If neither buy path triggers and trend not broken, wait 5s.
 
-    Takes up to 6 snapshots at 5-second intervals (max 30 seconds).
+    After 12 rounds without a buy → SKIP (timeout).
 
     Returns: (should_enter: bool, reason: str, detail: str)
     """
     interval = ENTRY_TIMING_INTERVAL_SEC
-    max_snaps = ENTRY_TIMING_MAX_SNAPSHOTS
-    min_rise_pct = ENTRY_TIMING_MIN_RISE_PCT
-    snapshots = []
-    saw_dip = False  # Did we see at least one down-move?
+    precheck_n = ENTRY_TIMING_M1_PRECHECK_SNAPS
+    buy_rounds = ENTRY_TIMING_BUY_LOOP_ROUNDS
+    trend_break_pct = ENTRY_TIMING_TREND_BREAK_PCT
+    v_recovery_pct = ENTRY_TIMING_V_RECOVERY_PCT
 
-    for i in range(max_snaps):
+    snapshots = []
+
+    def snap():
         price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
-        if not price or price <= 0:
+        if price and price > 0:
+            snapshots.append(price)
+            return True
+        return False
+
+    # --- Step 1: m1 pre-check (3 snapshots, 15 seconds) ---
+    for i in range(precheck_n):
+        if not snap():
             if not snapshots:
                 return False, 'no_price', 'could not get price'
             break
-        snapshots.append(price)
-
-        if len(snapshots) >= 2:
-            if snapshots[-1] < snapshots[-2]:
-                saw_dip = True
-
-        # Need at least 4 snapshots for a genuine dip-and-bounce:
-        # snap1(baseline) → snap2(rise) → snap3(dip) → snap4(bounce)
-        if len(snapshots) >= 4 and saw_dip:
-            total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-            latest_rising = snapshots[-1] > snapshots[-2]
-            high = max(snapshots)
-            from_high_pct = ((snapshots[-1] - high) / high) * 100 if high > 0 else 0
-
-            if total_pct >= min_rise_pct and latest_rising and from_high_pct < -1.0:
-                snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-                detail = (f'dip_bounce: total={total_pct:+.2f}% '
-                          f'latest_vs_prev={((snapshots[-1]-snapshots[-2])/snapshots[-2])*100:+.2f}% '
-                          f'from_high={from_high_pct:+.2f}% '
-                          f'dip_seen=true [{snap_str}]')
-                log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-                return True, 'dip_bounce', detail
-
-        if i < max_snaps - 1:
+        if i < precheck_n - 1:
             time.sleep(interval)
 
-    # Did not meet entry conditions
+    if len(snapshots) < precheck_n:
+        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
+        detail = f'm1_precheck insufficient snaps={len(snapshots)} [{snap_str}]'
+        log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+        return False, 'no_price', detail
+
+    baseline = snapshots[0]
+    pre_first, pre_last = snapshots[0], snapshots[precheck_n - 1]
+    pre_pct = ((pre_last - pre_first) / pre_first) * 100
+    # m1 OK: current close >= prev close, OR within -3% (still in body of prior up bar)
+    m1_ok = pre_last >= pre_first or (pre_last / pre_first) >= 0.97
+    if not m1_ok:
+        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+        detail = f'm1_broken: 15s={pre_pct:+.2f}% [{snap_str}]'
+        log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+        return False, 'm1_broken', detail
+
+    # --- Step 2: Buy loop (12 rounds × 5s) ---
+    saw_below_baseline = any(p < baseline for p in snapshots)
+
+    for round_i in range(buy_rounds):
+        time.sleep(interval)
+        if not snap():
+            break
+
+        # (a) Trend-break check on last 3 snapshots (15s window)
+        if len(snapshots) >= 3:
+            window_first = snapshots[-3]
+            window_last = snapshots[-1]
+            window_pct = ((window_last - window_first) / window_first) * 100
+            if window_last < window_first and window_pct <= -trend_break_pct:
+                snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+                detail = (f'trend_broke 15s={window_pct:+.2f}% '
+                          f'(<= -{trend_break_pct:.1f}%) [{snap_str}]')
+                log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+                return False, 'trend_broke', detail
+
+        if snapshots[-1] < baseline:
+            saw_below_baseline = True
+
+        # (b) Path A: any local uptick
+        if len(snapshots) >= 2 and snapshots[-1] > snapshots[-2]:
+            tick_pct = ((snapshots[-1] - snapshots[-2]) / snapshots[-2]) * 100
+            from_base_pct = ((snapshots[-1] - baseline) / baseline) * 100
+            snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+            detail = (f'uptick: tick={tick_pct:+.2f}% from_base={from_base_pct:+.2f}% '
+                      f'round={round_i+1} [{snap_str}]')
+            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
+            return True, 'uptick', detail
+
+        # (c) Path B: V-recovery
+        if saw_below_baseline and snapshots[-1] >= baseline * (1 + v_recovery_pct / 100):
+            from_base_pct = ((snapshots[-1] - baseline) / baseline) * 100
+            snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+            detail = (f'v_recovery: from_base={from_base_pct:+.2f}% '
+                      f'round={round_i+1} [{snap_str}]')
+            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
+            return True, 'v_recovery', detail
+
+    # Timeout
     snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
-    if len(snapshots) >= 2:
-        total_pct = ((snapshots[-1] - snapshots[0]) / snapshots[0]) * 100
-        high = max(snapshots)
-        from_high_pct = ((snapshots[-1] - high) / high) * 100 if high > 0 else 0
-        detail = (f'total={total_pct:+.2f}% from_high={from_high_pct:+.2f}% '
-                  f'saw_dip={saw_dip} snaps={len(snapshots)} '
-                  f'need dip+bounce with total>={min_rise_pct:+.1f}% '
-                  f'rising & from_high<-1% [{snap_str}]')
-    else:
-        detail = f'insufficient data: {len(snapshots)} snap(s) [{snap_str}]'
+    total_pct = ((snapshots[-1] - baseline) / baseline) * 100 if snapshots else 0
+    detail = (f'timeout: rounds={buy_rounds} snaps={len(snapshots)} '
+              f'total={total_pct:+.2f}% [{snap_str}]')
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-    return False, 'conditions_not_met', detail
+    return False, 'timeout', detail
 
 
 def get_pool_address(token_ca, cache={}):
