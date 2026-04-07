@@ -1378,6 +1378,11 @@ def _shared_quote_to_usd_price(out_amount_lamports, token_decimals):
         return None
     sol_usd = get_sol_price()
     if not sol_usd or sol_usd <= 0:
+        log.warning(
+            "  [SHARED_QUOTE_USD] sol_price unavailable, dropping shared-quote "
+            "price (lamports=%s decimals=%s) — caller will fall through",
+            out_amount_lamports, token_decimals,
+        )
         return None
     decimals = int(token_decimals) if token_decimals is not None else 6
     # USD per (1,000,000 raw token units) = (lamports / 1e9) * sol_usd
@@ -1677,8 +1682,16 @@ def get_sol_price():
     if cached_price and (now - fetched_at) < SOL_PRICE_TTL_SEC:
         return cached_price
 
-    if not direct_provider_fallback_allowed():
-        return cached_price
+    # SOL/USD is infrastructure-level data — every USD-denominated comparison
+    # in the paper trader (entry price, trail/SL evals, and the Jupiter
+    # shared-quote SOL→USD conversion) depends on it. The unified-truth
+    # `direct_provider_fallback_allowed()` flag is meant to gate token-level
+    # direct hits, not this universal anchor. If we honour it here and the
+    # shared SOL cache happens to be empty (e.g. right after a deploy
+    # restart), get_sol_price returns None and every shared-quote price
+    # conversion silently fails — producing the `no_price (age_ms=None)`
+    # entry-timing storm we saw on 2026-04-07 12:xx after fb5e595. Always
+    # allow the direct DexScreener call as a last-resort anchor fetch.
 
     data = curl_json("https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112")
     if not data:
