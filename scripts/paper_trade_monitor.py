@@ -1364,53 +1364,14 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None):
             'payload': payload,
         }
 
-    if shared_truth_source_enabled('quotes'):
-        shared_quote = get_shared_quote_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
-        if isinstance(shared_quote, dict):
-            quote = shared_quote.get('quote') or {}
-            out_amount = quote.get('outAmount')
-            try:
-                out_amount = float(out_amount)
-            except Exception:
-                out_amount = 0
-            if out_amount > 0:
-                fetched_at = shared_quote.get('fetchedAt')
-                try:
-                    fetched_at = int(fetched_at)
-                except Exception:
-                    fetched_at = int(time.time() * 1000)
-                timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
-                return {
-                    'price': out_amount / 1e9,
-                    'ts': int(timestamp_ms // 1000),
-                    'timestamp_ms': timestamp_ms,
-                    'source': 'shared-quote-cache',
-                    'payload': shared_quote,
-                }
-        shared_quote_result = get_shared_swap_quote(token_ca, 1000000)
-        if isinstance(shared_quote_result, dict):
-            quote = shared_quote_result.get('quote') or {}
-            out_amount = quote.get('outAmount')
-            try:
-                out_amount = float(out_amount)
-            except Exception:
-                out_amount = 0
-            if out_amount > 0:
-                fetched_at = shared_quote_result.get('fetchedAt')
-                try:
-                    fetched_at = int(fetched_at)
-                except Exception:
-                    fetched_at = int(time.time() * 1000)
-                timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
-                return {
-                    'price': out_amount / 1e9,
-                    'ts': int(timestamp_ms // 1000),
-                    'timestamp_ms': timestamp_ms,
-                    'source': 'shared-quote-runtime',
-                    'payload': shared_quote_result,
-                }
-            if shared_quote_result.get('rateLimited'):
-                return None
+    # NOTE: the shared swap-quote sources (getCache `quote:...:1000000` and
+    # the runtime getSwapQuote helper) return outAmount in SOL lamports for
+    # an unknown token-decimal input, so they cannot produce a reliable
+    # USD-per-token price. Callers compare this price against entry_price
+    # (USD), so SOL-denominated prices were producing trigger_pnl≈-99% phantom
+    # stop-loss exits (see DOODLE/INU/HOGE 2026-04-07). Skip them and let the
+    # request fall through to the Redis (price_usd) → DexScreener → direct
+    # (USD) sources which all return USD per token.
 
     dex_snapshot = get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=min_timestamp_ms)
     if dex_snapshot:
