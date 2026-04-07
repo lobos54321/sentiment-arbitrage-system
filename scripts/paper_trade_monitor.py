@@ -33,6 +33,7 @@ import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import redis
@@ -789,6 +790,15 @@ ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3
 # Must be fresh enough that our decisions track real market state, not
 # DexScreener cache artifacts (observed 30%+ divergence between sources).
 ENTRY_TIMING_SNAP_MAX_AGE_MS = int(os.environ.get('ENTRY_TIMING_SNAP_MAX_AGE_MS', '5000'))
+# Concurrent timing evaluations: up to this many signals can be in the
+# timing engine at once, so a slow 120s evaluation on one signal doesn't
+# block the main loop from processing new signals.
+TIMING_MAX_CONCURRENT = int(os.environ.get('TIMING_MAX_CONCURRENT', '4'))
+_timing_executor = ThreadPoolExecutor(
+    max_workers=TIMING_MAX_CONCURRENT, thread_name_prefix='timing'
+)
+# lifecycle_id -> {'future', 'ctx', 'submitted_at'}
+_timing_inflight = {}
 
 
 def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS):
@@ -919,6 +929,92 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
               f'total={total_pct:+.2f}% [{snap_str}]')
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
     return False, 'timeout', detail
+
+
+def submit_timing_eval(lifecycle_id, ctx):
+    """Submit a timing evaluation to the thread pool. Non-blocking."""
+    if lifecycle_id in _timing_inflight:
+        return False
+    future = _timing_executor.submit(
+        evaluate_entry_timing,
+        ctx['token_ca'],
+        ctx['symbol'],
+        ctx['pool'],
+    )
+    _timing_inflight[lifecycle_id] = {
+        'future': future,
+        'ctx': ctx,
+        'submitted_at': time.time(),
+    }
+    return True
+
+
+def drain_timing_results(pending_entries, lifecycles, positions):
+    """
+    Poll completed timing evaluations and promote passing ones to
+    pending_entries. Called from the main loop each iteration.
+    """
+    if not _timing_inflight:
+        return
+    for lifecycle_id in list(_timing_inflight.keys()):
+        entry = _timing_inflight[lifecycle_id]
+        future = entry['future']
+        if not future.done():
+            continue
+        ctx = entry['ctx']
+        symbol = ctx['symbol']
+        del _timing_inflight[lifecycle_id]
+
+        # Skip if this lifecycle already has a position or is already staged
+        if lifecycle_id in pending_entries:
+            log.debug(f"  [TIMING_DRAIN] {symbol} already staged, dropping result")
+            continue
+        if any(getattr(p, 'lifecycle_id', None) == lifecycle_id for p in positions.values()):
+            log.debug(f"  [TIMING_DRAIN] {symbol} already in positions, dropping result")
+            continue
+
+        try:
+            should_enter, reason, detail = future.result()
+        except Exception as e:
+            log.exception(f"  [TIMING_DRAIN] {symbol} eval raised: {e}")
+            continue
+
+        waited = int(time.time() - entry['submitted_at'])
+        if should_enter:
+            log.info(
+                f"  [PREBUY_FILTER] {symbol} PASS: trend+timing OK ({reason}) "
+                f"waited={waited}s inflight={len(_timing_inflight)}"
+            )
+            pending_entries[lifecycle_id] = {
+                'token_ca': ctx['token_ca'],
+                'symbol': symbol,
+                'signal_ts': ctx['signal_ts'],
+                'premium_signal_id': ctx['premium_signal_id'],
+                'signal_type': ctx['signal_type'],
+                'signal_minute_ts': ctx['signal_minute_ts'],
+                'pool': ctx['pool'],
+                'lifecycle_id': lifecycle_id,
+                'super_idx': ctx['super_idx'],
+                'staged_at': time.time(),
+                'attempts': 0,
+                'last_debug_at': 0,
+            }
+            lifecycles.setdefault(
+                lifecycle_id,
+                build_lifecycle_state(
+                    lifecycle_id, ctx['token_ca'], symbol, ctx['signal_ts'],
+                    ctx['premium_signal_id'], ctx['signal_type']
+                )
+            )
+            log.info(
+                f"New signal: {symbol} lifecycle={lifecycle_id} "
+                f"super={ctx['super_idx']} staged for stage1 execution"
+            )
+        else:
+            log.info(
+                f"  [PREBUY_FILTER] {symbol} BLOCKED by timing: {reason} — {detail} "
+                f"waited={waited}s"
+            )
 
 
 def get_pool_address(token_ca, cache={}):
@@ -3249,11 +3345,15 @@ def run_monitor(db):
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
 
+        # Drain any completed concurrent timing evaluations; passing ones
+        # are promoted into pending_entries for execution.
+        drain_timing_results(pending_entries, lifecycles, positions)
+
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
             log.info(
                 f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
-                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)} pending={len(pending_entries)}"
+                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)} pending={len(pending_entries)} timing_inflight={len(_timing_inflight)}"
             )
             last_heartbeat = now
 
@@ -3361,34 +3461,32 @@ def run_monitor(db):
                             log.warning(f"  [PREBUY_FILTER] {symbol} no trend data, allowing entry (fail-open)")
                             trend_ok = False
 
-                    # Layer 2: Entry timing — find a good moment to enter
+                    # Layer 2: Entry timing — submit to thread pool (non-blocking).
+                    # The result is picked up by drain_timing_results() at the
+                    # top of each main loop iteration and promoted to
+                    # pending_entries if it passes.
                     if trend_ok:
-                        should_enter, timing_reason, timing_detail = evaluate_entry_timing(token_ca, symbol=symbol, pool_address=pool)
-                        if not should_enter:
-                            log.info(
-                                f"  [PREBUY_FILTER] {symbol} BLOCKED by timing: {timing_reason} — {timing_detail}"
-                            )
+                        if lifecycle_id in _timing_inflight:
+                            log.debug(f"  [PREBUY_FILTER] {symbol} timing already in-flight, skipping re-submit")
                             continue
-                        log.info(f"  [PREBUY_FILTER] {symbol} PASS: trend+timing OK ({timing_reason})")
-
-                    signal_minute_ts = get_signal_minute_ts(signal_ts)
-                    pending_entries[lifecycle_id] = {
-                        'token_ca': token_ca,
-                        'symbol': symbol,
-                        'signal_ts': signal_ts,
-                        'premium_signal_id': premium_signal_id,
-                        'signal_type': signal_type,
-                        'signal_minute_ts': signal_minute_ts,
-                        'pool': pool,
-                        'lifecycle_id': lifecycle_id,
-                        'super_idx': super_idx,
-                        'staged_at': time.time(),
-                        'attempts': 0,
-                        'last_debug_at': 0,
-                    }
-                    lifecycles.setdefault(lifecycle_id, build_lifecycle_state(lifecycle_id, token_ca, symbol, signal_ts, premium_signal_id, signal_type))
-                    log.info(f"New signal: {symbol} lifecycle={lifecycle_id} super={super_idx} staged for stage1 execution")
-                    last_progress = time.time()
+                        signal_minute_ts = get_signal_minute_ts(signal_ts)
+                        timing_ctx = {
+                            'token_ca': token_ca,
+                            'symbol': symbol,
+                            'signal_ts': signal_ts,
+                            'premium_signal_id': premium_signal_id,
+                            'signal_type': signal_type,
+                            'signal_minute_ts': signal_minute_ts,
+                            'pool': pool,
+                            'super_idx': super_idx,
+                        }
+                        submit_timing_eval(lifecycle_id, timing_ctx)
+                        log.info(
+                            f"  [PREBUY_FILTER] {symbol} timing submitted "
+                            f"(inflight={len(_timing_inflight)}/{TIMING_MAX_CONCURRENT})"
+                        )
+                        last_progress = time.time()
+                        continue
                     time.sleep(0.05)
             except Exception as e:
                 log.error(f"Signal check error: {e}")
