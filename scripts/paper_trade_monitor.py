@@ -782,125 +782,103 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
     return None
 
 
-ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '5'))
-ENTRY_TIMING_M1_PRECHECK_SNAPS = int(os.environ.get('ENTRY_TIMING_M1_PRECHECK_SNAPS', '3'))
-ENTRY_TIMING_BUY_LOOP_ROUNDS = int(os.environ.get('ENTRY_TIMING_BUY_LOOP_ROUNDS', '12'))
-ENTRY_TIMING_TREND_BREAK_PCT = float(os.environ.get('ENTRY_TIMING_TREND_BREAK_PCT', '3.0'))
-ENTRY_TIMING_V_RECOVERY_PCT = float(os.environ.get('ENTRY_TIMING_V_RECOVERY_PCT', '3.0'))
+ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '15'))
+ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '8'))
+ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
 
 
 def evaluate_entry_timing(token_ca, symbol='?'):
     """
-    Entry timing engine v3:
+    Entry timing engine v4 (sliding 3-snapshot window).
 
-    Step 1 — m1 trend pre-check (3 snapshots, 15 seconds):
-        Take 3 snapshots at 5s intervals. We treat this 15s window as the
-        equivalent of comparing two consecutive 1-min candles:
-          OK if snap[2] >= snap[0]                       (current "close" >= prev "close")
-          OK if snap[2] < snap[0] but snap[2]/snap[0] >= 0.97
-              (both bars dropping but current hasn't broken below prior up bar)
-          BROKEN otherwise → SKIP
+    Snapshot interval: 15 seconds.
+    Each round takes one snapshot. Once we have >= 3 snapshots, we
+    evaluate the last 3 (a 30-second-spanning, 45-second-aged window)
+    on every new snapshot. Total max wait = 8 rounds × 15s ≈ 120s.
 
-    Step 2 — Buy loop (up to 12 rounds × 5s = 60 seconds):
-        Each round take a new snapshot, then check (in order):
-          a) Trend-break (15s window): if snap[-1] < snap[-3] AND drop >= 3%
-             → SKIP, trend dead
-          b) Path A (any local uptick): snap[-1] > snap[-2] → BUY
-          c) Path B (V-recovery): if previously dropped below baseline AND
-             snap[-1] >= baseline * 1.03 → BUY
-        If neither buy path triggers and trend not broken, wait 5s.
+    Let s1, s2, s3 = the most recent 3 snapshots (s3 = newest).
 
-    After 12 rounds without a buy → SKIP (timeout).
+    Trend-not-broken (continue waiting allowed):
+      - s3 >= s2                      → still rising
+      - s3 < s2 BUT s3 >= s1          → dropping but the two drops
+                                          haven't broken the prior up bar
+      - else                          → BROKEN → SKIP
+
+    Buy triggers:
+      (A) s3 > s2 AND s3 > s1         → 3 ascending highs, momentum
+      (B) s3 >= baseline * 1.03       → 3% breakout above baseline
+
+    Otherwise: not broken, no buy → wait next round.
+
+    After max rounds without buy → SKIP timeout.
 
     Returns: (should_enter: bool, reason: str, detail: str)
     """
     interval = ENTRY_TIMING_INTERVAL_SEC
-    precheck_n = ENTRY_TIMING_M1_PRECHECK_SNAPS
-    buy_rounds = ENTRY_TIMING_BUY_LOOP_ROUNDS
-    trend_break_pct = ENTRY_TIMING_TREND_BREAK_PCT
-    v_recovery_pct = ENTRY_TIMING_V_RECOVERY_PCT
+    max_rounds = ENTRY_TIMING_MAX_ROUNDS
+    breakout_pct = ENTRY_TIMING_BREAKOUT_PCT
 
     snapshots = []
+    baseline = None
 
-    def snap():
+    for round_i in range(max_rounds):
+        if round_i > 0:
+            time.sleep(interval)
+
         price, _ = fetch_dexscreener_price_usd(token_ca, timeout=5)
-        if price and price > 0:
-            snapshots.append(price)
-            return True
-        return False
-
-    # --- Step 1: m1 pre-check (3 snapshots, 15 seconds) ---
-    for i in range(precheck_n):
-        if not snap():
+        if not price or price <= 0:
             if not snapshots:
                 return False, 'no_price', 'could not get price'
             break
-        if i < precheck_n - 1:
-            time.sleep(interval)
+        snapshots.append(price)
 
-    if len(snapshots) < precheck_n:
-        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
-        detail = f'm1_precheck insufficient snaps={len(snapshots)} [{snap_str}]'
-        log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-        return False, 'no_price', detail
+        if baseline is None:
+            baseline = snapshots[0]
 
-    baseline = snapshots[0]
-    pre_first, pre_last = snapshots[0], snapshots[precheck_n - 1]
-    pre_pct = ((pre_last - pre_first) / pre_first) * 100
-    # m1 OK: current close >= prev close, OR within -3% (still in body of prior up bar)
-    m1_ok = pre_last >= pre_first or (pre_last / pre_first) >= 0.97
-    if not m1_ok:
+        # Need at least 3 snapshots before we can evaluate
+        if len(snapshots) < 3:
+            continue
+
+        s1, s2, s3 = snapshots[-3], snapshots[-2], snapshots[-1]
+        from_base_pct = ((s3 - baseline) / baseline) * 100
         snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-        detail = f'm1_broken: 15s={pre_pct:+.2f}% [{snap_str}]'
-        log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-        return False, 'm1_broken', detail
 
-    # --- Step 2: Buy loop (12 rounds × 5s) ---
-    saw_below_baseline = any(p < baseline for p in snapshots)
+        # Trend break check
+        # Not broken if rising (s3 >= s2) OR dropping but holding above 2-back (s3 >= s1)
+        not_broken = (s3 >= s2) or (s3 >= s1)
+        if not not_broken:
+            window_pct = ((s3 - s1) / s1) * 100
+            detail = (f'trend_broke: 30s window {window_pct:+.2f}% '
+                      f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
+                      f'round={round_i+1} [{snap_str}]')
+            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+            return False, 'trend_broke', detail
 
-    for round_i in range(buy_rounds):
-        time.sleep(interval)
-        if not snap():
-            break
-
-        # (a) Trend-break check on last 3 snapshots (15s window)
-        if len(snapshots) >= 3:
-            window_first = snapshots[-3]
-            window_last = snapshots[-1]
-            window_pct = ((window_last - window_first) / window_first) * 100
-            if window_last < window_first and window_pct <= -trend_break_pct:
-                snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-                detail = (f'trend_broke 15s={window_pct:+.2f}% '
-                          f'(<= -{trend_break_pct:.1f}%) [{snap_str}]')
-                log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-                return False, 'trend_broke', detail
-
-        if snapshots[-1] < baseline:
-            saw_below_baseline = True
-
-        # (b) Path A: any local uptick
-        if len(snapshots) >= 2 and snapshots[-1] > snapshots[-2]:
-            tick_pct = ((snapshots[-1] - snapshots[-2]) / snapshots[-2]) * 100
-            from_base_pct = ((snapshots[-1] - baseline) / baseline) * 100
-            snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-            detail = (f'uptick: tick={tick_pct:+.2f}% from_base={from_base_pct:+.2f}% '
+        # Buy trigger A: 3 ascending highs
+        if s3 > s2 and s3 > s1:
+            detail = (f'ascending_3: from_base={from_base_pct:+.2f}% '
+                      f'(s1=${s1:.10f}<s2=${s2:.10f}<s3=${s3:.10f}) '
                       f'round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'uptick', detail
+            return True, 'ascending_3', detail
 
-        # (c) Path B: V-recovery
-        if saw_below_baseline and snapshots[-1] >= baseline * (1 + v_recovery_pct / 100):
-            from_base_pct = ((snapshots[-1] - baseline) / baseline) * 100
-            snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-            detail = (f'v_recovery: from_base={from_base_pct:+.2f}% '
+        # Buy trigger B: 3% breakout above baseline
+        if s3 >= baseline * (1 + breakout_pct / 100):
+            detail = (f'breakout: from_base={from_base_pct:+.2f}% '
+                      f'(>=+{breakout_pct:.1f}%) '
                       f'round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'v_recovery', detail
+            return True, 'breakout', detail
+
+        # Trend intact, no buy yet → continue waiting
 
     # Timeout
     snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
-    total_pct = ((snapshots[-1] - baseline) / baseline) * 100 if snapshots else 0
-    detail = (f'timeout: rounds={buy_rounds} snaps={len(snapshots)} '
+    if snapshots and baseline:
+        total_pct = ((snapshots[-1] - baseline) / baseline) * 100
+    else:
+        total_pct = 0
+    detail = (f'timeout: rounds={max_rounds} snaps={len(snapshots)} '
               f'total={total_pct:+.2f}% [{snap_str}]')
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
     return False, 'timeout', detail
