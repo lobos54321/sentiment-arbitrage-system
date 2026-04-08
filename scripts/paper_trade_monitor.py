@@ -915,7 +915,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
             return False, 'trend_broke', detail, None
             
-        limit_pct = 8.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
+        limit_pct = 50.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
         if from_base_pct > limit_pct:
             detail = (f'blow_off: from_base={from_base_pct:+.2f}% > max {limit_pct}% '
                       f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
