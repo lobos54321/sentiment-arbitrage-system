@@ -783,13 +783,13 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
     return None
 
 
-ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '5'))
+ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '3'))
 ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '6'))
 ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
 # Reject ascending_3 / breakout signals where the rally is already too far
 # advanced inside the observation window — that's a parabolic blow-off top,
 # not an early-momentum entry.
-ENTRY_TIMING_FROM_BASE_MAX_PCT = float(os.environ.get('ENTRY_TIMING_FROM_BASE_MAX_PCT', '15.0'))
+ENTRY_TIMING_FROM_BASE_MAX_PCT = float(os.environ.get('ENTRY_TIMING_FROM_BASE_MAX_PCT', '100.0'))
 # Last-mile pre-buy recheck: between timing PASS and the buy quote we still
 # pay ~15-30s of execution latency, during which the entry wick often tops.
 # Refetch a real-time price right before submitting the buy and abort if it
@@ -840,11 +840,11 @@ def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MA
     return float(price), snap.get('source'), age_ms
 
 
-def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
+def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_open=False):
     """
-    Entry timing engine v4 (sliding 3-snapshot window).
+    Entry timing engine v4 (sliding 3-snapshot window + s4 confirm).
 
-    Snapshot interval: 15 seconds.
+    Snapshot interval: 3 seconds.
     Each round takes one snapshot. Once we have >= 3 snapshots, we
     evaluate the last 3 (a 30-second-spanning, 45-second-aged window)
     on every new snapshot. Total max wait = 8 rounds × 15s ≈ 120s.
@@ -915,28 +915,54 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
             return False, 'trend_broke', detail, None
             
-        if from_base_pct > ENTRY_TIMING_FROM_BASE_MAX_PCT:
-            detail = (f'blow_off: from_base={from_base_pct:+.2f}% > max {ENTRY_TIMING_FROM_BASE_MAX_PCT}% '
+        limit_pct = 8.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
+        if from_base_pct > limit_pct:
+            detail = (f'blow_off: from_base={from_base_pct:+.2f}% > max {limit_pct}% '
                       f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
                       f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
             return False, 'blow_off', detail, None
 
+        should_buy = False
+        buy_reason = ''
+
         # Buy trigger A: 3 ascending highs
         if s3 > s2 and s3 > s1:
-            detail = (f'ascending_3: from_base={from_base_pct:+.2f}% '
-                      f'(s1=${s1:.10f}<s2=${s2:.10f}<s3=${s3:.10f}) '
-                      f'src={src_str} round={round_i+1} [{snap_str}]')
-            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'ascending_3', detail, s3
-
+            should_buy = True
+            buy_reason = 'ascending_3'
+            
         # Buy trigger B: 3% breakout above baseline
-        if s3 >= baseline * (1 + breakout_pct / 100):
-            detail = (f'breakout: from_base={from_base_pct:+.2f}% '
-                      f'(>=+{breakout_pct:.1f}%) '
-                      f'src={src_str} round={round_i+1} [{snap_str}]')
-            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'breakout', detail, s3
+        elif not strict_fail_open and s3 >= baseline * (1 + breakout_pct / 100):
+            should_buy = True
+            buy_reason = 'breakout'
+            
+        if should_buy:
+            # Need s4 confirmation: wait another interval and fetch
+            time.sleep(interval)
+            s4, s4_src, s4_age = fetch_realtime_price(token_ca, pool_address)
+            
+            if not s4 or s4 <= 0:
+                detail = f'{buy_reason}_s4_fail: could not fetch s4 confirmation price'
+                log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+                return False, 's4_fail', detail, None
+                
+            snapshots.append(s4)
+            sources.append(s4_src or '?')
+            snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
+            src_str = ','.join(sources[-4:])
+            
+            if s4 >= s3 * 0.995:
+                detail = (f'{buy_reason}_confirmed: from_base={from_base_pct:+.2f}% '
+                          f'(s3=${s3:.10f} s4=${s4:.10f}) '
+                          f'src={src_str} rounds={round_i+2} [{snap_str}]')
+                log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
+                return True, buy_reason, detail, s4
+            else:
+                detail = (f'{buy_reason}_rejected: s4 dropped too much '
+                          f'(s3=${s3:.10f} s4=${s4:.10f} < {s3*0.995:.10f}) '
+                          f'src={src_str} rounds={round_i+2} [{snap_str}]')
+                log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+                return False, 'top_rejection', detail, None
 
         # Trend intact, no buy yet → continue waiting
 
@@ -961,6 +987,7 @@ def submit_timing_eval(lifecycle_id, ctx):
         ctx['token_ca'],
         ctx['symbol'],
         ctx['pool'],
+        ctx.get('strict_fail_open', False)
     )
     _timing_inflight[lifecycle_id] = {
         'future': future,
@@ -1570,20 +1597,21 @@ def get_notath_bars(pool_address, limit=5):
 
 def check_multi_bar_trend(bars, symbol):
     """
-    Evaluate trend using the last 5 closed 1m bars.
+    Evaluate trend using the last 3-5 closed 1m bars.
     Returns (trend_ok: bool, reason: str, detail: str)
     """
-    if not bars or len(bars) < 5:
+    if not bars or len(bars) < 3:
         return True, 'insufficient_bars', 'Not enough bars for shape analysis, fail-open'
 
-    b5, b4, b3, b2, b1 = bars[0], bars[1], bars[2], bars[3], bars[4]
+    b5, b4, b3 = bars[0], bars[1], bars[2]
+    b1 = bars[4] if len(bars) > 4 else None
 
     # Check 1: b5 dropping? (last 1 min)
     if b5['close'] < b4['close']:
         return False, 'dropping', f"b5.close={b5['close']:.10f} < b4.close={b4['close']:.10f}"
 
-    # Check 2: M top formed?
-    if b5['close'] < b3['close'] and b3['close'] > b1['close']:
+    # Check 2: M top formed? (Needs 5 bars)
+    if b1 is not None and b5['close'] < b3['close'] and b3['close'] > b1['close']:
         return False, 'm_top', f"M-top: b5={b5['close']:.10f} < b3={b3['close']:.10f} > b1={b1['close']:.10f}"
 
     # Check 3: Wick rejection?
@@ -1591,11 +1619,12 @@ def check_multi_bar_trend(bars, symbol):
     if b5['close'] < mid_b5:
         return False, 'wick_rejection', f"b5.close={b5['close']:.10f} below mid={mid_b5:.10f}"
 
-    # Check 4: exhaustion?
-    range_b5 = b5['close'] - b4['close']
-    range_b3 = b3['close'] - b1['close']
-    if range_b3 > 0 and range_b5 < (range_b3 / 4.0):
-        return False, 'exhaustion', f"rally exhausted: b5_range={range_b5:.10f} < b3_range/4={range_b3/4.0:.10f}"
+    # Check 4: exhaustion? (Needs 5 bars)
+    if b1 is not None:
+        range_b5 = b5['close'] - b4['close']
+        range_b3 = b3['close'] - b1['close']
+        if range_b3 > 0 and range_b5 < (range_b3 / 4.0):
+            return False, 'exhaustion', f"rally exhausted: b5_range={range_b5:.10f} < b3_range/4={range_b3/4.0:.10f}"
 
     # Check passing requirements
     if b5['close'] <= b4['close']:
@@ -3570,6 +3599,7 @@ def run_monitor(db):
                             'signal_minute_ts': signal_minute_ts,
                             'pool': pool,
                             'super_idx': super_idx,
+                            'strict_fail_open': trend_reason == 'insufficient_bars',
                         }
                         submit_timing_eval(lifecycle_id, timing_ctx)
                         log.info(
@@ -3807,6 +3837,15 @@ def run_monitor(db):
                     pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
                     sync_position_from_monitor_state(pos, allow_token_amount_override=(action == 'partial_sell'))
                     reason = exit_eval.get('exitReason') or exit_eval.get('lifecycleReason')
+                    
+                    # Add 10-second protection against any SL drop right after entry
+                    if (should_exit or action in ('partial_sell', 'exit')) and reason in ('sl', 'stop_loss'):
+                        if time.time() - pos.entry_ts <= 10:
+                            log.info(f"  [PROTECTION] {pos.symbol} ignoring SL trigger within first 10s of entry")
+                            should_exit = False
+                            action = 'hold'
+                            reason = 'hold'
+
                     pnl = float(exit_eval.get('realizedPnl') if exit_eval.get('realizedPnl') is not None else (exit_eval.get('triggerPnl') or 0.0))
                     trigger_pnl = float(exit_eval.get('triggerPnl') or 0.0)
                     lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
