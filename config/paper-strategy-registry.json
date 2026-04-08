@@ -154,7 +154,7 @@
             "allowAthOverride": false
           },
           "stage1Exit": {
-            "stopLossPct": 7.5,
+            "stopLossPct": 10,
             "trailStartPct": 15,
             "trailFactor": 0.6,
             "timeoutMinutes": 120
