@@ -125,9 +125,9 @@ export function decideNotAthAction(state, { pnl, holdTimeMin, now = Date.now() }
   if (!state.breakeven && state.highPnl >= 35) {
     state.breakeven = true;
   }
-  const dynamicSL = state.breakeven ? 0 : -20;
+  const dynamicSL = state.breakeven ? 0 : -15;
 
-  if (!state.tp1 && !state.breakeven && (state._updateCount || 0) <= 3 && state.highPnl <= 0 && pnl < -5) {
+  if (!state.tp1 && !state.breakeven && (state._updateCount || 0) <= 5 && state.highPnl <= 0 && pnl < -15) {
     return {
       type: 'exit',
       reason: `NOT_ATH_FAST_STOP(PnL${pnl.toFixed(0)}%)`,
@@ -136,11 +136,11 @@ export function decideNotAthAction(state, { pnl, holdTimeMin, now = Date.now() }
   }
 
   if (!state.tp1 && pnl <= dynamicSL) {
-    const label = state.breakeven ? 'BREAKEVEN_SL' : 'HARD_SL_20';
+    const label = state.breakeven ? 'BREAKEVEN_SL' : 'HARD_SL_15';
     return {
-      type: 'exit',
+      type: 'watch_reentry',
       reason: `NOT_ATH_${label}(PnL${pnl.toFixed(0)}%)`,
-      logLine: `🛑 [NOT_ATH:${label}] $${state.symbol} PnL:${pnl.toFixed(1)}% ≤ ${dynamicSL}% → 全卖`,
+      logLine: `🛑 [NOT_ATH:${label}] $${state.symbol} PnL:${pnl.toFixed(1)}% ≤ ${dynamicSL}% → 切换至观察模式等待反弹`,
     };
   }
 
@@ -199,11 +199,17 @@ export function decideNotAthAction(state, { pnl, holdTimeMin, now = Date.now() }
     }
     const moonPeak = state.moonbagHighPnl || pnl;
     const dropPct = moonPeak > 0 ? ((moonPeak - pnl) / moonPeak) * 100 : 0;
-    if (dropPct >= 35) {
+
+    // 动态回撤逻辑：利润越高，容忍度越低
+    let dynamicDropThreshold = 15;
+    if (moonPeak > 100) dynamicDropThreshold = 10;
+    if (moonPeak > 300) dynamicDropThreshold = 7;
+
+    if (dropPct >= dynamicDropThreshold) {
       return {
         type: 'exit',
         reason: `NOT_ATH_MOONBAG(peak+${moonPeak.toFixed(0)}%,PnL+${pnl.toFixed(0)}%)`,
-        logLine: `🎫 [NOT_ATH:Moonbag] $${state.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}% → 平仓`,
+        logLine: `🎫 [NOT_ATH:Moonbag] $${state.symbol} 从+${moonPeak.toFixed(0)}%回撤${dropPct.toFixed(0)}% (阈值:${dynamicDropThreshold}%) → 平仓`,
       };
     }
     return { type: 'hold', reason: 'moonbag_hold' };
