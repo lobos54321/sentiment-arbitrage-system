@@ -937,32 +937,11 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
             buy_reason = 'breakout'
             
         if should_buy:
-            # Need s4 confirmation: wait another interval and fetch
-            time.sleep(interval)
-            s4, s4_src, s4_age = fetch_realtime_price(token_ca, pool_address)
-            
-            if not s4 or s4 <= 0:
-                detail = f'{buy_reason}_s4_fail: could not fetch s4 confirmation price'
-                log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-                return False, 's4_fail', detail, None
-                
-            snapshots.append(s4)
-            sources.append(s4_src or '?')
-            snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-            src_str = ','.join(sources[-4:])
-            
-            if s4 >= s3 * 0.95:
-                detail = (f'{buy_reason}_confirmed: from_base={from_base_pct:+.2f}% '
-                          f'(s3=${s3:.10f} s4=${s4:.10f}) '
-                          f'src={src_str} rounds={round_i+2} [{snap_str}]')
-                log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-                return True, buy_reason, detail, s4
-            else:
-                detail = (f'{buy_reason}_rejected: s4 dropped too much '
-                          f'(s3=${s3:.10f} s4=${s4:.10f} < {s3*0.95:.10f}) '
-                          f'src={src_str} rounds={round_i+2} [{snap_str}]')
-                log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-                return False, 'top_rejection', detail, None
+            detail = (f'{buy_reason}: from_base={from_base_pct:+.2f}% '
+                      f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
+                      f'src={src_str} round={round_i+1} [{snap_str}]')
+            log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
+            return True, buy_reason, detail, s3
 
         # Trend intact, no buy yet → continue waiting
 
