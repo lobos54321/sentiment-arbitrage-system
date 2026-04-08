@@ -951,7 +951,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
             snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
             src_str = ','.join(sources[-4:])
             
-            if s4 >= s3 * 0.995:
+            if s4 >= s3 * 0.95:
                 detail = (f'{buy_reason}_confirmed: from_base={from_base_pct:+.2f}% '
                           f'(s3=${s3:.10f} s4=${s4:.10f}) '
                           f'src={src_str} rounds={round_i+2} [{snap_str}]')
@@ -959,7 +959,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
                 return True, buy_reason, detail, s4
             else:
                 detail = (f'{buy_reason}_rejected: s4 dropped too much '
-                          f'(s3=${s3:.10f} s4=${s4:.10f} < {s3*0.995:.10f}) '
+                          f'(s3=${s3:.10f} s4=${s4:.10f} < {s3*0.95:.10f}) '
                           f'src={src_str} rounds={round_i+2} [{snap_str}]')
                 log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
                 return False, 'top_rejection', detail, None
