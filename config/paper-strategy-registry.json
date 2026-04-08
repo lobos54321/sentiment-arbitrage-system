@@ -126,7 +126,7 @@
         "narrativeThresholds": { "minConfidence": 65, "minTierScore": 60 },
         "entryTimingFilters": { "minSuperIndex": 70, "minTradeDelta": 1, "minAddressIndex": 3, "minSecurityIndex": 15, "maxChasePremiumPct": 20 },
         "cooldownWindows": { "sameSymbolMinutes": 15, "postExitMinutes": 10 },
-        "paperExitRules": { "stopLossPct": 3, "trailStartPct": 2, "trailFactor": 0.9, "takeProfitPct": [50, 100, 200], "timeoutMinutes": 120 },
+        "paperExitRules": { "stopLossPct": 10, "trailStartPct": 2, "trailFactor": 0.9, "takeProfitPct": [50, 100, 200], "timeoutMinutes": 120 },
         "sourceToggles": { "allowATH": false, "allowNotAth": true, "requireKlineConfirmation": false },
         "signalFilters": {
           "aiConfidenceMin": 0,
@@ -154,7 +154,7 @@
             "allowAthOverride": false
           },
           "stage1Exit": {
-            "stopLossPct": 3,
+            "stopLossPct": 10,
             "trailStartPct": 2,
             "trailFactor": 0.9,
             "timeoutMinutes": 120
