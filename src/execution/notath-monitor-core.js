@@ -136,11 +136,11 @@ export function decideNotAthAction(state, { pnl, holdTimeMin, now = Date.now() }
   }
 
   if (!state.tp1 && pnl <= dynamicSL) {
-    const label = state.breakeven ? 'BREAKEVEN_SL' : 'HARD_SL_15';
+    const label = state.breakeven ? 'BREAKEVEN_SL' : 'WATCHING_REENTRY';
     return {
       type: 'watch_reentry',
       reason: `NOT_ATH_${label}(PnL${pnl.toFixed(0)}%)`,
-      logLine: `🛑 [NOT_ATH:${label}] $${state.symbol} PnL:${pnl.toFixed(1)}% ≤ ${dynamicSL}% → 切换至观察模式等待反弹`,
+      logLine: `🛑 [NOT_ATH:${label}] $${state.symbol} PnL:${pnl.toFixed(1)}% ≤ ${dynamicSL}% → 切换至观察模式，等待 Stage 2A 反弹再入场`,
     };
   }
 
