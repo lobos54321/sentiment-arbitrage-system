@@ -129,9 +129,9 @@ export function decideNotAthAction(state, { pnl, holdTimeMin, now = Date.now() }
 
   if (!state.tp1 && !state.breakeven && (state._updateCount || 0) <= 5 && state.highPnl <= 0 && pnl < -15) {
     return {
-      type: 'exit',
+      type: 'watch_reentry',
       reason: `NOT_ATH_FAST_STOP(PnL${pnl.toFixed(0)}%)`,
-      logLine: `⚡ [NOT_ATH:FAST_STOP] $${state.symbol} 入场即下跌 PnL:${pnl.toFixed(1)}% → 快速止损`,
+      logLine: `🛑 [NOT_ATH:FAST_STOP] $${state.symbol} 入场即下跌 PnL:${pnl.toFixed(1)}% → 进入观察模式等待 Stage 2A`,
     };
   }
 
