@@ -783,9 +783,18 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
     return None
 
 
-ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '15'))
-ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '8'))
+ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '5'))
+ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '6'))
 ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
+# Reject ascending_3 / breakout signals where the rally is already too far
+# advanced inside the observation window — that's a parabolic blow-off top,
+# not an early-momentum entry.
+ENTRY_TIMING_FROM_BASE_MAX_PCT = float(os.environ.get('ENTRY_TIMING_FROM_BASE_MAX_PCT', '8.0'))
+# Last-mile pre-buy recheck: between timing PASS and the buy quote we still
+# pay ~15-30s of execution latency, during which the entry wick often tops.
+# Refetch a real-time price right before submitting the buy and abort if it
+# has already drifted more than this fraction above the timing s3 trigger.
+ENTRY_PREBUY_RECHECK_MAX_PCT = float(os.environ.get('ENTRY_PREBUY_RECHECK_MAX_PCT', '3.0'))
 # Max acceptable staleness for timing-engine snapshots in milliseconds.
 # Must be fresh enough that our decisions track real market state, not
 # DexScreener cache artifacts (observed 30%+ divergence between sources).
@@ -876,7 +885,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
         price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
         if not price or price <= 0:
             if not snapshots:
-                return False, 'no_price', f'no fresh price (age_ms={age_ms})'
+                return False, 'no_price', f'no fresh price (age_ms={age_ms})', None
             # If we already have snapshots but this round failed, continue
             # waiting — don't burn the run on a single stale read.
             continue
@@ -904,7 +913,14 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
                       f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
                       f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-            return False, 'trend_broke', detail
+            return False, 'trend_broke', detail, None
+            
+        if from_base_pct > ENTRY_TIMING_FROM_BASE_MAX_PCT:
+            detail = (f'blow_off: from_base={from_base_pct:+.2f}% > max {ENTRY_TIMING_FROM_BASE_MAX_PCT}% '
+                      f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
+                      f'src={src_str} round={round_i+1} [{snap_str}]')
+            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+            return False, 'blow_off', detail, None
 
         # Buy trigger A: 3 ascending highs
         if s3 > s2 and s3 > s1:
@@ -912,7 +928,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
                       f'(s1=${s1:.10f}<s2=${s2:.10f}<s3=${s3:.10f}) '
                       f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'ascending_3', detail
+            return True, 'ascending_3', detail, s3
 
         # Buy trigger B: 3% breakout above baseline
         if s3 >= baseline * (1 + breakout_pct / 100):
@@ -920,7 +936,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
                       f'(>=+{breakout_pct:.1f}%) '
                       f'src={src_str} round={round_i+1} [{snap_str}]')
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
-            return True, 'breakout', detail
+            return True, 'breakout', detail, s3
 
         # Trend intact, no buy yet → continue waiting
 
@@ -933,7 +949,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None):
     detail = (f'timeout: rounds={max_rounds} snaps={len(snapshots)} '
               f'total={total_pct:+.2f}% [{snap_str}]')
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-    return False, 'timeout', detail
+    return False, 'timeout', detail, None
 
 
 def submit_timing_eval(lifecycle_id, ctx):
@@ -979,7 +995,7 @@ def drain_timing_results(pending_entries, lifecycles, positions):
             continue
 
         try:
-            should_enter, reason, detail = future.result()
+            should_enter, reason, detail, trigger_price = future.result()
         except Exception as e:
             log.exception(f"  [TIMING_DRAIN] {symbol} eval raised: {e}")
             continue
@@ -1000,6 +1016,7 @@ def drain_timing_results(pending_entries, lifecycles, positions):
                 'pool': ctx['pool'],
                 'lifecycle_id': lifecycle_id,
                 'super_idx': ctx['super_idx'],
+                'trigger_price': trigger_price,
                 'staged_at': time.time(),
                 'attempts': 0,
                 'last_debug_at': 0,
@@ -1549,6 +1566,53 @@ def get_notath_bars(pool_address, limit=5):
             'volume': float(row[5]),
         })
     return bars
+
+
+def check_multi_bar_trend(bars, symbol):
+    """
+    Evaluate trend using the last 5 closed 1m bars.
+    Returns (trend_ok: bool, reason: str, detail: str)
+    """
+    if not bars or len(bars) < 5:
+        return True, 'insufficient_bars', 'Not enough bars for shape analysis, fail-open'
+
+    b5, b4, b3, b2, b1 = bars[0], bars[1], bars[2], bars[3], bars[4]
+
+    # Check 1: b5 dropping? (last 1 min)
+    if b5['close'] < b4['close']:
+        return False, 'dropping', f"b5.close={b5['close']:.10f} < b4.close={b4['close']:.10f}"
+
+    # Check 2: M top formed?
+    if b5['close'] < b3['close'] and b3['close'] > b1['close']:
+        return False, 'm_top', f"M-top: b5={b5['close']:.10f} < b3={b3['close']:.10f} > b1={b1['close']:.10f}"
+
+    # Check 3: Wick rejection?
+    mid_b5 = (b5['high'] + b5['low']) / 2.0
+    if b5['close'] < mid_b5:
+        return False, 'wick_rejection', f"b5.close={b5['close']:.10f} below mid={mid_b5:.10f}"
+
+    # Check 4: exhaustion?
+    range_b5 = b5['close'] - b4['close']
+    range_b3 = b3['close'] - b1['close']
+    if range_b3 > 0 and range_b5 < (range_b3 / 4.0):
+        return False, 'exhaustion', f"rally exhausted: b5_range={range_b5:.10f} < b3_range/4={range_b3/4.0:.10f}"
+
+    # Check passing requirements
+    if b5['close'] <= b4['close']:
+        return False, 'not_rising', f"b5.close={b5['close']:.10f} <= b4.close={b4['close']:.10f}"
+        
+    if b5['close'] <= b3['close']:
+        return False, 'below_b3', f"b5.close={b5['close']:.10f} <= b3.close={b3['close']:.10f}"
+
+    # Check position in range
+    range_total = b5['high'] - b5['low']
+    pos_pct = 0.5
+    if range_total > 0:
+        pos_pct = (b5['close'] - b5['low']) / range_total
+        if pos_pct < 0.5:
+             return False, 'bottom_half_close', f"bar closed in bottom {pos_pct*100:.1f}% of range"
+
+    return True, 'passed_shape', f"multi-bar trend OK (pos_pct={pos_pct*100:.1f}%)"
 
 
 def compute_notath_score(bars):
@@ -3472,46 +3536,21 @@ def run_monitor(db):
                     time.sleep(0.1)
 
                     # --- Pre-buy filter: two-layer check ---
-                    # Layer 1: Trend check (5-min direction)
-                    #   - OHLCV candle: close < open → dropping → BLOCKED
-                    #   - DexScreener m5 < 0 → 5min trend negative → BLOCKED
-                    # Layer 2: Entry timing (10-second snapshots to find good entry point)
-                    #   - Takes up to 4 snapshots at 10s intervals
-                    #   - Enters on uptick (price bouncing up) or stable price
-                    #   - Skips if price keeps fading through all snapshots
-                    trend_ok = True
-                    entry_bar = get_entry_bar_ohlcv(pool, token_ca=token_ca)
-                    if entry_bar and entry_bar['open'] > 0:
-                        fbr = ((entry_bar['close'] - entry_bar['open']) / entry_bar['open']) * 100
-                        bar_age_sec = int(time.time() - entry_bar['ts'])
-                        if fbr < 0:
-                            log.info(
-                                f"  [PREBUY_FILTER] {symbol} BLOCKED: FBR={fbr:+.2f}% "
-                                f"(open={entry_bar['open']:.10f} close={entry_bar['close']:.10f} "
-                                f"bar_age={bar_age_sec}s) — price dropping at entry, skipping"
-                            )
-                            continue
-                        else:
-                            log.info(
-                                f"  [PREBUY_FILTER] {symbol} trend OK: FBR={fbr:+.2f}% "
-                                f"(bar_age={bar_age_sec}s)"
-                            )
+                    # Layer 1: Trend check (last 5 closed 1m bars shape analysis)
+                    notath_bars = get_notath_bars(pool, limit=5)
+                    trend_ok, trend_reason, trend_detail = check_multi_bar_trend(notath_bars, symbol)
+                    
+                    if not trend_ok:
+                        log.info(
+                            f"  [PREBUY_FILTER] {symbol} BLOCKED: {trend_reason} "
+                            f"— {trend_detail}, skipping"
+                        )
+                        continue
                     else:
-                        m5_pct = fetch_dexscreener_m5(token_ca, timeout=5)
-                        if m5_pct is not None:
-                            if m5_pct < 0:
-                                log.info(
-                                    f"  [PREBUY_FILTER] {symbol} BLOCKED: m5={m5_pct:+.1f}% "
-                                    f"— 5min trend negative, skipping"
-                                )
-                                continue
-                            else:
-                                log.info(
-                                    f"  [PREBUY_FILTER] {symbol} trend OK: m5={m5_pct:+.1f}%"
-                                )
-                        else:
+                        if trend_reason == 'insufficient_bars':
                             log.warning(f"  [PREBUY_FILTER] {symbol} no trend data, allowing entry (fail-open)")
-                            trend_ok = False
+                        else:
+                            log.info(f"  [PREBUY_FILTER] {symbol} trend OK: {trend_detail}")
 
                     # Layer 2: Entry timing — submit to thread pool (non-blocking).
                     # The result is picked up by drain_timing_results() at the
@@ -3547,6 +3586,19 @@ def run_monitor(db):
             for lifecycle_id, pending in list(pending_entries.items()):
                 try:
                     pending['attempts'] = int(pending.get('attempts') or 0) + 1
+                    
+                    # Phase 1c: Last-mile pre-buy price recheck
+                    # If this is the first execution attempt and we have a valid trigger price,
+                    # make sure the price hasn't already rocketed past our acceptable entry slippage.
+                    trigger_price = pending.get('trigger_price')
+                    if trigger_price and pending['attempts'] == 1:
+                        live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
+                        if live_price is not None and live_price > trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: entry_too_late "
+                                     f"live=${live_price:.10f} > max_allowed=${trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                            
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         position_size_sol,

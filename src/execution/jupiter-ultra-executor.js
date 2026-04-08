@@ -102,7 +102,8 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const order = await this._getOrder(SOL_MINT, tokenCA, amountLamports);
+      const buyOpts = { ...opts, slippageBps: Math.min(Number(opts.slippageBps || 500), 500) };
+      const order = await this._getOrder(SOL_MINT, tokenCA, amountLamports, buyOpts);
       return await this._normalizeQuoteResult('buy', order, {
         tokenCA,
         inputMint: SOL_MINT,
@@ -174,7 +175,7 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const order = await this._getOrder(tokenCA, SOL_MINT, rawAmount);
+      const order = await this._getOrder(tokenCA, SOL_MINT, rawAmount, opts);
       return await this._normalizeQuoteResult('sell', order, {
         tokenCA,
         inputMint: tokenCA,
@@ -396,7 +397,7 @@ export class JupiterUltraExecutor {
    * 获取 Ultra Order
    * GET /ultra/v1/order
    */
-  async _getOrder(inputMint, outputMint, amount) {
+  async _getOrder(inputMint, outputMint, amount, opts = {}) {
     try {
       const headers = {};
       if (this.jupiterApiKey) headers['x-api-key'] = this.jupiterApiKey;
@@ -408,6 +409,10 @@ export class JupiterUltraExecutor {
         taker: this.walletAddress,
         prioritizationFeeLamports: 'auto'  // 动态优先费，确保快速上链
       });
+      
+      if (opts.slippageBps != null) {
+        params.append('slippageBps', String(opts.slippageBps));
+      }
 
       const res = await axios.get(`${this.ultraApiBase}/order?${params.toString()}`, {
         headers,
