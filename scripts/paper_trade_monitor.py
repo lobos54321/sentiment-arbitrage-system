@@ -818,7 +818,7 @@ ENTRY_TIMING_FROM_BASE_MAX_PCT = float(os.environ.get('ENTRY_TIMING_FROM_BASE_MA
 # pay ~15-30s of execution latency, during which the entry wick often tops.
 # Refetch a real-time price right before submitting the buy and abort if it
 # has already drifted more than this fraction above the timing s3 trigger.
-ENTRY_PREBUY_RECHECK_MAX_PCT = float(os.environ.get('ENTRY_PREBUY_RECHECK_MAX_PCT', '3.0'))
+ENTRY_PREBUY_RECHECK_MAX_PCT = float(os.environ.get('ENTRY_PREBUY_RECHECK_MAX_PCT', '8.0'))
 # Max acceptable staleness for timing-engine snapshots in milliseconds.
 # Must be fresh enough that our decisions track real market state, not
 # DexScreener cache artifacts (observed 30%+ divergence between sources).
