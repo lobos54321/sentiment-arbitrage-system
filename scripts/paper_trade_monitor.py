@@ -789,7 +789,7 @@ ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3
 # Reject ascending_3 / breakout signals where the rally is already too far
 # advanced inside the observation window — that's a parabolic blow-off top,
 # not an early-momentum entry.
-ENTRY_TIMING_FROM_BASE_MAX_PCT = float(os.environ.get('ENTRY_TIMING_FROM_BASE_MAX_PCT', '100.0'))
+ENTRY_TIMING_FROM_BASE_MAX_PCT = float(os.environ.get('ENTRY_TIMING_FROM_BASE_MAX_PCT', '80.0'))
 # Last-mile pre-buy recheck: between timing PASS and the buy quote we still
 # pay ~15-30s of execution latency, during which the entry wick often tops.
 # Refetch a real-time price right before submitting the buy and abort if it
@@ -915,7 +915,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
             return False, 'trend_broke', detail, None
             
-        limit_pct = 50.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
+        limit_pct = 80.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
         if from_base_pct > limit_pct:
             detail = (f'blow_off: from_base={from_base_pct:+.2f}% > max {limit_pct}% '
                       f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
