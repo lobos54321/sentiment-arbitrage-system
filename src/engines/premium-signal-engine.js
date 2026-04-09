@@ -415,6 +415,16 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'exit_cooldown' };
       }
 
+      // ─── Step 1.5: 体积过滤 (剔除无效垃圾盘) ───
+      // 对于 MC < 16k 且 Volume < 38k 的情况，流动性极差且滑点极高，直接拦截
+      if ((signal.market_cap !== null && signal.market_cap < 16000) && 
+          (signal.volume_24h !== null && signal.volume_24h < 38000)) {
+        this.stats.precheck_failed = (this.stats.precheck_failed || 0) + 1;
+        console.log(`⏭️ [体积过滤] $${signal.symbol} MC=$${signal.market_cap} Vol=$${signal.volume_24h} (MC<16K 且 Vol<38K) → 跳过极低流动性盘`);
+        this.saveSignalRecord(signal, 'ILLIQUID_JUNK', null);
+        return { action: 'SKIP', reason: 'illiquid_junk' };
+      }
+
       // ─── Step 2: ATH 检查 — 最先过滤，非ATH检查 super_index (~0ms) ───
       const isATH = signal.is_ath === true;
       const signalIndices = signal.indices || {};
