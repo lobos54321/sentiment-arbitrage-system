@@ -808,6 +808,8 @@ _timing_executor = ThreadPoolExecutor(
 )
 # lifecycle_id -> {'future', 'ctx', 'submitted_at'}
 _timing_inflight = {}
+# lifecycle_id -> {'last_check': ts, 'prev_count': int, 'last_sig': str, 'peak_price': float}
+_post_entry_vol_stats = {}
 HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', 'f7e7e457-aba3-448b-a565-f188158e2d80')
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
@@ -3827,12 +3829,62 @@ def run_monitor(db):
                         pos.token_ca, pos_pool, max_age_ms=15000,
                         token_decimals=getattr(pos, 'token_decimals', None),
                     )
+                    smart_exit_triggered = False
+                    smart_exit_reason = None
+
                     if pre_price and pre_price > 0:
                         pre_ts = int(time.time() - (pre_age_ms or 0) / 1000)
                         log.debug(
                             f"  [PRE_PRICE] {pos.symbol}: ${pre_price:.10f} "
                             f"src={pre_src} age_ms={pre_age_ms}"
                         )
+                        
+                        # --- POST-ENTRY SMART EXIT ENGINE (Order Flow Divergence) ---
+                        if pos.strategy_stage == 'stage1':
+                            now_sec = time.time()
+                            vol_state = _post_entry_vol_stats.setdefault(pos.lifecycle_id, {
+                                'last_check': 0, 'prev_count': 0, 'last_sig': None, 'peak_price': pos.entry_price
+                            })
+                            
+                            if pre_price > vol_state['peak_price']:
+                                vol_state['peak_price'] = pre_price
+                                
+                            elapsed_check = now_sec - vol_state['last_check']
+                            if elapsed_check >= 10.0:  # Poll approx every 10 seconds
+                                current_sigs = get_recent_signatures(pos.token_ca, limit=100)
+                                if current_sigs:
+                                    s1_sig = vol_state['last_sig']
+                                    new_tx = 0
+                                    if s1_sig:
+                                        for sig in current_sigs:
+                                            if sig == s1_sig:
+                                                break
+                                            new_tx += 1
+                                    else:
+                                        # First run: set to 0 to establish baseline, or max out if > 100
+                                        new_tx = len(current_sigs) if len(current_sigs) < 100 else 0
+                                        
+                                    prev_tx = vol_state['prev_count']
+                                    
+                                    # Process Logic if we have valid historical baseline
+                                    if s1_sig and prev_tx > 0:
+                                        # Scenario 1: Retail FOMO Trap (Price Near High vs Vol Drops > 50%)
+                                        p_near_high = pre_price >= vol_state['peak_price'] * 0.98
+                                        if p_near_high and new_tx < prev_tx * 0.5 and prev_tx >= 15:
+                                            smart_exit_triggered = True
+                                            smart_exit_reason = 'smart_sell_exhaustion'
+                                            log.warning(f"  [SMART_EXIT] {pos.symbol} Retail FOMO Exhaustion (Vol {prev_tx}->{new_tx} in {elapsed_check:.1f}s, Price UP). Force Selling!")
+                                            
+                                        # Scenario 3: Giant Sell Wall / Distribution (Price dropping off peak vs Vol exploding)
+                                        p_dumping = pre_price <= vol_state['peak_price'] * 0.95
+                                        if p_dumping and new_tx > prev_tx * 1.5 and new_tx >= 25:
+                                            smart_exit_triggered = True
+                                            smart_exit_reason = 'smart_sell_wall_dump'
+                                            log.warning(f"  [SMART_EXIT] {pos.symbol} Distribution Sell Wall (Vol {prev_tx}->{new_tx} in {elapsed_check:.1f}s, Price Slipping). Force Selling!")
+
+                                    vol_state['last_check'] = now_sec
+                                    vol_state['prev_count'] = new_tx
+                                    vol_state['last_sig'] = current_sigs[0]
                     else:
                         pre_ts = None
                     exit_eval = evaluate_paper_exit(
@@ -3855,6 +3907,21 @@ def run_monitor(db):
                             'quoteTsSec': pre_ts,
                         }
                     )
+
+                    # Intercept: Force JS output to exit if Python detected Order Flow Divergence
+                    if smart_exit_triggered and not exit_eval.get('shouldExit') and pre_price:
+                        exit_eval['ok'] = True
+                        exit_eval['shouldExit'] = True
+                        exit_eval['action'] = 'exit'
+                        exit_eval['exitReason'] = smart_exit_reason
+                        pnl = (pre_price - pos.entry_price) / pos.entry_price
+                        exit_eval['triggerPnl'] = pnl
+                        exit_eval['realizedPnl'] = pnl
+                        exit_eval.setdefault('execution', {})
+                        exit_eval['execution']['effectivePrice'] = pre_price
+                        exit_eval['execution']['success'] = True
+                        exit_eval['markSource'] = 'force_smart_exit'
+
                     if not exit_eval.get('ok'):
                         failure_info = exit_eval.get('failureReason') or exit_eval.get('action') or 'unknown'
                         held_min = int(max(0, (time.time() - pos.entry_ts) / 60))
