@@ -988,10 +988,14 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
                         break
                     new_tx_count += 1
                 
-                # Minimum 3 txs in the pre-buy window to guarantee active order flow
-                if new_tx_count < 3:
-                    detail = (f"momentum_died: only {new_tx_count} txs in {elapsed:.1f}s "
-                              f"(req >= 3) src={src_str} round={round_i+1} [{snap_str}]")
+                # Calculate Transactions Per Second (TPS)
+                tps = new_tx_count / elapsed
+                
+                # Minimum 2.0 TPS (Transactions per Second) in the pre-buy window 
+                # to guarantee active order flow. (e.g. at least ~12 txs in a 6s window)
+                if tps < 2.0:
+                    detail = (f"momentum_died: TPS {tps:.1f} too low (only {new_tx_count} txs in {elapsed:.1f}s, req >= 2.0 TPS) "
+                              f"src={src_str} round={round_i+1} [{snap_str}]")
                     log.warning(f"  [ENTRY_TIMING] {symbol} BLOCKED: {detail}")
                     return False, 'momentum_died', detail, None
 
