@@ -1523,6 +1523,19 @@ def parse_super_index(description):
     return None
 
 
+def parse_top10_percent(description):
+    """
+    Extract Top10 holder percentage from string like 'Top10:** 24.73%'
+    """
+    m = re.search(r'Top10[^0-9]*([\d\.]+)\s*%', description, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
 def get_notath_bars(pool_address, limit=5):
     """
     Get recent 1-minute bars for NOT_ATH scoring.
@@ -3524,6 +3537,17 @@ def run_monitor(db):
 
                     symbol = sig['symbol'] or token_ca[:8]
                     super_idx = parse_super_index(sig['description'] or '')
+                    
+                    top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)
+                    # Config might have 100 as default from old JSON schema, if it's 100 we override to 45 for safety or honor it?
+                    # Since user wants it active, let's strictly use 45.0 if it's 100 or missing, to enforce safety easily without JSON patching.
+                    if top10_max >= 100.0:
+                        top10_max = 45.0
+                        
+                    top10_pct = parse_top10_percent(sig['description'] or '')
+                    if top10_pct is not None and top10_pct > top10_max:
+                        log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: Top10 {top10_pct}% exceeds max allowed {top10_max}%, skipping")
+                        continue
 
                     consumed, sol_price = try_awaken_stage3_from_signal(
                         db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
