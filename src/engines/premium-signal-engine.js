@@ -421,9 +421,9 @@ export class PremiumSignalEngine {
       const superIndex = signalIndices?.super_index?.current || signalIndices?.super_index?.value || 0;
 
       if (!isATH) {
-        // NOT_ATH 信号：需要 super_index >= 80 才允许交易
-        if (superIndex < 80) {
-          console.log(`⏭️ [NOT_ATH] $${signal.symbol} Super=${superIndex}<80 → 跳过`);
+        // NOT_ATH 信号：需要 super_index >= 70 才允许交易
+        if (superIndex < 70) {
+          console.log(`⏭️ [NOT_ATH] $${signal.symbol} Super=${superIndex}<70 → 跳过`);
           this.saveSignalRecord(signal, 'NOT_ATH_V17', null);
           this._trackForKline(ca, signal.symbol);
           return { action: 'SKIP', reason: 'not_ath_v17' };
