@@ -8,7 +8,7 @@ import { evaluatePaperLiveManagedPosition } from '../src/execution/paper-live-po
 import { SharedPoolOhlcvClient } from '../src/market-data/shared-pool-ohclv-client.js';
 import { SharedQuoteClient } from '../src/market-data/shared-quote-client.js';
 import { SharedMarketRuntime, applyMarketDataProcessOverride } from '../src/market-data/shared-market-runtime.js';
-import readline from 'readline';
+import http from 'http';
 
 async function readStdin() {
   return await new Promise((resolve, reject) => {
@@ -98,29 +98,36 @@ async function processCommand(command, payload, executor, marketDataBridge) {
 }
 
 async function runDaemon(executor, marketDataBridge) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: false
-  });
-  
-  // Signal ready to Python parent
-  process.stdout.write(JSON.stringify({ status: 'daemon_ready' }) + '\n');
-  
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    try {
-      const req = JSON.parse(line);
-      const command = req._command;
-      const payload = req.payload || {};
-      const result = await processCommand(command, payload, executor, marketDataBridge);
-      const resJson = JSON.stringify(result ?? { success: false, failureReason: 'bridge_undefined_result' });
-      process.stdout.write(resJson + '\n');
-    } catch (err) {
-      const resJson = JSON.stringify({ success: false, failureReason: err.message || 'daemon_eval_failed' });
-      process.stdout.write(resJson + '\n');
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end();
+      return;
     }
-  }
+    
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body);
+        const command = payload._command;
+        const cmdPayload = payload.payload || {};
+        const result = await processCommand(command, cmdPayload, executor, marketDataBridge);
+        const resJson = JSON.stringify(result ?? { success: false, failureReason: 'bridge_undefined_result' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(resJson);
+      } catch (err) {
+        const resJson = JSON.stringify({ success: false, failureReason: err.message || 'daemon_eval_failed' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(resJson);
+      }
+    });
+  });
+
+  server.listen(38942, '127.0.0.1', () => {
+    // Signal ready to Python parent
+    process.stdout.write(JSON.stringify({ status: 'daemon_ready' }) + '\n');
+  });
 }
 
 main().catch((error) => {

@@ -292,69 +292,56 @@ def build_execution_audit(execution=None, extra=None):
 
 
 import threading
-import select
+import requests
+import time
 
 class PersistentExecutionBridge:
     def __init__(self):
         self._proc = None
         self._lock = threading.Lock()
         
-    def _start(self):
-        env = os.environ.copy()
-        self._proc = subprocess.Popen(
-            ['node', str(EXECUTION_BRIDGE), 'daemon'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            cwd=str(PROJECT_ROOT),
-            env=env
-        )
-        for _ in range(50):
-            ready, _, _ = select.select([self._proc.stdout], [], [], 0.05)
-            if ready:
-                line = self._proc.stdout.readline()
-                if not line:
-                    break
+    def _start_if_needed(self):
+        with self._lock:
+            try:
+                res = requests.post("http://127.0.0.1:38942", json={"_command": "ping"}, timeout=0.1)
+                if res.status_code in [200, 405, 500]:
+                    return
+            except requests.exceptions.ConnectionError:
+                pass
+            
+            if self._proc is None or self._proc.poll() is not None:
+                env = os.environ.copy()
+                self._proc = subprocess.Popen(
+                    ['node', str(EXECUTION_BRIDGE), 'daemon'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(PROJECT_ROOT),
+                    env=env
+                )
+                
+            for _ in range(50):
                 try:
-                    data = json.loads(line)
-                    if data.get('status') == 'daemon_ready':
+                    res = requests.post("http://127.0.0.1:38942", json={"_command": "ping"}, timeout=0.5)
+                    if res.status_code in [200, 405, 500]:
                         return
-                except Exception:
+                except requests.exceptions.ConnectionError:
                     pass
+                time.sleep(0.1)
             
     def call(self, command, payload, timeout=10):
-        with self._lock:
-            if self._proc is None or self._proc.poll() is not None:
-                self._start()
-            if self._proc is None or self._proc.poll() is not None:
-                return {'success': False, 'failureReason': 'daemon_start_failed'}
-            
-            req = {"_command": command, "payload": payload}
-            try:
-                self._proc.stdin.write(json.dumps(req) + '\n')
-                self._proc.stdin.flush()
-            except Exception as e:
-                self._proc = None
-                return {'success': False, 'failureReason': f'daemon_write_failed:{e}'}
+        self._start_if_needed()
+        req = {"_command": command, "payload": payload}
+        try:
+            actual_timeout = timeout
+            if command in ['quote-buy', 'quote-sell', 'simulate-buy', 'simulate-sell']:
+                actual_timeout = max(timeout, 30)
                 
-            try:
-                ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
-                if not ready:
-                    self._proc.kill()
-                    self._proc = None
-                    return {'success': False, 'failureReason': 'daemon_timeout'}
-                    
-                resp_line = self._proc.stdout.readline()
-                if not resp_line:
-                    self._proc = None
-                    return {'success': False, 'failureReason': 'daemon_eof'}
-                    
-                return json.loads(resp_line)
-            except Exception as e:
-                self._proc = None
-                return {'success': False, 'failureReason': f'daemon_read_failed:{e}'}
+            res = requests.post("http://127.0.0.1:38942", json=req, timeout=actual_timeout)
+            return res.json()
+        except requests.exceptions.ReadTimeout:
+            return {'success': False, 'failureReason': 'daemon_timeout'}
+        except Exception as e:
+            return {'success': False, 'failureReason': f'daemon_request_failed:{e}'}
 
 _daemon_bridge = PersistentExecutionBridge()
 
