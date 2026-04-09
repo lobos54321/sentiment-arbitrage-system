@@ -292,8 +292,26 @@ def build_execution_audit(execution=None, extra=None):
 
 
 import threading
-import requests
+import urllib.request
+import urllib.error
+import socket
 import time
+
+def _post_json(url, json_payload, timeout_sec):
+    data = json.dumps(json_payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as response:
+            return response.status, json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode('utf-8'))
+        except Exception:
+            return e.code, {}
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, socket.timeout):
+            raise TimeoutError()
+        raise e
 
 class PersistentExecutionBridge:
     def __init__(self):
@@ -303,10 +321,10 @@ class PersistentExecutionBridge:
     def _start_if_needed(self):
         with self._lock:
             try:
-                res = requests.post("http://127.0.0.1:38942", json={"_command": "ping"}, timeout=0.1)
-                if res.status_code in [200, 405, 500]:
+                status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.1)
+                if status in [200, 405, 500]:
                     return
-            except requests.exceptions.ConnectionError:
+            except Exception:
                 pass
             
             if self._proc is None or self._proc.poll() is not None:
@@ -321,10 +339,10 @@ class PersistentExecutionBridge:
                 
             for _ in range(50):
                 try:
-                    res = requests.post("http://127.0.0.1:38942", json={"_command": "ping"}, timeout=0.5)
-                    if res.status_code in [200, 405, 500]:
+                    status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.5)
+                    if status in [200, 405, 500]:
                         return
-                except requests.exceptions.ConnectionError:
+                except Exception:
                     pass
                 time.sleep(0.1)
             
@@ -336,9 +354,9 @@ class PersistentExecutionBridge:
             if command in ['quote-buy', 'quote-sell', 'simulate-buy', 'simulate-sell']:
                 actual_timeout = max(timeout, 30)
                 
-            res = requests.post("http://127.0.0.1:38942", json=req, timeout=actual_timeout)
-            return res.json()
-        except requests.exceptions.ReadTimeout:
+            _, data = _post_json("http://127.0.0.1:38942", req, actual_timeout)
+            return data
+        except TimeoutError:
             return {'success': False, 'failureReason': 'daemon_timeout'}
         except Exception as e:
             return {'success': False, 'failureReason': f'daemon_request_failed:{e}'}
@@ -828,11 +846,9 @@ def get_recent_signatures(token_ca, limit=100):
     for attempt in range(3):
         try:
             # Short timeout: we only care about real-time speed. If it's slow, we skip it.
-            res = requests.post(HELIUS_RPC_URL, json=payload, timeout=2.5)
-            if res.status_code == 200:
-                data = res.json()
-                if 'result' in data:
-                    return [item['signature'] for item in data['result']]
+            status, res_data = _post_json(HELIUS_RPC_URL, payload, 2.5)
+            if status == 200 and 'result' in res_data:
+                return [item['signature'] for item in res_data['result']]
         except Exception:
             pass
         if attempt < 2:
