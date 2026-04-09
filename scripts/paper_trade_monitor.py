@@ -890,45 +890,38 @@ def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MA
 
 def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_open=False):
     """
-    Entry timing engine v4 (sliding 3-snapshot window + s4 confirm).
+    Entry timing engine v5 — Two-Phase "Dip-then-Rip" Sniper.
 
-    Snapshot interval: 3 seconds.
-    Each round takes one snapshot. Once we have >= 3 snapshots, we
-    evaluate the last 3 (a 30-second-spanning, 45-second-aged window)
-    on every new snapshot. Total max wait = 8 rounds × 15s ≈ 120s.
+    Total window : 5 min  = 100 rounds × 3s each.
+    Phase 1 budget: 2.5 min = 50 rounds — wait for a washout dip (>= -2%).
+    Phase 2 budget: remaining rounds — wait for 3-step recovery from valley.
 
-    Prices come from get_live_price_snapshot with strict freshness
-    (<= 5s) — Redis live price or Jupiter quote, NOT DexScreener cache.
+    Fail-Open: if Phase 1 exhausts with no dip, treat current price as valley
+               and proceed to Phase 2 with the remaining 50 rounds.
 
-    Let s1, s2, s3 = the most recent 3 snapshots (s3 = newest).
+    Buy triggers (Phase 2 only):
+      (A) s3 > s2 > s1  — 3 ascending price steps from valley
+      (B) s3 >= valley * 1.03 — 3% breakout above valley baseline
+      + Helius TPS >= 2.0 confirmation
 
-    Trend-not-broken (continue waiting allowed):
-      - s3 >= s2                      → still rising
-      - s3 < s2 BUT s3 >= s1          → dropping but the two drops
-                                          haven't broken the prior up bar
-      - else                          → BROKEN → Washout detected! The ladder resets!
-
-    Buy triggers:
-      (A) s3 > s2 AND s3 > s1         → 3 ascending highs, momentum
-      (B) s3 >= baseline * 1.03       → 3% breakout above baseline
-
-    Otherwise: not broken, no buy → wait next round.
-
-    After max rounds without buy → SKIP timeout.
-
-    Returns: (should_enter: bool, reason: str, detail: str)
+    Returns: (should_enter: bool, reason: str, detail: str, trigger_price)
     """
-    interval = ENTRY_TIMING_INTERVAL_SEC
-    max_rounds = ENTRY_TIMING_MAX_ROUNDS
-    breakout_pct = ENTRY_TIMING_BREAKOUT_PCT
+    interval          = ENTRY_TIMING_INTERVAL_SEC   # 3s
+    max_rounds        = ENTRY_TIMING_MAX_ROUNDS      # 100
+    phase1_max_rounds = max_rounds // 2              # 50 rounds = 2.5 min
+    breakout_pct      = ENTRY_TIMING_BREAKOUT_PCT    # 3.0
+    dip_threshold_pct = 2.0                          # require >= -2% dip
+
+    initial_baseline = None
+    valley_price     = None
+    saw_dip          = False
+    phase            = 1   # 1 = dip watch, 2 = rip watch
 
     snapshots = []
-    sources = []
-    baseline = None
-    
-    s1_sigs = None
+    sources   = []
+    s1_sigs   = None
     s1_top_sig = None
-    s1_time = 0
+    s1_time   = 0
 
     for round_i in range(max_rounds):
         if round_i > 0:
@@ -936,113 +929,156 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
 
         price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
         if not price or price <= 0:
-            if not snapshots:
+            if initial_baseline is None:
                 return False, 'no_price', f'no fresh price (age_ms={age_ms})', None
-            # If we already have snapshots but this round failed, continue
-            # waiting — don't burn the run on a single stale read.
-            continue
-        snapshots.append(price)
+            continue  # stale read — keep waiting
+
         sources.append(src or '?')
 
-        # Take transaction signature snapshot at S1
-        if len(snapshots) == 1:
-            try:
-                s1_sigs = get_recent_signatures(token_ca, limit=5)
-                s1_top_sig = s1_sigs[0] if s1_sigs else None
-                s1_time = time.time()
-            except Exception:
-                pass
+        # First good price initialises both baselines
+        if initial_baseline is None:
+            initial_baseline = price
+            valley_price     = price
+            log.info(f"  [ENTRY_TIMING] {symbol} Phase1 start baseline=${initial_baseline:.10f}")
 
-        if baseline is None:
-            baseline = snapshots[0]
+        # Always track the lowest price seen (updates valley in both phases)
+        if price < valley_price:
+            valley_price = price
 
-        # Need at least 3 snapshots before we can evaluate
+        # ──────────────────────────────────────────────────
+        # PHASE 1 — Wait for washout dip
+        # ──────────────────────────────────────────────────
+        if phase == 1:
+            dip_pct = ((price - initial_baseline) / initial_baseline) * 100
+
+            if dip_pct <= -dip_threshold_pct:
+                saw_dip = True
+                log.info(
+                    f"  [ENTRY_TIMING] {symbol} 🔻 Dip confirmed "
+                    f"dip={dip_pct:+.2f}% price=${price:.10f} "
+                    f"round={round_i+1} → Phase 2"
+                )
+                phase = 2
+                snapshots = [price]
+                try:
+                    s1_sigs    = get_recent_signatures(token_ca, limit=5)
+                    s1_top_sig = s1_sigs[0] if s1_sigs else None
+                    s1_time    = time.time()
+                except Exception:
+                    pass
+                continue
+
+            # Fail-Open after 2.5 min with no dip
+            if round_i + 1 >= phase1_max_rounds:
+                log.info(
+                    f"  [ENTRY_TIMING] {symbol} ⚡ Fail-Open: "
+                    f"no dip in {phase1_max_rounds} rounds, "
+                    f"current=${price:.10f} becomes valley"
+                )
+                valley_price = price
+                phase        = 2
+                snapshots    = [price]
+                try:
+                    s1_sigs    = get_recent_signatures(token_ca, limit=5)
+                    s1_top_sig = s1_sigs[0] if s1_sigs else None
+                    s1_time    = time.time()
+                except Exception:
+                    pass
+                continue
+
+            continue  # still waiting for dip
+
+        # ──────────────────────────────────────────────────
+        # PHASE 2 — Watch for 3-step recovery from valley
+        # ──────────────────────────────────────────────────
+        snapshots.append(price)
+        phase2_baseline = valley_price
+
         if len(snapshots) < 3:
             continue
 
         s1, s2, s3 = snapshots[-3], snapshots[-2], snapshots[-1]
-        from_base_pct = ((s3 - baseline) / baseline) * 100
-        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots)
-        src_str = ','.join(sources[-3:])
+        from_valley_pct = ((s3 - phase2_baseline) / phase2_baseline) * 100
+        snap_str = ' → '.join(f'${p:.10f}' for p in snapshots[-5:])
+        src_str  = ','.join(sources[-3:])
 
-        # Trend break check
-        # Not broken if rising (s3 >= s2) OR dropping but holding above 2-back (s3 >= s1)
-        not_broken = (s3 >= s2) or (s3 >= s1)
-        if not not_broken:
-            # Washout / ladder break. Instead of abandoning the token, we reset the ladder.
-            # This allows the token to stay in the 5-minute pool and form a new floor.
-            snapshots = [snapshots[-1]]
-            baseline = snapshots[0]
-            # Reset Helius signature tracking for the new baseline
+        # Blow-off guard — already ripped too far, don't chase
+        limit_pct = 80.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
+        if from_valley_pct > limit_pct:
+            detail = (
+                f'blow_off: from_valley={from_valley_pct:+.2f}% > max {limit_pct}% '
+                f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
+                f'src={src_str} round={round_i+1} [{snap_str}]'
+            )
+            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
+            return False, 'blow_off', detail, None
+
+        # Ladder break → reset from new low, keep hunting
+        if not ((s3 >= s2) or (s3 >= s1)):
+            if price < valley_price:
+                valley_price = price
+            snapshots = [price]
             try:
-                s1_sigs = get_recent_signatures(token_ca, limit=5)
+                s1_sigs    = get_recent_signatures(token_ca, limit=5)
                 s1_top_sig = s1_sigs[0] if s1_sigs else None
-                s1_time = time.time()
+                s1_time    = time.time()
             except Exception:
                 pass
             continue
-            
-        limit_pct = 80.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
-        if from_base_pct > limit_pct:
-            detail = (f'blow_off: from_base={from_base_pct:+.2f}% > max {limit_pct}% '
-                      f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
-                      f'src={src_str} round={round_i+1} [{snap_str}]')
-            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-            return False, 'blow_off', detail, None
 
         should_buy = False
         buy_reason = ''
 
-        # Buy trigger A: 3 ascending highs
+        # Trigger A: 3 ascending steps
         if s3 > s2 and s3 > s1:
             should_buy = True
-            buy_reason = 'ascending_3'
-            
-        # Buy trigger B: 3% breakout above baseline
-        elif not strict_fail_open and s3 >= baseline * (1 + breakout_pct / 100):
+            buy_reason = 'dip_then_rip' if saw_dip else 'ascending_3_failopen'
+
+        # Trigger B: 3% breakout above valley
+        elif not strict_fail_open and s3 >= phase2_baseline * (1 + breakout_pct / 100):
             should_buy = True
-            buy_reason = 'breakout'
-            
+            buy_reason = 'breakout_from_valley' if saw_dip else 'breakout_failopen'
+
         if should_buy:
-            # Helius Momentum / Tx Velocity Check
+            # Helius TPS confirmation
             elapsed = time.time() - s1_time
             if s1_top_sig and elapsed > 0:
                 current_sigs = get_recent_signatures(token_ca, limit=100)
-                new_tx_count = 0
-                for sig in current_sigs:
-                    if sig == s1_top_sig:
-                        break
-                    new_tx_count += 1
-                
-                # Calculate Transactions Per Second (TPS)
+                new_tx_count = sum(1 for sig in current_sigs
+                                   if sig != s1_top_sig) if s1_top_sig not in current_sigs \
+                               else next((i for i, sig in enumerate(current_sigs)
+                                          if sig == s1_top_sig), len(current_sigs))
                 tps = new_tx_count / elapsed
-                
-                # Minimum 2.0 TPS (Transactions per Second) in the pre-buy window 
-                # to guarantee active order flow. (e.g. at least ~12 txs in a 6s window)
                 if tps < 2.0:
-                    detail = (f"momentum_died: TPS {tps:.1f} too low (only {new_tx_count} txs in {elapsed:.1f}s, req >= 2.0 TPS) "
-                              f"src={src_str} round={round_i+1} [{snap_str}]")
+                    detail = (
+                        f"momentum_died: TPS {tps:.1f} too low "
+                        f"({new_tx_count} txs in {elapsed:.1f}s, req >= 2.0) "
+                        f"saw_dip={saw_dip} src={src_str} round={round_i+1}"
+                    )
                     log.warning(f"  [ENTRY_TIMING] {symbol} BLOCKED: {detail}")
                     return False, 'momentum_died', detail, None
 
-            detail = (f'{buy_reason}: from_base={from_base_pct:+.2f}% '
-                      f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
-                      f'src={src_str} round={round_i+1} [{snap_str}]')
+            detail = (
+                f'{buy_reason}: from_valley={from_valley_pct:+.2f}% '
+                f'saw_dip={saw_dip} valley=${phase2_baseline:.10f} '
+                f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
+                f'src={src_str} round={round_i+1} [{snap_str}]'
+            )
             log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
             return True, buy_reason, detail, s3
 
-        # Trend intact, no buy yet → continue waiting
-
-    # Timeout
-    snap_str = ' → '.join(f'${p:.10f}' for p in snapshots) if snapshots else 'none'
-    if snapshots and baseline:
-        total_pct = ((snapshots[-1] - baseline) / baseline) * 100
-    else:
-        total_pct = 0
-    detail = (f'timeout: rounds={max_rounds} snaps={len(snapshots)} '
-              f'total={total_pct:+.2f}% [{snap_str}]')
+    # ── Full 5-minute timeout ──────────────────────────────
+    snap_str  = ' → '.join(f'${p:.10f}' for p in snapshots[-5:]) if snapshots else 'none'
+    total_pct = ((snapshots[-1] - valley_price) / valley_price * 100
+                 if snapshots and valley_price else 0)
+    detail = (
+        f'timeout: rounds={max_rounds} phase={phase} saw_dip={saw_dip} '
+        f'valley=${valley_price:.10f} snaps={len(snapshots)} '
+        f'total={total_pct:+.2f}% [{snap_str}]'
+    )
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
     return False, 'timeout', detail, None
+
 
 
 def submit_timing_eval(lifecycle_id, ctx):
