@@ -808,6 +808,34 @@ _timing_executor = ThreadPoolExecutor(
 )
 # lifecycle_id -> {'future', 'ctx', 'submitted_at'}
 _timing_inflight = {}
+HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', 'f7e7e457-aba3-448b-a565-f188158e2d80')
+HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+
+def get_recent_signatures(token_ca, limit=100):
+    """Fetch recent signatures using Helius RPC to count momentum"""
+    if not HELIUS_API_KEY or 'your' in HELIUS_API_KEY.lower():
+        return []
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSignaturesForAddress",
+            "params": [
+                token_ca,
+                {"limit": limit}
+            ]
+        }
+        # Short timeout: we only care about real-time speed. If it's slow, we skip it.
+        res = requests.post(HELIUS_RPC_URL, json=payload, timeout=2.5)
+        if res.status_code == 200:
+            data = res.json()
+            if 'result' in data:
+                return [item['signature'] for item in data['result']]
+    except Exception as e:
+        pass
+    return []
+
+
 
 
 def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS, token_decimals=None):
@@ -877,6 +905,10 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
     snapshots = []
     sources = []
     baseline = None
+    
+    s1_sigs = None
+    s1_top_sig = None
+    s1_time = 0
 
     for round_i in range(max_rounds):
         if round_i > 0:
@@ -891,6 +923,15 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
             continue
         snapshots.append(price)
         sources.append(src or '?')
+
+        # Take transaction signature snapshot at S1
+        if len(snapshots) == 1:
+            try:
+                s1_sigs = get_recent_signatures(token_ca, limit=5)
+                s1_top_sig = s1_sigs[0] if s1_sigs else None
+                s1_time = time.time()
+            except Exception:
+                pass
 
         if baseline is None:
             baseline = snapshots[0]
@@ -937,6 +978,23 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
             buy_reason = 'breakout'
             
         if should_buy:
+            # Helius Momentum / Tx Velocity Check
+            elapsed = time.time() - s1_time
+            if s1_top_sig and elapsed > 0:
+                current_sigs = get_recent_signatures(token_ca, limit=100)
+                new_tx_count = 0
+                for sig in current_sigs:
+                    if sig == s1_top_sig:
+                        break
+                    new_tx_count += 1
+                
+                # Minimum 3 txs in the pre-buy window to guarantee active order flow
+                if new_tx_count < 3:
+                    detail = (f"momentum_died: only {new_tx_count} txs in {elapsed:.1f}s "
+                              f"(req >= 3) src={src_str} round={round_i+1} [{snap_str}]")
+                    log.warning(f"  [ENTRY_TIMING] {symbol} BLOCKED: {detail}")
+                    return False, 'momentum_died', detail, None
+
             detail = (f'{buy_reason}: from_base={from_base_pct:+.2f}% '
                       f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
                       f'src={src_str} round={round_i+1} [{snap_str}]')
