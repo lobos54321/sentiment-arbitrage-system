@@ -801,7 +801,7 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
 
 
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '3'))
-ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '6'))
+ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '100'))
 ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
 # Reject ascending_3 / breakout signals where the rally is already too far
 # advanced inside the observation window — that's a parabolic blow-off top,
@@ -817,9 +817,9 @@ ENTRY_PREBUY_RECHECK_MAX_PCT = float(os.environ.get('ENTRY_PREBUY_RECHECK_MAX_PC
 # DexScreener cache artifacts (observed 30%+ divergence between sources).
 ENTRY_TIMING_SNAP_MAX_AGE_MS = int(os.environ.get('ENTRY_TIMING_SNAP_MAX_AGE_MS', '5000'))
 # Concurrent timing evaluations: up to this many signals can be in the
-# timing engine at once, so a slow 120s evaluation on one signal doesn't
+# timing engine at once, so a slow 300s evaluation on one signal doesn't
 # block the main loop from processing new signals.
-TIMING_MAX_CONCURRENT = int(os.environ.get('TIMING_MAX_CONCURRENT', '4'))
+TIMING_MAX_CONCURRENT = int(os.environ.get('TIMING_MAX_CONCURRENT', '50'))
 _timing_executor = ThreadPoolExecutor(
     max_workers=TIMING_MAX_CONCURRENT, thread_name_prefix='timing'
 )
@@ -906,7 +906,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
       - s3 >= s2                      → still rising
       - s3 < s2 BUT s3 >= s1          → dropping but the two drops
                                           haven't broken the prior up bar
-      - else                          → BROKEN → SKIP
+      - else                          → BROKEN → Washout detected! The ladder resets!
 
     Buy triggers:
       (A) s3 > s2 AND s3 > s1         → 3 ascending highs, momentum
@@ -969,12 +969,18 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
         # Not broken if rising (s3 >= s2) OR dropping but holding above 2-back (s3 >= s1)
         not_broken = (s3 >= s2) or (s3 >= s1)
         if not not_broken:
-            window_pct = ((s3 - s1) / s1) * 100
-            detail = (f'trend_broke: 30s window {window_pct:+.2f}% '
-                      f'(s1=${s1:.10f} s2=${s2:.10f} s3=${s3:.10f}) '
-                      f'src={src_str} round={round_i+1} [{snap_str}]')
-            log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
-            return False, 'trend_broke', detail, None
+            # Washout / ladder break. Instead of abandoning the token, we reset the ladder.
+            # This allows the token to stay in the 5-minute pool and form a new floor.
+            snapshots = [snapshots[-1]]
+            baseline = snapshots[0]
+            # Reset Helius signature tracking for the new baseline
+            try:
+                s1_sigs = get_recent_signatures(token_ca, limit=5)
+                s1_top_sig = s1_sigs[0] if s1_sigs else None
+                s1_time = time.time()
+            except Exception:
+                pass
+            continue
             
         limit_pct = 80.0 if strict_fail_open else ENTRY_TIMING_FROM_BASE_MAX_PCT
         if from_base_pct > limit_pct:
