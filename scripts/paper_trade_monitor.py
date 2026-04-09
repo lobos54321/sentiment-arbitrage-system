@@ -453,8 +453,14 @@ def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, fin
         return None, total_sol_received if has_partial_history else final_exit_total_sol, entry_sol, accounting_source
 
     if has_partial_history:
-        if total_sol_received is None and final_exit_total_sol is not None:
-            total_sol_received = final_exit_total_sol
+        # BUG FIX: When partial history exists, totalSolReceived accumulates ALL previous
+        # partial exit amounts across the lifecycle. Using it for pnl_pct would double-count
+        # previous exits and produce wildly inflated PnL numbers (e.g. +86% on a loser).
+        # The correct approach: compute pnl only from this final exit's received SOL vs entry.
+        if final_exit_total_sol is not None and entry_sol > 0:
+            pnl = (final_exit_total_sol - entry_sol) / entry_sol
+            return pnl, final_exit_total_sol, entry_sol, 'final_exit_vs_entry_sol'
+        # Fallback: if we have no final exit amount, report as unknown
         if total_sol_received is None:
             return None, total_sol_received, entry_sol, 'monitor_state_total_sol_received'
         return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol, 'monitor_state_total_sol_received'
@@ -464,6 +470,7 @@ def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, fin
     if total_sol_received is not None:
         return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol, 'monitor_state_total_sol_received'
     return None, final_exit_total_sol, entry_sol, 'final_exit_only'
+
 
 
 def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
