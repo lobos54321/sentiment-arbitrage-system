@@ -8,6 +8,7 @@ import { evaluatePaperLiveManagedPosition } from '../src/execution/paper-live-po
 import { SharedPoolOhlcvClient } from '../src/market-data/shared-pool-ohclv-client.js';
 import { SharedQuoteClient } from '../src/market-data/shared-quote-client.js';
 import { SharedMarketRuntime, applyMarketDataProcessOverride } from '../src/market-data/shared-market-runtime.js';
+import readline from 'readline';
 
 async function readStdin() {
   return await new Promise((resolve, reject) => {
@@ -40,58 +41,86 @@ async function main() {
   const executor = new ParityExecutor({ mode: payload.mode || 'paper' }).initialize();
   const marketDataBridge = await createMarketDataBridge();
 
-  let result;
-  switch (command) {
-    case 'quote-buy':
-      result = await executor.quoteBuy(payload.tokenCA, payload.amountSol, payload.options || {});
-      break;
-    case 'quote-sell':
-      result = await executor.quoteSell(payload.tokenCA, payload.tokenAmountRaw, payload.options || {});
-      break;
-    case 'simulate-buy':
-      result = await executor.simulateBuy(payload.tokenCA, payload.amountSol, payload.options || {});
-      break;
-    case 'simulate-sell':
-      result = await executor.simulateSell(payload.tokenCA, payload.tokenAmountRaw, payload.options || {});
-      break;
-    case 'evaluate-paper-exit':
-      result = await evaluatePaperLiveManagedPosition({ ...payload, executor });
-      break;
-    case 'shared-runtime': {
-      const { method, payload: runtimePayload = {} } = payload;
-      if (method === 'getCache') {
-        result = await marketDataBridge.runtime.getCache(runtimePayload.key);
-      } else if (method === 'setCache') {
-        await marketDataBridge.runtime.setCache(runtimePayload.key, runtimePayload.value, runtimePayload.ttlMs || 0);
-        result = true;
-      } else if (method === 'getSharedCooldown') {
-        result = await marketDataBridge.runtime.getSharedCooldown(runtimePayload.provider);
-      } else if (method === 'getSwapQuote') {
-        result = await marketDataBridge.quoteClient.getSwapQuote(runtimePayload, runtimePayload.options || {});
-      } else if (method === 'getBestDexPair') {
-        result = await marketDataBridge.quoteClient.getBestDexPair(runtimePayload.tokenCA, runtimePayload.options || {});
-      } else if (method === 'resolvePool') {
-        result = await marketDataBridge.poolClient.resolvePool(runtimePayload.tokenCa || runtimePayload.tokenCA, runtimePayload.options || {});
-      } else if (method === 'fetchRecentOhlcvByPool') {
-        result = await marketDataBridge.poolClient.fetchRecentOhlcvByPool(runtimePayload.tokenCa || runtimePayload.tokenCA, runtimePayload.poolAddress, runtimePayload.options || {});
-      } else if (method === 'close') {
-        result = true;
-      } else {
-        throw new Error(`unsupported shared-runtime method: ${method}`);
-      }
-      break;
-    }
-    default:
-      throw new Error(`unsupported command: ${command}`);
+  if (command === 'daemon') {
+    return await runDaemon(executor, marketDataBridge);
   }
 
+  let result;
+  result = await processCommand(command, payload, executor, marketDataBridge);
+
   const json = JSON.stringify(result ?? { success: false, failureReason: 'bridge_undefined_result' });
-  process.stdout.write(json);
+  process.stdout.write(json + '\n');
   await Promise.allSettled([
     marketDataBridge.runtime.close(),
     marketDataBridge.quoteClient.close(),
     marketDataBridge.poolClient.close()
   ]);
+}
+
+async function processCommand(command, payload, executor, marketDataBridge) {
+  switch (command) {
+    case 'quote-buy':
+      return await executor.quoteBuy(payload.tokenCA, payload.amountSol, payload.options || {});
+    case 'quote-sell':
+      return await executor.quoteSell(payload.tokenCA, payload.tokenAmountRaw, payload.options || {});
+    case 'simulate-buy':
+      return await executor.simulateBuy(payload.tokenCA, payload.amountSol, payload.options || {});
+    case 'simulate-sell':
+      return await executor.simulateSell(payload.tokenCA, payload.tokenAmountRaw, payload.options || {});
+    case 'evaluate-paper-exit':
+      return await evaluatePaperLiveManagedPosition({ ...payload, executor });
+    case 'shared-runtime': {
+      const { method, payload: runtimePayload = {} } = payload;
+      if (method === 'getCache') {
+        return await marketDataBridge.runtime.getCache(runtimePayload.key);
+      } else if (method === 'setCache') {
+        await marketDataBridge.runtime.setCache(runtimePayload.key, runtimePayload.value, runtimePayload.ttlMs || 0);
+        return true;
+      } else if (method === 'getSharedCooldown') {
+        return await marketDataBridge.runtime.getSharedCooldown(runtimePayload.provider);
+      } else if (method === 'getSwapQuote') {
+        return await marketDataBridge.quoteClient.getSwapQuote(runtimePayload, runtimePayload.options || {});
+      } else if (method === 'getBestDexPair') {
+        return await marketDataBridge.quoteClient.getBestDexPair(runtimePayload.tokenCA, runtimePayload.options || {});
+      } else if (method === 'resolvePool') {
+        return await marketDataBridge.poolClient.resolvePool(runtimePayload.tokenCa || runtimePayload.tokenCA, runtimePayload.options || {});
+      } else if (method === 'fetchRecentOhlcvByPool') {
+        return await marketDataBridge.poolClient.fetchRecentOhlcvByPool(runtimePayload.tokenCa || runtimePayload.tokenCA, runtimePayload.poolAddress, runtimePayload.options || {});
+      } else if (method === 'close') {
+        return true;
+      } else {
+        throw new Error(`unsupported shared-runtime method: ${method}`);
+      }
+    }
+    default:
+      throw new Error(`unsupported command: ${command}`);
+  }
+}
+
+async function runDaemon(executor, marketDataBridge) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false
+  });
+  
+  // Signal ready to Python parent
+  process.stdout.write(JSON.stringify({ status: 'daemon_ready' }) + '\n');
+  
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    try {
+      const req = JSON.parse(line);
+      const command = req._command;
+      const payload = req.payload || {};
+      const result = await processCommand(command, payload, executor, marketDataBridge);
+      const resJson = JSON.stringify(result ?? { success: false, failureReason: 'bridge_undefined_result' });
+      process.stdout.write(resJson + '\n');
+    } catch (err) {
+      const resJson = JSON.stringify({ success: false, failureReason: err.message || 'daemon_eval_failed' });
+      process.stdout.write(resJson + '\n');
+    }
+  }
 }
 
 main().catch((error) => {

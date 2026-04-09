@@ -291,51 +291,75 @@ def build_execution_audit(execution=None, extra=None):
     return {key: value for key, value in audit.items() if value is not None}
 
 
-def call_execution_bridge(command, payload, timeout=10):
-    try:
-        result = subprocess.run(
-            ['node', str(EXECUTION_BRIDGE), command],
-            input=json.dumps(payload),
-            capture_output=True,
+import threading
+import select
+
+class PersistentExecutionBridge:
+    def __init__(self):
+        self._proc = None
+        self._lock = threading.Lock()
+        
+    def _start(self):
+        env = os.environ.copy()
+        self._proc = subprocess.Popen(
+            ['node', str(EXECUTION_BRIDGE), 'daemon'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            bufsize=1,
             cwd=str(PROJECT_ROOT),
+            env=env
         )
-    except Exception as e:
-        return {'success': False, 'failureReason': f'bridge_exec_failed:{e}'}
-
-    stdout = (result.stdout or '').strip()
-    stderr = (result.stderr or '').strip()
-
-    if result.returncode != 0:
-        failure = {'success': False, 'failureReason': 'bridge_failed'}
-        if stderr:
+        for _ in range(50):
+            ready, _, _ = select.select([self._proc.stdout], [], [], 0.05)
+            if ready:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    data = json.loads(line)
+                    if data.get('status') == 'daemon_ready':
+                        return
+                except Exception:
+                    pass
+            
+    def call(self, command, payload, timeout=10):
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                self._start()
+            if self._proc is None or self._proc.poll() is not None:
+                return {'success': False, 'failureReason': 'daemon_start_failed'}
+            
+            req = {"_command": command, "payload": payload}
             try:
-                parsed = json.loads(stderr)
-                failure.update(parsed if isinstance(parsed, dict) else {})
-            except Exception:
-                failure['failureReason'] = stderr[:300]
-        return failure
-
-    if not stdout:
-        return {'success': False, 'failureReason': 'bridge_empty_response'}
-
-    try:
-        parsed = json.loads(stdout)
-        return parsed if isinstance(parsed, dict) else {'success': False, 'failureReason': 'bridge_invalid_json'}
-    except Exception:
-        # stdout may contain non-JSON noise before/after the actual JSON payload;
-        # try to extract the JSON object from the output.
-        brace_start = stdout.find('{')
-        brace_end = stdout.rfind('}')
-        if brace_start >= 0 and brace_end > brace_start:
+                self._proc.stdin.write(json.dumps(req) + '\n')
+                self._proc.stdin.flush()
+            except Exception as e:
+                self._proc = None
+                return {'success': False, 'failureReason': f'daemon_write_failed:{e}'}
+                
             try:
-                parsed = json.loads(stdout[brace_start:brace_end + 1])
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-        return {'success': False, 'failureReason': f'bridge_parse_failed:{stdout[:200]}'}
+                ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+                if not ready:
+                    self._proc.kill()
+                    self._proc = None
+                    return {'success': False, 'failureReason': 'daemon_timeout'}
+                    
+                resp_line = self._proc.stdout.readline()
+                if not resp_line:
+                    self._proc = None
+                    return {'success': False, 'failureReason': 'daemon_eof'}
+                    
+                return json.loads(resp_line)
+            except Exception as e:
+                self._proc = None
+                return {'success': False, 'failureReason': f'daemon_read_failed:{e}'}
+
+_daemon_bridge = PersistentExecutionBridge()
+
+def call_execution_bridge(command, payload, timeout=10):
+    return _daemon_bridge.call(command, payload, timeout)
 
 
 def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None, lifecycle_id=None):
@@ -615,22 +639,10 @@ def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monito
         'namespace': runtime['namespace'],
     }
     try:
-        result = subprocess.run(
-            ['node', str(EXECUTION_BRIDGE), 'shared-runtime'],
-            input=json.dumps(bridge_payload),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(PROJECT_ROOT),
-        )
-    except Exception:
-        return None
-
-    stdout = (result.stdout or '').strip()
-    if result.returncode != 0 or not stdout:
-        return None
-    try:
-        return json.loads(stdout)
+        res = call_execution_bridge('shared-runtime', bridge_payload, timeout)
+        if isinstance(res, dict) and res.get('failureReason') and not res.get('success'):
+            return None
+        return res
     except Exception:
         return None
 
@@ -817,24 +829,27 @@ def get_recent_signatures(token_ca, limit=100):
     """Fetch recent signatures using Helius RPC to count momentum"""
     if not HELIUS_API_KEY or 'your' in HELIUS_API_KEY.lower():
         return []
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [
-                token_ca,
-                {"limit": limit}
-            ]
-        }
-        # Short timeout: we only care about real-time speed. If it's slow, we skip it.
-        res = requests.post(HELIUS_RPC_URL, json=payload, timeout=2.5)
-        if res.status_code == 200:
-            data = res.json()
-            if 'result' in data:
-                return [item['signature'] for item in data['result']]
-    except Exception as e:
-        pass
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [
+            token_ca,
+            {"limit": limit}
+        ]
+    }
+    for attempt in range(3):
+        try:
+            # Short timeout: we only care about real-time speed. If it's slow, we skip it.
+            res = requests.post(HELIUS_RPC_URL, json=payload, timeout=2.5)
+            if res.status_code == 200:
+                data = res.json()
+                if 'result' in data:
+                    return [item['signature'] for item in data['result']]
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(0.1)
     return []
 
 
@@ -3871,9 +3886,15 @@ def run_monitor(db):
                                         # Scenario 1: Retail FOMO Trap (Price Near High vs Vol Drops > 50%)
                                         p_near_high = pre_price >= vol_state['peak_price'] * 0.98
                                         if p_near_high and new_tx < prev_tx * 0.5 and prev_tx >= 15:
-                                            smart_exit_triggered = True
-                                            smart_exit_reason = 'smart_sell_exhaustion'
-                                            log.warning(f"  [SMART_EXIT] {pos.symbol} Retail FOMO Exhaustion (Vol {prev_tx}->{new_tx} in {elapsed_check:.1f}s, Price UP). Force Selling!")
+                                            vol_state['low_vol_strike'] = vol_state.get('low_vol_strike', 0) + 1
+                                            if vol_state['low_vol_strike'] >= 2:
+                                                smart_exit_triggered = True
+                                                smart_exit_reason = 'smart_sell_exhaustion'
+                                                log.warning(f"  [SMART_EXIT] {pos.symbol} Retail FOMO Exhaustion (Vol {prev_tx}->{new_tx} in {elapsed_check:.1f}s, Price UP) Confirmed. Force Selling!")
+                                            else:
+                                                log.info(f"  [VOL_WARNING] {pos.symbol} Retail FOMO detected (Vol {prev_tx}->{new_tx}), strike 1 (debouncing Jitter).")
+                                        else:
+                                            vol_state['low_vol_strike'] = 0
                                             
                                         # Scenario 3: Giant Sell Wall / Distribution (Price dropping off peak vs Vol exploding)
                                         p_dumping = pre_price <= vol_state['peak_price'] * 0.95
