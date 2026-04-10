@@ -3974,6 +3974,33 @@ def run_monitor(db):
                                 watchlist.update_position_state(w_entry['id'], dynamic_sl=exit_matrix['new_sl'])
                                 log.info(f"  [EXIT_MATRIX] {pos.symbol} SL tightened to {exit_matrix['new_sl']:.1%}")
                             exit_matrix['action'] = 'hold'
+                        
+                        # === BUG FIX: Persist all dynamic state back to watchlist DB ===
+                        # Without this, peak_pnl stays 0 forever and Trail/Lock never fires
+                        state_updates = {'last_matrix_check': time.time()}
+                        
+                        # Persist peak_pnl (critical for trail stop + lock profit)
+                        if 'peak_pnl' in exit_matrix and exit_matrix.get('current_pnl') is not None:
+                            new_peak = max(w_entry.get('peak_pnl', 0) or 0, exit_matrix['current_pnl'])
+                            state_updates['peak_pnl'] = new_peak
+                        elif exit_matrix.get('current_pnl') is not None:
+                            new_peak = max(w_entry.get('peak_pnl', 0) or 0, exit_matrix['current_pnl'])
+                            state_updates['peak_pnl'] = new_peak
+                        
+                        # Persist moon_peak_pnl (critical for moon trail)
+                        if exit_matrix.get('moon_peak_pnl') is not None:
+                            state_updates['moon_peak_pnl'] = exit_matrix['moon_peak_pnl']
+                        
+                        # Persist zero_vol_count (critical for volume-based SL tightening)
+                        if exit_matrix.get('new_zero_vol_count') is not None:
+                            state_updates['zero_vol_count'] = exit_matrix['new_zero_vol_count']
+                        
+                        # Persist moon_trend_zero_count (critical for moon trend death)
+                        if exit_matrix.get('new_moon_trend_zero_count') is not None:
+                            state_updates['moon_trend_zero_count'] = exit_matrix['new_moon_trend_zero_count']
+                        
+                        if w_entry:
+                            watchlist.update_position_state(w_entry['id'], **state_updates)
 
                         exit_eval = {
                             'ok': True,
