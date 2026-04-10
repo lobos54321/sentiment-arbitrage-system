@@ -321,10 +321,21 @@ class MatrixEvaluator:
         ready = self._check_pre_momentum_pass(scores, thresholds)
 
         # Hard blocks: no zero scores allowed for critical matrices
+        hard_block = None
         if scores['trend'] == 0:
             ready = False
+            hard_block = 'trend=0'
         if scores['price'] == 0:
             ready = False
+            hard_block = (hard_block + '+' if hard_block else '') + 'price=0'
+
+        # Always log evaluation result so we can diagnose filtering
+        log.info(
+            f"[Matrix] ${symbol} eval: "
+            f"T={scores['trend']} V={scores['volume']} P={scores['price']} S={scores['signal']} "
+            f"ready={ready} block={hard_block or 'none'} "
+            f"type={signal_type} age={int((time.time() - entry.get('added_at', time.time())) / 60)}min"
+        )
 
         action = 'wait'
         action_reason = 'matrices not yet aligned'

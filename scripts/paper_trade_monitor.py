@@ -3613,10 +3613,11 @@ def run_monitor(db):
 
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
-            active_watchlist = watchlist.get_active_count()
+            wl_watching = len(watchlist.get_watching())
+            wl_holding = watchlist.get_active_count()
             log.info(
                 f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
-                f"age_min={freshness.get('age_minutes')} active_watchlist={active_watchlist} active_positions={len(positions)} pending={len(pending_entries)}"
+                f"age_min={freshness.get('age_minutes')} watching={wl_watching} holding={wl_holding} active_positions={len(positions)} pending={len(pending_entries)}"
             )
             last_heartbeat = now
 
