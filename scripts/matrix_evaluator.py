@@ -391,11 +391,7 @@ class MatrixEvaluator:
             ('signal', scores.get('signal', 0), thresholds['signal_min']),
         ]
 
-        passing_count = sum(1 for _, val, _ in checks if val >= 60)
-        hard_fails = any(val < mins for _, val, mins in checks)
-
-        if hard_fails:
-            return False
+        passing_count = sum(1 for _, val, mins in checks if val >= mins)
 
         return passing_count >= thresholds['min_passing'] - 1  # -1 because momentum hasn't been checked
 
