@@ -85,11 +85,11 @@ def score_volume(bars, signal_tx24h=0):
 
     tx = signal_tx24h or 0
 
-    if vol_ratio >= 2.0 and tx >= 500:
+    if vol_ratio >= 2.0 and (tx == 0 or tx >= 300):
         return 100, f'strong_volume ratio={vol_ratio:.1f} tx={tx}'
-    elif vol_ratio >= 1.2 and tx >= 300:
+    elif vol_ratio >= 1.2 and (tx == 0 or tx >= 100):
         return 70, f'moderate_volume ratio={vol_ratio:.1f} tx={tx}'
-    elif vol_ratio >= 0.8 and tx >= 200:
+    elif vol_ratio >= 0.8:
         return 40, f'flat_volume ratio={vol_ratio:.1f} tx={tx}'
     else:
         return 0, f'weak_volume ratio={vol_ratio:.1f} tx={tx}'
@@ -213,9 +213,9 @@ class MatrixEvaluator:
         'trend_min': 50,    # must be at least fail-open
         'volume_min': 40,   # at least not shrinking
         'price_min': 70,    # healthy range
-        'signal_min': 50,   # at least some heat
+        'signal_min': 40,   # 40 means survives even if >10m but <120m
         'momentum_min': 60, # at least not declining
-        'min_passing': 4,   # at least 4 of 5 >= 60
+        'min_passing': 3,   # at least 3 of 4 pre-matrices >= threshold!
         'max_obs_minutes': 120,  # 2 hours max observation
     }
 

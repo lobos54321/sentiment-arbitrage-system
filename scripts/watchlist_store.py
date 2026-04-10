@@ -333,6 +333,8 @@ class WatchlistStore:
             updates['lowest_price'] = current_price
         if entry['highest_price'] is None or current_price > entry['highest_price']:
             updates['highest_price'] = current_price
+        if not entry.get('signal_price') or entry.get('signal_price') <= 0:
+            updates['signal_price'] = current_price
         if updates:
             self._update(entry_id, **updates)
 

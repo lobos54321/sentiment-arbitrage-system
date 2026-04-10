@@ -3691,9 +3691,10 @@ def run_monitor(db):
                         log.warning(f"  Could not find pool for {symbol}, skipping")
                         continue
                     time.sleep(0.1)
-                    sig_price = get_current_price(token_ca, pool)
+                    sig_price_val, _, _ = fetch_realtime_price(token_ca, pool, max_age_ms=15000)
+                    sig_price = sig_price_val if sig_price_val and sig_price_val > 0 else None
 
-                    log.info(f"  [WATCHLIST] Registering {symbol} ({signal_type}) Super={super_idx}")
+                    log.info(f"  [WATCHLIST] Registering {symbol} ({signal_type}) Super={super_idx} Price={sig_price}")
                     watchlist.register(
                         ca=token_ca,
                         symbol=symbol,
