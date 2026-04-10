@@ -35,6 +35,9 @@ from pathlib import Path
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
+from watchlist_store import WatchlistStore
+from matrix_evaluator import MatrixEvaluator, ExitMatrixEvaluator
+
 try:
     import redis
 except Exception:
@@ -1952,7 +1955,11 @@ def _normalize_signal_rows(rows):
         record.setdefault('timestamp', None)
         record.setdefault('description', '')
         record.setdefault('hard_gate_status', None)
-        record.setdefault('signal_type', None)
+        record.setdefault('market_cap', None)
+        record.setdefault('holders', None)
+        record.setdefault('volume_24h', None)
+        record.setdefault('top10_pct', None)
+        record.setdefault('is_ath', 0)
         normalized.append(record)
     return normalized
 
@@ -2019,7 +2026,7 @@ def _query_local_new_signals(last_signal_id):
     has_signal_type = _premium_signal_has_column(sdb, 'signal_type')
     signal_type_expr = 'signal_type' if has_signal_type else 'NULL AS signal_type'
     rows = sdb.execute(f"""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
         FROM premium_signals
         WHERE id > ?
           AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
@@ -2036,7 +2043,7 @@ def _query_local_recent_signals(limit=20):
     has_signal_type = _premium_signal_has_column(sdb, 'signal_type')
     signal_type_expr = 'signal_type' if has_signal_type else 'NULL AS signal_type'
     rows = sdb.execute(f"""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
         FROM premium_signals
         WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
           AND description LIKE '%New Trending%'
@@ -3407,6 +3414,11 @@ def run_monitor(db):
     strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
     position_size_sol = get_paper_position_size_sol(strategy_config)
     max_positions = get_paper_max_positions(strategy_config)
+    
+    # Initialize observation list and matrix evaluators
+    watchlist = WatchlistStore()
+    matrix_evaluator = MatrixEvaluator()
+    exit_matrix_evaluator = ExitMatrixEvaluator()
 
     log.info("=== Paper Trade Monitor Started ===")
     log.info(f"  strategy={strategy_id} role={strategy_role}")
@@ -3599,15 +3611,12 @@ def run_monitor(db):
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
 
-        # Drain any completed concurrent timing evaluations; passing ones
-        # are promoted into pending_entries for execution.
-        drain_timing_results(pending_entries, lifecycles, positions)
-
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
+            active_watchlist = watchlist.get_active_count()
             log.info(
                 f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
-                f"age_min={freshness.get('age_minutes')} active_positions={len(positions)} pending={len(pending_entries)} timing_inflight={len(_timing_inflight)}"
+                f"age_min={freshness.get('age_minutes')} active_watchlist={active_watchlist} active_positions={len(positions)} pending={len(pending_entries)}"
             )
             last_heartbeat = now
 
@@ -3675,62 +3684,74 @@ def run_monitor(db):
                         last_progress = time.time()
                         continue
 
-                    if super_idx is None or super_idx <= min_super_index:
-                        continue
-
+                    # Determine signal price immediately for reference
                     pool = get_pool_address(token_ca)
                     if not pool:
                         log.warning(f"  Could not find pool for {symbol}, skipping")
                         continue
                     time.sleep(0.1)
+                    sig_price = get_current_price(token_ca, pool)
 
-                    # --- Pre-buy filter: two-layer check ---
-                    # Layer 1: Trend check (last 5 closed 1m bars shape analysis)
-                    notath_bars = get_notath_bars(pool, limit=5)
-                    trend_ok, trend_reason, trend_detail = check_multi_bar_trend(notath_bars, symbol)
-                    
-                    if not trend_ok:
-                        log.info(
-                            f"  [PREBUY_FILTER] {symbol} BLOCKED: {trend_reason} "
-                            f"— {trend_detail}, skipping"
-                        )
-                        continue
-                    else:
-                        if trend_reason == 'insufficient_bars':
-                            log.warning(f"  [PREBUY_FILTER] {symbol} no trend data, allowing entry (fail-open)")
-                        else:
-                            log.info(f"  [PREBUY_FILTER] {symbol} trend OK: {trend_detail}")
-
-                    # Layer 2: Entry timing — submit to thread pool (non-blocking).
-                    # The result is picked up by drain_timing_results() at the
-                    # top of each main loop iteration and promoted to
-                    # pending_entries if it passes.
-                    if trend_ok:
-                        if lifecycle_id in _timing_inflight:
-                            log.debug(f"  [PREBUY_FILTER] {symbol} timing already in-flight, skipping re-submit")
-                            continue
-                        signal_minute_ts = get_signal_minute_ts(signal_ts)
-                        timing_ctx = {
-                            'token_ca': token_ca,
-                            'symbol': symbol,
-                            'signal_ts': signal_ts,
-                            'premium_signal_id': premium_signal_id,
-                            'signal_type': signal_type,
-                            'signal_minute_ts': signal_minute_ts,
-                            'pool': pool,
-                            'super_idx': super_idx,
-                            'strict_fail_open': trend_reason == 'insufficient_bars',
-                        }
-                        submit_timing_eval(lifecycle_id, timing_ctx)
-                        log.info(
-                            f"  [PREBUY_FILTER] {symbol} timing submitted "
-                            f"(inflight={len(_timing_inflight)}/{TIMING_MAX_CONCURRENT})"
-                        )
-                        last_progress = time.time()
-                        continue
-                    time.sleep(0.05)
+                    log.info(f"  [WATCHLIST] Registering {symbol} ({signal_type}) Super={super_idx}")
+                    watchlist.register(
+                        ca=token_ca,
+                        symbol=symbol,
+                        signal_type='ATH' if sig.get('is_ath') else 'NOT_ATH',
+                        pool_address=pool,
+                        signal_ts=signal_ts,
+                        premium_signal_id=premium_signal_id,
+                        signal_price=sig_price,
+                        signal_mc=sig.get('market_cap'),
+                        signal_super=super_idx or 0,
+                        signal_holders=sig.get('holders') or 0,
+                        signal_vol24h=sig.get('volume_24h') or 0,
+                        signal_tx24h=0, # not readily available in this row, evaluate_matrix gets recent bars anyway
+                        signal_top10=top10_pct or 0
+                    )
+                    last_progress = time.time()
             except Exception as e:
                 log.error(f"Signal check error: {e}")
+
+        # --- Evaluate Watchlist Entries ---
+        watching_entries = watchlist.get_watching()
+        for w_entry in watching_entries:
+            try:
+                lifecycle_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
+                
+                # Skip if already in pending or open positions
+                if lifecycle_id in pending_entries or any(p.lifecycle_id == lifecycle_id for p in positions.values()):
+                    continue
+                
+                # Enforce 60s evaluation interval
+                if time.time() - w_entry.get('last_eval_at', 0) < 60.0:
+                    continue
+                
+                # Skip if max positions reached
+                if len(positions) + len(pending_entries) >= max_positions:
+                    break
+                    
+                eval_res = matrix_evaluator.evaluate(w_entry)
+                watchlist.update_scores(w_entry['id'], eval_res['scores'])
+                
+                if eval_res['action'] == 'remove':
+                    watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
+                    log.info(f"  [WATCHLIST] 🗑️ Removed {w_entry['symbol']}: {eval_res['action_reason']}")
+                elif eval_res['action'] == 'fire':
+                    pending_entries[lifecycle_id] = {
+                        'token_ca': w_entry['ca'],
+                        'symbol': w_entry['symbol'],
+                        'signal_ts': w_entry['signal_ts'],
+                        'premium_signal_id': w_entry['premium_signal_id'],
+                        'signal_type': w_entry['type'],
+                        'pool': w_entry['pool_address'],
+                        'staged_at': time.time(),
+                        'trigger_price': eval_res['current_price'],
+                        'watchlist_id': w_entry['id']
+                    }
+                    log.info(f"  [WATCHLIST] 🚀 Fired {w_entry['symbol']} -> Pending queue")
+                    last_progress = time.time()
+            except Exception as e:
+                log.error(f"Watchlist evaluation error for {w_entry.get('symbol')}: {e}", exc_info=True)
 
         if pending_entries:
             for lifecycle_id, pending in list(pending_entries.items()):
@@ -3844,6 +3865,15 @@ def run_monitor(db):
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
                         f"lifecycle={lifecycle_id} via quoted execution"
                     )
+                    if 'watchlist_id' in pending:
+                        watchlist.mark_holding(
+                            pending['watchlist_id'], 
+                            price, 
+                            position_size_sol, 
+                            token_amount_raw, 
+                            token_decimals or 0, 
+                            trade_id
+                        )
                     last_progress = time.time()
                     time.sleep(0.2)
                 except Exception as e:
@@ -3892,94 +3922,63 @@ def run_monitor(db):
                             f"src={pre_src} age_ms={pre_age_ms}"
                         )
                         
-                        # --- POST-ENTRY SMART EXIT ENGINE (Order Flow Divergence) ---
-                        if pos.strategy_stage == 'stage1':
-                            now_sec = time.time()
-                            vol_state = _post_entry_vol_stats.setdefault(pos.lifecycle_id, {
-                                'last_check': 0, 'prev_count': 0, 'last_sig': None, 'peak_price': pos.entry_price
-                            })
+                        # --- POST-ENTRY EXIT MATRIX ENGINE ---
+                        w_entry = watchlist.get_by_ca(pos.token_ca)
+                        if not w_entry:
+                            exit_matrix = {'action': 'hold'}
+                        elif w_entry['status'] == 'moon_bag':
+                            exit_matrix = exit_matrix_evaluator.evaluate_moon_bag(w_entry, pre_price)
+                        else:
+                            exit_matrix = exit_matrix_evaluator.evaluate_exit(w_entry, pre_price)
                             
-                            if pre_price > vol_state['peak_price']:
-                                vol_state['peak_price'] = pre_price
-                                
-                            elapsed_check = now_sec - vol_state['last_check']
-                            if elapsed_check >= 10.0:  # Poll approx every 10 seconds
-                                current_sigs = get_recent_signatures(pos.token_ca, limit=100)
-                                if current_sigs:
-                                    s1_sig = vol_state['last_sig']
-                                    new_tx = 0
-                                    if s1_sig:
-                                        for sig in current_sigs:
-                                            if sig == s1_sig:
-                                                break
-                                            new_tx += 1
-                                    else:
-                                        # First run: set to 0 to establish baseline, or max out if > 100
-                                        new_tx = len(current_sigs) if len(current_sigs) < 100 else 0
-                                        
-                                    prev_tx = vol_state['prev_count']
-                                    
-                                    # Process Logic if we have valid historical baseline
-                                    if s1_sig and prev_tx > 0:
-                                        # Scenario 1: Retail FOMO Trap (Price Near High vs Vol Drops > 50%)
-                                        p_near_high = pre_price >= vol_state['peak_price'] * 0.98
-                                        if p_near_high and new_tx < prev_tx * 0.5 and prev_tx >= 15:
-                                            vol_state['low_vol_strike'] = vol_state.get('low_vol_strike', 0) + 1
-                                            if vol_state['low_vol_strike'] >= 2:
-                                                smart_exit_triggered = True
-                                                smart_exit_reason = 'smart_sell_exhaustion'
-                                                log.warning(f"  [SMART_EXIT] {pos.symbol} Retail FOMO Exhaustion (Vol {prev_tx}->{new_tx} in {elapsed_check:.1f}s, Price UP) Confirmed. Force Selling!")
-                                            else:
-                                                log.info(f"  [VOL_WARNING] {pos.symbol} Retail FOMO detected (Vol {prev_tx}->{new_tx}), strike 1 (debouncing Jitter).")
-                                        else:
-                                            vol_state['low_vol_strike'] = 0
-                                            
-                                        # Scenario 3: Giant Sell Wall / Distribution (Price dropping off peak vs Vol exploding)
-                                        p_dumping = pre_price <= vol_state['peak_price'] * 0.95
-                                        if p_dumping and new_tx > prev_tx * 1.5 and new_tx >= 25:
-                                            smart_exit_triggered = True
-                                            smart_exit_reason = 'smart_sell_wall_dump'
-                                            log.warning(f"  [SMART_EXIT] {pos.symbol} Distribution Sell Wall (Vol {prev_tx}->{new_tx} in {elapsed_check:.1f}s, Price Slipping). Force Selling!")
+                        if exit_matrix.get('action') == 'tighten_sl':
+                            if exit_matrix.get('new_sl'):
+                                watchlist.update_position_state(w_entry['id'], dynamic_sl=exit_matrix['new_sl'])
+                            exit_matrix['action'] = 'hold'
 
-                                    vol_state['last_check'] = now_sec
-                                    vol_state['prev_count'] = new_tx
-                                    vol_state['last_sig'] = current_sigs[0]
-                    else:
-                        pre_ts = None
-                    exit_eval = evaluate_paper_exit(
-                        {
-                            'tokenCA': pos.token_ca,
-                            'symbol': pos.symbol,
-                            'entryPrice': pos.entry_price,
-                            'entryTs': pos.entry_ts,
-                            'positionSizeSol': pos.position_size_sol,
-                            'tokenAmountRaw': pos.token_amount_raw,
-                            'tokenDecimals': pos.token_decimals,
-                            'strategyStage': pos.strategy_stage,
-                            'strategyId': strategy_id,
-                            'lifecycleId': pos.lifecycle_id,
-                            'monitorState': pos.monitor_state,
-                        },
-                        {
-                            'solPriceUsd': sol_price,
+                        exit_eval = {
+                            'ok': True,
                             'currentPrice': pre_price,
                             'quoteTsSec': pre_ts,
+                            'realizedPnl': exit_matrix.get('current_pnl', 0.0),
+                            'triggerPnl': exit_matrix.get('current_pnl', 0.0),
+                            'shouldExit': False,
+                            'action': 'hold',
+                            'execution': {'success': True, 'effectivePrice': pre_price},
+                            'markSource': 'matrix_engine'
                         }
-                    )
-
-                    # Intercept: Force JS output to exit if Python detected Order Flow Divergence
-                    if smart_exit_triggered and not exit_eval.get('shouldExit') and pre_price:
-                        exit_eval['ok'] = True
-                        exit_eval['shouldExit'] = True
-                        exit_eval['action'] = 'exit'
-                        exit_eval['exitReason'] = smart_exit_reason
-                        pnl = (pre_price - pos.entry_price) / pos.entry_price
-                        exit_eval['triggerPnl'] = pnl
-                        exit_eval['realizedPnl'] = pnl
-                        exit_eval.setdefault('execution', {})
-                        exit_eval['execution']['effectivePrice'] = pre_price
-                        exit_eval['execution']['success'] = True
-                        exit_eval['markSource'] = 'force_smart_exit'
+                        
+                        if exit_matrix['action'] in ('exit', 'lock_profit'):
+                            sell_pct = 0.5 if exit_matrix['action'] == 'lock_profit' else 1.0
+                            sell_amount_raw = int(float(pos.token_amount_raw) * sell_pct) if pos.token_amount_raw else 0
+                            
+                            simulate_res = simulate_exit_execution(
+                                pos.token_ca,
+                                str(sell_amount_raw),
+                                getattr(pos, 'token_decimals', 0) or 0,
+                                pos.strategy_stage,
+                                strategy_id=strategy_id,
+                                lifecycle_id=pos.lifecycle_id
+                            )
+                            
+                            if simulate_res.get('success'):
+                                exit_eval['shouldExit'] = True
+                                exit_eval['action'] = 'partial_sell' if exit_matrix['action'] == 'lock_profit' else 'exit'
+                                exit_eval['exitReason'] = exit_matrix.get('reason', 'matrix_exit')
+                                exit_eval['execution'] = simulate_res
+                                exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
+                                
+                                if exit_matrix['action'] == 'lock_profit' and w_entry:
+                                    watchlist.mark_moon_bag(w_entry['id'], exit_matrix.get('current_pnl', 0.0))
+                                    rem_amount = int(float(pos.token_amount_raw) - sell_amount_raw)
+                                    exit_eval['updatedState'] = (pos.monitor_state or {}).copy()
+                                    exit_eval['updatedState']['tokenAmount'] = rem_amount
+                            else:
+                                exit_eval['ok'] = False
+                                exit_eval['failureReason'] = simulate_res.get('failureReason', 'quote_failed')
+                    else:
+                        pre_ts = None
+                        exit_eval = {'ok': False, 'failureReason': 'no_price'}
 
                     if not exit_eval.get('ok'):
                         failure_info = exit_eval.get('failureReason') or exit_eval.get('action') or 'unknown'
@@ -4253,6 +4252,11 @@ def run_monitor(db):
                     pos.trade_id,
                 ))
                 db.commit()
+                
+                # Update Watchlist Status
+                w_entry = watchlist.get_by_ca(pos.token_ca)
+                if w_entry:
+                    watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=180)
                 last_progress = time.time()
                 if pos.strategy_stage == 'stage1' and reason == 'sl':
                     lifecycle['stage1_stop_ts'] = exit_ts
