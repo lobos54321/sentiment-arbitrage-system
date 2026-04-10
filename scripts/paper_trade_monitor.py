@@ -3715,24 +3715,37 @@ def run_monitor(db):
 
         # --- Evaluate Watchlist Entries ---
         watching_entries = watchlist.get_watching()
+        if watching_entries:
+            log.info(f"  [WATCHLIST_SCAN] Scanning {len(watching_entries)} watching tokens...")
+        wl_eval_count = 0
+        wl_skip_cooldown = 0
+        wl_skip_duplicate = 0
         for w_entry in watching_entries:
             try:
                 lifecycle_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                 
                 # Skip if already in pending or open positions
                 if lifecycle_id in pending_entries or any(p.lifecycle_id == lifecycle_id for p in positions.values()):
+                    wl_skip_duplicate += 1
                     continue
                 
                 # Enforce 60s evaluation interval
                 if time.time() - w_entry.get('last_eval_at', 0) < 60.0:
+                    wl_skip_cooldown += 1
                     continue
                 
                 # Skip if max positions reached
                 if len(positions) + len(pending_entries) >= max_positions:
+                    log.info(f"  [WATCHLIST_SCAN] Max positions reached ({max_positions}), stopping scan")
                     break
-                    
+                
+                wl_eval_count += 1
                 eval_res = matrix_evaluator.evaluate(w_entry)
                 watchlist.update_scores(w_entry['id'], eval_res['scores'])
+                
+                # Update price bounds if we got a price
+                if eval_res.get('current_price') and eval_res['current_price'] > 0:
+                    watchlist.update_price_bounds(w_entry['id'], eval_res['current_price'])
                 
                 if eval_res['action'] == 'remove':
                     watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
@@ -3749,10 +3762,24 @@ def run_monitor(db):
                         'trigger_price': eval_res['current_price'],
                         'watchlist_id': w_entry['id']
                     }
-                    log.info(f"  [WATCHLIST] 🚀 Fired {w_entry['symbol']} -> Pending queue")
+                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} -> Pending queue")
                     last_progress = time.time()
+                else:
+                    # Log the 'wait' action so user sees why it's not firing
+                    age_min = int((time.time() - w_entry.get('added_at', time.time())) / 60)
+                    log.info(
+                        f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT ({age_min}min) "
+                        f"reason={eval_res.get('action_reason', 'unknown')}"
+                    )
             except Exception as e:
                 log.error(f"Watchlist evaluation error for {w_entry.get('symbol')}: {e}", exc_info=True)
+        
+        if watching_entries:
+            log.info(
+                f"  [WATCHLIST_SCAN] Done: evaluated={wl_eval_count} "
+                f"skip_cooldown={wl_skip_cooldown} skip_dup={wl_skip_duplicate} "
+                f"total_watching={len(watching_entries)}"
+            )
 
         if pending_entries:
             for lifecycle_id, pending in list(pending_entries.items()):
@@ -3918,7 +3945,7 @@ def run_monitor(db):
 
                     if pre_price and pre_price > 0:
                         pre_ts = int(time.time() - (pre_age_ms or 0) / 1000)
-                        log.debug(
+                        log.info(
                             f"  [PRE_PRICE] {pos.symbol}: ${pre_price:.10f} "
                             f"src={pre_src} age_ms={pre_age_ms}"
                         )
@@ -3926,15 +3953,26 @@ def run_monitor(db):
                         # --- POST-ENTRY EXIT MATRIX ENGINE ---
                         w_entry = watchlist.get_by_ca(pos.token_ca)
                         if not w_entry:
-                            exit_matrix = {'action': 'hold'}
+                            exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}
                         elif w_entry['status'] == 'moon_bag':
                             exit_matrix = exit_matrix_evaluator.evaluate_moon_bag(w_entry, pre_price)
                         else:
                             exit_matrix = exit_matrix_evaluator.evaluate_exit(w_entry, pre_price)
+                        
+                        # Log every exit evaluation
+                        held_min = int((time.time() - pos.entry_ts) / 60)
+                        pnl_pct = exit_matrix.get('current_pnl', 0) * 100
+                        log.info(
+                            f"  [EXIT_MATRIX] {pos.symbol}/{pos.strategy_stage} "
+                            f"action={exit_matrix['action']} pnl={pnl_pct:+.1f}% "
+                            f"held={held_min}min reason={exit_matrix.get('reason', '-')} "
+                            f"price=${pre_price:.10f} trail={exit_matrix.get('trail_floor', '-')}"
+                        )
                             
                         if exit_matrix.get('action') == 'tighten_sl':
                             if exit_matrix.get('new_sl'):
                                 watchlist.update_position_state(w_entry['id'], dynamic_sl=exit_matrix['new_sl'])
+                                log.info(f"  [EXIT_MATRIX] {pos.symbol} SL tightened to {exit_matrix['new_sl']:.1%}")
                             exit_matrix['action'] = 'hold'
 
                         exit_eval = {
@@ -3968,6 +4006,11 @@ def run_monitor(db):
                                 exit_eval['exitReason'] = exit_matrix.get('reason', 'matrix_exit')
                                 exit_eval['execution'] = simulate_res
                                 exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
+                                
+                                if exit_matrix['action'] == 'lock_profit':
+                                    log.info(f"  [EXIT_MATRIX] 🌙 {pos.symbol} LOCK PROFIT! Selling 50%, rest → Moon Bag")
+                                else:
+                                    log.info(f"  [EXIT_MATRIX] 🔔 {pos.symbol} EXIT triggered: {exit_matrix.get('reason')}")
                                 
                                 if exit_matrix['action'] == 'lock_profit' and w_entry:
                                     watchlist.mark_moon_bag(w_entry['id'], exit_matrix.get('current_pnl', 0.0))
