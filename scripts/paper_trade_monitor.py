@@ -4159,9 +4159,9 @@ def run_monitor(db):
                     reason = exit_eval.get('exitReason') or exit_eval.get('lifecycleReason')
                     
                     # Add 10-second protection against any SL drop right after entry
-                    if (should_exit or action in ('partial_sell', 'exit')) and reason in ('sl', 'stop_loss'):
+                    if (should_exit or action in ('partial_sell', 'exit')) and reason and ('sl' in reason or 'stop_loss' in reason or 'hard_sl' in reason):
                         if time.time() - pos.entry_ts <= 10:
-                            log.info(f"  [PROTECTION] {pos.symbol} ignoring SL trigger within first 10s of entry")
+                            log.info(f"  [PROTECTION] {pos.symbol} ignoring SL trigger within first 10s of entry (reason={reason})")
                             should_exit = False
                             action = 'hold'
                             reason = 'hold'
