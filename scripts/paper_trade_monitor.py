@@ -3874,6 +3874,10 @@ def run_monitor(db):
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
+
+                    # Pop immediately after commit — prevents ghost duplicate on next loop
+                    pending_entries.pop(lifecycle_id, None)
+
                     pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
                                    'stage1', lifecycle_id, stage1_exit, position_size_sol, token_amount_raw, token_decimals or 0,
                                    monitor_state={
@@ -3887,8 +3891,15 @@ def run_monitor(db):
                                        'exitStrategy': 'NOT_ATH',
                                    })
                     positions[pos.trade_id] = pos
-                    lifecycles[lifecycle_id]['stage1_trade_id'] = trade_id
-                    pending_entries.pop(lifecycle_id, None)
+
+                    # Use setdefault to avoid KeyError if lifecycle not yet initialized
+                    lc = lifecycles.setdefault(lifecycle_id,
+                        build_lifecycle_state(lifecycle_id, pending['token_ca'],
+                            pending['symbol'], pending['signal_ts'],
+                            pending.get('premium_signal_id'),
+                            pending.get('signal_type')))
+                    lc['stage1_trade_id'] = trade_id
+
                     log.info(
                         f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} "
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
@@ -3906,6 +3917,8 @@ def run_monitor(db):
                     last_progress = time.time()
                     time.sleep(0.2)
                 except Exception as e:
+                    # Safety net: always pop to prevent infinite retry loop
+                    pending_entries.pop(lifecycle_id, None)
                     log.error(f"  Pending entry error for {pending.get('symbol', lifecycle_id)}: {e}")
 
         if now - last_position_check >= POSITION_POLL_INTERVAL:

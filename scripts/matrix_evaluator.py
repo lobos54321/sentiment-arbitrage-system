@@ -78,8 +78,12 @@ def score_volume(bars, signal_tx24h=0):
     prev_vols = [b.get('volume', 0) for b in bars[1:4]]
     avg_prev = sum(prev_vols) / len(prev_vols) if prev_vols else 0
 
+    # All-zero = data absent, not volume decline — fail-open
+    if avg_prev <= 0 and recent_vol <= 0:
+        return 50, 'no_volume_data (fail-open)'
+
     if avg_prev <= 0:
-        vol_ratio = 1.0 if recent_vol <= 0 else 999.0
+        vol_ratio = 999.0  # recent_vol > 0 with no prior data = new volume surge
     else:
         vol_ratio = recent_vol / avg_prev
 
@@ -328,6 +332,10 @@ class MatrixEvaluator:
         if scores['price'] == 0:
             ready = False
             hard_block = (hard_block + '+' if hard_block else '') + 'price=0'
+        if scores['volume'] < thresholds['volume_min']:
+            hard_block = (hard_block + '+' if hard_block else '') + f"vol={scores['volume']}<{thresholds['volume_min']}"
+        if scores['signal'] < thresholds['signal_min']:
+            hard_block = (hard_block + '+' if hard_block else '') + f"sig={scores['signal']}<{thresholds['signal_min']}"
 
         # Always log evaluation result so we can diagnose filtering
         log.info(
@@ -391,7 +399,9 @@ class MatrixEvaluator:
         ]
 
         passing_count = sum(1 for _, val, _ in checks if val >= 60)
-        hard_fails = any(val < mins for _, val, mins in checks)
+        # Signal is a historical attribute, not real-time market state — exclude from hard_fail
+        market_checks = [c for c in checks if c[0] != 'signal']
+        hard_fails = any(val < mins for _, val, mins in market_checks)
 
         if hard_fails:
             return False
@@ -459,6 +469,15 @@ class ExitMatrixEvaluator:
                 'trail_floor': None,
             }
 
+        # === Profit Lock at +20% (check BEFORE trail to prevent competition) ===
+        if peak_pnl >= 0.20 and not entry.get('has_locked_profit'):
+            return {
+                'action': 'lock_profit',
+                'reason': f'profit_lock (peak={peak_pnl:.1%} >= 20%)',
+                'current_pnl': current_pnl,
+                'trail_floor': None,
+            }
+
         # === Trailing Stop ===
         trail_floor = None
         if peak_pnl >= 0.05:  # +5% trail activation
@@ -474,15 +493,6 @@ class ExitMatrixEvaluator:
                     'current_pnl': current_pnl,
                     'trail_floor': trail_floor,
                 }
-
-        # === Profit Lock at +20% ===
-        if peak_pnl >= 0.20 and not entry.get('has_locked_profit'):
-            return {
-                'action': 'lock_profit',
-                'reason': f'profit_lock (peak={peak_pnl:.1%} >= 20%)',
-                'current_pnl': current_pnl,
-                'trail_floor': trail_floor,
-            }
 
         # === Matrix-based soft exit (trend check) ===
         pool = entry.get('pool_address')
