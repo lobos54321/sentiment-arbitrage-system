@@ -215,7 +215,7 @@ class MatrixEvaluator:
         'price_min': 70,    # healthy range
         'signal_min': 40,   # 40 means survives even if >10m but <120m
         'momentum_min': 60, # at least not declining
-        'min_passing': 3,   # at least 3 of 4 pre-matrices >= threshold!
+        'min_passing': 4,   # at least 3 of 4 pre-matrices >= 60!
         'max_obs_minutes': 120,  # 2 hours max observation
     }
 
@@ -382,16 +382,11 @@ class MatrixEvaluator:
             'current_price': current_price,
         }
 
-    def _check_pre_momentum_pass(self, scores, thresholds):
-        """Check if matrices ①②③⑤ meet thresholds for momentum trigger."""
-        checks = [
-            ('trend', scores.get('trend', 0), thresholds['trend_min']),
-            ('volume', scores.get('volume', 0), thresholds['volume_min']),
-            ('price', scores.get('price', 0), thresholds['price_min']),
-            ('signal', scores.get('signal', 0), thresholds['signal_min']),
-        ]
+        passing_count = sum(1 for _, val, _ in checks if val >= 60)
+        hard_fails = any(val < mins for _, val, mins in checks)
 
-        passing_count = sum(1 for _, val, mins in checks if val >= mins)
+        if hard_fails:
+            return False
 
         return passing_count >= thresholds['min_passing'] - 1  # -1 because momentum hasn't been checked
 
