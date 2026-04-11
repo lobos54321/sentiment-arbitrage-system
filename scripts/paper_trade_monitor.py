@@ -4042,22 +4042,67 @@ def run_monitor(db):
                             )
                             
                             if simulate_res.get('success'):
-                                exit_eval['shouldExit'] = True
-                                exit_eval['action'] = 'partial_sell' if exit_matrix['action'] == 'lock_profit' else 'exit'
-                                exit_eval['exitReason'] = exit_matrix.get('reason', 'matrix_exit')
-                                exit_eval['execution'] = simulate_res
-                                exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
-                                
-                                if exit_matrix['action'] == 'lock_profit':
-                                    log.info(f"  [EXIT_MATRIX] 🌙 {pos.symbol} LOCK PROFIT! Selling 50%, rest → Moon Bag")
-                                else:
-                                    log.info(f"  [EXIT_MATRIX] 🔔 {pos.symbol} EXIT triggered: {exit_matrix.get('reason')}")
-                                
-                                if exit_matrix['action'] == 'lock_profit' and w_entry:
-                                    watchlist.mark_moon_bag(w_entry['id'], exit_matrix.get('current_pnl', 0.0))
-                                    rem_amount = int(float(pos.token_amount_raw) - sell_amount_raw)
-                                    exit_eval['updatedState'] = (pos.monitor_state or {}).copy()
-                                    exit_eval['updatedState']['tokenAmount'] = rem_amount
+                                # --- Price Sanity Gate ---
+                                # shared-quote-runtime can diverge heavily from real execution
+                                # prices for low-liquidity tokens (e.g. trigger=-15% but quote=-4%).
+                                # Before committing to an exit, verify the trigger PNL against
+                                # the actual DEX quote price.
+                                sanity_override = False
+                                if exit_matrix['action'] == 'exit':
+                                    quote_eff_sol = simulate_res.get('effectivePrice')
+                                    if (quote_eff_sol and quote_eff_sol > 0 and
+                                            sol_price and sol_price > 0 and
+                                            pos.entry_price and pos.entry_price > 0):
+                                        quote_price_usd = quote_eff_sol * sol_price
+                                        quote_pnl = (quote_price_usd - pos.entry_price) / pos.entry_price
+                                        trigger_pnl = exit_matrix.get('current_pnl', 0.0)
+                                        divergence = abs(quote_pnl - trigger_pnl)
+
+                                        if divergence > 0.05:  # >5% price source disagreement
+                                            reason = exit_matrix.get('reason', '')
+                                            cancel = False
+
+                                            if 'hard_sl' in reason:
+                                                sl_threshold = w_entry.get('dynamic_sl', -0.075) if w_entry else -0.075
+                                                if quote_pnl > sl_threshold:
+                                                    cancel = True
+                                            elif 'trail_stop' in reason:
+                                                trail_floor = exit_matrix.get('trail_floor')
+                                                if trail_floor is not None and quote_pnl >= trail_floor:
+                                                    cancel = True
+
+                                            if cancel:
+                                                log.warning(
+                                                    f"  [PRICE_SANITY] {pos.symbol} EXIT CANCELLED — "
+                                                    f"trigger_pnl={trigger_pnl:+.1%} but quote_pnl={quote_pnl:+.1%} "
+                                                    f"(divergence={divergence:.1%}, src={pre_src}). "
+                                                    f"Trigger price was unreliable, holding position."
+                                                )
+                                                sanity_override = True
+                                            else:
+                                                log.info(
+                                                    f"  [PRICE_SANITY] {pos.symbol} price divergence noted: "
+                                                    f"trigger={trigger_pnl:+.1%} quote={quote_pnl:+.1%} "
+                                                    f"(gap={divergence:.1%}) — exit confirmed by quote"
+                                                )
+
+                                if not sanity_override:
+                                    exit_eval['shouldExit'] = True
+                                    exit_eval['action'] = 'partial_sell' if exit_matrix['action'] == 'lock_profit' else 'exit'
+                                    exit_eval['exitReason'] = exit_matrix.get('reason', 'matrix_exit')
+                                    exit_eval['execution'] = simulate_res
+                                    exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
+                                    
+                                    if exit_matrix['action'] == 'lock_profit':
+                                        log.info(f"  [EXIT_MATRIX] 🌙 {pos.symbol} LOCK PROFIT! Selling 50%, rest → Moon Bag")
+                                    else:
+                                        log.info(f"  [EXIT_MATRIX] 🔔 {pos.symbol} EXIT triggered: {exit_matrix.get('reason')}")
+                                    
+                                    if exit_matrix['action'] == 'lock_profit' and w_entry:
+                                        watchlist.mark_moon_bag(w_entry['id'], exit_matrix.get('current_pnl', 0.0))
+                                        rem_amount = int(float(pos.token_amount_raw) - sell_amount_raw)
+                                        exit_eval['updatedState'] = (pos.monitor_state or {}).copy()
+                                        exit_eval['updatedState']['tokenAmount'] = rem_amount
                             else:
                                 exit_eval['ok'] = False
                                 exit_eval['failureReason'] = simulate_res.get('failureReason', 'quote_failed')
