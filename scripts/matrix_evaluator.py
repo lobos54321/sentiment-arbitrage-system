@@ -201,7 +201,7 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     Matrix ④ — Realtime Momentum (3×3-second snapshots)
     Only called when matrices ①②③⑤ are already passing.
 
-    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (5%) in 6 seconds.
+    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (1.5%) in 6 seconds.
     This filters out noise micro-moves that are not real buying pressure.
 
     Returns: (score: int 0-100, reason: str, snapshots: list)
