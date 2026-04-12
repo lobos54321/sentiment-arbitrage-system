@@ -3847,6 +3847,25 @@ def run_monitor(db):
                                      f"live=${live_price:.10f} > max_allowed=${trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
+
+                    # --- Dip-then-Rip Entry Timing Gate ---
+                    # Wait for a washout dip then confirm ascending recovery
+                    # before executing the buy. This prevents "buying at the peak".
+                    if not pending.get('timing_passed'):
+                        should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_entry_timing(
+                            pending['token_ca'],
+                            symbol=pending['symbol'],
+                            pool_address=pending['pool'],
+                        )
+                        if not should_enter:
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} REJECT: {timing_reason} {timing_detail}")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        # Timing passed — update trigger price to the confirmed rip price
+                        pending['timing_passed'] = True
+                        if timing_trigger_price:
+                            pending['trigger_price'] = timing_trigger_price
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} PASS: {timing_reason} trigger=${timing_trigger_price}")
                             
                     execution = simulate_entry_execution(
                         pending['token_ca'],
