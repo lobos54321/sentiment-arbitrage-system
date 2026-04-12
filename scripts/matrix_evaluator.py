@@ -24,11 +24,12 @@ log = logging.getLogger('matrix')
 _trend_fn = None
 _bars_fn = None
 _price_fn = None
+_dex_volume_fn = None
 
 
 def _lazy_import():
     """Lazy import to avoid circular dependency with paper_trade_monitor."""
-    global _trend_fn, _bars_fn, _price_fn
+    global _trend_fn, _bars_fn, _price_fn, _dex_volume_fn
     if _trend_fn is None:
         from paper_trade_monitor import (
             check_multi_bar_trend,
@@ -38,6 +39,12 @@ def _lazy_import():
         _trend_fn = check_multi_bar_trend
         _bars_fn = get_notath_bars
         _price_fn = fetch_realtime_price
+        # DexScreener volume — may not exist yet, gracefully handle
+        try:
+            from paper_trade_monitor import fetch_dexscreener_volume
+            _dex_volume_fn = fetch_dexscreener_volume
+        except ImportError:
+            _dex_volume_fn = None
 
 
 # ─── Individual Matrix Scorers ─────────────────────────────────────────────
@@ -64,39 +71,70 @@ def score_trend(bars, symbol):
         return 0, reason, detail
 
 
-def score_volume(bars, signal_tx24h=0):
+def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_address=None):
     """
     Matrix ② — Volume Momentum
-    Compares recent bar volume to previous 3-bar average.
+    
+    Data priority:
+    1. K-line bars volume (compare recent vs avg) — if kline_cache has data
+    2. DexScreener real-time volume — fallback for new tokens
+    3. Signal's initial volume_24h — last-resort baseline
 
     Returns: (score: int 0-100, reason: str)
     """
-    if not bars or len(bars) < 4:
-        return 50, 'insufficient_bars'
+    _lazy_import()
+    
+    # --- Path 1: K-line bars available ---
+    if bars and len(bars) >= 4:
+        recent_vol = bars[0].get('volume', 0)
+        prev_vols = [b.get('volume', 0) for b in bars[1:4]]
+        avg_prev = sum(prev_vols) / len(prev_vols) if prev_vols else 0
 
-    recent_vol = bars[0].get('volume', 0)
-    prev_vols = [b.get('volume', 0) for b in bars[1:4]]
-    avg_prev = sum(prev_vols) / len(prev_vols) if prev_vols else 0
+        # All-zero = data absent, not volume decline — fall through to DexScreener
+        if not (avg_prev <= 0 and recent_vol <= 0):
+            if avg_prev <= 0:
+                vol_ratio = 999.0
+            else:
+                vol_ratio = recent_vol / avg_prev
 
-    # All-zero = data absent, not volume decline — fail-open
-    if avg_prev <= 0 and recent_vol <= 0:
-        return 50, 'no_volume_data (fail-open)'
-
-    if avg_prev <= 0:
-        vol_ratio = 999.0  # recent_vol > 0 with no prior data = new volume surge
-    else:
-        vol_ratio = recent_vol / avg_prev
-
-    tx = signal_tx24h or 0
-
-    if vol_ratio >= 2.0 and (tx == 0 or tx >= 300):
-        return 100, f'strong_volume ratio={vol_ratio:.1f} tx={tx}'
-    elif vol_ratio >= 1.2 and (tx == 0 or tx >= 100):
-        return 70, f'moderate_volume ratio={vol_ratio:.1f} tx={tx}'
-    elif vol_ratio >= 0.8:
-        return 40, f'flat_volume ratio={vol_ratio:.1f} tx={tx}'
-    else:
-        return 0, f'weak_volume ratio={vol_ratio:.1f} tx={tx}'
+            tx = signal_tx24h or 0
+            if vol_ratio >= 2.0 and (tx == 0 or tx >= 300):
+                return 100, f'strong_volume ratio={vol_ratio:.1f} tx={tx}'
+            elif vol_ratio >= 1.2 and (tx == 0 or tx >= 100):
+                return 70, f'moderate_volume ratio={vol_ratio:.1f} tx={tx}'
+            elif vol_ratio >= 0.8:
+                return 40, f'flat_volume ratio={vol_ratio:.1f} tx={tx}'
+            else:
+                return 0, f'weak_volume ratio={vol_ratio:.1f} tx={tx}'
+    
+    # --- Path 2: DexScreener real-time volume ---
+    if token_ca:
+        try:
+            dex_data = _dex_volume_fn(token_ca) if callable(globals().get('_dex_volume_fn')) else None
+            if dex_data and isinstance(dex_data, dict):
+                vol_usd = dex_data.get('volume_usd', 0) or 0
+                txns = dex_data.get('txns', 0) or 0
+                if vol_usd > 50000 and txns >= 300:
+                    return 100, f'dex_strong vol=${vol_usd:.0f} txns={txns}'
+                elif vol_usd > 20000 and txns >= 100:
+                    return 70, f'dex_moderate vol=${vol_usd:.0f} txns={txns}'
+                elif vol_usd > 5000:
+                    return 40, f'dex_flat vol=${vol_usd:.0f} txns={txns}'
+                elif vol_usd > 0:
+                    return 0, f'dex_weak vol=${vol_usd:.0f} txns={txns}'
+        except Exception:
+            pass
+    
+    # --- Path 3: Use signal's initial volume ---
+    vol24h = signal_vol24h or 0
+    if vol24h > 50000:
+        return 70, f'signal_vol24h=${vol24h:.0f} (strong initial)'
+    elif vol24h > 20000:
+        return 50, f'signal_vol24h=${vol24h:.0f} (moderate initial)'
+    elif vol24h > 0:
+        return 40, f'signal_vol24h=${vol24h:.0f} (weak initial)'
+    
+    return 50, 'no_volume_data (fail-open)'
 
 
 def score_price_strength(current_price, signal_price, lowest_price):
@@ -304,7 +342,11 @@ class MatrixEvaluator:
 
         # --- Matrix ② Volume ---
         scores['volume'], reasons['volume'] = score_volume(
-            bars, signal_tx24h=entry.get('signal_tx24h', 0)
+            bars,
+            signal_tx24h=entry.get('signal_tx24h', 0),
+            signal_vol24h=entry.get('signal_vol24h', 0),
+            token_ca=ca,
+            pool_address=pool,
         )
 
         # --- Matrix ③ Price Strength ---

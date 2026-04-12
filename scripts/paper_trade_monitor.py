@@ -810,6 +810,32 @@ def fetch_dexscreener_m5(token_ca, timeout=5):
     return None
 
 
+def fetch_dexscreener_volume(token_ca, timeout=5):
+    """Fetch 24h volume and transaction count from DexScreener.
+    Returns dict {volume_usd, txns} or None.
+    """
+    url = f'https://api.dexscreener.com/latest/dex/tokens/{token_ca}'
+    data = curl_json(url, timeout=timeout)
+    if not data or not isinstance(data, dict):
+        return None
+    pairs = data.get('pairs')
+    if not pairs or not isinstance(pairs, list):
+        return None
+    best = _select_best_dex_pair(token_ca, pairs)
+    if not best:
+        best = pairs[0]
+    volume = best.get('volume', {})
+    txns = best.get('txns', {})
+    vol_h24 = volume.get('h24', 0) or 0
+    buys = (txns.get('h24', {}) or {}).get('buys', 0) or 0
+    sells = (txns.get('h24', {}) or {}).get('sells', 0) or 0
+    total_txns = buys + sells
+    try:
+        return {'volume_usd': float(vol_h24), 'txns': int(total_txns)}
+    except (ValueError, TypeError):
+        return None
+
+
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '3'))
 ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '100'))
 ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
