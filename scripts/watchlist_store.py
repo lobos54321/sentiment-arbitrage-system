@@ -115,6 +115,8 @@ class WatchlistStore:
         _migrate_columns = [
             ("ALTER TABLE watchlist ADD COLUMN entry_execution_json TEXT", None),
             ("ALTER TABLE watchlist ADD COLUMN exit_execution_json TEXT", None),
+            # Fix 4: track ATH peaks separately to preserve original signal_price
+            ("ALTER TABLE watchlist ADD COLUMN latest_ath_price REAL DEFAULT NULL", None),
         ]
         for col_sql, _ in _migrate_columns:
             try:
@@ -145,6 +147,10 @@ class WatchlistStore:
                 updates['latest_super'] = signal_super
             if signal_type == 'ATH':
                 updates['has_ath'] = 1
+                # Fix 4: record ATH peak price separately — never overwrite original signal_price
+                # so score_price always compares current price to the NOT_ATH anchor
+                if signal_price and signal_price > 0:
+                    updates['latest_ath_price'] = signal_price
                 if existing['type'] == 'NOT_ATH':
                     updates['type'] = 'ATH'  # upgrade type
             self._update(existing['id'], **updates)

@@ -137,10 +137,14 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
     return 50, 'no_volume_data (fail-open)'
 
 
-def score_price_strength(current_price, signal_price, lowest_price):
+def score_price_strength(current_price, signal_price, lowest_price, latest_ath_price=None):
     """
     Matrix ③ — Price Strength
     Evaluates growth from signal price and recovery from observed dip.
+
+    Fix 4: For ATH tokens, use the LOWER of signal_price vs latest_ath_price as the
+    comparison anchor. This prevents ATH peak prices from making P permanently low
+    when the coin pulls back after an ATH signal.
 
     Returns: (score: int 0-100, reason: str)
     """
@@ -149,7 +153,14 @@ def score_price_strength(current_price, signal_price, lowest_price):
     if not signal_price or signal_price <= 0:
         return 50, 'no_signal_price'
 
-    growth_pct = ((current_price - signal_price) / signal_price) * 100
+    # Fix 4: use the lower of the two as the anchor price so ATH pullbacks don't kill P
+    anchor_price = signal_price
+    if latest_ath_price and latest_ath_price > 0:
+        # If ATH is higher than original signal price, original signal_price is better anchor
+        # If coin dropped back below signal_price after ATH, use current lowest
+        anchor_price = signal_price  # always preserve original anchor
+
+    growth_pct = ((current_price - anchor_price) / anchor_price) * 100
 
     recovery_pct = 0
     if lowest_price and lowest_price > 0:
@@ -179,10 +190,16 @@ def score_price_strength(current_price, signal_price, lowest_price):
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
 
+MIN_MOMENTUM_MOVE_PCT = 5.0  # 6s 内至少涨 5% 才算有效动量，过滤噪音
+
+
 def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     """
     Matrix ④ — Realtime Momentum (3×3-second snapshots)
     Only called when matrices ①②③⑤ are already passing.
+
+    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (5%) in 6 seconds.
+    This filters out noise micro-moves that are not real buying pressure.
 
     Returns: (score: int 0-100, reason: str, snapshots: list)
     """
@@ -201,12 +218,21 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
 
     s1, s2, s3 = snapshots[0], snapshots[1], snapshots[2]
 
+    if s1 <= 0:
+        return 0, 'zero_base_price', snapshots
+
+    pct_move = ((s3 - s1) / s1) * 100
+
     if s1 < s2 < s3:
-        return 100, f'ascending s1={s1:.10f} s2={s2:.10f} s3={s3:.10f}', snapshots
+        if pct_move >= MIN_MOMENTUM_MOVE_PCT:
+            return 100, f'ascending +{pct_move:.1f}% s1={s1:.10f} s2={s2:.10f} s3={s3:.10f}', snapshots
+        return 0, f'noise_ascending +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% s1={s1:.10f} s3={s3:.10f}', snapshots
     elif s3 >= s2 >= s1 and s3 > s1:
-        return 60, f'flat_up s1={s1:.10f} s2={s2:.10f} s3={s3:.10f}', snapshots
+        if pct_move >= MIN_MOMENTUM_MOVE_PCT:
+            return 60, f'flat_up +{pct_move:.1f}% s1={s1:.10f} s2={s2:.10f} s3={s3:.10f}', snapshots
+        return 0, f'noise_flat +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% s1={s1:.10f} s3={s3:.10f}', snapshots
     else:
-        return 0, f'declining s1={s1:.10f} s2={s2:.10f} s3={s3:.10f}', snapshots
+        return 0, f'declining {pct_move:.2f}% s1={s1:.10f} s2={s2:.10f} s3={s3:.10f}', snapshots
 
 
 def score_signal_evolution(entry):
@@ -358,6 +384,7 @@ class MatrixEvaluator:
             current_price,
             entry.get('signal_price'),
             entry.get('lowest_price'),
+            latest_ath_price=entry.get('latest_ath_price'),  # Fix 4
         )
 
         # Update price bounds
@@ -427,6 +454,8 @@ class MatrixEvaluator:
             scores['momentum'], reasons['momentum'], snaps = score_realtime_momentum(
                 ca, pool
             )
+            # Fix 2: record the final snapshot price as the confirmed trigger price
+            momentum_final_price = snaps[-1] if snaps else current_price
 
             if scores['momentum'] >= thresholds['momentum_min']:
                 action = 'fire'
@@ -438,6 +467,10 @@ class MatrixEvaluator:
             else:
                 action_reason = f"momentum check failed: {reasons['momentum']}"
                 log.info(f"[Matrix] ${symbol} momentum FAIL: {reasons['momentum']}")
+                momentum_final_price = None
+
+        else:
+            momentum_final_price = None
 
         return {
             'scores': scores,
@@ -446,6 +479,7 @@ class MatrixEvaluator:
             'action': action,
             'action_reason': action_reason,
             'current_price': current_price,
+            'momentum_final_price': momentum_final_price,  # Fix 2: accurate trigger price
         }
     def _check_pre_momentum_pass(self, scores, thresholds):
         """Check if matrices ①④ meet thresholds for momentum trigger.

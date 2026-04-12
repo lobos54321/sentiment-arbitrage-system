@@ -222,6 +222,68 @@ def get_paper_position_size_sol(strategy_config):
     return size if size > 0 else 0.06
 
 
+# ─── Kelly Criterion Position Sizing ─────────────────────────────────────────
+# Base capital: 5 SOL total
+# Base win rate: 30% (empirical: ~5/17 signal-bearing coins hit 30%+ in 6h audit)
+# Base odds: 5x (avg winner ~150% / avg loser ~15% stop loss)
+
+KELLY_BASE_CAPITAL_SOL = float(os.environ.get('KELLY_BASE_CAPITAL_SOL', '5.0'))
+KELLY_BASE_WIN_RATE    = 0.30
+KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss
+
+
+def calculate_kelly_position(watchlist_entry, base_capital=None):
+    """
+    Compute position size using Kelly Criterion scaled by signal quality.
+
+    Super Index is a 6-dimensional composite:
+      security + AI + social_media + address + sentiment + trade_index
+    Higher Super = higher probability of sustained move.
+
+    Returns position size in SOL (min 0.10, max 20% of base_capital).
+    """
+    if base_capital is None:
+        base_capital = KELLY_BASE_CAPITAL_SOL
+
+    p = KELLY_BASE_WIN_RATE
+    b = KELLY_BASE_ODDS
+
+    # Super Index adjustment (6-dim composite, the higher the better)
+    super_val = int(watchlist_entry.get('signal_super') or watchlist_entry.get('latest_super') or 0)
+    if super_val >= 130:
+        p *= 1.8
+    elif super_val >= 120:
+        p *= 1.5
+    elif super_val >= 110:
+        p *= 1.2
+    elif super_val < 90:
+        p *= 0.7
+
+    # ATH confirmation: already validated breakout = higher probability
+    if watchlist_entry.get('has_ath'):
+        p *= 1.5
+        b *= 1.3
+
+    # Multiple signals = more conviction
+    sc = int(watchlist_entry.get('signal_count') or 1)
+    if sc >= 3:
+        p *= 1.3
+    elif sc >= 2:
+        p *= 1.15
+
+    p = min(p, 0.65)  # cap probability
+
+    # Kelly formula: f* = (p*b - q) / b
+    q = 1.0 - p
+    kelly_f = max(0.0, (p * b - q) / b)
+
+    # Half-Kelly for safety
+    position = base_capital * kelly_f * 0.5
+
+    # Hard limits: min 0.10 SOL (covers tx fees), max 20% of capital
+    return round(max(0.10, min(position, base_capital * 0.20)), 3)
+
+
 def get_paper_max_positions(strategy_config):
     override = os.environ.get('PAPER_MAX_POSITIONS_OVERRIDE')
     if override is not None and str(override).strip() != '':
@@ -3809,8 +3871,11 @@ def run_monitor(db):
                         'signal_type': w_entry['type'],
                         'pool': w_entry['pool_address'],
                         'staged_at': time.time(),
-                        'trigger_price': eval_res['current_price'],
-                        'watchlist_id': w_entry['id']
+                        # Fix 2: use momentum's final snapshot price, not matrix eval start price
+                        'trigger_price': eval_res.get('momentum_final_price') or eval_res.get('current_price'),
+                        'watchlist_id': w_entry['id'],
+                        # Fix 5: Kelly position size based on signal quality
+                        'kelly_position_sol': calculate_kelly_position(w_entry),
                     }
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} -> Pending queue")
                     last_progress = time.time()
@@ -3869,7 +3934,8 @@ def run_monitor(db):
                             
                     execution = simulate_entry_execution(
                         pending['token_ca'],
-                        position_size_sol,
+                        # Fix 5: use Kelly position size, fallback to config default
+                        pending.get('kelly_position_sol') or position_size_sol,
                         'stage1',
                         strategy_id=strategy_id,
                         lifecycle_id=lifecycle_id,
