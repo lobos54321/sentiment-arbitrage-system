@@ -326,6 +326,26 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         p *= 1.05
     # velocity < 2 = normal, no adjustment
 
+    # ─── Layer 3: Social Score (Task 7 upgrade) ───────────────────────────
+    # If social_signal_service is running, use Twitter + DexScreener boost
+    social = fetch_social_signals(watchlist_entry.get('ca', ''), symbol=watchlist_entry.get('symbol', ''))
+    if social:
+        sc_score = social.get('social_score', 0)
+        # DexScreener boost: project committed real money → odds increase
+        if social.get('dex_has_boost'):
+            b *= 1.2   # 20% odds boost — project is spending to promote
+            log.info(f"[Kelly] DexBoost active (${social.get('dex_boost_amount', 0)} credits) → b={b:.2f}")
+        # Twitter mentions: real community discussion → probability increase
+        mentions = social.get('twitter_mentions', 0)
+        if mentions >= 20:
+            p *= 1.3
+        elif mentions >= 5:
+            p *= 1.15
+        elif mentions >= 1:
+            p *= 1.05
+        if sc_score > 0:
+            log.info(f"[Kelly] Social score={sc_score} mentions={mentions} → p={p:.3f}")
+
     p = min(p, 0.65)  # cap probability
 
     # Kelly formula: f* = (p*b - q) / b
@@ -951,6 +971,43 @@ def fetch_dexscreener_volume(token_ca, timeout=5):
         return {'volume_usd': float(vol_h24), 'txns': int(total_txns)}
     except (ValueError, TypeError):
         return None
+
+
+# ─── Social Signal Fetcher ────────────────────────────────────────────────────
+# Calls the social_signal_service.py microservice running on Zeabur.
+# Returns Twitter mention count + DexScreener boost status.
+# Service URL configured via SOCIAL_SERVICE_URL env var.
+# If service unavailable, returns None gracefully (never blocks trading).
+
+SOCIAL_SERVICE_URL = os.environ.get('SOCIAL_SERVICE_URL', 'http://localhost:8765')
+_social_signal_cache = {}  # {ca: (result, expire_ts)}
+SOCIAL_SIGNAL_CACHE_SEC = 120  # 2-minute cache
+
+
+def fetch_social_signals(token_ca, symbol='', timeout=5):
+    """Fetch social propagation signals from the social_signal_service.
+
+    Returns dict:
+      {twitter_mentions, twitter_unique_authors, twitter_engagement,
+       dex_has_boost, dex_boost_amount, dex_has_profile, social_score}
+    Returns None if service unavailable (non-blocking).
+    """
+    now = time.time()
+    cached = _social_signal_cache.get(token_ca)
+    if cached and now < cached[1]:
+        return cached[0]
+
+    try:
+        url = f"{SOCIAL_SERVICE_URL}/social?ca={token_ca}&symbol={symbol}"
+        req = urllib.request.Request(url)
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        data = json.loads(resp.read())
+        _social_signal_cache[token_ca] = (data, now + SOCIAL_SIGNAL_CACHE_SEC)
+        return data
+    except Exception:
+        # Service unavailable — fail silently, never block trading
+        return None
+
 
 
 # ─── Smart Entry Engine ──────────────────────────────────────────────────────
