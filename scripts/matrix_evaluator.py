@@ -399,8 +399,8 @@ class MatrixEvaluator:
             # Accumulate price observation for synthetic bar construction
             history = self._price_history.setdefault(ca, [])
             history.append((int(time.time()), current_price))
-            # Keep only last 10 minutes of observations (avoid memory leak)
-            cutoff = int(time.time()) - 600
+            # Keep last 30 minutes of observations for pullback-bounce detection
+            cutoff = int(time.time()) - 1800
             self._price_history[ca] = [(t, p) for t, p in history if t >= cutoff]
 
         # --- Matrix ⑤ Signal Evolution ---

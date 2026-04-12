@@ -898,6 +898,305 @@ def fetch_dexscreener_volume(token_ca, timeout=5):
         return None
 
 
+# ─── Smart Entry Engine ──────────────────────────────────────────────────────
+# Replaces the static Dip-then-Rip entry timing with a two-layer dynamic
+# engine based on real-time market state.
+#
+# Layer 1 (Scheme B): DexScreener volume-price trend confirmation
+#   → "Is this a REAL buying wave or a fake pump?"
+# Layer 2 (Scheme A): Price trajectory pullback-bounce detection
+#   → "Am I buying at a good pullback-bounce spot, NOT at the top?"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-token trend data cache: {token_ca: {'data': {...}, 'fetched_at': ts}}
+_dex_trend_cache = {}
+SMART_ENTRY_DEX_CACHE_SEC = 30       # Reuse DexScreener data for 30 seconds
+SMART_ENTRY_POLL_INTERVAL_SEC = 10   # Poll price every 10 seconds
+SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
+SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
+SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
+
+
+def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
+    """Fetch m5+h1 volume/txns/priceChange from DexScreener with 30s caching.
+    Returns dict with m5/h1 data, or None on failure.
+    """
+    now = time.time()
+    cached = _dex_trend_cache.get(token_ca)
+    if cached and (now - cached['fetched_at']) < SMART_ENTRY_DEX_CACHE_SEC:
+        return cached['data']
+
+    url = f'https://api.dexscreener.com/latest/dex/tokens/{token_ca}'
+    data = curl_json(url, timeout=timeout)
+    if not data or not isinstance(data, dict):
+        return cached['data'] if cached else None
+    pairs = data.get('pairs')
+    if not pairs or not isinstance(pairs, list):
+        return cached['data'] if cached else None
+
+    best = _select_best_dex_pair(token_ca, pairs)
+    if not best:
+        best = pairs[0]
+
+    volume = best.get('volume', {}) or {}
+    txns = best.get('txns', {}) or {}
+    price_change = best.get('priceChange', {}) or {}
+
+    result = {
+        'vol_m5': float(volume.get('m5', 0) or 0),
+        'vol_h1': float(volume.get('h1', 0) or 0),
+        'buys_m5': int((txns.get('m5', {}) or {}).get('buys', 0) or 0),
+        'sells_m5': int((txns.get('m5', {}) or {}).get('sells', 0) or 0),
+        'buys_h1': int((txns.get('h1', {}) or {}).get('buys', 0) or 0),
+        'sells_h1': int((txns.get('h1', {}) or {}).get('sells', 0) or 0),
+        'price_change_m5': float(price_change.get('m5', 0) or 0),
+        'price_change_h1': float(price_change.get('h1', 0) or 0),
+        'price_usd': float(best.get('priceUsd', 0) or 0),
+    }
+
+    _dex_trend_cache[token_ca] = {'data': result, 'fetched_at': now}
+    return result
+
+
+def evaluate_trend_phase(trend_data):
+    """
+    Layer 1 (Scheme B): Determine market phase from DexScreener volume-price.
+
+    Returns: (phase: str, reason: str)
+      phase: 'BULLISH' | 'FAKE_PUMP' | 'BEARISH' | 'WAIT'
+    """
+    if not trend_data:
+        return 'WAIT', 'no_trend_data'
+
+    pc_m5 = trend_data.get('price_change_m5', 0)
+    vol_m5 = trend_data.get('vol_m5', 0)
+    vol_h1 = trend_data.get('vol_h1', 0)
+    buys_m5 = trend_data.get('buys_m5', 0)
+    sells_m5 = trend_data.get('sells_m5', 0)
+
+    # Average m5 volume based on h1 (1 hour = 12 x 5-min windows)
+    h1_avg_m5 = vol_h1 / 12.0 if vol_h1 > 0 else 0
+    vol_ratio = vol_m5 / h1_avg_m5 if h1_avg_m5 > 0 else 0
+    buy_sell_ratio = buys_m5 / max(sells_m5, 1)
+
+    # Clear downtrend
+    if pc_m5 < -3.0:
+        return 'BEARISH', (
+            f'price_m5={pc_m5:+.1f}% vol_ratio={vol_ratio:.1f} '
+            f'buys={buys_m5} sells={sells_m5}'
+        )
+
+    # Price up but volume weak or sellers dominate = fake pump
+    if pc_m5 > 0:
+        if vol_ratio < 0.8 or buy_sell_ratio < 0.9:
+            return 'FAKE_PUMP', (
+                f'price_up_but_weak: price_m5={pc_m5:+.1f}% '
+                f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
+            )
+        if vol_ratio >= 1.5 and buy_sell_ratio >= 1.2:
+            return 'BULLISH', (
+                f'real_buying: price_m5={pc_m5:+.1f}% '
+                f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
+            )
+        # Moderate — price up with acceptable volume
+        if vol_ratio >= 0.8 and buy_sell_ratio >= 0.9:
+            return 'BULLISH', (
+                f'moderate_buying: price_m5={pc_m5:+.1f}% '
+                f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
+            )
+
+    return 'WAIT', (
+        f'sideways: price_m5={pc_m5:+.1f}% '
+        f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
+    )
+
+
+def evaluate_entry_position(price_history, current_price):
+    """
+    Layer 2 (Scheme A): Determine if current price is a good entry position
+    based on pullback-bounce pattern. No "chase" — never buys at top.
+
+    price_history: list of (timestamp, price) tuples, sorted by time
+    current_price: latest price
+
+    Returns: (position: str, detail: dict)
+      position: 'GOOD_ENTRY' | 'AT_TOP' | 'STILL_FALLING' | 'INSUFFICIENT_DATA'
+    """
+    if not price_history or len(price_history) < 3:
+        return 'INSUFFICIENT_DATA', {
+            'reason': f'only {len(price_history) if price_history else 0} price points'
+        }
+
+    prices = [p for _, p in price_history]
+
+    # Find local high (highest point in history)
+    local_high = max(prices)
+    high_idx = prices.index(local_high)
+
+    # Find local low AFTER the high (the pullback bottom)
+    prices_after_high = prices[high_idx:]
+    if len(prices_after_high) < 2:
+        # No data after the peak — we might be AT the peak
+        return 'AT_TOP', {
+            'reason': 'at_or_near_peak',
+            'local_high': local_high,
+            'current': current_price,
+        }
+
+    local_low = min(prices_after_high)
+
+    if local_high <= 0 or local_low <= 0:
+        return 'INSUFFICIENT_DATA', {'reason': 'zero_prices'}
+
+    pullback_depth = (local_high - local_low) / local_high * 100
+    bounce_from_low = (current_price - local_low) / local_low * 100
+    below_high = (local_high - current_price) / local_high * 100
+
+    detail = {
+        'local_high': local_high,
+        'local_low': local_low,
+        'current': current_price,
+        'pullback_depth_pct': round(pullback_depth, 2),
+        'bounce_from_low_pct': round(bounce_from_low, 2),
+        'below_high_pct': round(below_high, 2),
+        'n_points': len(prices),
+    }
+
+    # Good entry: pulled back enough AND bounced confirming bottom
+    if (pullback_depth >= SMART_ENTRY_MIN_PULLBACK_PCT
+            and bounce_from_low >= SMART_ENTRY_MIN_BOUNCE_PCT
+            and below_high >= 2.0):
+        return 'GOOD_ENTRY', detail
+
+    # At or near the top — no significant pullback yet
+    if pullback_depth < 1.0:
+        return 'AT_TOP', detail
+
+    # Pulled back but no bounce yet — still falling or at the bottom
+    if bounce_from_low < 1.0:
+        return 'STILL_FALLING', detail
+
+    # Bounced but almost back to the high — too late, risk of double-top
+    if below_high < 2.0:
+        return 'AT_TOP', detail
+
+    # Everything else: keep waiting
+    return 'STILL_FALLING', detail
+
+
+def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
+    """
+    Smart Entry Engine — replaces evaluate_entry_timing() (Dip-then-Rip).
+
+    Two-layer dynamic entry decision:
+      Layer 1: DexScreener volume-price trend confirmation (refreshed every 30s)
+      Layer 2: Price trajectory pullback-bounce detection (sampled every 10s)
+
+    Only enters on confirmed pullback-bounce pattern (NO chase / NO追涨).
+    Maximum wait: 15 minutes. After that, rejects the entry.
+
+    Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
+    """
+    max_rounds = int(SMART_ENTRY_MAX_WAIT_SEC / SMART_ENTRY_POLL_INTERVAL_SEC)  # 90
+    interval = SMART_ENTRY_POLL_INTERVAL_SEC  # 10s
+
+    price_history = []  # local to this evaluation
+    last_dex_check = 0
+    cached_trend = None
+    start_time = time.time()
+
+    log.info(
+        f"[SmartEntry] ${symbol} starting smart entry evaluation "
+        f"(max {SMART_ENTRY_MAX_WAIT_SEC}s, poll {interval}s)"
+    )
+
+    for round_num in range(1, max_rounds + 1):
+        elapsed = time.time() - start_time
+
+        # --- Sample price (every round, using Jupiter/Redis/Helius, NOT DexScreener) ---
+        price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
+        if price and price > 0:
+            price_history.append((time.time(), price))
+
+        # --- Refresh DexScreener trend data (every 30s) ---
+        if time.time() - last_dex_check >= SMART_ENTRY_DEX_CACHE_SEC:
+            trend_data = fetch_dexscreener_trend_snapshot(token_ca)
+            if trend_data:
+                cached_trend = trend_data
+                last_dex_check = time.time()
+
+        # --- Layer 1: Trend Phase (Scheme B) ---
+        trend_phase, trend_reason = evaluate_trend_phase(cached_trend)
+
+        if trend_phase == 'BEARISH':
+            log.info(
+                f"[SmartEntry] ${symbol} round {round_num} BEARISH: {trend_reason} "
+                f"({elapsed:.0f}s elapsed)"
+            )
+            # Don't reject immediately on bearish — it might recover.
+            # But if still bearish after 5 minutes, give up.
+            if elapsed > 300:
+                return False, 'trend_bearish_timeout', trend_reason, None
+            time.sleep(interval)
+            continue
+
+        if trend_phase == 'FAKE_PUMP':
+            log.info(
+                f"[SmartEntry] ${symbol} round {round_num} FAKE_PUMP: {trend_reason} "
+                f"({elapsed:.0f}s elapsed)"
+            )
+            time.sleep(interval)
+            continue
+
+        if trend_phase == 'WAIT':
+            if round_num % 6 == 0:  # Log every 60s
+                log.info(
+                    f"[SmartEntry] ${symbol} round {round_num} WAIT: {trend_reason} "
+                    f"({elapsed:.0f}s elapsed)"
+                )
+            time.sleep(interval)
+            continue
+
+        # --- trend_phase == 'BULLISH' → proceed to Layer 2 ---
+
+        # --- Layer 2: Entry Position (Scheme A) ---
+        if not price or price <= 0:
+            time.sleep(interval)
+            continue
+
+        position, detail = evaluate_entry_position(price_history, price)
+
+        if position == 'GOOD_ENTRY':
+            trigger_price = price
+            detail_str = (
+                f"pullback={detail['pullback_depth_pct']:.1f}% "
+                f"bounce={detail['bounce_from_low_pct']:.1f}% "
+                f"below_high={detail['below_high_pct']:.1f}% "
+                f"trend={trend_reason} "
+                f"n_points={detail['n_points']} "
+                f"waited={elapsed:.0f}s"
+            )
+            log.info(
+                f"[SmartEntry] ✅ ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}"
+            )
+            return True, 'smart_entry_pullback_bounce', detail_str, trigger_price
+
+        # Not a good entry yet — log and keep polling
+        if round_num % 6 == 0:  # Log every 60s
+            log.info(
+                f"[SmartEntry] ${symbol} round {round_num} BULLISH but {position}: "
+                f"pullback={detail.get('pullback_depth_pct', '?')}% "
+                f"bounce={detail.get('bounce_from_low_pct', '?')}% "
+                f"trend={trend_reason} ({elapsed:.0f}s)"
+            )
+
+        time.sleep(interval)
+
+    # Timeout — could not find a good entry in 15 minutes
+    elapsed = time.time() - start_time
+    return False, 'smart_entry_timeout', f'no_good_entry_in_{elapsed:.0f}s', None
+
+
 ENTRY_TIMING_INTERVAL_SEC = int(os.environ.get('ENTRY_TIMING_INTERVAL_SEC', '3'))
 ENTRY_TIMING_MAX_ROUNDS = int(os.environ.get('ENTRY_TIMING_MAX_ROUNDS', '100'))
 ENTRY_TIMING_BREAKOUT_PCT = float(os.environ.get('ENTRY_TIMING_BREAKOUT_PCT', '3.0'))
@@ -3913,24 +4212,25 @@ def run_monitor(db):
                             pending_entries.pop(lifecycle_id, None)
                             continue
 
-                    # --- Dip-then-Rip Entry Timing Gate ---
-                    # Wait for a washout dip then confirm ascending recovery
-                    # before executing the buy. This prevents "buying at the peak".
+                    # --- Smart Entry Engine (replaces Dip-then-Rip) ---
+                    # Layer 1: DexScreener volume-price trend confirmation
+                    # Layer 2: Price trajectory pullback-bounce detection
+                    # Max wait: 15 minutes. No chase — only pullback-bounce entries.
                     if not pending.get('timing_passed'):
-                        should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_entry_timing(
+                        should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
                             pending['token_ca'],
                             symbol=pending['symbol'],
                             pool_address=pending['pool'],
                         )
                         if not should_enter:
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} REJECT: {timing_reason} {timing_detail}")
+                            log.info(f"  [SmartEntry] {pending['symbol']} REJECT: {timing_reason} {timing_detail}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
-                        # Timing passed — update trigger price to the confirmed rip price
+                        # Smart entry passed — update trigger price to the confirmed entry price
                         pending['timing_passed'] = True
                         if timing_trigger_price:
                             pending['trigger_price'] = timing_trigger_price
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} PASS: {timing_reason} trigger=${timing_trigger_price}")
+                        log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger=${timing_trigger_price}")
                             
                     execution = simulate_entry_execution(
                         pending['token_ca'],
