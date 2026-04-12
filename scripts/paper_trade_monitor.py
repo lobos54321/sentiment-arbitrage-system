@@ -1960,6 +1960,16 @@ def _normalize_signal_rows(rows):
         record.setdefault('volume_24h', None)
         record.setdefault('top10_pct', None)
         record.setdefault('is_ath', 0)
+        
+        # Ensure is_ath and signal_type are properly inferred from description if missing/not set
+        desc = record.get('description') or ''
+        if not record.get('is_ath') and ('ATH' in desc or 'All Time High' in desc):
+            record['is_ath'] = 1
+        if record.get('is_ath') and not record.get('signal_type'):
+            record['signal_type'] = 'ATH'
+        elif not record.get('signal_type') and 'New Trending' in desc:
+            record['signal_type'] = 'NEW_TRENDING'
+            
         normalized.append(record)
     return normalized
 
@@ -2009,7 +2019,16 @@ def _is_paper_trade_signal(record):
     status = (record.get('hard_gate_status') or '').upper()
     description = record.get('description') or ''
     signal_type = (record.get('signal_type') or '').upper()
-    return status in {'PASS', 'RISK_BLOCKED'} and (signal_type == 'NEW_TRENDING' or 'New Trending' in description)
+    
+    # Allow both NEW_TRENDING and ATH signals
+    is_valid_type = (
+        signal_type in ('NEW_TRENDING', 'ATH') or
+        'New Trending' in description or
+        'ATH' in description or
+        'All Time High' in description
+    )
+    
+    return status in {'PASS', 'RISK_BLOCKED'} and is_valid_type
 
 
 def _premium_signal_has_column(sdb, column_name):
@@ -2030,7 +2049,7 @@ def _query_local_new_signals(last_signal_id):
         FROM premium_signals
         WHERE id > ?
           AND hard_gate_status IN ('PASS', 'RISK_BLOCKED')
-          AND description LIKE '%New Trending%'
+          AND (description LIKE '%New Trending%' OR description LIKE '%New ATH%' OR description LIKE '%ATH%' OR description LIKE '%All Time High%')
         ORDER BY id ASC
     """, (last_signal_id,)).fetchall()
     sdb.close()
@@ -2046,7 +2065,7 @@ def _query_local_recent_signals(limit=20):
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
         FROM premium_signals
         WHERE hard_gate_status IN ('PASS', 'RISK_BLOCKED')
-          AND description LIKE '%New Trending%'
+          AND (description LIKE '%New Trending%' OR description LIKE '%New ATH%' OR description LIKE '%ATH%' OR description LIKE '%All Time High%')
         ORDER BY id DESC
         LIMIT ?
     """, (limit,)).fetchall()
