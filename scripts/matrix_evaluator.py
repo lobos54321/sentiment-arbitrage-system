@@ -212,6 +212,11 @@ class MatrixEvaluator:
     If all pass thresholds → runs matrix ④ (costs 6 seconds for 3×3s snapshots).
     """
 
+    # In-memory price history: {ca: [(timestamp, price), ...]}
+    # Accumulated from each evaluate() call to provide synthetic bars
+    # when kline_cache.db has no data for the token.
+    _price_history = {}
+
     # Thresholds for NOT_ATH entries
     NOT_ATH_THRESHOLDS = {
         'trend_min': 50,    # must be at least fail-open
@@ -290,6 +295,11 @@ class MatrixEvaluator:
         bars = None
         if pool:
             bars = _bars_fn(pool, limit=5)
+
+        # If no bars from kline_cache, build synthetic bars from our own price history
+        if not bars or len(bars) < 3:
+            bars = self._get_synthetic_bars(ca)
+
         scores['trend'], reasons['trend'], _ = score_trend(bars, symbol)
 
         # --- Matrix ② Volume ---
@@ -314,6 +324,12 @@ class MatrixEvaluator:
                 entry['lowest_price'] = current_price
             if entry.get('highest_price') is None or current_price > entry['highest_price']:
                 entry['highest_price'] = current_price
+            # Accumulate price observation for synthetic bar construction
+            history = self._price_history.setdefault(ca, [])
+            history.append((int(time.time()), current_price))
+            # Keep only last 10 minutes of observations (avoid memory leak)
+            cutoff = int(time.time()) - 600
+            self._price_history[ca] = [(t, p) for t, p in history if t >= cutoff]
 
         # --- Matrix ⑤ Signal Evolution ---
         scores['signal'], reasons['signal'] = score_signal_evolution(entry)
@@ -410,6 +426,44 @@ class MatrixEvaluator:
             passing_count += 1
 
         return passing_count >= thresholds['min_passing'] - 1  # -1 because momentum hasn't been checked
+
+    def _get_synthetic_bars(self, ca, bar_count=5):
+        """Build synthetic 1-minute bars from accumulated price observations.
+        
+        Each evaluate() call records a (timestamp, price) pair. We bucket these
+        into 1-minute windows to create OHLCV-like bars so that score_trend and
+        score_volume can make real decisions instead of returning fail-open 50.
+        
+        Returns list of bar dicts (newest first), or None if insufficient data.
+        """
+        history = self._price_history.get(ca)
+        if not history or len(history) < 3:
+            return None
+
+        # Bucket observations into 1-minute windows
+        now = int(time.time())
+        bars = []
+        for i in range(bar_count):
+            window_end = now - i * 60
+            window_start = window_end - 60
+            points = [(t, p) for t, p in history if window_start <= t < window_end]
+            if not points:
+                continue
+            prices = [p for _, p in points]
+            bars.append({
+                'ts': window_start,
+                'open': prices[0],
+                'high': max(prices),
+                'low': min(prices),
+                'close': prices[-1],
+                'volume': len(points),  # use observation count as a proxy for activity
+            })
+
+        if len(bars) < 3:
+            return None
+
+        return bars  # newest first (already in this order)
+
     def _check_removal(self, entry, thresholds):
         """Check if entry should be removed from watchlist."""
         now = time.time()
