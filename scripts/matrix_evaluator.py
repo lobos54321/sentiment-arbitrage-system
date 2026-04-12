@@ -190,7 +190,10 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
 
-MIN_MOMENTUM_MOVE_PCT = 5.0  # 6s 内至少涨 5% 才算有效动量，过滤噪音
+MIN_MOMENTUM_MOVE_PCT = 1.5  # 6s minimum move: 1.5%
+# Data-driven: in 6h audit, all FIRE passes had <1% 6s move (noise), max observed
+# meme coin 6s move was +3.69%. 5% would block ALL entries including Wifejak (+484%).
+# 1.5% filters pure noise while allowing legitimate trend momentum through.
 
 
 def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
