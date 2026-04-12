@@ -232,13 +232,14 @@ KELLY_BASE_WIN_RATE    = 0.30
 KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss
 
 
-def calculate_kelly_position(watchlist_entry, base_capital=None):
+def calculate_kelly_position(watchlist_entry, base_capital=None, description=None):
     """
     Compute position size using Kelly Criterion scaled by signal quality.
 
-    Super Index is a 6-dimensional composite:
-      security + AI + social_media + address + sentiment + trade_index
-    Higher Super = higher probability of sustained move.
+    Uses three layers of signal intelligence:
+      1. Sub-indices (Task 6): security, trade, media, address, AI, sentiment
+      2. Signal velocity (Task 7): propagation rate across Telegram
+      3. ATH confirmation + Super Index composite (original)
 
     Returns position size in SOL (min 0.10, max 20% of base_capital).
     """
@@ -248,28 +249,82 @@ def calculate_kelly_position(watchlist_entry, base_capital=None):
     p = KELLY_BASE_WIN_RATE
     b = KELLY_BASE_ODDS
 
-    # Super Index adjustment (6-dim composite, the higher the better)
-    super_val = int(watchlist_entry.get('signal_super') or watchlist_entry.get('latest_super') or 0)
-    if super_val >= 130:
-        p *= 1.8
-    elif super_val >= 120:
-        p *= 1.5
-    elif super_val >= 110:
-        p *= 1.2
-    elif super_val < 90:
-        p *= 0.7
+    # ─── Layer 1: Sub-indices (Task 6) ─────────────────────────────────
+    # If description available, parse 6 sub-indices for fine-grained tuning
+    sub = parse_sub_indices(description) if description else None
+    used_sub_indices = False
 
-    # ATH confirmation: already validated breakout = higher probability
+    if sub and sum(sub.values()) > 0:
+        used_sub_indices = True
+
+        # Security Index: prerequisite — low security = reduce probability hard
+        sec = sub.get('security', 0)
+        if sec >= 25:
+            p *= 1.2   # good contract safety
+        elif sec >= 15:
+            pass        # neutral
+        else:
+            p *= 0.5    # risky contract — cut probability in half
+
+        # Trade Index: direct buying pressure signal
+        trade = sub.get('trade', 0)
+        if trade >= 15:
+            p *= 1.4    # strong buying activity
+            b *= 1.2    # fund inflow → larger potential move
+        elif trade >= 7:
+            p *= 1.15
+        elif trade <= 2:
+            p *= 0.8    # weak trading
+
+        # Media Index: social spreading
+        media = sub.get('media', 0)
+        if media >= 60:
+            b *= 1.3    # viral → more momentum followers → bigger move
+        elif media >= 30:
+            b *= 1.1
+
+        # Address Index: real wallets (not bots)
+        addr = sub.get('address', 0)
+        if addr >= 15:
+            p *= 1.15   # genuine distribution
+
+        # AI Index: algorithmic confidence
+        ai = sub.get('ai', 0)
+        if ai >= 30:
+            p *= 1.1
+
+        log.info(
+            f"[Kelly] Sub-indices: sec={sec} trade={trade} media={media} "
+            f"addr={addr} ai={ai} sent={sub.get('sentiment', 0)} → p={p:.3f} b={b:.2f}"
+        )
+
+    # ─── Fallback: Super Index composite (if no sub-indices) ───────────
+    if not used_sub_indices:
+        super_val = int(watchlist_entry.get('signal_super') or watchlist_entry.get('latest_super') or 0)
+        if super_val >= 130:
+            p *= 1.8
+        elif super_val >= 120:
+            p *= 1.5
+        elif super_val >= 110:
+            p *= 1.2
+        elif super_val < 90:
+            p *= 0.7
+
+    # ─── ATH confirmation ──────────────────────────────────────────────
     if watchlist_entry.get('has_ath'):
         p *= 1.5
         b *= 1.3
 
-    # Multiple signals = more conviction
-    sc = int(watchlist_entry.get('signal_count') or 1)
-    if sc >= 3:
+    # ─── Layer 2: Signal Velocity (Task 7) ─────────────────────────────
+    velocity = calculate_signal_velocity(watchlist_entry)
+    if velocity >= 6.0:      # 6+ signals/hour = viral
         p *= 1.3
-    elif sc >= 2:
+        b *= 1.2
+    elif velocity >= 3.0:    # 3+ signals/hour = active spreading
         p *= 1.15
+    elif velocity >= 2.0:
+        p *= 1.05
+    # velocity < 2 = normal, no adjustment
 
     p = min(p, 0.65)  # cap probability
 
@@ -2028,6 +2083,45 @@ def parse_super_index(description):
     if m:
         return int(m.group(1))
     return None
+
+
+# ─── Task 6: Sub-Index Parsing ──────────────────────────────────────────────
+_SUB_INDEX_NAMES = ['ai', 'trade', 'security', 'address', 'sentiment', 'media']
+
+def parse_sub_indices(description):
+    """Extract all 6 sub-index values from signal description.
+    Supports NOT_ATH format: 'AI         Index：15🔮'
+    and ATH format: 'AI Index：(signal)15 --> 45 🔺200%' (takes current=45)
+    Returns dict with keys: ai, trade, security, address, sentiment, media.
+    """
+    result = {k: 0 for k in _SUB_INDEX_NAMES}
+    if not description:
+        return result
+    normalized = str(description).replace('**', '').replace('\\r', '')
+    _pat_map = {'ai': 'AI', 'trade': 'Trade', 'security': 'Security',
+                'address': 'Address', 'sentiment': 'Sentiment', 'media': 'Media'}
+    for name, pat in _pat_map.items():
+        # ATH format: "AI Index：(signal)15 --> 45 🔺200%"
+        m = re.search(pat + r'\s+Index[：:]\s*\(signal\)\d+\s*-->\s*(\d+)', normalized, re.IGNORECASE)
+        if m:
+            result[name] = int(m.group(1))
+            continue
+        # NOT_ATH format: "AI         Index：15🔮"
+        m = re.search(pat + r'\s+Index[：:]\s*(\d+)', normalized, re.IGNORECASE)
+        if m:
+            result[name] = int(m.group(1))
+    return result
+
+
+# ─── Task 7: Signal Velocity (Telegram Propagation Proxy) ────────────────────
+def calculate_signal_velocity(watchlist_entry):
+    """Signal velocity = signal_count / hours since registration.
+    Higher velocity = token spreading rapidly across Telegram channels.
+    """
+    sc = int(watchlist_entry.get('signal_count') or 1)
+    added_at = watchlist_entry.get('added_at') or time.time()
+    hours = max((time.time() - added_at) / 3600, 0.0167)  # min 1 minute
+    return round(sc / hours, 2)
 
 
 def parse_top10_percent(description):
@@ -4162,6 +4256,18 @@ def run_monitor(db):
                     watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
                     log.info(f"  [WATCHLIST] 🗑️ Removed {w_entry['symbol']}: {eval_res['action_reason']}")
                 elif eval_res['action'] == 'fire':
+                    # Fetch signal description for sub-index parsing (Task 6)
+                    _sig_desc = None
+                    try:
+                        _psid = w_entry.get('premium_signal_id')
+                        if _psid:
+                            _row = db.execute(
+                                "SELECT description FROM premium_signals WHERE id = ?", (_psid,)
+                            ).fetchone()
+                            if _row:
+                                _sig_desc = _row[0] if isinstance(_row, (tuple, list)) else _row['description']
+                    except Exception:
+                        pass
                     pending_entries[lifecycle_id] = {
                         'token_ca': w_entry['ca'],
                         'symbol': w_entry['symbol'],
@@ -4173,8 +4279,8 @@ def run_monitor(db):
                         # Fix 2: use momentum's final snapshot price, not matrix eval start price
                         'trigger_price': eval_res.get('momentum_final_price') or eval_res.get('current_price'),
                         'watchlist_id': w_entry['id'],
-                        # Fix 5: Kelly position size based on signal quality
-                        'kelly_position_sol': calculate_kelly_position(w_entry),
+                        # Task 6+7: Kelly with sub-indices + signal velocity
+                        'kelly_position_sol': calculate_kelly_position(w_entry, description=_sig_desc),
                     }
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} -> Pending queue")
                     last_progress = time.time()
