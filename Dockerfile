@@ -22,7 +22,7 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 # Install Python dependencies (--break-system-packages required on Debian Bookworm / PEP 668)
-RUN pip3 install --no-cache-dir --break-system-packages redis
+RUN pip3 install --no-cache-dir --break-system-packages redis twikit diskcache
 
 # Copy application code
 COPY . .
@@ -36,7 +36,7 @@ mkdir -p /app/data /app/logs
 
 shutdown() {
   echo '[SHUTDOWN] Forwarding termination signal...'
-  kill -TERM \$REDIS_PID \$NODE_PID \$LIFECYCLE_PID \$PAPER_PID 2>/dev/null || true
+  kill -TERM \$REDIS_PID \$NODE_PID \$LIFECYCLE_PID \$PAPER_PID \$SOCIAL_PID 2>/dev/null || true
   wait || true
   exit 0
 }
@@ -101,13 +101,30 @@ echo '[STARTUP] Starting paper-trader (with auto-restart)...'
 ) &
 PAPER_PID=\$!
 
-echo \"[STARTUP] PIDs redis=\$REDIS_PID node=\$NODE_PID lifecycle=\$LIFECYCLE_PID paper=\$PAPER_PID\"
+echo '[STARTUP] Starting social-signal-service...'
+(
+  while true; do
+    TWITTER_USERNAME=${TWITTER_USERNAME:-} \
+    TWITTER_EMAIL=${TWITTER_EMAIL:-} \
+    TWITTER_PASSWORD=${TWITTER_PASSWORD:-} \
+    TWITTER_COOKIES_PATH=/app/data/tw_cookies.json \
+    SOCIAL_SERVICE_PORT=8765 \
+    PYTHONUNBUFFERED=1 \
+    python3 scripts/social_signal_service.py 2>&1 | tee -a /app/data/social-service.log
+    echo "[social-service] $(date -u '+%Y-%m-%dT%H:%M:%SZ') restarting in 10s" | tee -a /app/data/social-service.log
+    sleep 10
+  done
+) &
+SOCIAL_PID=\$!
+
+echo \"[STARTUP] PIDs redis=\$REDIS_PID node=\$NODE_PID lifecycle=\$LIFECYCLE_PID paper=\$PAPER_PID social=\$SOCIAL_PID\"
 
 sleep 3
 kill -0 \$REDIS_PID 2>/dev/null
 kill -0 \$NODE_PID 2>/dev/null
 kill -0 \$LIFECYCLE_PID 2>/dev/null
 kill -0 \$PAPER_PID 2>/dev/null
+# SOCIAL_PID: optional, don't fail if not started
 
 wait
 "
