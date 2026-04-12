@@ -349,7 +349,8 @@ class MatrixEvaluator:
             ready = False
             hard_block = (hard_block + '+' if hard_block else '') + 'price=0'
         if scores['volume'] < thresholds['volume_min']:
-            hard_block = (hard_block + '+' if hard_block else '') + f"vol={scores['volume']}<{thresholds['volume_min']}"
+            # Volume is informational only — logged but not a blocker
+            pass
         # Signal (S) is pure bonus — not a blocker, so no hard_block entry for it
 
         # Always log evaluation result so we can diagnose filtering
@@ -405,23 +406,25 @@ class MatrixEvaluator:
             'current_price': current_price,
         }
     def _check_pre_momentum_pass(self, scores, thresholds):
-        """Check if matrices ①②③ meet thresholds for momentum trigger.
-        Signal (⑤) is pure bonus — never blocks, never counts toward min_passing.
+        """Check if matrices ①④ meet thresholds for momentum trigger.
+        Volume (②) and Signal (⑤) are pure bonus — never block, only add passing count.
+        Only Trend (①) and Price (③) are structural hard-gates.
         """
-        # Only real-time market structure matrices participate in pass/fail
-        market_checks = [
+        # Only real-time structural matrices that we can reliably measure
+        hard_checks = [
             ('trend', scores.get('trend', 0), thresholds['trend_min']),
-            ('volume', scores.get('volume', 0), thresholds['volume_min']),
             ('price', scores.get('price', 0), thresholds['price_min']),
         ]
 
-        passing_count = sum(1 for _, val, _ in market_checks if val >= 60)
-        hard_fails = any(val < mins for _, val, mins in market_checks)
+        passing_count = sum(1 for _, val, _ in hard_checks if val >= 60)
+        hard_fails = any(val < mins for _, val, mins in hard_checks)
 
         if hard_fails:
             return False
 
-        # Signal score is a bonus: if S >= 60 it adds to passing_count, but never blocks
+        # Volume and Signal are bonuses: if >= 60 they add to passing_count
+        if scores.get('volume', 0) >= 60:
+            passing_count += 1
         if scores.get('signal', 0) >= 60:
             passing_count += 1
 
