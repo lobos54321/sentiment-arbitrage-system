@@ -370,13 +370,18 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
 
     # Kelly formula: f* = (p*b - q) / b
     q = 1.0 - p
-    kelly_f = max(0.0, (p * b - q) / b)
+    kelly_f = (p * b - q) / b if b > 0 else -1.0
+
+    # Negative EV → Kelly says don't trade
+    if kelly_f <= 0:
+        log.info(f"[Kelly] f*={kelly_f:.3f} ≤ 0 → SKIP (negative EV) | p={p:.3f} b={b:.2f}")
+        return 0.0
 
     # Half-Kelly for safety
     position = base_capital * kelly_f * 0.5
 
-    # Hard limits: min 0.10 SOL (covers tx fees), max 20% of capital
-    return round(max(0.10, min(position, base_capital * 0.20)), 3)
+    # Hard limits: min 0.03 SOL, max 20% of capital
+    return round(max(0.03, min(position, base_capital * 0.20)), 3)
 
 
 def get_paper_max_positions(strategy_config):
@@ -4426,10 +4431,20 @@ def run_monitor(db):
                         # Fix 2: use momentum's final snapshot price, not matrix eval start price
                         'trigger_price': eval_res.get('momentum_final_price') or eval_res.get('current_price'),
                         'watchlist_id': w_entry['id'],
-                        # Task 6+7: Kelly with sub-indices + signal velocity
+                        # Task 6+7: Kelly with sub-indices + signal velocity + MC + ATH
                         'kelly_position_sol': calculate_kelly_position(w_entry, description=_sig_desc),
                     }
-                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} -> Pending queue")
+
+                    # Kelly veto: if f* ≤ 0, Kelly says negative EV → skip
+                    if not pending_entries[lifecycle_id]['kelly_position_sol']:
+                        log.info(
+                            f"  [WATCHLIST] ❌ {w_entry['symbol']} Kelly VETO: "
+                            f"f*≤0 → negative EV, skipping despite matrix/momentum pass"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
+                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {pending_entries[lifecycle_id]['kelly_position_sol']} SOL -> Pending queue")
                     last_progress = time.time()
                 else:
                     # Log the 'wait' action so user sees why it's not firing
