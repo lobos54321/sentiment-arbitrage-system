@@ -4386,8 +4386,18 @@ def run_monitor(db):
                     wl_skip_duplicate += 1
                     continue
                 
-                # Enforce 60s evaluation interval
-                if time.time() - w_entry.get('last_eval_at', 0) < 60.0:
+                # Adaptive evaluation interval:
+                # Fresh entries (<5min): every 10s — need fast momentum detection
+                # Mid-age (5-30min): every 30s — still active but less urgent
+                # Mature (30min+): every 60s — long-term monitoring, save API quota
+                entry_age_min = (time.time() - w_entry.get('added_at', time.time())) / 60
+                if entry_age_min < 5:
+                    eval_interval = 10.0
+                elif entry_age_min < 30:
+                    eval_interval = 30.0
+                else:
+                    eval_interval = 60.0
+                if time.time() - w_entry.get('last_eval_at', 0) < eval_interval:
                     wl_skip_cooldown += 1
                     continue
                 
@@ -4540,7 +4550,17 @@ def run_monitor(db):
                     if sol_price is None:
                         sol_price = get_sol_price()
                         time.sleep(0.2)
-                    price = quote_price_sol * sol_price if sol_price else quote_price_sol
+                    quote_price = quote_price_sol * sol_price if sol_price else quote_price_sol
+                    # Fix: use SmartEntry trigger_price (real-time market price) for entry PnL.
+                    # Jupiter quote_price has ~5% spread that caused $BATTLE to hit SL on a +605% coin.
+                    # trigger_price = price at the moment SmartEntry decided to buy = actual market price.
+                    trigger_price_val = pending.get('trigger_price')
+                    if trigger_price_val and trigger_price_val > 0:
+                        price = trigger_price_val
+                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price=${price:.10f} (quote=${quote_price:.10f} spread={((quote_price-price)/price*100):+.1f}%)")
+                    else:
+                        price = quote_price
+                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price=${price:.10f} (no trigger_price)")
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades

@@ -316,14 +316,18 @@ class MatrixEvaluator:
     }
 
     # Thresholds for ATH entries (more lenient)
+    # Data-validated 2026-04-13: ALL ATH coins have P=30 (by definition: ATH = peak).
+    # P has ZERO discriminating power for ATH. Rely on T + momentum + Kelly VETO.
+    # Timeout extended to 2h: ATH consolidation can take 30min+, $Rudi timed out at 30min
+    # while still being a +622% coin.
     ATH_THRESHOLDS = {
         'trend_min': 50,    # must pass
         'volume_min': 0,    # ATH self-carries volume
-        'price_min': 70,    # must pass (anti-chase)
+        'price_min': 30,    # was 70, but ALL ATH coins have P=30 (no discriminating power)
         'signal_min': 0,    # ATH = auto 100
-        'momentum_min': 60, # must not decline
+        'momentum_min': 60, # must not decline — this IS the real filter for ATH
         'min_passing': 3,   # at least 3 of 5 >= 60
-        'max_obs_minutes': 30,  # 30 min max for ATH
+        'max_obs_minutes': 120,  # 2h (was 30min) — match NOT_ATH, allow consolidation
     }
 
     def evaluate(self, entry):
@@ -576,11 +580,14 @@ class MatrixEvaluator:
             return f'timeout ({age_minutes:.0f}min >= {thresholds["max_obs_minutes"]}min)'
 
         # Price collapse: current << signal
+        # Data-validated: -70% kills all truly dead coins (REDBULL -99%, COOKED -95%,
+        # LIB -100%, GOUT -80%) while preserving coins with recovery potential.
+        # Was -50% which risked killing coins like BabyBull (-49% but had +295% run).
         signal_price = entry.get('signal_price')
         lowest_price = entry.get('lowest_price')
         if signal_price and lowest_price:
-            if lowest_price < signal_price * 0.5:
-                return f'price_collapse (lowest={lowest_price:.10f} < 50% of signal={signal_price:.10f})'
+            if lowest_price < signal_price * 0.3:
+                return f'price_collapse (lowest={lowest_price:.10f} < 70% drop from signal={signal_price:.10f})'
 
         return None
 
