@@ -1027,6 +1027,7 @@ SMART_ENTRY_POLL_INTERVAL_SEC = 10   # Poll price every 10 seconds
 SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
 SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
 SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
+SMART_ENTRY_MIN_BOUNCE_RATIO = 0.25  # bounce/pullback must be >= 25% (avoid dead cat bounce)
 
 
 def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
@@ -1110,10 +1111,16 @@ def evaluate_trend_phase(trend_data):
                 f'real_buying: price_m5={pc_m5:+.1f}% '
                 f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
             )
-        # Moderate — price up with acceptable volume
-        if vol_ratio >= 0.8 and buy_sell_ratio >= 0.9:
+        # Moderate — price up but buy_sell must show clear buyer advantage
+        if vol_ratio >= 0.8 and buy_sell_ratio >= 1.2:
             return 'BULLISH', (
                 f'moderate_buying: price_m5={pc_m5:+.1f}% '
+                f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
+            )
+        # Weak — price up but no real buyer edge, not actionable
+        if vol_ratio >= 0.8 and buy_sell_ratio >= 0.9:
+            return 'WAIT', (
+                f'weak_buying: price_m5={pc_m5:+.1f}% '
                 f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
             )
 
@@ -1216,6 +1223,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
     last_dex_check = 0
     cached_trend = None
     start_time = time.time()
+    best_trend_phase = None  # Track the strongest trend phase seen so far
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
@@ -1271,6 +1279,16 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
         # --- trend_phase == 'BULLISH' → proceed to Layer 2 ---
 
+        # Track strongest trend phase seen (real_buying > moderate_buying)
+        is_real = 'real_buying' in trend_reason
+        if best_trend_phase is None:
+            best_trend_phase = 'real_buying' if is_real else 'moderate_buying'
+        elif is_real:
+            best_trend_phase = 'real_buying'
+
+        # Trend downgrade detection: was real_buying, now moderate_buying
+        trend_downgraded = (best_trend_phase == 'real_buying' and not is_real)
+
         # --- Layer 2: Entry Position (Scheme A) ---
         if not price or price <= 0:
             time.sleep(interval)
@@ -1279,10 +1297,36 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
         position, detail = evaluate_entry_position(price_history, price)
 
         if position == 'GOOD_ENTRY':
+            pullback = detail.get('pullback_depth_pct', 0)
+            bounce = detail.get('bounce_from_low_pct', 0)
+            bounce_ratio = bounce / pullback if pullback > 0 else 0
+
+            # Guard 1: bounce/pullback ratio — reject dead cat bounces
+            if bounce_ratio < SMART_ENTRY_MIN_BOUNCE_RATIO:
+                if round_num % 6 == 0:
+                    log.info(
+                        f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
+                        f"bounce_ratio={bounce_ratio:.0%} < {SMART_ENTRY_MIN_BOUNCE_RATIO:.0%} "
+                        f"(bounce={bounce:.1f}% pullback={pullback:.1f}%) ({elapsed:.0f}s)"
+                    )
+                time.sleep(interval)
+                continue
+
+            # Guard 2: trend downgrade — buying pressure fading
+            if trend_downgraded:
+                log.info(
+                    f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
+                    f"trend downgraded real_buying→moderate_buying, "
+                    f"buying pressure fading ({elapsed:.0f}s)"
+                )
+                time.sleep(interval)
+                continue
+
             trigger_price = price
             detail_str = (
-                f"pullback={detail['pullback_depth_pct']:.1f}% "
-                f"bounce={detail['bounce_from_low_pct']:.1f}% "
+                f"pullback={pullback:.1f}% "
+                f"bounce={bounce:.1f}% "
+                f"bounce_ratio={bounce_ratio:.0%} "
                 f"below_high={detail['below_high_pct']:.1f}% "
                 f"trend={trend_reason} "
                 f"n_points={detail['n_points']} "
