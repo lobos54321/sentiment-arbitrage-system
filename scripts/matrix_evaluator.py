@@ -447,8 +447,9 @@ class MatrixEvaluator:
             # Accumulate price observation for synthetic bar construction
             history = self._price_history.setdefault(ca, [])
             history.append((int(time.time()), current_price))
-            # Keep last 30 minutes of observations for pullback-bounce detection
-            cutoff = int(time.time()) - 1800
+            # Keep last 60 minutes of observations for synthetic K-line construction.
+            # Synthetic bars are the PRIMARY T score data source (see _get_synthetic_bars).
+            cutoff = int(time.time()) - 3600
             self._price_history[ca] = [(t, p) for t, p in history if t >= cutoff]
 
         # --- Matrix ⑤ Signal Evolution ---
@@ -564,12 +565,20 @@ class MatrixEvaluator:
 
         return passing_count >= thresholds['min_passing'] - 1  # -1 because momentum hasn't been checked
 
-    def _get_synthetic_bars(self, ca, bar_count=5):
+    def _get_synthetic_bars(self, ca, bar_count=30):
         """Build synthetic 1-minute bars from accumulated price observations.
         
-        Each evaluate() call records a (timestamp, price) pair. We bucket these
-        into 1-minute windows to create OHLCV-like bars so that score_trend and
-        score_volume can make real decisions instead of returning fail-open 50.
+        CRITICAL: This is the PRIMARY data source for T score!
+        - kline_cache.db has been stale since 2026-04-02 (11+ days)
+        - GeckoTerminal returns 403 (Cloudflare blocked) for pump.fun coins
+        
+        So synthetic bars from our own price observations are the only
+        actual data feeding check_multi_bar_trend / linear regression.
+        
+        With adaptive evaluation frequency (10s for first 5 min),
+        each 1-minute bar gets ~6 price observations — enough for
+        meaningful OHLC values. Extended from 5 bars to 30 bars
+        to give linear regression a wider window.
         
         Returns list of bar dicts (newest first), or None if insufficient data.
         """
