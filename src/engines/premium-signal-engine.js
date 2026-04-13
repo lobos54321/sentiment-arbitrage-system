@@ -144,55 +144,6 @@ export class PremiumSignalEngine {
   }
 
   /**
-   * ATH 信号凯利公式计算
-   * 
-   * 赔率 b = f(MC): MC 越低上涨空间越大
-   * 概率 p = f(ATH#, superIndex): ATH# 越大概率略降
-   * 仓位 = half-Kelly × bankroll, 上下限 0.03-0.10 SOL
-   * 
-   * @param {number} mc - 实时或信号 MC (USD)
-   * @param {number} athNum - 第几次 ATH (1, 2, 3...)
-   * @param {number} superIndex - Super Index (0-200+)
-   * @returns {{ enter: boolean, positionSol: number, fStar: number, odds: number, prob: number }}
-   */
-  _calculateAthKelly(mc, athNum = 1, superIndex = 0) {
-    // ─── 赔率 b: MC → 上涨空间 ───
-    // MC $30K → b=5.4, MC $100K → b=4.0, MC $200K → b=2.0, MC $300K → b=0
-    // 公式: b = max(0, 6.0 - MC/50000)
-    const odds = Math.max(0, 6.0 - mc / 50000);
-
-    // ─── 概率 p: ATH# + Super Index ───
-    // 基础概率: ATH#1=0.55, #2=0.50, #3=0.45, #4+=0.40
-    const pBaseMap = { 1: 0.55, 2: 0.50, 3: 0.45 };
-    const pBase = pBaseMap[athNum] || 0.40;
-
-    // Super Index 调整: ±0.05 (super=0 无调整, super=150 → +0.05)
-    const pSuperAdj = superIndex > 0 ? Math.min((superIndex - 50) / 2000, 0.05) : 0;
-
-    // 最终概率, 限制在 0.30 - 0.70
-    const prob = Math.max(0.30, Math.min(0.70, pBase + pSuperAdj));
-
-    // ─── Kelly f* = (b*p - q) / b ───
-    const q = 1 - prob;
-    const fStar = odds > 0 ? (odds * prob - q) / odds : -1;
-
-    // ─── 仓位计算 ───
-    if (fStar <= 0) {
-      return { enter: false, positionSol: 0, fStar, odds, prob };
-    }
-
-    // Quarter-Kelly (保守，避免单笔过大)
-    const quarterKelly = fStar * 0.25;
-
-    // bankroll = 0.5 SOL，仓位上下限 0.03-0.10
-    const bankroll = 0.5;
-    const rawPosition = quarterKelly * bankroll;
-    const positionSol = Math.max(0.03, Math.min(0.10, rawPosition));
-
-    return { enter: true, positionSol, fStar, odds, prob };
-  }
-
-  /**
    * 设置 LivePriceMonitor（shadow 模式也可用）
    */
   setLivePriceMonitor(priceMonitor) {
@@ -562,40 +513,16 @@ export class PremiumSignalEngine {
         console.log(`   ℹ️ [槽位] 在险: ${atRiskCount}/5 | 零成本登月仓: ${moonBagCount}个`);
       }
 
-      // ─── Kelly 公式计算（替代硬性规则）─────────────────────────
+      // ─── ATH 基本安全检查（Kelly 统一由 Python 处理）─────────────
       const mc = signal.market_cap || 0;
       const liveMC = this._getCachedMC(ca);
-      const effectiveMC = (liveMC > 0) ? liveMC : mc;  // 优先用实时 MC
+      const effectiveMC = (liveMC > 0) ? liveMC : mc;
 
-      // MC 基本范围检查（太小的币流动性差，太大的不玩）
       if (effectiveMC < 20000) {
-        console.log(`⏭️ [ATH_KELLY] $${signal.symbol} MC=$${(effectiveMC/1000).toFixed(1)}K < $20K → 流动性太差`);
+        console.log(`⏭️ [ATH] $${signal.symbol} MC=$${(effectiveMC/1000).toFixed(1)}K < $20K → 流动性太差`);
         this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
         return { action: 'SKIP', reason: 'mc_too_low', mc: effectiveMC };
       }
-
-      const kelly = this._calculateAthKelly(effectiveMC, currentAthNum, superCurrent);
-
-      if (!kelly.enter) {
-        console.log(
-          `🎲 [ATH_KELLY] $${signal.symbol} ATH#${currentAthNum} ❌ SKIP | ` +
-          `MC=$${(effectiveMC/1000).toFixed(1)}K b=${kelly.odds.toFixed(2)} p=${kelly.prob.toFixed(3)} ` +
-          `f*=${kelly.fStar.toFixed(3)} → 负期望，不入场`
-        );
-        this.saveSignalRecord(signal, 'ATH_KELLY_NEGATIVE', null);
-        return { action: 'SKIP', reason: 'kelly_negative_ev', kelly };
-      }
-
-      const finalSize = kelly.positionSol;
-      const exitStrategy = 'ASYMMETRIC';
-      const tradeConviction = kelly.fStar > 0.3 ? 'HIGH' : 'MEDIUM';
-
-      const elapsed = Date.now() - t0;
-      console.log(
-        `🎲 [ATH_KELLY] $${signal.symbol} ATH#${currentAthNum} ✅ ENTER | ` +
-        `MC=$${(effectiveMC/1000).toFixed(1)}K b=${kelly.odds.toFixed(2)} p=${kelly.prob.toFixed(3)} ` +
-        `f*=${kelly.fStar.toFixed(3)} → ${finalSize.toFixed(3)} SOL | 决策耗时:${elapsed}ms`
-      );
 
       // 补充 sigHistory 元数据
       const updatedHistory = this.signalHistory.get(ca);
@@ -607,13 +534,24 @@ export class PremiumSignalEngine {
         if (prevAthCount === 0 && signal.market_cap > 0) updatedHistory.mc1 = signal.market_cap;
       }
 
+      const finalSize = 0.06;  // 默认值，Python Kelly 会覆盖
+      const exitStrategy = 'ASYMMETRIC';
+      const tradeConviction = 'HIGH';
+
+      const elapsed = Date.now() - t0;
+      console.log(
+        `🎯 [ATH] $${signal.symbol} ATH#${currentAthNum} ✅ PASS | ` +
+        `MC=$${(effectiveMC/1000).toFixed(1)}K Super=${superCurrent} | ` +
+        `→ 交给观察列表 + 统一Kelly | 决策耗时:${elapsed}ms`
+      );
+
       const aiResult = {
-        action: 'BUY_FULL', confidence: Math.round(kelly.prob * 100),
+        action: 'BUY_FULL', confidence: 80,
         narrative_tier: 'CONFIRMED',
-        narrative_reason: `ATH#${currentAthNum} Kelly: MC=$${(effectiveMC/1000).toFixed(1)}K b=${kelly.odds.toFixed(2)} p=${kelly.prob.toFixed(3)} f*=${kelly.fStar.toFixed(3)} pos=${finalSize.toFixed(3)}SOL`,
+        narrative_reason: `ATH#${currentAthNum} MC=$${(effectiveMC/1000).toFixed(1)}K Super=${superCurrent} → unified Kelly in Python`,
         entry_timing: 'OPTIMAL', stop_loss_percent: 35,
         exitStrategy,
-        kelly_position_sol: finalSize
+        ath_num: currentAthNum  // 传给 Python Kelly 使用
       };
 
       // ─── Step 6: 执行 ─────────────────────────────────────────

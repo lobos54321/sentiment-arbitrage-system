@@ -310,10 +310,7 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         elif super_val < 90:
             p *= 0.7
 
-    # ─── ATH confirmation ──────────────────────────────────────────────
-    if watchlist_entry.get('has_ath'):
-        p *= 1.5
-        b *= 1.3
+    # ATH confirmation moved to Layer 5 (below) — unified with ath_num support
 
     # ─── Layer 2: Signal Velocity (Task 7) ─────────────────────────────
     velocity = calculate_signal_velocity(watchlist_entry)
@@ -345,6 +342,29 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
             p *= 1.05
         if sc_score > 0:
             log.info(f"[Kelly] Social score={sc_score} mentions={mentions} → p={p:.3f}")
+
+    # ─── Layer 4: MC → odds adjustment (防追高 + 空间评估) ─────────────
+    # Lower MC = more upside room = higher odds
+    # Higher MC = less room = lower odds (auto anti-chase)
+    mc_val = float(watchlist_entry.get('signal_mc') or watchlist_entry.get('market_cap') or watchlist_entry.get('mc') or 0)
+    if mc_val > 0:
+        # MC $30K → b×1.5, MC $100K → b×1.0 (neutral), MC $200K → b×0.5, MC $300K+ → b×0.1
+        mc_factor = max(0.1, min(1.5, 2.0 - mc_val / 100000))
+        b *= mc_factor
+        if mc_factor < 0.5 or mc_factor > 1.2:
+            log.info(f"[Kelly] MC=${mc_val/1000:.0f}K → mc_factor={mc_factor:.2f} → b={b:.2f}")
+
+    # ─── Layer 5: ATH confirmation adjustment ──────────────────────────
+    # ATH signals get probability boost (token already proven to pump)
+    # ath_num may be passed from Node.js, otherwise use has_ath flag
+    ath_num = int(watchlist_entry.get('ath_num') or 0)
+    if ath_num > 0:
+        ath_boost = {1: 1.6, 2: 1.4, 3: 1.2}.get(ath_num, 1.1)
+        p *= ath_boost
+        log.info(f"[Kelly] ATH#{ath_num} → p×{ath_boost} → p={p:.3f}")
+    elif watchlist_entry.get('has_ath') or watchlist_entry.get('type') == 'ATH':
+        p *= 1.5
+        b *= 1.3
 
     p = min(p, 0.65)  # cap probability
 
