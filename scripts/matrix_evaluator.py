@@ -316,18 +316,14 @@ class MatrixEvaluator:
     }
 
     # Thresholds for ATH entries (more lenient)
-    # ATH signals are already price-confirmed (new all-time-high).
-    # P threshold lowered: ATH tokens often consolidate right after signal,
-    # so P stays at 30 (no "further" gain).  That killed $pumphouse (+560%)
-    # and $Rudi (+622%) — both stuck at P=30 for 30 min then timed out.
     ATH_THRESHOLDS = {
         'trend_min': 50,    # must pass
         'volume_min': 0,    # ATH self-carries volume
-        'price_min': 30,    # lowered from 70: ATH = already price-confirmed
+        'price_min': 70,    # must pass (anti-chase)
         'signal_min': 0,    # ATH = auto 100
         'momentum_min': 60, # must not decline
         'min_passing': 3,   # at least 3 of 5 >= 60
-        'max_obs_minutes': 45,  # 45 min (was 30) — ATH consolidation can take 15-30min
+        'max_obs_minutes': 30,  # 30 min max for ATH
     }
 
     def evaluate(self, entry):
@@ -622,11 +618,8 @@ class ExitMatrixEvaluator:
         current_pnl = (current_price - entry_price) / entry_price
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
-        # === Hard Stop-Loss (-12%) ===
-        # Widened from -7.5% to -12%.  Meme coins have ~5% quote slippage
-        # on entry, leaving only 2.5% room before old SL fired.  $BATTLE
-        # was a +667% h6 coin that got shaken out at -7.6% from a normal dip.
-        hard_sl = entry.get('dynamic_sl', -0.12)
+        # === Hard Stop-Loss (-7.5%) ===
+        hard_sl = entry.get('dynamic_sl', -0.075)
         if current_pnl <= hard_sl:
             return {
                 'action': 'exit',
