@@ -796,8 +796,8 @@ class ExitMatrixEvaluator:
                 'current_pnl': current_pnl,
             }
 
-        # === Moon Trail (factor 0.3) ===
-        moon_floor = moon_peak * 0.3
+        # === Moon Trail (factor 0.2) ===
+        moon_floor = moon_peak * 0.2
         if moon_floor > 0 and current_pnl < moon_floor:
             return {
                 'action': 'exit',
