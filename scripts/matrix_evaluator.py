@@ -393,19 +393,20 @@ class MatrixEvaluator:
 
         # ① Prefer kline_cache.db if data is fresh (< 5 minutes old)
         if pool:
-            db_bars = _bars_fn(pool, limit=5)
+            db_bars = _bars_fn(pool, limit=100)  # fetch all available bars
             if db_bars and len(db_bars) >= 3:
                 newest_ts = db_bars[0].get('ts', 0)
                 if newest_ts >= time.time() - 300:
                     bars = db_bars
 
         # ② GeckoTerminal real 1m K-lines (with 30s in-memory cache)
+        # limit=100 → fetch all available bars; linear regression benefits from longer history
         if not bars and pool:
             cached_kline = self.__class__._kline_cache.get(ca)
             if cached_kline and time.time() - cached_kline[1] < 30:
                 bars = cached_kline[0]
             else:
-                gt_bars = _bars_fn(pool, limit=5)
+                gt_bars = _bars_fn(pool, limit=100)
                 if gt_bars:
                     self.__class__._kline_cache[ca] = (gt_bars, time.time())
                     bars = gt_bars

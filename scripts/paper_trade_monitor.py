@@ -2354,15 +2354,13 @@ def get_notath_bars(pool_address, limit=5):
 
 def check_multi_bar_trend(bars, symbol):
     """
-    Evaluate trend using linear regression on the last 3-5 closed 1m bars.
+    Evaluate trend using linear regression on ALL available 1m bars.
 
-    Old logic: looked at single-bar shape (b5 < b4 → T=0). Caused $Rudi to
-    get T=0 for 74% of evaluations because ATH after-candles oscillate wildly:
-    big green → big red → big green. Each red candle triggered T=0.
+    Looks at the overall direction regardless of individual candle drops.
+    A large red candle in the middle of an uptrend does not kill the score.
 
-    New logic: compute linear regression slope of close prices. Only T=0 if
-    the OVERALL trend across all 5 bars is declining. One or two red candles
-    in an uptrend no longer kill the score.
+    Auto-calibrates threshold: uses normalized slope (slope / std-dev of prices),
+    which scales correctly whether we have 5 bars or 100 bars.
 
     Returns (trend_ok: bool, reason: str, detail: str)
     """
@@ -2370,7 +2368,7 @@ def check_multi_bar_trend(bars, symbol):
         return True, 'insufficient_bars', 'Not enough bars for shape analysis, fail-open'
 
     # bars is newest-first; reverse to get chronological order
-    closes = [b['close'] for b in bars[:5]]
+    closes = [b['close'] for b in bars]
     closes = list(reversed(closes))  # oldest → newest
     n = len(closes)
 
@@ -2388,16 +2386,30 @@ def check_multi_bar_trend(bars, symbol):
     # Convert to % change per bar relative to mean price
     slope_pct = (slope / mean_y * 100) if mean_y > 0 else 0
 
-    # Thresholds:
-    # > +0.3%/bar: clearly rising
-    # < -0.3%/bar: clearly falling → T=0
-    # between: sideways (fail-open = pass)
-    if slope_pct > 0.3:
-        return True, 'passed_shape', f'uptrend slope={slope_pct:+.2f}%/bar n={n}'
-    elif slope_pct < -0.3:
-        return False, 'downtrend', f'downtrend slope={slope_pct:+.2f}%/bar n={n}'
+    # Auto-calibrate threshold: normalize by std-dev of prices
+    # This makes the threshold scale-invariant: works the same for 5 bars or 100 bars.
+    # A slope of 0.15x std-dev = meaningful directional move, not just noise.
+    variance = sum((c - mean_y) ** 2 for c in closes) / n
+    std_pct = (variance ** 0.5 / mean_y * 100) if mean_y > 0 else 1.0
+    std_pct = max(std_pct, 0.01)  # floor to avoid div-by-zero on flat price
+    normalized_slope = slope_pct / std_pct
+
+    # Thresholds (normalized, window-size invariant):
+    # normalized_slope > +0.15: overall rising (slope > 15% of 1 std-dev per bar)
+    # normalized_slope < -0.15: overall falling
+    # between: sideways → fail-open
+    if normalized_slope > 0.15:
+        return True, 'passed_shape', (
+            f'uptrend slope={slope_pct:+.3f}%/bar norm={normalized_slope:+.2f} n={n}'
+        )
+    elif normalized_slope < -0.15:
+        return False, 'downtrend', (
+            f'downtrend slope={slope_pct:+.3f}%/bar norm={normalized_slope:+.2f} n={n}'
+        )
     else:
-        return True, 'sideways', f'sideways slope={slope_pct:+.2f}%/bar n={n} (pass)'
+        return True, 'sideways', (
+            f'sideways slope={slope_pct:+.3f}%/bar norm={normalized_slope:+.2f} n={n} (pass)'
+        )
 
 
 def compute_notath_score(bars):

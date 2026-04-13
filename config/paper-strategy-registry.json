@@ -3,7 +3,10 @@
   "updatedAt": "2026-04-02T00:00:00.000Z",
   "activeBaselineId": "notath-selective-v1",
   "activeChallengerId": null,
-  "promotedIds": ["baseline-v1", "notath-selective-v1"],
+  "promotedIds": [
+    "baseline-v1",
+    "notath-selective-v1"
+  ],
   "candidates": {
     "baseline-v1": {
       "id": "baseline-v1",
@@ -33,13 +36,48 @@
       "guardrailResults": {},
       "notes": null,
       "strategyConfig": {
-        "sourceWeights": { "telegram": 0.35, "twitter": 0.1, "smartMoney": 0.35, "narrative": 0.2 },
-        "scoreThresholds": { "buy": 75, "watch": 60, "confidence": 70 },
-        "narrativeThresholds": { "minConfidence": 65, "minTierScore": 60 },
-        "entryTimingFilters": { "minSuperIndex": 70, "minTradeDelta": 1, "minAddressIndex": 3, "minSecurityIndex": 15, "maxChasePremiumPct": 20 },
-        "cooldownWindows": { "sameSymbolMinutes": 15, "postExitMinutes": 10 },
-        "paperExitRules": { "stopLossPct": 15, "trailStartPct": 3, "trailFactor": 0.9, "takeProfitPct": [50, 100, 200], "timeoutMinutes": 30 },
-        "sourceToggles": { "allowATH": true, "allowNotAth": true, "requireKlineConfirmation": false },
+        "sourceWeights": {
+          "telegram": 0.35,
+          "twitter": 0.1,
+          "smartMoney": 0.35,
+          "narrative": 0.2
+        },
+        "scoreThresholds": {
+          "buy": 75,
+          "watch": 60,
+          "confidence": 70
+        },
+        "narrativeThresholds": {
+          "minConfidence": 65,
+          "minTierScore": 60
+        },
+        "entryTimingFilters": {
+          "minSuperIndex": 70,
+          "minTradeDelta": 1,
+          "minAddressIndex": 3,
+          "minSecurityIndex": 15,
+          "maxChasePremiumPct": 20
+        },
+        "cooldownWindows": {
+          "sameSymbolMinutes": 15,
+          "postExitMinutes": 10
+        },
+        "paperExitRules": {
+          "stopLossPct": 15,
+          "trailStartPct": 3,
+          "trailFactor": 0.9,
+          "takeProfitPct": [
+            50,
+            100,
+            200
+          ],
+          "timeoutMinutes": 30
+        },
+        "sourceToggles": {
+          "allowATH": true,
+          "allowNotAth": true,
+          "requireKlineConfirmation": false
+        },
         "signalFilters": {
           "aiConfidenceMin": 0,
           "holdersMin": 0,
@@ -53,7 +91,10 @@
           "secondaryBandBonus": 0
         },
         "stageRules": {},
-        "paperRiskCaps": { "maxPositions": 5, "positionSizeSol": 0.06 },
+        "paperRiskCaps": {
+          "maxPositions": 5,
+          "positionSizeSol": 0.06
+        },
         "paperExecution": {
           "executionMode": "parity",
           "entryPriceSource": "quote",
@@ -75,30 +116,150 @@
       "createdBy": "system",
       "configVersion": 3,
       "mutationSet": [
-        { "path": "sourceToggles.allowATH", "previousValue": true, "nextValue": false, "reason": "keep this candidate NOT_ATH-only" },
-        { "path": "stageRules.stage1Exit.stopLossPct", "previousValue": 35, "nextValue": 3, "reason": "stage 1 stop-loss" },
-        { "path": "stageRules.stage1Exit.trailStartPct", "previousValue": 3, "nextValue": 2, "reason": "stage 1 trail activation" },
-        { "path": "stageRules.stage1Exit.trailFactor", "previousValue": 0.9, "nextValue": 0.9, "reason": "stage 1 trail factor" },
-        { "path": "stageRules.stage1Exit.timeoutMinutes", "previousValue": 30, "nextValue": 120, "reason": "stage 1 timeout" },
-        { "path": "stageRules.stage2A.enabled", "previousValue": true, "nextValue": true, "reason": "loser recovery re-entry" },
-        { "path": "stageRules.stage2A.waitBarsAfterStop", "previousValue": 3, "nextValue": 3, "reason": "wait 3 bars after stop-loss" },
-        { "path": "stageRules.stage2A.reboundFromRollingLowPct", "previousValue": 18, "nextValue": 18, "reason": "+18% rebound trigger" },
-        { "path": "stageRules.stage2A.rollingLowBars", "previousValue": 3, "nextValue": 3, "reason": "rolling low window" },
-        { "path": "stageRules.stage2A.stopLossPct", "previousValue": 4, "nextValue": 4, "reason": "stage 2A stop-loss" },
-        { "path": "stageRules.stage2A.trailStartPct", "previousValue": 3, "nextValue": 3, "reason": "stage 2A trail activation" },
-        { "path": "stageRules.stage2A.trailFactor", "previousValue": 0.9, "nextValue": 0.9, "reason": "stage 2A trail factor" },
-        { "path": "stageRules.stage2A.timeoutMinutes", "previousValue": 120, "nextValue": 120, "reason": "stage 2A timeout" },
-        { "path": "stageRules.stage3.enabled", "previousValue": false, "nextValue": true, "reason": "enable continuation re-entry" },
-        { "path": "stageRules.stage3.firstPeakMinPct", "previousValue": 0, "nextValue": 10, "reason": "require +10% first peak before stage 3" },
-        { "path": "stageRules.stage3.awakeningMinSuperIndex", "previousValue": 100, "nextValue": 100, "reason": "require awakening super index above 100" },
-        { "path": "stageRules.stage3.priceFloor", "previousValue": 0.5, "nextValue": 0.5, "reason": "require price to hold at least 50% of first peak" },
-        { "path": "stageRules.stage3.stopLossPct", "previousValue": 4, "nextValue": 4, "reason": "stage 3 stop-loss" },
-        { "path": "stageRules.stage3.trailStartPct", "previousValue": 3, "nextValue": 3, "reason": "stage 3 trail activation" },
-        { "path": "stageRules.stage3.trailFactor", "previousValue": 0.9, "nextValue": 0.9, "reason": "stage 3 trail factor" },
-        { "path": "stageRules.stage3.timeoutMinutes", "previousValue": 120, "nextValue": 120, "reason": "stage 3 timeout" },
-        { "path": "paperExecution.executionMode", "previousValue": "close", "nextValue": "parity", "reason": "paper execution uses parity quotes" },
-        { "path": "paperExecution.entryPriceSource", "previousValue": "close", "nextValue": "quote", "reason": "stage entries use quote pricing" },
-        { "path": "paperExecution.exitPriceSource", "previousValue": "snapshot", "nextValue": "quote", "reason": "stage exits use quote pricing" }
+        {
+          "path": "sourceToggles.allowATH",
+          "previousValue": true,
+          "nextValue": false,
+          "reason": "keep this candidate NOT_ATH-only"
+        },
+        {
+          "path": "stageRules.stage1Exit.stopLossPct",
+          "previousValue": 35,
+          "nextValue": 3,
+          "reason": "stage 1 stop-loss"
+        },
+        {
+          "path": "stageRules.stage1Exit.trailStartPct",
+          "previousValue": 3,
+          "nextValue": 2,
+          "reason": "stage 1 trail activation"
+        },
+        {
+          "path": "stageRules.stage1Exit.trailFactor",
+          "previousValue": 0.9,
+          "nextValue": 0.9,
+          "reason": "stage 1 trail factor"
+        },
+        {
+          "path": "stageRules.stage1Exit.timeoutMinutes",
+          "previousValue": 30,
+          "nextValue": 120,
+          "reason": "stage 1 timeout"
+        },
+        {
+          "path": "stageRules.stage2A.enabled",
+          "previousValue": true,
+          "nextValue": true,
+          "reason": "loser recovery re-entry"
+        },
+        {
+          "path": "stageRules.stage2A.waitBarsAfterStop",
+          "previousValue": 3,
+          "nextValue": 3,
+          "reason": "wait 3 bars after stop-loss"
+        },
+        {
+          "path": "stageRules.stage2A.reboundFromRollingLowPct",
+          "previousValue": 18,
+          "nextValue": 18,
+          "reason": "+18% rebound trigger"
+        },
+        {
+          "path": "stageRules.stage2A.rollingLowBars",
+          "previousValue": 3,
+          "nextValue": 3,
+          "reason": "rolling low window"
+        },
+        {
+          "path": "stageRules.stage2A.stopLossPct",
+          "previousValue": 4,
+          "nextValue": 4,
+          "reason": "stage 2A stop-loss"
+        },
+        {
+          "path": "stageRules.stage2A.trailStartPct",
+          "previousValue": 3,
+          "nextValue": 3,
+          "reason": "stage 2A trail activation"
+        },
+        {
+          "path": "stageRules.stage2A.trailFactor",
+          "previousValue": 0.9,
+          "nextValue": 0.9,
+          "reason": "stage 2A trail factor"
+        },
+        {
+          "path": "stageRules.stage2A.timeoutMinutes",
+          "previousValue": 120,
+          "nextValue": 120,
+          "reason": "stage 2A timeout"
+        },
+        {
+          "path": "stageRules.stage3.enabled",
+          "previousValue": false,
+          "nextValue": true,
+          "reason": "enable continuation re-entry"
+        },
+        {
+          "path": "stageRules.stage3.firstPeakMinPct",
+          "previousValue": 0,
+          "nextValue": 10,
+          "reason": "require +10% first peak before stage 3"
+        },
+        {
+          "path": "stageRules.stage3.awakeningMinSuperIndex",
+          "previousValue": 100,
+          "nextValue": 100,
+          "reason": "require awakening super index above 100"
+        },
+        {
+          "path": "stageRules.stage3.priceFloor",
+          "previousValue": 0.5,
+          "nextValue": 0.5,
+          "reason": "require price to hold at least 50% of first peak"
+        },
+        {
+          "path": "stageRules.stage3.stopLossPct",
+          "previousValue": 4,
+          "nextValue": 4,
+          "reason": "stage 3 stop-loss"
+        },
+        {
+          "path": "stageRules.stage3.trailStartPct",
+          "previousValue": 3,
+          "nextValue": 3,
+          "reason": "stage 3 trail activation"
+        },
+        {
+          "path": "stageRules.stage3.trailFactor",
+          "previousValue": 0.9,
+          "nextValue": 0.9,
+          "reason": "stage 3 trail factor"
+        },
+        {
+          "path": "stageRules.stage3.timeoutMinutes",
+          "previousValue": 120,
+          "nextValue": 120,
+          "reason": "stage 3 timeout"
+        },
+        {
+          "path": "paperExecution.executionMode",
+          "previousValue": "close",
+          "nextValue": "parity",
+          "reason": "paper execution uses parity quotes"
+        },
+        {
+          "path": "paperExecution.entryPriceSource",
+          "previousValue": "close",
+          "nextValue": "quote",
+          "reason": "stage entries use quote pricing"
+        },
+        {
+          "path": "paperExecution.exitPriceSource",
+          "previousValue": "snapshot",
+          "nextValue": "quote",
+          "reason": "stage exits use quote pricing"
+        }
       ],
       "status": "promoted",
       "datasetRefs": [],
@@ -121,13 +282,48 @@
       "guardrailResults": {},
       "notes": "Three-stage lifecycle: Stage1 super>80, Stage2A stop-loss recovery, Stage3 event-awakened continuation",
       "strategyConfig": {
-        "sourceWeights": { "telegram": 0.35, "twitter": 0.1, "smartMoney": 0.35, "narrative": 0.2 },
-        "scoreThresholds": { "buy": 75, "watch": 60, "confidence": 70 },
-        "narrativeThresholds": { "minConfidence": 65, "minTierScore": 60 },
-        "entryTimingFilters": { "minSuperIndex": 70, "minTradeDelta": 1, "minAddressIndex": 3, "minSecurityIndex": 15, "maxChasePremiumPct": 20 },
-        "cooldownWindows": { "sameSymbolMinutes": 15, "postExitMinutes": 10 },
-        "paperExitRules": { "stopLossPct": 10, "trailStartPct": 25, "trailFactor": 0.6, "takeProfitPct": [50, 100, 200], "timeoutMinutes": 120 },
-        "sourceToggles": { "allowATH": false, "allowNotAth": true, "requireKlineConfirmation": false },
+        "sourceWeights": {
+          "telegram": 0.35,
+          "twitter": 0.1,
+          "smartMoney": 0.35,
+          "narrative": 0.2
+        },
+        "scoreThresholds": {
+          "buy": 75,
+          "watch": 60,
+          "confidence": 70
+        },
+        "narrativeThresholds": {
+          "minConfidence": 65,
+          "minTierScore": 60
+        },
+        "entryTimingFilters": {
+          "minSuperIndex": 70,
+          "minTradeDelta": 1,
+          "minAddressIndex": 3,
+          "minSecurityIndex": 15,
+          "maxChasePremiumPct": 20
+        },
+        "cooldownWindows": {
+          "sameSymbolMinutes": 15,
+          "postExitMinutes": 10
+        },
+        "paperExitRules": {
+          "stopLossPct": 10,
+          "trailStartPct": 25,
+          "trailFactor": 0.6,
+          "takeProfitPct": [
+            50,
+            100,
+            200
+          ],
+          "timeoutMinutes": 120
+        },
+        "sourceToggles": {
+          "allowATH": false,
+          "allowNotAth": true,
+          "requireKlineConfirmation": false
+        },
         "signalFilters": {
           "aiConfidenceMin": 0,
           "holdersMin": 0,
@@ -154,7 +350,7 @@
             "allowAthOverride": false
           },
           "stage1Exit": {
-            "stopLossPct": 7.5,
+            "stopLossPct": 15,
             "trailStartPct": 25,
             "trailFactor": 0.6,
             "timeoutMinutes": 120
@@ -180,7 +376,10 @@
             "timeoutMinutes": 120
           }
         },
-        "paperRiskCaps": { "maxPositions": 50, "positionSizeSol": 0.06 },
+        "paperRiskCaps": {
+          "maxPositions": 50,
+          "positionSizeSol": 0.06
+        },
         "paperExecution": {
           "executionMode": "parity",
           "entryPriceSource": "quote",
@@ -197,8 +396,23 @@
     }
   },
   "history": [
-    { "action": "register", "candidateId": "baseline-v1", "status": "promoted", "createdAt": "2026-01-01T00:00:00.000Z" },
-    { "action": "register", "candidateId": "notath-selective-v1", "status": "promoted", "createdAt": "2026-03-29T00:00:00.000Z" },
-    { "action": "promote", "candidateId": "notath-selective-v1", "reason": "three_stage_lifecycle_activated", "createdAt": "2026-03-29T00:00:00.000Z" }
+    {
+      "action": "register",
+      "candidateId": "baseline-v1",
+      "status": "promoted",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "action": "register",
+      "candidateId": "notath-selective-v1",
+      "status": "promoted",
+      "createdAt": "2026-03-29T00:00:00.000Z"
+    },
+    {
+      "action": "promote",
+      "candidateId": "notath-selective-v1",
+      "reason": "three_stage_lifecycle_activated",
+      "createdAt": "2026-03-29T00:00:00.000Z"
+    }
   ]
 }
