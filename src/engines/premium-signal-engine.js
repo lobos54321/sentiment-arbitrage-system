@@ -144,6 +144,55 @@ export class PremiumSignalEngine {
   }
 
   /**
+   * ATH 信号凯利公式计算
+   * 
+   * 赔率 b = f(MC): MC 越低上涨空间越大
+   * 概率 p = f(ATH#, superIndex): ATH# 越大概率略降
+   * 仓位 = half-Kelly × bankroll, 上下限 0.03-0.10 SOL
+   * 
+   * @param {number} mc - 实时或信号 MC (USD)
+   * @param {number} athNum - 第几次 ATH (1, 2, 3...)
+   * @param {number} superIndex - Super Index (0-200+)
+   * @returns {{ enter: boolean, positionSol: number, fStar: number, odds: number, prob: number }}
+   */
+  _calculateAthKelly(mc, athNum = 1, superIndex = 0) {
+    // ─── 赔率 b: MC → 上涨空间 ───
+    // MC $30K → b=5.4, MC $100K → b=4.0, MC $200K → b=2.0, MC $300K → b=0
+    // 公式: b = max(0, 6.0 - MC/50000)
+    const odds = Math.max(0, 6.0 - mc / 50000);
+
+    // ─── 概率 p: ATH# + Super Index ───
+    // 基础概率: ATH#1=0.55, #2=0.50, #3=0.45, #4+=0.40
+    const pBaseMap = { 1: 0.55, 2: 0.50, 3: 0.45 };
+    const pBase = pBaseMap[athNum] || 0.40;
+
+    // Super Index 调整: ±0.05 (super=0 无调整, super=150 → +0.05)
+    const pSuperAdj = superIndex > 0 ? Math.min((superIndex - 50) / 2000, 0.05) : 0;
+
+    // 最终概率, 限制在 0.30 - 0.70
+    const prob = Math.max(0.30, Math.min(0.70, pBase + pSuperAdj));
+
+    // ─── Kelly f* = (b*p - q) / b ───
+    const q = 1 - prob;
+    const fStar = odds > 0 ? (odds * prob - q) / odds : -1;
+
+    // ─── 仓位计算 ───
+    if (fStar <= 0) {
+      return { enter: false, positionSol: 0, fStar, odds, prob };
+    }
+
+    // Quarter-Kelly (保守，避免单笔过大)
+    const quarterKelly = fStar * 0.25;
+
+    // bankroll = 0.5 SOL，仓位上下限 0.03-0.10
+    const bankroll = 0.5;
+    const rawPosition = quarterKelly * bankroll;
+    const positionSol = Math.max(0.03, Math.min(0.10, rawPosition));
+
+    return { enter: true, positionSol, fStar, odds, prob };
+  }
+
+  /**
    * 设置 LivePriceMonitor（shadow 模式也可用）
    */
   setLivePriceMonitor(priceMonitor) {
@@ -470,18 +519,21 @@ export class PremiumSignalEngine {
       const addressCurrent  = idx?.address_index?.current  || 0;
       const securityCurrent = idx?.security_index?.current || 0;
 
-      // ATH 计数器 — 先读取不递增，所有过滤通过后才提交
+      // ATH 计数器 — 记录第几次看到此币的 ATH 信号
       const sigHistory = this.signalHistory.get(ca);
       const prevAthCount = sigHistory ? (sigHistory.athCount || 0) : 0;
       const currentAthNum = prevAthCount + 1;
 
-      if (currentAthNum !== 1) {
-        console.log(`⏭️ [v17] $${signal.symbol} ATH#${currentAthNum} → 仅ATH#1入场`);
-        this.saveSignalRecord(signal, 'V17_NOT_ATH1', null);
-        return { action: 'SKIP', reason: 'v17_only_ath1' };
+      // 提交 ATH 计数（不论是否入场，ATH# 就是 ATH#）
+      if (!sigHistory) {
+        this.signalHistory.set(ca, { athCount: 1, lastSeen: Date.now() });
+      } else {
+        sigHistory.athCount = (sigHistory.athCount || 0) + 1;
+        sigHistory.lastSeen = Date.now();
       }
+      this._saveAthCounts();
 
-      // ─── 风控检查（不消耗 ATH#1）─────────────────────────
+      // ─── 风控检查 ─────────────────────────────────────────
       const riskCheck = this._checkEntryRisk(signal.symbol, 'ATH');
       if (!riskCheck.allowed) {
         this.saveSignalRecord(signal, 'RISK_BLOCKED', null);
@@ -510,38 +562,42 @@ export class PremiumSignalEngine {
         console.log(`   ℹ️ [槽位] 在险: ${atRiskCount}/5 | 零成本登月仓: ${moonBagCount}个`);
       }
 
-      // ATH 信号简化过滤：只保留 MC 范围 + 防追高
-      // Super/Trade/Addr/Sec 指标对 ATH 不准确（如 Super_cur=0），
-      // 质量交给观察列表的矩阵+动量+SmartEntry 判断
+      // ─── Kelly 公式计算（替代硬性规则）─────────────────────────
       const mc = signal.market_cap || 0;
-      if (mc < 30000 || mc > 300000) {
-        console.log(`⏭️ [v18] MC=$${(mc/1000).toFixed(1)}K 不在$30-300K → 跳过`);
-        this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
-        return { action: 'SKIP', reason: 'v18_mc_filter', mc };
-      }
-
-      // ─── Step 5: 防追高 (~200ms) ─
       const liveMC = this._getCachedMC(ca);
-      if (liveMC > 0 && mc > 0 && liveMC > mc * 1.20) {
-        const premium = ((liveMC / mc - 1) * 100).toFixed(1);
-        console.log(`🚫 [防追高] $${signal.symbol} 信号MC=$${(mc/1000).toFixed(1)}K → 实时MC=$${(liveMC/1000).toFixed(1)}K (溢价+${premium}% > 20%) → 放弃`);
-        this.saveSignalRecord(signal, 'ANTI_CHASE', null);
-        return { action: 'SKIP', reason: 'anti_chase', premium: parseFloat(premium) };
+      const effectiveMC = (liveMC > 0) ? liveMC : mc;  // 优先用实时 MC
+
+      // MC 基本范围检查（太小的币流动性差，太大的不玩）
+      if (effectiveMC < 20000) {
+        console.log(`⏭️ [ATH_KELLY] $${signal.symbol} MC=$${(effectiveMC/1000).toFixed(1)}K < $20K → 流动性太差`);
+        this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
+        return { action: 'SKIP', reason: 'mc_too_low', mc: effectiveMC };
       }
 
-      // ─── 所有过滤通过，现在才提交 ATH 计数 ─────────────────────────
-      if (!sigHistory) {
-        this.signalHistory.set(ca, { athCount: 1, lastSeen: Date.now() });
-      } else {
-        sigHistory.athCount = (sigHistory.athCount || 0) + 1;
-        sigHistory.lastSeen = Date.now();
+      const kelly = this._calculateAthKelly(effectiveMC, currentAthNum, superCurrent);
+
+      if (!kelly.enter) {
+        console.log(
+          `🎲 [ATH_KELLY] $${signal.symbol} ATH#${currentAthNum} ❌ SKIP | ` +
+          `MC=$${(effectiveMC/1000).toFixed(1)}K b=${kelly.odds.toFixed(2)} p=${kelly.prob.toFixed(3)} ` +
+          `f*=${kelly.fStar.toFixed(3)} → 负期望，不入场`
+        );
+        this.saveSignalRecord(signal, 'ATH_KELLY_NEGATIVE', null);
+        return { action: 'SKIP', reason: 'kelly_negative_ev', kelly };
       }
-      this._saveAthCounts();
+
+      const finalSize = kelly.positionSol;
+      const exitStrategy = 'ASYMMETRIC';
+      const tradeConviction = kelly.fStar > 0.3 ? 'HIGH' : 'MEDIUM';
 
       const elapsed = Date.now() - t0;
-      console.log(`🎯 [v18] $${signal.symbol} ATH#1 ✅ MC=$${(mc/1000).toFixed(1)}K Super=${superCurrent} Trade=${tradeCurrent} | ATH计数已提交 | 决策耗时:${elapsed}ms`);
+      console.log(
+        `🎲 [ATH_KELLY] $${signal.symbol} ATH#${currentAthNum} ✅ ENTER | ` +
+        `MC=$${(effectiveMC/1000).toFixed(1)}K b=${kelly.odds.toFixed(2)} p=${kelly.prob.toFixed(3)} ` +
+        `f*=${kelly.fStar.toFixed(3)} → ${finalSize.toFixed(3)} SOL | 决策耗时:${elapsed}ms`
+      );
 
-      // 所有过滤通过，补充 sigHistory 元数据
+      // 补充 sigHistory 元数据
       const updatedHistory = this.signalHistory.get(ca);
       if (updatedHistory) {
         if (idx?.super_index) {
@@ -551,16 +607,13 @@ export class PremiumSignalEngine {
         if (prevAthCount === 0 && signal.market_cap > 0) updatedHistory.mc1 = signal.market_cap;
       }
 
-      const finalSize = 0.06;
-      const exitStrategy = 'ASYMMETRIC';
-      const tradeConviction = 'HIGH';
-
       const aiResult = {
-        action: 'BUY_FULL', confidence: 90,
+        action: 'BUY_FULL', confidence: Math.round(kelly.prob * 100),
         narrative_tier: 'CONFIRMED',
-        narrative_reason: `v18: ATH#1 MC=$${(mc/1000).toFixed(1)}K Super_cur=${superCurrent} SupΔ=${superDelta} TΔ=${tradeDelta} Addr=${addressCurrent} Sec=${securityCurrent}`,
+        narrative_reason: `ATH#${currentAthNum} Kelly: MC=$${(effectiveMC/1000).toFixed(1)}K b=${kelly.odds.toFixed(2)} p=${kelly.prob.toFixed(3)} f*=${kelly.fStar.toFixed(3)} pos=${finalSize.toFixed(3)}SOL`,
         entry_timing: 'OPTIMAL', stop_loss_percent: 35,
-        exitStrategy
+        exitStrategy,
+        kelly_position_sol: finalSize
       };
 
       // ─── Step 6: 执行 ─────────────────────────────────────────
