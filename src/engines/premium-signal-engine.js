@@ -523,6 +523,11 @@ export class PremiumSignalEngine {
         this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
         return { action: 'SKIP', reason: 'mc_too_low', mc: effectiveMC };
       }
+      if (effectiveMC > 500000) {
+        console.log(`⏭️ [ATH] $${signal.symbol} MC=$${(effectiveMC/1000).toFixed(1)}K > $500K → MC过高，早期机会已过`);
+        this.saveSignalRecord(signal, 'V18_MC_FILTER', null);
+        return { action: 'SKIP', reason: 'mc_too_high', mc: effectiveMC };
+      }
 
       // 补充 sigHistory 元数据
       const updatedHistory = this.signalHistory.get(ca);
