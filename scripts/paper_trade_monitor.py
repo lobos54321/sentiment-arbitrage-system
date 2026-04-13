@@ -4938,6 +4938,24 @@ def run_monitor(db):
                 elif actual_out is not None and pos.position_size_sol:
                     realized_pnl = (float(actual_out) - float(pos.position_size_sol)) / float(pos.position_size_sol)
                     accounting_source = 'final_exit_only'
+
+                # ─── PnL Sanity Guard ────────────────────────────────────
+                # quotedOutAmount from Jupiter can be wildly wrong for
+                # low-liquidity tokens (e.g. returning token amount instead
+                # of SOL amount). If accounting PnL diverges > 50pp from
+                # the price-based trigger PnL, fall back to trigger PnL
+                # which is derived from real market prices.
+                if trigger_pnl is not None and realized_pnl is not None:
+                    divergence = abs(realized_pnl - trigger_pnl)
+                    if divergence > 0.50:  # >50 percentage points
+                        log.warning(
+                            f"  [PNL_SANITY] {pos.symbol} accounting PnL={realized_pnl*100:+.1f}% "
+                            f"diverges from trigger PnL={trigger_pnl*100:+.1f}% "
+                            f"(gap={divergence*100:.0f}pp). Using trigger PnL."
+                        )
+                        realized_pnl = trigger_pnl
+                        accounting_source = f'trigger_pnl_override(was={accounting_source})'
+
                 log.info(
                     f"ACCOUNTING_SOURCE trade_id={pos.trade_id} lifecycle={pos.lifecycle_id} stage={pos.strategy_stage} "
                     f"source={accounting_source} partialHistory={1 if has_partial_history else 0} "
