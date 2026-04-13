@@ -656,8 +656,10 @@ class ExitMatrixEvaluator:
         current_pnl = (current_price - entry_price) / entry_price
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
-        # === Hard Stop-Loss (-7.5%) ===
-        hard_sl = entry.get('dynamic_sl', -0.075)
+        # === Hard Stop-Loss ===
+        # Default -15% (matches strategy config stage1Exit.stopLossPct=15).
+        # dynamic_sl can tighten this if trailing stop moves SL up.
+        hard_sl = entry.get('dynamic_sl', -0.15)
         if current_pnl <= hard_sl:
             return {
                 'action': 'exit',
@@ -699,7 +701,7 @@ class ExitMatrixEvaluator:
         )
 
         if should_check_matrix:
-            bars = _bars_fn(pool, limit=5)
+            bars = _bars_fn(pool, limit=100)
 
             # Trend check
             trend_ok, reason, detail = _trend_fn(bars, entry.get('symbol', '?'))
@@ -806,7 +808,7 @@ class ExitMatrixEvaluator:
         # === Trend death check (every 5 min) ===
         pool = entry.get('pool_address')
         if pool and time.time() - entry.get('last_matrix_check', 0) >= 300:
-            bars = _bars_fn(pool, limit=5)
+            bars = _bars_fn(pool, limit=100)
             trend_ok, reason, _ = _trend_fn(bars, entry.get('symbol', '?'))
 
             if not trend_ok:
