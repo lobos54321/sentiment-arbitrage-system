@@ -1224,6 +1224,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
     cached_trend = None
     start_time = time.time()
     best_trend_phase = None  # Track the strongest trend phase seen so far
+    consecutive_momentum_rounds = 0  # Track consecutive strong momentum rounds
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
@@ -1277,7 +1278,32 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
             time.sleep(interval)
             continue
 
-        # --- trend_phase == 'BULLISH' → proceed to Layer 2 ---
+        # --- trend_phase == 'BULLISH' → check momentum direct entry first ---
+
+        # Momentum Direct Entry: for parabolic movers that never pull back
+        # If price consistently surging with buyers in control, enter directly
+        if cached_trend:
+            pc_m5 = cached_trend.get('price_change_m5', 0)
+            b_m5 = cached_trend.get('buys_m5', 0)
+            s_m5 = max(cached_trend.get('sells_m5', 1), 1)
+            bs_ratio = b_m5 / s_m5
+            if pc_m5 > 15.0 and bs_ratio > 1.0:
+                consecutive_momentum_rounds += 1
+            else:
+                consecutive_momentum_rounds = 0
+
+            if (consecutive_momentum_rounds >= 3
+                    and elapsed > 60
+                    and price and price > 0):
+                detail_str = (
+                    f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} "
+                    f"consecutive={consecutive_momentum_rounds} "
+                    f"waited={elapsed:.0f}s trend={trend_reason}"
+                )
+                log.info(
+                    f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}"
+                )
+                return True, 'momentum_direct_entry', detail_str, price
 
         # Track strongest trend phase seen (real_buying > moderate_buying)
         is_real = 'real_buying' in trend_reason

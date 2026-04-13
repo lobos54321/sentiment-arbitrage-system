@@ -1,0 +1,180 @@
+[2026-04-09T11:43:46.392Z] [INFO] 🛡️  Risk Manager initialized
+[2026-04-09T11:43:46.392Z] [INFO]    最低入场分数: 50
+[2026-04-09T11:43:46.392Z] [INFO]    单笔上限: 2%
+[2026-04-09T11:43:46.392Z] [INFO]    最大持仓: 6
+[2026-04-09T11:43:46.393Z] [INFO]    连亏暂停: 6 笔
+[2026-04-09T11:43:46.394Z] [INFO] ⏱️  Rate Limiter initialized: 10 RPS, burst 5
+[2026-04-09T11:43:46.394Z] [INFO] 📡 [SOL] Using RPC: Alchemy (Enhanced)
+[2026-04-09T11:43:46.798Z] [INFO] ⏱️  Rate Limiter initialized: 2 RPS, burst 1
+[2026-04-09T11:43:46.798Z] [INFO] ⏱️  Rate Limiter initialized: 1 RPS, burst 1
+[2026-04-09T11:43:46.799Z] [INFO] 
+────────────────────────────────────────────────────────────
+[2026-04-09T11:43:46.799Z] [INFO] 💎 [Premium Engine] 初始化
+[2026-04-09T11:43:46.799Z] [INFO]    模式: 💰 LIVE
+[2026-04-09T11:43:46.799Z] [INFO]    自动买入: ✅
+[2026-04-09T11:43:46.799Z] [INFO]    仓位: 0.1 SOL
+[2026-04-09T11:43:46.799Z] [INFO]    最大持仓: 8
+[2026-04-09T11:43:46.799Z] [INFO] ────────────────────────────────────────────────────────────
+
+[2026-04-09T11:43:46.799Z] [INFO] 
+════════════════════════════════════════════════════════════════════════════════
+[2026-04-09T11:43:46.799Z] [INFO] 💎 PREMIUM CHANNEL MODE
+[2026-04-09T11:43:46.800Z] [INFO] ════════════════════════════════════════════════════════════════════════════════
+[2026-04-09T11:43:46.800Z] [INFO] Mode: 💰 LIVE
+[2026-04-09T11:43:46.800Z] [INFO] 执行器: Jupiter Swap
+[2026-04-09T11:43:46.800Z] [INFO] 仓位: 0.1 SOL
+[2026-04-09T11:43:46.800Z] [INFO] RPC: https://mainnet.helius-rpc.com/?api-key=fc942b56-923c-4a62-b786-38035d8a8e08
+[2026-04-09T11:43:46.800Z] [INFO] Channel ID: 3636518327
+[2026-04-09T11:43:46.800Z] [INFO] ════════════════════════════════════════════════════════════════════════════════
+
+[2026-04-09T11:43:46.801Z] [INFO] 🪐 [JupiterUltra] 初始化 (Ultra V3)
+[2026-04-09T11:43:46.905Z] [INFO] ✅ [JupiterUltra] 钱包: 6vWT1DXf...KE1d
+[2026-04-09T11:43:46.905Z] [INFO] ⚡ [JupiterUltra] Ultra V3 就绪（内置 MEV 保护 + 自动滑点 + Beam 发送）
+[2026-04-09T11:43:46.905Z] [INFO] 📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (LIVE) | unified=true
+[2026-04-09T11:43:46.906Z] [INFO] 📡 [LivePriceMonitorV2] 初始化 - Ultra 优先 + Dex fallback
+[2026-04-09T11:43:46.910Z] [INFO] ✅ [LivePriceMonitorV2] 启动 | Ultra: 1500ms | DexScreener: 10000ms
+[2026-04-09T11:43:46.910Z] [INFO] ✅ [Shadow Tracker] LivePriceMonitor 已注入
+[2026-04-09T11:43:46.910Z] [INFO] ✅ [Premium Engine] LivePriceMonitor 已注入
+[2026-04-09T11:43:46.974Z] [INFO] 📊 [KlineCollector] 已绑定到价格监控器，开始收集 K 线
+[2026-04-09T11:43:47.037Z] [INFO] 🎯 [LivePositionMonitor] 初始化
+[2026-04-09T11:43:47.098Z] [INFO] ✅ [LivePositionMonitor] 启动 | 持仓: 0
+[2026-04-09T11:43:47.099Z] [INFO] ✅ [Premium Engine] LiveExecution + LivePositionMonitor 已注入
+[2026-04-09T11:43:47.315Z] [ERROR] Server responded with 429 Too Many Requests.  Retrying after 500ms delay...
+[2026-04-09T11:43:47.829Z] [ERROR] Server responded with 429 Too Many Requests.  Retrying after 1000ms delay...
+[2026-04-09T11:43:48.844Z] [ERROR] Server responded with 429 Too Many Requests.  Retrying after 2000ms delay...
+[2026-04-09T11:43:50.856Z] [ERROR] Server responded with 429 Too Many Requests.  Retrying after 4000ms delay...
+[2026-04-09T11:43:54.870Z] [ERROR] ⚠️  [JupiterUltra] 查询 SOL 余额失败: failed to get balance of account 6vWT1DXfTTRp1HLdVPfgxpRJRTBPuXX8USKy361eKE1d: Error: 429 Too Many Requests: {"jsonrpc":"2.0","error":{"code":-32429,"message":"max usage reached"}}
+[2026-04-09T11:43:54.870Z] [INFO] 💰 [实盘] 钱包余额: 0.0000 SOL
+[2026-04-09T11:43:54.871Z] [INFO] 🤖 [Claude Analyst] 初始化完成 | 模型: claude-opus-4-6 | 温度: 0.3 | Base: https://api.like-ai.cc
+[2026-04-09T11:43:54.871Z] [INFO] ✅ [Premium Engine] 使用 Jupiter Swap 执行器
+[2026-04-09T11:43:54.979Z] [INFO] ✅ [ATH] 已加载42个代币的ATH计数
+[2026-04-09T11:43:54.984Z] [INFO] ✅ [v16] 已加载0个观察列表条目
+[2026-04-09T11:43:54.993Z] [INFO] ✅ [SOL市场] 市场环境检查已启动（每5分钟）
+[2026-04-09T11:43:55.009Z] [INFO] ✅ [Premium Engine] 所有服务初始化完成
+[2026-04-09T11:43:55.010Z] [INFO] [33m[2026-04-09T11:43:55.010] [INFO] - [Running gramJS version 2.26.21][0m
+[2026-04-09T11:43:55.014Z] [INFO] [33m[2026-04-09T11:43:55.014] [INFO] - [Connecting to 91.108.56.184:80/TCPFull...][0m
+[2026-04-09T11:43:55.190Z] [INFO] [33m[2026-04-09T11:43:55.190] [INFO] - [Connection to 91.108.56.184:80/TCPFull complete!][0m
+[2026-04-09T11:43:55.191Z] [INFO] [33m[2026-04-09T11:43:55.191] [INFO] - [Using LAYER 198 for initial connect][0m
+[2026-04-09T11:43:55.565Z] [INFO] ✅ Connected to Telegram User API (Premium)
+[2026-04-09T11:43:55.571Z] [INFO] ✅ Loaded channel entity from cache: 3636518327
+[2026-04-09T11:43:55.571Z] [INFO] ✅ Reusing cached channel entity: EgeyeAI Gems 100X Vip💵
+[2026-04-09T11:43:55.571Z] [INFO] ✅ Premium channel listener started
+[2026-04-09T11:43:55.572Z] [INFO] ✅ [Premium Engine] Telegram Buzz Scanner 已启用
+[2026-04-09T11:43:55.572Z] [INFO] 
+✅ Premium Channel System 运行中...
+[2026-04-09T11:43:55.572Z] [INFO]    等待频道信号...
+
+[2026-04-09T11:43:55.574Z] [INFO] 🌐 Dashboard server running at http://localhost:8080
+[2026-04-09T11:44:46.975Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:45:46.975Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:46:46.974Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:47:46.975Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:48:46.976Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:49:46.976Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:50:46.975Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:51:46.976Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:52:46.977Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:53:46.977Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:54:46.977Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:55:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:56:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:57:46.977Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:58:46.977Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T11:59:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:00:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:01:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:02:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:03:46.978Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:04:46.979Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:05:46.979Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:06:46.980Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:07:46.980Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:08:46.980Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:09:46.980Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:10:46.981Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:11:46.982Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:12:46.983Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:13:46.982Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:14:46.983Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:15:46.984Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:16:46.984Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:17:46.984Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:18:46.985Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:19:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:20:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:21:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:22:46.985Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:23:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:24:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:25:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:26:46.987Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:27:46.987Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:28:46.986Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:29:46.987Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:30:46.987Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:31:46.988Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:32:46.987Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:33:46.987Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:34:46.988Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:35:46.989Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:36:46.989Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:37:46.990Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:38:46.990Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:39:46.991Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:40:46.991Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:41:46.992Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:42:46.992Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:43:46.799Z] [INFO] 🧹 [Cleanup] 清理了 7 条过期信号历史 (剩余 35)
+[2026-04-09T12:43:46.993Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:44:46.993Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:45:46.993Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:46:46.994Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:47:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:48:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:49:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:50:46.994Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:51:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:52:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:53:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:54:46.995Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:55:46.997Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:56:46.997Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:57:46.999Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:58:46.999Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T12:59:46.999Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:00:46.999Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:01:47.001Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:02:47.001Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:03:47.002Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:04:47.002Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:05:47.003Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:06:47.004Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:07:47.004Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:08:47.004Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:09:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:10:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:11:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:12:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:13:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:14:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:15:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:16:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:17:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:18:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:19:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:20:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:21:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:22:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:23:47.005Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:24:47.006Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:25:47.007Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:26:47.007Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:27:47.008Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:28:47.008Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:29:47.008Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:30:47.009Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:31:47.010Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:32:47.010Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:33:47.009Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:34:47.010Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
+[2026-04-09T13:35:47.011Z] [INFO] 📊 [KlineCollector] flush 0 bars | 总计 0 | 活跃 0 tokens | ticks 0
