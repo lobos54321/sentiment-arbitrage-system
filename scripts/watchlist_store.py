@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     moon_start_time REAL,
     moon_trend_zero_count INTEGER DEFAULT 0,
     zero_vol_count  INTEGER DEFAULT 0,
-    dynamic_sl      REAL DEFAULT -0.075,               -- current dynamic stop-loss
+    dynamic_sl      REAL DEFAULT -0.12,                -- current dynamic stop-loss (widened from -0.075)
     trailing_active INTEGER DEFAULT 0,
     last_matrix_check REAL DEFAULT 0,
 
@@ -276,7 +276,7 @@ class WatchlistStore:
                      trade_id=trade_id,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.075,
+                     dynamic_sl=-0.12,
                      zero_vol_count=0,
                      last_matrix_check=now,
                      entry_count_delta=1)  # increment entry_count
@@ -308,7 +308,7 @@ class WatchlistStore:
                      trade_id=None,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.075,
+                     dynamic_sl=-0.12,
                      zero_vol_count=0,
                      moon_peak_pnl=0,
                      moon_start_time=None,
