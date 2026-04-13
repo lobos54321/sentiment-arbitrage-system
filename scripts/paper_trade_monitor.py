@@ -1325,8 +1325,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
             else:
                 consecutive_momentum_rounds = 0
 
-            # Dynamic min wait: 30s for extreme buyer dominance, 60s otherwise
-            min_momentum_wait = 30 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
+            # Dynamic min wait based on signal strength:
+            # Extreme (buy_sell≥5 + pc_m5>20%): 10s — buyer domination, no need to wait
+            # Normal: 60s — let the momentum develop
+            min_momentum_wait = 10 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
             if (consecutive_momentum_rounds >= 3
                     and elapsed > min_momentum_wait
                     and price and price > 0):
@@ -2352,51 +2354,50 @@ def get_notath_bars(pool_address, limit=5):
 
 def check_multi_bar_trend(bars, symbol):
     """
-    Evaluate trend using the last 3-5 closed 1m bars.
+    Evaluate trend using linear regression on the last 3-5 closed 1m bars.
+
+    Old logic: looked at single-bar shape (b5 < b4 → T=0). Caused $Rudi to
+    get T=0 for 74% of evaluations because ATH after-candles oscillate wildly:
+    big green → big red → big green. Each red candle triggered T=0.
+
+    New logic: compute linear regression slope of close prices. Only T=0 if
+    the OVERALL trend across all 5 bars is declining. One or two red candles
+    in an uptrend no longer kill the score.
+
     Returns (trend_ok: bool, reason: str, detail: str)
     """
     if not bars or len(bars) < 3:
         return True, 'insufficient_bars', 'Not enough bars for shape analysis, fail-open'
 
-    b5, b4, b3 = bars[0], bars[1], bars[2]
-    b1 = bars[4] if len(bars) > 4 else None
+    # bars is newest-first; reverse to get chronological order
+    closes = [b['close'] for b in bars[:5]]
+    closes = list(reversed(closes))  # oldest → newest
+    n = len(closes)
 
-    # Check 1: b5 dropping? (last 1 min)
-    if b5['close'] < b4['close']:
-        return False, 'dropping', f"b5.close={b5['close']:.10f} < b4.close={b4['close']:.10f}"
+    # Validate prices
+    if any(c <= 0 for c in closes):
+        return True, 'insufficient_bars', 'Invalid close prices, fail-open'
 
-    # Check 2: M top formed? (Needs 5 bars)
-    if b1 is not None and b5['close'] < b3['close'] and b3['close'] > b1['close']:
-        return False, 'm_top', f"M-top: b5={b5['close']:.10f} < b3={b3['close']:.10f} > b1={b1['close']:.10f}"
+    # Linear regression slope
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(closes) / n
+    numerator = sum((i - mean_x) * (closes[i] - mean_y) for i in range(n))
+    denominator = sum((i - mean_x) ** 2 for i in range(n))
+    slope = numerator / denominator if denominator != 0 else 0
 
-    # Check 3: Wick rejection?
-    mid_b5 = (b5['high'] + b5['low']) / 2.0
-    if b5['close'] < mid_b5:
-        return False, 'wick_rejection', f"b5.close={b5['close']:.10f} below mid={mid_b5:.10f}"
+    # Convert to % change per bar relative to mean price
+    slope_pct = (slope / mean_y * 100) if mean_y > 0 else 0
 
-    # Check 4: exhaustion? (Needs 5 bars)
-    if b1 is not None:
-        range_b5 = b5['close'] - b4['close']
-        range_b3 = b3['close'] - b1['close']
-        if range_b3 > 0 and range_b5 < (range_b3 / 4.0):
-            return False, 'exhaustion', f"rally exhausted: b5_range={range_b5:.10f} < b3_range/4={range_b3/4.0:.10f}"
-
-    # Check passing requirements
-    if b5['close'] <= b4['close']:
-        return False, 'not_rising', f"b5.close={b5['close']:.10f} <= b4.close={b4['close']:.10f}"
-        
-    if b5['close'] <= b3['close']:
-        return False, 'below_b3', f"b5.close={b5['close']:.10f} <= b3.close={b3['close']:.10f}"
-
-    # Check position in range
-    range_total = b5['high'] - b5['low']
-    pos_pct = 0.5
-    if range_total > 0:
-        pos_pct = (b5['close'] - b5['low']) / range_total
-        if pos_pct < 0.5:
-             return False, 'bottom_half_close', f"bar closed in bottom {pos_pct*100:.1f}% of range"
-
-    return True, 'passed_shape', f"multi-bar trend OK (pos_pct={pos_pct*100:.1f}%)"
+    # Thresholds:
+    # > +0.3%/bar: clearly rising
+    # < -0.3%/bar: clearly falling → T=0
+    # between: sideways (fail-open = pass)
+    if slope_pct > 0.3:
+        return True, 'passed_shape', f'uptrend slope={slope_pct:+.2f}%/bar n={n}'
+    elif slope_pct < -0.3:
+        return False, 'downtrend', f'downtrend slope={slope_pct:+.2f}%/bar n={n}'
+    else:
+        return True, 'sideways', f'sideways slope={slope_pct:+.2f}%/bar n={n} (pass)'
 
 
 def compute_notath_score(bars):

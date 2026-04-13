@@ -304,6 +304,12 @@ class MatrixEvaluator:
     # when kline_cache.db has no data for the token.
     _price_history = {}
 
+    # K-line fetch cache: {ca: (bars, fetched_at)}
+    # Caches GeckoTerminal K-line responses for 30s to avoid hitting rate limits.
+    # kline_cache.db is the first choice but has been stale since 2026-04-02;
+    # this ensures we always have real 1m K-line data from GeckoTerminal.
+    _kline_cache = {}
+
     # Thresholds for NOT_ATH entries
     NOT_ATH_THRESHOLDS = {
         'trend_min': 50,    # must be at least fail-open
@@ -382,12 +388,29 @@ class MatrixEvaluator:
                 'action_reason': 'max_entries_reached (3)',
             }
 
-        # --- Matrix ① Trend ---
+        # --- Matrix ① Trend --- (uses real 1m K-lines from GeckoTerminal)
         bars = None
-        if pool:
-            bars = _bars_fn(pool, limit=5)
 
-        # If no bars from kline_cache, build synthetic bars from our own price history
+        # ① Prefer kline_cache.db if data is fresh (< 5 minutes old)
+        if pool:
+            db_bars = _bars_fn(pool, limit=5)
+            if db_bars and len(db_bars) >= 3:
+                newest_ts = db_bars[0].get('ts', 0)
+                if newest_ts >= time.time() - 300:
+                    bars = db_bars
+
+        # ② GeckoTerminal real 1m K-lines (with 30s in-memory cache)
+        if not bars and pool:
+            cached_kline = self.__class__._kline_cache.get(ca)
+            if cached_kline and time.time() - cached_kline[1] < 30:
+                bars = cached_kline[0]
+            else:
+                gt_bars = _bars_fn(pool, limit=5)
+                if gt_bars:
+                    self.__class__._kline_cache[ca] = (gt_bars, time.time())
+                    bars = gt_bars
+
+        # ③ Final fallback: synthetic bars from our own price observations
         if not bars or len(bars) < 3:
             bars = self._get_synthetic_bars(ca)
 
