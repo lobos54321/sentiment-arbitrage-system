@@ -437,10 +437,17 @@ class MatrixEvaluator:
         ready = self._check_pre_momentum_pass(scores, thresholds)
 
         # Hard blocks: no zero scores allowed for critical matrices
+        # Exception: ATH signals get T=0 as soft check (not block).
+        # Data: $Rudi T=0 for 74% of evals. ATH K-lines oscillate wildly (big green→big red).
+        # T has no discriminating power for ATH. Momentum check (M) is the real guard.
         hard_block = None
         if scores['trend'] == 0:
-            ready = False
-            hard_block = 'trend=0'
+            if signal_type == 'ATH':
+                # ATH: T=0 is just a warning, not a block
+                hard_block = 'trend=0(soft)'
+            else:
+                ready = False
+                hard_block = 'trend=0'
         if scores['price'] == 0:
             ready = False
             hard_block = (hard_block + '+' if hard_block else '') + 'price=0'

@@ -1047,7 +1047,7 @@ def fetch_social_signals(token_ca, symbol='', timeout=5):
 
 # Per-token trend data cache: {token_ca: {'data': {...}, 'fetched_at': ts}}
 _dex_trend_cache = {}
-SMART_ENTRY_DEX_CACHE_SEC = 30       # Reuse DexScreener data for 30 seconds
+SMART_ENTRY_DEX_CACHE_SEC = 15       # Reuse DexScreener data for 15 seconds (was 30; faster refresh for entry timing)
 SMART_ENTRY_POLL_INTERVAL_SEC = 10   # Poll price every 10 seconds
 SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
 SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
@@ -1127,6 +1127,14 @@ def evaluate_trend_phase(trend_data):
     # Price up but volume weak or sellers dominate = fake pump
     if pc_m5 > 0:
         if vol_ratio < 0.8 or buy_sell_ratio < 0.9:
+            # Exemption: buyer-dominated market override
+            # $BATTLE had buy_sell=11.0, pc_m5=+26% but vol_ratio=0.6 → wrongly FAKE_PUMP.
+            # Low MC coins have erratic vol_ratio but buy_sell tells the truth.
+            if buy_sell_ratio >= 3.0 and pc_m5 > 10:
+                return 'BULLISH', (
+                    f'buyer_dominated: price_m5={pc_m5:+.1f}% '
+                    f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f} (exempted)'
+                )
             return 'FAKE_PUMP', (
                 f'price_up_but_weak: price_m5={pc_m5:+.1f}% '
                 f'vol_ratio={vol_ratio:.1f} buy_sell={buy_sell_ratio:.2f}'
@@ -1317,8 +1325,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
             else:
                 consecutive_momentum_rounds = 0
 
+            # Dynamic min wait: 30s for extreme buyer dominance, 60s otherwise
+            min_momentum_wait = 30 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
             if (consecutive_momentum_rounds >= 3
-                    and elapsed > 60
+                    and elapsed > min_momentum_wait
                     and price and price > 0):
                 detail_str = (
                     f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} "
