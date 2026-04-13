@@ -556,15 +556,17 @@ export class PremiumSignalEngine {
 
       // ─── Step 6: 执行 ─────────────────────────────────────────
 
-      // FBR过滤：检查第一根K线是否绿色
-      const fbrResult = await this._checkFBR(ca);
-      if (!fbrResult.passed) {
-        console.log(`🚫 [FBR] $${signal.symbol} 第一根K线红色 (open=${fbrResult.open?.toFixed(10)} close=${fbrResult.close?.toFixed(10)} FBR=${fbrResult.fbr?.toFixed(2)}%) → 跳过`);
-        this.saveSignalRecord(signal, 'FBR_FAIL', aiResult, false);
-        return { action: 'SKIP', reason: 'fbr_failed', fbr: fbrResult.fbr };
-      }
-      if (fbrResult.reason !== 'error_skip') {
-        console.log(`✅ [FBR] $${signal.symbol} 第一根K线绿色 (FBR=${fbrResult.fbr?.toFixed(2)}%)`);
+      // FBR过滤：检查第一根K线是否绿色（仅在方法存在时）
+      if (typeof this._checkFBR === 'function') {
+        const fbrResult = await this._checkFBR(ca);
+        if (!fbrResult.passed) {
+          console.log(`🚫 [FBR] $${signal.symbol} 第一根K线红色 (open=${fbrResult.open?.toFixed(10)} close=${fbrResult.close?.toFixed(10)} FBR=${fbrResult.fbr?.toFixed(2)}%) → 跳过`);
+          this.saveSignalRecord(signal, 'FBR_FAIL', aiResult, false);
+          return { action: 'SKIP', reason: 'fbr_failed', fbr: fbrResult.fbr };
+        }
+        if (fbrResult.reason !== 'error_skip') {
+          console.log(`✅ [FBR] $${signal.symbol} 第一根K线绿色 (FBR=${fbrResult.fbr?.toFixed(2)}%)`);
+        }
       }
 
       if (this.shadowMode) {
