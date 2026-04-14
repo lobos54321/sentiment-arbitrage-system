@@ -76,10 +76,10 @@ def _get_historical_odds(min_trades=20, default_b=None):
         return default_b
 
     b_real = max(avg_win / avg_loss, 0.1)  # floor at 0.1
-    b_real = min(b_real, 8.0)  # cap at 8.0 — meme coins naturally have high b (avg_win>>avg_loss due to SL truncation)
+    b_real = min(b_real, 3.0)  # cap at 3.0 — higher caps destroy Kelly's signal differentiation (90% hit position cap)
     log.info(
         f"[Kelly] Historical odds: avg_win={avg_win*100:.1f}% avg_loss={avg_loss*100:.1f}% "
-        f"b_real={b_real:.3f} (from {total} trades, capped at 8.0)"
+        f"b_real={b_real:.3f} (from {total} trades, capped at 3.0)"
     )
     return b_real
 
