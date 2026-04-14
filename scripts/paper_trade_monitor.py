@@ -3955,17 +3955,25 @@ def run_monitor(db):
                     log.info(f"  [WATCHLIST] 🗑️ Removed {w_entry['symbol']}: {eval_res['action_reason']}")
                 elif eval_res['action'] == 'fire':
                     # Fetch signal description for sub-index parsing (Task 6)
+                    # NOTE: premium_signals lives in SENTIMENT_DB (sentiment_arb.db),
+                    # not in the paper_trades db connection.
                     _sig_desc = None
                     try:
                         _psid = w_entry.get('premium_signal_id')
                         if _psid:
-                            _row = db.execute(
+                            import sqlite3 as _sqlite3
+                            _sdb = _sqlite3.connect(SENTIMENT_DB)
+                            _sdb.row_factory = _sqlite3.Row
+                            _row = _sdb.execute(
                                 "SELECT description FROM premium_signals WHERE id = ?", (_psid,)
                             ).fetchone()
+                            _sdb.close()
                             if _row:
                                 _sig_desc = _row[0] if isinstance(_row, (tuple, list)) else _row['description']
-                    except Exception:
-                        pass
+                            if _sig_desc:
+                                log.info(f"  [WATCHLIST] 📋 Loaded signal description for {w_entry['symbol']} (psid={_psid}, len={len(_sig_desc)})")
+                    except Exception as _e:
+                        log.warning(f"  [WATCHLIST] Failed to load signal description for psid={w_entry.get('premium_signal_id')}: {_e}")
                     pending_entries[lifecycle_id] = {
                         'token_ca': w_entry['ca'],
                         'symbol': w_entry['symbol'],
