@@ -4895,6 +4895,7 @@ def run_monitor(db):
             last_position_check = now
 
             # --- P6: Process Guardian exit signals first (highest priority) ---
+            to_close = []  # initialize BEFORE Guardian processing
             guardian_exits = exit_guardian.get_pending_exits()
             for gx in guardian_exits:
                 gx_trade_id = gx.get('trade_id')
@@ -4920,7 +4921,6 @@ def run_monitor(db):
                         lifecycle_id=gx_lifecycle_id
                     )
                     gx_trigger_pnl = gx.get('trigger_pnl', 0)
-                    to_close = to_close if 'to_close' in dir() else []
                     to_close.append({
                         'trade_id': gx_trade_id,
                         'reason': gx['reason'],
@@ -4933,8 +4933,6 @@ def run_monitor(db):
                     })
                     with positions_lock:
                         positions.pop(gx_trade_id, None)
-
-            to_close = []
             try:
                 new_sol = get_sol_price()
                 if new_sol:
