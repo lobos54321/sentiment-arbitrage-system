@@ -3985,8 +3985,8 @@ def run_monitor(db):
                         # Fix 2: use momentum's final snapshot price, not matrix eval start price
                         'trigger_price': eval_res.get('momentum_final_price') or eval_res.get('current_price'),
                         'watchlist_id': w_entry['id'],
-                        # Task 6+7: Kelly with sub-indices + signal velocity + MC + ATH
-                        'kelly_position_sol': calculate_kelly_position(w_entry, description=_sig_desc),
+                        # Task 6+7: Kelly with sub-indices + signal velocity + Matrix crowding
+                        'kelly_position_sol': calculate_kelly_position(w_entry, description=_sig_desc, matrix_scores=eval_res.get('scores')),
                     }
 
                     # Kelly veto: if f* ≤ 0, Kelly says negative EV → skip

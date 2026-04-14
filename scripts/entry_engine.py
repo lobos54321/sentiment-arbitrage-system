@@ -84,16 +84,18 @@ def _get_historical_odds(min_trades=20, default_b=None):
     return b_real
 
 
-def calculate_kelly_position(watchlist_entry, base_capital=None, description=None):
+def calculate_kelly_position(watchlist_entry, base_capital=None, description=None, matrix_scores=None):
     """
     Compute position size using Kelly Criterion scaled by signal quality.
 
-    Uses three layers of signal intelligence:
-      1. Sub-indices (Task 6): security, trade, media, address, AI, sentiment
-      2. Signal velocity (Task 7): propagation rate across Telegram
-      3. ATH confirmation + Super Index composite (original)
+    Layers (data-validated from 12-trade sample 2026-04-14):
+      1. Sub-indices: media only (the one positive-correlation signal)
+      2. Signal velocity: propagation rate across Telegram
+      3. DexScreener Boost: real money commitment
+      4. Matrix crowding penalty: 4+ perfect scores = crowded = reduce
+      5. ATH confirmation
 
-    Returns position size in SOL (min 0.10, max 20% of base_capital).
+    Returns position size in SOL (min 0.03, max 20% of base_capital).
     """
     # Lazy imports to avoid circular dependency
     from paper_trade_monitor import parse_sub_indices, calculate_signal_velocity, fetch_social_signals
@@ -102,55 +104,28 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         base_capital = KELLY_BASE_CAPITAL_SOL
 
     p = KELLY_BASE_WIN_RATE
-    b = _get_historical_odds()  # P3: use historical avg_win/avg_loss instead of fixed 5.0
+    b = _get_historical_odds()  # historical avg_win/avg_loss, capped at 3.0
 
-    # ─── Layer 1: Sub-indices (Task 6) ─────────────────────────────────
-    # If description available, parse 6 sub-indices for fine-grained tuning
+    # ─── Layer 1: Sub-indices (simplified — data-validated) ───────────
+    # Data analysis of 12 trades showed: sec, trade, addr, ai ALL had
+    # REVERSE correlation (higher scores in losing trades).
+    # Only media had positive correlation (wins avg 50 vs losses avg 40).
+    # So we keep media for b boost, drop the rest as noise.
     sub = parse_sub_indices(description) if description else None
     used_sub_indices = False
 
     if sub and sum(sub.values()) > 0:
         used_sub_indices = True
-
-        # Security Index: prerequisite — low security = reduce probability hard
-        sec = sub.get('security', 0)
-        if sec >= 25:
-            p *= 1.2   # good contract safety
-        elif sec >= 15:
-            pass        # neutral
-        else:
-            p *= 0.5    # risky contract — cut probability in half
-
-        # Trade Index: direct buying pressure signal
-        trade = sub.get('trade', 0)
-        if trade >= 15:
-            p *= 1.4    # strong buying activity
-            b *= 1.2    # fund inflow → larger potential move
-        elif trade >= 7:
-            p *= 1.15
-        elif trade <= 2:
-            p *= 0.8    # weak trading
-
-        # Media Index: social spreading
         media = sub.get('media', 0)
         if media >= 60:
             b *= 1.3    # viral → more momentum followers → bigger move
         elif media >= 30:
             b *= 1.1
 
-        # Address Index: real wallets (not bots)
-        addr = sub.get('address', 0)
-        if addr >= 15:
-            p *= 1.15   # genuine distribution
-
-        # AI Index: algorithmic confidence
-        ai = sub.get('ai', 0)
-        if ai >= 30:
-            p *= 1.1
-
         log.info(
-            f"[Kelly] Sub-indices: sec={sec} trade={trade} media={media} "
-            f"addr={addr} ai={ai} sent={sub.get('sentiment', 0)} → p={p:.3f} b={b:.2f}"
+            f"[Kelly] Sub-indices: sec={sub.get('security',0)} trade={sub.get('trade',0)} "
+            f"media={media} addr={sub.get('address',0)} ai={sub.get('ai',0)} "
+            f"→ p={p:.3f} b={b:.2f} (media-only mode)"
         )
 
     # ─── Fallback: Super Index composite (if no sub-indices) ───────────
@@ -165,8 +140,6 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         elif super_val < 90:
             p *= 0.7
 
-    # ATH confirmation moved to Layer 5 (below) — unified with ath_num support
-
     # ─── Layer 2: Signal Velocity (Task 7) ─────────────────────────────
     velocity = calculate_signal_velocity(watchlist_entry)
     if velocity >= 6.0:      # 6+ signals/hour = viral
@@ -176,22 +149,31 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         p *= 1.15
     elif velocity >= 2.0:
         p *= 1.05
-    # velocity < 2 = normal, no adjustment
 
-    # ─── Layer 3: DexScreener Boost only ──────────────────────────────────
-    # twitter_mentions was FAKE — estimated from DexScreener txn count, not real Twitter data.
-    # mc_factor was useless — all sub-$50K meme coins got identical 1.50.
-    # Only DexScreener boost (project paid real money) is a genuine signal.
+    # ─── Layer 3: DexScreener Boost only ──────────────────────────────
     social = fetch_social_signals(watchlist_entry.get('ca', ''), symbol=watchlist_entry.get('symbol', ''))
     if social:
         if social.get('dex_has_boost'):
-            b *= 1.2   # 20% odds boost — project is spending to promote
+            b *= 1.2
             log.info(f"[Kelly] DexBoost active (${social.get('dex_boost_amount', 0)} credits) → b={b:.2f}")
 
+    # ─── Layer 4: Matrix Crowding Penalty (data-validated) ─────────────
+    # 12-trade backtest showed clear pattern:
+    #   1/5 perfect(=100) scores → avg +27.8%, 100% win rate
+    #   4/5 perfect(=100) scores → avg -5.2%, 40% win rate
+    # More "perfect" dimensions = too obvious signal = crowded entry
+    if matrix_scores:
+        perfect_count = sum(1 for v in matrix_scores.values() if v == 100)
+        if perfect_count >= 4:
+            p *= 0.7    # heavy crowding penalty
+            log.info(f"[Kelly] Matrix crowding: {perfect_count}/5 perfect → p×0.7 (crowded signal)")
+        elif perfect_count >= 3:
+            p *= 0.9    # mild penalty
+        elif perfect_count <= 1:
+            p *= 1.2    # contrarian bonus — less crowded
+            log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2 (less crowded)")
 
     # ─── Layer 5: ATH confirmation adjustment ──────────────────────────
-    # ATH signals get probability boost (token already proven to pump)
-    # ath_num may be passed from Node.js, otherwise use has_ath flag
     ath_num = int(watchlist_entry.get('ath_num') or 0)
     if ath_num > 0:
         ath_boost = {1: 1.6, 2: 1.4, 3: 1.2}.get(ath_num, 1.1)
