@@ -189,10 +189,10 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     q = 1.0 - p
     kelly_f = (p * b - q) / b if b > 0 else -1.0
 
-    # Negative EV → Kelly says don't trade
+    # Negative EV → use minimum position (Kelly sizes, doesn't veto — Matrix decides trades)
     if kelly_f <= 0:
-        log.info(f"[Kelly] f*={kelly_f:.3f} ≤ 0 → SKIP (negative EV) | p={p:.3f} b={b:.2f}")
-        return 0.0
+        log.info(f"[Kelly] f*={kelly_f:.3f} ≤ 0 → MIN position 0.03 SOL | p={p:.3f} b={b:.2f}")
+        return 0.03
 
     # Half-Kelly for safety
     position = base_capital * kelly_f * 0.5
