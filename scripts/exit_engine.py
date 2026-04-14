@@ -149,8 +149,51 @@ class ExitGuardianThread(threading.Thread):
                         })
                     continue
 
-                # === Moon Bag Breakeven Stop ===
+                # === Update peak_pnl in real-time (critical for trail accuracy) ===
+                if pnl > pos.peak_pnl:
+                    pos.peak_pnl = pnl
+
+                # === Trail Floor Check (3s frequency) ===
+                # Mirrors ExitMatrixEvaluator logic (matrix_evaluator.py L728-740).
+                # Data showed main loop gaps of 49-381s caused 2-14pp loss per trade.
+                # Guardian's 3s cycle catches floor breaches within seconds.
+                # Skip for moon_bag positions (they have their own moon_trail below).
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
+                has_locked = w_entry and w_entry.get('has_locked_profit')
+
+                if not is_moon and pos.peak_pnl >= 0.05:
+                    if pos.peak_pnl < 0.20:
+                        trail_floor = pos.peak_pnl * 0.5   # preserve 50% of peak
+                    else:
+                        trail_floor = pos.peak_pnl * 0.6   # preserve 60% of peak
+
+                    if pnl < trail_floor:
+                        log.info(
+                            f"[ExitGuardian] 📉 {pos.symbol} TRAIL STOP: "
+                            f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}%) "
+                            f"price=${price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%})',
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                            })
+                        continue
+
+                # === Profit Lock Detection (peak >= 20%, not yet locked) ===
+                # Don't execute the lock from Guardian (too complex: 50% sell + moon bag state).
+                # Instead, just log it so the main loop picks it up on next eval.
+                if not is_moon and not has_locked and pos.peak_pnl >= 0.20:
+                    log.info(
+                        f"[ExitGuardian] 🌙 {pos.symbol} PROFIT LOCK DETECTED: "
+                        f"peak={pos.peak_pnl*100:.1f}% >= 20% — main loop will execute lock"
+                    )
+
+                # === Moon Bag Breakeven Stop ===
                 if is_moon and price <= entry_price:
                     log.info(
                         f"[ExitGuardian] 🔔 {pos.symbol} MOON BREAKEVEN: "
