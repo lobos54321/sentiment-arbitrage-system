@@ -178,36 +178,16 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         p *= 1.05
     # velocity < 2 = normal, no adjustment
 
-    # ─── Layer 3: Social Score (Task 7 upgrade) ───────────────────────────
-    # If social_signal_service is running, use Twitter + DexScreener boost
+    # ─── Layer 3: DexScreener Boost only ──────────────────────────────────
+    # twitter_mentions was FAKE — estimated from DexScreener txn count, not real Twitter data.
+    # mc_factor was useless — all sub-$50K meme coins got identical 1.50.
+    # Only DexScreener boost (project paid real money) is a genuine signal.
     social = fetch_social_signals(watchlist_entry.get('ca', ''), symbol=watchlist_entry.get('symbol', ''))
     if social:
-        sc_score = social.get('social_score', 0)
-        # DexScreener boost: project committed real money → odds increase
         if social.get('dex_has_boost'):
             b *= 1.2   # 20% odds boost — project is spending to promote
             log.info(f"[Kelly] DexBoost active (${social.get('dex_boost_amount', 0)} credits) → b={b:.2f}")
-        # Twitter mentions: real community discussion → probability increase
-        mentions = social.get('twitter_mentions', 0)
-        if mentions >= 20:
-            p *= 1.3
-        elif mentions >= 5:
-            p *= 1.15
-        elif mentions >= 1:
-            p *= 1.05
-        if sc_score > 0:
-            log.info(f"[Kelly] Social score={sc_score} mentions={mentions} → p={p:.3f}")
 
-    # ─── Layer 4: MC → odds adjustment (防追高 + 空间评估) ─────────────
-    # Lower MC = more upside room = higher odds
-    # Higher MC = less room = lower odds (auto anti-chase)
-    mc_val = float(watchlist_entry.get('signal_mc') or watchlist_entry.get('market_cap') or watchlist_entry.get('mc') or 0)
-    if mc_val > 0:
-        # MC $30K → b×1.5, MC $100K → b×1.0 (neutral), MC $200K → b×0.5, MC $300K+ → b×0.1
-        mc_factor = max(0.1, min(1.5, 2.0 - mc_val / 100000))
-        b *= mc_factor
-        if mc_factor < 0.5 or mc_factor > 1.2:
-            log.info(f"[Kelly] MC=${mc_val/1000:.0f}K → mc_factor={mc_factor:.2f} → b={b:.2f}")
 
     # ─── Layer 5: ATH confirmation adjustment ──────────────────────────
     # ATH signals get probability boost (token already proven to pump)
