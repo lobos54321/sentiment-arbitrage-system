@@ -4054,10 +4054,11 @@ def run_monitor(db):
                             pending['trigger_price'] = timing_trigger_price
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger=${timing_trigger_price}")
                             
+                    # Kelly position size: use kelly_position_sol if available, else config default
+                    actual_position_size_sol = pending.get('kelly_position_sol') or position_size_sol
                     execution = simulate_entry_execution(
                         pending['token_ca'],
-                        # Fix 5: use Kelly position size, fallback to config default
-                        pending.get('kelly_position_sol') or position_size_sol,
+                        actual_position_size_sol,
                         'stage1',
                         strategy_id=strategy_id,
                         lifecycle_id=lifecycle_id,
@@ -4120,17 +4121,17 @@ def run_monitor(db):
                         strategy_id, strategy_role, 'stage1', 'stage1_entered',
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
                         regime, lifecycle_id, stage_seq('stage1'), entry_ts, price,
-                        position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
+                        actual_position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
                             'auditVersion': 1,
                             'stage': 'stage1',
                             'lifecycleId': lifecycle_id,
                             'entryPriceUsd': price,
-                            'positionSizeSol': position_size_sol,
+                            'positionSizeSol': actual_position_size_sol,
                         })), json.dumps({
                             'tokenCA': pending['token_ca'],
                             'symbol': pending['symbol'],
                             'entryPrice': price,
-                            'entrySol': position_size_sol,
+                            'entrySol': actual_position_size_sol,
                             'tokenAmount': int(token_amount_raw),
                             'tokenDecimals': int(token_decimals or 0),
                             'entryTime': int(entry_ts) * 1000,
@@ -4145,12 +4146,12 @@ def run_monitor(db):
                     pending_entries.pop(lifecycle_id, None)
 
                     pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
-                                   'stage1', lifecycle_id, stage1_exit, position_size_sol, token_amount_raw, token_decimals or 0,
+                                   'stage1', lifecycle_id, stage1_exit, actual_position_size_sol, token_amount_raw, token_decimals or 0,
                                    monitor_state={
                                        'tokenCA': pending['token_ca'],
                                        'symbol': pending['symbol'],
                                        'entryPrice': price,
-                                       'entrySol': position_size_sol,
+                                       'entrySol': actual_position_size_sol,
                                        'tokenAmount': int(token_amount_raw),
                                        'tokenDecimals': int(token_decimals or 0),
                                        'entryTime': int(entry_ts) * 1000,
@@ -4175,7 +4176,7 @@ def run_monitor(db):
                         watchlist.mark_holding(
                             pending['watchlist_id'], 
                             price, 
-                            position_size_sol, 
+                            actual_position_size_sol, 
                             token_amount_raw, 
                             token_decimals or 0, 
                             trade_id
