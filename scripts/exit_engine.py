@@ -210,9 +210,13 @@ def process_guardian_exits(exit_guardian, positions, positions_lock, lifecycles,
             'exit_price': gx.get('trigger_price', gx_pos.entry_price),
             'exit_ts': int(time.time()),
             'mark_source': 'exit_guardian',
-            'execution': gx_sim if gx_sim.get('success') else None,
+            'exit_eval': {
+                'action': 'close',
+                'execution': gx_sim if (gx_sim and gx_sim.get('success')) else {'success': True, 'synthetic': True},
+            },
         })
-        with positions_lock:
-            positions.pop(gx_trade_id, None)
+        # IMPORTANT: Do NOT pop positions[gx_trade_id] here!
+        # The main loop pipeline needs to get it to write DB logs.
+        # It will be popped by close_position_as_... later.
 
     return to_close
