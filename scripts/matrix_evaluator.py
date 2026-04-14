@@ -48,10 +48,14 @@ def _lazy_import():
             _dex_volume_fn = None
         # P1: DexScreener trend snapshot for real-time volume scoring
         try:
-            from paper_trade_monitor import fetch_dexscreener_trend_snapshot
+            from entry_engine import fetch_dexscreener_trend_snapshot
             _dex_trend_fn = fetch_dexscreener_trend_snapshot
         except ImportError:
-            _dex_trend_fn = None
+            try:
+                from paper_trade_monitor import fetch_dexscreener_trend_snapshot
+                _dex_trend_fn = fetch_dexscreener_trend_snapshot
+            except ImportError:
+                _dex_trend_fn = None
 
 
 # ─── Individual Matrix Scorers ─────────────────────────────────────────────
