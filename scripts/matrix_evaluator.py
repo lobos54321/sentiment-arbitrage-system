@@ -25,11 +25,12 @@ _trend_fn = None
 _bars_fn = None
 _price_fn = None
 _dex_volume_fn = None
+_dex_trend_fn = None      # P1: DexScreener trend snapshot for volume scoring
 
 
 def _lazy_import():
     """Lazy import to avoid circular dependency with paper_trade_monitor."""
-    global _trend_fn, _bars_fn, _price_fn, _dex_volume_fn
+    global _trend_fn, _bars_fn, _price_fn, _dex_volume_fn, _dex_trend_fn
     if _trend_fn is None:
         from paper_trade_monitor import (
             check_multi_bar_trend,
@@ -45,6 +46,12 @@ def _lazy_import():
             _dex_volume_fn = fetch_dexscreener_volume
         except ImportError:
             _dex_volume_fn = None
+        # P1: DexScreener trend snapshot for real-time volume scoring
+        try:
+            from paper_trade_monitor import fetch_dexscreener_trend_snapshot
+            _dex_trend_fn = fetch_dexscreener_trend_snapshot
+        except ImportError:
+            _dex_trend_fn = None
 
 
 # ─── Individual Matrix Scorers ─────────────────────────────────────────────
@@ -83,7 +90,33 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
     Returns: (score: int 0-100, reason: str)
     """
     _lazy_import()
-    
+
+    # --- Path 0 (P1): DexScreener 5-min real trade data (most reliable) ---
+    # Uses the same proven data source as SmartEntry: real buys_m5/sells_m5/vol_m5/vol_h1
+    # instead of synthetic observation counts from price polling.
+    if token_ca and callable(_dex_trend_fn):
+        try:
+            trend_data = _dex_trend_fn(token_ca)
+            if trend_data:
+                buys = trend_data.get('buys_m5', 0) or 0
+                sells = trend_data.get('sells_m5', 0) or 0
+                vol_m5 = trend_data.get('vol_m5', 0) or 0
+                vol_h1 = trend_data.get('vol_h1', 0) or 0
+                total_txns = buys + sells
+                h1_avg_m5 = vol_h1 / 12.0 if vol_h1 > 0 else 0
+                vol_ratio = vol_m5 / h1_avg_m5 if h1_avg_m5 > 0 else 0
+
+                if total_txns >= 300 and vol_ratio >= 2.0:
+                    return 100, f'dex_trend_strong txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
+                elif total_txns >= 100 and vol_ratio >= 1.2:
+                    return 70, f'dex_trend_moderate txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
+                elif total_txns >= 50 and vol_ratio >= 0.8:
+                    return 40, f'dex_trend_flat txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
+                else:
+                    return 0, f'dex_trend_weak txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
+        except Exception:
+            pass  # fall through to existing paths
+
     # --- Path 1: K-line bars available ---
     if bars and len(bars) >= 4:
         recent_vol = bars[0].get('volume', 0)
@@ -796,13 +829,51 @@ class ExitMatrixEvaluator:
                 'current_pnl': current_pnl,
             }
 
-        # === Moon Trail (factor 0.2) ===
-        moon_floor = moon_peak * 0.2
+        # === Moon Trail (Dynamic Velocity-Based Factor) ===
+        # P4: Factor adjusts based on how fast PnL is rising (velocity).
+        # Velocity = PnL change per minute over 2-min sliding window.
+        # Factor ratchets up only (never decreases).
+        # Tiered: <5%/min → 0.2, 5-15%/min → 0.4, >15%/min → 0.6
+
+        # Get or initialize PnL history for velocity calculation
+        pnl_history = entry.get('_pnl_history', [])
+        pnl_history.append((time.time(), current_pnl))
+        # Keep only last 5 minutes of history
+        cutoff = time.time() - 300
+        pnl_history = [(t, p) for t, p in pnl_history if t > cutoff]
+
+        # Calculate velocity over 2-min window
+        velocity = 0.0
+        window_sec = 120
+        now_t = time.time()
+        recent = [(t, p) for t, p in pnl_history if now_t - t <= window_sec]
+        if len(recent) >= 2:
+            oldest_t, oldest_p = recent[0]
+            newest_t, newest_p = recent[-1]
+            dt_min = (newest_t - oldest_t) / 60.0
+            if dt_min > 0:
+                velocity = ((newest_p - oldest_p) * 100) / dt_min  # %/min
+
+        # Map velocity to target factor
+        if velocity > 15.0:
+            target_factor = 0.6
+        elif velocity > 5.0:
+            target_factor = 0.4
+        else:
+            target_factor = 0.2
+
+        # Ratchet: only increase, never decrease
+        current_factor = entry.get('moon_trail_factor', 0.2) or 0.2
+        moon_trail_factor = max(target_factor, current_factor)
+
+        moon_floor = moon_peak * moon_trail_factor
         if moon_floor > 0 and current_pnl < moon_floor:
             return {
                 'action': 'exit',
-                'reason': f'moon_trail (pnl={current_pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%})',
+                'reason': f'moon_trail (pnl={current_pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, factor={moon_trail_factor}, vel={velocity:.1f}%/min)',
                 'current_pnl': current_pnl,
+                'moon_trail_factor': moon_trail_factor,
+                '_pnl_history': pnl_history,
             }
 
         # === 24h safety cap ===
@@ -835,6 +906,8 @@ class ExitMatrixEvaluator:
                     'current_pnl': current_pnl,
                     'moon_peak_pnl': moon_peak,
                     'new_moon_trend_zero_count': zero_count,
+                    'moon_trail_factor': moon_trail_factor,
+                    '_pnl_history': pnl_history,
                 }
             else:
                 return {
@@ -843,6 +916,8 @@ class ExitMatrixEvaluator:
                     'current_pnl': current_pnl,
                     'moon_peak_pnl': moon_peak,
                     'new_moon_trend_zero_count': 0,
+                    'moon_trail_factor': moon_trail_factor,
+                    '_pnl_history': pnl_history,
                 }
 
         return {
@@ -850,4 +925,6 @@ class ExitMatrixEvaluator:
             'reason': 'moon_ok',
             'current_pnl': current_pnl,
             'moon_peak_pnl': moon_peak,
+            'moon_trail_factor': moon_trail_factor,
+            '_pnl_history': pnl_history,
         }

@@ -30,6 +30,7 @@ import signal
 import logging
 import urllib.request
 import urllib.parse
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
@@ -97,6 +98,10 @@ POSITION_POLL_INTERVAL = max(1, int(os.environ.get('POSITION_POLL_INTERVAL_SEC',
 MAIN_LOOP_TICK_SEC = max(0.5, float(os.environ.get('MAIN_LOOP_TICK_SEC', '1.0')))
 DAILY_REPORT_HOUR = 0           # UTC hour for daily report
 HEARTBEAT_INTERVAL_SEC = 300
+
+# P6: Global reference for SmartEntry to check active holdings count
+# Set by run_monitor() to a lambda that returns holdings count
+_active_holdings_count = None
 PENDING_ENTRY_BAR_LOOKBACK = max(8, int(os.environ.get('PENDING_ENTRY_BAR_LOOKBACK', '30')))
 PENDING_ENTRY_DEBUG_INTERVAL_SEC = max(30, int(os.environ.get('PENDING_ENTRY_DEBUG_INTERVAL_SEC', '120')))
 PENDING_ENTRY_BAR_TOLERANCE_SEC = max(30, int(os.environ.get('PENDING_ENTRY_BAR_TOLERANCE_SEC', '90')))
@@ -229,7 +234,57 @@ def get_paper_position_size_sol(strategy_config):
 
 KELLY_BASE_CAPITAL_SOL = float(os.environ.get('KELLY_BASE_CAPITAL_SOL', '5.0'))
 KELLY_BASE_WIN_RATE    = 0.30
-KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss
+KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss (ONLY used as fallback)
+KELLY_COLD_START_ODDS  = 1.5   # P3: conservative default when < 20 historical trades
+
+# P3: Historical odds cache
+_kelly_trade_cache = {'wins': [], 'losses': [], 'last_refresh': 0}
+
+def _get_historical_odds(min_trades=20, default_b=None):
+    """P3: Calculate b = avg_win/avg_loss from recent trade history.
+    Uses rolling 50-trade window. Falls back to KELLY_COLD_START_ODDS if insufficient data."""
+    if default_b is None:
+        default_b = KELLY_COLD_START_ODDS
+    cache = _kelly_trade_cache
+    now = time.time()
+
+    # Refresh from DB every 5 minutes
+    if now - cache['last_refresh'] > 300:
+        try:
+            store = WatchlistStore()
+            trades = store.get_recent_closed_trades(limit=50)
+            cache['wins'] = [t['exit_pnl'] for t in trades if t['exit_pnl'] and t['exit_pnl'] > 0]
+            cache['losses'] = [abs(t['exit_pnl']) for t in trades if t['exit_pnl'] and t['exit_pnl'] < 0]
+            cache['last_refresh'] = now
+            log.info(
+                f"[Kelly] Historical data refreshed: {len(cache['wins'])} wins, "
+                f"{len(cache['losses'])} losses from last 50 trades"
+            )
+        except Exception as e:
+            log.warning(f"[Kelly] Failed to refresh historical data: {e}")
+            cache['last_refresh'] = now  # avoid hammering on error
+
+    total = len(cache['wins']) + len(cache['losses'])
+    if total < min_trades:
+        log.info(f"[Kelly] Cold start: only {total} trades, using default b={default_b}")
+        return default_b
+
+    # Use last 20 trades for rolling average
+    recent_wins = cache['wins'][-20:] if cache['wins'] else []
+    recent_losses = cache['losses'][-20:] if cache['losses'] else []
+
+    avg_win = sum(recent_wins) / max(len(recent_wins), 1) if recent_wins else 0
+    avg_loss = sum(recent_losses) / max(len(recent_losses), 1) if recent_losses else 0
+
+    if avg_loss <= 0:
+        return default_b
+
+    b_real = max(avg_win / avg_loss, 0.1)  # floor at 0.1
+    log.info(
+        f"[Kelly] Historical odds: avg_win={avg_win*100:.1f}% avg_loss={avg_loss*100:.1f}% "
+        f"b_real={b_real:.3f} (from {total} trades)"
+    )
+    return b_real
 
 
 def calculate_kelly_position(watchlist_entry, base_capital=None, description=None):
@@ -247,7 +302,7 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         base_capital = KELLY_BASE_CAPITAL_SOL
 
     p = KELLY_BASE_WIN_RATE
-    b = KELLY_BASE_ODDS
+    b = _get_historical_odds()  # P3: use historical avg_win/avg_loss instead of fixed 5.0
 
     # ─── Layer 1: Sub-indices (Task 6) ─────────────────────────────────
     # If description available, parse 6 sub-indices for fine-grained tuning
@@ -1053,6 +1108,146 @@ SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
 SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
 SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
 SMART_ENTRY_MIN_BOUNCE_RATIO = 0.25  # bounce/pullback must be >= 25% (avoid dead cat bounce)
+SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
+SMART_ENTRY_MAX_WAIT_WITH_HOLDINGS = 180  # 3-min max wait when system has active holdings
+
+
+# ─── EXIT Guardian Thread ─────────────────────────────────────────────────────
+# Independent thread that monitors all positions every 3 seconds.
+# Never blocked by SmartEntry or watchlist scanning.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExitGuardianThread(threading.Thread):
+    """Independent thread that monitors all positions every 3 seconds.
+    Never blocked by SmartEntry or watchlist scanning.
+    
+    Checks:
+    1. Hard stop-loss (emergency exit)
+    2. Moon Bag trail floor (emergency exit)
+    3. Breakeven stop for moon bags
+    """
+
+    def __init__(self, positions_ref, positions_lock, watchlist_store_ref,
+                 exit_queue, fetch_price_fn):
+        super().__init__(daemon=True, name='exit-guardian')
+        self.positions = positions_ref      # shared dict reference
+        self.lock = positions_lock          # threading.Lock
+        self.store = watchlist_store_ref     # WatchlistStore instance
+        self.exit_queue = exit_queue         # list to push exit signals (checked by main loop)
+        self.exit_queue_lock = threading.Lock()
+        self.fetch_price = fetch_price_fn   # fetch_realtime_price function
+        self.interval = 3  # seconds
+        self._running = True
+
+    def run(self):
+        log.info("[ExitGuardian] 🛡️ Started — monitoring positions every 3s")
+        while self._running:
+            try:
+                self._check_all_positions()
+            except Exception as e:
+                log.error(f"[ExitGuardian] Error: {e}", exc_info=True)
+            time.sleep(self.interval)
+
+    def stop(self):
+        self._running = False
+
+    def get_pending_exits(self):
+        """Retrieve and clear pending exit signals (called by main loop)."""
+        with self.exit_queue_lock:
+            exits = list(self.exit_queue)
+            self.exit_queue.clear()
+            return exits
+
+    def _check_all_positions(self):
+        # Take snapshot under lock
+        with self.lock:
+            snapshot = list(self.positions.items())
+
+        if not snapshot:
+            return
+
+        for trade_id, pos in snapshot:
+            try:
+                ca = pos.token_ca
+                pool = pos.pool_address
+                entry_price = pos.entry_price
+                if not ca or not entry_price or entry_price <= 0:
+                    continue
+
+                # Fetch current price
+                price, src, age_ms = self.fetch_price(ca, pool)
+                if not price or price <= 0:
+                    continue
+
+                pnl = (price - entry_price) / entry_price
+
+                # --- Get watchlist entry for dynamic_sl ---
+                w_entry = self.store.get_by_ca(ca)
+                hard_sl = -0.15
+                if w_entry:
+                    hard_sl = w_entry.get('dynamic_sl', -0.15)
+
+                # === Hard Stop Loss ===
+                if pnl <= hard_sl:
+                    log.info(
+                        f"[ExitGuardian] 🚨 {pos.symbol} EMERGENCY SL: "
+                        f"pnl={pnl*100:+.1f}% <= SL={hard_sl*100:.1f}% "
+                        f"price=${price:.10f}"
+                    )
+                    with self.exit_queue_lock:
+                        self.exit_queue.append({
+                            'trade_id': trade_id,
+                            'symbol': pos.symbol,
+                            'reason': f'guardian_hard_sl ({pnl:.1%} <= {hard_sl:.1%})',
+                            'trigger_price': price,
+                            'trigger_pnl': pnl,
+                        })
+                    continue
+
+                # === Moon Bag Breakeven Stop ===
+                is_moon = w_entry and w_entry.get('status') == 'moon_bag'
+                if is_moon and price <= entry_price:
+                    log.info(
+                        f"[ExitGuardian] 🔔 {pos.symbol} MOON BREAKEVEN: "
+                        f"price=${price:.10f} <= entry=${entry_price:.10f}"
+                    )
+                    with self.exit_queue_lock:
+                        self.exit_queue.append({
+                            'trade_id': trade_id,
+                            'symbol': pos.symbol,
+                            'reason': f'guardian_moon_breakeven (price <= entry)',
+                            'trigger_price': price,
+                            'trigger_pnl': pnl,
+                        })
+                    continue
+
+                # === Moon Bag Trail Floor ===
+                if is_moon and w_entry:
+                    moon_peak = max(w_entry.get('moon_peak_pnl', 0) or 0, pnl)
+                    # Update peak in DB if needed
+                    if pnl > (w_entry.get('moon_peak_pnl', 0) or 0):
+                        self.store.update_position_state(w_entry['id'], moon_peak_pnl=pnl)
+
+                    trail_factor = w_entry.get('moon_trail_factor', 0.2) or 0.2
+                    moon_floor = moon_peak * trail_factor
+                    if moon_peak > 0 and pnl < moon_floor:
+                        log.info(
+                            f"[ExitGuardian] 🔔 {pos.symbol} MOON TRAIL: "
+                            f"pnl={pnl*100:+.1f}% < floor={moon_floor*100:.1f}% "
+                            f"(peak={moon_peak*100:.1f}% factor={trail_factor})"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': f'guardian_moon_trail (pnl={pnl:.1%} < floor={moon_floor:.1%})',
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                            })
+
+            except Exception as e:
+                sym = getattr(pos, 'symbol', '?') if pos else '?'
+                log.warning(f"[ExitGuardian] Check failed for {sym}: {e}")
 
 
 def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
@@ -1249,7 +1444,16 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
     Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
     """
-    max_rounds = int(SMART_ENTRY_MAX_WAIT_SEC / SMART_ENTRY_POLL_INTERVAL_SEC)  # 90
+    # P6: Use shorter max_wait when system has active holdings
+    effective_max_wait = SMART_ENTRY_MAX_WAIT_SEC
+    if _active_holdings_count is not None:
+        try:
+            if _active_holdings_count() > 0:
+                effective_max_wait = SMART_ENTRY_MAX_WAIT_WITH_HOLDINGS
+        except Exception:
+            pass
+
+    max_rounds = int(effective_max_wait / SMART_ENTRY_POLL_INTERVAL_SEC)
     interval = SMART_ENTRY_POLL_INTERVAL_SEC  # 10s
 
     price_history = []  # local to this evaluation
@@ -1258,10 +1462,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
     start_time = time.time()
     best_trend_phase = None  # Track the strongest trend phase seen so far
     consecutive_momentum_rounds = 0  # Track consecutive strong momentum rounds
+    fake_pump_count = 0  # P5: accumulate FAKE_PUMP rounds
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
-        f"(max {SMART_ENTRY_MAX_WAIT_SEC}s, poll {interval}s)"
+        f"(max {effective_max_wait}s, poll {interval}s)"
     )
 
     for round_num in range(1, max_rounds + 1):
@@ -1295,9 +1500,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
             continue
 
         if trend_phase == 'FAKE_PUMP':
+            fake_pump_count += 1  # P5: increment FAKE_PUMP counter
             log.info(
                 f"[SmartEntry] ${symbol} round {round_num} FAKE_PUMP: {trend_reason} "
-                f"({elapsed:.0f}s elapsed)"
+                f"(fp_count={fake_pump_count}) ({elapsed:.0f}s elapsed)"
             )
             time.sleep(interval)
             continue
@@ -1312,6 +1518,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
             continue
 
         # --- trend_phase == 'BULLISH' → check momentum direct entry first ---
+
+        # P5: If too many FAKE_PUMPs accumulated, require stricter validation
+        if fake_pump_count >= SMART_ENTRY_FAKE_PUMP_THRESHOLD and cached_trend:
+            bs_check = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
+            if bs_check < 2.0:
+                log.info(
+                    f"[SmartEntry] ${symbol} round {round_num} BLOCKED: "
+                    f"fake_pump_history={fake_pump_count} requires buy_sell>=2.0, "
+                    f"got {bs_check:.2f} ({elapsed:.0f}s)"
+                )
+                time.sleep(interval)
+                continue
 
         # Momentum Direct Entry: for parabolic movers that never pull back
         # If price consistently surging with buyers in control, enter directly
@@ -4129,6 +4347,8 @@ def run_monitor(db):
         log.warning(f"  premium_signals has no rows from {freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process")
 
     positions = {}
+    positions_lock = threading.Lock()  # P6: shared lock for Guardian thread
+    guardian_exit_queue = []  # P6: Guardian pushes exit signals here
     pending_entries = {}
     lifecycles = restore_lifecycles(db)
     sanitized_monitor_states = 0
@@ -4284,6 +4504,20 @@ def run_monitor(db):
     last_heartbeat = 0.0
     last_progress = time.time()
     _eval_rotation_offset = 0
+
+    # --- P6: Start EXIT Guardian Thread ---
+    exit_guardian = ExitGuardianThread(
+        positions_ref=positions,
+        positions_lock=positions_lock,
+        watchlist_store_ref=watchlist,
+        exit_queue=guardian_exit_queue,
+        fetch_price_fn=fetch_realtime_price,
+    )
+    exit_guardian.start()
+
+    # P6: Wire up SmartEntry's max_wait dynamic adjustment
+    global _active_holdings_count
+    _active_holdings_count = lambda: len(positions)
 
     while True:
       try:
@@ -4668,6 +4902,47 @@ def run_monitor(db):
 
         if now - last_position_check >= POSITION_POLL_INTERVAL:
             last_position_check = now
+
+            # --- P6: Process Guardian exit signals first (highest priority) ---
+            guardian_exits = exit_guardian.get_pending_exits()
+            for gx in guardian_exits:
+                gx_trade_id = gx.get('trade_id')
+                if gx_trade_id in positions:
+                    gx_pos = positions[gx_trade_id]
+                    gx_lifecycle_id = gx_pos.lifecycle_id
+                    gx_lifecycle = lifecycles.setdefault(
+                        gx_lifecycle_id,
+                        build_lifecycle_state(gx_lifecycle_id, gx_pos.token_ca, gx_pos.symbol,
+                                              gx_pos.signal_ts, getattr(gx_pos, 'premium_signal_id', None),
+                                              getattr(gx_pos, 'signal_type', None))
+                    )
+                    log.info(
+                        f"  [GUARDIAN_EXIT] 🚨 Processing {gx['symbol']}: {gx['reason']} "
+                        f"trigger_pnl={gx.get('trigger_pnl', 0)*100:+.1f}%"
+                    )
+                    # Simulate exit execution
+                    gx_sell_amount = int(float(gx_pos.token_amount_raw)) if gx_pos.token_amount_raw else 0
+                    gx_sim = simulate_exit_execution(
+                        gx_pos.token_ca, str(gx_sell_amount),
+                        getattr(gx_pos, 'token_decimals', 0) or 0,
+                        gx_pos.strategy_stage, strategy_id=strategy_id,
+                        lifecycle_id=gx_lifecycle_id
+                    )
+                    gx_trigger_pnl = gx.get('trigger_pnl', 0)
+                    to_close = to_close if 'to_close' in dir() else []
+                    to_close.append({
+                        'trade_id': gx_trade_id,
+                        'reason': gx['reason'],
+                        'pnl': gx_trigger_pnl,
+                        'trigger_pnl': gx_trigger_pnl,
+                        'exit_price': gx.get('trigger_price', gx_pos.entry_price),
+                        'exit_ts': int(time.time()),
+                        'mark_source': 'exit_guardian',
+                        'execution': gx_sim if gx_sim.get('success') else None,
+                    })
+                    with positions_lock:
+                        positions.pop(gx_trade_id, None)
+
             to_close = []
             try:
                 new_sol = get_sol_price()
@@ -4757,6 +5032,10 @@ def run_monitor(db):
                         # Persist moon_trend_zero_count (critical for moon trend death)
                         if exit_matrix.get('new_moon_trend_zero_count') is not None:
                             state_updates['moon_trend_zero_count'] = exit_matrix['new_moon_trend_zero_count']
+                        
+                        # P4: Persist moon_trail_factor (critical for velocity ratchet)
+                        if exit_matrix.get('moon_trail_factor') is not None:
+                            state_updates['moon_trail_factor'] = exit_matrix['moon_trail_factor']
                         
                         if w_entry:
                             watchlist.update_position_state(w_entry['id'], **state_updates)

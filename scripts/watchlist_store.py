@@ -73,9 +73,12 @@ CREATE TABLE IF NOT EXISTS watchlist (
     moon_start_time REAL,
     moon_trend_zero_count INTEGER DEFAULT 0,
     zero_vol_count  INTEGER DEFAULT 0,
-    dynamic_sl      REAL DEFAULT -0.075,               -- current dynamic stop-loss
+    dynamic_sl      REAL DEFAULT -0.15,                -- current dynamic stop-loss
     trailing_active INTEGER DEFAULT 0,
     last_matrix_check REAL DEFAULT 0,
+    moon_trail_factor REAL DEFAULT 0.2,                -- P4: dynamic trail factor (velocity ratchet)
+    consecutive_losses INTEGER DEFAULT 0,              -- P2: consecutive loss count for cooldown
+    last_loss_time  REAL DEFAULT 0,                    -- P2: timestamp of last loss
 
     -- Lifecycle
     status          TEXT NOT NULL DEFAULT 'watching',  -- watching | pending_momentum | holding | moon_bag | expired
@@ -117,6 +120,11 @@ class WatchlistStore:
             ("ALTER TABLE watchlist ADD COLUMN exit_execution_json TEXT", None),
             # Fix 4: track ATH peaks separately to preserve original signal_price
             ("ALTER TABLE watchlist ADD COLUMN latest_ath_price REAL DEFAULT NULL", None),
+            # P4: dynamic trail factor for moon bags
+            ("ALTER TABLE watchlist ADD COLUMN moon_trail_factor REAL DEFAULT 0.2", None),
+            # P2: loss cooldown tracking
+            ("ALTER TABLE watchlist ADD COLUMN consecutive_losses INTEGER DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN last_loss_time REAL DEFAULT 0", None),
         ]
         for col_sql, _ in _migrate_columns:
             try:
@@ -259,6 +267,16 @@ class WatchlistStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_recent_closed_trades(self, limit=50):
+        """P3: Fetch recent closed trades with exit PnL for Kelly odds calculation.
+        Returns list of dicts with 'exit_pnl' key."""
+        rows = self.db.execute('''
+            SELECT last_exit_pnl as exit_pnl FROM watchlist
+            WHERE status IN ('watching', 'expired') AND last_exit_pnl IS NOT NULL
+            ORDER BY last_exit_at DESC LIMIT ?
+        ''', (limit,)).fetchall()
+        return [{'exit_pnl': r['exit_pnl']} for r in rows]
+
     # ─── State Transitions ─────────────────────────────────────────────
 
     def mark_holding(self, entry_id, entry_price, position_size_sol,
@@ -276,8 +294,9 @@ class WatchlistStore:
                      trade_id=trade_id,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.075,
+                     dynamic_sl=-0.15,
                      zero_vol_count=0,
+                     moon_trail_factor=0.2,
                      last_matrix_check=now,
                      entry_count_delta=1)  # increment entry_count
         log.info(f"[WL] → holding (entry_id={entry_id} trade_id={trade_id})")
@@ -297,6 +316,26 @@ class WatchlistStore:
     def mark_watching(self, entry_id, exit_pnl, cooldown_sec=180):
         """Transition from holding/moon_bag → watching (re-observation after exit)."""
         now = time.time()
+
+        # P2: Track consecutive losses for cooldown
+        existing = self.get_by_id(entry_id)
+        prev_consec = (existing.get('consecutive_losses', 0) or 0) if existing else 0
+
+        if exit_pnl is not None and exit_pnl < 0:
+            # Loss: increment consecutive loss counter
+            new_consec = prev_consec + 1
+            loss_time = now
+            # Dynamic cooldown: 1 loss → 15min, 2+ losses → 2h
+            if new_consec >= 2:
+                cooldown_sec = 7200   # 2 hours
+            else:
+                cooldown_sec = 900    # 15 minutes
+            log.info(f"[WL] Loss cooldown: consecutive_losses={new_consec} → cooldown={cooldown_sec}s")
+        else:
+            # Profit or breakeven: reset consecutive loss counter
+            new_consec = 0
+            loss_time = 0
+
         self._update(entry_id,
                      status='watching',
                      last_exit_pnl=exit_pnl,
@@ -308,13 +347,16 @@ class WatchlistStore:
                      trade_id=None,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.075,
+                     dynamic_sl=-0.15,
                      zero_vol_count=0,
                      moon_peak_pnl=0,
                      moon_start_time=None,
                      moon_trend_zero_count=0,
+                     moon_trail_factor=0.2,
+                     consecutive_losses=new_consec,
+                     last_loss_time=loss_time,
                      last_eval_at=0)
-        log.info(f"[WL] → watching (re-observation, exit_pnl={exit_pnl:.1%})")
+        log.info(f"[WL] → watching (re-observation, exit_pnl={exit_pnl:.1%}, consec_losses={new_consec})")
 
     def mark_expired(self, entry_id, reason):
         """Remove token from active watchlist."""
