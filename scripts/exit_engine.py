@@ -88,20 +88,64 @@ class ExitGuardianThread(threading.Thread):
                 if w_entry:
                     hard_sl = w_entry.get('dynamic_sl', -0.15)
 
-                # === Hard Stop Loss ===
+                # === Hard Stop Loss (Double-Tap Confirmation) ===
+                # P0 Fix: A single bad price read from Redis killed Coco (+73% → -20.8%).
+                # Now we require TWO consecutive price checks to confirm SL breach.
+                # If first check triggers SL, wait 1s and re-fetch. Only proceed if both agree.
                 if pnl <= hard_sl:
+                    first_price = price
+                    first_pnl = pnl
+                    first_src = src
                     log.info(
-                        f"[ExitGuardian] 🚨 {pos.symbol} EMERGENCY SL: "
+                        f"[ExitGuardian] ⚠️ {pos.symbol} SL CHECK #1: "
                         f"pnl={pnl*100:+.1f}% <= SL={hard_sl*100:.1f}% "
-                        f"price=${price:.10f}"
+                        f"price=${price:.10f} src={src} — confirming in 1s..."
+                    )
+
+                    # Second check after 1 second delay
+                    time.sleep(1.0)
+                    price2, src2, age_ms2 = self.fetch_price(ca, pool)
+
+                    if not price2 or price2 <= 0:
+                        log.warning(
+                            f"[ExitGuardian] {pos.symbol} SL CONFIRM FAILED: "
+                            f"second price fetch returned None, holding position"
+                        )
+                        continue
+
+                    pnl2 = (price2 - entry_price) / entry_price
+
+                    # Check price divergence between the two reads
+                    price_divergence = abs(price2 - first_price) / max(first_price, 1e-15)
+
+                    if pnl2 > hard_sl:
+                        # Second check says NOT in SL territory → price glitch, skip exit
+                        log.warning(
+                            f"[ExitGuardian] 🛡️ {pos.symbol} SL CANCELLED — price glitch detected! "
+                            f"Check#1: pnl={first_pnl*100:+.1f}% price=${first_price:.10f} src={first_src} | "
+                            f"Check#2: pnl={pnl2*100:+.1f}% price=${price2:.10f} src={src2} | "
+                            f"divergence={price_divergence:.1%} — holding position"
+                        )
+                        continue
+
+                    # Both checks confirm SL breach → proceed with exit
+                    # Use the BETTER (higher) price of the two for the trigger
+                    confirmed_price = max(first_price, price2)
+                    confirmed_pnl = (confirmed_price - entry_price) / entry_price
+
+                    log.info(
+                        f"[ExitGuardian] 🚨 {pos.symbol} EMERGENCY SL CONFIRMED: "
+                        f"Check#1: pnl={first_pnl*100:+.1f}% src={first_src} | "
+                        f"Check#2: pnl={pnl2*100:+.1f}% src={src2} | "
+                        f"divergence={price_divergence:.1%} — executing exit"
                     )
                     with self.exit_queue_lock:
                         self.exit_queue.append({
                             'trade_id': trade_id,
                             'symbol': pos.symbol,
-                            'reason': f'guardian_hard_sl ({pnl:.1%} <= {hard_sl:.1%})',
-                            'trigger_price': price,
-                            'trigger_pnl': pnl,
+                            'reason': f'guardian_hard_sl ({confirmed_pnl:.1%} <= {hard_sl:.1%})',
+                            'trigger_price': confirmed_price,
+                            'trigger_pnl': confirmed_pnl,
                         })
                     continue
 
