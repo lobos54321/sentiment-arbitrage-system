@@ -1110,7 +1110,6 @@ SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
 SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
 SMART_ENTRY_MIN_BOUNCE_RATIO = 0.25  # bounce/pullback must be >= 25% (avoid dead cat bounce)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
-SMART_ENTRY_MAX_WAIT_WITH_HOLDINGS = 180  # 3-min max wait when system has active holdings
 
 
 # ─── EXIT Guardian Thread ─────────────────────────────────────────────────────
@@ -1445,16 +1444,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
     Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
     """
-    # P6: Use shorter max_wait when system has active holdings
-    effective_max_wait = SMART_ENTRY_MAX_WAIT_SEC
-    if _active_holdings_count is not None:
-        try:
-            if _active_holdings_count() > 0:
-                effective_max_wait = SMART_ENTRY_MAX_WAIT_WITH_HOLDINGS
-        except Exception:
-            pass
-
-    max_rounds = int(effective_max_wait / SMART_ENTRY_POLL_INTERVAL_SEC)
+    max_rounds = int(SMART_ENTRY_MAX_WAIT_SEC / SMART_ENTRY_POLL_INTERVAL_SEC)
     interval = SMART_ENTRY_POLL_INTERVAL_SEC  # 10s
 
     price_history = []  # local to this evaluation
@@ -1467,7 +1457,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
-        f"(max {effective_max_wait}s, poll {interval}s)"
+        f"(max {SMART_ENTRY_MAX_WAIT_SEC}s, poll {interval}s)"
     )
 
     for round_num in range(1, max_rounds + 1):
