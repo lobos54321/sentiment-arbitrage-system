@@ -280,9 +280,10 @@ def _get_historical_odds(min_trades=20, default_b=None):
         return default_b
 
     b_real = max(avg_win / avg_loss, 0.1)  # floor at 0.1
+    b_real = min(b_real, 3.0)  # cap at 3.0 — prevent outlier wins from inflating odds
     log.info(
         f"[Kelly] Historical odds: avg_win={avg_win*100:.1f}% avg_loss={avg_loss*100:.1f}% "
-        f"b_real={b_real:.3f} (from {total} trades)"
+        f"b_real={b_real:.3f} (from {total} trades, capped at 3.0)"
     )
     return b_real
 
