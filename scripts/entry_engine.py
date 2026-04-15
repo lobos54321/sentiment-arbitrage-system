@@ -16,9 +16,13 @@ log = logging.getLogger('paper_trade_monitor')
 
 # ─── Kelly Criterion Constants ────────────────────────────────────────────────
 KELLY_BASE_CAPITAL_SOL = float(os.environ.get('KELLY_BASE_CAPITAL_SOL', '5.0'))
-KELLY_BASE_WIN_RATE    = 0.30
+KELLY_BASE_WIN_RATE    = 0.45   # Based on overnight data: 48% win rate (conservative)
 KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss (ONLY used as fallback)
-KELLY_COLD_START_ODDS  = 1.5   # P3: conservative default when < 20 historical trades
+KELLY_COLD_START_ODDS  = 2.0   # Based on overnight data: avg_win=16.3% / avg_loss=8%
+
+# Only use trades after this date for Kelly historical data
+# (old trades used -15% SL, now we use -7.5% — old avg_loss is not representative)
+KELLY_DATA_CUTOFF = '2026-04-15 12:00:00'
 
 # P3: Historical odds cache
 _kelly_trade_cache = {'wins': [], 'losses': [], 'last_refresh': 0}
@@ -49,6 +53,9 @@ def _get_historical_odds(min_trades=20, default_b=None):
         try:
             store = WatchlistStore()
             trades = store.get_recent_closed_trades(limit=50)
+            # Filter: only use trades after cutoff (old -15% SL data is not representative)
+            trades = [t for t in trades
+                      if t.get('closed_at', '') >= KELLY_DATA_CUTOFF]
             cache['wins'] = [t['exit_pnl'] for t in trades if t['exit_pnl'] and t['exit_pnl'] > 0]
             cache['losses'] = [abs(t['exit_pnl']) for t in trades if t['exit_pnl'] and t['exit_pnl'] < 0]
             cache['last_refresh'] = now
