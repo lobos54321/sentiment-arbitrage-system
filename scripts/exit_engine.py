@@ -179,43 +179,59 @@ class ExitGuardianThread(threading.Thread):
                 pos.price_ring.append((time.time(), price))
 
                 # === Compute real-time velocity + tick_volatility ===
-                vel_30s = self._calc_velocity(pos.price_ring, 30)
+                raw_vel_30s = self._calc_velocity(pos.price_ring, 30)
                 vel_60s = self._calc_velocity(pos.price_ring, 60)
                 tick_vol = self._calc_tick_volatility(pos.price_ring)
 
+                # Multi-round velocity smoothing (3 rounds × 3s = 9s average)
+                pos.vel_history.append(raw_vel_30s)
+                smoothed_vel = sum(pos.vel_history) / len(pos.vel_history) if pos.vel_history else 0.0
+
+                # Extreme crash bypass: vel < -15%/min → use raw, don't wait for avg
+                # Data: GRASS crashed -75% in minutes = ~-15%/min sustained
+                use_vel = raw_vel_30s if raw_vel_30s < -15.0 else smoothed_vel
+
+                # Read Helius TPS from watchlist (written by main loop)
+                tps_smooth = 0.0
+                if w_entry:
+                    tps_smooth = w_entry.get('_helius_tps', 0) or 0
+
                 # Write to watchlist entry so main-loop evaluate_exit can read
                 if w_entry:
-                    w_entry['_guardian_velocity'] = vel_30s
+                    w_entry['_guardian_velocity'] = use_vel
                     w_entry['_guardian_tick_vol'] = tick_vol
 
-                # === Trail Floor Check (3s frequency, velocity-driven) ===
-                # Now uses Guardian's own price_ring velocity instead of
-                # relying on main loop's _pnl_history (60s delay → 3s delay).
+                # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
-                has_locked = w_entry and w_entry.get('has_locked_profit')
 
                 if not is_moon and pos.peak_pnl >= 0.05:
                     # Tiered base factor by peak level
-                    if pos.peak_pnl >= 0.20:
+                    if pos.peak_pnl >= 0.50:
+                        base_factor = 0.65   # >= +50% — about to become moon bag
+                    elif pos.peak_pnl >= 0.20:
                         base_factor = 0.6
                     elif pos.peak_pnl >= 0.10:
                         base_factor = 0.55
                     else:
                         base_factor = 0.5
 
-                    # Velocity-driven factor (3s granularity!)
-                    if vel_30s > 15.0:
-                        vel_factor = 0.70    # rocketing up → lock hard
-                    elif vel_30s > 5.0:
-                        vel_factor = 0.60    # moderate pump
-                    elif vel_30s < -5.0:
+                    # Velocity-driven factor
+                    if raw_vel_30s < -15.0:
+                        vel_factor = 0.85    # CRASH → emergency tight (skip smoothing)
+                    elif use_vel < -5.0:
                         vel_factor = 0.75    # fast downtrend → very tight
+                    elif use_vel > 15.0:
+                        vel_factor = 0.70    # rocketing up → lock hard
+                    elif use_vel > 5.0:
+                        vel_factor = 0.60    # moderate pump
                     else:
                         vel_factor = base_factor
 
-                    # Volume exhaustion: no price movement = no trades → tighten
+                    # Volume signals (B: tick_vol + C: Helius TPS)
                     if tick_vol < 0.001 and len(pos.price_ring) >= 5:
-                        vel_factor = max(vel_factor, 0.70)
+                        vel_factor = max(vel_factor, 0.70)   # B: no price movement
+                    if tps_smooth >= 0 and tps_smooth < 0.5 and len(pos.price_ring) >= 5:
+                        vel_factor = max(vel_factor, 0.70)   # C: real volume dried up
 
                     # Ratchet: never lower the factor
                     ratcheted = 0
@@ -234,14 +250,15 @@ class ExitGuardianThread(threading.Thread):
                             f"[ExitGuardian] 📉 {pos.symbol} TRAIL STOP: "
                             f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
                             f"(peak={pos.peak_pnl*100:.1f}% factor={trail_factor:.2f}) "
-                            f"vel={vel_30s:.1f}%/min tick_vol={tick_vol:.4f} "
+                            f"vel={use_vel:.1f}%/min(raw={raw_vel_30s:.1f}) "
+                            f"tick_vol={tick_vol:.4f} tps={tps_smooth:.1f} "
                             f"price=${price:.10f} src={src}"
                         )
                         with self.exit_queue_lock:
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
-                                'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, vel={vel_30s:.1f})',
+                                'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, vel={use_vel:.1f}, tps={tps_smooth:.1f})',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             })

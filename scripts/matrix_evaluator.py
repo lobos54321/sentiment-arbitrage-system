@@ -716,23 +716,24 @@ class ExitMatrixEvaluator:
                 'trail_floor': None,
             }
 
-        # === Profit Lock at +20% (velocity-aware) ===
-        # B+C: Don't lock during strong momentum — delay and tighten trail instead.
-        # Safety cap: always lock at +35% regardless of velocity.
-        if peak_pnl >= 0.20 and not entry.get('has_locked_profit'):
+        # === Profit Lock at +50% (velocity-aware) ===
+        # B+C covers -15% to +50% with velocity+volume trail.
+        # Lock profit (sell 50% → moon bag) only at +50%+.
+        # Safety cap: always lock at +70% regardless of velocity.
+        if peak_pnl >= 0.50 and not entry.get('has_locked_profit'):
             velocity = entry.get('_guardian_velocity', 0)
             helius_tps = entry.get('_helius_tps', 0)
             symbol = entry.get('symbol', '?')
 
-            # Safety cap: force lock at +35% no matter what
-            if peak_pnl >= 0.35:
+            # Safety cap: force lock at +70% no matter what
+            if peak_pnl >= 0.70:
                 log.info(
                     f"[ExitMatrix] {symbol} FORCE lock_profit: "
-                    f"peak={peak_pnl:.1%} >= 35% safety cap"
+                    f"peak={peak_pnl:.1%} >= 70% safety cap"
                 )
                 return {
                     'action': 'lock_profit',
-                    'reason': f'profit_lock_forced (peak={peak_pnl:.1%} >= 35%)',
+                    'reason': f'profit_lock_forced (peak={peak_pnl:.1%} >= 70%)',
                     'current_pnl': current_pnl,
                     'trail_floor': None,
                 }
@@ -750,7 +751,7 @@ class ExitMatrixEvaluator:
                 # Momentum has faded → normal lock
                 return {
                     'action': 'lock_profit',
-                    'reason': f'profit_lock (peak={peak_pnl:.1%} >= 20%, vel={velocity:.1f}, tps={helius_tps:.1f})',
+                    'reason': f'profit_lock (peak={peak_pnl:.1%} >= 50%, vel={velocity:.1f}, tps={helius_tps:.1f})',
                     'current_pnl': current_pnl,
                     'trail_floor': None,
                 }

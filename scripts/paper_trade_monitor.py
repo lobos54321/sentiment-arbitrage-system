@@ -944,42 +944,52 @@ HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', 'f7e7e457-aba3-448b-a565-f1881
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 # B+C: Helius volume polling cache for held positions
-# trade_id → {'last_check': ts, 'last_sig': str, 'tps': float}
+# trade_id → {'last_check': ts, 'last_sig': str, 'tps': float, 'tps_history': [float]}
 _helius_vol_cache = {}
 
 def poll_helius_volume(trade_id, pool_address, interval=30):
     """Poll Helius for real transaction frequency (TPS) of a held position.
-    Returns TPS (transactions per second) or -1 on first call (no baseline).
+    Returns smoothed TPS (average of last 3 readings) for stability.
     Cached per trade_id, re-fetches only after `interval` seconds.
     """
     now = time.time()
     cache = _helius_vol_cache.get(trade_id)
 
     if cache and (now - cache['last_check']) < interval:
-        return cache.get('tps', 0.0)
+        return cache.get('tps_smooth', cache.get('tps', 0.0))
 
     try:
         sigs = get_recent_signatures(pool_address, limit=30)
         if not sigs:
-            tps = 0.0
+            raw_tps = 0.0
         elif cache and cache.get('last_sig'):
             new_count = next(
                 (i for i, sig in enumerate(sigs) if sig == cache['last_sig']),
                 len(sigs)
             )
             elapsed = now - cache['last_check']
-            tps = new_count / elapsed if elapsed > 0 else 0.0
+            raw_tps = new_count / elapsed if elapsed > 0 else 0.0
         else:
-            tps = -1.0  # first call, no baseline yet
+            raw_tps = -1.0  # first call, no baseline yet
+
+        # Multi-round smoothing: keep last 3 TPS readings, return average
+        tps_history = (cache.get('tps_history') if cache else None) or []
+        if raw_tps >= 0:
+            tps_history.append(raw_tps)
+        if len(tps_history) > 3:
+            tps_history = tps_history[-3:]
+        tps_smooth = sum(tps_history) / len(tps_history) if tps_history else 0.0
 
         _helius_vol_cache[trade_id] = {
             'last_check': now,
             'last_sig': sigs[0] if sigs else None,
-            'tps': tps,
+            'tps': raw_tps,
+            'tps_smooth': tps_smooth,
+            'tps_history': tps_history,
         }
-        return tps
+        return tps_smooth
     except Exception:
-        return cache.get('tps', 0.0) if cache else 0.0
+        return cache.get('tps_smooth', cache.get('tps', 0.0)) if cache else 0.0
 
 def get_recent_signatures(token_ca, limit=100):
     """Fetch recent signatures using Helius RPC to count momentum"""
@@ -2480,6 +2490,7 @@ class Position:
         'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
         'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
         'monitor_state', 'entry_execution_json', 'premium_signal_id', 'signal_type',
+        'price_ring', 'vel_history',
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
@@ -2512,6 +2523,8 @@ class Position:
         self.signal_type = None
         # B+C velocity system: Guardian fills every 3s, 20 slots = 60s history
         self.price_ring = deque(maxlen=20)
+        # Multi-round velocity smoothing: last 3 vel_30s readings → avg
+        self.vel_history = deque(maxlen=3)
 
 
 def build_lifecycle_id(token_ca, signal_ts):
