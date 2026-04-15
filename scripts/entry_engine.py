@@ -480,40 +480,47 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
                 continue
 
         # Momentum Direct Entry: for parabolic movers that never pull back
-        # Uses REAL-TIME price change from our own price_history (Jupiter, 10s interval)
-        # instead of DexScreener's lagged 5-min data which caused false momentum signals.
-        # DexScreener buy/sell ratio still used as secondary confirmation.
+        # Uses REAL-TIME velocity from our own price_history (Jupiter, 10s interval)
+        # Same approach as Guardian's _calc_velocity: %/minute rate over time windows.
+        # Two windows: 30s (responsive) + 60s (confirms sustained move, not spike).
         if cached_trend and len(price_history) >= 2:
-            # Compute real-time price change from our own data
             now_t = time.time()
-            # Look back ~60s in price_history for a reliable short-term trend
-            lookback_prices = [(t, p) for t, p in price_history if now_t - t <= 60 and p > 0]
-            if len(lookback_prices) >= 2:
-                oldest_p = lookback_prices[0][1]
-                newest_p = lookback_prices[-1][1]
-                realtime_pc = ((newest_p - oldest_p) / oldest_p) * 100.0
-            else:
-                realtime_pc = 0.0
+
+            def _calc_vel(window_sec):
+                """Price velocity in %/minute over window, same as Guardian."""
+                pts = [(t, p) for t, p in price_history if now_t - t <= window_sec and p > 0]
+                if len(pts) < 2:
+                    return 0.0
+                dt_min = (pts[-1][0] - pts[0][0]) / 60.0
+                if dt_min <= 0:
+                    return 0.0
+                return ((pts[-1][1] - pts[0][1]) / pts[0][1] * 100) / dt_min
+
+            vel_30s = _calc_vel(30)
+            vel_60s = _calc_vel(60)
 
             b_m5 = cached_trend.get('buys_m5', 0)
             s_m5 = max(cached_trend.get('sells_m5', 1), 1)
             bs_ratio = b_m5 / s_m5
 
-            # Real-time price surging + DexScreener confirms buyers in control
-            if realtime_pc > 15.0 and bs_ratio > 1.0:
+            # Real-time velocity surging + DexScreener confirms buyers in control
+            # vel_30s > 15%/min: short-term rocket (responsive)
+            # vel_60s > 5%/min: sustained over a full minute (not a 10s spike)
+            if vel_30s > 15.0 and vel_60s > 5.0 and bs_ratio > 1.0:
                 consecutive_momentum_rounds += 1
             else:
                 consecutive_momentum_rounds = 0
 
             # Dynamic min wait based on signal strength:
-            # Extreme (buy_sell≥5 + realtime_pc>20%): 10s — buyer domination
+            # Extreme (buy_sell≥5 + vel_30s>30%/min): 10s — buyer domination
             # Normal: 60s — let the momentum develop
-            min_momentum_wait = 10 if (bs_ratio >= 5.0 and realtime_pc > 20) else 60
+            min_momentum_wait = 10 if (bs_ratio >= 5.0 and vel_30s > 30) else 60
             if (consecutive_momentum_rounds >= 3
                     and elapsed > min_momentum_wait
                     and price and price > 0):
                 detail_str = (
-                    f"rt_pc_60s={realtime_pc:+.1f}% buy_sell={bs_ratio:.2f} "
+                    f"vel_30s={vel_30s:+.1f}%/min vel_60s={vel_60s:+.1f}%/min "
+                    f"buy_sell={bs_ratio:.2f} "
                     f"consecutive={consecutive_momentum_rounds} "
                     f"waited={elapsed:.0f}s trend={trend_reason}"
                 )
