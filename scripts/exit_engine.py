@@ -187,9 +187,9 @@ class ExitGuardianThread(threading.Thread):
                 pos.vel_history.append(raw_vel_30s)
                 smoothed_vel = sum(pos.vel_history) / len(pos.vel_history) if pos.vel_history else 0.0
 
-                # Extreme crash bypass: vel < -15%/min → use raw, don't wait for avg
-                # Data: GRASS crashed -75% in minutes = ~-15%/min sustained
-                use_vel = raw_vel_30s if raw_vel_30s < -15.0 else smoothed_vel
+                # Extreme crash bypass: vel < -10%/min → use raw, don't wait for avg
+                # Data: ROTJAK crashed -24%/min, NOTOKEN -13%/min; normal noise is -0.3~-1%/min
+                use_vel = raw_vel_30s if raw_vel_30s < -10.0 else smoothed_vel
 
                 # Read Helius TPS from watchlist (written by main loop)
                 tps_smooth = 0.0
@@ -216,9 +216,9 @@ class ExitGuardianThread(threading.Thread):
                         base_factor = 0.5
 
                     # Velocity-driven factor
-                    if raw_vel_30s < -15.0:
+                    if raw_vel_30s < -10.0:
                         vel_factor = 0.85    # CRASH → emergency tight (skip smoothing)
-                    elif use_vel < -5.0:
+                    elif use_vel < -3.0:
                         vel_factor = 0.75    # fast downtrend → very tight
                     elif use_vel > 15.0:
                         vel_factor = 0.70    # rocketing up → lock hard
