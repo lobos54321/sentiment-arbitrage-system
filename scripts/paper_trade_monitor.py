@@ -4408,7 +4408,7 @@ def run_monitor(db):
                                             cancel = False
 
                                             if 'hard_sl' in reason:
-                                                sl_threshold = w_entry.get('dynamic_sl', -0.15) if w_entry else -0.15
+                                                sl_threshold = w_entry.get('dynamic_sl', -0.075) if w_entry else -0.075
                                                 if quote_pnl > sl_threshold:
                                                     cancel = True
                                             elif 'trail_stop' in reason:

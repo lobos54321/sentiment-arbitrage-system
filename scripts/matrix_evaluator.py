@@ -705,9 +705,9 @@ class ExitMatrixEvaluator:
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
         # === Hard Stop-Loss ===
-        # Default -15% (matches strategy config stage1Exit.stopLossPct=15).
+        # Default -7.5% — momentum entries that immediately drop 7.5% are bad signals.
         # dynamic_sl can tighten this if trailing stop moves SL up.
-        hard_sl = entry.get('dynamic_sl', -0.15)
+        hard_sl = entry.get('dynamic_sl', -0.075)
         if current_pnl <= hard_sl:
             return {
                 'action': 'exit',

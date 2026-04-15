@@ -106,9 +106,9 @@ class ExitGuardianThread(threading.Thread):
 
                 # --- Get watchlist entry for dynamic_sl ---
                 w_entry = self.store.get_by_ca(ca)
-                hard_sl = -0.15
+                hard_sl = -0.075
                 if w_entry:
-                    hard_sl = w_entry.get('dynamic_sl', -0.15)
+                    hard_sl = w_entry.get('dynamic_sl', -0.075)
 
                 # === Hard Stop Loss (Double-Tap Confirmation) ===
                 # P0 Fix: A single bad price read from Redis killed Coco (+73% → -20.8%).
