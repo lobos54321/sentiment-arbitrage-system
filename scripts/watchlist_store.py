@@ -321,8 +321,8 @@ class WatchlistStore:
         existing = self.get_by_id(entry_id)
         prev_consec = (existing.get('consecutive_losses', 0) or 0) if existing else 0
 
-        if exit_pnl is not None and exit_pnl < 0:
-            # Loss: increment consecutive loss counter
+        if exit_pnl is not None and exit_pnl < 0 and cooldown_sec > 0:
+            # Loss from hard stop: increment consecutive loss counter
             new_consec = prev_consec + 1
             loss_time = now
             # Dynamic cooldown: 1 loss → 15min, 2+ losses → 2h
@@ -331,6 +331,11 @@ class WatchlistStore:
             else:
                 cooldown_sec = 900    # 15 minutes
             log.info(f"[WL] Loss cooldown: consecutive_losses={new_consec} → cooldown={cooldown_sec}s")
+        elif exit_pnl is not None and exit_pnl < 0 and cooldown_sec == 0:
+            # Trail stop loss: no cooldown, don't escalate consecutive losses
+            new_consec = prev_consec  # preserve count but don't increment
+            loss_time = 0
+            log.info(f"[WL] Trail stop exit: no cooldown (let Matrix re-evaluate)")
         else:
             # Profit or breakeven: reset consecutive loss counter
             new_consec = 0
