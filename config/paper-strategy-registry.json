@@ -63,7 +63,7 @@
           "postExitMinutes": 10
         },
         "paperExitRules": {
-          "stopLossPct": 15,
+          "stopLossPct": 7.5,
           "trailStartPct": 3,
           "trailFactor": 0.9,
           "takeProfitPct": [
@@ -350,7 +350,7 @@
             "allowAthOverride": false
           },
           "stage1Exit": {
-            "stopLossPct": 15,
+            "stopLossPct": 7.5,
             "trailStartPct": 25,
             "trailFactor": 0.6,
             "timeoutMinutes": 120
