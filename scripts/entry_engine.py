@@ -91,96 +91,31 @@ def _get_historical_odds(min_trades=20, default_b=None):
     return b_real
 
 
-def calculate_kelly_position(watchlist_entry, base_capital=None, description=None, matrix_scores=None):
+def calculate_kelly_position(watchlist_entry, base_capital=None, description=None, matrix_scores=None,
+                              entry_mode=None):
     """
-    Compute position size using Kelly Criterion scaled by signal quality.
+    Compute position size using Kelly Criterion.
 
-    Layers (data-validated from 12-trade sample 2026-04-14):
-      1. Sub-indices: media only (the one positive-correlation signal)
-      2. Signal velocity: propagation rate across Telegram
-      3. DexScreener Boost: real money commitment
-      4. Matrix crowding penalty: 4+ perfect scores = crowded = reduce
-      5. ATH confirmation
+    Simplified based on 23-trade backtest (2026-04-15):
+      - Only entry_mode and ATH are data-validated predictors
+      - Matrix crowding, sub-indices, signal velocity, DexBoost: NOT predictive → removed
+      - momentum_direct: 62% win rate → full position
+      - pullback_bounce: 43% win rate → p × 0.85
 
     Returns position size in SOL (min 0.03, max 20% of base_capital).
     """
-    # Lazy imports to avoid circular dependency
-    from paper_trade_monitor import parse_sub_indices, calculate_signal_velocity, fetch_social_signals
-
     if base_capital is None:
         base_capital = KELLY_BASE_CAPITAL_SOL
 
     p = KELLY_BASE_WIN_RATE
     b = _get_historical_odds()  # historical avg_win/avg_loss, capped at 3.0
 
-    # ─── Layer 1: Sub-indices (simplified — data-validated) ───────────
-    # Data analysis of 12 trades showed: sec, trade, addr, ai ALL had
-    # REVERSE correlation (higher scores in losing trades).
-    # Only media had positive correlation (wins avg 50 vs losses avg 40).
-    # So we keep media for b boost, drop the rest as noise.
-    sub = parse_sub_indices(description) if description else None
-    used_sub_indices = False
+    # ─── Entry mode adjustment (data-validated: 62% vs 43% win rate) ──
+    if entry_mode == 'pullback_bounce':
+        p *= 0.85
+        log.info(f"[Kelly] pullback_bounce entry → p×0.85 → p={p:.3f}")
 
-    if sub and sum(sub.values()) > 0:
-        used_sub_indices = True
-        media = sub.get('media', 0)
-        if media >= 60:
-            b *= 1.3    # viral → more momentum followers → bigger move
-        elif media >= 30:
-            b *= 1.1
-
-        log.info(
-            f"[Kelly] Sub-indices: sec={sub.get('security',0)} trade={sub.get('trade',0)} "
-            f"media={media} addr={sub.get('address',0)} ai={sub.get('ai',0)} "
-            f"→ p={p:.3f} b={b:.2f} (media-only mode)"
-        )
-
-    # ─── Fallback: Super Index composite (if no sub-indices) ───────────
-    if not used_sub_indices:
-        super_val = int(watchlist_entry.get('signal_super') or watchlist_entry.get('latest_super') or 0)
-        if super_val >= 130:
-            p *= 1.8
-        elif super_val >= 120:
-            p *= 1.5
-        elif super_val >= 110:
-            p *= 1.2
-        elif super_val < 90:
-            p *= 0.7
-
-    # ─── Layer 2: Signal Velocity (Task 7) ─────────────────────────────
-    velocity = calculate_signal_velocity(watchlist_entry)
-    if velocity >= 6.0:      # 6+ signals/hour = viral
-        p *= 1.3
-        b *= 1.2
-    elif velocity >= 3.0:    # 3+ signals/hour = active spreading
-        p *= 1.15
-    elif velocity >= 2.0:
-        p *= 1.05
-
-    # ─── Layer 3: DexScreener Boost only ──────────────────────────────
-    social = fetch_social_signals(watchlist_entry.get('ca', ''), symbol=watchlist_entry.get('symbol', ''))
-    if social:
-        if social.get('dex_has_boost'):
-            b *= 1.2
-            log.info(f"[Kelly] DexBoost active (${social.get('dex_boost_amount', 0)} credits) → b={b:.2f}")
-
-    # ─── Layer 4: Matrix Crowding Penalty (data-validated) ─────────────
-    # 12-trade backtest showed clear pattern:
-    #   1/5 perfect(=100) scores → avg +27.8%, 100% win rate
-    #   4/5 perfect(=100) scores → avg -5.2%, 40% win rate
-    # More "perfect" dimensions = too obvious signal = crowded entry
-    if matrix_scores:
-        perfect_count = sum(1 for v in matrix_scores.values() if v == 100)
-        if perfect_count >= 4:
-            p *= 0.7    # heavy crowding penalty
-            log.info(f"[Kelly] Matrix crowding: {perfect_count}/5 perfect → p×0.7 (crowded signal)")
-        elif perfect_count >= 3:
-            p *= 0.9    # mild penalty
-        elif perfect_count <= 1:
-            p *= 1.2    # contrarian bonus — less crowded
-            log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2 (less crowded)")
-
-    # ─── Layer 5: ATH confirmation adjustment ──────────────────────────
+    # ─── ATH confirmation (logical — new highs have momentum) ─────────
     ath_num = int(watchlist_entry.get('ath_num') or 0)
     if ath_num > 0:
         ath_boost = {1: 1.6, 2: 1.4, 3: 1.2}.get(ath_num, 1.1)
@@ -205,7 +140,9 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     position = base_capital * kelly_f * 0.5
 
     # Hard limits: min 0.03 SOL, max 20% of capital
-    return round(max(0.03, min(position, base_capital * 0.20)), 3)
+    pos = round(max(0.03, min(position, base_capital * 0.20)), 3)
+    log.info(f"[Kelly] f*={kelly_f:.3f} → {pos} SOL | p={p:.3f} b={b:.2f} mode={entry_mode or 'default'}")
+    return pos
 
 
 # ─── SmartEntry ───────────────────────────────────────────────────────────────
