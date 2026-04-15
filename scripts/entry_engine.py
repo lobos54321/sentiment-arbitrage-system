@@ -410,6 +410,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
     start_time = time.time()
     best_trend_phase = None  # Track the strongest trend phase seen so far
     consecutive_momentum_rounds = 0  # Track consecutive strong momentum rounds
+    last_momentum_data = None  # Track last DexScreener data to detect stale cache
     fake_pump_count = 0  # P5: accumulate FAKE_PUMP rounds
 
     log.info(
@@ -481,15 +482,24 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
         # Momentum Direct Entry: for parabolic movers that never pull back
         # If price consistently surging with buyers in control, enter directly
+        # IMPORTANT: Only count when DexScreener data actually refreshed
+        # (avoid counting same cached data 3 times as "3 consecutive")
         if cached_trend:
             pc_m5 = cached_trend.get('price_change_m5', 0)
             b_m5 = cached_trend.get('buys_m5', 0)
             s_m5 = max(cached_trend.get('sells_m5', 1), 1)
             bs_ratio = b_m5 / s_m5
-            if pc_m5 > 15.0 and bs_ratio > 1.0:
+
+            # Check if data actually changed from last round
+            current_data_key = (round(pc_m5, 1), b_m5, s_m5)
+            data_is_fresh = (current_data_key != last_momentum_data)
+            last_momentum_data = current_data_key
+
+            if pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
                 consecutive_momentum_rounds += 1
-            else:
+            elif not (pc_m5 > 15.0 and bs_ratio > 1.0):
                 consecutive_momentum_rounds = 0
+            # If data not fresh but still bullish → don't increment, don't reset
 
             # Dynamic min wait based on signal strength:
             # Extreme (buy_sell≥5 + pc_m5>20%): 10s — buyer domination, no need to wait
