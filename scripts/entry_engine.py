@@ -572,6 +572,25 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
                 time.sleep(interval)
                 continue
 
+            # Guard 3: overextension — coin already pumped too much
+            # If vel_60s > 30%/min, the "pullback bounce" is likely a crash beginning
+            # (Normie: +45% in 5min, pullback_bounce entered → instant -27%)
+            if len(price_history) >= 4:
+                _now = time.time()
+                _pts_60 = [(t, p) for t, p in price_history if _now - t <= 60 and p > 0]
+                if len(_pts_60) >= 2:
+                    _dt = (_pts_60[-1][0] - _pts_60[0][0]) / 60.0
+                    if _dt > 0:
+                        _vel_60 = ((_pts_60[-1][1] - _pts_60[0][1]) / _pts_60[0][1] * 100) / _dt
+                        if _vel_60 > 30.0:
+                            log.info(
+                                f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
+                                f"overextended vel_60s={_vel_60:+.1f}%/min > 30%/min, "
+                                f"pullback likely crash not bounce ({elapsed:.0f}s)"
+                            )
+                            time.sleep(interval)
+                            continue
+
             trigger_price = price
             detail_str = (
                 f"pullback={pullback:.1f}% "
