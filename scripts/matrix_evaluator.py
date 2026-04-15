@@ -778,7 +778,7 @@ class ExitMatrixEvaluator:
 
             # Tiered trail factor based on peak level + velocity
             if peak_pnl >= 0.20:
-                base_factor = 0.6    # >= +20% preserve at least 60%
+                base_factor = 0.7    # >= +20% preserve at least 70% (was 0.6, data: avg 45% retention too low)
             elif peak_pnl >= 0.10:
                 base_factor = 0.55   # >= +10% preserve at least 55%
             else:
