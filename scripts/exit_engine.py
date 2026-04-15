@@ -215,33 +215,25 @@ class ExitGuardianThread(threading.Thread):
                     else:
                         base_factor = 0.5
 
-                    # Velocity-driven factor
+                    # Velocity-driven factor — ONLY tighten on crashes
+                    # Uptrend: let base_factor handle it (gives meme coins room to breathe)
+                    # Downtrend: tighten to protect profits
                     if raw_vel_30s < -10.0:
                         vel_factor = 0.85    # CRASH → emergency tight (skip smoothing)
                     elif use_vel < -3.0:
-                        vel_factor = 0.75    # fast downtrend → very tight
-                    elif use_vel > 15.0:
-                        vel_factor = 0.70    # rocketing up → lock hard
-                    elif use_vel > 5.0:
-                        vel_factor = 0.60    # moderate pump
+                        vel_factor = 0.70    # fast downtrend → tight
                     else:
-                        vel_factor = base_factor
+                        vel_factor = base_factor  # uptrend/sideways → use base only
 
                     # Volume signals (B: tick_vol + C: Helius TPS)
+                    # Only mild tightening — meme coins have erratic volume
                     if tick_vol < 0.001 and len(pos.price_ring) >= 5:
-                        vel_factor = max(vel_factor, 0.70)   # B: no price movement
+                        vel_factor = max(vel_factor, 0.60)   # B: no price movement
                     if tps_smooth >= 0 and tps_smooth < 0.5 and len(pos.price_ring) >= 5:
-                        vel_factor = max(vel_factor, 0.70)   # C: real volume dried up
+                        vel_factor = max(vel_factor, 0.60)   # C: real volume dried up
 
-                    # Ratchet: never lower the factor
-                    ratcheted = 0
-                    if w_entry:
-                        ratcheted = w_entry.get('_trail_factor', 0) or 0
-                    trail_factor = max(base_factor, vel_factor, ratcheted)
-
-                    # Write back ratchet for main-loop to read
-                    if w_entry:
-                        w_entry['_trail_factor'] = trail_factor
+                    # NO ratchet — let factor respond to current conditions
+                    trail_factor = max(base_factor, vel_factor)
 
                     trail_floor = pos.peak_pnl * trail_factor
 

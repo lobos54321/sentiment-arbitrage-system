@@ -4748,10 +4748,10 @@ def run_monitor(db):
                 
                 # Update Watchlist Status
                 if w_entry:
-                    # Trail stop = had momentum, short cooldown for DexScreener to refresh (5min)
-                    # Hard SL = genuinely crashing, longer cooldown (mark_watching escalates)
-                    is_trail_exit = 'trail' in (reason or '')
-                    exit_cooldown = 300 if is_trail_exit else 180
+                    # Cooldown by exit PnL:
+                    #   Won → no cooldown (trend may continue, let re-enter)
+                    #   Lost → 15min cooldown (don't chase losing coins)
+                    exit_cooldown = 0 if realized_pnl > 0 else 900
                     watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=exit_cooldown)
                 last_progress = time.time()
                 if pos.strategy_stage == 'stage1' and reason == 'sl':
