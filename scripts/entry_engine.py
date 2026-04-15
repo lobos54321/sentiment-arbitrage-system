@@ -480,32 +480,40 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
                 continue
 
         # Momentum Direct Entry: for parabolic movers that never pull back
-        # If price consistently surging with buyers in control, enter directly
-        # IMPORTANT: Only count when DexScreener data actually refreshed this round
-        # (not repeated reads of same cached data — 30s cache means 3 rounds see
-        #  identical data, giving false "3 consecutive" confidence)
-        dex_refreshed_this_round = (time.time() - last_dex_check < interval + 1)
-        if cached_trend:
-            pc_m5 = cached_trend.get('price_change_m5', 0)
+        # Uses REAL-TIME price change from our own price_history (Jupiter, 10s interval)
+        # instead of DexScreener's lagged 5-min data which caused false momentum signals.
+        # DexScreener buy/sell ratio still used as secondary confirmation.
+        if cached_trend and len(price_history) >= 2:
+            # Compute real-time price change from our own data
+            now_t = time.time()
+            # Look back ~60s in price_history for a reliable short-term trend
+            lookback_prices = [(t, p) for t, p in price_history if now_t - t <= 60 and p > 0]
+            if len(lookback_prices) >= 2:
+                oldest_p = lookback_prices[0][1]
+                newest_p = lookback_prices[-1][1]
+                realtime_pc = ((newest_p - oldest_p) / oldest_p) * 100.0
+            else:
+                realtime_pc = 0.0
+
             b_m5 = cached_trend.get('buys_m5', 0)
             s_m5 = max(cached_trend.get('sells_m5', 1), 1)
             bs_ratio = b_m5 / s_m5
-            if pc_m5 > 15.0 and bs_ratio > 1.0:
-                if dex_refreshed_this_round:
-                    consecutive_momentum_rounds += 1
-                # else: same cached data, don't increment
+
+            # Real-time price surging + DexScreener confirms buyers in control
+            if realtime_pc > 15.0 and bs_ratio > 1.0:
+                consecutive_momentum_rounds += 1
             else:
                 consecutive_momentum_rounds = 0
 
             # Dynamic min wait based on signal strength:
-            # Extreme (buy_sell≥5 + pc_m5>20%): 10s — buyer domination, no need to wait
+            # Extreme (buy_sell≥5 + realtime_pc>20%): 10s — buyer domination
             # Normal: 60s — let the momentum develop
-            min_momentum_wait = 10 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
+            min_momentum_wait = 10 if (bs_ratio >= 5.0 and realtime_pc > 20) else 60
             if (consecutive_momentum_rounds >= 3
                     and elapsed > min_momentum_wait
                     and price and price > 0):
                 detail_str = (
-                    f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} "
+                    f"rt_pc_60s={realtime_pc:+.1f}% buy_sell={bs_ratio:.2f} "
                     f"consecutive={consecutive_momentum_rounds} "
                     f"waited={elapsed:.0f}s trend={trend_reason}"
                 )
