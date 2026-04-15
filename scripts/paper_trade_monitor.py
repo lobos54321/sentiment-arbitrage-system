@@ -67,7 +67,7 @@ EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
 
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
-DEFAULT_STAGE1_EXIT = {'stopLossPct': 15, 'trailStartPct': 15, 'trailFactor': 0.6, 'timeoutMinutes': 120}
+DEFAULT_STAGE1_EXIT = {'stopLossPct': 7.5, 'trailStartPct': 15, 'trailFactor': 0.6, 'timeoutMinutes': 120}
 DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120}
 DEFAULT_STAGE3 = {
     'enabled': True,

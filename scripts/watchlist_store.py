@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     moon_start_time REAL,
     moon_trend_zero_count INTEGER DEFAULT 0,
     zero_vol_count  INTEGER DEFAULT 0,
-    dynamic_sl      REAL DEFAULT -0.15,                -- current dynamic stop-loss
+    dynamic_sl      REAL DEFAULT -0.075,               -- current dynamic stop-loss (-7.5%)
     trailing_active INTEGER DEFAULT 0,
     last_matrix_check REAL DEFAULT 0,
     moon_trail_factor REAL DEFAULT 0.2,                -- P4: dynamic trail factor (velocity ratchet)
@@ -294,7 +294,7 @@ class WatchlistStore:
                      trade_id=trade_id,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.15,
+                     dynamic_sl=-0.075,
                      zero_vol_count=0,
                      moon_trail_factor=0.2,
                      last_matrix_check=now,
@@ -347,7 +347,7 @@ class WatchlistStore:
                      trade_id=None,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.15,
+                     dynamic_sl=-0.075,
                      zero_vol_count=0,
                      moon_peak_pnl=0,
                      moon_start_time=None,
