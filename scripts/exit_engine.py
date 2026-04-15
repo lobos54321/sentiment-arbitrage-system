@@ -259,6 +259,7 @@ class ExitGuardianThread(threading.Thread):
                 # === Profit Lock Detection (peak >= 20%, not yet locked) ===
                 # Don't execute the lock from Guardian (too complex: 50% sell + moon bag state).
                 # Instead, just log it so the main loop picks it up on next eval.
+                has_locked = w_entry.get('_profit_locked', False) if w_entry else False
                 if not is_moon and not has_locked and pos.peak_pnl >= 0.20:
                     log.info(
                         f"[ExitGuardian] 🌙 {pos.symbol} PROFIT LOCK DETECTED: "
