@@ -359,18 +359,16 @@ class MatrixEvaluator:
     }
 
     # Thresholds for ATH entries (more lenient)
-    # Data-validated 2026-04-13: ALL ATH coins have P=30 (by definition: ATH = peak).
-    # P has ZERO discriminating power for ATH. Rely on T + momentum + Kelly VETO.
-    # Timeout extended to 2h: ATH consolidation can take 30min+, $Rudi timed out at 30min
-    # while still being a +622% coin.
+    # Data-validated 2026-04-15: P<=30 trades avg -16.8%. V=0 means zero liquidity.
+    # Both are now hard-blocked. ATH still needs real buying momentum.
     ATH_THRESHOLDS = {
         'trend_min': 50,    # must pass
-        'volume_min': 0,    # ATH self-carries volume
-        'price_min': 30,    # was 70, but ALL ATH coins have P=30 (no discriminating power)
+        'volume_min': 40,   # V=0 means no liquidity — hard block (was 0)
+        'price_min': 40,    # P<=30 = chasing a top → avg -16.8% (was 30)
         'signal_min': 0,    # ATH = auto 100
         'momentum_min': 60, # must not decline — this IS the real filter for ATH
         'min_passing': 3,   # at least 3 of 5 >= 60
-        'max_obs_minutes': 120,  # 2h (was 30min) — match NOT_ATH, allow consolidation
+        'max_obs_minutes': 120,  # 2h — allow consolidation
     }
 
     def evaluate(self, entry):
@@ -513,8 +511,12 @@ class MatrixEvaluator:
         if scores['price'] == 0:
             ready = False
             hard_block = (hard_block + '+' if hard_block else '') + 'price=0'
-        if scores['volume'] < thresholds['volume_min']:
-            # Volume is informational only — logged but not a blocker
+        if scores['volume'] == 0:
+            # V=0 = no liquidity, hard block (data: GRASS V=0 lost -75.2%)
+            ready = False
+            hard_block = (hard_block + '+' if hard_block else '') + 'volume=0'
+        elif scores['volume'] < thresholds['volume_min']:
+            # Low volume (but not zero) — informational warning, not a blocker
             pass
         # Signal (S) is pure bonus — not a blocker, so no hard_block entry for it
 
@@ -723,20 +725,55 @@ class ExitMatrixEvaluator:
                 'trail_floor': None,
             }
 
-        # === Trailing Stop ===
+        # === Trailing Stop (velocity-aware, like Moon Bag) ===
+        # Data: old fixed 0.5/0.6 factor only preserved 34% of peak profit.
+        # New: velocity-based ratchet — fast moves lock more profit.
         trail_floor = None
         if peak_pnl >= 0.05:  # +5% trail activation
-            if peak_pnl < 0.20:
-                trail_floor = peak_pnl * 0.5   # preserve 50% of peak
+            # Calculate price velocity (PnL change per minute)
+            pnl_history = entry.get('_pnl_history', [])
+            pnl_history.append((time.time(), current_pnl))
+            cutoff = time.time() - 300  # keep 5 min of history
+            pnl_history = [(t, p) for t, p in pnl_history if t >= cutoff]
+
+            velocity = 0.0
+            window_sec = 120  # 2-min velocity window
+            now_t = time.time()
+            recent = [(t, p) for t, p in pnl_history if now_t - t <= window_sec]
+            if len(recent) >= 2:
+                dt_min = (recent[-1][0] - recent[0][0]) / 60.0
+                if dt_min > 0:
+                    velocity = ((recent[-1][1] - recent[0][1]) * 100) / dt_min
+
+            # Tiered trail factor based on peak level + velocity
+            if peak_pnl >= 0.20:
+                base_factor = 0.6    # >= +20% preserve at least 60%
+            elif peak_pnl >= 0.10:
+                base_factor = 0.55   # >= +10% preserve at least 55%
             else:
-                trail_floor = peak_pnl * 0.6   # preserve 60% of peak
+                base_factor = 0.5    # >= +5% preserve at least 50%
+
+            # Velocity bonus: fast pumps get tighter trail
+            if velocity > 15.0:
+                vel_factor = 0.7     # rocketing → lock hard
+            elif velocity > 5.0:
+                vel_factor = 0.6     # moderate pump
+            else:
+                vel_factor = base_factor
+
+            # Ratchet: use whichever is higher, never lower the factor
+            current_factor = entry.get('_trail_factor', base_factor)
+            trail_factor = max(base_factor, vel_factor, current_factor)
+            trail_floor = peak_pnl * trail_factor
 
             if current_pnl < trail_floor:
                 return {
                     'action': 'exit',
-                    'reason': f'trail_stop (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%})',
+                    'reason': f'trail_stop (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, factor={trail_factor:.2f}, vel={velocity:.1f}%/min)',
                     'current_pnl': current_pnl,
                     'trail_floor': trail_floor,
+                    '_trail_factor': trail_factor,
+                    '_pnl_history': pnl_history,
                 }
 
         # === Matrix-based soft exit (trend check) ===

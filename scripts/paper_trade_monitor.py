@@ -3987,6 +3987,8 @@ def run_monitor(db):
                         'watchlist_id': w_entry['id'],
                         # Task 6+7: Kelly with sub-indices + signal velocity + Matrix crowding
                         'kelly_position_sol': calculate_kelly_position(w_entry, description=_sig_desc, matrix_scores=eval_res.get('scores')),
+                        # SmartEntry retry tracking (persisted across FIRE→REJECT→re-FIRE)
+                        'smart_entry_retries': w_entry.get('_smart_entry_retries', 0),
                     }
 
                     # Kelly veto: if f* ≤ 0, Kelly says negative EV → skip
@@ -4045,8 +4047,21 @@ def run_monitor(db):
                             pool_address=pending['pool'],
                         )
                         if not should_enter:
-                            log.info(f"  [SmartEntry] {pending['symbol']} REJECT: {timing_reason} {timing_detail}")
-                            pending_entries.pop(lifecycle_id, None)
+                            retry_count = pending.get('smart_entry_retries', 0)
+                            max_retries = 3
+                            if retry_count >= max_retries:
+                                log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
+                                pending_entries.pop(lifecycle_id, None)
+                            else:
+                                # Return to watchlist for re-evaluation on next Matrix PASS
+                                log.info(
+                                    f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
+                                    f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                                )
+                                # Store retry count, remove from pending so watchlist scanner picks it up again
+                                if w_entry:
+                                    w_entry['_smart_entry_retries'] = retry_count + 1
+                                pending_entries.pop(lifecycle_id, None)
                             continue
                         # Smart entry passed — update trigger price to the confirmed entry price
                         pending['timing_passed'] = True

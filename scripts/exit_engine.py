@@ -162,10 +162,22 @@ class ExitGuardianThread(threading.Thread):
                 has_locked = w_entry and w_entry.get('has_locked_profit')
 
                 if not is_moon and pos.peak_pnl >= 0.05:
-                    if pos.peak_pnl < 0.20:
-                        trail_floor = pos.peak_pnl * 0.5   # preserve 50% of peak
+                    # Tiered trail factor matching ExitMatrixEvaluator (matrix_evaluator.py)
+                    # Guardian uses base_factor only (no velocity — needs pnl_history from main loop)
+                    if pos.peak_pnl >= 0.20:
+                        trail_factor = 0.6    # >= +20% preserve 60%
+                    elif pos.peak_pnl >= 0.10:
+                        trail_factor = 0.55   # >= +10% preserve 55%
                     else:
-                        trail_floor = pos.peak_pnl * 0.6   # preserve 60% of peak
+                        trail_factor = 0.5    # >= +5% preserve 50%
+
+                    # If main-loop velocity ratchet has set a higher factor, use it
+                    if w_entry:
+                        ratcheted = w_entry.get('_trail_factor', 0)
+                        if ratcheted and ratcheted > trail_factor:
+                            trail_factor = ratcheted
+
+                    trail_floor = pos.peak_pnl * trail_factor
 
                     if pnl < trail_floor:
                         log.info(
