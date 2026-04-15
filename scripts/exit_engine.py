@@ -202,9 +202,10 @@ class ExitGuardianThread(threading.Thread):
                     w_entry['_guardian_tick_vol'] = tick_vol
 
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
+                # Applies to ALL positions including moon bags
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
 
-                if not is_moon and pos.peak_pnl >= 0.05:
+                if pos.peak_pnl >= 0.05:
                     # Tiered base factor by peak level
                     if pos.peak_pnl >= 0.50:
                         base_factor = 0.65   # >= +50% — about to become moon bag
