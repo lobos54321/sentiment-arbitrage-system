@@ -481,13 +481,19 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
         # Momentum Direct Entry: for parabolic movers that never pull back
         # If price consistently surging with buyers in control, enter directly
+        # IMPORTANT: Only count when DexScreener data actually refreshed this round
+        # (not repeated reads of same cached data — 30s cache means 3 rounds see
+        #  identical data, giving false "3 consecutive" confidence)
+        dex_refreshed_this_round = (time.time() - last_dex_check < interval + 1)
         if cached_trend:
             pc_m5 = cached_trend.get('price_change_m5', 0)
             b_m5 = cached_trend.get('buys_m5', 0)
             s_m5 = max(cached_trend.get('sells_m5', 1), 1)
             bs_ratio = b_m5 / s_m5
             if pc_m5 > 15.0 and bs_ratio > 1.0:
-                consecutive_momentum_rounds += 1
+                if dex_refreshed_this_round:
+                    consecutive_momentum_rounds += 1
+                # else: same cached data, don't increment
             else:
                 consecutive_momentum_rounds = 0
 
