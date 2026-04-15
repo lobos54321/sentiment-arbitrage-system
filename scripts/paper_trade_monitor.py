@@ -4040,6 +4040,7 @@ def run_monitor(db):
                         'watchlist_id': w_entry['id'],
                         # Task 6+7: Kelly with sub-indices + signal velocity + Matrix crowding
                         'kelly_position_sol': calculate_kelly_position(w_entry, description=_sig_desc, matrix_scores=eval_res.get('scores')),
+                        'matrix_scores': eval_res.get('scores'),  # stored for Kelly recalc after SmartEntry
                         # SmartEntry retry tracking (persisted across FIRE→REJECT→re-FIRE)
                         'smart_entry_retries': w_entry.get('_smart_entry_retries', 0),
                     }
@@ -4116,9 +4117,10 @@ def run_monitor(db):
                             pending['trigger_price'] = timing_trigger_price
                         # Determine entry mode from SmartEntry result
                         entry_mode = 'momentum_direct' if 'momentum' in (timing_reason or '').lower() else 'pullback_bounce'
-                        # Recalculate Kelly with entry mode (momentum gets full position, pullback gets p×0.85)
+                        # Recalculate Kelly with entry mode + matrix scores
                         pending['kelly_position_sol'] = calculate_kelly_position(
-                            w_entry, entry_mode=entry_mode)
+                            w_entry, entry_mode=entry_mode,
+                            matrix_scores=pending.get('matrix_scores'))
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger=${timing_trigger_price}")
                             
                     # Kelly position size: use kelly_position_sol if available, else config default

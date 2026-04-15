@@ -115,6 +115,18 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         p *= 0.85
         log.info(f"[Kelly] pullback_bounce entry → p×0.85 → p={p:.3f}")
 
+    # ─── Matrix crowding (avg pnl validated: ≤1 perfect=+5%, 2 perfect=-1.1%) ──
+    if matrix_scores:
+        perfect_count = sum(1 for v in matrix_scores.values() if v == 100)
+        if perfect_count >= 4:
+            p *= 0.7    # heavy crowding penalty
+            log.info(f"[Kelly] Matrix crowding: {perfect_count}/5 perfect → p×0.7")
+        elif perfect_count >= 3:
+            p *= 0.9    # mild penalty
+        elif perfect_count <= 1:
+            p *= 1.2    # contrarian bonus — less crowded
+            log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2")
+
     # ─── ATH confirmation (logical — new highs have momentum) ─────────
     ath_num = int(watchlist_entry.get('ath_num') or 0)
     if ath_num > 0:
