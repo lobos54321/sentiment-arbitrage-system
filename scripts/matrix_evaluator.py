@@ -784,13 +784,17 @@ class ExitMatrixEvaluator:
             else:
                 base_factor = 0.5    # >= +5% preserve at least 50%
 
-            # Velocity bonus: fast pumps get tighter trail
-            if velocity > 15.0:
-                vel_factor = 0.7     # rocketing → lock hard
-            elif velocity > 5.0:
-                vel_factor = 0.6     # moderate pump
+            # Velocity-aware trail: momentum decides tightness
+            # Strong momentum → let it run (looser trail)
+            # Fading momentum → lock profit fast (tighter trail)
+            if velocity < -5.0:
+                vel_factor = 0.85    # dumping → lock hard, preserve 85%
+            elif velocity < 0:
+                vel_factor = 0.75    # fading → tighten
+            elif velocity > 10.0:
+                vel_factor = base_factor  # rocketing → use base, let it run
             else:
-                vel_factor = base_factor
+                vel_factor = 0.70    # neutral → moderate protection
 
             # Ratchet: use whichever is higher, never lower the factor
             current_factor = entry.get('_trail_factor', base_factor)
