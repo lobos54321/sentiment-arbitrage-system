@@ -4747,9 +4747,12 @@ def run_monitor(db):
                 db.commit()
                 
                 # Update Watchlist Status
-                w_entry = watchlist.get_by_ca(pos.token_ca)
                 if w_entry:
-                    watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=180)
+                    # Trail stop = had momentum, short cooldown for DexScreener to refresh (5min)
+                    # Hard SL = genuinely crashing, longer cooldown (mark_watching escalates)
+                    is_trail_exit = 'trail' in (reason or '')
+                    exit_cooldown = 300 if is_trail_exit else 180
+                    watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=exit_cooldown)
                 last_progress = time.time()
                 if pos.strategy_stage == 'stage1' and reason == 'sl':
                     lifecycle['stage1_stop_ts'] = exit_ts
