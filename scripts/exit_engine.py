@@ -59,6 +59,28 @@ class ExitGuardianThread(threading.Thread):
             self.exit_queue.clear()
             return exits
 
+    @staticmethod
+    def _calc_velocity(ring, window_sec):
+        """Price velocity in %/minute over window_sec from ring buffer."""
+        now = time.time()
+        pts = [(t, p) for t, p in ring if now - t <= window_sec]
+        if len(pts) < 2:
+            return 0.0
+        dt_min = (pts[-1][0] - pts[0][0]) / 60.0
+        if dt_min <= 0:
+            return 0.0
+        return ((pts[-1][1] - pts[0][1]) / pts[0][1] * 100) / dt_min
+
+    @staticmethod
+    def _calc_tick_volatility(ring):
+        """Mean absolute tick-to-tick change as volume proxy."""
+        prices = [p for _, p in ring]
+        if len(prices) < 3:
+            return 0.0
+        changes = [abs(prices[i] - prices[i-1]) / prices[i-1]
+                    for i in range(1, len(prices))]
+        return sum(changes) / len(changes)
+
     def _check_all_positions(self):
         # Take snapshot under lock
         with self.lock:
@@ -153,29 +175,57 @@ class ExitGuardianThread(threading.Thread):
                 if pnl > pos.peak_pnl:
                     pos.peak_pnl = pnl
 
-                # === Trail Floor Check (3s frequency) ===
-                # Mirrors ExitMatrixEvaluator logic (matrix_evaluator.py L728-740).
-                # Data showed main loop gaps of 49-381s caused 2-14pp loss per trade.
-                # Guardian's 3s cycle catches floor breaches within seconds.
-                # Skip for moon_bag positions (they have their own moon_trail below).
+                # === B+C: Record price into ring buffer for velocity calc ===
+                pos.price_ring.append((time.time(), price))
+
+                # === Compute real-time velocity + tick_volatility ===
+                vel_30s = self._calc_velocity(pos.price_ring, 30)
+                vel_60s = self._calc_velocity(pos.price_ring, 60)
+                tick_vol = self._calc_tick_volatility(pos.price_ring)
+
+                # Write to watchlist entry so main-loop evaluate_exit can read
+                if w_entry:
+                    w_entry['_guardian_velocity'] = vel_30s
+                    w_entry['_guardian_tick_vol'] = tick_vol
+
+                # === Trail Floor Check (3s frequency, velocity-driven) ===
+                # Now uses Guardian's own price_ring velocity instead of
+                # relying on main loop's _pnl_history (60s delay → 3s delay).
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
                 has_locked = w_entry and w_entry.get('has_locked_profit')
 
                 if not is_moon and pos.peak_pnl >= 0.05:
-                    # Tiered trail factor matching ExitMatrixEvaluator (matrix_evaluator.py)
-                    # Guardian uses base_factor only (no velocity — needs pnl_history from main loop)
+                    # Tiered base factor by peak level
                     if pos.peak_pnl >= 0.20:
-                        trail_factor = 0.6    # >= +20% preserve 60%
+                        base_factor = 0.6
                     elif pos.peak_pnl >= 0.10:
-                        trail_factor = 0.55   # >= +10% preserve 55%
+                        base_factor = 0.55
                     else:
-                        trail_factor = 0.5    # >= +5% preserve 50%
+                        base_factor = 0.5
 
-                    # If main-loop velocity ratchet has set a higher factor, use it
+                    # Velocity-driven factor (3s granularity!)
+                    if vel_30s > 15.0:
+                        vel_factor = 0.70    # rocketing up → lock hard
+                    elif vel_30s > 5.0:
+                        vel_factor = 0.60    # moderate pump
+                    elif vel_30s < -5.0:
+                        vel_factor = 0.75    # fast downtrend → very tight
+                    else:
+                        vel_factor = base_factor
+
+                    # Volume exhaustion: no price movement = no trades → tighten
+                    if tick_vol < 0.001 and len(pos.price_ring) >= 5:
+                        vel_factor = max(vel_factor, 0.70)
+
+                    # Ratchet: never lower the factor
+                    ratcheted = 0
                     if w_entry:
-                        ratcheted = w_entry.get('_trail_factor', 0)
-                        if ratcheted and ratcheted > trail_factor:
-                            trail_factor = ratcheted
+                        ratcheted = w_entry.get('_trail_factor', 0) or 0
+                    trail_factor = max(base_factor, vel_factor, ratcheted)
+
+                    # Write back ratchet for main-loop to read
+                    if w_entry:
+                        w_entry['_trail_factor'] = trail_factor
 
                     trail_floor = pos.peak_pnl * trail_factor
 
@@ -183,14 +233,15 @@ class ExitGuardianThread(threading.Thread):
                         log.info(
                             f"[ExitGuardian] 📉 {pos.symbol} TRAIL STOP: "
                             f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
-                            f"(peak={pos.peak_pnl*100:.1f}%) "
+                            f"(peak={pos.peak_pnl*100:.1f}% factor={trail_factor:.2f}) "
+                            f"vel={vel_30s:.1f}%/min tick_vol={tick_vol:.4f} "
                             f"price=${price:.10f} src={src}"
                         )
                         with self.exit_queue_lock:
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
-                                'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%})',
+                                'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, vel={vel_30s:.1f})',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             })

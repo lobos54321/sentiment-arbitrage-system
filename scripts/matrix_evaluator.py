@@ -716,14 +716,44 @@ class ExitMatrixEvaluator:
                 'trail_floor': None,
             }
 
-        # === Profit Lock at +20% (check BEFORE trail to prevent competition) ===
+        # === Profit Lock at +20% (velocity-aware) ===
+        # B+C: Don't lock during strong momentum — delay and tighten trail instead.
+        # Safety cap: always lock at +35% regardless of velocity.
         if peak_pnl >= 0.20 and not entry.get('has_locked_profit'):
-            return {
-                'action': 'lock_profit',
-                'reason': f'profit_lock (peak={peak_pnl:.1%} >= 20%)',
-                'current_pnl': current_pnl,
-                'trail_floor': None,
-            }
+            velocity = entry.get('_guardian_velocity', 0)
+            helius_tps = entry.get('_helius_tps', 0)
+            symbol = entry.get('symbol', '?')
+
+            # Safety cap: force lock at +35% no matter what
+            if peak_pnl >= 0.35:
+                log.info(
+                    f"[ExitMatrix] {symbol} FORCE lock_profit: "
+                    f"peak={peak_pnl:.1%} >= 35% safety cap"
+                )
+                return {
+                    'action': 'lock_profit',
+                    'reason': f'profit_lock_forced (peak={peak_pnl:.1%} >= 35%)',
+                    'current_pnl': current_pnl,
+                    'trail_floor': None,
+                }
+
+            # Rocket + real volume → delay lock, tighten trail
+            if velocity > 10.0 and helius_tps > 3.0:
+                entry['_trail_factor'] = max(entry.get('_trail_factor', 0) or 0, 0.70)
+                log.info(
+                    f"[ExitMatrix] {symbol} DELAY lock_profit: "
+                    f"vel={velocity:.1f}%/min tps={helius_tps:.1f} → trail ratchet to 0.70 "
+                    f"(peak={peak_pnl:.1%}, will lock when momentum fades)"
+                )
+                # Don't return lock_profit → fall through to trail logic below
+            else:
+                # Momentum has faded → normal lock
+                return {
+                    'action': 'lock_profit',
+                    'reason': f'profit_lock (peak={peak_pnl:.1%} >= 20%, vel={velocity:.1f}, tps={helius_tps:.1f})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': None,
+                }
 
         # === Trailing Stop (velocity-aware, like Moon Bag) ===
         # Data: old fixed 0.5/0.6 factor only preserved 34% of peak profit.
