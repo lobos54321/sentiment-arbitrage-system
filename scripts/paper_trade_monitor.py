@@ -3991,14 +3991,8 @@ def run_monitor(db):
                         'smart_entry_retries': w_entry.get('_smart_entry_retries', 0),
                     }
 
-                    # Kelly veto: if f* ≤ 0, Kelly says negative EV → skip
-                    if not pending_entries[lifecycle_id]['kelly_position_sol']:
-                        log.info(
-                            f"  [WATCHLIST] ❌ {w_entry['symbol']} Kelly VETO: "
-                            f"f*≤0 → negative EV, skipping despite matrix/momentum pass"
-                        )
-                        pending_entries.pop(lifecycle_id, None)
-                        continue
+                    # Note: Kelly always returns >= 0.03 SOL (never vetoes).
+                    # Matrix+Momentum decide whether to trade; Kelly only sizes.
 
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {pending_entries[lifecycle_id]['kelly_position_sol']} SOL -> Pending queue")
                     last_progress = time.time()
