@@ -360,6 +360,13 @@ class WatchlistStore:
 
     def mark_expired(self, entry_id, reason):
         """Remove token from active watchlist."""
+        # Clean up any old expired records for the same ca to avoid UNIQUE(ca, status) conflict
+        entry = self.get_by_id(entry_id)
+        if entry:
+            self.db.execute(
+                "DELETE FROM watchlist WHERE ca = ? AND status = 'expired' AND id != ?",
+                (entry['ca'], entry_id)
+            )
         self._update(entry_id, status='expired', expire_reason=reason)
         log.info(f"[WL] → expired (entry_id={entry_id} reason={reason})")
 
