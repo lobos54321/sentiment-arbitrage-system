@@ -1707,8 +1707,8 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
         shared_quote = get_shared_quote_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
         if isinstance(shared_quote, dict):
             quote = shared_quote.get('quote') or {}
-            usd_price = _shared_quote_to_sol_price(quote.get('outAmount'), token_decimals)
-            if usd_price and usd_price > 0:
+            sol_price_val = _shared_quote_to_sol_price(quote.get('outAmount'), token_decimals)
+            if sol_price_val and sol_price_val > 0:
                 fetched_at = shared_quote.get('fetchedAt')
                 try:
                     fetched_at = int(fetched_at)
@@ -1717,7 +1717,7 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
                 timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
                 if min_timestamp_ms is None or timestamp_ms >= min_timestamp_ms:
                     return {
-                        'price': usd_price,
+                        'price': sol_price_val,
                         'ts': int(timestamp_ms // 1000),
                         'timestamp_ms': timestamp_ms,
                         'source': 'shared-quote-cache',
@@ -1726,8 +1726,8 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
         shared_quote_result = get_shared_swap_quote(token_ca, 1000000)
         if isinstance(shared_quote_result, dict):
             quote = shared_quote_result.get('quote') or {}
-            usd_price = _shared_quote_to_sol_price(quote.get('outAmount'), token_decimals)
-            if usd_price and usd_price > 0:
+            sol_price_val = _shared_quote_to_sol_price(quote.get('outAmount'), token_decimals)
+            if sol_price_val and sol_price_val > 0:
                 fetched_at = shared_quote_result.get('fetchedAt')
                 try:
                     fetched_at = int(fetched_at)
@@ -1735,7 +1735,7 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
                     fetched_at = int(time.time() * 1000)
                 timestamp_ms = fetched_at if fetched_at > 10_000_000_000 else int(fetched_at * 1000)
                 return {
-                    'price': usd_price,
+                    'price': sol_price_val,
                     'ts': int(timestamp_ms // 1000),
                     'timestamp_ms': timestamp_ms,
                     'source': 'shared-quote-runtime',
