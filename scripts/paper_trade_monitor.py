@@ -1088,7 +1088,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
         if initial_baseline is None:
             initial_baseline = price
             valley_price     = price
-            log.info(f"  [ENTRY_TIMING] {symbol} Phase1 start baseline=${initial_baseline:.10f}")
+            log.info(f"  [ENTRY_TIMING] {symbol} Phase1 start baseline={initial_baseline:.10f}")
 
         # Always track the lowest price seen (updates valley in both phases)
         if price < valley_price:
@@ -1100,11 +1100,20 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
         if phase == 1:
             dip_pct = ((price - initial_baseline) / initial_baseline) * 100
 
+            # Early-stop: if price craters >15% after 10+ rounds with no recovery, abort.
+            # Saves ~2 min of wasted observation on dying tokens.
+            if round_i >= 10 and dip_pct <= -15.0:
+                log.info(
+                    f"  [ENTRY_TIMING] {symbol} ❌ Early-stop: "
+                    f"price cratering {dip_pct:+.1f}% after {round_i+1} rounds, aborting"
+                )
+                return False, 'early_stop', f'price cratering {dip_pct:+.1f}% (>{-15}%)', None
+
             if dip_pct <= -dip_threshold_pct:
                 saw_dip = True
                 log.info(
                     f"  [ENTRY_TIMING] {symbol} 🔻 Dip confirmed "
-                    f"dip={dip_pct:+.2f}% price=${price:.10f} "
+                    f"dip={dip_pct:+.2f}% price={price:.10f} "
                     f"round={round_i+1} → Phase 2"
                 )
                 phase = 2
@@ -1122,7 +1131,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
                 log.info(
                     f"  [ENTRY_TIMING] {symbol} ⚡ Fail-Open: "
                     f"no dip in {phase1_max_rounds} rounds, "
-                    f"current=${price:.10f} becomes valley"
+                    f"current={price:.10f} becomes valley"
                 )
                 valley_price = price
                 phase        = 2
@@ -1156,7 +1165,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
         if from_valley_pct > limit_pct:
             detail = (
                 f'blow_off: from_valley={from_valley_pct:+.2f}% > max {limit_pct}% '
-                f'price=${price:.10f} valley=${valley_price:.10f} '
+                f'price={price:.10f} valley={valley_price:.10f} '
                 f'src={src_str} round={round_i+1}'
             )
             log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
@@ -1166,7 +1175,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
         if price < phase2_target:
             log.debug(
                 f"  [ENTRY_TIMING] {symbol} Phase2 watching: "
-                f"price=${price:.10f} target=${phase2_target:.10f} "
+                f"price={price:.10f} target={phase2_target:.10f} "
                 f"({from_valley_pct:+.2f}% / needed +{target_recovery_pct}%) "
                 f"round={round_i+1}"
             )
@@ -1195,8 +1204,8 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
 
         detail = (
             f'{buy_reason}: from_valley={from_valley_pct:+.2f}% '
-            f'saw_dip={saw_dip} valley=${valley_price:.10f} target=${phase2_target:.10f} '
-            f'price=${price:.10f} src={src_str} round={round_i+1}'
+            f'saw_dip={saw_dip} valley={valley_price:.10f} target={phase2_target:.10f} '
+            f'price={price:.10f} src={src_str} round={round_i+1}'
         )
         log.info(f"  [ENTRY_TIMING] {symbol} ENTER: {detail}")
         return True, buy_reason, detail, price
@@ -1208,7 +1217,7 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
                               if valley_price and valley_price > 0 else 0)
     detail = (
         f'timeout: rounds={max_rounds} phase={phase} saw_dip={saw_dip} '
-        f'valley=${valley_price:.10f} final={from_valley_pct_final:+.2f}%'
+        f'valley={valley_price:.10f} final={from_valley_pct_final:+.2f}%'
     )
     log.info(f"  [ENTRY_TIMING] {symbol} SKIP: {detail}")
     return False, 'timeout', detail, None
@@ -2481,7 +2490,7 @@ class Position:
         'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
         'monitor_state', 'entry_execution_json', 'premium_signal_id', 'signal_type',
         'price_ring', 'vel_history',
-        'pnl_history', 'trail_factor',  # ExitMatrix velocity & trail ratchet (in-memory, persistent)
+        'trail_factor',  # ExitMatrix trail ratchet (in-memory, persistent)
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
@@ -2517,7 +2526,6 @@ class Position:
         # Multi-round velocity smoothing: last 3 vel_30s readings → avg
         self.vel_history = deque(maxlen=3)
         # ExitMatrix velocity & trail ratchet (persist across cycles, was lost when stored on w_entry)
-        self.pnl_history = []
         self.trail_factor = 0.0
 
 
@@ -3753,7 +3761,7 @@ def run_monitor(db):
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
                         if live_price is not None and live_price > trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):
                             log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: entry_too_late "
-                                     f"live=${live_price:.10f} > max_allowed=${trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
+                                     f"live={live_price:.10f} > max_allowed={trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
 
@@ -3794,7 +3802,7 @@ def run_monitor(db):
                         pending['kelly_position_sol'] = calculate_kelly_position(
                             w_entry, entry_mode=entry_mode,
                             matrix_scores=pending.get('matrix_scores'))
-                        log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger=${timing_trigger_price}")
+                        log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
                     # Kelly position size: use kelly_position_sol if available, else config default
                     actual_position_size_sol = pending.get('kelly_position_sol') or position_size_sol
@@ -3847,10 +3855,10 @@ def run_monitor(db):
                     trigger_price_val = pending.get('trigger_price')
                     if trigger_price_val and trigger_price_val > 0:
                         price = trigger_price_val
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price(SOL)=${price:.12f} (quote_sol=${quote_price:.12f} spread={((quote_price-price)/price*100):+.1f}%)")
+                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price(SOL)={price:.12f} (quote_sol={quote_price:.12f} spread={((quote_price-price)/price*100):+.1f}%)")
                     else:
                         price = quote_price
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price(SOL)=${price:.12f} (no trigger_price)")
+                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price(SOL)={price:.12f} (no trigger_price)")
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades
@@ -3913,7 +3921,7 @@ def run_monitor(db):
                     lc['stage1_trade_id'] = trade_id
 
                     log.info(
-                        f"  Entered {pending['symbol']}/stage1 @ ${price:.10f} "
+                        f"  Entered {pending['symbol']}/stage1 @ {price:.10f} "
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
                         f"lifecycle={lifecycle_id} via quoted execution"
                     )
@@ -3977,7 +3985,7 @@ def run_monitor(db):
                     if pre_price and pre_price > 0:
                         pre_ts = int(time.time() - (pre_age_ms or 0) / 1000)
                         log.info(
-                            f"  [PRE_PRICE] {pos.symbol}: ${pre_price:.10f} "
+                            f"  [PRE_PRICE] {pos.symbol}: {pre_price:.10f} "
                             f"src={pre_src} age_ms={pre_age_ms}"
                         )
                         
@@ -3991,7 +3999,6 @@ def run_monitor(db):
                             w_entry['_helius_tps'] = helius_tps
                             # Inject in-memory state that must persist across cycles
                             # (w_entry is re-fetched from DB each cycle, losing _ prefixed fields)
-                            w_entry['_pnl_history'] = pos.pnl_history
                             w_entry['_trail_factor'] = pos.trail_factor
                             # Guardian writes velocity to its own w_entry copy → relay via Position
                             if hasattr(pos, '_guardian_velocity'):
@@ -4011,7 +4018,7 @@ def run_monitor(db):
                             f"  [EXIT_MATRIX] {pos.symbol}/{pos.strategy_stage} "
                             f"action={exit_matrix['action']} pnl={pnl_pct:+.1f}% "
                             f"held={held_min}min reason={exit_matrix.get('reason', '-')} "
-                            f"price=${pre_price:.10f} trail={exit_matrix.get('trail_floor', '-')}"
+                            f"price={pre_price:.10f} trail={exit_matrix.get('trail_floor', '-')}"
                         )
                             
                         if exit_matrix.get('action') == 'tighten_sl':
@@ -4052,8 +4059,6 @@ def run_monitor(db):
                             watchlist.update_position_state(w_entry['id'], **state_updates)
 
                         # Read back in-memory state from ExitMatrix → Position (persist across cycles)
-                        if exit_matrix.get('_pnl_history') is not None:
-                            pos.pnl_history = exit_matrix['_pnl_history']
                         if exit_matrix.get('_trail_factor') is not None:
                             pos.trail_factor = exit_matrix['_trail_factor']
 
@@ -4230,9 +4235,9 @@ def run_monitor(db):
                         )
                         log.info(
                             f"  Exit trigger {pos.symbol}/{pos.strategy_stage}: action={action} reason={reason} "
-                            f"trigger_pnl={trigger_pnl*100:+.1f}% trigger_price=${trigger_price_text} "
+                            f"trigger_pnl={trigger_pnl*100:+.1f}% trigger_price={trigger_price_text} "
                             f"source={mark_source} quote_route={mark_quote_route} "
-                            f"quote_reason={mark_quote_reason or '-'} quote_price=${quote_price_text} "
+                            f"quote_reason={mark_quote_reason or '-'} quote_price={quote_price_text} "
                             f"quote_out={quote_out_text} trail_active={str(debug_fields['trail_active']).lower()} "
                             f"trail_floor_pct={trail_floor_text} stop_loss_pct={debug_fields['stop_loss_pct']:+.1f}%"
                         )
@@ -4456,7 +4461,7 @@ def run_monitor(db):
                 log.info(
                     f"  CLOSED {pos.symbol}/{pos.strategy_stage}: {reason} pnl={realized_pnl*100:+.1f}% "
                     f"trigger_pnl={trigger_pnl*100:+.1f}% peak={pos.peak_pnl*100:+.1f}% bars={pos.bars_held} "
-                    f"trigger_price=${trigger_price_text} quoted_price=${quoted_price_text} "
+                    f"trigger_price={trigger_price_text} quoted_price={quoted_price_text} "
                     f"quote_out={quote_out_text} total_realized_sol={total_realized_text} source={mark_source} lifecycle={pos.lifecycle_id}"
                 )
               except Exception as e:
@@ -4471,6 +4476,17 @@ def run_monitor(db):
             yesterday = (now_utc - timedelta(days=1)).strftime('%Y-%m-%d')
             print_daily_report(db, yesterday)
             last_daily_report = today_str
+
+            # Periodic cache cleanup (runs once per day alongside daily report)
+            now_cache = time.time()
+            expired_social = [k for k, (_, exp) in _social_signal_cache.items() if exp < now_cache]
+            for k in expired_social:
+                del _social_signal_cache[k]
+            stale_helius = [k for k, v in _helius_vol_cache.items() if now_cache - v.get('ts', 0) > 7200]
+            for k in stale_helius:
+                del _helius_vol_cache[k]
+            if expired_social or stale_helius:
+                log.info(f"  [CACHE_CLEANUP] social={len(expired_social)} helius={len(stale_helius)} pruned")
 
         time.sleep(MAIN_LOOP_TICK_SEC)
       except KeyboardInterrupt:

@@ -761,20 +761,9 @@ class ExitMatrixEvaluator:
         # New: velocity-based ratchet — fast moves lock more profit.
         trail_floor = None
         if peak_pnl >= 0.05:  # +5% trail activation
-            # Calculate price velocity (PnL change per minute)
-            pnl_history = entry.get('_pnl_history', [])
-            pnl_history.append((time.time(), current_pnl))
-            cutoff = time.time() - 300  # keep 5 min of history
-            pnl_history = [(t, p) for t, p in pnl_history if t >= cutoff]
-
-            velocity = 0.0
-            window_sec = 120  # 2-min velocity window
-            now_t = time.time()
-            recent = [(t, p) for t, p in pnl_history if now_t - t <= window_sec]
-            if len(recent) >= 2:
-                dt_min = (recent[-1][0] - recent[0][0]) / 60.0
-                if dt_min > 0:
-                    velocity = ((recent[-1][1] - recent[0][1]) * 100) / dt_min
+            # Use Guardian's velocity (3s price ring, 30s window) — more accurate
+            # than computing our own from 2-min PnL history
+            velocity = entry.get('_guardian_velocity', 0)
 
             # Tiered trail factor based on peak level + velocity
             if peak_pnl >= 0.20:
@@ -808,7 +797,6 @@ class ExitMatrixEvaluator:
                     'current_pnl': current_pnl,
                     'trail_floor': trail_floor,
                     '_trail_factor': trail_factor,
-                    '_pnl_history': pnl_history,
                 }
 
         # === Matrix-based soft exit (trend check) ===
@@ -911,24 +899,8 @@ class ExitMatrixEvaluator:
         # Factor ratchets up only (never decreases).
         # Tiered: <5%/min → 0.2, 5-15%/min → 0.4, >15%/min → 0.6
 
-        # Get or initialize PnL history for velocity calculation
-        pnl_history = entry.get('_pnl_history', [])
-        pnl_history.append((time.time(), current_pnl))
-        # Keep only last 5 minutes of history
-        cutoff = time.time() - 300
-        pnl_history = [(t, p) for t, p in pnl_history if t > cutoff]
-
-        # Calculate velocity over 2-min window
-        velocity = 0.0
-        window_sec = 120
-        now_t = time.time()
-        recent = [(t, p) for t, p in pnl_history if now_t - t <= window_sec]
-        if len(recent) >= 2:
-            oldest_t, oldest_p = recent[0]
-            newest_t, newest_p = recent[-1]
-            dt_min = (newest_t - oldest_t) / 60.0
-            if dt_min > 0:
-                velocity = ((newest_p - oldest_p) * 100) / dt_min  # %/min
+        # Use Guardian's velocity directly (3s price ring, 30s window)
+        velocity = entry.get('_guardian_velocity', 0)
 
         # Map velocity to target factor
         if velocity > 15.0:
@@ -949,7 +921,6 @@ class ExitMatrixEvaluator:
                 'reason': f'moon_trail (pnl={current_pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, factor={moon_trail_factor}, vel={velocity:.1f}%/min)',
                 'current_pnl': current_pnl,
                 'moon_trail_factor': moon_trail_factor,
-                '_pnl_history': pnl_history,
             }
 
         # === 24h safety cap ===
@@ -983,7 +954,6 @@ class ExitMatrixEvaluator:
                     'moon_peak_pnl': moon_peak,
                     'new_moon_trend_zero_count': zero_count,
                     'moon_trail_factor': moon_trail_factor,
-                    '_pnl_history': pnl_history,
                 }
             else:
                 return {
@@ -993,7 +963,6 @@ class ExitMatrixEvaluator:
                     'moon_peak_pnl': moon_peak,
                     'new_moon_trend_zero_count': 0,
                     'moon_trail_factor': moon_trail_factor,
-                    '_pnl_history': pnl_history,
                 }
 
         return {
@@ -1002,5 +971,4 @@ class ExitMatrixEvaluator:
             'current_pnl': current_pnl,
             'moon_peak_pnl': moon_peak,
             'moon_trail_factor': moon_trail_factor,
-            '_pnl_history': pnl_history,
         }
