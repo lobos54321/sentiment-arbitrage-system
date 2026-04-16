@@ -347,6 +347,24 @@ def process_guardian_exits(exit_guardian, positions, positions_lock, lifecycles,
             continue
 
         gx_pos = positions[gx_trade_id]
+
+        # === STALE EXIT GUARD ===
+        # Guardian queues exits every 3s, but main loop may process them minutes later.
+        # If price has recovered since the exit was queued, SKIP IT.
+        # ROOT CAUSE: Republicans peaked +72% but a stale +4.3% trail_stop from 6 min ago
+        # was still in the queue and got executed, killing a winning trade.
+        if 'trail_stop' in gx.get('reason', '') and gx_pos.entry_price and gx_pos.entry_price > 0:
+            current_peak = max(gx_pos.peak_pnl, 0)
+            trigger_pnl = gx.get('trigger_pnl', 0)
+            # If peak has moved significantly beyond the trigger, this exit is stale
+            if current_peak > 0.05 and trigger_pnl < current_peak * 0.5:
+                log.info(
+                    f"  [GUARDIAN_EXIT] ⏭️ SKIPPING stale trail_stop for {gx['symbol']}: "
+                    f"trigger_pnl={trigger_pnl*100:+.1f}% but current peak={current_peak*100:+.1f}% "
+                    f"— price has recovered, exit no longer valid"
+                )
+                continue
+
         gx_lifecycle_id = gx_pos.lifecycle_id
         gx_lifecycle = lifecycles.setdefault(
             gx_lifecycle_id,
