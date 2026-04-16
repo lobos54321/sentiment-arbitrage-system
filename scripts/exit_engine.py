@@ -172,8 +172,15 @@ class ExitGuardianThread(threading.Thread):
                     continue
 
                 # === Update peak_pnl in real-time (critical for trail accuracy) ===
+                # BUG FIX: Sync peak between Guardian (pos.peak_pnl) and ExitMatrix (w_entry['peak_pnl'])
+                # Without this, they diverge and Guardian uses stale peak → wrong trail floor
+                if w_entry:
+                    w_peak = w_entry.get('peak_pnl', 0) or 0
+                    pos.peak_pnl = max(pos.peak_pnl, w_peak)  # read ExitMatrix's peak
                 if pnl > pos.peak_pnl:
                     pos.peak_pnl = pnl
+                if w_entry and pos.peak_pnl > (w_entry.get('peak_pnl', 0) or 0):
+                    w_entry['peak_pnl'] = pos.peak_pnl  # write back for ExitMatrix
 
                 # === B+C: Record price into ring buffer for velocity calc ===
                 pos.price_ring.append((time.time(), price))
@@ -208,9 +215,9 @@ class ExitGuardianThread(threading.Thread):
                 if pos.peak_pnl >= 0.05:
                     # Tiered base factor by peak level
                     if pos.peak_pnl >= 0.50:
-                        base_factor = 0.65   # >= +50% — about to become moon bag
+                        base_factor = 0.70   # >= +50% — about to become moon bag (synced with matrix_evaluator)
                     elif pos.peak_pnl >= 0.20:
-                        base_factor = 0.6
+                        base_factor = 0.7    # >= +20% preserve 70% (synced with matrix_evaluator)
                     elif pos.peak_pnl >= 0.10:
                         base_factor = 0.55
                     else:
