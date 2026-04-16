@@ -530,79 +530,21 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
         position, detail = evaluate_entry_position(price_history, price)
 
         if position == 'GOOD_ENTRY':
+            # DISABLED: pullback_bounce entry path.
+            # Data (2026-04-16, 7 trades): pullback_bounce 0 wins / 3 losses (avg -13.6%)
+            # vs momentum_direct 2 wins / 2 losses (avg +31.5%, includes WOJAK +103%).
+            # Pullback-bounce catches "dead cat bounces" in meme coins — the bounce
+            # looks real (bounce_ratio up to 72%) but price dumps immediately after entry.
+            # Keeping detection for monitoring; only momentum_direct_entry can trigger trades.
             pullback = detail.get('pullback_depth_pct', 0)
             bounce = detail.get('bounce_from_low_pct', 0)
             bounce_ratio = bounce / pullback if pullback > 0 else 0
-
-            # Guard 0: real-time buy/sell confirmation — buyers must still be present
-            # L1 passed BULLISH (buy_sell≥1.2) but cached data can be up to 15s old;
-            # verify at execution time that buy pressure hasn't dried up (≥1.0 is lenient)
-            if cached_trend:
-                _bs_now = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
-                if _bs_now < 1.0:
-                    if round_num % 6 == 0:
-                        log.info(
-                            f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                            f"buy_sell={_bs_now:.2f} < 1.0 at GOOD_ENTRY — buyers dried up "
-                            f"({elapsed:.0f}s)"
-                        )
-                    time.sleep(interval)
-                    continue
-
-            # Guard 1: bounce/pullback ratio — reject dead cat bounces
-            if bounce_ratio < SMART_ENTRY_MIN_BOUNCE_RATIO:
-                if round_num % 6 == 0:
-                    log.info(
-                        f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                        f"bounce_ratio={bounce_ratio:.0%} < {SMART_ENTRY_MIN_BOUNCE_RATIO:.0%} "
-                        f"(bounce={bounce:.1f}% pullback={pullback:.1f}%) ({elapsed:.0f}s)"
-                    )
-                time.sleep(interval)
-                continue
-
-            # Guard 2: trend downgrade — buying pressure fading
-            if trend_downgraded:
+            if round_num % 6 == 0:
                 log.info(
-                    f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                    f"trend downgraded real_buying→moderate_buying, "
-                    f"buying pressure fading ({elapsed:.0f}s)"
+                    f"[SmartEntry] ${symbol} round {round_num} GOOD_ENTRY(disabled): "
+                    f"pullback={pullback:.1f}% bounce={bounce:.1f}% "
+                    f"ratio={bounce_ratio:.0%} trend={trend_reason} ({elapsed:.0f}s)"
                 )
-                time.sleep(interval)
-                continue
-
-            # Guard 3: overextension — coin already pumped too much
-            # If vel_60s > 20%/min, the "pullback bounce" is likely a crash beginning
-            # (Normie: vel_60s ≈ 23%/min, +45% in 5min → pullback_bounce → instant -27%)
-            if len(price_history) >= 4:
-                _now = time.time()
-                _pts_60 = [(t, p) for t, p in price_history if _now - t <= 60 and p > 0]
-                if len(_pts_60) >= 2:
-                    _dt = (_pts_60[-1][0] - _pts_60[0][0]) / 60.0
-                    if _dt > 0:
-                        _vel_60 = ((_pts_60[-1][1] - _pts_60[0][1]) / _pts_60[0][1] * 100) / _dt
-                        if _vel_60 > 20.0:
-                            log.info(
-                                f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                                f"overextended vel_60s={_vel_60:+.1f}%/min > 20%/min, "
-                                f"pullback likely crash not bounce ({elapsed:.0f}s)"
-                            )
-                            time.sleep(interval)
-                            continue
-
-            trigger_price = price
-            detail_str = (
-                f"pullback={pullback:.1f}% "
-                f"bounce={bounce:.1f}% "
-                f"bounce_ratio={bounce_ratio:.0%} "
-                f"below_high={detail['below_high_pct']:.1f}% "
-                f"trend={trend_reason} "
-                f"n_points={detail['n_points']} "
-                f"waited={elapsed:.0f}s"
-            )
-            log.info(
-                f"[SmartEntry] ✅ ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}"
-            )
-            return True, 'smart_entry_pullback_bounce', detail_str, trigger_price
 
         # Not a good entry yet — log and keep polling
         if round_num % 6 == 0:  # Log every 60s
