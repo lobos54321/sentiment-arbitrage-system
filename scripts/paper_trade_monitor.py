@@ -1021,7 +1021,7 @@ def get_recent_signatures(token_ca, limit=100):
 
 def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS, token_decimals=None):
     """
-    Fetch a real-time USD price for the timing/exit engines.
+    Fetch a real-time SOL-denominated price for the timing/exit engines.
 
     Uses get_live_price_snapshot (Redis → shared Jupiter quote → DexScreener
     → direct) but enforces a strict freshness check: any snapshot older than
@@ -1650,19 +1650,18 @@ def get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=None):
     }
 
 
-def _shared_quote_to_usd_price(out_amount_lamports, token_decimals):
+def _shared_quote_to_sol_price(out_amount_lamports, token_decimals):
     """
     Convert a Jupiter shared-quote outAmount (SOL lamports for an input of
-    1,000,000 raw token units) into USD per token.
+    1,000,000 raw token units) into SOL per token.
 
     For pump.fun-style tokens (decimals=6), 1,000,000 raw = 1 token, so the
-    conversion is simply (lamports / 1e9) * sol_price_usd. For other decimal
-    counts we adjust by 10^(decimals-6).
+    conversion is simply (lamports / 1e9). For other decimal counts we adjust
+    by 10^(decimals-6).
 
-    Returns None if sol_price is unavailable or inputs are invalid — the
-    caller should fall through to the next price source rather than emit a
-    SOL-denominated value (the bug behind the trigger_pnl≈-99% phantom SLs
-    on 2026-04-07).
+    Returns SOL-denominated price directly — no USD conversion needed.
+    All position monitoring now uses SOL pricing to eliminate phantom PnL
+    from SOL/USD fluctuations during trades.
     """
     try:
         lamports = float(out_amount_lamports or 0)
@@ -1670,50 +1669,45 @@ def _shared_quote_to_usd_price(out_amount_lamports, token_decimals):
         return None
     if lamports <= 0:
         return None
-    sol_usd = get_sol_price()
-    if not sol_usd or sol_usd <= 0:
-        log.warning(
-            "  [SHARED_QUOTE_USD] sol_price unavailable, dropping shared-quote "
-            "price (lamports=%s decimals=%s) — caller will fall through",
-            out_amount_lamports, token_decimals,
-        )
-        return None
     decimals = int(token_decimals) if token_decimals is not None else 6
-    # USD per (1,000,000 raw token units) = (lamports / 1e9) * sol_usd
-    # tokens per (1,000,000 raw)            = 1e6 / 10^decimals
-    # USD per token                          = above / tokens_per_million_raw
+    # SOL per (1,000,000 raw token units) = lamports / 1e9
+    # tokens per (1,000,000 raw)           = 1e6 / 10^decimals
+    # SOL per token                         = above / tokens_per_million_raw
     tokens_per_million_raw = (10 ** 6) / (10 ** decimals) if decimals >= 0 else 1.0
     if tokens_per_million_raw <= 0:
         return None
-    usd_per_million_raw = (lamports / 1e9) * sol_usd
-    return usd_per_million_raw / tokens_per_million_raw
+    sol_per_million_raw = lamports / 1e9
+    return sol_per_million_raw / tokens_per_million_raw
 
 
 def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, token_decimals=None):
-    """Get Redis/shared-cache first live price snapshot with direct fallback only when needed.
+    """Get live price snapshot — ALL prices returned in SOL per token.
 
-    All returned `price` values are USD per token. The shared-quote sources
-    (Jupiter outAmount in SOL lamports) are converted via
-    `_shared_quote_to_usd_price` using the live SOL/USD price; pass
-    `token_decimals` when known so non-6-decimal tokens convert correctly,
-    otherwise we assume 6 (the pump.fun default).
+    Primary source: Jupiter shared-quote (already in SOL lamports).
+    Fallback sources (Redis/DexScreener/GeckoTerminal) return USD and are
+    converted to SOL via sol_price. This eliminates phantom PnL from
+    SOL/USD fluctuations during trades.
     """
     payload = read_redis_payload(token_ca)
     if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
         timestamp_ms = _coerce_timestamp_ms(payload)
-        return {
-            'price': float(payload['price_usd']),
-            'ts': int(timestamp_ms // 1000),
-            'timestamp_ms': timestamp_ms,
-            'source': 'redis',
-            'payload': payload,
-        }
+        usd_price = float(payload['price_usd'])
+        sol_usd = get_sol_price()
+        if sol_usd and sol_usd > 0:
+            sol_price_val = usd_price / sol_usd  # Convert USD → SOL
+            return {
+                'price': sol_price_val,
+                'ts': int(timestamp_ms // 1000),
+                'timestamp_ms': timestamp_ms,
+                'source': 'redis',
+                'payload': payload,
+            }
 
     if shared_truth_source_enabled('quotes'):
         shared_quote = get_shared_quote_cache_value(f'quote:{token_ca}:So11111111111111111111111111111111111111112:1000000')
         if isinstance(shared_quote, dict):
             quote = shared_quote.get('quote') or {}
-            usd_price = _shared_quote_to_usd_price(quote.get('outAmount'), token_decimals)
+            usd_price = _shared_quote_to_sol_price(quote.get('outAmount'), token_decimals)
             if usd_price and usd_price > 0:
                 fetched_at = shared_quote.get('fetchedAt')
                 try:
@@ -1732,7 +1726,7 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
         shared_quote_result = get_shared_swap_quote(token_ca, 1000000)
         if isinstance(shared_quote_result, dict):
             quote = shared_quote_result.get('quote') or {}
-            usd_price = _shared_quote_to_usd_price(quote.get('outAmount'), token_decimals)
+            usd_price = _shared_quote_to_sol_price(quote.get('outAmount'), token_decimals)
             if usd_price and usd_price > 0:
                 fetched_at = shared_quote_result.get('fetchedAt')
                 try:
@@ -1752,12 +1746,20 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
 
     dex_snapshot = get_dexscreener_price_snapshot(token_ca, min_timestamp_ms=min_timestamp_ms)
     if dex_snapshot:
-        return dex_snapshot
+        # DexScreener returns USD — convert to SOL
+        sol_usd = get_sol_price()
+        if sol_usd and sol_usd > 0:
+            dex_snapshot['price'] = dex_snapshot['price'] / sol_usd
+            return dex_snapshot
 
     direct = get_current_price_direct(token_ca, pool_address)
     if not direct:
         return None
     direct['timestamp_ms'] = int(direct['ts']) * 1000
+    # GeckoTerminal returns USD — convert to SOL
+    sol_usd = get_sol_price()
+    if sol_usd and sol_usd > 0:
+        direct['price'] = direct['price'] / sol_usd
     return direct
 
 
@@ -2861,7 +2863,7 @@ def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strate
     token_amount_raw = execution.get('quotedOutAmountRaw')
     token_decimals = execution.get('outputDecimals') or 0
     entry_ts = int((execution.get('quoteTs') or (entry_ts * 1000)) / 1000)
-    entry_price = quote_price_sol * sol_price if sol_price else quote_price_sol
+    entry_price = quote_price_sol  # SOL pricing: store SOL/token directly
     db.execute("""
         INSERT INTO paper_trades
             (strategy_id, strategy_role, strategy_stage, stage_outcome,
@@ -4164,17 +4166,20 @@ def run_monitor(db):
                     if sol_price is None:
                         sol_price = get_sol_price()
                         time.sleep(0.2)
-                    quote_price = quote_price_sol * sol_price if sol_price else quote_price_sol
+                    # SOL pricing: quote_price_sol is already SOL/token from Jupiter
+                    # No USD conversion needed — all monitoring now uses SOL
+                    quote_price = quote_price_sol
                     # Fix: use SmartEntry trigger_price (real-time market price) for entry PnL.
                     # Jupiter quote_price has ~5% spread that caused $BATTLE to hit SL on a +605% coin.
                     # trigger_price = price at the moment SmartEntry decided to buy = actual market price.
+                    # NOTE: trigger_price now comes from fetch_realtime_price which returns SOL
                     trigger_price_val = pending.get('trigger_price')
                     if trigger_price_val and trigger_price_val > 0:
                         price = trigger_price_val
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price=${price:.10f} (quote=${quote_price:.10f} spread={((quote_price-price)/price*100):+.1f}%)")
+                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price(SOL)=${price:.12f} (quote_sol=${quote_price:.12f} spread={((quote_price-price)/price*100):+.1f}%)")
                     else:
                         price = quote_price
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price=${price:.10f} (no trigger_price)")
+                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price(SOL)=${price:.12f} (no trigger_price)")
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades
@@ -4403,10 +4408,9 @@ def run_monitor(db):
                                 if exit_matrix['action'] == 'exit':
                                     quote_eff_sol = simulate_res.get('effectivePrice')
                                     if (quote_eff_sol and quote_eff_sol > 0 and
-                                            sol_price and sol_price > 0 and
                                             pos.entry_price and pos.entry_price > 0):
-                                        quote_price_usd = quote_eff_sol * sol_price
-                                        quote_pnl = (quote_price_usd - pos.entry_price) / pos.entry_price
+                                        # SOL pricing: entry_price is SOL, quote_eff_sol is SOL — compare directly
+                                        quote_pnl = (quote_eff_sol - pos.entry_price) / pos.entry_price
                                         trigger_pnl = exit_matrix.get('current_pnl', 0.0)
                                         divergence = abs(quote_pnl - trigger_pnl)
 
@@ -4890,7 +4894,7 @@ def run_monitor(db):
                                 log.warning(f"  Stage2A invalid execution payload for {lifecycle['symbol']} lifecycle={lifecycle_id}")
                                 continue
                             entry_ts = int((execution.get('quoteTs') or (bar_ts * 1000)) / 1000)
-                            entry_price = quote_price_sol * sol_price if sol_price else quote_price_sol
+                            entry_price = quote_price_sol  # SOL pricing: store SOL/token directly
                             db.execute("""
                                 INSERT INTO paper_trades
                                     (strategy_id, strategy_role, strategy_stage, stage_outcome,
