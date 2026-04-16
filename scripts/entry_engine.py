@@ -499,6 +499,21 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
             bounce = detail.get('bounce_from_low_pct', 0)
             bounce_ratio = bounce / pullback if pullback > 0 else 0
 
+            # Guard 0: real-time buy/sell confirmation — buyers must still be present
+            # L1 passed BULLISH (buy_sell≥1.2) but cached data can be up to 15s old;
+            # verify at execution time that buy pressure hasn't dried up (≥1.0 is lenient)
+            if cached_trend:
+                _bs_now = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
+                if _bs_now < 1.0:
+                    if round_num % 6 == 0:
+                        log.info(
+                            f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
+                            f"buy_sell={_bs_now:.2f} < 1.0 at GOOD_ENTRY — buyers dried up "
+                            f"({elapsed:.0f}s)"
+                        )
+                    time.sleep(interval)
+                    continue
+
             # Guard 1: bounce/pullback ratio — reject dead cat bounces
             if bounce_ratio < SMART_ENTRY_MIN_BOUNCE_RATIO:
                 if round_num % 6 == 0:
