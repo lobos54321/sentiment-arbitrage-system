@@ -266,15 +266,17 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     if s1 < s2 < s3:
         return 100, f'ascending +{pct_move:.2f}% [{snap_str}]', snapshots
 
-    # Moderate: s3 >= s2 >= s1 and s3 > s1 (not dropping, net up)
-    if s3 >= s2 >= s1 and s3 > s1:
-        return 60, f'flat_up +{pct_move:.2f}% [{snap_str}]', snapshots
+    # Moderate: s3 > s1 (net positive over 6s, even if not strictly ascending)
+    # Per documented strategy: s3 > s1 → M=60 (宽松上升)
+    if s3 > s1:
+        rises = sum(1 for a, b in zip(snapshots, snapshots[1:]) if b > a)
+        return 60, f'net_up +{pct_move:.2f}% rises={rises}/2 [{snap_str}]', snapshots
 
     # Declining: s3 < s1
     if s3 < s1:
         return 0, f'declining {pct_move:+.2f}% [{snap_str}]', snapshots
 
-    # Flat (no movement at all)
+    # Flat (s3 == s1, no net movement)
     return 0, f'flat {pct_move:+.2f}% [{snap_str}]', snapshots
 
 
