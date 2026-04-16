@@ -203,10 +203,10 @@ class ExitGuardianThread(threading.Thread):
                 if w_entry:
                     tps_smooth = w_entry.get('_helius_tps', 0) or 0
 
-                # Write to watchlist entry so main-loop evaluate_exit can read
-                if w_entry:
-                    w_entry['_guardian_velocity'] = use_vel
-                    w_entry['_guardian_tick_vol'] = tick_vol
+                # Write velocity to Position object (shared with main loop)
+                # w_entry is a separate DB copy — writing here is lost
+                pos._guardian_velocity = use_vel
+                pos._guardian_tick_vol = tick_vol
 
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 # Applies to ALL positions including moon bags

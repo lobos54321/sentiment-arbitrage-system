@@ -2493,6 +2493,7 @@ class Position:
         'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
         'monitor_state', 'entry_execution_json', 'premium_signal_id', 'signal_type',
         'price_ring', 'vel_history',
+        'pnl_history', 'trail_factor',  # ExitMatrix velocity & trail ratchet (in-memory, persistent)
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
@@ -2527,6 +2528,9 @@ class Position:
         self.price_ring = deque(maxlen=20)
         # Multi-round velocity smoothing: last 3 vel_30s readings → avg
         self.vel_history = deque(maxlen=3)
+        # ExitMatrix velocity & trail ratchet (persist across cycles, was lost when stored on w_entry)
+        self.pnl_history = []
+        self.trail_factor = 0.0
 
 
 def build_lifecycle_id(token_ca, signal_ts):
@@ -4318,6 +4322,13 @@ def run_monitor(db):
                             pos_pool = pos.pool_address or get_pool_address(pos.token_ca)
                             helius_tps = poll_helius_volume(pos.trade_id, pos_pool)
                             w_entry['_helius_tps'] = helius_tps
+                            # Inject in-memory state that must persist across cycles
+                            # (w_entry is re-fetched from DB each cycle, losing _ prefixed fields)
+                            w_entry['_pnl_history'] = pos.pnl_history
+                            w_entry['_trail_factor'] = pos.trail_factor
+                            # Guardian writes velocity to its own w_entry copy → relay via Position
+                            if hasattr(pos, '_guardian_velocity'):
+                                w_entry['_guardian_velocity'] = pos._guardian_velocity
 
                         if not w_entry:
                             exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}
@@ -4372,6 +4383,12 @@ def run_monitor(db):
                         
                         if w_entry:
                             watchlist.update_position_state(w_entry['id'], **state_updates)
+
+                        # Read back in-memory state from ExitMatrix → Position (persist across cycles)
+                        if exit_matrix.get('_pnl_history') is not None:
+                            pos.pnl_history = exit_matrix['_pnl_history']
+                        if exit_matrix.get('_trail_factor') is not None:
+                            pos.trail_factor = exit_matrix['_trail_factor']
 
                         exit_eval = {
                             'ok': True,
