@@ -4490,8 +4490,8 @@ def run_monitor(db):
                 pool_count = len(_SHARED_POOL_CACHE)
                 _SHARED_POOL_CACHE.clear()
                 try:
-                    from matrix_evaluator import MatrixEvaluator
-                    MatrixEvaluator.clear_kline_cache()
+                    import matrix_evaluator as _me
+                    _me.MatrixEvaluator.clear_kline_cache()
                 except Exception:
                     pass
                 clear_dex_trend_cache()
