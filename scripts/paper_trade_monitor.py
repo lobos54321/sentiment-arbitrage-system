@@ -68,17 +68,7 @@ EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
 DEFAULT_STAGE1_EXIT = {'stopLossPct': 7.5, 'trailStartPct': 15, 'trailFactor': 0.6, 'timeoutMinutes': 120}
-DEFAULT_STAGE2A = {'enabled': True, 'waitBarsAfterStop': 3, 'reboundFromRollingLowPct': 18, 'rollingLowBars': 3, 'stopLossPct': 4, 'trailStartPct': 3, 'trailFactor': 0.9, 'timeoutMinutes': 120}
-DEFAULT_STAGE3 = {
-    'enabled': True,
-    'firstPeakMinPct': 10,
-    'awakeningMinSuperIndex': 100,
-    'priceFloor': 0.50,
-    'stopLossPct': 4,
-    'trailStartPct': 3,
-    'trailFactor': 0.9,
-    'timeoutMinutes': 120,
-}
+
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
     'entryPriceSource': 'quote',
@@ -197,8 +187,6 @@ def load_active_strategy_config():
         'paperExecution': dict(DEFAULT_PAPER_EXECUTION),
         'stageRules': {
             'stage1Exit': dict(DEFAULT_STAGE1_EXIT),
-            'stage2A': dict(DEFAULT_STAGE2A),
-            'stage3': dict(DEFAULT_STAGE3),
         },
     }
     try:
@@ -2670,43 +2658,12 @@ def load_lifecycle_rows(db, lifecycle_id):
     """, (lifecycle_id,)).fetchall()
 
 
-def validate_lifecycle_child_insert(db, lifecycle_id, expected_stage, require_stage1_sl=False):
-    rows = load_lifecycle_rows(db, lifecycle_id)
-    if not rows:
-        return False, f"no lifecycle rows found for {lifecycle_id}", None
-
-    summary = summarize_lifecycle_rows(rows)
-    canonical_stage1 = summary['canonical_stage1']
-    if canonical_stage1 is None:
-        return False, f"no canonical stage1 root found for {lifecycle_id}", summary
-
-    if (canonical_stage1['strategy_stage'] or 'stage1') != 'stage1':
-        return False, f"canonical parent {canonical_stage1['id']} is not a stage1 row", summary
-
-    if row_effective_lifecycle_id(canonical_stage1) != lifecycle_id:
-        return False, f"canonical parent {canonical_stage1['id']} is outside lifecycle {lifecycle_id}", summary
-
-    if summary['plausible_stage1_root_count'] > 1:
-        return False, f"ambiguous lifecycle {lifecycle_id} has {summary['plausible_stage1_root_count']} plausible stage1 roots", summary
-
-    if require_stage1_sl and (canonical_stage1['exit_reason'] or '') != 'sl':
-        return False, f"canonical stage1 parent {canonical_stage1['id']} exit_reason={canonical_stage1['exit_reason'] or 'NULL'}", summary
-
-    valid_existing_child = summary['valid_stage2a_row'] if expected_stage == 'stage2A' else summary['valid_stage3_row']
-    if valid_existing_child is not None:
-        return False, f"valid {expected_stage} row already exists ({valid_existing_child['id']})", summary
-
-    return True, None, summary
 
 
 def get_exit_rules_for_stage(strategy_config, stage_name):
     stage_rules = (strategy_config or {}).get('stageRules') or {}
     if stage_name == 'stage1':
         return dict(stage_rules.get('stage1Exit') or DEFAULT_STAGE1_EXIT)
-    if stage_name == 'stage2A':
-        return dict(stage_rules.get('stage2A') or DEFAULT_STAGE2A)
-    if stage_name == 'stage3':
-        return dict(stage_rules.get('stage3') or DEFAULT_STAGE3)
     return dict(DEFAULT_STAGE1_EXIT)
 
 
@@ -2789,146 +2746,6 @@ def restore_lifecycles(db):
     return lifecycles
 
 
-def count_open_positions_for_lifecycle(positions, lifecycle_id):
-    return sum(1 for pos in positions.values() if pos.lifecycle_id == lifecycle_id)
-
-
-def try_awaken_stage3_from_signal(db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price, token_ca, symbol, signal_ts, super_idx, position_size_sol=0.06, max_positions=None, pending_count=0):
-    if max_positions and (len(positions) + int(pending_count or 0)) >= max_positions:
-        return False, sol_price
-
-    candidate = next(
-        (
-            lc for lc in lifecycles.values()
-            if lc.get('token_ca') == token_ca
-            and lc.get('stage3_dormant')
-            and not lc.get('stage3_attempted')
-            and not lc.get('stage3_blacklisted')
-            and not lc.get('stage3_trade_id')
-            and count_open_positions_for_lifecycle(positions, lc['lifecycle_id']) == 0
-        ),
-        None,
-    )
-    if candidate is None:
-        return False, sol_price
-
-    awakening_min_super_index = int(stage3_rules.get('awakeningMinSuperIndex', 100))
-    if super_idx is None or super_idx <= awakening_min_super_index:
-        return False, sol_price
-
-    pool = get_pool_address(token_ca)
-    if not pool:
-        return False, sol_price
-
-    snapshot = get_live_price_snapshot(token_ca, pool)
-    if not snapshot:
-        return False, sol_price
-    current_price = snapshot['price']
-    entry_ts = int(snapshot['ts'])
-    peak_price = float(candidate.get('stage3_peak_price') or 0.0)
-    price_floor = float(stage3_rules.get('priceFloor', 0.50))
-    if peak_price <= 0 or current_price < peak_price * price_floor:
-        return False, sol_price
-
-    valid_parent, validation_error, validation_summary = validate_lifecycle_child_insert(
-        db, candidate['lifecycle_id'], 'stage3', require_stage1_sl=False
-    )
-    if not valid_parent:
-        candidate['stage3_attempted'] = True
-        candidate['stage3_dormant'] = False
-        if validation_summary:
-            candidate['stage1_trade_id'] = validation_summary['canonical_stage1_id']
-        log.warning(f"  Suppressing {symbol}/stage3 awakening for lifecycle={candidate['lifecycle_id']}: {validation_error}")
-        return True, sol_price
-
-    candidate['stage1_trade_id'] = validation_summary['canonical_stage1_id']
-    if sol_price is None:
-        sol_price = get_sol_price()
-        time.sleep(0.2)
-    execution = simulate_entry_execution(
-        token_ca,
-        position_size_sol,
-        'stage3',
-        strategy_id=strategy_id,
-        lifecycle_id=candidate['lifecycle_id'],
-    )
-    if not execution.get('success'):
-        candidate['stage3_attempted'] = True
-        candidate['stage3_dormant'] = False
-        candidate['stage3_blacklisted'] = True
-        log.warning(f"  Stage3 awakening quote failed for {symbol}: {execution.get('failureReason')}")
-        return True, sol_price
-
-    regime = determine_market_regime(sol_price) if sol_price else 'unknown'
-    quote_price_sol = execution.get('effectivePrice')
-    if quote_price_sol is None or quote_price_sol <= 0:
-        log.warning(f"  Stage3 awakening invalid execution price for {symbol}")
-        return True, sol_price
-    token_amount_raw = execution.get('quotedOutAmountRaw')
-    token_decimals = execution.get('outputDecimals') or 0
-    entry_ts = int((execution.get('quoteTs') or (entry_ts * 1000)) / 1000)
-    entry_price = quote_price_sol  # SOL pricing: store SOL/token directly
-    db.execute("""
-        INSERT INTO paper_trades
-            (strategy_id, strategy_role, strategy_stage, stage_outcome,
-             token_ca, symbol, signal_ts, entry_price, entry_ts,
-             market_regime, replay_source, peak_pnl, trailing_active,
-             lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
-             reentry_source, first_peak_pct, stage3_peak_price, stage3_qualifying_exit_ts,
-             stage3_dormant, stage3_blacklisted, position_size_sol, token_amount_raw, token_decimals,
-             entry_execution_json, entry_execution_audit_json, monitor_state_json,
-             premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-    """, (
-        strategy_id, strategy_role, 'stage3', 'stage3_entered',
-        token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts,
-        regime, candidate['lifecycle_id'], candidate.get('stage1_trade_id'), stage_seq('stage3'), signal_ts, current_price,
-        'v2_event_awakening', candidate.get('first_peak_pct') or 0.0,
-        candidate.get('stage3_peak_price'), candidate.get('stage3_qualifying_exit_ts'),
-        position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution), json.dumps(build_execution_audit(execution, {
-            'auditVersion': 1,
-            'stage': 'stage3',
-            'lifecycleId': candidate['lifecycle_id'],
-            'entryPriceUsd': entry_price,
-            'positionSizeSol': position_size_sol,
-        })), json.dumps({
-            'tokenCA': token_ca,
-            'symbol': symbol,
-            'entryPrice': entry_price,
-            'entrySol': position_size_sol,
-            'tokenAmount': int(token_amount_raw),
-            'tokenDecimals': int(token_decimals or 0),
-            'entryTime': int(entry_ts) * 1000,
-            'exitStrategy': 'NOT_ATH',
-        }),
-        candidate.get('premium_signal_id'), candidate.get('signal_type') or 'NEW_TRENDING', 'entered', 'available', 'open'
-    ))
-    trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-    db.commit()
-    pos = Position(trade_id, token_ca, symbol, candidate['signal_ts'], entry_price, entry_ts, pool,
-                   'stage3', candidate['lifecycle_id'], stage3_rules, position_size_sol, token_amount_raw, token_decimals,
-                   monitor_state={
-                       'tokenCA': token_ca,
-                       'symbol': symbol,
-                       'entryPrice': entry_price,
-                       'entrySol': position_size_sol,
-                       'tokenAmount': int(token_amount_raw),
-                       'tokenDecimals': int(token_decimals or 0),
-                       'entryTime': int(entry_ts) * 1000,
-                       'exitStrategy': 'NOT_ATH',
-                   })
-    pos.premium_signal_id = candidate.get('premium_signal_id')
-    pos.signal_type = candidate.get('signal_type') or 'NEW_TRENDING'
-    positions[pos.trade_id] = pos
-    candidate['stage3_trade_id'] = trade_id
-    candidate['stage3_attempted'] = True
-    candidate['stage3_dormant'] = False
-    log.info(
-        f"  Entered {symbol}/stage3 @ ${entry_price:.10f} "
-        f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals}) "
-        f"lifecycle={candidate['lifecycle_id']} via awakening quote"
-    )
-    return True, sol_price
 
 
 # === Daily Report ===
@@ -3183,8 +3000,6 @@ def dry_run(db):
     strategy_config = load_active_strategy_config()
     stage_rules = strategy_config.get('stageRules') or {}
     stage1_exit = get_exit_rules_for_stage(strategy_config, 'stage1')
-    stage2a_rules = get_exit_rules_for_stage(strategy_config, 'stage2A')
-    stage3_rules = get_exit_rules_for_stage(strategy_config, 'stage3')
     min_super_index = int(((strategy_config.get('entryTimingFilters') or {}).get('minSuperIndex')) or 80)
     strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
     strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
@@ -3224,7 +3039,7 @@ def dry_run(db):
             stage_counts['stage1_rejected'] += 1
             continue
 
-        bars = get_kline_bars(kline_db, token_ca, signal_ts, limit=max(stage1_exit['timeoutMinutes'], stage2a_rules.get('timeoutMinutes', 120), 240))
+        bars = get_kline_bars(kline_db, token_ca, signal_ts, limit=max(stage1_exit['timeoutMinutes'], 240))
         if len(bars) < 5:
             log.info(f"  [{symbol}] insufficient K-line bars ({len(bars)}), skipping")
             continue
@@ -3314,140 +3129,7 @@ def dry_run(db):
         stage_counts[f"stage1_exit_{stage1_result['exit_reason']}"] += 1
         completed.append(stage1_result['exit_pnl'])
 
-        if stage1_result['exit_reason'] == 'sl' and stage_rules.get('stage2A', {}).get('enabled') and 'stage2A' not in existing_stages:
-            lifecycle['stage1_stop_ts'] = stage1_result['exit_ts']
-            wait_bars = int(stage_rules['stage2A'].get('waitBarsAfterStop', 3))
-            rolling_low = None
-            rolling_low_ts = None
-            stage2_start_index = None
-            for idx in range(stage1_result['bars_held'] + wait_bars, len(bars)):
-                close_price = bars[idx]['close'] or bars[idx]['open']
-                if not close_price or close_price <= 0:
-                    continue
-                if rolling_low is None or close_price < rolling_low:
-                    rolling_low = close_price
-                    rolling_low_ts = int(bars[idx]['timestamp'])
-                rebound_target = rolling_low * (1 + pct_to_decimal(stage_rules['stage2A'].get('reboundFromRollingLowPct', 18)))
-                if close_price >= rebound_target:
-                    stage2_start_index = idx
-                    lifecycle['rolling_low_after_stop'] = rolling_low
-                    lifecycle['rolling_low_ts'] = rolling_low_ts
-                    break
-            stage_counts['stage2A_armed'] += 1
-            lifecycle['stage2a_attempted'] = True
-            if stage2_start_index is not None:
-                valid_parent, validation_error, validation_summary = validate_lifecycle_child_insert(
-                    db, lifecycle_id, 'stage2A', require_stage1_sl=True
-                )
-                if not valid_parent:
-                    if validation_summary:
-                        lifecycle['stage1_trade_id'] = validation_summary['canonical_stage1_id']
-                        lifecycle['stage1_stop_ts'] = validation_summary['stage1_stop_ts']
-                    log.warning(f"  Suppressing {symbol}/stage2A replay for lifecycle={lifecycle_id}: {validation_error}")
-                    stage_counts['stage2A_expired'] += 1
-                else:
-                    lifecycle['stage1_trade_id'] = validation_summary['canonical_stage1_id']
-                    lifecycle['stage1_stop_ts'] = validation_summary['stage1_stop_ts']
-                    stage2_result = replay_trade('stage2A', stage2_start_index, stage2a_rules)
-                    if stage2_result:
-                        db.execute("""
-                            INSERT INTO paper_trades
-                                (strategy_id, strategy_role, strategy_stage, stage_outcome,
-                                 token_ca, symbol, signal_ts, entry_price, entry_ts,
-                                 exit_price, exit_ts, exit_reason, pnl_pct, bars_held,
-                                 market_regime, replay_source, peak_pnl, trailing_active,
-                                 lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
-                                 armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
-                                 premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close,
-                                 exit_execution_audit_json)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-                        """, (
-                            strategy_id, strategy_role, 'stage2A', f"stage2A_{stage2_result['exit_reason']}",
-                            token_ca, symbol, int(signal_ts_ms), stage2_result['entry_price'], stage2_result['entry_ts'],
-                            stage2_result['exit_price'], stage2_result['exit_ts'], stage2_result['exit_reason'], stage2_result['exit_pnl'], stage2_result['bars_held'],
-                            'real_kline', 'real_kline_replay', stage2_result['peak_pnl'], int(stage2_result['trailing_active']),
-                            lifecycle_id, lifecycle['stage1_trade_id'], stage_seq('stage2A'), stage2_result['entry_ts'], stage2_result['entry_price'],
-                            lifecycle['stage1_stop_ts'], lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound',
-                            lifecycle.get('premium_signal_id'), lifecycle.get('signal_type') or 'NEW_TRENDING', stage2_result['exit_reason'], 'available', 'closed_real',
-                            json.dumps({
-                                'accountingSource': 'replay_exit_only',
-                                'preExitTotalSolReceived': None,
-                                'exitSolReceived': None,
-                                'postExitTotalSolReceived': None,
-                                'replaySource': 'real_kline_replay',
-                            })
-                        ))
-                        stage2_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-                        db.commit()
-                        existing_stages.add('stage2A')
-                        lifecycle['stage2a_trade_id'] = stage2_trade_id
-                        stage_counts['stage2A_entered'] += 1
-                        stage_counts[f"stage2A_exit_{stage2_result['exit_reason']}"] += 1
-                        completed.append(stage2_result['exit_pnl'])
-            else:
-                stage_counts['stage2A_expired'] += 1
 
-        if stage_rules.get('stage3', {}).get('enabled'):
-            first_peak_min_pct = float(stage_rules['stage3'].get('firstPeakMinPct', 10))
-            for candidate_result, candidate_trade_id in (
-                (stage1_result, stage1_trade_id),
-                (stage2_result, lifecycle.get('stage2a_trade_id')),
-            ):
-                if not candidate_result:
-                    continue
-                if lifecycle.get('stage3_attempted') or lifecycle.get('stage3_dormant') or lifecycle.get('stage3_blacklisted'):
-                    break
-
-                stage3_peak_price = None
-                if candidate_result.get('entry_price'):
-                    stage3_peak_price = candidate_result['entry_price'] * (1.0 + max(candidate_result['peak_pnl'], 0.0))
-                if stage3_peak_price and stage3_peak_price > 0:
-                    lifecycle['stage3_peak_price'] = stage3_peak_price
-
-                qualifies = (
-                    candidate_result['exit_reason'] == 'trail'
-                    and candidate_result['exit_pnl'] > 0
-                    and (candidate_result['peak_pnl'] * 100.0) >= first_peak_min_pct
-                    and stage3_peak_price
-                    and stage3_peak_price > 0
-                )
-                if qualifies:
-                    lifecycle['stage3_qualifying_exit_ts'] = candidate_result['exit_ts']
-                    lifecycle['stage3_dormant'] = True
-                    lifecycle['stage3_blacklisted'] = False
-                    db.execute(
-                        """
-                        UPDATE paper_trades
-                        SET stage3_peak_price = ?, stage3_qualifying_exit_ts = ?,
-                            stage3_dormant = 1, stage3_blacklisted = 0
-                        WHERE id = ?
-                        """,
-                        (stage3_peak_price, candidate_result['exit_ts'], candidate_trade_id)
-                    )
-                    db.commit()
-                    stage_counts['stage3_dormant'] += 1
-                    break
-
-                if (
-                    candidate_result['exit_reason'] in ('sl', 'timeout')
-                    or candidate_result['exit_pnl'] <= 0
-                    or (candidate_result['peak_pnl'] * 100.0) < first_peak_min_pct
-                ):
-                    lifecycle['stage3_dormant'] = False
-                    lifecycle['stage3_blacklisted'] = True
-                    lifecycle['stage3_attempted'] = True
-                    db.execute(
-                        """
-                        UPDATE paper_trades
-                        SET stage3_peak_price = COALESCE(?, stage3_peak_price),
-                            stage3_dormant = 0, stage3_blacklisted = 1
-                        WHERE id = ?
-                        """,
-                        (stage3_peak_price, candidate_trade_id)
-                    )
-                    db.commit()
-                    stage_counts['stage3_blacklisted'] += 1
-                    break
 
     kline_db.close()
 
@@ -3455,8 +3137,6 @@ def dry_run(db):
     log.info(f"Real K-line replays: {real_klines_used}")
     log.info(f"Stage 1 entered / rejected: {stage_counts['stage1_entered']} / {stage_counts['stage1_rejected']}")
     log.info(f"Stage 1 exit breakdown: sl={stage_counts['stage1_exit_sl']} trail={stage_counts['stage1_exit_trail']} timeout={stage_counts['stage1_exit_timeout']}")
-    log.info(f"Stage 2A armed / entered / expired: {stage_counts['stage2A_armed']} / {stage_counts['stage2A_entered']} / {stage_counts['stage2A_expired']}")
-    log.info(f"Stage 3 dormant / blacklisted: {stage_counts['stage3_dormant']} / {stage_counts['stage3_blacklisted']}")
     log.info(f"Duplicate prevented: {duplicate_prevented}")
 
     if completed:
@@ -3642,8 +3322,6 @@ def run_monitor(db):
     stage_rules = strategy_config.get('stageRules') or {}
     paper_execution = get_paper_execution_config(strategy_config)
     stage1_exit = get_exit_rules_for_stage(strategy_config, 'stage1')
-    stage2a_rules = get_exit_rules_for_stage(strategy_config, 'stage2A')
-    stage3_rules = get_exit_rules_for_stage(strategy_config, 'stage3')
     min_super_index = int(((strategy_config.get('entryTimingFilters') or {}).get('minSuperIndex')) or 80)
     strategy_id = strategy_config.get('strategyId') or DEFAULT_STRATEGY_ID
     strategy_role = strategy_config.get('strategyRole') or DEFAULT_STRATEGY_ROLE
@@ -3666,8 +3344,6 @@ def run_monitor(db):
         f"timeout_ms={paper_execution['quoteTimeoutMs']} penalty={paper_execution['applyPaperPenalty']}"
     )
     log.info(f"  stage1 exit: SL={stage1_exit['stopLossPct']}% Trail Start={stage1_exit['trailStartPct']}% Trail Factor={stage1_exit['trailFactor']*100:.0f}% Timeout={stage1_exit['timeoutMinutes']}min")
-    log.info(f"  stage2A exit: SL={stage2a_rules['stopLossPct']}% Trail Start={stage2a_rules['trailStartPct']}% Timeout={stage2a_rules['timeoutMinutes']}min")
-    log.info(f"  stage3 exit: SL={stage3_rules['stopLossPct']}% Trail Start={stage3_rules['trailStartPct']}% Timeout={stage3_rules['timeoutMinutes']}min")
     log.info(f"  Signal poll: {SIGNAL_POLL_INTERVAL}s  Position poll: {POSITION_POLL_INTERVAL}s")
     if REMOTE_SIGNAL_URL:
         log.info(f"  Signal Source: remote export {REMOTE_SIGNAL_URL}")
@@ -3925,15 +3601,6 @@ def run_monitor(db):
                     top10_pct = parse_top10_percent(sig['description'] or '')
                     if top10_pct is not None and top10_pct > top10_max:
                         log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: Top10 {top10_pct}% exceeds max allowed {top10_max}%, skipping")
-                        continue
-
-                    consumed, sol_price = try_awaken_stage3_from_signal(
-                        db, lifecycles, positions, strategy_id, strategy_role, stage3_rules, sol_price,
-                        token_ca, symbol, signal_ts, super_idx, position_size_sol,
-                        max_positions=max_positions, pending_count=len(pending_entries)
-                    )
-                    if consumed:
-                        last_progress = time.time()
                         continue
 
                     # Determine signal price immediately for reference
@@ -4693,7 +4360,6 @@ def run_monitor(db):
                 lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
-                stage3_peak_price = pos.entry_price * (1.0 + max(pos.peak_pnl, 0.0)) if pos.entry_price else None
                 quoted_exit_price = exit_execution.get('effectivePrice')
                 # SOL pricing: quoted_exit_price is already SOL/token from Jupiter
                 effective_exit_price = quoted_exit_price if quoted_exit_price is not None else exit_price
@@ -4783,50 +4449,6 @@ def run_monitor(db):
                     exit_cooldown = 0 if realized_pnl > 0 else 900
                     watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=exit_cooldown)
                 last_progress = time.time()
-                if pos.strategy_stage == 'stage1' and reason == 'sl':
-                    lifecycle['stage1_stop_ts'] = exit_ts
-                    lifecycle['rolling_low_after_stop'] = None
-                    lifecycle['rolling_low_ts'] = None
-
-                if pos.strategy_stage in ('stage1', 'stage2A') and not lifecycle.get('stage3_attempted') and not lifecycle.get('stage3_dormant') and not lifecycle.get('stage3_blacklisted'):
-                    first_peak_min_pct = float(stage3_rules.get('firstPeakMinPct', 10))
-                    qualifies = (
-                        reason == 'trail'
-                        and realized_pnl > 0
-                        and (lifecycle.get('first_peak_pct') or 0.0) >= first_peak_min_pct
-                        and stage3_peak_price
-                        and stage3_peak_price > 0
-                    )
-                    if qualifies:
-                        lifecycle['stage3_peak_price'] = stage3_peak_price
-                        lifecycle['stage3_qualifying_exit_ts'] = exit_ts
-                        lifecycle['stage3_dormant'] = True
-                        lifecycle['stage3_blacklisted'] = False
-                        db.execute(
-                            """
-                            UPDATE paper_trades
-                            SET stage3_peak_price = ?, stage3_qualifying_exit_ts = ?,
-                                stage3_dormant = 1, stage3_blacklisted = 0
-                            WHERE id = ?
-                            """,
-                            (stage3_peak_price, exit_ts, pos.trade_id)
-                        )
-                        db.commit()
-                    elif reason in ('sl', 'timeout') or realized_pnl <= 0 or (lifecycle.get('first_peak_pct') or 0.0) < first_peak_min_pct:
-                        lifecycle['stage3_peak_price'] = stage3_peak_price or lifecycle.get('stage3_peak_price')
-                        lifecycle['stage3_dormant'] = False
-                        lifecycle['stage3_blacklisted'] = True
-                        lifecycle['stage3_attempted'] = True
-                        db.execute(
-                            """
-                            UPDATE paper_trades
-                            SET stage3_peak_price = COALESCE(?, stage3_peak_price),
-                                stage3_dormant = 0, stage3_blacklisted = 1
-                            WHERE id = ?
-                            """,
-                            (stage3_peak_price, pos.trade_id)
-                        )
-                        db.commit()
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'
                 quoted_price_text = f"{effective_exit_price:.10f}" if effective_exit_price is not None else 'na'
                 quote_out_text = f"{float(actual_out):.6f}" if actual_out is not None else 'na'
@@ -4840,142 +4462,6 @@ def run_monitor(db):
               except Exception as e:
                 log.error(f"  Close event error for trade_id={close_event.get('trade_id')}: {e}", exc_info=True)
 
-            _lifecycle_evals_this_cycle = 0
-            for lifecycle_id, lifecycle in list(lifecycles.items()):
-              try:
-                if _lifecycle_evals_this_cycle >= MAX_EVALS_PER_CYCLE:
-                    break
-                if count_open_positions_for_lifecycle(positions, lifecycle_id) > 0:
-                    continue
-                pool = get_pool_address(lifecycle['token_ca'])
-                if not pool:
-                    continue
-                min_bar_ts = max(
-                    int(lifecycle.get('rolling_low_ts') or 0),
-                    int((lifecycle.get('stage1_stop_ts') or 0) // 1000 if (lifecycle.get('stage1_stop_ts') or 0) > 1e12 else (lifecycle.get('stage1_stop_ts') or 0)),
-                    int((lifecycle.get('signal_ts') or 0) // 1000 if (lifecycle.get('signal_ts') or 0) > 1e12 else (lifecycle.get('signal_ts') or 0)),
-                )
-                _lifecycle_evals_this_cycle += 1
-                snapshot = get_live_price_snapshot(lifecycle['token_ca'], pool, min_timestamp_ms=min_bar_ts * 1000 if min_bar_ts else None)
-                if not snapshot:
-                    continue
-                bar_ts = int(snapshot['ts'])
-                close_price = snapshot['price']
-                if close_price is None or close_price <= 0:
-                    continue
-
-                if stage_rules.get('stage2A', {}).get('enabled') and lifecycle.get('stage1_stop_ts') and not lifecycle.get('stage2a_attempted'):
-                    wait_bars = int(stage_rules['stage2A'].get('waitBarsAfterStop', 3))
-                    wait_seconds = wait_bars * 60
-                    if bar_ts >= int(lifecycle['stage1_stop_ts']) + wait_seconds:
-                        rolling_low = lifecycle.get('rolling_low_after_stop')
-                        if rolling_low is None or close_price < rolling_low:
-                            lifecycle['rolling_low_after_stop'] = close_price
-                            lifecycle['rolling_low_ts'] = bar_ts
-                        rolling_low = lifecycle.get('rolling_low_after_stop')
-                        rebound_target = rolling_low * (1 + pct_to_decimal(stage_rules['stage2A'].get('reboundFromRollingLowPct', 18)))
-                        if close_price >= rebound_target:
-                            valid_parent, validation_error, validation_summary = validate_lifecycle_child_insert(
-                                db, lifecycle_id, 'stage2A', require_stage1_sl=True
-                            )
-                            if not valid_parent:
-                                lifecycle['stage2a_attempted'] = True
-                                if validation_summary:
-                                    lifecycle['stage1_trade_id'] = validation_summary['canonical_stage1_id']
-                                    lifecycle['stage1_stop_ts'] = validation_summary['stage1_stop_ts']
-                                log.warning(f"  Suppressing {lifecycle['symbol']}/stage2A for lifecycle={lifecycle_id}: {validation_error}")
-                                continue
-                            lifecycle['stage1_trade_id'] = validation_summary['canonical_stage1_id']
-                            lifecycle['stage1_stop_ts'] = validation_summary['stage1_stop_ts']
-                            regime = determine_market_regime(sol_price) if sol_price else 'unknown'
-                            execution = simulate_entry_execution(
-                                lifecycle['token_ca'],
-                                position_size_sol,
-                                'stage2A',
-                                strategy_id=strategy_id,
-                                lifecycle_id=lifecycle_id,
-                            )
-                            if not execution.get('success'):
-                                lifecycle['stage2a_quote_failures'] = int(lifecycle.get('stage2a_quote_failures') or 0) + 1
-                                failure_reason = execution.get('failureReason') or 'unknown'
-                                if lifecycle['stage2a_quote_failures'] >= paper_execution['quoteRetries']:
-                                    lifecycle['stage2a_attempted'] = True
-                                    log.warning(f"  Stage2A quote permanently failed for {lifecycle['symbol']} lifecycle={lifecycle_id} after {lifecycle['stage2a_quote_failures']} attempts: {failure_reason}")
-                                else:
-                                    log.warning(f"  Stage2A quote failed for {lifecycle['symbol']} lifecycle={lifecycle_id} attempt={lifecycle['stage2a_quote_failures']}: {failure_reason} — will retry")
-                                continue
-                            quote_price_sol = execution.get('effectivePrice')
-                            token_amount_raw = execution.get('quotedOutAmountRaw')
-                            token_decimals = execution.get('outputDecimals') or 0
-                            if quote_price_sol is None or quote_price_sol <= 0 or not token_amount_raw:
-                                lifecycle['stage2a_attempted'] = True
-                                log.warning(f"  Stage2A invalid execution payload for {lifecycle['symbol']} lifecycle={lifecycle_id}")
-                                continue
-                            entry_ts = int((execution.get('quoteTs') or (bar_ts * 1000)) / 1000)
-                            entry_price = quote_price_sol  # SOL pricing: store SOL/token directly
-                            db.execute("""
-                                INSERT INTO paper_trades
-                                    (strategy_id, strategy_role, strategy_stage, stage_outcome,
-                                     token_ca, symbol, signal_ts, entry_price, entry_ts,
-                                     market_regime, replay_source, peak_pnl, trailing_active,
-                                     lifecycle_id, parent_trade_id, stage_seq, trigger_ts, trigger_price,
-                                     armed_ts, rolling_low_price, rolling_low_ts, reentry_source,
-                                     position_size_sol, token_amount_raw, token_decimals,
-                                     entry_execution_json, entry_execution_audit_json, monitor_state_json,
-                                     premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                            """, (
-                                strategy_id, strategy_role, 'stage2A', 'stage2A_entered',
-                                lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts,
-                                regime, lifecycle_id, lifecycle.get('stage1_trade_id'), stage_seq('stage2A'), bar_ts, close_price,
-                                lifecycle.get('stage1_stop_ts'), lifecycle.get('rolling_low_after_stop'), lifecycle.get('rolling_low_ts'), 'stage1_sl_rebound',
-                                position_size_sol, str(token_amount_raw), token_decimals, json.dumps(execution), json.dumps(build_execution_audit(execution, {
-                                    'auditVersion': 1,
-                                    'stage': 'stage2A',
-                                    'lifecycleId': lifecycle_id,
-                                    'entryPriceUsd': entry_price,
-                                    'positionSizeSol': position_size_sol,
-                                    'reentrySource': 'stage1_sl_rebound',
-                                })), json.dumps({
-                                    'tokenCA': lifecycle['token_ca'],
-                                    'symbol': lifecycle['symbol'],
-                                    'entryPrice': entry_price,
-                                    'entrySol': position_size_sol,
-                                    'tokenAmount': int(token_amount_raw),
-                                    'tokenDecimals': int(token_decimals or 0),
-                                    'entryTime': int(entry_ts) * 1000,
-                                    'exitStrategy': 'NOT_ATH',
-                                }),
-                                lifecycle.get('premium_signal_id'), lifecycle.get('signal_type') or 'NEW_TRENDING', 'entered', 'available', 'open'
-                            ))
-                            trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-                            db.commit()
-                            pos = Position(trade_id, lifecycle['token_ca'], lifecycle['symbol'], lifecycle['signal_ts'], entry_price, entry_ts, pool,
-                                           'stage2A', lifecycle_id, stage2a_rules, position_size_sol, token_amount_raw, token_decimals,
-                                           monitor_state={
-                                               'tokenCA': lifecycle['token_ca'],
-                                               'symbol': lifecycle['symbol'],
-                                               'entryPrice': entry_price,
-                                               'entrySol': position_size_sol,
-                                               'tokenAmount': int(token_amount_raw),
-                                               'tokenDecimals': int(token_decimals or 0),
-                                               'entryTime': int(entry_ts) * 1000,
-                                               'exitStrategy': 'NOT_ATH',
-                                           })
-                            pos.premium_signal_id = lifecycle.get('premium_signal_id')
-                            pos.signal_type = lifecycle.get('signal_type') or 'NEW_TRENDING'
-                            positions[pos.trade_id] = pos
-                            lifecycle['stage2a_trade_id'] = trade_id
-                            lifecycle['stage2a_attempted'] = True
-                            log.info(
-                                f"  Entered {lifecycle['symbol']}/stage2A @ ${entry_price:.10f} "
-                                f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals}) "
-                                f"lifecycle={lifecycle_id} via quote"
-                            )
-                            last_progress = time.time()
-                            continue
-              except Exception as e:
-                log.error(f"  Lifecycle check error for {lifecycle_id}: {e}", exc_info=True)
 
             if positions:
                 log.info(f"  Open positions: {len(positions)}  [{', '.join(f'{p.symbol}/{p.strategy_stage}' for p in positions.values())}]")
