@@ -41,7 +41,7 @@ from matrix_evaluator import MatrixEvaluator, ExitMatrixEvaluator
 from entry_engine import (
     calculate_kelly_position, evaluate_smart_entry,
     fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
-    evaluate_entry_position,
+    evaluate_entry_position, clear_dex_trend_cache,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
@@ -926,9 +926,7 @@ _timing_executor = ThreadPoolExecutor(
 )
 # lifecycle_id -> {'future', 'ctx', 'submitted_at'}
 _timing_inflight = {}
-# lifecycle_id -> {'last_check': ts, 'prev_count': int, 'last_sig': str, 'peak_price': float}
-_post_entry_vol_stats = {}
-HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', 'f7e7e457-aba3-448b-a565-f188158e2d80')
+HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', '')
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 # B+C: Helius volume polling cache for held positions
@@ -1313,10 +1311,8 @@ def drain_timing_results(pending_entries, lifecycles, positions):
             )
 
 
-def get_pool_address(token_ca, cache={}):
+def get_pool_address(token_ca):
     """Get pool address from shared/local truth sources first, then DexScreener fallback."""
-    if token_ca in cache:
-        return cache[token_ca]
     if token_ca in _SHARED_POOL_CACHE:
         return _SHARED_POOL_CACHE[token_ca]
 
@@ -1325,14 +1321,12 @@ def get_pool_address(token_ca, cache={}):
         if isinstance(shared_cached, dict):
             pool = str(shared_cached.get('poolAddress') or '').replace('solana_', '').strip()
             if pool:
-                cache[token_ca] = pool
                 _SHARED_POOL_CACHE[token_ca] = pool
                 return pool
         shared_resolved = get_shared_pool_resolution(token_ca)
         if isinstance(shared_resolved, dict):
             pool = str(shared_resolved.get('poolAddress') or '').replace('solana_', '').strip()
             if pool:
-                cache[token_ca] = pool
                 _SHARED_POOL_CACHE[token_ca] = pool
                 return pool
             if shared_resolved.get('rateLimited'):
@@ -1345,19 +1339,19 @@ def get_pool_address(token_ca, cache={}):
             if row and row['pool_address']:
                 pool = str(row['pool_address']).replace('solana_', '').strip()
                 if pool:
-                    cache[token_ca] = pool
+                    _SHARED_POOL_CACHE[token_ca] = pool
                     return pool
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"Pool lookup via pool_mapping failed for {token_ca}: {e}")
         try:
             row = kline_db.execute("SELECT pool_address FROM kline_1m WHERE token_ca = ? AND pool_address IS NOT NULL AND TRIM(pool_address) != '' ORDER BY fetched_at DESC, timestamp DESC LIMIT 1", (token_ca,)).fetchone()
             if row and row['pool_address']:
                 pool = str(row['pool_address']).replace('solana_', '').strip()
                 if pool:
-                    cache[token_ca] = pool
+                    _SHARED_POOL_CACHE[token_ca] = pool
                     return pool
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"Pool lookup via kline_1m failed for {token_ca}: {e}")
 
     if not direct_provider_fallback_allowed():
         return None
@@ -1379,7 +1373,6 @@ def get_pool_address(token_ca, cache={}):
     pair = max(sol_pairs, key=lambda p: (p.get('liquidity', {}).get('usd', 0) or 0))
     pool = pair.get('pairAddress', '')
     if pool:
-        cache[token_ca] = pool
         _SHARED_POOL_CACHE[token_ca] = pool
         set_shared_cache_value(f'pool:{token_ca}', {'poolAddress': pool, 'provider': 'paper-monitor:dexscreener'}, 15 * 60 * 1000)
     return pool or None
@@ -3913,7 +3906,8 @@ def run_monitor(db):
                                        'entryTime': int(entry_ts) * 1000,
                                        'exitStrategy': 'NOT_ATH',
                                    })
-                    positions[pos.trade_id] = pos
+                    with positions_lock:
+                        positions[pos.trade_id] = pos
 
                     # Use setdefault to avoid KeyError if lifecycle not yet initialized
                     lc = lifecycles.setdefault(lifecycle_id,
@@ -3949,7 +3943,7 @@ def run_monitor(db):
 
             # --- P6: Process Guardian exit signals first (highest priority) ---
             to_close = process_guardian_exits(
-                exit_guardian, positions, positions_lock, lifecycles,
+                exit_guardian, positions, lifecycles,
                 strategy_id, build_lifecycle_state, simulate_exit_execution
             )
             try:
@@ -3957,10 +3951,11 @@ def run_monitor(db):
                 if new_sol:
                     sol_price = new_sol
                 time.sleep(0.2)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug(f"SOL price update failed: {e}")
 
-            all_positions = list(positions.items())
+            with positions_lock:
+                all_positions = list(positions.items())
             if len(all_positions) > MAX_EVALS_PER_CYCLE:
                 start = _eval_rotation_offset % len(all_positions)
                 eval_batch = all_positions[start:start + MAX_EVALS_PER_CYCLE]
@@ -4347,7 +4342,8 @@ def run_monitor(db):
                         trap_reason = 'trapped_no_route' if trap_failure_reason == 'no_route' else 'trapped_token_not_tradable'
                         failure_count_field = 'noRouteFailureCount' if trap_failure_reason == 'no_route' else 'tokenNotTradableFailureCount'
                         if pos.exit_quote_failures >= paper_execution[threshold_key] or held_minutes >= paper_execution[trap_minutes_key]:
-                            positions.pop(trade_id, None)
+                            with positions_lock:
+                                positions.pop(trade_id, None)
                             close_position_as_trapped_no_route(
                                 db,
                                 pos,
@@ -4364,7 +4360,8 @@ def run_monitor(db):
                 pos.exit_quote_failures = 0
                 pos.last_exit_quote_failure = None
 
-                positions.pop(trade_id, None)
+                with positions_lock:
+                    positions.pop(trade_id, None)
                 lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
@@ -4489,8 +4486,19 @@ def run_monitor(db):
                 stale_helius = [k for k, v in _helius_vol_cache.items() if now_cache - v.get('ts', 0) > 7200]
                 for k in stale_helius:
                     del _helius_vol_cache[k]
-                if expired_social or stale_helius:
-                    log.info(f"  [CACHE_CLEANUP] social={len(expired_social)} helius={len(stale_helius)} pruned")
+                # Clear unbounded caches that grow with every unique token seen
+                pool_count = len(_SHARED_POOL_CACHE)
+                _SHARED_POOL_CACHE.clear()
+                try:
+                    from matrix_evaluator import MatrixEvaluator
+                    MatrixEvaluator.clear_kline_cache()
+                except Exception:
+                    pass
+                clear_dex_trend_cache()
+                log.info(
+                    f"  [CACHE_CLEANUP] social={len(expired_social)} helius={len(stale_helius)} "
+                    f"pool={pool_count} kline+dex_trend=cleared"
+                )
 
         time.sleep(MAIN_LOOP_TICK_SEC)
       except KeyboardInterrupt:

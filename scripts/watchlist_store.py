@@ -100,7 +100,12 @@ CREATE_INDEX_SQL = [
 # ─── Store Class ───────────────────────────────────────────────────────────
 
 class WatchlistStore:
-    """Thread-safe SQLite persistence for the observation watchlist."""
+    """SQLite persistence for the observation watchlist.
+    
+    NOTE: Not internally thread-safe. Relies on CPython GIL for basic
+    atomicity. Concurrent heavy writes from multiple threads may cause
+    'database is locked' errors with SQLite.
+    """
 
     def __init__(self, db_path=None):
         self.db_path = db_path or WATCHLIST_DB

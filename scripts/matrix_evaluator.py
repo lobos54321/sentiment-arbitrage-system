@@ -118,7 +118,8 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
                     return 40, f'dex_trend_flat txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
                 else:
                     return 0, f'dex_trend_weak txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
-        except Exception:
+        except Exception as e:
+            logging.getLogger('matrix_evaluator').warning(f"dex_trend_weak parsing failed: {e}")
             pass  # fall through to existing paths
 
     # --- Path 1: K-line bars available ---
@@ -159,7 +160,8 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
                     return 40, f'dex_flat vol=${vol_usd:.0f} txns={txns}'
                 elif vol_usd > 0:
                     return 0, f'dex_weak vol=${vol_usd:.0f} txns={txns}'
-        except Exception:
+        except Exception as e:
+            logging.getLogger('matrix_evaluator').warning(f"dex_weak parsing failed: {e}")
             pass
     
     # --- Path 3: Use signal's initial volume ---
@@ -346,6 +348,11 @@ class MatrixEvaluator:
     # kline_cache.db is the first choice but has been stale since 2026-04-02;
     # this ensures we always have real 1m K-line data from GeckoTerminal.
     _kline_cache = {}
+
+    @classmethod
+    def clear_kline_cache(cls):
+        """Purges the in-memory kline cache to prevent indefinite memory growth."""
+        cls._kline_cache.clear()
 
     # Thresholds for NOT_ATH entries
     NOT_ATH_THRESHOLDS = {

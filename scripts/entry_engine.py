@@ -37,6 +37,9 @@ SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
 SMART_ENTRY_MIN_BOUNCE_RATIO = 0.25  # bounce/pullback must be >= 25% (avoid dead cat bounce)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
+def clear_dex_trend_cache():
+    """Purges the in-memory DexScreener trend cache to prevent memory leaks."""
+    _dex_trend_cache.clear()
 
 # ─── Kelly ────────────────────────────────────────────────────────────────────
 

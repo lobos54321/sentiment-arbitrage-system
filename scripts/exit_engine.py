@@ -331,7 +331,7 @@ class ExitGuardianThread(threading.Thread):
                 log.warning(f"[ExitGuardian] Check failed for {sym}: {e}")
 
 
-def process_guardian_exits(exit_guardian, positions, positions_lock, lifecycles,
+def process_guardian_exits(exit_guardian, positions, lifecycles,
                           strategy_id, build_lifecycle_state_fn, simulate_exit_fn):
     """Process pending Guardian exit signals and return list of positions to close.
 
@@ -341,7 +341,6 @@ def process_guardian_exits(exit_guardian, positions, positions_lock, lifecycles,
     Args:
         exit_guardian: ExitGuardianThread instance
         positions: shared positions dict
-        positions_lock: threading.Lock
         lifecycles: lifecycle state dict
         strategy_id: current strategy ID
         build_lifecycle_state_fn: function to build lifecycle state
