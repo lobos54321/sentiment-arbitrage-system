@@ -4536,7 +4536,7 @@ def run_monitor(db):
                         trigger_price_text = f"{price:.10f}" if price is not None else 'na'
                         quote_price_text = 'na'
                         if mark_quote_price is not None and mark_quote_price > 0:
-                            quote_price_value = (mark_quote_price * sol_price) if sol_price else mark_quote_price
+                            quote_price_value = mark_quote_price  # SOL pricing: already SOL
                             quote_price_text = f"{quote_price_value:.10f}"
                         quote_out_text = f"{float(mark_quote_out):.6f}" if mark_quote_out is not None else 'na'
                         debug_fields = compute_exit_debug_fields(pos.exit_rules, pos, trigger_pnl)
@@ -4678,7 +4678,8 @@ def run_monitor(db):
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
                 stage3_peak_price = pos.entry_price * (1.0 + max(pos.peak_pnl, 0.0)) if pos.entry_price else None
                 quoted_exit_price = exit_execution.get('effectivePrice')
-                effective_exit_price = (quoted_exit_price * sol_price) if (quoted_exit_price is not None and sol_price) else (quoted_exit_price or exit_price)
+                # SOL pricing: quoted_exit_price is already SOL/token from Jupiter
+                effective_exit_price = quoted_exit_price if quoted_exit_price is not None else exit_price
                 realized_pnl = pnl
                 actual_out = exit_execution.get('quotedOutAmount')
                 has_partial_history = not has_partial_state_gap(
@@ -4747,8 +4748,8 @@ def run_monitor(db):
                         'preExitTotalSolReceived': _safe_float(exit_eval.get('preExitTotalSolReceived', exit_execution.get('preExitTotalSolReceived')), None),
                         'exitSolReceived': _safe_float(exit_eval.get('exitSolReceived', exit_execution.get('exitSolReceived')), None),
                         'postExitTotalSolReceived': _safe_float(exit_eval.get('postExitTotalSolReceived', exit_execution.get('postExitTotalSolReceived')), None),
-                        'triggerPriceUsd': _safe_float(exit_price, None),
-                        'effectiveExitPriceUsd': _safe_float(effective_exit_price, None),
+                        'triggerPrice': _safe_float(exit_price, None),
+                        'effectiveExitPrice': _safe_float(effective_exit_price, None),
                     })),
                     'force_timeout' if is_force_timeout else reason,
                     'unavailable' if is_force_timeout else 'available',
