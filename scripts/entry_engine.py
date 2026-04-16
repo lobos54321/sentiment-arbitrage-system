@@ -37,6 +37,22 @@ SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
 SMART_ENTRY_MIN_BOUNCE_RATIO = 0.25  # bounce/pullback must be >= 25% (avoid dead cat bounce)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
+
+def _calc_velocity(price_history, window_sec):
+    """Calculate price velocity (%/min) from Jupiter real-time price history.
+
+    Uses the same approach as Guardian's velocity calculation.
+    Returns 0.0 if insufficient data.
+    """
+    now = time.time()
+    pts = [(t, p) for t, p in price_history if now - t <= window_sec and p > 0]
+    if len(pts) < 2:
+        return 0.0
+    dt_min = (pts[-1][0] - pts[0][0]) / 60.0
+    if dt_min <= 0.01:  # avoid division by near-zero
+        return 0.0
+    return ((pts[-1][1] - pts[0][1]) / pts[0][1] * 100) / dt_min
+
 def clear_dex_trend_cache():
     """Purges the in-memory DexScreener trend cache to prevent memory leaks."""
     _dex_trend_cache.clear()
@@ -359,11 +375,20 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
     """
     # Lazy import to avoid circular dependency
     from paper_trade_monitor import fetch_realtime_price
+    from matrix_evaluator import MatrixEvaluator
 
     max_rounds = int(SMART_ENTRY_MAX_WAIT_SEC / SMART_ENTRY_POLL_INTERVAL_SEC)
     interval = SMART_ENTRY_POLL_INTERVAL_SEC  # 10s
 
-    price_history = []  # local to this evaluation
+    # Seed price_history from Matrix's accumulated observations.
+    # MatrixEvaluator polls this token every 10-60s since it joined the watchlist,
+    # so we typically have 5-30+ minutes of pre-existing price data.
+    # This means vel_30s and vel_60s work from round 1 — no cold-start delay.
+    now = time.time()
+    existing = MatrixEvaluator._price_history.get(token_ca, [])
+    price_history = [(t, p) for t, p in existing if now - t <= 120 and p > 0]
+    seed_count = len(price_history)
+
     last_dex_check = 0
     cached_trend = None
     start_time = time.time()
@@ -374,8 +399,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
-        f"(max {SMART_ENTRY_MAX_WAIT_SEC}s, poll {interval}s)"
+        f"(max {SMART_ENTRY_MAX_WAIT_SEC}s, poll {interval}s, "
+        f"seeded {seed_count} price points from watchlist)"
     )
+
 
     for round_num in range(1, max_rounds + 1):
         elapsed = time.time() - start_time
@@ -440,35 +467,43 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
                 continue
 
         # Momentum Direct Entry: for parabolic movers that never pull back
-        # If price consistently surging with buyers in control, enter directly
-        # IMPORTANT: Only count when DexScreener data actually refreshed
-        # (avoid counting same cached data 3 times as "3 consecutive")
-        if cached_trend:
-            pc_m5 = cached_trend.get('price_change_m5', 0)
-            b_m5 = cached_trend.get('buys_m5', 0)
-            s_m5 = max(cached_trend.get('sells_m5', 1), 1)
-            bs_ratio = b_m5 / s_m5
+        # Uses Jupiter real-time price velocity (NOT DexScreener 5-min bucket).
+        # Dual window: vel_30s catches immediate surge, vel_60s filters dead cat bounces.
+        if len(price_history) >= 2:
+            vel_30s = _calc_velocity(price_history, 30)
+            vel_60s = _calc_velocity(price_history, 60)
 
-            # Check if data actually changed from last round
-            current_data_key = (round(pc_m5, 1), b_m5, s_m5)
-            data_is_fresh = (current_data_key != last_momentum_data)
-            last_momentum_data = current_data_key
+            # DexScreener buy_sell ratio — confirms buyer dominance
+            bs_ratio = 1.0
+            if cached_trend:
+                b_m5 = cached_trend.get('buys_m5', 0)
+                s_m5 = max(cached_trend.get('sells_m5', 1), 1)
+                bs_ratio = b_m5 / s_m5
 
-            if pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
-                consecutive_momentum_rounds += 1
-            elif not (pc_m5 > 15.0 and bs_ratio > 1.0):
+            # Dead cat bounce filter: vel_30s spike but vel_60s negative = fake
+            if vel_30s > 15.0 and vel_60s < 0:
                 consecutive_momentum_rounds = 0
-            # If data not fresh but still bullish → don't increment, don't reset
+                if round_num % 6 == 0:
+                    log.info(
+                        f"[SmartEntry] ${symbol} round {round_num} DEAD_CAT: "
+                        f"vel_30s={vel_30s:+.1f}%/min but vel_60s={vel_60s:+.1f}%/min "
+                        f"({elapsed:.0f}s)"
+                    )
+            elif vel_30s > 15.0 and vel_60s > 5.0 and bs_ratio > 1.0:
+                consecutive_momentum_rounds += 1
+            else:
+                consecutive_momentum_rounds = 0
 
             # Dynamic min wait based on signal strength:
-            # Extreme (buy_sell≥5 + pc_m5>20%): 10s — buyer domination, no need to wait
+            # Extreme (buy_sell≥5 + vel_30s>30%): 10s — buyer domination
             # Normal: 60s — let the momentum develop
-            min_momentum_wait = 10 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
+            min_momentum_wait = 10 if (bs_ratio >= 5.0 and vel_30s > 30.0) else 60
             if (consecutive_momentum_rounds >= 3
                     and elapsed > min_momentum_wait
                     and price and price > 0):
                 detail_str = (
-                    f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} "
+                    f"vel_30s={vel_30s:+.1f}%/min vel_60s={vel_60s:+.1f}%/min "
+                    f"buy_sell={bs_ratio:.2f} "
                     f"consecutive={consecutive_momentum_rounds} "
                     f"waited={elapsed:.0f}s trend={trend_reason}"
                 )
