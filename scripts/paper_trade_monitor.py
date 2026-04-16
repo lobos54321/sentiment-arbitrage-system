@@ -2527,6 +2527,7 @@ class Position:
         self.vel_history = deque(maxlen=3)
         # ExitMatrix velocity & trail ratchet (persist across cycles, was lost when stored on w_entry)
         self.trail_factor = 0.0
+        self._guardian_velocity = 0  # Set by Guardian thread, consumed by ExitMatrix
 
 
 def build_lifecycle_id(token_ca, signal_ts):
