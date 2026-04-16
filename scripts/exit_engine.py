@@ -36,6 +36,7 @@ class ExitGuardianThread(threading.Thread):
         self.store = watchlist_store_ref     # WatchlistStore instance
         self.exit_queue = exit_queue         # list to push exit signals (checked by main loop)
         self.exit_queue_lock = threading.Lock()
+        self._exit_pending = set()           # trade_ids already queued (dedup)
         self.fetch_price = fetch_price_fn   # fetch_realtime_price function
         self.interval = 3  # seconds
         self._running = True
@@ -57,6 +58,7 @@ class ExitGuardianThread(threading.Thread):
         with self.exit_queue_lock:
             exits = list(self.exit_queue)
             self.exit_queue.clear()
+            self._exit_pending.clear()
             return exits
 
     @staticmethod
@@ -97,6 +99,10 @@ class ExitGuardianThread(threading.Thread):
                 if not ca or not entry_price or entry_price <= 0:
                     continue
 
+                # Skip positions we already queued an exit for (dedup)
+                if trade_id in self._exit_pending:
+                    continue
+
                 # Fetch current price
                 price, src, age_ms = self.fetch_price(ca, pool)
                 if not price or price <= 0:
@@ -121,7 +127,7 @@ class ExitGuardianThread(threading.Thread):
                     log.info(
                         f"[ExitGuardian] ⚠️ {pos.symbol} SL CHECK #1: "
                         f"pnl={pnl*100:+.1f}% <= SL={hard_sl*100:.1f}% "
-                        f"price=${price:.10f} src={src} — confirming in 1s..."
+                        f"price={price:.10f} src={src} — confirming in 1s..."
                     )
 
                     # Second check after 1 second delay
@@ -144,8 +150,8 @@ class ExitGuardianThread(threading.Thread):
                         # Second check says NOT in SL territory → price glitch, skip exit
                         log.warning(
                             f"[ExitGuardian] 🛡️ {pos.symbol} SL CANCELLED — price glitch detected! "
-                            f"Check#1: pnl={first_pnl*100:+.1f}% price=${first_price:.10f} src={first_src} | "
-                            f"Check#2: pnl={pnl2*100:+.1f}% price=${price2:.10f} src={src2} | "
+                            f"Check#1: pnl={first_pnl*100:+.1f}% price={first_price:.10f} src={first_src} | "
+                            f"Check#2: pnl={pnl2*100:+.1f}% price={price2:.10f} src={src2} | "
                             f"divergence={price_divergence:.1%} — holding position"
                         )
                         continue
@@ -169,6 +175,7 @@ class ExitGuardianThread(threading.Thread):
                             'trigger_price': confirmed_price,
                             'trigger_pnl': confirmed_pnl,
                         })
+                    self._exit_pending.add(trade_id)
                     continue
 
                 # === Update peak_pnl in real-time (critical for trail accuracy) ===
@@ -254,7 +261,7 @@ class ExitGuardianThread(threading.Thread):
                             f"(peak={pos.peak_pnl*100:.1f}% factor={trail_factor:.2f}) "
                             f"vel={use_vel:.1f}%/min(raw={raw_vel_30s:.1f}) "
                             f"tick_vol={tick_vol:.4f} tps={tps_smooth:.1f} "
-                            f"price=${price:.10f} src={src}"
+                            f"price={price:.10f} src={src}"
                         )
                         with self.exit_queue_lock:
                             self.exit_queue.append({
@@ -264,6 +271,7 @@ class ExitGuardianThread(threading.Thread):
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             })
+                        self._exit_pending.add(trade_id)
                         continue
 
                 # === Profit Lock Detection (peak >= 20%, not yet locked) ===
@@ -280,7 +288,7 @@ class ExitGuardianThread(threading.Thread):
                 if is_moon and price <= entry_price:
                     log.info(
                         f"[ExitGuardian] 🔔 {pos.symbol} MOON BREAKEVEN: "
-                        f"price=${price:.10f} <= entry=${entry_price:.10f}"
+                        f"price={price:.10f} <= entry={entry_price:.10f}"
                     )
                     with self.exit_queue_lock:
                         self.exit_queue.append({
@@ -290,6 +298,7 @@ class ExitGuardianThread(threading.Thread):
                             'trigger_price': price,
                             'trigger_pnl': pnl,
                         })
+                    self._exit_pending.add(trade_id)
                     continue
 
                 # === Moon Bag Trail Floor ===
@@ -315,6 +324,7 @@ class ExitGuardianThread(threading.Thread):
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             })
+                        self._exit_pending.add(trade_id)
 
             except Exception as e:
                 sym = getattr(pos, 'symbol', '?') if pos else '?'

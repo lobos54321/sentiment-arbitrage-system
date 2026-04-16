@@ -4477,16 +4477,17 @@ def run_monitor(db):
             print_daily_report(db, yesterday)
             last_daily_report = today_str
 
-            # Periodic cache cleanup (runs once per day alongside daily report)
-            now_cache = time.time()
-            expired_social = [k for k, (_, exp) in _social_signal_cache.items() if exp < now_cache]
-            for k in expired_social:
-                del _social_signal_cache[k]
-            stale_helius = [k for k, v in _helius_vol_cache.items() if now_cache - v.get('ts', 0) > 7200]
-            for k in stale_helius:
-                del _helius_vol_cache[k]
-            if expired_social or stale_helius:
-                log.info(f"  [CACHE_CLEANUP] social={len(expired_social)} helius={len(stale_helius)} pruned")
+            # Weekly cache cleanup (runs on Mondays alongside daily report)
+            if now_utc.weekday() == 0:  # Monday
+                now_cache = time.time()
+                expired_social = [k for k, (_, exp) in _social_signal_cache.items() if exp < now_cache]
+                for k in expired_social:
+                    del _social_signal_cache[k]
+                stale_helius = [k for k, v in _helius_vol_cache.items() if now_cache - v.get('ts', 0) > 7200]
+                for k in stale_helius:
+                    del _helius_vol_cache[k]
+                if expired_social or stale_helius:
+                    log.info(f"  [CACHE_CLEANUP] social={len(expired_social)} helius={len(stale_helius)} pruned")
 
         time.sleep(MAIN_LOOP_TICK_SEC)
       except KeyboardInterrupt:
