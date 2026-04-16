@@ -223,15 +223,17 @@ class ExitGuardianThread(threading.Thread):
                     else:
                         base_factor = 0.5
 
-                    # Velocity-driven factor — ONLY tighten on crashes
-                    # Uptrend: let base_factor handle it (gives meme coins room to breathe)
-                    # Downtrend: tighten to protect profits
-                    if raw_vel_30s < -10.0:
-                        vel_factor = 0.85    # CRASH → emergency tight (skip smoothing)
-                    elif use_vel < -3.0:
-                        vel_factor = 0.70    # fast downtrend → tight
+                    # Velocity-driven factor — synced with ExitMatrix thresholds
+                    # Strong momentum → let it run (looser trail)
+                    # Fading momentum → lock profit fast (tighter trail)
+                    if raw_vel_30s < -5.0:
+                        vel_factor = 0.85    # CRASH → lock hard (skip smoothing)
+                    elif use_vel < 0:
+                        vel_factor = 0.75    # fading → tighten
+                    elif use_vel > 10.0:
+                        vel_factor = base_factor  # rocketing → use base, let it run
                     else:
-                        vel_factor = base_factor  # uptrend/sideways → use base only
+                        vel_factor = 0.70    # neutral → moderate protection
 
                     # Volume signals (B: tick_vol + C: Helius TPS)
                     # Only mild tightening — meme coins have erratic volume
