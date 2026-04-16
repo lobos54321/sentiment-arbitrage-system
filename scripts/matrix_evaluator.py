@@ -544,7 +544,7 @@ class MatrixEvaluator:
             log.info(
                 f"[Matrix] ${symbol} pre-momentum PASS: "
                 f"T={scores['trend']} V={scores['volume']} P={scores['price']} S={scores['signal']} "
-                f"→ running 3×3s momentum check..."
+                f"→ running 5×3s momentum check..."
             )
 
             # For re-entries: verify price > last exit price
