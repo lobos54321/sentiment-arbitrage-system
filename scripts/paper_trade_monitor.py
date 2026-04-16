@@ -2491,6 +2491,7 @@ class Position:
         'monitor_state', 'entry_execution_json', 'premium_signal_id', 'signal_type',
         'price_ring', 'vel_history',
         'trail_factor',  # ExitMatrix trail ratchet (in-memory, persistent)
+        '_guardian_velocity', '_guardian_tick_vol',  # Written by Guardian thread
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
@@ -2528,6 +2529,7 @@ class Position:
         # ExitMatrix velocity & trail ratchet (persist across cycles, was lost when stored on w_entry)
         self.trail_factor = 0.0
         self._guardian_velocity = 0  # Set by Guardian thread, consumed by ExitMatrix
+        self._guardian_tick_vol = 0  # Set by Guardian thread
 
 
 def build_lifecycle_id(token_ca, signal_ts):
