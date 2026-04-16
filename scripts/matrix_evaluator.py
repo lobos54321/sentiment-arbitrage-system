@@ -229,22 +229,27 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
 
+MIN_MOMENTUM_MOVE_PCT = 1.5  # 12s minimum move: 1.5%
+# Data-driven: in 6h audit, all FIRE passes had <1% 6s move (noise), max observed
+# meme coin 6s move was +3.69%. 5% would block ALL entries including Wifejak (+484%).
+# 1.5% filters pure noise while allowing legitimate trend momentum through.
+# Upgraded: 5×3s=12s window (from 3×3s=6s) to catch pulsed meme coin moves.
+
 
 def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     """
-    Matrix ④ — Realtime Momentum (3×3-second snapshots = 6s window)
+    Matrix ④ — Realtime Momentum (5×3-second snapshots = 12s window)
     Only called when matrices ①②③⑤ are already passing.
 
-    Simple ascending check: s1 < s2 < s3 = strong momentum.
-    No minimum percentage threshold — the 5-matrix filter already ensures
-    the token is worth watching; momentum just confirms the instant direction.
+    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (1.5%) over 12 seconds.
+    Uses 5 samples to better capture pulsed meme coin price action.
 
     Returns: (score: int 0-100, reason: str, snapshots: list)
     """
     _lazy_import()
 
     snapshots = []
-    for i in range(3):
+    for i in range(5):
         if i > 0:
             time.sleep(interval_sec)
         price, src, age_ms = _price_fn(token_ca, pool_address)
@@ -254,30 +259,42 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     if len(snapshots) < 3:
         return 0, 'insufficient_snapshots', snapshots
 
-    s1, s2, s3 = snapshots[0], snapshots[1], snapshots[2]
+    s_first = snapshots[0]
+    s_last = snapshots[-1]
+    s_max = max(snapshots)
+    s_min = min(snapshots)
 
-    if s1 <= 0:
+    if s_first <= 0:
         return 0, 'zero_base_price', snapshots
 
-    pct_move = ((s3 - s1) / s1) * 100
+    pct_move = ((s_last - s_first) / s_first) * 100
+    pct_max = ((s_max - s_first) / s_first) * 100
+
+    # Count how many consecutive rises we see
+    rises = sum(1 for i in range(1, len(snapshots)) if snapshots[i] > snapshots[i-1])
     snap_str = ' '.join(f'{s:.10f}' for s in snapshots)
 
-    # Strong ascending: s1 < s2 < s3
-    if s1 < s2 < s3:
-        return 100, f'ascending +{pct_move:.2f}% [{snap_str}]', snapshots
+    # Strong ascending: mostly rising, last > first by threshold
+    if rises >= 3 and pct_move >= MIN_MOMENTUM_MOVE_PCT:
+        return 100, f'ascending +{pct_move:.1f}% rises={rises}/4 [{snap_str}]', snapshots
 
-    # Moderate: s3 > s1 (net positive over 6s, even if not strictly ascending)
-    # Per documented strategy: s3 > s1 → M=60 (宽松上升)
-    if s3 > s1:
-        rises = sum(1 for a, b in zip(snapshots, snapshots[1:]) if b > a)
-        return 60, f'net_up +{pct_move:.2f}% rises={rises}/2 [{snap_str}]', snapshots
+    # Moderate: last > first by threshold, at least some rises
+    if pct_move >= MIN_MOMENTUM_MOVE_PCT and rises >= 2:
+        return 100, f'net_ascending +{pct_move:.1f}% rises={rises}/4 [{snap_str}]', snapshots
 
-    # Declining: s3 < s1
-    if s3 < s1:
-        return 0, f'declining {pct_move:+.2f}% [{snap_str}]', snapshots
+    # Weak but valid: overall up by threshold, even with dips mid-way
+    if pct_move >= MIN_MOMENTUM_MOVE_PCT and s_last > s_first:
+        return 60, f'choppy_up +{pct_move:.1f}% rises={rises}/4 [{snap_str}]', snapshots
 
-    # Flat (s3 == s1, no net movement)
-    return 0, f'flat {pct_move:+.2f}% [{snap_str}]', snapshots
+    # Peak during window but ended lower (pump fading)
+    if pct_max >= MIN_MOMENTUM_MOVE_PCT and pct_move < MIN_MOMENTUM_MOVE_PCT:
+        return 0, f'fading peak={pct_max:+.1f}% end={pct_move:+.2f}% [{snap_str}]', snapshots
+
+    # Below threshold
+    if pct_move > 0:
+        return 0, f'noise +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% rises={rises}/4 [{snap_str}]', snapshots
+
+    return 0, f'declining {pct_move:.2f}% rises={rises}/4 [{snap_str}]', snapshots
 
 
 
