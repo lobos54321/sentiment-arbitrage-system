@@ -3684,6 +3684,25 @@ def run_monitor(db):
                     watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
                     log.info(f"  [WATCHLIST] 🗑️ Removed {w_entry['symbol']}: {eval_res['action_reason']}")
                 elif eval_res['action'] == 'fire':
+                    # P3: Minimum age filter — skip tokens younger than 3 minutes
+                    # pump.fun's most toxic dump window is 0-3 min after launch
+                    if entry_age_min < 3:
+                        log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT ({entry_age_min:.0f}min) reason=age_too_young (<3min)")
+                        continue
+
+                    # P2: Per-CA cooldown cross-check — if ANY entry for this CA is in cooldown, skip
+                    _ca = w_entry['ca']
+                    _any_ca_cooldown = False
+                    for _other in watching_entries:
+                        if (_other['ca'] == _ca and _other['id'] != w_entry['id']
+                                and _other.get('cooldown_until', 0) and _other['cooldown_until'] > time.time()):
+                            _remaining = int(_other['cooldown_until'] - time.time())
+                            log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=same_ca_cooldown ({_remaining}s remaining from entry#{_other['id']})")
+                            _any_ca_cooldown = True
+                            break
+                    if _any_ca_cooldown:
+                        continue
+
                     # Fetch signal description for sub-index parsing (Task 6)
                     # NOTE: premium_signals lives in SENTIMENT_DB (sentiment_arb.db),
                     # not in the paper_trades db connection.
@@ -3832,7 +3851,11 @@ def run_monitor(db):
                             log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
                     # Kelly position size: use kelly_position_sol if available, else config default
-                    actual_position_size_sol = pending.get('kelly_position_sol') or position_size_sol
+                    # P0: Hard cap at 0.5 SOL — protect against Kelly outliers on small sample
+                    actual_position_size_sol = min(
+                        pending.get('kelly_position_sol') or position_size_sol,
+                        0.5
+                    )
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,

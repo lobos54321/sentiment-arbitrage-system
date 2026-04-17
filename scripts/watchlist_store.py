@@ -276,13 +276,15 @@ class WatchlistStore:
 
     def get_recent_closed_trades(self, limit=50):
         """P3: Fetch recent closed trades with exit PnL for Kelly odds calculation.
-        Returns list of dicts with 'exit_pnl' key."""
+        Returns list of dicts with 'exit_pnl' and 'closed_at' keys."""
         rows = self.db.execute('''
-            SELECT last_exit_pnl as exit_pnl FROM watchlist
+            SELECT last_exit_pnl as exit_pnl,
+                   datetime(last_exit_at, 'unixepoch') as closed_at
+            FROM watchlist
             WHERE status IN ('watching', 'expired') AND last_exit_pnl IS NOT NULL
             ORDER BY last_exit_at DESC LIMIT ?
         ''', (limit,)).fetchall()
-        return [{'exit_pnl': r['exit_pnl']} for r in rows]
+        return [{'exit_pnl': r['exit_pnl'], 'closed_at': r['closed_at'] or ''} for r in rows]
 
     # ─── State Transitions ─────────────────────────────────────────────
 
@@ -340,7 +342,7 @@ class WatchlistStore:
             if new_consec >= 2:
                 cooldown_sec = 7200   # 2 hours
             else:
-                cooldown_sec = 900    # 15 minutes
+                cooldown_sec = 1800   # 30 minutes (was 15min — too short for meme dumps)
             log.info(f"[WL] Loss cooldown: consecutive_losses={new_consec} → cooldown={cooldown_sec}s")
         else:
             # Profit or breakeven: reset consecutive loss counter

@@ -781,10 +781,45 @@ class ExitMatrixEvaluator:
                     'trail_floor': trail_floor,
                 }
 
-            # Phase 1: peak < 50% — free run, no trail stop
+            # Phase 1: peak < 50% — tiered protection (was unconditional free_run → DUCK bug)
+            # Sub-phase 1c: peak >= 25% → trail with -15pp floor
+            if peak_pnl >= 0.25:
+                trail_floor = peak_pnl - 0.15
+                if current_pnl < trail_floor:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_phase1_trail_25 (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, -15pp)',
+                        'current_pnl': current_pnl,
+                        'trail_floor': trail_floor,
+                    }
+                return {
+                    'action': 'hold',
+                    'reason': f'ath_phase1_hold_25 (floor={trail_floor:.1%}, peak={peak_pnl:.1%})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': trail_floor,
+                }
+
+            # Sub-phase 1b: peak >= 15% → trail with -10pp floor
+            if peak_pnl >= 0.15:
+                trail_floor = peak_pnl - 0.10
+                if current_pnl < trail_floor:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_phase1_trail_15 (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, -10pp)',
+                        'current_pnl': current_pnl,
+                        'trail_floor': trail_floor,
+                    }
+                return {
+                    'action': 'hold',
+                    'reason': f'ath_phase1_hold_15 (floor={trail_floor:.1%}, peak={peak_pnl:.1%})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': trail_floor,
+                }
+
+            # Sub-phase 1a: peak < 15% — free run, only Hard SL -7.5%
             return {
                 'action': 'hold',
-                'reason': f'ath_phase1_free_run (peak={peak_pnl:.1%} < 50%)',
+                'reason': f'ath_phase1_free_run (peak={peak_pnl:.1%} < 15%)',
                 'current_pnl': current_pnl,
                 'trail_floor': None,
             }

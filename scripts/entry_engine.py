@@ -19,10 +19,7 @@ KELLY_BASE_CAPITAL_SOL = float(os.environ.get('KELLY_BASE_CAPITAL_SOL', '5.0'))
 KELLY_BASE_WIN_RATE    = 0.45   # Based on overnight data: 48% win rate (conservative)
 KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss (ONLY used as fallback)
 KELLY_COLD_START_ODDS  = 2.0   # Based on overnight data: avg_win=16.3% / avg_loss=8%
-
-# Only use trades after this date for Kelly historical data
-# (old trades used -15% SL, now we use -7.5% — old avg_loss is not representative)
-KELLY_DATA_CUTOFF = '2026-04-15 12:00:00'
+MAX_POSITION_SOL       = 0.5   # Hard cap: protect against Kelly outliers (was uncapped → 1.0 SOL)
 
 # P3: Historical odds cache
 _kelly_trade_cache = {'wins': [], 'losses': [], 'last_refresh': 0}
@@ -74,9 +71,10 @@ def _get_historical_odds(min_trades=20, default_b=None):
         try:
             store = WatchlistStore()
             trades = store.get_recent_closed_trades(limit=50)
-            # Filter: only use trades after cutoff (old -15% SL data is not representative)
-            trades = [t for t in trades
-                      if t.get('closed_at', '') >= KELLY_DATA_CUTOFF]
+            # BUG FIX: previous code filtered by t.get('closed_at', '') which didn't exist
+            # in the query result → every trade was filtered out → Kelly was always cold start.
+            # Now watchlist_store returns closed_at properly. No cutoff filter needed —
+            # the query already orders by last_exit_at DESC and limits to 50.
             cache['wins'] = [t['exit_pnl'] for t in trades if t['exit_pnl'] and t['exit_pnl'] > 0]
             cache['losses'] = [abs(t['exit_pnl']) for t in trades if t['exit_pnl'] and t['exit_pnl'] < 0]
             cache['last_refresh'] = now
@@ -186,8 +184,8 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         position *= 0.5
         log.info(f"[Kelly] Re-entry #{entry_count+1} → position×0.5")
 
-    # Hard limits: min 0.03 SOL, max 20% of capital
-    pos = round(max(0.03, min(position, base_capital * 0.20)), 3)
+    # Hard limits: min 0.03 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
+    pos = round(max(0.03, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
     log.info(f"[Kelly] f*={kelly_f:.3f} → {pos} SOL | p={p:.3f} b={b:.2f} mode={entry_mode or 'default'}")
     return pos
 
@@ -498,7 +496,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             data_is_fresh = (current_data_key != last_momentum_data)
             last_momentum_data = current_data_key
 
-            if pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
+            # P1: price_m5 > 50% = already doubled in 5min, too late to chase
+            if pc_m5 > 50.0:
+                consecutive_momentum_rounds = 0  # reset — refuse to chase a doubler
+            elif pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
                 consecutive_momentum_rounds += 1
             elif not (pc_m5 > 15.0 and bs_ratio > 1.0):
                 consecutive_momentum_rounds = 0

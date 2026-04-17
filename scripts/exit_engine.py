@@ -261,8 +261,45 @@ class ExitGuardianThread(threading.Thread):
                                 })
                             self._exit_pending.add(trade_id)
                             continue
-                    # Phase 1 (peak < 50%): no Guardian trail — only hard SL applies
-                    # (hard SL is handled separately in the main loop)
+                    # === ATH Phase 1 (peak < 50%): tiered trail protection ===
+                    # Synced with matrix_evaluator Phase1 tiers (fixes DUCK +20.6% → -15.8% bug)
+                    if pos.peak_pnl >= 0.25:
+                        trail_floor = pos.peak_pnl - 0.15
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_25: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, -15pp) price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_phase1_trail_25 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -15pp)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+                    elif pos.peak_pnl >= 0.15:
+                        trail_floor = pos.peak_pnl - 0.10
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_15: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, -10pp) price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_phase1_trail_15 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -10pp)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+                    # peak < 15%: free run, only hard SL applies (handled by main loop)
 
                 else:
                     # === Standard (non-ATH) Trail ===
