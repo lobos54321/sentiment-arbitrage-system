@@ -343,36 +343,31 @@ class WatchlistStore:
                      last_matrix_check=now)
         log.info(f"[WL] → moon_bag (entry_id={entry_id})")
 
-    def mark_watching(self, entry_id, exit_pnl, cooldown_sec=120):
+    def mark_watching(self, entry_id, exit_pnl, cooldown_sec=0):
         """Transition from holding/moon_bag → watching (re-observation after exit).
 
-        Cooldown strategy (data-driven, replaces P2/P5 rigid cooldowns):
-        - Win exit: 2-min cooldown to prevent whipsaw (price is still above entry,
-          need to let pullback stabilize before price-gate check is meaningful)
-        - Loss exit: NO cooldown. Price-gate (current_price > last_entry_price)
-          naturally blocks re-entry since hard_sl means price is 7.5%+ below entry.
-          If price genuinely recovers above entry, that's bullish — don't delay.
+        Re-entry gating is handled entirely by PRICE-GATE (current_price > last_entry_price)
+        in paper_trade_monitor.py — no artificial cooldown needed.
+        The natural latency of Matrix→SmartEntry evaluation (~30s+) provides implicit delay.
         """
         now = time.time()
 
         # Save current entry_price as last_exit_price before clearing
-        # (fixes bug where entry_price=None broke re-entry price validation)
+        # (used by price-gate check: re-entry requires current_price > last_entry_price)
         existing = self.get_by_id(entry_id)
         last_exit_price_val = existing.get('entry_price') if existing else None
 
-        # Track consecutive losses (for logging/diagnostics, no longer drives cooldown)
+        # Track consecutive losses (for logging/diagnostics only)
         prev_consec = (existing.get('consecutive_losses', 0) or 0) if existing else 0
 
         if exit_pnl is not None and exit_pnl < 0:
             new_consec = prev_consec + 1
             loss_time = now
-            cooldown_sec = 0  # No cooldown for losses — price gate handles it
-            log.info(f"[WL] Loss exit: consecutive_losses={new_consec}, cooldown=0s (price-gate active)")
+            log.info(f"[WL] Loss exit: consecutive_losses={new_consec}, no cooldown (price-gate active)")
         else:
             new_consec = 0
             loss_time = 0
-            cooldown_sec = 120  # 2-min anti-whipsaw for win exits
-            log.info(f"[WL] Win exit: cooldown={cooldown_sec}s (anti-whipsaw)")
+            log.info(f"[WL] Win exit: no cooldown (price-gate active)")
 
         self._update(entry_id,
                      status='watching',
