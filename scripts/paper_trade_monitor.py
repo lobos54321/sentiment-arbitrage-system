@@ -3752,60 +3752,70 @@ def run_monitor(db):
                     # Phase 1c: Last-mile pre-buy price recheck
                     # If this is the first execution attempt and we have a valid trigger price,
                     # make sure the price hasn't already rocketed past our acceptable entry slippage.
+                    # EXCEPTION: ATH + M=100 = verified parabolic move → skip entirely, buy ASAP.
                     trigger_price = pending.get('trigger_price')
-                    if trigger_price and pending['attempts'] == 1:
+                    _m_score = (pending.get('matrix_scores') or {}).get('momentum', 0)
+                    _is_ath_momentum = (pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100)
+
+                    if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                        # ATH + M=100 = verified parabolic move (e.g. ASTEROID h1 +15865%)
-                        # Normal 8% max slippage is too tight for these. Use 30%.
-                        _m_score = (pending.get('matrix_scores') or {}).get('momentum', 0)
-                        _is_ath = pending.get('signal_type') == 'ATH'
-                        _max_pct = 30.0 if (_is_ath and _m_score and _m_score >= 100) else ENTRY_PREBUY_RECHECK_MAX_PCT
-                        if live_price is not None and live_price > trigger_price * (1 + _max_pct / 100):
+                        if live_price is not None and live_price > trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):
                             log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: entry_too_late "
-                                     f"live={live_price:.10f} > max_allowed={trigger_price * (1 + _max_pct / 100):.10f} "
-                                     f"(max_pct={_max_pct}% {'ATH_MOMENTUM' if _max_pct > 8 else 'normal'})")
+                                     f"live={live_price:.10f} > max_allowed={trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
+                    elif _is_ath_momentum:
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+M100 → skip price recheck, buy ASAP")
 
                     # --- Smart Entry Engine (replaces Dip-then-Rip) ---
                     # Layer 1: DexScreener volume-price trend confirmation
                     # Layer 2: Price trajectory pullback-bounce detection
                     # Max wait: 15 minutes. No chase — only pullback-bounce entries.
+                    # EXCEPTION: ATH + M=100 → skip SmartEntry, buy immediately (momentum_direct).
                     if not pending.get('timing_passed'):
-                        should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
-                            pending['token_ca'],
-                            symbol=pending['symbol'],
-                            pool_address=pending['pool'],
-                            entry_count=w_entry.get('entry_count', 0) if w_entry else 0,
-                        )
-                        if not should_enter:
-                            retry_count = pending.get('smart_entry_retries', 0)
-                            max_retries = 3
-                            if retry_count >= max_retries:
-                                log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
-                                pending_entries.pop(lifecycle_id, None)
-                            else:
-                                # Return to watchlist for re-evaluation on next Matrix PASS
-                                log.info(
-                                    f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
-                                    f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
-                                )
-                                # Store retry count, remove from pending so watchlist scanner picks it up again
-                                if w_entry:
-                                    w_entry['_smart_entry_retries'] = retry_count + 1
-                                pending_entries.pop(lifecycle_id, None)
-                            continue
-                        # Smart entry passed — update trigger price to the confirmed entry price
-                        pending['timing_passed'] = True
-                        if timing_trigger_price:
-                            pending['trigger_price'] = timing_trigger_price
-                        # Determine entry mode from SmartEntry result
-                        entry_mode = 'momentum_direct' if 'momentum' in (timing_reason or '').lower() else 'pullback_bounce'
-                        # Recalculate Kelly with entry mode + matrix scores
-                        pending['kelly_position_sol'] = calculate_kelly_position(
-                            w_entry, entry_mode=entry_mode,
-                            matrix_scores=pending.get('matrix_scores'))
-                        log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
+                        if _is_ath_momentum:
+                            # Verified parabolic — no pullback to wait for, just buy
+                            log.info(f"  [SmartEntry] {pending['symbol']} ATH+M100 → SKIP pullback wait, momentum_direct")
+                            pending['timing_passed'] = True
+                            entry_mode = 'momentum_direct'
+                            pending['kelly_position_sol'] = calculate_kelly_position(
+                                w_entry, entry_mode=entry_mode,
+                                matrix_scores=pending.get('matrix_scores'))
+                        else:
+                            should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
+                                pending['token_ca'],
+                                symbol=pending['symbol'],
+                                pool_address=pending['pool'],
+                                entry_count=w_entry.get('entry_count', 0) if w_entry else 0,
+                            )
+                            if not should_enter:
+                                retry_count = pending.get('smart_entry_retries', 0)
+                                max_retries = 3
+                                if retry_count >= max_retries:
+                                    log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
+                                    pending_entries.pop(lifecycle_id, None)
+                                else:
+                                    # Return to watchlist for re-evaluation on next Matrix PASS
+                                    log.info(
+                                        f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
+                                        f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                                    )
+                                    # Store retry count, remove from pending so watchlist scanner picks it up again
+                                    if w_entry:
+                                        w_entry['_smart_entry_retries'] = retry_count + 1
+                                    pending_entries.pop(lifecycle_id, None)
+                                continue
+                            # Smart entry passed — update trigger price to the confirmed entry price
+                            pending['timing_passed'] = True
+                            if timing_trigger_price:
+                                pending['trigger_price'] = timing_trigger_price
+                            # Determine entry mode from SmartEntry result
+                            entry_mode = 'momentum_direct' if 'momentum' in (timing_reason or '').lower() else 'pullback_bounce'
+                            # Recalculate Kelly with entry mode + matrix scores
+                            pending['kelly_position_sol'] = calculate_kelly_position(
+                                w_entry, entry_mode=entry_mode,
+                                matrix_scores=pending.get('matrix_scores'))
+                            log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
                     # Kelly position size: use kelly_position_sol if available, else config default
                     actual_position_size_sol = pending.get('kelly_position_sol') or position_size_sol
