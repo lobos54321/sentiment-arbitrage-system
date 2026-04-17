@@ -220,13 +220,15 @@ class ExitGuardianThread(threading.Thread):
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
 
                 if pos.peak_pnl >= 0.05:
-                    # Tiered base factor by peak level
+                    # ATH tokens get wider trailing — parabolic moves have ±6% swings in seconds
+                    _is_ath_entry = w_entry and (w_entry.get('type') == 'ATH' or w_entry.get('signal_type') == 'ATH')
+                    # Tiered base factor by peak level (synced with matrix_evaluator)
                     if pos.peak_pnl >= 0.50:
-                        base_factor = 0.70   # >= +50% — about to become moon bag (synced with matrix_evaluator)
+                        base_factor = 0.70   # >= +50% — about to become moon bag
                     elif pos.peak_pnl >= 0.20:
-                        base_factor = 0.7    # >= +20% preserve 70% (synced with matrix_evaluator)
+                        base_factor = 0.50 if _is_ath_entry else 0.60   # ATH: 50% | non-ATH: 60%
                     elif pos.peak_pnl >= 0.10:
-                        base_factor = 0.55
+                        base_factor = 0.50 if _is_ath_entry else 0.55   # ATH: wider room
                     else:
                         base_factor = 0.5
 
@@ -240,7 +242,7 @@ class ExitGuardianThread(threading.Thread):
                     elif use_vel > 10.0:
                         vel_factor = base_factor  # rocketing → use base, let it run
                     else:
-                        vel_factor = 0.70    # neutral → moderate protection
+                        vel_factor = 0.60    # neutral → moderate protection (was 0.70)
 
                     # Volume signals (B: tick_vol + C: Helius TPS)
                     # Only mild tightening — meme coins have erratic volume

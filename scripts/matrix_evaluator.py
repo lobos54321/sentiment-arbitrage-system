@@ -793,10 +793,12 @@ class ExitMatrixEvaluator:
             velocity = entry.get('_guardian_velocity', 0)
 
             # Tiered trail factor based on peak level + velocity
+            # ATH tokens get wider trailing (0.50) because parabolic moves have ±6% swings in 6 seconds
+            _is_ath_entry = entry.get('type') == 'ATH' or entry.get('signal_type') == 'ATH'
             if peak_pnl >= 0.20:
-                base_factor = 0.7    # >= +20% preserve at least 70% (was 0.6, data: avg 45% retention too low)
+                base_factor = 0.50 if _is_ath_entry else 0.60   # ATH: 50% floor | non-ATH: 60% floor
             elif peak_pnl >= 0.10:
-                base_factor = 0.55   # >= +10% preserve at least 55%
+                base_factor = 0.50 if _is_ath_entry else 0.55   # ATH: wider room for continuation
             else:
                 base_factor = 0.5    # >= +5% preserve at least 50%
 
@@ -810,7 +812,7 @@ class ExitMatrixEvaluator:
             elif velocity > 10.0:
                 vel_factor = base_factor  # rocketing → use base, let it run
             else:
-                vel_factor = 0.70    # neutral → moderate protection
+                vel_factor = 0.60    # neutral → moderate protection (was 0.70)
 
             # Ratchet: use whichever is higher, never lower the factor
             current_factor = entry.get('_trail_factor', base_factor)

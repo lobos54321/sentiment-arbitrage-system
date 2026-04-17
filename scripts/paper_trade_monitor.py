@@ -3754,8 +3754,14 @@ def run_monitor(db):
                     # make sure the price hasn't already rocketed past our acceptable entry slippage.
                     # EXCEPTION: ATH + M=100 = verified parabolic move → skip entirely, buy ASAP.
                     trigger_price = pending.get('trigger_price')
-                    _m_score = (pending.get('matrix_scores') or {}).get('momentum', 0)
-                    _is_ath_momentum = (pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100)
+                    _scores = pending.get('matrix_scores') or {}
+                    _m_score = _scores.get('momentum', 0)
+                    _v_score = _scores.get('volume', 0)
+                    # Fast lane requires ATH + M=100 + V≥70 (volume confirms real buying pressure)
+                    # WOLANA had V=40 T=50 → fake breakout. V≥70 would have blocked it.
+                    _is_ath_momentum = (pending.get('signal_type') == 'ATH'
+                                       and _m_score and _m_score >= 100
+                                       and _v_score and _v_score >= 70)
 
                     if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
