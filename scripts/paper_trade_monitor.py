@@ -2486,6 +2486,7 @@ class Position:
         'price_ring', 'vel_history',
         'trail_factor',  # ExitMatrix trail ratchet (in-memory, persistent)
         '_guardian_velocity', '_guardian_tick_vol',  # Written by Guardian thread
+        'peak_ts', '_initial_tick_vol',  # A3 (time-decay) and A4 (flat-top) fields
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
