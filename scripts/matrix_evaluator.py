@@ -743,11 +743,58 @@ class ExitMatrixEvaluator:
                 'trail_floor': None,
             }
 
+        # === ATH Fast Lane: Three-Phase Exit Strategy ===
+        # Phase 1 (peak < 50%):  Free run — only Hard SL -7.5% (already checked above)
+        # Phase 2 (50-100%):     Trail with absolute -20pp floor
+        # Phase 3 (peak >= 100%): lock_profit → sell 50% (recover principal) → rest goes moon_bag
+        _is_ath_entry = entry.get('type') == 'ATH' or entry.get('signal_type') == 'ATH'
+        if _is_ath_entry:
+            symbol = entry.get('symbol', '?')
+
+            # Phase 3: peak >= 100% → trigger lock_profit (sell 50% to recover principal)
+            if peak_pnl >= 1.0 and not entry.get('has_locked_profit'):
+                log.info(
+                    f"[ExitMatrix] {symbol} ATH PHASE3: peak={peak_pnl:.1%} >= 100% "
+                    f"→ lock_profit (sell 50% to recover principal, rest → moon_bag)"
+                )
+                return {
+                    'action': 'lock_profit',
+                    'reason': f'ath_phase3_lock (peak={peak_pnl:.1%} >= 100%, sell 50% → recover principal)',
+                    'current_pnl': current_pnl,
+                    'trail_floor': None,
+                }
+
+            # Phase 2: peak 50-100% → trail with absolute -20pp floor
+            if peak_pnl >= 0.50:
+                trail_floor = peak_pnl - 0.20
+                if current_pnl < trail_floor:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_phase2_trail (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, -20pp abs)',
+                        'current_pnl': current_pnl,
+                        'trail_floor': trail_floor,
+                    }
+                return {
+                    'action': 'hold',
+                    'reason': f'ath_phase2_hold (floor={trail_floor:.1%}, peak={peak_pnl:.1%})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': trail_floor,
+                }
+
+            # Phase 1: peak < 50% — free run, no trail stop
+            return {
+                'action': 'hold',
+                'reason': f'ath_phase1_free_run (peak={peak_pnl:.1%} < 50%)',
+                'current_pnl': current_pnl,
+                'trail_floor': None,
+            }
+
         # === Profit Lock at +50% (velocity-aware) ===
         # B+C covers -15% to +50% with velocity+volume trail.
         # Lock profit (sell 50% → moon bag) only at +50%+.
         # Safety cap: always lock at +70% regardless of velocity.
         if peak_pnl >= 0.50 and not entry.get('has_locked_profit'):
+
             velocity = entry.get('_guardian_velocity', 0)
             helius_tps = entry.get('_helius_tps', 0)
             symbol = entry.get('symbol', '?')
@@ -922,6 +969,23 @@ class ExitMatrixEvaluator:
                 'current_pnl': current_pnl,
             }
 
+        # === ATH Phase 3 Moon Bag: absolute -40pp trail (house money, let it moonshot) ===
+        _is_ath_entry = entry.get('type') == 'ATH' or entry.get('signal_type') == 'ATH'
+        if _is_ath_entry:
+            # floor = peak - 40pp absolute. At peak=150% → floor=110%. At peak=300% → floor=260%.
+            moon_floor = moon_peak - 0.40
+            if moon_floor > 0 and current_pnl < moon_floor:
+                return {
+                    'action': 'exit',
+                    'reason': f'ath_phase3_moon_trail (pnl={current_pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, -40pp abs)',
+                    'current_pnl': current_pnl,
+                }
+            return {
+                'action': 'hold',
+                'reason': f'ath_phase3_moon_hold (floor={moon_floor:.1%}, peak={moon_peak:.1%})',
+                'current_pnl': current_pnl,
+            }
+
         # === Moon Trail (Dynamic Velocity-Based Factor) ===
         # P4: Factor adjusts based on how fast PnL is rising (velocity).
         # Velocity = PnL change per minute over 2-min sliding window.
@@ -944,6 +1008,7 @@ class ExitMatrixEvaluator:
         moon_trail_factor = max(target_factor, current_factor)
 
         moon_floor = moon_peak * moon_trail_factor
+
         if moon_floor > 0 and current_pnl < moon_floor:
             return {
                 'action': 'exit',

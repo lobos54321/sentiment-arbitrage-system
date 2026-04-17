@@ -216,65 +216,106 @@ class ExitGuardianThread(threading.Thread):
                 pos._guardian_tick_vol = tick_vol
 
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
-                # Applies to ALL positions including moon bags
+                # ATH Fast Lane: three-phase — mirrors matrix_evaluator logic
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
+                _is_ath_entry = w_entry and (w_entry.get('type') == 'ATH' or w_entry.get('signal_type') == 'ATH')
 
-                if pos.peak_pnl >= 0.05:
-                    # ATH tokens get wider trailing — parabolic moves have ±6% swings in seconds
-                    _is_ath_entry = w_entry and (w_entry.get('type') == 'ATH' or w_entry.get('signal_type') == 'ATH')
-                    # Tiered base factor by peak level (synced with matrix_evaluator)
-                    if pos.peak_pnl >= 0.50:
-                        base_factor = 0.70   # >= +50% — about to become moon bag
-                    elif pos.peak_pnl >= 0.20:
-                        base_factor = 0.50 if _is_ath_entry else 0.60   # ATH: 50% | non-ATH: 60%
-                    elif pos.peak_pnl >= 0.10:
-                        base_factor = 0.50 if _is_ath_entry else 0.55   # ATH: wider room
-                    else:
-                        base_factor = 0.5
-
-                    # Velocity-driven factor — synced with ExitMatrix thresholds
-                    # Strong momentum → let it run (looser trail)
-                    # Fading momentum → lock profit fast (tighter trail)
-                    if raw_vel_30s < -5.0:
-                        vel_factor = 0.85    # CRASH → lock hard (skip smoothing)
-                    elif use_vel < 0:
-                        vel_factor = 0.75    # fading → tighten
-                    elif use_vel > 10.0:
-                        vel_factor = base_factor  # rocketing → use base, let it run
-                    else:
-                        vel_factor = 0.60    # neutral → moderate protection (was 0.70)
-
-                    # Volume signals (B: tick_vol + C: Helius TPS)
-                    # Only mild tightening — meme coins have erratic volume
-                    if tick_vol < 0.001 and len(pos.price_ring) >= 5:
-                        vel_factor = max(vel_factor, 0.60)   # B: no price movement
-                    if tps_smooth >= 0 and tps_smooth < 0.5 and len(pos.price_ring) >= 5:
-                        vel_factor = max(vel_factor, 0.60)   # C: real volume dried up
-
-                    # NO ratchet — let factor respond to current conditions
-                    trail_factor = max(base_factor, vel_factor)
-
-                    trail_floor = pos.peak_pnl * trail_factor
-
-                    if pnl < trail_floor:
+                if _is_ath_entry and is_moon:
+                    # === ATH Phase 3 Moon Bag: absolute -40pp trail ===
+                    moon_peak = pos.peak_pnl
+                    moon_floor = moon_peak - 0.40
+                    if moon_floor > 0 and pnl < moon_floor:
                         log.info(
-                            f"[ExitGuardian] 📉 {pos.symbol} TRAIL STOP: "
-                            f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
-                            f"(peak={pos.peak_pnl*100:.1f}% factor={trail_factor:.2f}) "
-                            f"vel={use_vel:.1f}%/min(raw={raw_vel_30s:.1f}) "
-                            f"tick_vol={tick_vol:.4f} tps={tps_smooth:.1f} "
-                            f"price={price:.10f} src={src}"
+                            f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE3 MOON TRAIL: "
+                            f"pnl={pnl*100:+.1f}% < floor={moon_floor*100:.1f}% "
+                            f"(peak={moon_peak*100:.1f}%, -40pp abs) price={price:.10f} src={src}"
                         )
                         with self.exit_queue_lock:
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
-                                'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, vel={use_vel:.1f}, tps={tps_smooth:.1f})',
+                                'reason': f'guardian_ath_phase3_moon (pnl={pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, -40pp)',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             })
                         self._exit_pending.add(trade_id)
                         continue
+
+                elif _is_ath_entry and not is_moon:
+                    # === ATH Phase 2 (50-100%): absolute -20pp trail ===
+                    if pos.peak_pnl >= 0.50:
+                        trail_floor = pos.peak_pnl - 0.20
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE2 TRAIL: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, -20pp abs) price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_phase2 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -20pp)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+                    # Phase 1 (peak < 50%): no Guardian trail — only hard SL applies
+                    # (hard SL is handled separately in the main loop)
+
+                else:
+                    # === Standard (non-ATH) Trail ===
+                    if pos.peak_pnl >= 0.05:
+                        # Tiered base factor by peak level (synced with matrix_evaluator)
+                        if pos.peak_pnl >= 0.50:
+                            base_factor = 0.70   # >= +50% — about to become moon bag
+                        elif pos.peak_pnl >= 0.20:
+                            base_factor = 0.60
+                        elif pos.peak_pnl >= 0.10:
+                            base_factor = 0.55
+                        else:
+                            base_factor = 0.5
+
+                        # Velocity-driven factor
+                        if raw_vel_30s < -5.0:
+                            vel_factor = 0.85    # CRASH → lock hard
+                        elif use_vel < 0:
+                            vel_factor = 0.75    # fading → tighten
+                        elif use_vel > 10.0:
+                            vel_factor = base_factor  # rocketing → use base
+                        else:
+                            vel_factor = 0.60    # neutral
+
+                        # Volume signals
+                        if tick_vol < 0.001 and len(pos.price_ring) >= 5:
+                            vel_factor = max(vel_factor, 0.60)
+                        if tps_smooth >= 0 and tps_smooth < 0.5 and len(pos.price_ring) >= 5:
+                            vel_factor = max(vel_factor, 0.60)
+
+                        trail_factor = max(base_factor, vel_factor)
+                        trail_floor = pos.peak_pnl * trail_factor
+
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} TRAIL STOP: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}% factor={trail_factor:.2f}) "
+                                f"vel={use_vel:.1f}%/min(raw={raw_vel_30s:.1f}) "
+                                f"tick_vol={tick_vol:.4f} tps={tps_smooth:.1f} "
+                                f"price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, vel={use_vel:.1f}, tps={tps_smooth:.1f})',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+
 
                 # === Profit Lock Detection (peak >= 20%, not yet locked) ===
                 # Don't execute the lock from Guardian (too complex: 50% sell + moon bag state).
