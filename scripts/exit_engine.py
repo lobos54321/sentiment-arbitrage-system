@@ -237,6 +237,11 @@ class ExitGuardianThread(threading.Thread):
                         _decay_factor = 0.75  # 3min+ stale → 25% tighter
                     else:
                         _decay_factor = 0.90  # 2min+ stale → 10% tighter
+                    log.info(
+                        f"[ExitGuardian] ⏳ {pos.symbol} TIME_DECAY active: "
+                        f"peak={pos.peak_pnl*100:+.1f}% stale for {_time_since_peak:.0f}s "
+                        f"→ decay_factor={_decay_factor} (trail margins ×{_decay_factor})"
+                    )
                 else:
                     _decay_factor = 1.0  # no decay
 

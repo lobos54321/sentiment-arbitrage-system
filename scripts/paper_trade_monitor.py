@@ -3716,6 +3716,29 @@ def run_monitor(db):
                     if _any_ca_cooldown:
                         continue
 
+                    # PRICE-GATE: For re-entries, current price must be above last entry price.
+                    # Data: 100% of dead cat bounces had price below entry during dip.
+                    # Genuine second waves (SOLANA +1030%, Crashout +1140%) never dipped below entry.
+                    _entry_count = w_entry.get('entry_count', 0) or 0
+                    _last_entry_price = w_entry.get('last_exit_price')  # stores entry_price of last trade
+                    if _entry_count > 0 and _last_entry_price and _last_entry_price > 0:
+                        _current_price = eval_res.get('current_price', 0) or 0
+                        if _current_price > 0 and _current_price <= _last_entry_price:
+                            _price_vs_entry = (_current_price - _last_entry_price) / _last_entry_price * 100
+                            log.info(
+                                f"  [WATCHLIST] 🚫 {w_entry['symbol']} PRICE-GATE BLOCKED: "
+                                f"re-entry #{_entry_count+1}, current={_current_price:.10f} "
+                                f"<= last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
+                            )
+                            continue
+                        elif _current_price > _last_entry_price:
+                            _price_vs_entry = (_current_price - _last_entry_price) / _last_entry_price * 100
+                            log.info(
+                                f"  [WATCHLIST] ✅ {w_entry['symbol']} PRICE-GATE PASS: "
+                                f"re-entry #{_entry_count+1}, current={_current_price:.10f} "
+                                f"> last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
+                            )
+
                     # Fetch signal description for sub-index parsing (Task 6)
                     # NOTE: premium_signals lives in SENTIMENT_DB (sentiment_arb.db),
                     # not in the paper_trades db connection.
