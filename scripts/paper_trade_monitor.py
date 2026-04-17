@@ -3669,6 +3669,16 @@ def run_monitor(db):
                 if time.time() - w_entry.get('last_eval_at', 0) < eval_interval:
                     wl_skip_cooldown += 1
                     continue
+
+                # P5: Self cooldown — respect cooldown_until on THIS entry
+                # Catches the deadly "win → instant re-buy same CA → loss" pattern
+                _cd_until = w_entry.get('cooldown_until', 0) or 0
+                if _cd_until > time.time():
+                    _cd_remain = int(_cd_until - time.time())
+                    if _cd_remain > 15:  # only log if > 15s remaining to reduce spam
+                        log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=post_exit_cooldown ({_cd_remain}s remaining)")
+                    wl_skip_cooldown += 1
+                    continue
                 
                 # Skip if max positions reached
                 if len(positions) + len(pending_entries) >= max_positions:
@@ -3747,7 +3757,15 @@ def run_monitor(db):
                     # Note: Kelly always returns >= 0.03 SOL (never vetoes).
                     # Matrix+Momentum decide whether to trade; Kelly only sizes.
 
-                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {pending_entries[lifecycle_id]['kelly_position_sol']} SOL -> Pending queue")
+                    # P7: Minimum position threshold — skip if Kelly gives floor value
+                    # Data: 0.03 SOL trades have terrible risk/reward (avg loss -15%, wins earn 0.002 SOL)
+                    _kelly_sol = pending_entries[lifecycle_id]['kelly_position_sol']
+                    if _kelly_sol <= 0.05:
+                        log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
+                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {_kelly_sol} SOL -> Pending queue")
                     last_progress = time.time()
                 else:
                     # Log the 'wait' action so user sees why it's not firing

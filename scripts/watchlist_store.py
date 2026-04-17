@@ -343,8 +343,11 @@ class WatchlistStore:
                      last_matrix_check=now)
         log.info(f"[WL] → moon_bag (entry_id={entry_id})")
 
-    def mark_watching(self, entry_id, exit_pnl, cooldown_sec=180):
-        """Transition from holding/moon_bag → watching (re-observation after exit)."""
+    def mark_watching(self, entry_id, exit_pnl, cooldown_sec=300):
+        """Transition from holding/moon_bag → watching (re-observation after exit).
+        P5: Default 5-min cooldown for ALL exits (win or loss) to prevent
+        'win→instant re-buy→loss' pattern. Loss cooldown overrides to longer.
+        """
         now = time.time()
 
         # Save current entry_price as last_exit_price before clearing
