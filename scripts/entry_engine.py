@@ -190,6 +190,32 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     return pos
 
 
+def get_liquidity_position_cap(token_ca, sol_price_usd, max_pool_pct=0.01):
+    """A1: Compute max position size in SOL based on pool liquidity.
+    Cap = pool_liquidity_usd * max_pool_pct / sol_price_usd
+    This prevents taking positions that are too large relative to the AMM pool,
+    which causes excessive slippage on both entry and especially exit.
+    Returns None if liquidity data unavailable (no cap applied).
+    """
+    if not sol_price_usd or sol_price_usd <= 0:
+        return None
+    try:
+        snap = fetch_dexscreener_trend_snapshot(token_ca)
+        if not snap:
+            return None
+        liquidity_usd = snap.get('liquidity_usd', 0) or 0
+        if liquidity_usd <= 0:
+            return None
+        cap = (liquidity_usd * max_pool_pct) / sol_price_usd
+        # Floor at 0.03 SOL (don't block tiny test trades), cap display at 0.5 (hard cap handles upper bound)
+        cap = max(0.03, cap)
+        log.info(f"[Liquidity] pool=${liquidity_usd:,.0f} → {max_pool_pct*100:.0f}% cap={cap:.3f} SOL (sol=${sol_price_usd:.0f})")
+        return cap
+    except Exception as e:
+        log.debug(f"[Liquidity] cap calc failed: {e}")
+        return None
+
+
 # ─── SmartEntry ───────────────────────────────────────────────────────────────
 
 def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
@@ -219,6 +245,7 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
     volume = best.get('volume', {}) or {}
     txns = best.get('txns', {}) or {}
     price_change = best.get('priceChange', {}) or {}
+    liquidity = best.get('liquidity', {}) or {}
 
     result = {
         'vol_m5': float(volume.get('m5', 0) or 0),
@@ -230,6 +257,8 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
         'price_change_m5': float(price_change.get('m5', 0) or 0),
         'price_change_h1': float(price_change.get('h1', 0) or 0),
         'price_usd': float(best.get('priceUsd', 0) or 0),
+        # A1: Pool liquidity for position sizing — prevent oversized entries in thin pools
+        'liquidity_usd': float(liquidity.get('usd', 0) or 0),
     }
 
     _dex_trend_cache[token_ca] = {'data': result, 'fetched_at': now}

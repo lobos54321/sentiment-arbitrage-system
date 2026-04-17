@@ -215,6 +215,15 @@ class ExitGuardianThread(threading.Thread):
                 pos._guardian_velocity = use_vel
                 pos._guardian_tick_vol = tick_vol
 
+                # === A1: Thin Pool Liquidity Adjustment ===
+                # If DexScreener pool liquidity < $15k, tighten all trail floors by 5pp.
+                # Rationale: thin pools cause extra exit slippage; we want to exit sooner
+                # before the price has time to decay further.
+                _liq_usd = (w_entry.get('_dex_liquidity_usd') or 0) if w_entry else 0
+                _thin_pool_bonus = 0.05 if (0 < _liq_usd < 15000) else 0.0
+                if _thin_pool_bonus:
+                    log.debug(f"[ExitGuardian] {pos.symbol} thin pool (${_liq_usd:,.0f}) → trail +5pp tighter")
+
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 # ATH Fast Lane: three-phase — mirrors matrix_evaluator logic
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
@@ -244,12 +253,12 @@ class ExitGuardianThread(threading.Thread):
                 elif _is_ath_entry and not is_moon:
                     # === ATH Phase 2 (50-100%): absolute -20pp trail ===
                     if pos.peak_pnl >= 0.50:
-                        trail_floor = pos.peak_pnl - 0.20
+                        trail_floor = pos.peak_pnl - 0.20 + _thin_pool_bonus  # +5pp if thin pool
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE2 TRAIL: "
                                 f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, -20pp abs) price={price:.10f} src={src}"
+                                f"(peak={pos.peak_pnl*100:.1f}%, -20pp+liq{_thin_pool_bonus*100:.0f}pp) price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
@@ -264,12 +273,12 @@ class ExitGuardianThread(threading.Thread):
                     # === ATH Phase 1 (peak < 50%): tiered trail protection ===
                     # Synced with matrix_evaluator Phase1 tiers (fixes DUCK +20.6% → -15.8% bug)
                     if pos.peak_pnl >= 0.25:
-                        trail_floor = pos.peak_pnl - 0.15
+                        trail_floor = pos.peak_pnl - 0.15 + _thin_pool_bonus
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_25: "
                                 f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, -15pp) price={price:.10f} src={src}"
+                                f"(peak={pos.peak_pnl*100:.1f}%, -15pp+liq) price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
@@ -282,12 +291,12 @@ class ExitGuardianThread(threading.Thread):
                             self._exit_pending.add(trade_id)
                             continue
                     elif pos.peak_pnl >= 0.15:
-                        trail_floor = pos.peak_pnl - 0.10
+                        trail_floor = pos.peak_pnl - 0.10 + _thin_pool_bonus
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_15: "
                                 f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, -10pp) price={price:.10f} src={src}"
+                                f"(peak={pos.peak_pnl*100:.1f}%, -10pp+liq) price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({

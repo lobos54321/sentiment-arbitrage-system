@@ -42,6 +42,7 @@ from entry_engine import (
     calculate_kelly_position, evaluate_smart_entry,
     fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
     evaluate_entry_position, clear_dex_trend_cache,
+    get_liquidity_position_cap,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
@@ -3850,12 +3851,22 @@ def run_monitor(db):
                                 matrix_scores=pending.get('matrix_scores'))
                             log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
-                    # Kelly position size: use kelly_position_sol if available, else config default
-                    # P0: Hard cap at 0.5 SOL — protect against Kelly outliers on small sample
-                    actual_position_size_sol = min(
-                        pending.get('kelly_position_sol') or position_size_sol,
-                        0.5
+                    # Kelly position size: apply three-layer cap
+                    # Layer 1: Kelly formula output
+                    # Layer 2: MAXposition 0.5 SOL hard cap
+                    # Layer 3: A1 - max 1% of pool liquidity (prevents slippage in thin pools)
+                    _kelly_raw = pending.get('kelly_position_sol') or position_size_sol
+                    _liq_cap = get_liquidity_position_cap(
+                        pending['token_ca'],
+                        sol_price_usd=sol_price,
                     )
+                    actual_position_size_sol = min(
+                        _kelly_raw,
+                        0.5,  # hard cap
+                        _liq_cap if _liq_cap is not None else 0.5,
+                    )
+                    if _liq_cap is not None and actual_position_size_sol < _kelly_raw:
+                        log.info(f"  [ENTRY_SIZE] {pending['symbol']} kelly={_kelly_raw:.3f} → liq_cap={actual_position_size_sol:.3f} SOL (pool liquidity limit)")
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,
