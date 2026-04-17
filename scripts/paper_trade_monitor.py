@@ -2508,6 +2508,7 @@ class Position:
         self.exit_quote_failures = int(exit_quote_failures or 0)
         self.last_exit_quote_failure = last_exit_quote_failure or None
         self.peak_pnl = 0.0
+        self.peak_ts = int(entry_ts)  # A3: timestamp of last peak_pnl update (for time-decay trail)
         self.trailing_active = False
         self.bars_held = 0
         self.last_bar_ts = int(entry_ts)
@@ -4066,6 +4067,9 @@ def run_monitor(db):
                             # Guardian writes velocity to its own w_entry copy → relay via Position
                             if hasattr(pos, '_guardian_velocity'):
                                 w_entry['_guardian_velocity'] = pos._guardian_velocity
+                            # A3: relay peak_ts for time-decay trail calculation
+                            if hasattr(pos, 'peak_ts'):
+                                w_entry['_peak_ts'] = pos.peak_ts
 
                         if not w_entry:
                             exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}

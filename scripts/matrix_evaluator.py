@@ -731,6 +731,22 @@ class ExitMatrixEvaluator:
         current_pnl = (current_price - entry_price) / entry_price
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
+        # === A3: Time-Decay Factor ===
+        # If peak hasn't been refreshed in >2min and peak is meaningful (>10%),
+        # progressively tighten trail margins. Meme coins that peak and plateau
+        # are almost certainly in distribution phase.
+        _peak_ts = entry.get('_peak_ts', 0) or entry.get('entry_time', 0) or 0
+        _time_since_peak = (time.time() - _peak_ts) if _peak_ts > 0 else 0
+        if peak_pnl >= 0.10 and _time_since_peak > 120:
+            if _time_since_peak > 300:
+                _decay = 0.50   # 5min+ → halve margin
+            elif _time_since_peak > 180:
+                _decay = 0.75   # 3min+ → 25% tighter
+            else:
+                _decay = 0.90   # 2min+ → 10% tighter
+        else:
+            _decay = 1.0
+
         # === Hard Stop-Loss ===
         # Default -7.5% — momentum entries that immediately drop 7.5% are bad signals.
         # dynamic_sl can tighten this if trailing stop moves SL up.
@@ -764,9 +780,9 @@ class ExitMatrixEvaluator:
                     'trail_floor': None,
                 }
 
-            # Phase 2: peak 50-100% → trail with absolute -20pp floor
+            # Phase 2: peak 50-100% → trail with absolute -20pp floor (A3: time-decay applied)
             if peak_pnl >= 0.50:
-                trail_floor = peak_pnl - 0.20
+                trail_floor = peak_pnl - (0.20 * _decay)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -782,9 +798,9 @@ class ExitMatrixEvaluator:
                 }
 
             # Phase 1: peak < 50% — tiered protection (was unconditional free_run → DUCK bug)
-            # Sub-phase 1c: peak >= 25% → trail with -15pp floor
+            # Sub-phase 1c: peak >= 25% → trail with -15pp floor (A3: time-decay applied)
             if peak_pnl >= 0.25:
-                trail_floor = peak_pnl - 0.15
+                trail_floor = peak_pnl - (0.15 * _decay)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -799,9 +815,9 @@ class ExitMatrixEvaluator:
                     'trail_floor': trail_floor,
                 }
 
-            # Sub-phase 1b: peak >= 15% → trail with -10pp floor
+            # Sub-phase 1b: peak >= 15% → trail with -10pp floor (A3: time-decay applied)
             if peak_pnl >= 0.15:
-                trail_floor = peak_pnl - 0.10
+                trail_floor = peak_pnl - (0.10 * _decay)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
