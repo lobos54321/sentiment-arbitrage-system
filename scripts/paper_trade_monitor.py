@@ -3755,9 +3755,15 @@ def run_monitor(db):
                     trigger_price = pending.get('trigger_price')
                     if trigger_price and pending['attempts'] == 1:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                        if live_price is not None and live_price > trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):
+                        # ATH + M=100 = verified parabolic move (e.g. ASTEROID h1 +15865%)
+                        # Normal 8% max slippage is too tight for these. Use 30%.
+                        _m_score = (pending.get('matrix_scores') or {}).get('momentum', 0)
+                        _is_ath = pending.get('signal_type') == 'ATH'
+                        _max_pct = 30.0 if (_is_ath and _m_score and _m_score >= 100) else ENTRY_PREBUY_RECHECK_MAX_PCT
+                        if live_price is not None and live_price > trigger_price * (1 + _max_pct / 100):
                             log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: entry_too_late "
-                                     f"live={live_price:.10f} > max_allowed={trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
+                                     f"live={live_price:.10f} > max_allowed={trigger_price * (1 + _max_pct / 100):.10f} "
+                                     f"(max_pct={_max_pct}% {'ATH_MOMENTUM' if _max_pct > 8 else 'normal'})")
                             pending_entries.pop(lifecycle_id, None)
                             continue
 
