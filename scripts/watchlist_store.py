@@ -286,11 +286,32 @@ class WatchlistStore:
         ''', (limit,)).fetchall()
         return [{'exit_pnl': r['exit_pnl'], 'closed_at': r['closed_at'] or ''} for r in rows]
 
+    def get_recent_avg_peak_pnl(self, limit=20):
+        """A2: Get average peak_pnl from recent trades for ATR-adaptive stop-loss.
+        Uses paper_trades table — peak_pnl is recorded at close time.
+        Returns float average (e.g., 0.15 = 15% avg peak), or None if insufficient data.
+        """
+        try:
+            rows = self.db.execute('''
+                SELECT peak_pnl FROM paper_trades
+                WHERE peak_pnl IS NOT NULL AND peak_pnl > 0
+                ORDER BY rowid DESC LIMIT ?
+            ''', (limit,)).fetchall()
+            if len(rows) < 5:  # Need at least 5 trades for meaningful average
+                return None
+            avg = sum(r['peak_pnl'] for r in rows) / len(rows)
+            return avg
+        except Exception:
+            return None
+
     # ─── State Transitions ─────────────────────────────────────────────
 
     def mark_holding(self, entry_id, entry_price, position_size_sol,
-                     token_amount_raw, token_decimals, trade_id):
-        """Transition from watching → holding after buy execution."""
+                     token_amount_raw, token_decimals, trade_id,
+                     initial_sl=-0.075):
+        """Transition from watching → holding after buy execution.
+        initial_sl: A2 adaptive stop-loss (default -7.5%, overridden by get_adaptive_stop_loss())
+        """
         now = time.time()
         self._update(entry_id,
                      status='holding',
@@ -303,12 +324,12 @@ class WatchlistStore:
                      trade_id=trade_id,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.075,
+                     dynamic_sl=initial_sl,
                      zero_vol_count=0,
                      moon_trail_factor=0.2,
                      last_matrix_check=now,
                      entry_count_delta=1)  # increment entry_count
-        log.info(f"[WL] → holding (entry_id={entry_id} trade_id={trade_id})")
+        log.info(f"[WL] → holding (entry_id={entry_id} trade_id={trade_id} sl={initial_sl*100:.1f}%)")
 
     def mark_moon_bag(self, entry_id, moon_peak_pnl):
         """Transition from holding → moon_bag after 50% profit lock."""

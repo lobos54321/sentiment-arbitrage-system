@@ -24,6 +24,41 @@ MAX_POSITION_SOL       = 0.5   # Hard cap: protect against Kelly outliers (was u
 # P3: Historical odds cache
 _kelly_trade_cache = {'wins': [], 'losses': [], 'last_refresh': 0}
 
+# A2: Adaptive stop-loss cache (refreshed every 5 minutes)
+_adaptive_sl_cache = {'sl': -0.075, 'last_refresh': 0}
+
+def get_adaptive_stop_loss():
+    """A2: Compute adaptive stop-loss based on recent trade volatility.
+    Uses avg peak_pnl from last 20 trades as a volatility proxy:
+    - High avg peak (25%+) → wide SL (-12%) to avoid early washout
+    - Low avg peak (6%) → tight SL (-5%) to cut losers fast
+    - Default (no data): -7.5%
+    Returns: float (e.g., -0.075)
+    """
+    cache = _adaptive_sl_cache
+    now = time.time()
+    if now - cache['last_refresh'] < 300:  # refresh every 5 min
+        return cache['sl']
+
+    try:
+        store = WatchlistStore()
+        avg_peak = store.get_recent_avg_peak_pnl(limit=20)
+        if avg_peak is None:
+            cache['last_refresh'] = now
+            return cache['sl']  # keep previous value
+
+        # Formula: sl = -(avg_peak * 0.35), clamped to [-0.12, -0.05]
+        raw_sl = -(avg_peak * 0.35)
+        adaptive = max(-0.12, min(-0.05, raw_sl))
+        cache['sl'] = round(adaptive, 4)
+        cache['last_refresh'] = now
+        log.info(f"[AdaptiveSL] avg_peak={avg_peak*100:.1f}% → SL={adaptive*100:.1f}% (raw={raw_sl*100:.2f}%)")
+        return cache['sl']
+    except Exception as e:
+        log.debug(f"[AdaptiveSL] failed: {e}")
+        cache['last_refresh'] = now
+        return cache['sl']
+
 # ─── SmartEntry Constants ─────────────────────────────────────────────────────
 _dex_trend_cache = {}
 SMART_ENTRY_DEX_CACHE_SEC = 15       # Reuse DexScreener data for 15 seconds

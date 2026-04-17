@@ -42,7 +42,7 @@ from entry_engine import (
     calculate_kelly_position, evaluate_smart_entry,
     fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
     evaluate_entry_position, clear_dex_trend_cache,
-    get_liquidity_position_cap,
+    get_liquidity_position_cap, get_adaptive_stop_loss,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
@@ -3995,7 +3995,8 @@ def run_monitor(db):
                             actual_position_size_sol, 
                             token_amount_raw, 
                             token_decimals or 0, 
-                            trade_id
+                            trade_id,
+                            initial_sl=get_adaptive_stop_loss(),  # A2: volatility-adjusted SL
                         )
                     last_progress = time.time()
                     time.sleep(0.2)

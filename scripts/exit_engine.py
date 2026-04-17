@@ -240,6 +240,31 @@ class ExitGuardianThread(threading.Thread):
                 else:
                     _decay_factor = 1.0  # no decay
 
+                # === A4: Flat-Top Distribution Detection ===
+                # If price has been flat (< 0.5% change over last 8+ ticks = 24s+)
+                # while peak > 10% AND tick_vol has decayed > 50%, it's likely
+                # a distribution phase (whales exiting, price propped by small buys).
+                # Add +3pp to trail floor to force earlier exit.
+                _distrib_bonus = 0.0
+                if pos.peak_pnl >= 0.10 and len(pos.price_ring) >= 8:
+                    _recent_prices = [p for _, p in list(pos.price_ring)[-8:]]
+                    _p_min, _p_max = min(_recent_prices), max(_recent_prices)
+                    _flat_range = (_p_max - _p_min) / _p_min if _p_min > 0 else 0
+                    # Check if tick_vol has decayed (compare current to initial)
+                    _initial_tvol = getattr(pos, '_initial_tick_vol', None)
+                    if _initial_tvol is None and tick_vol > 0:
+                        pos._initial_tick_vol = tick_vol
+                        _initial_tvol = tick_vol
+                    _tvol_decay = (tick_vol / _initial_tvol) if _initial_tvol and _initial_tvol > 0 else 1.0
+
+                    if _flat_range < 0.005 and _tvol_decay < 0.50:
+                        _distrib_bonus = 0.03  # +3pp tighter
+                        log.info(
+                            f"[ExitGuardian] ⚠️ {pos.symbol} FLAT-TOP detected: "
+                            f"range={_flat_range*100:.2f}% over 8 ticks, "
+                            f"tick_vol decay={_tvol_decay:.1%} → trail +3pp"
+                        )
+
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 # ATH Fast Lane: three-phase — mirrors matrix_evaluator logic
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
@@ -270,7 +295,7 @@ class ExitGuardianThread(threading.Thread):
                     # === ATH Phase 2 (50-100%): absolute -20pp trail ===
                     if pos.peak_pnl >= 0.50:
                         _base_margin = 0.20 * _decay_factor  # A3: time decay narrows margin
-                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE2 TRAIL: "
@@ -291,7 +316,7 @@ class ExitGuardianThread(threading.Thread):
                     # Synced with matrix_evaluator Phase1 tiers (fixes DUCK +20.6% → -15.8% bug)
                     if pos.peak_pnl >= 0.25:
                         _base_margin = 0.15 * _decay_factor
-                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_25: "
@@ -310,7 +335,7 @@ class ExitGuardianThread(threading.Thread):
                             continue
                     elif pos.peak_pnl >= 0.15:
                         _base_margin = 0.10 * _decay_factor
-                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_15: "
@@ -359,7 +384,7 @@ class ExitGuardianThread(threading.Thread):
                             vel_factor = max(vel_factor, 0.60)
 
                         trail_factor = max(base_factor, vel_factor)
-                        trail_floor = pos.peak_pnl * trail_factor
+                        trail_floor = pos.peak_pnl * trail_factor + _thin_pool_bonus + _distrib_bonus
 
                         if pnl < trail_floor:
                             log.info(
