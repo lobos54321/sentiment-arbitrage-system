@@ -502,7 +502,7 @@ class MatrixEvaluator:
         scores['momentum'] = None
         reasons['momentum'] = 'not_evaluated'
 
-        ready = self._check_pre_momentum_pass(scores, thresholds)
+        ready = self._check_pre_momentum_pass(scores, thresholds, signal_type=signal_type)
 
         # Hard blocks: no zero scores allowed for critical matrices
         # Exception: ATH signals get T=0 as soft check (not block).
@@ -590,10 +590,14 @@ class MatrixEvaluator:
             'current_price': current_price,
             'momentum_final_price': momentum_final_price,  # Fix 2: accurate trigger price
         }
-    def _check_pre_momentum_pass(self, scores, thresholds):
+    def _check_pre_momentum_pass(self, scores, thresholds, signal_type='NOT_ATH'):
         """Check if matrices ①④ meet thresholds for momentum trigger.
         Volume (②) and Signal (⑤) are pure bonus — never block, only add passing count.
         Only Trend (①) and Price (③) are structural hard-gates.
+
+        Exception: ATH + strong T/V → P hard-gate is bypassed (momentum_direct).
+        ATH coins naturally sit at price highs → P is always low. The real filter
+        for ATH is Matrix ④ momentum, not price position.
         """
         # Only real-time structural matrices that we can reliably measure
         hard_checks = [
@@ -605,7 +609,19 @@ class MatrixEvaluator:
         hard_fails = any(val < mins for _, val, mins in hard_checks)
 
         if hard_fails:
-            return False
+            # Momentum-direct bypass: ATH + T≥100 + V≥70 → let momentum check decide
+            # Data: ASTEROID T=100 V=100 S=100 P=30 — P blocked a real breakout.
+            # P is meaningless for ATH (price IS at highs). M check is the real guard.
+            t_score = scores.get('trend', 0)
+            v_score = scores.get('volume', 0)
+            if signal_type == 'ATH' and t_score >= 100 and v_score >= 70:
+                log.info(
+                    f"[Matrix] ATH momentum-direct bypass: T={t_score} V={v_score} "
+                    f"P={scores.get('price', 0)} → bypassing P hard-gate, letting momentum decide"
+                )
+                # Still count passing matrices normally
+            else:
+                return False
 
         # Volume and Signal are bonuses: if >= 60 they add to passing_count
         if scores.get('volume', 0) >= 60:
