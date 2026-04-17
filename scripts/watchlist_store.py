@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     entry_count     INTEGER DEFAULT 0,                -- how many times we've entered
     last_exit_pnl   REAL,                             -- PnL of last exit
     last_exit_at    REAL,                              -- timestamp of last exit
+    last_exit_price REAL,                              -- price at last exit (for re-entry validation)
     cooldown_until  REAL DEFAULT 0,                   -- re-entry cooldown
 
     -- Position info (when holding)
@@ -130,6 +131,7 @@ class WatchlistStore:
             # P2: loss cooldown tracking
             ("ALTER TABLE watchlist ADD COLUMN consecutive_losses INTEGER DEFAULT 0", None),
             ("ALTER TABLE watchlist ADD COLUMN last_loss_time REAL DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN last_exit_price REAL DEFAULT NULL", None),
         ]
         for col_sql, _ in _migrate_columns:
             try:
@@ -322,8 +324,12 @@ class WatchlistStore:
         """Transition from holding/moon_bag → watching (re-observation after exit)."""
         now = time.time()
 
-        # P2: Track consecutive losses for cooldown
+        # Save current entry_price as last_exit_price before clearing
+        # (fixes bug where entry_price=None broke re-entry price validation)
         existing = self.get_by_id(entry_id)
+        last_exit_price_val = existing.get('entry_price') if existing else None
+
+        # P2: Track consecutive losses for cooldown
         prev_consec = (existing.get('consecutive_losses', 0) or 0) if existing else 0
 
         if exit_pnl is not None and exit_pnl < 0:
@@ -345,6 +351,7 @@ class WatchlistStore:
                      status='watching',
                      last_exit_pnl=exit_pnl,
                      last_exit_at=now,
+                     last_exit_price=last_exit_price_val,
                      cooldown_until=now + cooldown_sec,
                      entry_price=None,
                      entry_time=None,

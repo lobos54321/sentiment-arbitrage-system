@@ -34,7 +34,9 @@ SMART_ENTRY_POLL_INTERVAL_SEC = 10   # Poll price every 10 seconds
 SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
 SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
 SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
-SMART_ENTRY_MIN_BOUNCE_RATIO = 0.25  # bounce/pullback must be >= 25% (avoid dead cat bounce)
+SMART_ENTRY_MIN_BOUNCE_RATIO = 0.30  # bounce/pullback must be >= 30% (data: 25% let through Goose -14.8%)
+SMART_ENTRY_MIN_VOL_RATIO = 1.0      # vol_ratio floor (data: Buddy vol=0.8 → instant -18.8% crash)
+SMART_ENTRY_REENTRY_VOL_RATIO = 1.1  # stricter vol_ratio for re-entries (user tuned)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
 
@@ -129,6 +131,8 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     p = KELLY_BASE_WIN_RATE
     b = _get_historical_odds()  # historical avg_win/avg_loss, capped at 3.0
 
+    entry_count = int(watchlist_entry.get('entry_count') or 0)
+
     # ─── Entry mode adjustment (data-validated: 62% vs 43% win rate) ──
     if entry_mode == 'pullback_bounce':
         p *= 0.85
@@ -143,8 +147,15 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         elif perfect_count >= 3:
             p *= 0.9    # mild penalty
         elif perfect_count <= 1:
-            p *= 1.2    # contrarian bonus — less crowded
-            log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2")
+            # Contrarian bonus — ONLY for first entry on fresh coins.
+            # Data: Veteran② got contrarian ×1.2 on re-entry (decaying signal) → 0.775 SOL → -12.5%.
+            # Low perfect_count on re-entry means signal decay, not contrarian opportunity.
+            entry_age_min = (time.time() - watchlist_entry.get('added_at', time.time())) / 60
+            if entry_count == 0 and entry_age_min <= 5:
+                p *= 1.2    # contrarian bonus — less crowded, fresh signal
+                log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2")
+            else:
+                log.info(f"[Kelly] Matrix low-perfect={perfect_count}/5 but entry_count={entry_count} age={entry_age_min:.0f}min → no contrarian bonus")
 
     # ─── ATH confirmation (logical — new highs have momentum) ─────────
     ath_num = int(watchlist_entry.get('ath_num') or 0)
@@ -169,6 +180,11 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
 
     # Half-Kelly for safety
     position = base_capital * kelly_f * 0.5
+
+    # ─── Re-entry penalty: halve position (data: re-entries 50% win vs 64% first) ──
+    if entry_count > 0:
+        position *= 0.5
+        log.info(f"[Kelly] Re-entry #{entry_count+1} → position×0.5")
 
     # Hard limits: min 0.03 SOL, max 20% of capital
     pos = round(max(0.03, min(position, base_capital * 0.20)), 3)
@@ -360,7 +376,7 @@ def evaluate_entry_position(price_history, current_price):
     return 'STILL_FALLING', detail
 
 
-def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
+def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0):
     """
     Smart Entry Engine — replaces evaluate_entry_timing() (Dip-then-Rip).
 
@@ -534,6 +550,25 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None):
                         f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
                         f"bounce_ratio={bounce_ratio:.0%} < {SMART_ENTRY_MIN_BOUNCE_RATIO:.0%} "
                         f"(bounce={bounce:.1f}% pullback={pullback:.1f}%) ({elapsed:.0f}s)"
+                    )
+                time.sleep(interval)
+                continue
+
+            # Guard 1b: volume ratio — reject low-volume bounces
+            # Data: Buddy vol_ratio=0.8 → instant -18.8% crash. No volume = no support.
+            _cur_vol_ratio = 0
+            if cached_trend:
+                _v5 = cached_trend.get('volume_m5', 0)
+                _vh1 = cached_trend.get('volume_h1', 0)
+                _h1_avg = _vh1 / 12 if _vh1 > 0 else 0
+                _cur_vol_ratio = _v5 / _h1_avg if _h1_avg > 0 else 0
+            _min_vol = SMART_ENTRY_REENTRY_VOL_RATIO if entry_count > 0 else SMART_ENTRY_MIN_VOL_RATIO
+            if _cur_vol_ratio < _min_vol:
+                if round_num % 6 == 0:
+                    log.info(
+                        f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
+                        f"vol_ratio={_cur_vol_ratio:.1f} < {_min_vol} "
+                        f"(low volume, no support) ({elapsed:.0f}s)"
                     )
                 time.sleep(interval)
                 continue

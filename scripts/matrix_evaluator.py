@@ -548,13 +548,16 @@ class MatrixEvaluator:
             )
 
             # For re-entries: verify price > last exit price
-            if entry.get('entry_count', 0) > 0 and entry.get('last_exit_pnl') is not None:
-                if current_price and entry.get('entry_price') and current_price <= entry['entry_price']:
+            # BUG FIX: was checking entry_price which gets cleared to None on exit.
+            # Now uses last_exit_price which is persisted in mark_watching().
+            last_exit_px = entry.get('last_exit_price')
+            if entry.get('entry_count', 0) > 0 and last_exit_px is not None:
+                if current_price and current_price <= last_exit_px:
                     return {
                         'scores': scores, 'reasons': reasons,
                         'ready_for_momentum': False,
                         'action': 'wait',
-                        'action_reason': 'reentry: price below last exit, waiting for recovery',
+                        'action_reason': f"reentry: price {current_price:.10f} <= last_exit {last_exit_px:.10f}, waiting for recovery",
                     }
 
             scores['momentum'], reasons['momentum'], snaps = score_realtime_momentum(

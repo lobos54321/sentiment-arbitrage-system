@@ -3770,6 +3770,7 @@ def run_monitor(db):
                             pending['token_ca'],
                             symbol=pending['symbol'],
                             pool_address=pending['pool'],
+                            entry_count=w_entry.get('entry_count', 0) if w_entry else 0,
                         )
                         if not should_enter:
                             retry_count = pending.get('smart_entry_retries', 0)
