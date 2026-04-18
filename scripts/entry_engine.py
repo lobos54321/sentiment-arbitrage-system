@@ -21,6 +21,15 @@ KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss (ONLY used as fallback)
 KELLY_COLD_START_ODDS  = 2.0   # Based on overnight data: avg_win=16.3% / avg_loss=8%
 MAX_POSITION_SOL       = 0.5   # Hard cap: protect against Kelly outliers (was uncapped → 1.0 SOL)
 
+# Data cleanup: entry_price phantom-baseline bug was fixed at commit cce57b6
+# (2026-04-18 14:33:36 +1000 = 2026-04-18 04:33:36 UTC = unix ts 1776486816).
+# All trades closed before this timestamp have inflated loss rates because
+# ExitGuardian used trigger_price as baseline, causing in-flight PnL to show
+# artificial -X% losses the moment a trade opened. Kelly reading these poisoned
+# trades gave ~28% win rate against true rate ~45-50%. We exclude them.
+# Until min_trades (20) clean trades accumulate, cold start applies (b=2.0).
+KELLY_CLEAN_DATA_FROM_TS = 1776486816  # 2026-04-18 04:33:36 UTC
+
 # P3: Historical odds cache
 _kelly_trade_cache = {'wins': [], 'losses': [], 'last_refresh': 0}
 
@@ -106,16 +115,22 @@ def _get_historical_odds(min_trades=20, default_b=None):
         try:
             store = WatchlistStore()
             trades = store.get_recent_closed_trades(limit=50)
-            # BUG FIX: previous code filtered by t.get('closed_at', '') which didn't exist
-            # in the query result → every trade was filtered out → Kelly was always cold start.
-            # Now watchlist_store returns closed_at properly. No cutoff filter needed —
-            # the query already orders by last_exit_at DESC and limits to 50.
-            cache['wins'] = [t['exit_pnl'] for t in trades if t['exit_pnl'] and t['exit_pnl'] > 0]
-            cache['losses'] = [abs(t['exit_pnl']) for t in trades if t['exit_pnl'] and t['exit_pnl'] < 0]
+            # Filter: exclude trades closed before the entry_price phantom-baseline
+            # bug fix. Those trades have inflated loss rates (Guardian calculated
+            # PnL against trigger_price, causing fake instant -X% on open).
+            # Reading them poisoned the win rate. See KELLY_CLEAN_DATA_FROM_TS.
+            clean_trades = [
+                t for t in trades
+                if (t.get('last_exit_at') or 0) >= KELLY_CLEAN_DATA_FROM_TS
+            ]
+            dirty_count = len(trades) - len(clean_trades)
+            cache['wins'] = [t['exit_pnl'] for t in clean_trades if t['exit_pnl'] and t['exit_pnl'] > 0]
+            cache['losses'] = [abs(t['exit_pnl']) for t in clean_trades if t['exit_pnl'] and t['exit_pnl'] < 0]
             cache['last_refresh'] = now
             log.info(
                 f"[Kelly] Historical data refreshed: {len(cache['wins'])} wins, "
-                f"{len(cache['losses'])} losses from last 50 trades"
+                f"{len(cache['losses'])} losses from {len(clean_trades)} clean trades "
+                f"(excluded {dirty_count} pre-fix contaminated trades)"
             )
         except Exception as e:
             log.warning(f"[Kelly] Failed to refresh historical data: {e}")

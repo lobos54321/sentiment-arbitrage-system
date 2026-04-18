@@ -276,15 +276,20 @@ class WatchlistStore:
 
     def get_recent_closed_trades(self, limit=50):
         """P3: Fetch recent closed trades with exit PnL for Kelly odds calculation.
-        Returns list of dicts with 'exit_pnl' and 'closed_at' keys."""
+        Returns list of dicts with 'exit_pnl', 'closed_at', 'last_exit_at' (unix ts) keys."""
         rows = self.db.execute('''
             SELECT last_exit_pnl as exit_pnl,
+                   last_exit_at,
                    datetime(last_exit_at, 'unixepoch') as closed_at
             FROM watchlist
             WHERE status IN ('watching', 'expired') AND last_exit_pnl IS NOT NULL
             ORDER BY last_exit_at DESC LIMIT ?
         ''', (limit,)).fetchall()
-        return [{'exit_pnl': r['exit_pnl'], 'closed_at': r['closed_at'] or ''} for r in rows]
+        return [{
+            'exit_pnl': r['exit_pnl'],
+            'closed_at': r['closed_at'] or '',
+            'last_exit_at': r['last_exit_at'] or 0,
+        } for r in rows]
 
     def get_recent_avg_peak_pnl(self, limit=20):
         """A2: Get average peak_pnl from recent trades for ATR-adaptive stop-loss.

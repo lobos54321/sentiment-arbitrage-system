@@ -3792,26 +3792,10 @@ def run_monitor(db):
                     # P7: Minimum position threshold — skip if Kelly gives floor value
                     # Data: 0.03 SOL trades have terrible risk/reward (avg loss -15%, wins earn 0.002 SOL)
                     _kelly_sol = pending_entries[lifecycle_id]['kelly_position_sol']
-                    # Plan #1B: Fast-lane bypass — historical Kelly stats are contaminated
-                    # by pre-fix phantom-baseline losses. Don't let stale stats veto the
-                    # strongest live signal class (ATH + matrix all green: T=V=S=M=100).
-                    _scores_fire = eval_res.get('scores') or {}
-                    _is_fast_lane = (
-                        w_entry.get('type') == 'ATH'
-                        and (_scores_fire.get('trend') or 0) >= 100
-                        and (_scores_fire.get('volume') or 0) >= 100
-                        and (_scores_fire.get('signal') or 0) >= 100
-                        and (_scores_fire.get('momentum') or 0) >= 100
-                    )
                     if _kelly_sol <= 0.05:
-                        if _is_fast_lane:
-                            _kelly_sol = 0.05  # force minimum tradable size
-                            pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
-                            log.info(f"  [WATCHLIST] 🟢 {w_entry['symbol']} P7 BYPASS (fast_lane all-green): forcing Kelly={_kelly_sol:.3f} SOL")
-                        else:
-                            log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
-                            pending_entries.pop(lifecycle_id, None)
-                            continue
+                        log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
 
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {_kelly_sol} SOL -> Pending queue")
                     last_progress = time.time()
