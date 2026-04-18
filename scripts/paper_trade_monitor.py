@@ -3820,16 +3820,22 @@ def run_monitor(db):
                     _scores = pending.get('matrix_scores') or {}
                     _m_score = _scores.get('momentum', 0)
                     _v_score = _scores.get('volume', 0)
-                    # Fast lane requires ATH + M=100 + V≥70 + buy_sell≥1.0
-                    # V≥70 filters volume, buy_sell≥1.0 ensures buyers >= sellers (uses cached DexScreener)
+                    _t_score = _scores.get('trend', 0)
+                    _entry_count = w_entry.get('entry_count', 0) if w_entry else 0
+                    # Fast lane requires ATH + T≥100 + M=100 + V≥70 + buy_sell≥1.0
+                    # T≥100 required: matches matrix_evaluator ATH bypass (RETAIL T=50 was wrongly fast-laned)
+                    # Re-entries NEVER get fast lane — must go through SmartEntry for pullback-bounce confirmation
                     _ath_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
-                        pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70
+                        pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100
+                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 70
                     ) else None
                     _ath_bs_ratio = (_ath_dex.get('buys_m5', 0) / max(_ath_dex.get('sells_m5', 1), 1)) if _ath_dex else 0
                     _is_ath_momentum = (pending.get('signal_type') == 'ATH'
+                                       and _t_score and _t_score >= 100
                                        and _m_score and _m_score >= 100
                                        and _v_score and _v_score >= 70
-                                       and _ath_bs_ratio >= 1.0)
+                                       and _ath_bs_ratio >= 1.0
+                                       and _entry_count == 0)  # re-entries must go through SmartEntry
 
                     if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
@@ -3839,20 +3845,24 @@ def run_monitor(db):
                             pending_entries.pop(lifecycle_id, None)
                             continue
                     elif _is_ath_momentum:
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+M100+V{_v_score}+BS{_ath_bs_ratio:.1f} → skip price recheck, buy ASAP")
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f} → skip price recheck, buy ASAP")
                     elif pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
-                        # ATH+M100+V70 but buy_sell failed → fall through to normal path
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: buy_sell={_ath_bs_ratio:.2f} < 1.0 (sellers dominate)")
+                        # ATH but missing T≥100 or buy_sell or is re-entry → fall through to SmartEntry
+                        _block_reasons = []
+                        if _t_score < 100: _block_reasons.append(f"T={_t_score}<100")
+                        if _ath_bs_ratio < 1.0: _block_reasons.append(f"bs={_ath_bs_ratio:.2f}<1.0")
+                        if _entry_count > 0: _block_reasons.append(f"re-entry#{_entry_count+1}")
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
 
                     # --- Smart Entry Engine (replaces Dip-then-Rip) ---
                     # Layer 1: DexScreener volume-price trend confirmation
                     # Layer 2: Price trajectory pullback-bounce detection
                     # Max wait: 15 minutes. No chase — only pullback-bounce entries.
-                    # EXCEPTION: ATH + M=100 → skip SmartEntry, buy immediately (momentum_direct).
+                    # EXCEPTION: ATH + T≥100 + M=100 + first entry → skip SmartEntry (momentum_direct).
                     if not pending.get('timing_passed'):
                         if _is_ath_momentum:
-                            # Verified parabolic — no pullback to wait for, just buy
-                            log.info(f"  [SmartEntry] {pending['symbol']} ATH+M100 → SKIP pullback wait, momentum_direct")
+                            # Verified parabolic first entry — no pullback to wait for, just buy
+                            log.info(f"  [SmartEntry] {pending['symbol']} ATH+T100+M100 first entry → SKIP pullback wait, momentum_direct")
                             pending['timing_passed'] = True
                             entry_mode = 'momentum_direct'
                             pending['kelly_position_sol'] = calculate_kelly_position(
@@ -4560,11 +4570,9 @@ def run_monitor(db):
                 
                 # Update Watchlist Status
                 if w_entry:
-                    # Cooldown by exit PnL:
-                    #   Won → no cooldown (trend may continue, let re-enter)
-                    #   Lost → 15min cooldown (don't chase losing coins)
-                    exit_cooldown = 0 if realized_pnl > 0 else 900
-                    watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=exit_cooldown)
+                    # No artificial cooldown — price-gate (current_price > last_entry_price)
+                    # handles re-entry filtering. See mark_watching() docstring.
+                    watchlist.mark_watching(w_entry['id'], realized_pnl)
                 last_progress = time.time()
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'
                 quoted_price_text = f"{effective_exit_price:.10f}" if effective_exit_price is not None else 'na'
