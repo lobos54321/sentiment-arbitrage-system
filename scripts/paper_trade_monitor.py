@@ -3775,6 +3775,10 @@ def run_monitor(db):
                         'matrix_scores': eval_res.get('scores'),  # stored for Kelly recalc after SmartEntry
                         # SmartEntry retry tracking (persisted across FIRE→REJECT→re-FIRE)
                         'smart_entry_retries': w_entry.get('_smart_entry_retries', 0),
+                        # Pin the watchlist entry to this pending slot so downstream Kelly recalcs
+                        # and retry-counter writes don't latch onto whichever w_entry the outer
+                        # watching_entries loop happened to land on last.
+                        'w_entry': w_entry,
                     }
 
                     # Note: Kelly always returns >= 0.03 SOL (never vetoes).
@@ -3822,7 +3826,9 @@ def run_monitor(db):
                     _v_score = _scores.get('volume', 0)
                     _t_score = _scores.get('trend', 0)
                     _s_score = _scores.get('signal', 0)
-                    _entry_count = w_entry.get('entry_count', 0) if w_entry else 0
+                    # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
+                    pending_w_entry = pending.get('w_entry')
+                    _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
                     # Fast lane requires ATH + T=100 + V=100 + S=100 + M=100 + buy_sell≥1.0
                     # P is exempt: ATH tokens naturally sit at price highs → P is always low
                     # ALL other scores must be perfect. Any weakness = go through SmartEntry.
@@ -3870,14 +3876,14 @@ def run_monitor(db):
                             pending['timing_passed'] = True
                             entry_mode = 'momentum_direct'
                             pending['kelly_position_sol'] = calculate_kelly_position(
-                                w_entry, entry_mode=entry_mode,
+                                pending_w_entry, entry_mode=entry_mode,
                                 matrix_scores=pending.get('matrix_scores'))
                         else:
                             should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
                                 pending['token_ca'],
                                 symbol=pending['symbol'],
                                 pool_address=pending['pool'],
-                                entry_count=w_entry.get('entry_count', 0) if w_entry else 0,
+                                entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
                             )
                             if not should_enter:
                                 retry_count = pending.get('smart_entry_retries', 0)
@@ -3892,8 +3898,8 @@ def run_monitor(db):
                                         f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
                                     )
                                     # Store retry count, remove from pending so watchlist scanner picks it up again
-                                    if w_entry:
-                                        w_entry['_smart_entry_retries'] = retry_count + 1
+                                    if pending_w_entry:
+                                        pending_w_entry['_smart_entry_retries'] = retry_count + 1
                                     pending_entries.pop(lifecycle_id, None)
                                 continue
                             # Smart entry passed — update trigger price to the confirmed entry price
@@ -3904,7 +3910,7 @@ def run_monitor(db):
                             entry_mode = 'momentum_direct' if 'momentum' in (timing_reason or '').lower() else 'pullback_bounce'
                             # Recalculate Kelly with entry mode + matrix scores
                             pending['kelly_position_sol'] = calculate_kelly_position(
-                                w_entry, entry_mode=entry_mode,
+                                pending_w_entry, entry_mode=entry_mode,
                                 matrix_scores=pending.get('matrix_scores'))
                             log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
