@@ -292,16 +292,21 @@ class WatchlistStore:
         Returns float average (e.g., 0.15 = 15% avg peak), or None if insufficient data.
         """
         try:
-            rows = self.db.execute('''
-                SELECT peak_pnl FROM paper_trades
-                WHERE peak_pnl IS NOT NULL AND peak_pnl > 0
-                ORDER BY rowid DESC LIMIT ?
-            ''', (limit,)).fetchall()
-            if len(rows) < 5:  # Need at least 5 trades for meaningful average
-                return None
-            avg = sum(r['peak_pnl'] for r in rows) / len(rows)
-            return avg
-        except Exception:
+            # Need to connect to paper_trades.db explicitly since self.db is watchlist.db
+            paper_db_path = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
+            with sqlite3.connect(paper_db_path) as pdb:
+                pdb.row_factory = sqlite3.Row
+                rows = pdb.execute('''
+                    SELECT peak_pnl FROM paper_trades
+                    WHERE peak_pnl IS NOT NULL AND peak_pnl > 0
+                    ORDER BY rowid DESC LIMIT ?
+                ''', (limit,)).fetchall()
+                if len(rows) < 5:  # Need at least 5 trades for meaningful average
+                    return None
+                avg = sum(r['peak_pnl'] for r in rows) / len(rows)
+                return avg
+        except Exception as e:
+            log.error(f"[WL] Error calculating avg_peak_pnl: {e}")
             return None
 
     # ─── State Transitions ─────────────────────────────────────────────
