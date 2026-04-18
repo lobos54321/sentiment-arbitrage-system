@@ -3839,12 +3839,14 @@ def run_monitor(db):
                         and _s_score and _s_score >= 100
                     ) else None
                     _ath_bs_ratio = (_ath_dex.get('buys_m5', 0) / max(_ath_dex.get('sells_m5', 1), 1)) if _ath_dex else 0
+                    _ath_pc_m5 = _ath_dex.get('price_change_m5', 0) if _ath_dex else 0
                     _is_ath_momentum = (pending.get('signal_type') == 'ATH'
                                        and _t_score and _t_score >= 100
                                        and _v_score and _v_score >= 100
                                        and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
                                        and _ath_bs_ratio >= 1.0
+                                       and _ath_pc_m5 > 0  # 5min price must be UP (fixes Abducted: 15s bounce in -9% crash)
                                        and _entry_count == 0)  # re-entries must go through SmartEntry
 
                     if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
@@ -3872,12 +3874,13 @@ def run_monitor(db):
                                      f"(live={_fl_price:.10f} vs trigger={trigger_price:.10f})")
                             pending_entries.pop(lifecycle_id, None)
                             continue
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f} → price OK, buy ASAP")
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → price OK, buy ASAP")
                     elif pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
-                        # ATH but missing T≥100 or buy_sell or is re-entry → fall through to SmartEntry
+                        # ATH but missing T≥100 or buy_sell or is re-entry or price_m5≤0 → fall through to SmartEntry
                         _block_reasons = []
                         if _t_score < 100: _block_reasons.append(f"T={_t_score}<100")
                         if _ath_bs_ratio < 1.0: _block_reasons.append(f"bs={_ath_bs_ratio:.2f}<1.0")
+                        if _ath_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_ath_pc_m5:+.1f}%<=0")
                         if _entry_count > 0: _block_reasons.append(f"re-entry#{_entry_count+1}")
                         log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
 
