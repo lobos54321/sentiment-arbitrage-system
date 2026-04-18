@@ -3371,6 +3371,8 @@ def run_monitor(db):
     positions_lock = threading.Lock()  # P6: shared lock for Guardian thread
     guardian_exit_queue = []  # P6: Guardian pushes exit signals here
     pending_entries = {}
+    # SmartEntry async: each coin evaluates in its own thread, no blocking
+    smart_entry_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='SmartEntry')
     lifecycles = restore_lifecycles(db)
     sanitized_monitor_states = 0
 
@@ -3895,6 +3897,7 @@ def run_monitor(db):
                     # Max wait: 15 minutes. No chase — only pullback-bounce entries.
                     # EXCEPTION: ATH + T≥100 + M=100 + first entry → skip SmartEntry (momentum_direct).
                     if not pending.get('timing_passed'):
+                        pending_w_entry = pending.get('w_entry')
                         if _is_ath_momentum:
                             # Verified parabolic first entry — no pullback to wait for, just buy
                             log.info(f"  [SmartEntry] {pending['symbol']} ATH+T100+M100 first entry → SKIP pullback wait, momentum_direct")
@@ -3904,12 +3907,36 @@ def run_monitor(db):
                                 pending_w_entry, entry_mode=entry_mode,
                                 matrix_scores=pending.get('matrix_scores'))
                         else:
-                            should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
-                                pending['token_ca'],
-                                symbol=pending['symbol'],
-                                pool_address=pending['pool'],
-                                entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
-                            )
+                            # --- Async SmartEntry: submit to thread pool, check on next iteration ---
+                            _se_future = pending.get('_smart_entry_future')
+
+                            if _se_future is None:
+                                # First time: submit SmartEntry to thread pool (non-blocking)
+                                _se_future = smart_entry_pool.submit(
+                                    evaluate_smart_entry,
+                                    pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    pool_address=pending['pool'],
+                                    entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
+                                )
+                                pending['_smart_entry_future'] = _se_future
+                                log.info(f"  [SmartEntry] {pending['symbol']} submitted to async thread pool")
+                                continue  # Move to next pending coin, don't block
+
+                            if not _se_future.done():
+                                # Still running in background — skip, process other coins
+                                continue
+
+                            # Future completed — collect result
+                            try:
+                                should_enter, timing_reason, timing_detail, timing_trigger_price = _se_future.result()
+                            except Exception as _se_err:
+                                log.error(f"  [SmartEntry] {pending['symbol']} thread error: {_se_err}", exc_info=True)
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
+                            finally:
+                                pending.pop('_smart_entry_future', None)  # Clean up future reference
+
                             if not should_enter:
                                 retry_count = pending.get('smart_entry_retries', 0)
                                 max_retries = 3

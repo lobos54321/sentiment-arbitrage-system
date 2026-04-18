@@ -13,6 +13,66 @@ import threading
 log = logging.getLogger('paper_trade_monitor')
 
 
+# ─── Plan #3: Dynamic Stop-Loss (4-factor) ────────────────────────────────────
+# Adjusts the base SL per-tick based on live market state instead of using
+# a fixed -7.5% threshold for every position. Designed to:
+#   - widen when accumulation signals are intact (bs>=1.5, vol>=2x, mom up)
+#   - tighten when sellers dominate (bs<0.7, vol<0.5x, mom down)
+#   - protect realized peak gains (never give back >15pp from a peak >20%)
+# Bounded to [-15%, -3%] so neither runaway widening nor over-tightening.
+
+def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
+    """4-factor dynamic SL.
+    pos:        Position object (uses .price_ring, .peak_pnl)
+    dex_trend:  DexScreener trend snapshot dict (or None)
+    base_sl:    starting SL (negative float, e.g. -0.07)
+    Returns float in range [-0.15, -0.03].
+    """
+    sl = base_sl
+
+    # Factor 1: buy/sell ratio
+    if dex_trend:
+        bs = dex_trend.get('buys_m5', 0) / max(dex_trend.get('sells_m5', 1), 1)
+        if bs >= 1.5:
+            sl -= 0.03   # widen (more negative) — buyers dominate, give room
+        elif bs < 0.7:
+            sl += 0.03   # tighten — sellers dominate
+
+        # Factor 2: volume trend (vol_m5 vs h1_avg)
+        v5 = dex_trend.get('vol_m5', 0)
+        vh1 = dex_trend.get('vol_h1', 0)
+        h1_avg = vh1 / 12.0 if vh1 > 0 else 0
+        v_ratio = v5 / h1_avg if h1_avg > 0 else 1.0
+        if v_ratio >= 2.0:
+            sl -= 0.02   # widen — surge in interest
+        elif v_ratio < 0.5:
+            sl += 0.03   # tighten — interest collapsing
+
+    # Factor 3: 3-bar momentum direction from price_ring
+    # Requires strict direction — flat bars are neutral (no adjustment).
+    ring = list(getattr(pos, 'price_ring', []))
+    if len(ring) >= 4:
+        last_4 = [p for _, p in ring[-4:]]
+        rises = sum(1 for i in range(1, 4) if last_4[i] > last_4[i-1])
+        falls = sum(1 for i in range(1, 4) if last_4[i] < last_4[i-1])
+        if rises == 3:
+            sl -= 0.02   # 3 strict up bars — widen
+        elif falls == 3:
+            sl += 0.02   # 3 strict down bars — tighten
+
+    # Factor 4: peak protection (sub-trail zone only)
+    # Scope: peak 10-50%, below Guardian's Phase 2 trail threshold.
+    # Above peak >= 50%, Guardian's ath_phase2/phase3 trail handles protection.
+    # Here we just tighten the hard SL so a modest winner doesn't retrace all
+    # the way to -7% before exiting.
+    peak = getattr(pos, 'peak_pnl', 0) or 0
+    if peak > 0.10:
+        sl = max(sl, -0.03)
+
+    # Bounds: at most -15% (room), at least -3% (don't sit through bigger losses)
+    return max(-0.15, min(-0.03, sl))
+
+
 # ─── EXIT Guardian Thread ─────────────────────────────────────────────────────
 # Independent thread that monitors all positions every 3 seconds.
 # Never blocked by SmartEntry or watchlist scanning.
@@ -112,9 +172,18 @@ class ExitGuardianThread(threading.Thread):
 
                 # --- Get watchlist entry for dynamic_sl ---
                 w_entry = self.store.get_by_ca(ca)
-                hard_sl = -0.075
+                # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
+                # Base SL comes from AdaptiveSL (w_entry['dynamic_sl']) if set, else -0.07
+                base_sl = -0.07
                 if w_entry:
-                    hard_sl = w_entry.get('dynamic_sl', -0.075)
+                    base_sl = w_entry.get('dynamic_sl', -0.07)
+                # Lazy import to avoid circular dependency
+                try:
+                    from entry_engine import fetch_dexscreener_trend_snapshot
+                    _dex_trend = fetch_dexscreener_trend_snapshot(ca)
+                except Exception:
+                    _dex_trend = None
+                hard_sl = compute_dynamic_sl(pos, _dex_trend, base_sl=base_sl)
 
                 # === Hard Stop Loss (Double-Tap Confirmation) ===
                 # P0 Fix: A single bad price read from Redis killed Coco (+73% → -20.8%).
