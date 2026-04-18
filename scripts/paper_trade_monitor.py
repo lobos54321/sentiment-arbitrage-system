@@ -3854,8 +3854,25 @@ def run_monitor(db):
                                      f"live={live_price:.10f} > max_allowed={trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
+                        # BUG FIX: Also reject if price DROPPED >10% — token likely crashing
+                        if live_price is not None and live_price < trigger_price * 0.90:
+                            _drop_pct = (live_price - trigger_price) / trigger_price * 100
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: price_collapsed "
+                                     f"live={live_price:.10f} dropped {_drop_pct:+.1f}% from trigger={trigger_price:.10f}")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
                     elif _is_ath_momentum:
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f} → skip price recheck, buy ASAP")
+                        # Fast lane: still do a price drop sanity check (漏洞2 fix)
+                        # Skip SmartEntry but DON'T buy into a crash
+                        _fl_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
+                        if _fl_price is not None and trigger_price and _fl_price < trigger_price * 0.90:
+                            _fl_drop = (_fl_price - trigger_price) / trigger_price * 100
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast-lane ABORT: "
+                                     f"price collapsed {_fl_drop:+.1f}% since FIRE "
+                                     f"(live={_fl_price:.10f} vs trigger={trigger_price:.10f})")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f} → price OK, buy ASAP")
                     elif pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
                         # ATH but missing T≥100 or buy_sell or is re-entry → fall through to SmartEntry
                         _block_reasons = []
@@ -3972,17 +3989,24 @@ def run_monitor(db):
                     # SOL pricing: quote_price_sol is already SOL/token from Jupiter
                     # No USD conversion needed — all monitoring now uses SOL
                     quote_price = quote_price_sol
-                    # Fix: use SmartEntry trigger_price (real-time market price) for entry PnL.
-                    # Jupiter quote_price has ~5% spread that caused $BATTLE to hit SL on a +605% coin.
-                    # trigger_price = price at the moment SmartEntry decided to buy = actual market price.
-                    # NOTE: trigger_price now comes from fetch_realtime_price which returns SOL
+
+                    # CRITICAL FIX: Use Jupiter actual fill price as entry_price baseline.
+                    # Previously used trigger_price (Matrix eval snapshot) which could be
+                    # 15-30s stale for fast-lane ATH entries. When price dropped between
+                    # FIRE and execution, entry_price was artificially HIGH → Guardian saw
+                    # phantom -11% PnL on a position that was actually -3% → false hard_sl.
+                    #
+                    # quote_price_sol = what Jupiter actually priced the swap at = true cost basis.
+                    # trigger_price is preserved in the DB 'trigger_price' column for analysis.
+                    price = quote_price
                     trigger_price_val = pending.get('trigger_price')
-                    if trigger_price_val and trigger_price_val > 0:
-                        price = trigger_price_val
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price(SOL)={price:.12f} (quote_sol={quote_price:.12f} spread={((quote_price-price)/price*100):+.1f}%)")
-                    else:
-                        price = quote_price
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price(SOL)={price:.12f} (no trigger_price)")
+                    _spread = ((quote_price - trigger_price_val) / trigger_price_val * 100) if trigger_price_val and trigger_price_val > 0 else 0
+                    _trigger_str = f"{trigger_price_val:.12f}" if trigger_price_val else "N/A"
+                    log.info(
+                        f"  [ENTRY_PRICE] {pending['symbol']} entry_price={price:.12f} "
+                        f"(quote_fill, trigger_was={_trigger_str} "
+                        f"spread={_spread:+.1f}%)"
+                    )
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades
