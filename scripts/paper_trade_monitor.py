@@ -42,6 +42,7 @@ from entry_engine import (
     calculate_kelly_position, evaluate_smart_entry,
     fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
     evaluate_entry_position, clear_dex_trend_cache,
+    get_liquidity_position_cap, get_adaptive_stop_loss,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
@@ -2485,6 +2486,7 @@ class Position:
         'price_ring', 'vel_history',
         'trail_factor',  # ExitMatrix trail ratchet (in-memory, persistent)
         '_guardian_velocity', '_guardian_tick_vol',  # Written by Guardian thread
+        'peak_ts', '_initial_tick_vol',  # A3 (time-decay) and A4 (flat-top) fields
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
@@ -2507,6 +2509,7 @@ class Position:
         self.exit_quote_failures = int(exit_quote_failures or 0)
         self.last_exit_quote_failure = last_exit_quote_failure or None
         self.peak_pnl = 0.0
+        self.peak_ts = int(entry_ts)  # A3: timestamp of last peak_pnl update (for time-decay trail)
         self.trailing_active = False
         self.bars_held = 0
         self.last_bar_ts = int(entry_ts)
@@ -3595,7 +3598,12 @@ def run_monitor(db):
 
                     symbol = sig['symbol'] or token_ca[:8]
                     super_idx = parse_super_index(sig['description'] or '')
-                    
+
+                    # Super Score filter:
+                    # NOT_ATH: must have Super > min_super_index (config=70)
+                    # ATH: no Super Score (None), skip this filter — ATH uses own pipeline
+                    if not sig.get('is_ath') and (super_idx is None or super_idx <= min_super_index):
+                        continue                    
                     top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)
                     # Config might have 100 as default from old JSON schema, if it's 100 we override to 45 for safety or honor it?
                     # Since user wants it active, let's strictly use 45.0 if it's 100 or missing, to enforce safety easily without JSON patching.
@@ -3666,6 +3674,16 @@ def run_monitor(db):
                 if time.time() - w_entry.get('last_eval_at', 0) < eval_interval:
                     wl_skip_cooldown += 1
                     continue
+
+                # P5: Self cooldown — respect cooldown_until on THIS entry
+                # Catches the deadly "win → instant re-buy same CA → loss" pattern
+                _cd_until = w_entry.get('cooldown_until', 0) or 0
+                if _cd_until > time.time():
+                    _cd_remain = int(_cd_until - time.time())
+                    if _cd_remain > 15:  # only log if > 15s remaining to reduce spam
+                        log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=post_exit_cooldown ({_cd_remain}s remaining)")
+                    wl_skip_cooldown += 1
+                    continue
                 
                 # Skip if max positions reached
                 if len(positions) + len(pending_entries) >= max_positions:
@@ -3684,6 +3702,48 @@ def run_monitor(db):
                     watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
                     log.info(f"  [WATCHLIST] 🗑️ Removed {w_entry['symbol']}: {eval_res['action_reason']}")
                 elif eval_res['action'] == 'fire':
+                    # P3: Minimum age filter — skip tokens younger than 3 minutes
+                    # pump.fun's most toxic dump window is 0-3 min after launch
+                    if entry_age_min < 3:
+                        log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT ({entry_age_min:.0f}min) reason=age_too_young (<3min)")
+                        continue
+
+                    # P2: Per-CA cooldown cross-check — if ANY entry for this CA is in cooldown, skip
+                    _ca = w_entry['ca']
+                    _any_ca_cooldown = False
+                    for _other in watching_entries:
+                        if (_other['ca'] == _ca and _other['id'] != w_entry['id']
+                                and _other.get('cooldown_until', 0) and _other['cooldown_until'] > time.time()):
+                            _remaining = int(_other['cooldown_until'] - time.time())
+                            log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=same_ca_cooldown ({_remaining}s remaining from entry#{_other['id']})")
+                            _any_ca_cooldown = True
+                            break
+                    if _any_ca_cooldown:
+                        continue
+
+                    # PRICE-GATE: For re-entries, current price must be above last entry price.
+                    # Data: 100% of dead cat bounces had price below entry during dip.
+                    # Genuine second waves (SOLANA +1030%, Crashout +1140%) never dipped below entry.
+                    _entry_count = w_entry.get('entry_count', 0) or 0
+                    _last_entry_price = w_entry.get('last_exit_price')  # stores entry_price of last trade
+                    if _entry_count > 0 and _last_entry_price and _last_entry_price > 0:
+                        _current_price = eval_res.get('current_price', 0) or 0
+                        if _current_price > 0 and _current_price <= _last_entry_price:
+                            _price_vs_entry = (_current_price - _last_entry_price) / _last_entry_price * 100
+                            log.info(
+                                f"  [WATCHLIST] 🚫 {w_entry['symbol']} PRICE-GATE BLOCKED: "
+                                f"re-entry #{_entry_count+1}, current={_current_price:.10f} "
+                                f"<= last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
+                            )
+                            continue
+                        elif _current_price > _last_entry_price:
+                            _price_vs_entry = (_current_price - _last_entry_price) / _last_entry_price * 100
+                            log.info(
+                                f"  [WATCHLIST] ✅ {w_entry['symbol']} PRICE-GATE PASS: "
+                                f"re-entry #{_entry_count+1}, current={_current_price:.10f} "
+                                f"> last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
+                            )
+
                     # Fetch signal description for sub-index parsing (Task 6)
                     # NOTE: premium_signals lives in SENTIMENT_DB (sentiment_arb.db),
                     # not in the paper_trades db connection.
@@ -3729,7 +3789,15 @@ def run_monitor(db):
                     # Note: Kelly always returns >= 0.03 SOL (never vetoes).
                     # Matrix+Momentum decide whether to trade; Kelly only sizes.
 
-                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {pending_entries[lifecycle_id]['kelly_position_sol']} SOL -> Pending queue")
+                    # P7: Minimum position threshold — skip if Kelly gives floor value
+                    # Data: 0.03 SOL trades have terrible risk/reward (avg loss -15%, wins earn 0.002 SOL)
+                    _kelly_sol = pending_entries[lifecycle_id]['kelly_position_sol']
+                    if _kelly_sol <= 0.05:
+                        log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
+                    log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {_kelly_sol} SOL -> Pending queue")
                     last_progress = time.time()
                 else:
                     # Log the 'wait' action so user sees why it's not firing
@@ -3761,16 +3829,30 @@ def run_monitor(db):
                     _scores = pending.get('matrix_scores') or {}
                     _m_score = _scores.get('momentum', 0)
                     _v_score = _scores.get('volume', 0)
-                    # Fast lane requires ATH + M=100 + V≥70 + buy_sell≥1.0
-                    # V≥70 filters volume, buy_sell≥1.0 ensures buyers >= sellers (uses cached DexScreener)
+                    _t_score = _scores.get('trend', 0)
+                    _s_score = _scores.get('signal', 0)
+                    # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
+                    pending_w_entry = pending.get('w_entry')
+                    _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
+                    # Fast lane requires ATH + T=100 + V=100 + S=100 + M=100 + buy_sell≥1.0
+                    # P is exempt: ATH tokens naturally sit at price highs → P is always low
+                    # ALL other scores must be perfect. Any weakness = go through SmartEntry.
+                    # Re-entries NEVER get fast lane — must confirm pullback-bounce first.
                     _ath_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
-                        pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70
+                        pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100
+                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 100
+                        and _s_score and _s_score >= 100
                     ) else None
                     _ath_bs_ratio = (_ath_dex.get('buys_m5', 0) / max(_ath_dex.get('sells_m5', 1), 1)) if _ath_dex else 0
+                    _ath_pc_m5 = _ath_dex.get('price_change_m5', 0) if _ath_dex else 0
                     _is_ath_momentum = (pending.get('signal_type') == 'ATH'
+                                       and _t_score and _t_score >= 100
+                                       and _v_score and _v_score >= 100
+                                       and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
-                                       and _v_score and _v_score >= 70
-                                       and _ath_bs_ratio >= 1.0)
+                                       and _ath_bs_ratio >= 1.0
+                                       and _ath_pc_m5 > 0  # 5min price must be UP (fixes Abducted: 15s bounce in -9% crash)
+                                       and _entry_count == 0)  # re-entries must go through SmartEntry
 
                     if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
@@ -3779,22 +3861,44 @@ def run_monitor(db):
                                      f"live={live_price:.10f} > max_allowed={trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
+                        # BUG FIX: Also reject if price DROPPED >10% — token likely crashing
+                        if live_price is not None and live_price < trigger_price * 0.90:
+                            _drop_pct = (live_price - trigger_price) / trigger_price * 100
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: price_collapsed "
+                                     f"live={live_price:.10f} dropped {_drop_pct:+.1f}% from trigger={trigger_price:.10f}")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
                     elif _is_ath_momentum:
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+M100+V{_v_score}+BS{_ath_bs_ratio:.1f} → skip price recheck, buy ASAP")
+                        # Fast lane: still do a price drop sanity check (漏洞2 fix)
+                        # Skip SmartEntry but DON'T buy into a crash
+                        _fl_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
+                        if _fl_price is not None and trigger_price and _fl_price < trigger_price * 0.90:
+                            _fl_drop = (_fl_price - trigger_price) / trigger_price * 100
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast-lane ABORT: "
+                                     f"price collapsed {_fl_drop:+.1f}% since FIRE "
+                                     f"(live={_fl_price:.10f} vs trigger={trigger_price:.10f})")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → price OK, buy ASAP")
                     elif pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
-                        # ATH+M100+V70 but buy_sell failed → fall through to normal path
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: buy_sell={_ath_bs_ratio:.2f} < 1.0 (sellers dominate)")
+                        # ATH but missing T≥100 or buy_sell or is re-entry or price_m5≤0 → fall through to SmartEntry
+                        _block_reasons = []
+                        if _t_score < 100: _block_reasons.append(f"T={_t_score}<100")
+                        if _ath_bs_ratio < 1.0: _block_reasons.append(f"bs={_ath_bs_ratio:.2f}<1.0")
+                        if _ath_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_ath_pc_m5:+.1f}%<=0")
+                        if _entry_count > 0: _block_reasons.append(f"re-entry#{_entry_count+1}")
+                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
 
                     # --- Smart Entry Engine (replaces Dip-then-Rip) ---
                     # Layer 1: DexScreener volume-price trend confirmation
                     # Layer 2: Price trajectory pullback-bounce detection
                     # Max wait: 15 minutes. No chase — only pullback-bounce entries.
-                    # EXCEPTION: ATH + M=100 → skip SmartEntry, buy immediately (momentum_direct).
+                    # EXCEPTION: ATH + T≥100 + M=100 + first entry → skip SmartEntry (momentum_direct).
                     if not pending.get('timing_passed'):
                         pending_w_entry = pending.get('w_entry')
                         if _is_ath_momentum:
-                            # Verified parabolic — no pullback to wait for, just buy
-                            log.info(f"  [SmartEntry] {pending['symbol']} ATH+M100 → SKIP pullback wait, momentum_direct")
+                            # Verified parabolic first entry — no pullback to wait for, just buy
+                            log.info(f"  [SmartEntry] {pending['symbol']} ATH+T100+M100 first entry → SKIP pullback wait, momentum_direct")
                             pending['timing_passed'] = True
                             entry_mode = 'momentum_direct'
                             pending['kelly_position_sol'] = calculate_kelly_position(
@@ -3836,8 +3940,22 @@ def run_monitor(db):
                                 matrix_scores=pending.get('matrix_scores'))
                             log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
-                    # Kelly position size: use kelly_position_sol if available, else config default
-                    actual_position_size_sol = pending.get('kelly_position_sol') or position_size_sol
+                    # Kelly position size: apply three-layer cap
+                    # Layer 1: Kelly formula output
+                    # Layer 2: MAXposition 0.5 SOL hard cap
+                    # Layer 3: A1 - max 1% of pool liquidity (prevents slippage in thin pools)
+                    _kelly_raw = pending.get('kelly_position_sol') or position_size_sol
+                    _liq_cap = get_liquidity_position_cap(
+                        pending['token_ca'],
+                        sol_price_usd=sol_price,
+                    )
+                    actual_position_size_sol = min(
+                        _kelly_raw,
+                        0.5,  # hard cap
+                        _liq_cap if _liq_cap is not None else 0.5,
+                    )
+                    if _liq_cap is not None and actual_position_size_sol < _kelly_raw:
+                        log.info(f"  [ENTRY_SIZE] {pending['symbol']} kelly={_kelly_raw:.3f} → liq_cap={actual_position_size_sol:.3f} SOL (pool liquidity limit)")
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,
@@ -3880,17 +3998,24 @@ def run_monitor(db):
                     # SOL pricing: quote_price_sol is already SOL/token from Jupiter
                     # No USD conversion needed — all monitoring now uses SOL
                     quote_price = quote_price_sol
-                    # Fix: use SmartEntry trigger_price (real-time market price) for entry PnL.
-                    # Jupiter quote_price has ~5% spread that caused $BATTLE to hit SL on a +605% coin.
-                    # trigger_price = price at the moment SmartEntry decided to buy = actual market price.
-                    # NOTE: trigger_price now comes from fetch_realtime_price which returns SOL
+
+                    # CRITICAL FIX: Use Jupiter actual fill price as entry_price baseline.
+                    # Previously used trigger_price (Matrix eval snapshot) which could be
+                    # 15-30s stale for fast-lane ATH entries. When price dropped between
+                    # FIRE and execution, entry_price was artificially HIGH → Guardian saw
+                    # phantom -11% PnL on a position that was actually -3% → false hard_sl.
+                    #
+                    # quote_price_sol = what Jupiter actually priced the swap at = true cost basis.
+                    # trigger_price is preserved in the DB 'trigger_price' column for analysis.
+                    price = quote_price
                     trigger_price_val = pending.get('trigger_price')
-                    if trigger_price_val and trigger_price_val > 0:
-                        price = trigger_price_val
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using trigger_price(SOL)={price:.12f} (quote_sol={quote_price:.12f} spread={((quote_price-price)/price*100):+.1f}%)")
-                    else:
-                        price = quote_price
-                        log.info(f"  [ENTRY_PRICE] {pending['symbol']} using quote_price(SOL)={price:.12f} (no trigger_price)")
+                    _spread = ((quote_price - trigger_price_val) / trigger_price_val * 100) if trigger_price_val and trigger_price_val > 0 else 0
+                    _trigger_str = f"{trigger_price_val:.12f}" if trigger_price_val else "N/A"
+                    log.info(
+                        f"  [ENTRY_PRICE] {pending['symbol']} entry_price={price:.12f} "
+                        f"(quote_fill, trigger_was={_trigger_str} "
+                        f"spread={_spread:+.1f}%)"
+                    )
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades
@@ -3965,7 +4090,8 @@ def run_monitor(db):
                             actual_position_size_sol, 
                             token_amount_raw, 
                             token_decimals or 0, 
-                            trade_id
+                            trade_id,
+                            initial_sl=get_adaptive_stop_loss(),  # A2: volatility-adjusted SL
                         )
                     last_progress = time.time()
                     time.sleep(0.2)
@@ -4037,6 +4163,9 @@ def run_monitor(db):
                             # Guardian writes velocity to its own w_entry copy → relay via Position
                             if hasattr(pos, '_guardian_velocity'):
                                 w_entry['_guardian_velocity'] = pos._guardian_velocity
+                            # A3: relay peak_ts for time-decay trail calculation
+                            if hasattr(pos, 'peak_ts'):
+                                w_entry['_peak_ts'] = pos.peak_ts
 
                         if not w_entry:
                             exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}
@@ -4484,11 +4613,9 @@ def run_monitor(db):
                 
                 # Update Watchlist Status
                 if w_entry:
-                    # Cooldown by exit PnL:
-                    #   Won → no cooldown (trend may continue, let re-enter)
-                    #   Lost → 15min cooldown (don't chase losing coins)
-                    exit_cooldown = 0 if realized_pnl > 0 else 900
-                    watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=exit_cooldown)
+                    # No artificial cooldown — price-gate (current_price > last_entry_price)
+                    # handles re-entry filtering. See mark_watching() docstring.
+                    watchlist.mark_watching(w_entry['id'], realized_pnl)
                 last_progress = time.time()
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'
                 quoted_price_text = f"{effective_exit_price:.10f}" if effective_exit_price is not None else 'na'

@@ -183,9 +183,11 @@ class ExitGuardianThread(threading.Thread):
                 # Without this, they diverge and Guardian uses stale peak → wrong trail floor
                 if w_entry:
                     w_peak = w_entry.get('peak_pnl', 0) or 0
-                    pos.peak_pnl = max(pos.peak_pnl, w_peak)  # read ExitMatrix's peak
+                    if w_peak > pos.peak_pnl:
+                        pos.peak_pnl = w_peak  # read ExitMatrix's peak
                 if pnl > pos.peak_pnl:
                     pos.peak_pnl = pnl
+                    pos.peak_ts = time.time()  # A3: record when peak was achieved
                 if w_entry and pos.peak_pnl > (w_entry.get('peak_pnl', 0) or 0):
                     w_entry['peak_pnl'] = pos.peak_pnl  # write back for ExitMatrix
 
@@ -215,6 +217,59 @@ class ExitGuardianThread(threading.Thread):
                 pos._guardian_velocity = use_vel
                 pos._guardian_tick_vol = tick_vol
 
+                # === A1: Thin Pool Liquidity Adjustment ===
+                # If DexScreener pool liquidity < $15k, tighten all trail floors by 5pp.
+                _liq_usd = (w_entry.get('_dex_liquidity_usd') or 0) if w_entry else 0
+                _thin_pool_bonus = 0.05 if (0 < _liq_usd < 15000) else 0.0
+                if _thin_pool_bonus:
+                    log.debug(f"[ExitGuardian] {pos.symbol} thin pool (${_liq_usd:,.0f}) → trail +5pp tighter")
+
+                # === A3: Time-Decay Trail Tightening ===
+                # After peak is established (>10%), the longer we stay without making
+                # a new high, the more the trail floor tightens.
+                # This catches the 'slow bleed at the top' pattern.
+                _time_since_peak = time.time() - getattr(pos, 'peak_ts', pos.entry_ts)
+                if pos.peak_pnl >= 0.10 and _time_since_peak > 120:
+                    # Decay schedule: >2min=10%, >3min=25%, >5min=50% tighter
+                    if _time_since_peak > 300:
+                        _decay_factor = 0.50  # 5min+ stale → halve the trail margin
+                    elif _time_since_peak > 180:
+                        _decay_factor = 0.75  # 3min+ stale → 25% tighter
+                    else:
+                        _decay_factor = 0.90  # 2min+ stale → 10% tighter
+                    log.info(
+                        f"[ExitGuardian] ⏳ {pos.symbol} TIME_DECAY active: "
+                        f"peak={pos.peak_pnl*100:+.1f}% stale for {_time_since_peak:.0f}s "
+                        f"→ decay_factor={_decay_factor} (trail margins ×{_decay_factor})"
+                    )
+                else:
+                    _decay_factor = 1.0  # no decay
+
+                # === A4: Flat-Top Distribution Detection ===
+                # If price has been flat (< 0.5% change over last 8+ ticks = 24s+)
+                # while peak > 10% AND tick_vol has decayed > 50%, it's likely
+                # a distribution phase (whales exiting, price propped by small buys).
+                # Add +3pp to trail floor to force earlier exit.
+                _distrib_bonus = 0.0
+                if pos.peak_pnl >= 0.10 and len(pos.price_ring) >= 8:
+                    _recent_prices = [p for _, p in list(pos.price_ring)[-8:]]
+                    _p_min, _p_max = min(_recent_prices), max(_recent_prices)
+                    _flat_range = (_p_max - _p_min) / _p_min if _p_min > 0 else 0
+                    # Check if tick_vol has decayed (compare current to initial)
+                    _initial_tvol = getattr(pos, '_initial_tick_vol', None)
+                    if _initial_tvol is None and tick_vol > 0:
+                        pos._initial_tick_vol = tick_vol
+                        _initial_tvol = tick_vol
+                    _tvol_decay = (tick_vol / _initial_tvol) if _initial_tvol and _initial_tvol > 0 else 1.0
+
+                    if _flat_range < 0.005 and _tvol_decay < 0.50:
+                        _distrib_bonus = 0.03  # +3pp tighter
+                        log.info(
+                            f"[ExitGuardian] ⚠️ {pos.symbol} FLAT-TOP detected: "
+                            f"range={_flat_range*100:.2f}% over 8 ticks, "
+                            f"tick_vol decay={_tvol_decay:.1%} → trail +3pp"
+                        )
+
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 # ATH Fast Lane: three-phase — mirrors matrix_evaluator logic
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
@@ -242,14 +297,24 @@ class ExitGuardianThread(threading.Thread):
                         continue
 
                 elif _is_ath_entry and not is_moon:
+                    # === Velocity factor for ALL ATH trail phases ===
+                    # Tighten margins when velocity signals crash/fade
+                    if raw_vel_30s < -5.0:
+                        _vel_tighten = 0.70   # CRASH → 30% tighter margins
+                    elif use_vel < -2.0:
+                        _vel_tighten = 0.85   # fading → 15% tighter
+                    else:
+                        _vel_tighten = 1.0    # neutral/rising → no change
+
                     # === ATH Phase 2 (50-100%): absolute -20pp trail ===
                     if pos.peak_pnl >= 0.50:
-                        trail_floor = pos.peak_pnl - 0.20
+                        _base_margin = 0.20 * _decay_factor * _vel_tighten
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE2 TRAIL: "
                                 f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, -20pp abs) price={price:.10f} src={src}"
+                                f"(peak={pos.peak_pnl*100:.1f}%, -20pp+liq{_thin_pool_bonus*100:.0f}pp) price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
@@ -261,8 +326,82 @@ class ExitGuardianThread(threading.Thread):
                                 })
                             self._exit_pending.add(trade_id)
                             continue
-                    # Phase 1 (peak < 50%): no Guardian trail — only hard SL applies
-                    # (hard SL is handled separately in the main loop)
+                    # === ATH Phase 1 (peak < 50%): tiered trail protection ===
+                    # Synced with matrix_evaluator Phase1 tiers (fixes DUCK +20.6% → -15.8% bug)
+                    if pos.peak_pnl >= 0.25:
+                        _base_margin = 0.15 * _decay_factor * _vel_tighten
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_25: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, -15pp+liq) price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_phase1_trail_25 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -15pp)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+                    elif pos.peak_pnl >= 0.15:
+                        _base_margin = 0.10 * _decay_factor * _vel_tighten
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_15: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, -10pp+liq) price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_phase1_trail_15 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -10pp)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+                    # === ATH Phase 1a: peak < 15% — velocity+volume crash brake ===
+                    # Previously "free run" — no protection at all. TripleUnch lost +11.9% → -6.9%.
+                    # Now: use velocity and volume signals to detect crashes early.
+                    if pos.peak_pnl >= 0.05:  # only if we've seen at least +5% peak
+                        _ath_crash_exit = False
+                        _ath_crash_reason = ''
+
+                        # Crash brake 1: velocity-driven — rapid decline
+                        if raw_vel_30s < -5.0 and pnl < pos.peak_pnl * 0.3:
+                            # Crashing >5%/min AND lost >70% of peak → dump it
+                            _ath_crash_exit = True
+                            _ath_crash_reason = f'vel_crash (vel={raw_vel_30s:.1f}%/min, pnl={pnl:.1%} < 30% of peak={pos.peak_pnl:.1%})'
+                        elif use_vel < -3.0 and pnl <= 0:
+                            # Steady decline >3%/min AND back to breakeven → cut
+                            _ath_crash_exit = True
+                            _ath_crash_reason = f'vel_fade (vel={use_vel:.1f}%/min, pnl={pnl:.1%} <= 0, peak was {pos.peak_pnl:.1%})'
+                        # Crash brake 2: volume death — tick_vol near zero while declining
+                        elif tick_vol < 0.001 and pnl < pos.peak_pnl * 0.5 and len(pos.price_ring) >= 5:
+                            _ath_crash_exit = True
+                            _ath_crash_reason = f'vol_death (tick_vol={tick_vol:.4f}, pnl={pnl:.1%} < 50% of peak={pos.peak_pnl:.1%})'
+
+                        if _ath_crash_exit:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 CRASH BRAKE: "
+                                f"{_ath_crash_reason} price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_crash_brake ({_ath_crash_reason})',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
 
                 else:
                     # === Standard (non-ATH) Trail ===
@@ -294,7 +433,7 @@ class ExitGuardianThread(threading.Thread):
                             vel_factor = max(vel_factor, 0.60)
 
                         trail_factor = max(base_factor, vel_factor)
-                        trail_floor = pos.peak_pnl * trail_factor
+                        trail_floor = pos.peak_pnl * trail_factor + _thin_pool_bonus + _distrib_bonus
 
                         if pnl < trail_floor:
                             log.info(

@@ -60,10 +60,11 @@ def _lazy_import():
 
 # ─── Individual Matrix Scorers ─────────────────────────────────────────────
 
-def score_trend(bars, symbol):
+def score_trend(bars, symbol, token_ca=None, pool_address=None):
     """
     Matrix ① — Trend Direction
-    Reuses existing check_multi_bar_trend logic.
+    Uses K-line slope (check_multi_bar_trend) as primary signal,
+    cross-checked with DexScreener price_m5 to catch recent reversals.
 
     Returns: (score: int 0-100, reason: str, detail: str)
     """
@@ -75,6 +76,20 @@ def score_trend(bars, symbol):
 
     if trend_ok:
         if reason == 'passed_shape':
+            # Cross-check: K-line says uptrend, but is DexScreener 5-min also up?
+            # Catches dead cat bounces where K-line history is still positive
+            # but the last 5 minutes saw a crash (Abducted bug).
+            if token_ca and callable(_dex_trend_fn):
+                try:
+                    _dex = _dex_trend_fn(token_ca)
+                    _pc_m5 = _dex.get('price_change_m5', 0) if _dex else 0
+                    if _pc_m5 < -3.0:
+                        return 0, 'slope_vs_dex_conflict', (
+                            f"K-line uptrend BUT dex price_m5={_pc_m5:+.1f}% (recent crash). "
+                            f"Original: {detail}"
+                        )
+                except Exception:
+                    pass  # DexScreener failure → trust K-line alone
             return 100, reason, detail
         else:
             return 50, reason, detail  # insufficient_bars etc
@@ -458,7 +473,7 @@ class MatrixEvaluator:
         if not bars or len(bars) < 3:
             bars = self._get_synthetic_bars(ca)
 
-        scores['trend'], reasons['trend'], _ = score_trend(bars, symbol)
+        scores['trend'], reasons['trend'], _ = score_trend(bars, symbol, token_ca=ca)
 
         # --- Matrix ② Volume ---
         scores['volume'], reasons['volume'] = score_volume(
@@ -540,7 +555,10 @@ class MatrixEvaluator:
         action_reason = 'matrices not yet aligned'
 
         if ready:
-            # --- Matrix ④ Realtime Momentum (costs ~6 seconds) ---
+            # DexScreener price_m5 trend check is now integrated into score_trend()
+            # (T score). If K-line says uptrend but price_m5 < -3% → T=0 → hard block
+            # for NOT_ATH. No need for a separate Trend Gate.
+
             log.info(
                 f"[Matrix] ${symbol} pre-momentum PASS: "
                 f"T={scores['trend']} V={scores['volume']} P={scores['price']} S={scores['signal']} "
@@ -731,6 +749,22 @@ class ExitMatrixEvaluator:
         current_pnl = (current_price - entry_price) / entry_price
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
+        # === A3: Time-Decay Factor ===
+        # If peak hasn't been refreshed in >2min and peak is meaningful (>10%),
+        # progressively tighten trail margins. Meme coins that peak and plateau
+        # are almost certainly in distribution phase.
+        _peak_ts = entry.get('_peak_ts', 0) or entry.get('entry_time', 0) or 0
+        _time_since_peak = (time.time() - _peak_ts) if _peak_ts > 0 else 0
+        if peak_pnl >= 0.10 and _time_since_peak > 120:
+            if _time_since_peak > 300:
+                _decay = 0.50   # 5min+ → halve margin
+            elif _time_since_peak > 180:
+                _decay = 0.75   # 3min+ → 25% tighter
+            else:
+                _decay = 0.90   # 2min+ → 10% tighter
+        else:
+            _decay = 1.0
+
         # === Hard Stop-Loss ===
         # Default -7.5% — momentum entries that immediately drop 7.5% are bad signals.
         # dynamic_sl can tighten this if trailing stop moves SL up.
@@ -764,9 +798,18 @@ class ExitMatrixEvaluator:
                     'trail_floor': None,
                 }
 
-            # Phase 2: peak 50-100% → trail with absolute -20pp floor
+            # Phase 2: peak 50-100% → trail with absolute -20pp floor (A3: time-decay applied)
+            # Velocity factor: tighten margins when momentum is fading
+            _vel = entry.get('_guardian_velocity', 0) or 0
+            if _vel < -5.0:
+                _vel_t = 0.70   # CRASH → 30% tighter
+            elif _vel < -2.0:
+                _vel_t = 0.85   # fading → 15% tighter
+            else:
+                _vel_t = 1.0
+
             if peak_pnl >= 0.50:
-                trail_floor = peak_pnl - 0.20
+                trail_floor = peak_pnl - (0.20 * _decay * _vel_t)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -781,10 +824,68 @@ class ExitMatrixEvaluator:
                     'trail_floor': trail_floor,
                 }
 
-            # Phase 1: peak < 50% — free run, no trail stop
+            # Phase 1: peak < 50% — tiered protection (was unconditional free_run → DUCK bug)
+            # Sub-phase 1c: peak >= 25% → trail with -15pp floor (A3: time-decay applied)
+            if peak_pnl >= 0.25:
+                trail_floor = peak_pnl - (0.15 * _decay * _vel_t)
+                if current_pnl < trail_floor:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_phase1_trail_25 (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, -15pp)',
+                        'current_pnl': current_pnl,
+                        'trail_floor': trail_floor,
+                    }
+                return {
+                    'action': 'hold',
+                    'reason': f'ath_phase1_hold_25 (floor={trail_floor:.1%}, peak={peak_pnl:.1%})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': trail_floor,
+                }
+
+            # Sub-phase 1b: peak >= 15% → trail with -10pp floor (A3: time-decay applied)
+            if peak_pnl >= 0.15:
+                trail_floor = peak_pnl - (0.10 * _decay * _vel_t)
+                if current_pnl < trail_floor:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_phase1_trail_15 (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, -10pp)',
+                        'current_pnl': current_pnl,
+                        'trail_floor': trail_floor,
+                    }
+                return {
+                    'action': 'hold',
+                    'reason': f'ath_phase1_hold_15 (floor={trail_floor:.1%}, peak={peak_pnl:.1%})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': trail_floor,
+                }
+
+            # Sub-phase 1a: peak < 15% — velocity+volume crash brake
+            # Previously unconditional free_run. Now uses Guardian velocity signals.
+            _vel = entry.get('_guardian_velocity', 0) or 0
+            _tvol = entry.get('_guardian_tick_vol', 1) or 1
+            if peak_pnl >= 0.05:  # had at least +5% peak
+                _crash = False
+                _crash_reason = ''
+                if _vel < -5.0 and current_pnl < peak_pnl * 0.3:
+                    _crash = True
+                    _crash_reason = f'vel_crash (vel={_vel:.1f}, pnl={current_pnl:.1%} < 30% of peak={peak_pnl:.1%})'
+                elif _vel < -3.0 and current_pnl <= 0:
+                    _crash = True
+                    _crash_reason = f'vel_fade (vel={_vel:.1f}, pnl={current_pnl:.1%}, peak was {peak_pnl:.1%})'
+                elif _tvol < 0.001 and current_pnl < peak_pnl * 0.5:
+                    _crash = True
+                    _crash_reason = f'vol_death (tvol={_tvol:.4f}, pnl={current_pnl:.1%} < 50% of peak={peak_pnl:.1%})'
+                if _crash:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_crash_brake ({_crash_reason})',
+                        'current_pnl': current_pnl,
+                        'trail_floor': None,
+                    }
+
             return {
                 'action': 'hold',
-                'reason': f'ath_phase1_free_run (peak={peak_pnl:.1%} < 50%)',
+                'reason': f'ath_phase1_free_run (peak={peak_pnl:.1%} < 15%)',
                 'current_pnl': current_pnl,
                 'trail_floor': None,
             }

@@ -276,19 +276,47 @@ class WatchlistStore:
 
     def get_recent_closed_trades(self, limit=50):
         """P3: Fetch recent closed trades with exit PnL for Kelly odds calculation.
-        Returns list of dicts with 'exit_pnl' key."""
+        Returns list of dicts with 'exit_pnl' and 'closed_at' keys."""
         rows = self.db.execute('''
-            SELECT last_exit_pnl as exit_pnl FROM watchlist
+            SELECT last_exit_pnl as exit_pnl,
+                   datetime(last_exit_at, 'unixepoch') as closed_at
+            FROM watchlist
             WHERE status IN ('watching', 'expired') AND last_exit_pnl IS NOT NULL
             ORDER BY last_exit_at DESC LIMIT ?
         ''', (limit,)).fetchall()
-        return [{'exit_pnl': r['exit_pnl']} for r in rows]
+        return [{'exit_pnl': r['exit_pnl'], 'closed_at': r['closed_at'] or ''} for r in rows]
+
+    def get_recent_avg_peak_pnl(self, limit=20):
+        """A2: Get average peak_pnl from recent trades for ATR-adaptive stop-loss.
+        Uses paper_trades table — peak_pnl is recorded at close time.
+        Returns float average (e.g., 0.15 = 15% avg peak), or None if insufficient data.
+        """
+        try:
+            # Need to connect to paper_trades.db explicitly since self.db is watchlist.db
+            paper_db_path = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
+            with sqlite3.connect(paper_db_path) as pdb:
+                pdb.row_factory = sqlite3.Row
+                rows = pdb.execute('''
+                    SELECT peak_pnl FROM paper_trades
+                    WHERE peak_pnl IS NOT NULL AND peak_pnl > 0
+                    ORDER BY rowid DESC LIMIT ?
+                ''', (limit,)).fetchall()
+                if len(rows) < 5:  # Need at least 5 trades for meaningful average
+                    return None
+                avg = sum(r['peak_pnl'] for r in rows) / len(rows)
+                return avg
+        except Exception as e:
+            log.error(f"[WL] Error calculating avg_peak_pnl: {e}")
+            return None
 
     # ─── State Transitions ─────────────────────────────────────────────
 
     def mark_holding(self, entry_id, entry_price, position_size_sol,
-                     token_amount_raw, token_decimals, trade_id):
-        """Transition from watching → holding after buy execution."""
+                     token_amount_raw, token_decimals, trade_id,
+                     initial_sl=-0.075):
+        """Transition from watching → holding after buy execution.
+        initial_sl: A2 adaptive stop-loss (default -7.5%, overridden by get_adaptive_stop_loss())
+        """
         now = time.time()
         self._update(entry_id,
                      status='holding',
@@ -301,12 +329,12 @@ class WatchlistStore:
                      trade_id=trade_id,
                      has_locked_profit=0,
                      trailing_active=0,
-                     dynamic_sl=-0.075,
+                     dynamic_sl=initial_sl,
                      zero_vol_count=0,
                      moon_trail_factor=0.2,
                      last_matrix_check=now,
                      entry_count_delta=1)  # increment entry_count
-        log.info(f"[WL] → holding (entry_id={entry_id} trade_id={trade_id})")
+        log.info(f"[WL] → holding (entry_id={entry_id} trade_id={trade_id} sl={initial_sl*100:.1f}%)")
 
     def mark_moon_bag(self, entry_id, moon_peak_pnl):
         """Transition from holding → moon_bag after 50% profit lock."""
@@ -320,32 +348,31 @@ class WatchlistStore:
                      last_matrix_check=now)
         log.info(f"[WL] → moon_bag (entry_id={entry_id})")
 
-    def mark_watching(self, entry_id, exit_pnl, cooldown_sec=180):
-        """Transition from holding/moon_bag → watching (re-observation after exit)."""
+    def mark_watching(self, entry_id, exit_pnl, cooldown_sec=0):
+        """Transition from holding/moon_bag → watching (re-observation after exit).
+
+        Re-entry gating is handled entirely by PRICE-GATE (current_price > last_entry_price)
+        in paper_trade_monitor.py — no artificial cooldown needed.
+        The natural latency of Matrix→SmartEntry evaluation (~30s+) provides implicit delay.
+        """
         now = time.time()
 
         # Save current entry_price as last_exit_price before clearing
-        # (fixes bug where entry_price=None broke re-entry price validation)
+        # (used by price-gate check: re-entry requires current_price > last_entry_price)
         existing = self.get_by_id(entry_id)
         last_exit_price_val = existing.get('entry_price') if existing else None
 
-        # P2: Track consecutive losses for cooldown
+        # Track consecutive losses (for logging/diagnostics only)
         prev_consec = (existing.get('consecutive_losses', 0) or 0) if existing else 0
 
         if exit_pnl is not None and exit_pnl < 0:
-            # Loss: increment consecutive loss counter
             new_consec = prev_consec + 1
             loss_time = now
-            # Dynamic cooldown: 1 loss → 15min, 2+ losses → 2h
-            if new_consec >= 2:
-                cooldown_sec = 7200   # 2 hours
-            else:
-                cooldown_sec = 900    # 15 minutes
-            log.info(f"[WL] Loss cooldown: consecutive_losses={new_consec} → cooldown={cooldown_sec}s")
+            log.info(f"[WL] Loss exit: consecutive_losses={new_consec}, no cooldown (price-gate active)")
         else:
-            # Profit or breakeven: reset consecutive loss counter
             new_consec = 0
             loss_time = 0
+            log.info(f"[WL] Win exit: no cooldown (price-gate active)")
 
         self._update(entry_id,
                      status='watching',

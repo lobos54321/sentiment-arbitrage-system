@@ -19,13 +19,45 @@ KELLY_BASE_CAPITAL_SOL = float(os.environ.get('KELLY_BASE_CAPITAL_SOL', '5.0'))
 KELLY_BASE_WIN_RATE    = 0.45   # Based on overnight data: 48% win rate (conservative)
 KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss (ONLY used as fallback)
 KELLY_COLD_START_ODDS  = 2.0   # Based on overnight data: avg_win=16.3% / avg_loss=8%
-
-# Only use trades after this date for Kelly historical data
-# (old trades used -15% SL, now we use -7.5% — old avg_loss is not representative)
-KELLY_DATA_CUTOFF = '2026-04-15 12:00:00'
+MAX_POSITION_SOL       = 0.5   # Hard cap: protect against Kelly outliers (was uncapped → 1.0 SOL)
 
 # P3: Historical odds cache
 _kelly_trade_cache = {'wins': [], 'losses': [], 'last_refresh': 0}
+
+# A2: Adaptive stop-loss cache (refreshed every 5 minutes)
+_adaptive_sl_cache = {'sl': -0.075, 'last_refresh': 0}
+
+def get_adaptive_stop_loss():
+    """A2: Compute adaptive stop-loss based on recent trade volatility.
+    Uses avg peak_pnl from last 20 trades as a volatility proxy:
+    - High avg peak (25%+) → wide SL (-12%) to avoid early washout
+    - Low avg peak (6%) → tight SL (-5%) to cut losers fast
+    - Default (no data): -7.5%
+    Returns: float (e.g., -0.075)
+    """
+    cache = _adaptive_sl_cache
+    now = time.time()
+    if now - cache['last_refresh'] < 300:  # refresh every 5 min
+        return cache['sl']
+
+    try:
+        store = WatchlistStore()
+        avg_peak = store.get_recent_avg_peak_pnl(limit=20)
+        if avg_peak is None:
+            cache['last_refresh'] = now
+            return cache['sl']  # keep previous value
+
+        # Formula: sl = -(avg_peak * 0.35), clamped to [-0.12, -0.05]
+        raw_sl = -(avg_peak * 0.35)
+        adaptive = max(-0.12, min(-0.05, raw_sl))
+        cache['sl'] = round(adaptive, 4)
+        cache['last_refresh'] = now
+        log.info(f"[AdaptiveSL] avg_peak={avg_peak*100:.1f}% → SL={adaptive*100:.1f}% (raw={raw_sl*100:.2f}%)")
+        return cache['sl']
+    except Exception as e:
+        log.debug(f"[AdaptiveSL] failed: {e}")
+        cache['last_refresh'] = now
+        return cache['sl']
 
 # ─── SmartEntry Constants ─────────────────────────────────────────────────────
 _dex_trend_cache = {}
@@ -74,9 +106,10 @@ def _get_historical_odds(min_trades=20, default_b=None):
         try:
             store = WatchlistStore()
             trades = store.get_recent_closed_trades(limit=50)
-            # Filter: only use trades after cutoff (old -15% SL data is not representative)
-            trades = [t for t in trades
-                      if t.get('closed_at', '') >= KELLY_DATA_CUTOFF]
+            # BUG FIX: previous code filtered by t.get('closed_at', '') which didn't exist
+            # in the query result → every trade was filtered out → Kelly was always cold start.
+            # Now watchlist_store returns closed_at properly. No cutoff filter needed —
+            # the query already orders by last_exit_at DESC and limits to 50.
             cache['wins'] = [t['exit_pnl'] for t in trades if t['exit_pnl'] and t['exit_pnl'] > 0]
             cache['losses'] = [abs(t['exit_pnl']) for t in trades if t['exit_pnl'] and t['exit_pnl'] < 0]
             cache['last_refresh'] = now
@@ -186,10 +219,36 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         position *= 0.5
         log.info(f"[Kelly] Re-entry #{entry_count+1} → position×0.5")
 
-    # Hard limits: min 0.03 SOL, max 20% of capital
-    pos = round(max(0.03, min(position, base_capital * 0.20)), 3)
+    # Hard limits: min 0.03 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
+    pos = round(max(0.03, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
     log.info(f"[Kelly] f*={kelly_f:.3f} → {pos} SOL | p={p:.3f} b={b:.2f} mode={entry_mode or 'default'}")
     return pos
+
+
+def get_liquidity_position_cap(token_ca, sol_price_usd, max_pool_pct=0.01):
+    """A1: Compute max position size in SOL based on pool liquidity.
+    Cap = pool_liquidity_usd * max_pool_pct / sol_price_usd
+    This prevents taking positions that are too large relative to the AMM pool,
+    which causes excessive slippage on both entry and especially exit.
+    Returns None if liquidity data unavailable (no cap applied).
+    """
+    if not sol_price_usd or sol_price_usd <= 0:
+        return None
+    try:
+        snap = fetch_dexscreener_trend_snapshot(token_ca)
+        if not snap:
+            return None
+        liquidity_usd = snap.get('liquidity_usd', 0) or 0
+        if liquidity_usd <= 0:
+            return None
+        cap = (liquidity_usd * max_pool_pct) / sol_price_usd
+        # Floor at 0.03 SOL (don't block tiny test trades), cap display at 0.5 (hard cap handles upper bound)
+        cap = max(0.03, cap)
+        log.info(f"[Liquidity] pool=${liquidity_usd:,.0f} → {max_pool_pct*100:.0f}% cap={cap:.3f} SOL (sol=${sol_price_usd:.0f})")
+        return cap
+    except Exception as e:
+        log.debug(f"[Liquidity] cap calc failed: {e}")
+        return None
 
 
 # ─── SmartEntry ───────────────────────────────────────────────────────────────
@@ -221,6 +280,7 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
     volume = best.get('volume', {}) or {}
     txns = best.get('txns', {}) or {}
     price_change = best.get('priceChange', {}) or {}
+    liquidity = best.get('liquidity', {}) or {}
 
     result = {
         'vol_m5': float(volume.get('m5', 0) or 0),
@@ -232,6 +292,8 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
         'price_change_m5': float(price_change.get('m5', 0) or 0),
         'price_change_h1': float(price_change.get('h1', 0) or 0),
         'price_usd': float(best.get('priceUsd', 0) or 0),
+        # A1: Pool liquidity for position sizing — prevent oversized entries in thin pools
+        'liquidity_usd': float(liquidity.get('usd', 0) or 0),
     }
 
     _dex_trend_cache[token_ca] = {'data': result, 'fetched_at': now}
@@ -498,7 +560,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             data_is_fresh = (current_data_key != last_momentum_data)
             last_momentum_data = current_data_key
 
-            if pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
+            # P1: price_m5 > 25% = already extended in 5min, too late to chase.
+            # Picante#1 entered at pc_m5=+24.1% and dumped -7.4% in 26s → SL.
+            if pc_m5 > 25.0:
+                consecutive_momentum_rounds = 0  # reset — refuse to chase
+            elif pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
                 consecutive_momentum_rounds += 1
             elif not (pc_m5 > 15.0 and bs_ratio > 1.0):
                 consecutive_momentum_rounds = 0
