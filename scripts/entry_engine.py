@@ -474,6 +474,9 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
     consecutive_momentum_rounds = 0  # Track consecutive strong momentum rounds
     last_momentum_data = None  # Track last DexScreener data to detect stale cache
     fake_pump_count = 0  # P5: accumulate FAKE_PUMP rounds
+    bearish_extended = False  # Plan #2: granted accumulation grace period once
+    # Plan #2: dynamic max-wait — accumulation extension adds 600s
+    max_wait_sec = SMART_ENTRY_MAX_WAIT_SEC
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
@@ -481,9 +484,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
         f"seeded {seed_count} price points from watchlist)"
     )
 
-
-    for round_num in range(1, max_rounds + 1):
+    round_num = 0
+    while True:
+        round_num += 1
         elapsed = time.time() - start_time
+        if elapsed > max_wait_sec:
+            break
 
         # --- Sample price (every round, using Jupiter/Redis/Helius, NOT DexScreener) ---
         price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
@@ -508,6 +514,46 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             # Don't reject immediately on bearish — it might recover.
             # But if still bearish after 5 minutes, give up.
             if elapsed > 300:
+                # Plan #2: 3-state classifier — distinguish dying from accumulating
+                # before killing the entry. Accumulating coins (sideways with
+                # stable bs/vol) get one 600s extension; only true dying coins
+                # (decisive sell pressure) are rejected outright.
+                _pc_m5 = (cached_trend or {}).get('price_change_m5', 0)
+                _v5 = (cached_trend or {}).get('vol_m5', 0)
+                _vh1 = (cached_trend or {}).get('vol_h1', 0)
+                _h1_avg = _vh1 / 12.0 if _vh1 > 0 else 0
+                _v_ratio = _v5 / _h1_avg if _h1_avg > 0 else 0
+                _bs = (cached_trend or {}).get('buys_m5', 0) / max((cached_trend or {}).get('sells_m5', 1), 1)
+
+                # Dying: decisive death — reject (large dump + low volume + sellers dominate)
+                _is_dying = (_pc_m5 < -5.0 and _v_ratio < 0.7 and _bs < 0.8)
+                # Accumulating: shallow dip with stable vol/bs — extend, don't reject
+                _is_accumulating = (
+                    _pc_m5 >= -5.0
+                    and 0.7 <= _v_ratio <= 1.5
+                    and _bs >= 0.85
+                )
+
+                if _is_dying:
+                    log.info(
+                        f"[SmartEntry] ${symbol} REJECT trend_dying: "
+                        f"pc_m5={_pc_m5:+.1f}% vol_ratio={_v_ratio:.2f} bs={_bs:.2f}"
+                    )
+                    return False, 'trend_dying', (
+                        f'pc_m5={_pc_m5:+.1f}% vol_ratio={_v_ratio:.2f} bs={_bs:.2f}'
+                    ), None
+
+                if _is_accumulating and not bearish_extended:
+                    bearish_extended = True
+                    max_wait_sec = SMART_ENTRY_MAX_WAIT_SEC + 600
+                    log.info(
+                        f"[SmartEntry] ${symbol} ACCUMULATING — extending wait by 600s "
+                        f"(pc_m5={_pc_m5:+.1f}% vol_ratio={_v_ratio:.2f} bs={_bs:.2f})"
+                    )
+                    time.sleep(interval)
+                    continue
+
+                # Neither clearly dying nor clearly accumulating, or already extended
                 return False, 'trend_bearish_timeout', trend_reason, None
             time.sleep(interval)
             continue
