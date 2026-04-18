@@ -560,9 +560,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             data_is_fresh = (current_data_key != last_momentum_data)
             last_momentum_data = current_data_key
 
-            # P1: price_m5 > 50% = already doubled in 5min, too late to chase
-            if pc_m5 > 50.0:
-                consecutive_momentum_rounds = 0  # reset — refuse to chase a doubler
+            # P1: price_m5 > 25% = already extended in 5min, too late to chase.
+            # Picante#1 entered at pc_m5=+24.1% and dumped -7.4% in 26s → SL.
+            if pc_m5 > 25.0:
+                consecutive_momentum_rounds = 0  # reset — refuse to chase
             elif pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
                 consecutive_momentum_rounds += 1
             elif not (pc_m5 > 15.0 and bs_ratio > 1.0):
