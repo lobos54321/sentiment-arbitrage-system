@@ -548,9 +548,11 @@ class MatrixEvaluator:
             from entry_engine import fetch_dexscreener_trend_snapshot
             _fresh_dex = fetch_dexscreener_trend_snapshot(ca)
             _pc_m5 = _fresh_dex.get('price_change_m5', 0) if _fresh_dex else 0
-            if _pc_m5 <= 0:
+            # Threshold -3%: meme coins often dip -0.5~-2% during consolidation
+            # before breakout. Only block truly bearish 5-min trends.
+            if _pc_m5 < -3.0:
                 log.info(
-                    f"[Matrix] ${symbol} TREND GATE FAIL: price_m5={_pc_m5:+.1f}% <= 0 "
+                    f"[Matrix] ${symbol} TREND GATE FAIL: price_m5={_pc_m5:+.1f}% < -3% "
                     f"→ skipping momentum check (broader trend bearish)"
                 )
                 return {

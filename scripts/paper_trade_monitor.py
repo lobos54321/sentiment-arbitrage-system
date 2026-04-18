@@ -3598,7 +3598,11 @@ def run_monitor(db):
 
                     symbol = sig['symbol'] or token_ca[:8]
                     super_idx = parse_super_index(sig['description'] or '')
-                    
+
+                    # Super Score filter: NOT_ATH signals must have Super > min_super_index (80)
+                    # ATH signals don't carry Super Score (None) — they use ATH-specific pipeline
+                    if not sig.get('is_ath') and (super_idx is None or super_idx <= min_super_index):
+                        continue                    
                     top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)
                     # Config might have 100 as default from old JSON schema, if it's 100 we override to 45 for safety or honor it?
                     # Since user wants it active, let's strictly use 45.0 if it's 100 or missing, to enforce safety easily without JSON patching.
