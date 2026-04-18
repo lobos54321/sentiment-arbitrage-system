@@ -3821,19 +3821,23 @@ def run_monitor(db):
                     _m_score = _scores.get('momentum', 0)
                     _v_score = _scores.get('volume', 0)
                     _t_score = _scores.get('trend', 0)
+                    _s_score = _scores.get('signal', 0)
                     _entry_count = w_entry.get('entry_count', 0) if w_entry else 0
-                    # Fast lane requires ATH + T≥100 + M=100 + V≥70 + buy_sell≥1.0
-                    # T≥100 required: matches matrix_evaluator ATH bypass (RETAIL T=50 was wrongly fast-laned)
-                    # Re-entries NEVER get fast lane — must go through SmartEntry for pullback-bounce confirmation
+                    # Fast lane requires ATH + T=100 + V=100 + S=100 + M=100 + buy_sell≥1.0
+                    # P is exempt: ATH tokens naturally sit at price highs → P is always low
+                    # ALL other scores must be perfect. Any weakness = go through SmartEntry.
+                    # Re-entries NEVER get fast lane — must confirm pullback-bounce first.
                     _ath_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
                         pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100
-                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 70
+                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 100
+                        and _s_score and _s_score >= 100
                     ) else None
                     _ath_bs_ratio = (_ath_dex.get('buys_m5', 0) / max(_ath_dex.get('sells_m5', 1), 1)) if _ath_dex else 0
                     _is_ath_momentum = (pending.get('signal_type') == 'ATH'
                                        and _t_score and _t_score >= 100
+                                       and _v_score and _v_score >= 100
+                                       and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
-                                       and _v_score and _v_score >= 70
                                        and _ath_bs_ratio >= 1.0
                                        and _entry_count == 0)  # re-entries must go through SmartEntry
 
