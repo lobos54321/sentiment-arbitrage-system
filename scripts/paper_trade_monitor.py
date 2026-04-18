@@ -3599,8 +3599,9 @@ def run_monitor(db):
                     symbol = sig['symbol'] or token_ca[:8]
                     super_idx = parse_super_index(sig['description'] or '')
 
-                    # Super Score filter: NOT_ATH signals must have Super > min_super_index (80)
-                    # ATH signals don't carry Super Score (None) — they use ATH-specific pipeline
+                    # Super Score filter:
+                    # NOT_ATH: must have Super > min_super_index (config=70)
+                    # ATH: no Super Score (None), skip this filter — ATH uses own pipeline
                     if not sig.get('is_ath') and (super_idx is None or super_idx <= min_super_index):
                         continue                    
                     top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)

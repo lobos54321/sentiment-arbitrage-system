@@ -60,10 +60,11 @@ def _lazy_import():
 
 # ─── Individual Matrix Scorers ─────────────────────────────────────────────
 
-def score_trend(bars, symbol):
+def score_trend(bars, symbol, token_ca=None, pool_address=None):
     """
     Matrix ① — Trend Direction
-    Reuses existing check_multi_bar_trend logic.
+    Uses K-line slope (check_multi_bar_trend) as primary signal,
+    cross-checked with DexScreener price_m5 to catch recent reversals.
 
     Returns: (score: int 0-100, reason: str, detail: str)
     """
@@ -75,6 +76,20 @@ def score_trend(bars, symbol):
 
     if trend_ok:
         if reason == 'passed_shape':
+            # Cross-check: K-line says uptrend, but is DexScreener 5-min also up?
+            # Catches dead cat bounces where K-line history is still positive
+            # but the last 5 minutes saw a crash (Abducted bug).
+            if token_ca and callable(_dex_trend_fn):
+                try:
+                    _dex = _dex_trend_fn(token_ca)
+                    _pc_m5 = _dex.get('price_change_m5', 0) if _dex else 0
+                    if _pc_m5 < -3.0:
+                        return 0, 'slope_vs_dex_conflict', (
+                            f"K-line uptrend BUT dex price_m5={_pc_m5:+.1f}% (recent crash). "
+                            f"Original: {detail}"
+                        )
+                except Exception:
+                    pass  # DexScreener failure → trust K-line alone
             return 100, reason, detail
         else:
             return 50, reason, detail  # insufficient_bars etc
@@ -458,7 +473,7 @@ class MatrixEvaluator:
         if not bars or len(bars) < 3:
             bars = self._get_synthetic_bars(ca)
 
-        scores['trend'], reasons['trend'], _ = score_trend(bars, symbol)
+        scores['trend'], reasons['trend'], _ = score_trend(bars, symbol, token_ca=ca)
 
         # --- Matrix ② Volume ---
         scores['volume'], reasons['volume'] = score_volume(
@@ -540,32 +555,14 @@ class MatrixEvaluator:
         action_reason = 'matrices not yet aligned'
 
         if ready:
-            # --- Pre-check: Fresh DexScreener 5-min trend ---
-            # MUST come BEFORE the expensive momentum check (15s).
-            # If the 5-minute price change is negative, the broader trend is
-            # bearish — a 15-second micro-window finding a bounce is meaningless.
-            # This is the correct order: trend first, then momentum details.
-            from entry_engine import fetch_dexscreener_trend_snapshot
-            _fresh_dex = fetch_dexscreener_trend_snapshot(ca)
-            _pc_m5 = _fresh_dex.get('price_change_m5', 0) if _fresh_dex else 0
-            # Threshold -3%: meme coins often dip -0.5~-2% during consolidation
-            # before breakout. Only block truly bearish 5-min trends.
-            if _pc_m5 < -3.0:
-                log.info(
-                    f"[Matrix] ${symbol} TREND GATE FAIL: price_m5={_pc_m5:+.1f}% < -3% "
-                    f"→ skipping momentum check (broader trend bearish)"
-                )
-                return {
-                    'scores': scores, 'reasons': reasons,
-                    'ready_for_momentum': False,
-                    'action': 'wait',
-                    'action_reason': f"trend_gate: price_m5={_pc_m5:+.1f}% (5min trend bearish, skipping momentum)",
-                }
+            # DexScreener price_m5 trend check is now integrated into score_trend()
+            # (T score). If K-line says uptrend but price_m5 < -3% → T=0 → hard block
+            # for NOT_ATH. No need for a separate Trend Gate.
 
             log.info(
                 f"[Matrix] ${symbol} pre-momentum PASS: "
                 f"T={scores['trend']} V={scores['volume']} P={scores['price']} S={scores['signal']} "
-                f"pc_m5={_pc_m5:+.1f}% → running 5×3s momentum check..."
+                f"→ running 5×3s momentum check..."
             )
 
             # For re-entries: verify price > last exit price
