@@ -60,13 +60,13 @@ def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
         elif falls == 3:
             sl += 0.02   # 3 strict down bars — tighten
 
-    # Factor 4: peak protection — once we've made gains, don't give them all back
+    # Factor 4: peak protection (sub-trail zone only)
+    # Scope: peak 10-50%, below Guardian's Phase 2 trail threshold.
+    # Above peak >= 50%, Guardian's ath_phase2/phase3 trail handles protection.
+    # Here we just tighten the hard SL so a modest winner doesn't retrace all
+    # the way to -7% before exiting.
     peak = getattr(pos, 'peak_pnl', 0) or 0
-    if peak > 0.20:
-        # never give back more than 15pp from peak
-        sl = max(sl, peak - 0.15)
-    elif peak > 0.10:
-        # protect at -3% if we made any double-digit peak
+    if peak > 0.10:
         sl = max(sl, -0.03)
 
     # Bounds: at most -15% (room), at least -3% (don't sit through bigger losses)
