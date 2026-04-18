@@ -781,8 +781,17 @@ class ExitMatrixEvaluator:
                 }
 
             # Phase 2: peak 50-100% → trail with absolute -20pp floor (A3: time-decay applied)
+            # Velocity factor: tighten margins when momentum is fading
+            _vel = entry.get('_guardian_velocity', 0) or 0
+            if _vel < -5.0:
+                _vel_t = 0.70   # CRASH → 30% tighter
+            elif _vel < -2.0:
+                _vel_t = 0.85   # fading → 15% tighter
+            else:
+                _vel_t = 1.0
+
             if peak_pnl >= 0.50:
-                trail_floor = peak_pnl - (0.20 * _decay)
+                trail_floor = peak_pnl - (0.20 * _decay * _vel_t)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -800,7 +809,7 @@ class ExitMatrixEvaluator:
             # Phase 1: peak < 50% — tiered protection (was unconditional free_run → DUCK bug)
             # Sub-phase 1c: peak >= 25% → trail with -15pp floor (A3: time-decay applied)
             if peak_pnl >= 0.25:
-                trail_floor = peak_pnl - (0.15 * _decay)
+                trail_floor = peak_pnl - (0.15 * _decay * _vel_t)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -817,7 +826,7 @@ class ExitMatrixEvaluator:
 
             # Sub-phase 1b: peak >= 15% → trail with -10pp floor (A3: time-decay applied)
             if peak_pnl >= 0.15:
-                trail_floor = peak_pnl - (0.10 * _decay)
+                trail_floor = peak_pnl - (0.10 * _decay * _vel_t)
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -832,7 +841,30 @@ class ExitMatrixEvaluator:
                     'trail_floor': trail_floor,
                 }
 
-            # Sub-phase 1a: peak < 15% — free run, only Hard SL -7.5%
+            # Sub-phase 1a: peak < 15% — velocity+volume crash brake
+            # Previously unconditional free_run. Now uses Guardian velocity signals.
+            _vel = entry.get('_guardian_velocity', 0) or 0
+            _tvol = entry.get('_guardian_tick_vol', 1) or 1
+            if peak_pnl >= 0.05:  # had at least +5% peak
+                _crash = False
+                _crash_reason = ''
+                if _vel < -5.0 and current_pnl < peak_pnl * 0.3:
+                    _crash = True
+                    _crash_reason = f'vel_crash (vel={_vel:.1f}, pnl={current_pnl:.1%} < 30% of peak={peak_pnl:.1%})'
+                elif _vel < -3.0 and current_pnl <= 0:
+                    _crash = True
+                    _crash_reason = f'vel_fade (vel={_vel:.1f}, pnl={current_pnl:.1%}, peak was {peak_pnl:.1%})'
+                elif _tvol < 0.001 and current_pnl < peak_pnl * 0.5:
+                    _crash = True
+                    _crash_reason = f'vol_death (tvol={_tvol:.4f}, pnl={current_pnl:.1%} < 50% of peak={peak_pnl:.1%})'
+                if _crash:
+                    return {
+                        'action': 'exit',
+                        'reason': f'ath_crash_brake ({_crash_reason})',
+                        'current_pnl': current_pnl,
+                        'trail_floor': None,
+                    }
+
             return {
                 'action': 'hold',
                 'reason': f'ath_phase1_free_run (peak={peak_pnl:.1%} < 15%)',

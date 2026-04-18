@@ -297,9 +297,18 @@ class ExitGuardianThread(threading.Thread):
                         continue
 
                 elif _is_ath_entry and not is_moon:
+                    # === Velocity factor for ALL ATH trail phases ===
+                    # Tighten margins when velocity signals crash/fade
+                    if raw_vel_30s < -5.0:
+                        _vel_tighten = 0.70   # CRASH → 30% tighter margins
+                    elif use_vel < -2.0:
+                        _vel_tighten = 0.85   # fading → 15% tighter
+                    else:
+                        _vel_tighten = 1.0    # neutral/rising → no change
+
                     # === ATH Phase 2 (50-100%): absolute -20pp trail ===
                     if pos.peak_pnl >= 0.50:
-                        _base_margin = 0.20 * _decay_factor  # A3: time decay narrows margin
+                        _base_margin = 0.20 * _decay_factor * _vel_tighten
                         trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
@@ -320,7 +329,7 @@ class ExitGuardianThread(threading.Thread):
                     # === ATH Phase 1 (peak < 50%): tiered trail protection ===
                     # Synced with matrix_evaluator Phase1 tiers (fixes DUCK +20.6% → -15.8% bug)
                     if pos.peak_pnl >= 0.25:
-                        _base_margin = 0.15 * _decay_factor
+                        _base_margin = 0.15 * _decay_factor * _vel_tighten
                         trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
@@ -339,7 +348,7 @@ class ExitGuardianThread(threading.Thread):
                             self._exit_pending.add(trade_id)
                             continue
                     elif pos.peak_pnl >= 0.15:
-                        _base_margin = 0.10 * _decay_factor
+                        _base_margin = 0.10 * _decay_factor * _vel_tighten
                         trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
                         if pnl < trail_floor:
                             log.info(
@@ -357,7 +366,42 @@ class ExitGuardianThread(threading.Thread):
                                 })
                             self._exit_pending.add(trade_id)
                             continue
-                    # peak < 15%: free run, only hard SL applies (handled by main loop)
+                    # === ATH Phase 1a: peak < 15% — velocity+volume crash brake ===
+                    # Previously "free run" — no protection at all. TripleUnch lost +11.9% → -6.9%.
+                    # Now: use velocity and volume signals to detect crashes early.
+                    if pos.peak_pnl >= 0.05:  # only if we've seen at least +5% peak
+                        _ath_crash_exit = False
+                        _ath_crash_reason = ''
+
+                        # Crash brake 1: velocity-driven — rapid decline
+                        if raw_vel_30s < -5.0 and pnl < pos.peak_pnl * 0.3:
+                            # Crashing >5%/min AND lost >70% of peak → dump it
+                            _ath_crash_exit = True
+                            _ath_crash_reason = f'vel_crash (vel={raw_vel_30s:.1f}%/min, pnl={pnl:.1%} < 30% of peak={pos.peak_pnl:.1%})'
+                        elif use_vel < -3.0 and pnl <= 0:
+                            # Steady decline >3%/min AND back to breakeven → cut
+                            _ath_crash_exit = True
+                            _ath_crash_reason = f'vel_fade (vel={use_vel:.1f}%/min, pnl={pnl:.1%} <= 0, peak was {pos.peak_pnl:.1%})'
+                        # Crash brake 2: volume death — tick_vol near zero while declining
+                        elif tick_vol < 0.001 and pnl < pos.peak_pnl * 0.5 and len(pos.price_ring) >= 5:
+                            _ath_crash_exit = True
+                            _ath_crash_reason = f'vol_death (tick_vol={tick_vol:.4f}, pnl={pnl:.1%} < 50% of peak={pos.peak_pnl:.1%})'
+
+                        if _ath_crash_exit:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 CRASH BRAKE: "
+                                f"{_ath_crash_reason} price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_crash_brake ({_ath_crash_reason})',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
 
                 else:
                     # === Standard (non-ATH) Trail ===
