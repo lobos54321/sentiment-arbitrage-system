@@ -540,11 +540,30 @@ class MatrixEvaluator:
         action_reason = 'matrices not yet aligned'
 
         if ready:
-            # --- Matrix ④ Realtime Momentum (costs ~6 seconds) ---
+            # --- Pre-check: Fresh DexScreener 5-min trend ---
+            # MUST come BEFORE the expensive momentum check (15s).
+            # If the 5-minute price change is negative, the broader trend is
+            # bearish — a 15-second micro-window finding a bounce is meaningless.
+            # This is the correct order: trend first, then momentum details.
+            from entry_engine import fetch_dexscreener_trend_snapshot
+            _fresh_dex = fetch_dexscreener_trend_snapshot(ca)
+            _pc_m5 = _fresh_dex.get('price_change_m5', 0) if _fresh_dex else 0
+            if _pc_m5 <= 0:
+                log.info(
+                    f"[Matrix] ${symbol} TREND GATE FAIL: price_m5={_pc_m5:+.1f}% <= 0 "
+                    f"→ skipping momentum check (broader trend bearish)"
+                )
+                return {
+                    'scores': scores, 'reasons': reasons,
+                    'ready_for_momentum': False,
+                    'action': 'wait',
+                    'action_reason': f"trend_gate: price_m5={_pc_m5:+.1f}% (5min trend bearish, skipping momentum)",
+                }
+
             log.info(
                 f"[Matrix] ${symbol} pre-momentum PASS: "
                 f"T={scores['trend']} V={scores['volume']} P={scores['price']} S={scores['signal']} "
-                f"→ running 5×3s momentum check..."
+                f"pc_m5={_pc_m5:+.1f}% → running 5×3s momentum check..."
             )
 
             # For re-entries: verify price > last exit price
