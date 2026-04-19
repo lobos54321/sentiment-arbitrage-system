@@ -80,6 +80,7 @@ SMART_ENTRY_BOUNCE_RATIO_STRONG = 0.15   # strong signal: bs>=1.5 + vol>=2.0 + r
 SMART_ENTRY_BOUNCE_RATIO_MEDIUM = 0.20   # medium signal: bs>=1.3 + vol>=1.5
 SMART_ENTRY_MIN_VOL_RATIO = 1.0      # vol_ratio floor (data: Buddy vol=0.8 → instant -18.8% crash)
 SMART_ENTRY_REENTRY_VOL_RATIO = 1.1  # stricter vol_ratio for re-entries (user tuned)
+SMART_ENTRY_MIN_POINTS = 6            # Minimum price data points before entry (data: GREKT 4pt → instant -7.7% SL)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
 
@@ -722,6 +723,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
         position, detail = evaluate_entry_position(price_history, price)
 
         if position == 'GOOD_ENTRY':
+            # Guard 0: minimum data points — too few points = noise, not a real pattern
+            # Data: GREKT 4pt/10s → -7.7% instant SL. All winners had 6+ points.
+            if len(price_history) < SMART_ENTRY_MIN_POINTS:
+                if round_num % 6 == 0:
+                    log.info(
+                        f"[SmartEntry] ${symbol} round {round_num} WAIT: "
+                        f"n_points={len(price_history)} < {SMART_ENTRY_MIN_POINTS} "
+                        f"(need more data) ({elapsed:.0f}s)"
+                    )
+                time.sleep(interval)
+                continue
+
             pullback = detail.get('pullback_depth_pct', 0)
             bounce = detail.get('bounce_from_low_pct', 0)
             bounce_ratio = bounce / pullback if pullback > 0 else 0

@@ -3747,6 +3747,17 @@ def run_monitor(db):
                                 f"> last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
                             )
 
+                    # REENTRY-P-GATE: re-entry #2+ must have P>=50 (token not exhausted)
+                    # Data: GREKT re-entry#2 P=30 → -7.7%, FLASH re-entry#2 P=30 → trigger=-11.5%
+                    if _entry_count >= 2:
+                        _p_score = eval_res.get('scores', {}).get('price', 0)
+                        if _p_score < 50:
+                            log.info(
+                                f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY-P-GATE: "
+                                f"re-entry #{_entry_count+1} P={_p_score}<50, token exhausted"
+                            )
+                            continue
+
                     # Fetch signal description for sub-index parsing (Task 6)
                     # NOTE: premium_signals lives in SENTIMENT_DB (sentiment_arb.db),
                     # not in the paper_trades db connection.
@@ -3899,7 +3910,11 @@ def run_monitor(db):
                         if _ath_bs_ratio < 1.0: _block_reasons.append(f"bs={_ath_bs_ratio:.2f}<1.0")
                         if _ath_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_ath_pc_m5:+.1f}%<=0")
                         if _entry_count > 0: _block_reasons.append(f"re-entry#{_entry_count+1}")
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
+                        # Throttle this log: only every 30s (was every ~1s, flooding logs)
+                        _fl_last_log = pending.get('_fl_blocked_log_ts', 0)
+                        if time.time() - _fl_last_log >= 30:
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
+                            pending['_fl_blocked_log_ts'] = time.time()
 
                     # --- Smart Entry Engine (replaces Dip-then-Rip) ---
                     # Layer 1: DexScreener volume-price trend confirmation
