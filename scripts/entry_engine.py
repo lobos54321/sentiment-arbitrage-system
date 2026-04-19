@@ -400,7 +400,12 @@ def is_chasing_top(trend_data):
     sells_m5 = max(trend_data.get('sells_m5', 1), 1)
 
     h1_avg = vol_h1 / 12.0 if vol_h1 > 0 else 0
-    vol_ratio = vol_m5 / h1_avg if h1_avg > 0 else 0
+    if h1_avg > 0:
+        vol_ratio = vol_m5 / h1_avg
+    elif vol_m5 > 0:
+        vol_ratio = 5.0  # has m5 volume but no h1 → brand new token, assume active
+    else:
+        vol_ratio = 0
     bs_ratio = buys_m5 / sells_m5
 
     # Hard ceiling: pc_m5 > 100% AND buyers not dominant → FOMO territory
@@ -732,10 +737,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             # Data: Buddy vol_ratio=0.8 → instant -18.8% crash. No volume = no support.
             _cur_vol_ratio = 0
             if cached_trend:
-                _v5 = cached_trend.get('volume_m5', 0)
-                _vh1 = cached_trend.get('volume_h1', 0)
+                _v5 = cached_trend.get('vol_m5', 0)
+                _vh1 = cached_trend.get('vol_h1', 0)
                 _h1_avg = _vh1 / 12 if _vh1 > 0 else 0
-                _cur_vol_ratio = _v5 / _h1_avg if _h1_avg > 0 else 0
+                _cur_vol_ratio = _v5 / _h1_avg if _h1_avg > 0 else (5.0 if _v5 > 0 else 0)
             _min_vol = SMART_ENTRY_REENTRY_VOL_RATIO if entry_count > 0 else SMART_ENTRY_MIN_VOL_RATIO
             if _cur_vol_ratio < _min_vol:
                 if round_num % 6 == 0:

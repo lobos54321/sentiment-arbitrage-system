@@ -90,7 +90,6 @@ def score_trend(bars, symbol, token_ca=None, pool_address=None):
         _buys = _dex.get('buys_m5', 0) or 0
         _sells = max(_dex.get('sells_m5', 1) or 1, 1)
         _bs = _buys / _sells
-        _vol_m5 = _dex.get('vol_m5', 0) or 0
 
         _dex_detail = f'dex: pc_m5={_pc_m5:+.1f}% bs={_bs:.2f} buys={_buys} sells={_sells}'
 
