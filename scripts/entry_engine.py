@@ -75,7 +75,9 @@ SMART_ENTRY_POLL_INTERVAL_SEC = 10   # Poll price every 10 seconds
 SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
 SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
 SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
-SMART_ENTRY_MIN_BOUNCE_RATIO = 0.30  # bounce/pullback must be >= 30% (data: 25% let through Goose -14.8%)
+SMART_ENTRY_MIN_BOUNCE_RATIO = 0.30  # bounce/pullback default (data: 25% let through Goose -14.8%)
+SMART_ENTRY_BOUNCE_RATIO_STRONG = 0.15   # strong signal: bs>=1.5 + vol>=2.0 + real_buying
+SMART_ENTRY_BOUNCE_RATIO_MEDIUM = 0.20   # medium signal: bs>=1.3 + vol>=1.5
 SMART_ENTRY_MIN_VOL_RATIO = 1.0      # vol_ratio floor (data: Buddy vol=0.8 → instant -18.8% crash)
 SMART_ENTRY_REENTRY_VOL_RATIO = 1.1  # stricter vol_ratio for re-entries (user tuned)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
@@ -415,10 +417,12 @@ def is_chasing_top(trend_data):
 
     # Dynamic tiers: higher price surge → stricter funding requirements
     # Tier 3 (50-100%): need strong buyer edge + volume surge
+    # Data: LOCKED bs=1.42 vol=2.5 at pc_m5=52% → was blocked by bs<1.5, missed +120%
+    # Adjusted: bs>=1.4 vol>=1.3 for smoother gradient from mid_chase tier
     if pc_m5 > 50.0:
-        if bs_ratio < 1.5 or vol_ratio < 1.5:
+        if bs_ratio < 1.4 or vol_ratio < 1.3:
             return True, (f'high_chase: pc_m5={pc_m5:+.0f}% '
-                          f'needs bs>=1.5+vol>=1.5, '
+                          f'needs bs>=1.4+vol>=1.3, '
                           f'got bs={bs_ratio:.1f} vol={vol_ratio:.1f}')
 
     # Tier 2 (15-50%): need moderate buyer edge + stable volume
@@ -722,16 +726,41 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             bounce = detail.get('bounce_from_low_pct', 0)
             bounce_ratio = bounce / pullback if pullback > 0 else 0
 
-            # Guard 1: bounce/pullback ratio — reject dead cat bounces
-            if bounce_ratio < SMART_ENTRY_MIN_BOUNCE_RATIO:
+            # Guard 1: adaptive bounce_ratio — threshold depends on signal strength
+            # Strong signals (all green) get lower bar; weak signals keep strict 30%
+            _br_threshold = SMART_ENTRY_MIN_BOUNCE_RATIO  # default 30%
+            _br_tier = 'default'
+            if cached_trend:
+                _br_bs = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
+                _br_vol_m5 = cached_trend.get('vol_m5', 0)
+                _br_vol_h1 = cached_trend.get('vol_h1', 0)
+                _br_h1_avg = _br_vol_h1 / 12.0 if _br_vol_h1 > 0 else 0
+                _br_vol_ratio = _br_vol_m5 / _br_h1_avg if _br_h1_avg > 0 else (5.0 if _br_vol_m5 > 0 else 0)
+                _br_is_real = 'real_buying' in trend_reason
+
+                if _br_bs >= 1.5 and _br_vol_ratio >= 2.0 and _br_is_real:
+                    _br_threshold = SMART_ENTRY_BOUNCE_RATIO_STRONG  # 15%
+                    _br_tier = 'strong'
+                elif _br_bs >= 1.3 and _br_vol_ratio >= 1.5:
+                    _br_threshold = SMART_ENTRY_BOUNCE_RATIO_MEDIUM  # 20%
+                    _br_tier = 'medium'
+
+            if bounce_ratio < _br_threshold:
                 if round_num % 6 == 0:
                     log.info(
                         f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                        f"bounce_ratio={bounce_ratio:.0%} < {SMART_ENTRY_MIN_BOUNCE_RATIO:.0%} "
-                        f"(bounce={bounce:.1f}% pullback={pullback:.1f}%) ({elapsed:.0f}s)"
+                        f"bounce_ratio={bounce_ratio:.0%} < {_br_threshold:.0%} "
+                        f"(bounce={bounce:.1f}% pullback={pullback:.1f}%) "
+                        f"tier={_br_tier} ({elapsed:.0f}s)"
                     )
                 time.sleep(interval)
                 continue
+            # Log when adaptive tier actually helped (non-default)
+            if _br_tier != 'default':
+                log.info(
+                    f"[SmartEntry] ${symbol} adaptive_bounce threshold={_br_threshold:.0%} "
+                    f"tier={_br_tier} bounce_ratio={bounce_ratio:.0%} → PASS"
+                )
 
             # Guard 1b: volume ratio — reject low-volume bounces
             # Data: Buddy vol_ratio=0.8 → instant -18.8% crash. No volume = no support.
