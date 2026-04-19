@@ -380,6 +380,53 @@ def evaluate_trend_phase(trend_data):
     )
 
 
+def is_chasing_top(trend_data):
+    """Multi-factor chase protection: decides if we're too late to enter.
+
+    Instead of a fixed pc_m5 cutoff, looks at whether money is still flowing IN:
+      - Higher pc_m5 → requires proportionally stronger buy pressure + volume
+      - If buyers still dominate and volume is surging, high pc_m5 is OK
+      - If buyers are fading or volume is dropping, even moderate pc_m5 is risky
+
+    Returns: (too_late: bool, reason: str)
+    """
+    if not trend_data:
+        return False, 'no_data'
+
+    pc_m5 = trend_data.get('price_change_m5', 0)
+    vol_m5 = trend_data.get('vol_m5', 0)
+    vol_h1 = trend_data.get('vol_h1', 0)
+    buys_m5 = trend_data.get('buys_m5', 0)
+    sells_m5 = max(trend_data.get('sells_m5', 1), 1)
+
+    h1_avg = vol_h1 / 12.0 if vol_h1 > 0 else 0
+    vol_ratio = vol_m5 / h1_avg if h1_avg > 0 else 0
+    bs_ratio = buys_m5 / sells_m5
+
+    # Hard ceiling: pc_m5 > 100% AND buyers not dominant → FOMO territory
+    if pc_m5 > 100.0 and bs_ratio < 2.0:
+        return True, (f'extreme_chase: pc_m5={pc_m5:+.0f}% '
+                      f'bs={bs_ratio:.1f}<2.0 vol={vol_ratio:.1f}')
+
+    # Dynamic tiers: higher price surge → stricter funding requirements
+    # Tier 3 (50-100%): need strong buyer edge + volume surge
+    if pc_m5 > 50.0:
+        if bs_ratio < 1.5 or vol_ratio < 1.5:
+            return True, (f'high_chase: pc_m5={pc_m5:+.0f}% '
+                          f'needs bs>=1.5+vol>=1.5, '
+                          f'got bs={bs_ratio:.1f} vol={vol_ratio:.1f}')
+
+    # Tier 2 (15-50%): need moderate buyer edge + stable volume
+    elif pc_m5 > 15.0:
+        if bs_ratio < 1.2 or vol_ratio < 1.0:
+            return True, (f'mid_chase: pc_m5={pc_m5:+.0f}% '
+                          f'needs bs>=1.2+vol>=1.0, '
+                          f'got bs={bs_ratio:.1f} vol={vol_ratio:.1f}')
+
+    # Tier 1 (0-15%): no chase restriction — Layer 1 BULLISH is sufficient
+    return False, 'ok'
+
+
 def evaluate_entry_position(price_history, current_price):
     """
     Layer 2 (Scheme A): Determine if current price is a good entry position
@@ -621,10 +668,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             data_is_fresh = (current_data_key != last_momentum_data)
             last_momentum_data = current_data_key
 
-            # P1: price_m5 > 25% = already extended in 5min, too late to chase.
-            # Picante#1 entered at pc_m5=+24.1% and dumped -7.4% in 26s → SL.
-            if pc_m5 > 25.0:
-                consecutive_momentum_rounds = 0  # reset — refuse to chase
+            # Multi-factor chase protection (replaces fixed pc_m5 cutoffs)
+            _chasing, _chase_reason = is_chasing_top(cached_trend)
+            if _chasing:
+                consecutive_momentum_rounds = 0  # reset — money leaving, don't chase
             elif pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
                 consecutive_momentum_rounds += 1
             elif not (pc_m5 > 15.0 and bs_ratio > 1.0):

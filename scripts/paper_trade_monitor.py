@@ -43,6 +43,7 @@ from entry_engine import (
     fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
     evaluate_entry_position, clear_dex_trend_cache,
     get_liquidity_position_cap, get_adaptive_stop_loss,
+    is_chasing_top,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
@@ -3881,7 +3882,16 @@ def run_monitor(db):
                                      f"(live={_fl_price:.10f} vs trigger={trigger_price:.10f})")
                             pending_entries.pop(lifecycle_id, None)
                             continue
-                        log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → price OK, buy ASAP")
+                        # Chase protection: even with perfect scores, don't buy at extreme tops
+                        if _ath_dex:
+                            _fl_chasing, _fl_chase_reason = is_chasing_top(_ath_dex)
+                            if _fl_chasing:
+                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED by chase protection: {_fl_chase_reason} → SmartEntry required")
+                                _is_ath_momentum = False  # downgrade to SmartEntry
+                            else:
+                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → chase_check OK, buy ASAP")
+                        else:
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → price OK, buy ASAP")
                     elif pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
                         # ATH but missing T≥100 or buy_sell or is re-entry or price_m5≤0 → fall through to SmartEntry
                         _block_reasons = []
