@@ -3659,7 +3659,32 @@ def run_monitor(db):
                 lifecycle_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                 
                 # Skip if already in pending or open positions
+                # But if SmartEntry is actively running, send it a data refresh
                 if lifecycle_id in pending_entries or any(p.lifecycle_id == lifecycle_id for p in positions.values()):
+                    # Send data refresh to running SmartEntry thread (if any)
+                    _pending = pending_entries.get(lifecycle_id)
+                    if _pending and _pending.get('_smart_entry_future') and not _pending['_smart_entry_future'].done():
+                        # SmartEntry is actively running — push fresh data
+                        _refresh_cooldown = _pending.get('_refresh_sent_at', 0)
+                        if time.time() - _refresh_cooldown >= 30:  # max once per 30s
+                            _refresh_scores = None
+                            _refresh_trend = None
+                            try:
+                                _refresh_eval = matrix_evaluator.evaluate(w_entry)
+                                _refresh_scores = _refresh_eval.get('scores')
+                                _refresh_trend = fetch_dexscreener_trend_snapshot(w_entry['ca'])
+                            except Exception:
+                                pass
+                            if _refresh_scores:
+                                from entry_engine import _smart_entry_signals
+                                _smart_entry_signals[w_entry['ca']] = {
+                                    'scores': _refresh_scores,
+                                    'trend_data': _refresh_trend,
+                                    'ts': time.time(),
+                                }
+                                _pending['_refresh_sent_at'] = time.time()
+                                # Also update matrix_scores in pending for downstream use
+                                _pending['matrix_scores'] = _refresh_scores
                     wl_skip_duplicate += 1
                     continue
                 
@@ -3848,7 +3873,7 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane requires ATH + T=100 + V=100 + S=100 + M=100 + buy_sell≥1.0
+                    # Fast lane requires ATH + T=100 + V=100 + S=100 + M=100 + buy_sell≥2.0
                     # P is exempt: ATH tokens naturally sit at price highs → P is always low
                     # ALL other scores must be perfect. Any weakness = go through SmartEntry.
                     # Re-entries NEVER get fast lane — must confirm pullback-bounce first.
@@ -3864,8 +3889,8 @@ def run_monitor(db):
                                        and _v_score and _v_score >= 100
                                        and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
-                                       and _ath_bs_ratio >= 1.0
-                                       and _ath_pc_m5 > 0  # 5min price must be UP (fixes Abducted: 15s bounce in -9% crash)
+                                       and _ath_bs_ratio >= 2.0  # buyers must be 2x sellers for true breakout
+                                       and _ath_pc_m5 > 0  # 5min price must be UP
                                        and _entry_count == 0)  # re-entries must go through SmartEntry
 
                     if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
@@ -3936,6 +3961,23 @@ def run_monitor(db):
                             _se_future = pending.get('_smart_entry_future')
 
                             if _se_future is None:
+                                # P=30 OVEREXTENDED GUARD: block P≤30 from SmartEntry path.
+                                # P=30 means price already 2x'd from signal (growth>100%).
+                                # Data: 12 ATH P=30 via SmartEntry = 8% win rate, -74.7% total.
+                                # Fast-lane bypasses SmartEntry, so golden dogs with P=30 still pass.
+                                _p_score = _scores.get('price', 50)
+                                if _p_score <= 30 and _p_score > 0:
+                                    _fl_last_log = pending.get('_p30_log_ts', 0)
+                                    if time.time() - _fl_last_log >= 30:
+                                        log.info(
+                                            f"  [SmartEntry] {pending['symbol']} BLOCKED: "
+                                            f"P={_p_score} overextended (growth>100%) — "
+                                            f"only Fast-lane can buy P≤30"
+                                        )
+                                        pending['_p30_log_ts'] = time.time()
+                                    pending_entries.pop(lifecycle_id, None)
+                                    continue
+
                                 # First time: submit SmartEntry to thread pool (non-blocking)
                                 _se_future = smart_entry_pool.submit(
                                     evaluate_smart_entry,

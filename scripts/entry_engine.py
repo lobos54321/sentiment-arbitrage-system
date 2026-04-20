@@ -510,6 +510,13 @@ def evaluate_entry_position(price_history, current_price):
     return 'STILL_FALLING', detail
 
 
+# Shared dict for cross-thread data refresh: main thread → SmartEntry thread.
+# When a coin re-FIREs while SmartEntry is running, main thread writes here.
+# SmartEntry checks this each round and uses fresh data for decisions.
+# Python dict assignment is atomic (GIL), so no lock needed.
+_smart_entry_signals = {}
+
+
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0):
     """
     Smart Entry Engine — replaces evaluate_entry_timing() (Dip-then-Rip).
@@ -564,6 +571,21 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
         elapsed = time.time() - start_time
         if elapsed > max_wait_sec:
             break
+
+        # --- Check for data refresh from main thread ---
+        # If this coin re-FIREd while we're evaluating, use the fresh data.
+        _refresh = _smart_entry_signals.pop(token_ca, None)
+        if _refresh:
+            log.info(
+                f"[SmartEntry] ${symbol} round {round_num} DATA REFRESH from new FIRE: "
+                f"scores={_refresh.get('scores', '?')} "
+                f"({elapsed:.0f}s into evaluation)"
+            )
+            # Reset momentum tracking with fresh signal
+            _new_trend = _refresh.get('trend_data')
+            if _new_trend:
+                cached_trend = _new_trend
+                last_dex_check = time.time()
 
         # --- Sample price (every round, using Jupiter/Redis/Helius, NOT DexScreener) ---
         price, src, age_ms = fetch_realtime_price(token_ca, pool_address)

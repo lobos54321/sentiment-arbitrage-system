@@ -659,6 +659,11 @@ class MatrixEvaluator:
         Exception: ATH + strong T/V → P hard-gate is bypassed (momentum_direct).
         ATH coins naturally sit at price highs → P is always low. The real filter
         for ATH is Matrix ④ momentum, not price position.
+
+        NOTE: P=30 (overextended) is NOT blocked here. It is blocked at SmartEntry
+        submission instead, so that Fast-lane (which bypasses SmartEntry) can still
+        catch golden dogs with P=30. Data: 12 ATH P=30 via SmartEntry = 8% win rate,
+        but Fast-lane P=30 with T100+V100+M100+bs≥2.0 is a genuine breakout.
         """
         # Only real-time structural matrices that we can reliably measure
         hard_checks = [
@@ -666,32 +671,27 @@ class MatrixEvaluator:
             ('price', scores.get('price', 0), thresholds['price_min']),
         ]
 
-        passing_count = sum(1 for _, val, _ in hard_checks if val >= 60)
+        # For ATH: T=50 counts as passing (not just >=60).
+        # ATH T score is very unreliable (e.g. $Rudi T=0 for 74% of evals).
+        # T=50 is the fail-open default. Requiring T=100 to reach M check
+        # wastes 3-7 minutes. Data: fuckface T=50 for 6 rounds (70s) before T=100.
+        if signal_type == 'ATH':
+            passing_count = sum(1 for name, val, _ in hard_checks
+                                if val >= 60 or (name == 'trend' and val >= 50))
+        else:
+            passing_count = sum(1 for _, val, _ in hard_checks if val >= 60)
         hard_fails = any(val < mins for _, val, mins in hard_checks)
 
         if hard_fails:
-            # Momentum-direct bypass: ATH + T≥100 + V≥70 → let momentum check decide
+            # Momentum-direct bypass: ATH + T≥50 + V≥70 → let momentum check decide
             # Data: ASTEROID T=100 V=100 S=100 P=30 — P blocked a real breakout.
             # P is meaningless for ATH (price IS at highs). M check is the real guard.
-            #
-            # EXCEPTION: P=30 "overextended" (growth>100%) should NOT be bypassed.
-            # Data: 12 ATH P=30 trades had 8% win rate, -74.7% total (78% of all losses).
-            # P=30 means price has MORE THAN DOUBLED from signal → we're chasing a pump,
-            # not buying a coin that's "naturally at highs".
             t_score = scores.get('trend', 0)
             v_score = scores.get('volume', 0)
-            p_score = scores.get('price', 0)
-            if signal_type == 'ATH' and t_score >= 100 and v_score >= 70:
-                if p_score <= 30:
-                    # P=30 = overextended (growth>100%). Do NOT bypass.
-                    log.info(
-                        f"[Matrix] ATH P-bypass BLOCKED: P={p_score} (overextended, growth>100%) "
-                        f"T={t_score} V={v_score} — price already 2x'd from signal, too risky"
-                    )
-                    return False
+            if signal_type == 'ATH' and t_score >= 50 and v_score >= 70:
                 log.info(
                     f"[Matrix] ATH momentum-direct bypass: T={t_score} V={v_score} "
-                    f"P={p_score} → bypassing P hard-gate, letting momentum decide"
+                    f"P={scores.get('price', 0)} → bypassing P hard-gate, letting momentum decide"
                 )
                 # Still count passing matrices normally
             else:
