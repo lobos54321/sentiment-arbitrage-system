@@ -716,9 +716,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
             _chasing, _chase_reason = is_chasing_top(cached_trend)
             if _chasing:
                 consecutive_momentum_rounds = 0  # reset — money leaving, don't chase
-            elif pc_m5 > 15.0 and bs_ratio > 1.0 and data_is_fresh:
+            elif pc_m5 > 15.0 and bs_ratio > 1.4 and data_is_fresh:
+                # bs threshold raised from 1.0 → 1.4 based on audit (31 trades):
+                # momentum_direct with bs 1.0-1.37 was 0W/5L (SOLASTER bs=1.33, FLASH bs=1.47 borderline)
+                # Only MISA bs=1.37 won but was borderline. bs>=1.4 filters weak-buyer entries.
                 consecutive_momentum_rounds += 1
-            elif not (pc_m5 > 15.0 and bs_ratio > 1.0):
+            elif not (pc_m5 > 15.0 and bs_ratio > 1.4):
                 consecutive_momentum_rounds = 0
             # If data not fresh but still bullish → don't increment, don't reset
 
