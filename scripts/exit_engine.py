@@ -288,6 +288,11 @@ class ExitGuardianThread(threading.Thread):
                 pos._guardian_velocity = use_vel
                 pos._guardian_tick_vol = tick_vol
 
+                # Initialize threat tighten for first-check safety.
+                # If any code above threw an exception on a prior iteration, this
+                # attribute would never have been written → AttributeError cascade.
+                _threat_tighten = getattr(pos, '_guardian_threat_tighten', 0)
+
                 # === COORDINATED THREAT SCORE SYSTEM ===
                 # Three factors work together: each adds threat points.
                 # Combined score tightens trail floor (2pp per point, max 6pp).

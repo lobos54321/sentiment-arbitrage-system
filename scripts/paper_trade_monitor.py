@@ -2487,6 +2487,7 @@ class Position:
         'price_ring', 'vel_history',
         'trail_factor',  # ExitMatrix trail ratchet (in-memory, persistent)
         '_guardian_velocity', '_guardian_tick_vol',  # Written by Guardian thread
+        '_guardian_threat_tighten',  # Threat score tightening (Guardian → EXIT_MATRIX relay)
         'peak_ts', '_initial_tick_vol',  # A3 (time-decay) and A4 (flat-top) fields
     ]
 
@@ -2527,6 +2528,7 @@ class Position:
         self.trail_factor = 0.0
         self._guardian_velocity = 0  # Set by Guardian thread, consumed by ExitMatrix
         self._guardian_tick_vol = 0  # Set by Guardian thread
+        self._guardian_threat_tighten = 0  # Threat score tightening (Guardian → EXIT_MATRIX)
 
 
 def build_lifecycle_id(token_ca, signal_ts):
