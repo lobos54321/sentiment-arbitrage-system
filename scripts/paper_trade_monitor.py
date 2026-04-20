@@ -3831,6 +3831,21 @@ def run_monitor(db):
                     # P7: Minimum position threshold — skip if Kelly gives floor value
                     # Data: 0.03 SOL trades have terrible risk/reward (avg loss -15%, wins earn 0.002 SOL)
                     _kelly_sol = pending_entries[lifecycle_id]['kelly_position_sol']
+                    # Matrix-conviction floor: if scores are strong enough to FIRE,
+                    # Kelly cold start shouldn't veto. Data: MITSUKI T100+V100+P100+M100
+                    # → Kelly=0.03 → SKIP → missed +114% golden dog.
+                    _matrix_scores = eval_res.get('scores', {})
+                    _matrix_strong = (
+                        _matrix_scores.get('trend', 0) >= 50
+                        and _matrix_scores.get('volume', 0) >= 70
+                        and _matrix_scores.get('price', 0) >= 70
+                        and _matrix_scores.get('momentum', 0) >= 60
+                    )
+                    if _kelly_sol < 0.1 and _matrix_strong:
+                        log.info(f"  [Kelly] {w_entry['symbol']} Matrix-conviction floor: Kelly={_kelly_sol:.3f} → 0.1 SOL (scores={_matrix_scores})")
+                        _kelly_sol = 0.1
+                        pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
+
                     if _kelly_sol <= 0.05:
                         log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
                         pending_entries.pop(lifecycle_id, None)
@@ -3879,27 +3894,25 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane requires ATH + T=100 + V=100 + S=100 + M=100 + buy_sell≥2.0
-                    # P is exempt: ATH tokens naturally sit at price highs → P is always low
-                    # ALL other scores must be perfect. Any weakness = go through SmartEntry.
+                    # Fast lane: T≥100 + V≥70 + M=100 + buy_sell≥1.8 + pc_m5>0
+                    # Open to BOTH ATH and NOT_ATH. Data: trust (NOT_ATH +110%) had no
+                    # fast-lane path and timed out in SmartEntry waiting for a pullback
+                    # that never came. P is exempt (ATH naturally at highs, NOT_ATH may have P=80).
                     # Re-entries NEVER get fast lane — must confirm pullback-bounce first.
-                    _ath_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
-                        pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100
-                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 100
-                        and _s_score and _s_score >= 100
+                    _fl_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
+                        _m_score and _m_score >= 100
+                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 70
                     ) else None
-                    _ath_bs_ratio = (_ath_dex.get('buys_m5', 0) / max(_ath_dex.get('sells_m5', 1), 1)) if _ath_dex else 0
-                    _ath_pc_m5 = _ath_dex.get('price_change_m5', 0) if _ath_dex else 0
-                    _is_ath_momentum = (pending.get('signal_type') == 'ATH'
-                                       and _t_score and _t_score >= 100
-                                       and _v_score and _v_score >= 100
-                                       and _s_score and _s_score >= 100
+                    _fl_bs_ratio = (_fl_dex.get('buys_m5', 0) / max(_fl_dex.get('sells_m5', 1), 1)) if _fl_dex else 0
+                    _fl_pc_m5 = _fl_dex.get('price_change_m5', 0) if _fl_dex else 0
+                    _is_fast_lane = (_t_score and _t_score >= 100
+                                       and _v_score and _v_score >= 70
                                        and _m_score and _m_score >= 100
-                                       and _ath_bs_ratio >= 2.0  # buyers must be 2x sellers for true breakout
-                                       and _ath_pc_m5 > 0  # 5min price must be UP
+                                       and _fl_bs_ratio >= 1.8  # Data: pooplana bs≈1.3-1.8 → missed +97%. 2.0 too strict.
+                                       and _fl_pc_m5 > 0  # 5min price must be UP
                                        and _entry_count == 0)  # re-entries must go through SmartEntry
 
-                    if trigger_price and pending['attempts'] == 1 and not _is_ath_momentum:
+                    if trigger_price and pending['attempts'] == 1 and not _is_fast_lane:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
                         if live_price is not None and live_price > trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):
                             log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: entry_too_late "
@@ -3913,38 +3926,40 @@ def run_monitor(db):
                                      f"live={live_price:.10f} dropped {_drop_pct:+.1f}% from trigger={trigger_price:.10f}")
                             pending_entries.pop(lifecycle_id, None)
                             continue
-                    elif _is_ath_momentum:
+                    elif _is_fast_lane:
                         # Fast lane: still do a price drop sanity check (漏洞2 fix)
                         # Skip SmartEntry but DON'T buy into a crash
                         _fl_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
                         if _fl_price is not None and trigger_price and _fl_price < trigger_price * 0.90:
                             _fl_drop = (_fl_price - trigger_price) / trigger_price * 100
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast-lane ABORT: "
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast-lane ABORT: "
                                      f"price collapsed {_fl_drop:+.1f}% since FIRE "
                                      f"(live={_fl_price:.10f} vs trigger={trigger_price:.10f})")
                             pending_entries.pop(lifecycle_id, None)
                             continue
                         # Chase protection: even with perfect scores, don't buy at extreme tops
-                        if _ath_dex:
-                            _fl_chasing, _fl_chase_reason = is_chasing_top(_ath_dex)
+                        if _fl_dex:
+                            _fl_chasing, _fl_chase_reason = is_chasing_top(_fl_dex)
                             if _fl_chasing:
-                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED by chase protection: {_fl_chase_reason} → SmartEntry required")
-                                _is_ath_momentum = False  # downgrade to SmartEntry
+                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast lane BLOCKED by chase protection: {_fl_chase_reason} → SmartEntry required")
+                                _is_fast_lane = False  # downgrade to SmartEntry
                             else:
-                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → chase_check OK, buy ASAP")
+                                _fl_sig_type = pending.get('signal_type', '?')
+                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100+V{_v_score}+BS{_fl_bs_ratio:.1f}+pc_m5={_fl_pc_m5:+.1f}% → chase_check OK, buy ASAP")
                         else:
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH+T{_t_score}+M100+V{_v_score}+BS{_ath_bs_ratio:.1f}+pc_m5={_ath_pc_m5:+.1f}% → price OK, buy ASAP")
-                    elif pending.get('signal_type') == 'ATH' and _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
-                        # ATH but missing T≥100 or buy_sell or is re-entry or price_m5≤0 → fall through to SmartEntry
+                            _fl_sig_type = pending.get('signal_type', '?')
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100+V{_v_score}+BS{_fl_bs_ratio:.1f}+pc_m5={_fl_pc_m5:+.1f}% → price OK, buy ASAP")
+                    elif _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
+                        # Has good M+V but missing T≥100 or bs or is re-entry or price_m5≤0 → fall through to SmartEntry
                         _block_reasons = []
                         if _t_score < 100: _block_reasons.append(f"T={_t_score}<100")
-                        if _ath_bs_ratio < 1.0: _block_reasons.append(f"bs={_ath_bs_ratio:.2f}<1.0")
-                        if _ath_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_ath_pc_m5:+.1f}%<=0")
+                        if _fl_bs_ratio < 1.0: _block_reasons.append(f"bs={_fl_bs_ratio:.2f}<1.0")
+                        if _fl_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_fl_pc_m5:+.1f}%<=0")
                         if _entry_count > 0: _block_reasons.append(f"re-entry#{_entry_count+1}")
                         # Throttle this log: only every 30s (was every ~1s, flooding logs)
                         _fl_last_log = pending.get('_fl_blocked_log_ts', 0)
                         if time.time() - _fl_last_log >= 30:
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} ATH fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
+                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
                             pending['_fl_blocked_log_ts'] = time.time()
 
                     # --- Smart Entry Engine (replaces Dip-then-Rip) ---
@@ -3954,9 +3969,10 @@ def run_monitor(db):
                     # EXCEPTION: ATH + T≥100 + M=100 + first entry → skip SmartEntry (momentum_direct).
                     if not pending.get('timing_passed'):
                         pending_w_entry = pending.get('w_entry')
-                        if _is_ath_momentum:
+                        if _is_fast_lane:
                             # Verified parabolic first entry — no pullback to wait for, just buy
-                            log.info(f"  [SmartEntry] {pending['symbol']} ATH+T100+M100 first entry → SKIP pullback wait, momentum_direct")
+                            _fl_sig_type = pending.get('signal_type', '?')
+                            log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
                             pending['timing_passed'] = True
                             entry_mode = 'momentum_direct'
                             pending['kelly_position_sol'] = calculate_kelly_position(

@@ -174,7 +174,18 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
                 elif total_txns >= 50 and vol_ratio >= 0.8:
                     return 40, f'dex_trend_flat txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
                 else:
-                    return 0, f'dex_trend_weak txns={total_txns} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
+                    # m5 txns too low — try h1 as fallback before returning V=0.
+                    # Data: SOLTARD m5=8 txns → V=0 for 30min, but h1=271 txns.
+                    # New coins often have sparse m5 data but active h1.
+                    buys_h1 = trend_data.get('buys_h1', 0) or 0
+                    sells_h1 = trend_data.get('sells_h1', 0) or 0
+                    total_h1 = buys_h1 + sells_h1
+                    if total_h1 >= 200 and vol_h1 > 0:
+                        return 70, f'dex_h1_fallback h1_txns={total_h1} vol_h1=${vol_h1:.0f} (m5_txns={total_txns} too sparse)'
+                    elif total_h1 >= 80 and vol_h1 > 0:
+                        return 40, f'dex_h1_moderate h1_txns={total_h1} vol_h1=${vol_h1:.0f} (m5_txns={total_txns} too sparse)'
+                    else:
+                        return 0, f'dex_trend_weak txns={total_txns} h1_txns={total_h1} ratio={vol_ratio:.1f} buys={buys} sells={sells}'
         except Exception as e:
             logging.getLogger('matrix_evaluator').warning(f"dex_trend_weak parsing failed: {e}")
             pass  # fall through to existing paths
