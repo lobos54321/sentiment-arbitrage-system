@@ -549,6 +549,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
     bearish_extended = False  # Plan #2: granted accumulation grace period once
     # Plan #2: dynamic max-wait — accumulation extension adds 600s
     max_wait_sec = SMART_ENTRY_MAX_WAIT_SEC
+    pc_m5_peak = 0.0  # Track pc_m5 peak to detect momentum fading
 
     log.info(
         f"[SmartEntry] ${symbol} starting smart entry evaluation "
@@ -650,6 +651,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
 
         # --- trend_phase == 'BULLISH' → check momentum direct entry first ---
 
+        # Track pc_m5 peak for momentum fading detection
+        if cached_trend:
+            _cur_pc_m5 = cached_trend.get('price_change_m5', 0)
+            if _cur_pc_m5 > pc_m5_peak:
+                pc_m5_peak = _cur_pc_m5
+
         # P5: If too many FAKE_PUMPs accumulated, require stricter validation
         if fake_pump_count >= SMART_ENTRY_FAKE_PUMP_THRESHOLD and cached_trend:
             bs_check = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
@@ -723,6 +730,21 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
         position, detail = evaluate_entry_position(price_history, price)
 
         if position == 'GOOD_ENTRY':
+            # Guard -1: momentum fading — pc_m5 dropped >50% from its peak
+            # Data: GREKT pc_m5 +20%→+5.8% → -7.0%, ADHD +13%→+1.7% → -4.4%
+            # Momentum is dying even though snapshot says BULLISH.
+            if cached_trend and pc_m5_peak >= 10.0:
+                _cur_pc = cached_trend.get('price_change_m5', 0)
+                if _cur_pc < pc_m5_peak * 0.5:
+                    if round_num % 6 == 0:
+                        log.info(
+                            f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
+                            f"momentum_fading pc_m5 peaked at {pc_m5_peak:+.1f}%, "
+                            f"now {_cur_pc:+.1f}% (dropped >{50}%) ({elapsed:.0f}s)"
+                        )
+                    time.sleep(interval)
+                    continue
+
             # Guard 0: minimum data points — too few points = noise, not a real pattern
             # Data: GREKT 4pt/10s → -7.7% instant SL. All winners had 6+ points.
             if len(price_history) < SMART_ENTRY_MIN_POINTS:
