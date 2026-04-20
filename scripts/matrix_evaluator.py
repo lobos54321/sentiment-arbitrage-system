@@ -673,12 +673,25 @@ class MatrixEvaluator:
             # Momentum-direct bypass: ATH + T≥100 + V≥70 → let momentum check decide
             # Data: ASTEROID T=100 V=100 S=100 P=30 — P blocked a real breakout.
             # P is meaningless for ATH (price IS at highs). M check is the real guard.
+            #
+            # EXCEPTION: P=30 "overextended" (growth>100%) should NOT be bypassed.
+            # Data: 12 ATH P=30 trades had 8% win rate, -74.7% total (78% of all losses).
+            # P=30 means price has MORE THAN DOUBLED from signal → we're chasing a pump,
+            # not buying a coin that's "naturally at highs".
             t_score = scores.get('trend', 0)
             v_score = scores.get('volume', 0)
+            p_score = scores.get('price', 0)
             if signal_type == 'ATH' and t_score >= 100 and v_score >= 70:
+                if p_score <= 30:
+                    # P=30 = overextended (growth>100%). Do NOT bypass.
+                    log.info(
+                        f"[Matrix] ATH P-bypass BLOCKED: P={p_score} (overextended, growth>100%) "
+                        f"T={t_score} V={v_score} — price already 2x'd from signal, too risky"
+                    )
+                    return False
                 log.info(
                     f"[Matrix] ATH momentum-direct bypass: T={t_score} V={v_score} "
-                    f"P={scores.get('price', 0)} → bypassing P hard-gate, letting momentum decide"
+                    f"P={p_score} → bypassing P hard-gate, letting momentum decide"
                 )
                 # Still count passing matrices normally
             else:
