@@ -184,10 +184,14 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
 
     entry_count = int(watchlist_entry.get('entry_count') or 0)
 
-    # ─── Entry mode adjustment (data-validated: 62% vs 43% win rate) ──
-    if entry_mode == 'pullback_bounce':
-        p *= 0.85
-        log.info(f"[Kelly] pullback_bounce entry → p×0.85 → p={p:.3f}")
+    # ─── Entry mode adjustment ──────────────────────────────────────
+    # REMOVED: pullback_bounce penalty (p *= 0.85) was based on assumed 62% vs 43% win rates.
+    # Deep audit (31 trades, commit 71be6ec5) found the OPPOSITE:
+    #   momentum_direct: 12% win rate (1W/7L, -42.3%)
+    #   pullback_bounce: 31% win rate (4W/9L, -34.3%)
+    # Penalizing pullback_bounce was making things worse.
+    # With only 8+13 trades, neither sample is statistically significant (p=0.017/0.083),
+    # so we neutralize entry_mode's effect on Kelly rather than reverse it.
 
     # ─── Matrix crowding (avg pnl validated: ≤1 perfect=+5%, 2 perfect=-1.1%) ──
     if matrix_scores:
