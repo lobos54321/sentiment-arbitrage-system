@@ -346,6 +346,9 @@ class ExitGuardianThread(threading.Thread):
                         f"reasons=[{', '.join(_threat_reasons)}] "
                         f"peak={pos.peak_pnl*100:+.1f}%"
                     )
+                # Share full threat score with EXIT_MATRIX (includes FLAT-TOP
+                # which EXIT_MATRIX can't compute because it lacks price_ring)
+                pos._guardian_threat_tighten = _threat_tighten
 
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 # ATH Fast Lane: three-phase — mirrors matrix_evaluator logic

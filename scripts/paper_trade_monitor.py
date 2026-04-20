@@ -4292,6 +4292,10 @@ def run_monitor(db):
                                     w_entry['_dex_liquidity_usd'] = _dex_snap.get('liquidity_usd', 0) or 0
                             except Exception:
                                 pass
+                            # Relay Guardian's full threat score (includes FLAT-TOP)
+                            # to EXIT_MATRIX so both engines use identical trail tightening
+                            if hasattr(pos, '_guardian_threat_tighten'):
+                                w_entry['_guardian_threat_tighten'] = pos._guardian_threat_tighten
 
                         if not w_entry:
                             exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}

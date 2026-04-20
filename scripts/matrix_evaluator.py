@@ -780,30 +780,28 @@ class ExitMatrixEvaluator:
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
         # === COORDINATED THREAT SCORE (synced with ExitGuardian) ===
-        # Same system as exit_engine.py: factors add threat points,
-        # combined score tightens trail floor (2pp per point, max 6pp).
-        # FLAT-TOP omitted here (needs price_ring, Guardian handles it).
-        _threat_score = 0
-        _decay = 1.0  # kept for downstream compat
-
-        # Factor 1: TIME_DECAY — peak stale (not making new highs)
-        _peak_ts = entry.get('_peak_ts', 0) or entry.get('entry_time', 0) or 0
-        _time_since_peak = (time.time() - _peak_ts) if _peak_ts > 0 else 0
-        if peak_pnl >= 0.05:
-            if _time_since_peak > 60:
+        # Prefer Guardian's full score (includes FLAT-TOP from price_ring).
+        # Fall back to local TIME_DECAY + THIN_POOL if Guardian hasn't run yet.
+        _guardian_threat = entry.get('_guardian_threat_tighten')
+        if _guardian_threat is not None:
+            _threat_tighten = _guardian_threat
+        else:
+            # Fallback: compute locally without FLAT-TOP
+            _threat_score = 0
+            _peak_ts = entry.get('_peak_ts', 0) or entry.get('entry_time', 0) or 0
+            _time_since_peak = (time.time() - _peak_ts) if _peak_ts > 0 else 0
+            if peak_pnl >= 0.05:
+                if _time_since_peak > 60:
+                    _threat_score += 2
+                elif _time_since_peak > 30:
+                    _threat_score += 1
+            _liq_usd = entry.get('_dex_liquidity_usd', 0) or 0
+            if 0 < _liq_usd < 10000:
                 _threat_score += 2
-            elif _time_since_peak > 30:
+            elif 0 < _liq_usd < 20000:
                 _threat_score += 1
-
-        # Factor 3: THIN POOL — small liquidity pool
-        _liq_usd = entry.get('_dex_liquidity_usd', 0) or 0
-        if 0 < _liq_usd < 10000:
-            _threat_score += 2
-        elif 0 < _liq_usd < 20000:
-            _threat_score += 1
-
-        # Combined trail tightening: 2pp per point, max 6pp
-        _threat_tighten = min(_threat_score * 0.02, 0.06)
+            _threat_tighten = min(_threat_score * 0.02, 0.06)
+        _decay = 1.0  # kept for downstream compat
 
         # === Hard Stop-Loss ===
         # Default -7.5% — momentum entries that immediately drop 7.5% are bad signals.
