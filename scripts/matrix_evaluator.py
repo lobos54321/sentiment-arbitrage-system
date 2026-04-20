@@ -779,21 +779,31 @@ class ExitMatrixEvaluator:
         current_pnl = (current_price - entry_price) / entry_price
         peak_pnl = max(entry.get('peak_pnl', 0), current_pnl)
 
-        # === A3: Time-Decay Factor ===
-        # If peak hasn't been refreshed in >2min and peak is meaningful (>10%),
-        # progressively tighten trail margins. Meme coins that peak and plateau
-        # are almost certainly in distribution phase.
+        # === COORDINATED THREAT SCORE (synced with ExitGuardian) ===
+        # Same system as exit_engine.py: factors add threat points,
+        # combined score tightens trail floor (2pp per point, max 6pp).
+        # FLAT-TOP omitted here (needs price_ring, Guardian handles it).
+        _threat_score = 0
+        _decay = 1.0  # kept for downstream compat
+
+        # Factor 1: TIME_DECAY — peak stale (not making new highs)
         _peak_ts = entry.get('_peak_ts', 0) or entry.get('entry_time', 0) or 0
         _time_since_peak = (time.time() - _peak_ts) if _peak_ts > 0 else 0
-        if peak_pnl >= 0.10 and _time_since_peak > 120:
-            if _time_since_peak > 300:
-                _decay = 0.50   # 5min+ → halve margin
-            elif _time_since_peak > 180:
-                _decay = 0.75   # 3min+ → 25% tighter
-            else:
-                _decay = 0.90   # 2min+ → 10% tighter
-        else:
-            _decay = 1.0
+        if peak_pnl >= 0.05:
+            if _time_since_peak > 60:
+                _threat_score += 2
+            elif _time_since_peak > 30:
+                _threat_score += 1
+
+        # Factor 3: THIN POOL — small liquidity pool
+        _liq_usd = entry.get('_dex_liquidity_usd', 0) or 0
+        if 0 < _liq_usd < 10000:
+            _threat_score += 2
+        elif 0 < _liq_usd < 20000:
+            _threat_score += 1
+
+        # Combined trail tightening: 2pp per point, max 6pp
+        _threat_tighten = min(_threat_score * 0.02, 0.06)
 
         # === Hard Stop-Loss ===
         # Default -7.5% — momentum entries that immediately drop 7.5% are bad signals.
@@ -839,7 +849,7 @@ class ExitMatrixEvaluator:
                 _vel_t = 1.0
 
             if peak_pnl >= 0.50:
-                trail_floor = peak_pnl - (0.20 * _decay * _vel_t)
+                trail_floor = peak_pnl - (0.20 * _vel_t) + _threat_tighten
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -857,7 +867,7 @@ class ExitMatrixEvaluator:
             # Phase 1: peak < 50% — tiered protection (was unconditional free_run → DUCK bug)
             # Sub-phase 1c: peak >= 25% → trail with -15pp floor (A3: time-decay applied)
             if peak_pnl >= 0.25:
-                trail_floor = peak_pnl - (0.15 * _decay * _vel_t)
+                trail_floor = peak_pnl - (0.15 * _vel_t) + _threat_tighten
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -874,7 +884,7 @@ class ExitMatrixEvaluator:
 
             # Sub-phase 1b: peak >= 15% → trail with -10pp floor (A3: time-decay applied)
             if peak_pnl >= 0.15:
-                trail_floor = peak_pnl - (0.10 * _decay * _vel_t)
+                trail_floor = peak_pnl - (0.10 * _vel_t) + _threat_tighten
                 if current_pnl < trail_floor:
                     return {
                         'action': 'exit',
@@ -995,7 +1005,7 @@ class ExitMatrixEvaluator:
             # Ratchet: use whichever is higher, never lower the factor
             current_factor = entry.get('_trail_factor', base_factor)
             trail_factor = max(base_factor, vel_factor, current_factor)
-            trail_floor = peak_pnl * trail_factor
+            trail_floor = peak_pnl * trail_factor + _threat_tighten
 
             if current_pnl < trail_floor:
                 return {
