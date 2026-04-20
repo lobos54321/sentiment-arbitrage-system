@@ -78,8 +78,8 @@ SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
 SMART_ENTRY_MIN_BOUNCE_RATIO = 0.30  # bounce/pullback default (data: 25% let through Goose -14.8%)
 SMART_ENTRY_BOUNCE_RATIO_STRONG = 0.15   # strong signal: bs>=1.5 + vol>=2.0 + real_buying
 SMART_ENTRY_BOUNCE_RATIO_MEDIUM = 0.20   # medium signal: bs>=1.3 + vol>=1.5
-SMART_ENTRY_MIN_VOL_RATIO = 1.0      # vol_ratio floor (data: Buddy vol=0.8 → instant -18.8% crash)
-SMART_ENTRY_REENTRY_VOL_RATIO = 1.1  # stricter vol_ratio for re-entries (user tuned)
+SMART_ENTRY_MIN_VOL_RATIO = 2.0      # vol_ratio floor (data: ALL trades with vol<2.0 lost, 0W/6L on 2026-04-19)
+SMART_ENTRY_REENTRY_VOL_RATIO = 2.0  # same threshold for re-entries (data: no reason to be lenient)
 SMART_ENTRY_MIN_POINTS = 6            # Minimum price data points before entry (data: GREKT 4pt → instant -7.7% SL)
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
