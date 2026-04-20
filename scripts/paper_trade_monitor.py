@@ -4068,11 +4068,13 @@ def run_monitor(db):
                         f"spread={_spread:+.1f}%)"
                     )
 
-                    # SPREAD GUARD: reject if fill price is >3% above SmartEntry trigger price.
-                    # Root cause: 60% of peak=0% trades were caused by 3-5% quote spread
-                    # eating the entire SL buffer. Entry starts -3% to -5% in the hole.
-                    # Data: FLASH +2.8%→SL, GREKT +3.4%→SL, ETH +5.6%→SL, Highcoin +3.9%→SL
-                    _SPREAD_GUARD_MAX_PCT = 3.0
+                    # SPREAD GUARD: reject if fill price is >5% above SmartEntry trigger price.
+                    # Root cause: peak=0% trades caused by large quote spread eating SL buffer.
+                    # Backtest (31 trades):
+                    #   >3%: blocks 11L but also 5W (AGI +21.7%, Jared +14.3%) = net +46.5% but loses best trades
+                    #   >5%: blocks 5L (-44.3%), only misses 1W (-4.1%) = net +40.2% ← optimal
+                    #   >6%: blocks 1L only = too loose
+                    _SPREAD_GUARD_MAX_PCT = 5.0
                     if _spread > _SPREAD_GUARD_MAX_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] 🚫 {pending['symbol']} ABORT: "
