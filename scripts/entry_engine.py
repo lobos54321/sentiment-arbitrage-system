@@ -533,12 +533,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
     # Seed price_history from Matrix's accumulated observations.
     # MatrixEvaluator polls this token every 10-60s since it joined the watchlist,
     # so we typically have 5-30+ minutes of pre-existing price data.
-    # LIMIT TO 60s: stale highs from 2+ min ago cause false "big pullback" patterns
-    # that trigger GOOD_ENTRY on what's actually a downtrend continuation.
-    # Data: 42% of trades had peak=0% — likely caused by stale local_high.
+    # This means vel_30s and vel_60s work from round 1 — no cold-start delay.
+    # NOTE: 120s window validated — peak=0% root cause is quote spread, not stale data.
     now = time.time()
     existing = MatrixEvaluator._price_history.get(token_ca, [])
-    price_history = [(t, p) for t, p in existing if now - t <= 60 and p > 0]
+    price_history = [(t, p) for t, p in existing if now - t <= 120 and p > 0]
     seed_count = len(price_history)
 
     last_dex_check = 0

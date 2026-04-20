@@ -4067,6 +4067,22 @@ def run_monitor(db):
                         f"(quote_fill, trigger_was={_trigger_str} "
                         f"spread={_spread:+.1f}%)"
                     )
+
+                    # SPREAD GUARD: reject if fill price is >3% above SmartEntry trigger price.
+                    # Root cause: 60% of peak=0% trades were caused by 3-5% quote spread
+                    # eating the entire SL buffer. Entry starts -3% to -5% in the hole.
+                    # Data: FLASH +2.8%→SL, GREKT +3.4%→SL, ETH +5.6%→SL, Highcoin +3.9%→SL
+                    _SPREAD_GUARD_MAX_PCT = 3.0
+                    if _spread > _SPREAD_GUARD_MAX_PCT:
+                        log.info(
+                            f"  [SPREAD_GUARD] 🚫 {pending['symbol']} ABORT: "
+                            f"fill spread {_spread:+.1f}% > {_SPREAD_GUARD_MAX_PCT}% max "
+                            f"(fill={price:.12f} vs trigger={_trigger_str}). "
+                            f"SL buffer would be eaten by spread."
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     db.execute("""
                         INSERT INTO paper_trades
