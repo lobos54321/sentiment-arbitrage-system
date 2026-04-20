@@ -3834,6 +3834,12 @@ def run_monitor(db):
                     if _kelly_sol <= 0.05:
                         log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
                         pending_entries.pop(lifecycle_id, None)
+                        # Set cooldown to prevent immediate re-FIRE on next eval
+                        # Data: geeked Kelly=0.030 cycled 52 times — wasted eval resources
+                        try:
+                            watchlist.mark_expired(w_entry['id'], f'kelly_too_small_{_kelly_sol:.3f}')
+                        except Exception:
+                            pass
                         continue
 
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {_kelly_sol} SOL -> Pending queue")
@@ -4192,7 +4198,7 @@ def run_monitor(db):
                     log.info(
                         f"  Entered {pending['symbol']}/stage1 @ {price:.10f} "
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
-                        f"lifecycle={lifecycle_id} via quoted execution"
+                        f"mode={entry_mode} lifecycle={lifecycle_id} via quoted execution"
                     )
                     if 'watchlist_id' in pending:
                         watchlist.mark_holding(

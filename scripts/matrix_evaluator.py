@@ -179,30 +179,10 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
             logging.getLogger('matrix_evaluator').warning(f"dex_trend_weak parsing failed: {e}")
             pass  # fall through to existing paths
 
-    # --- Path 1: K-line bars available ---
-    if bars and len(bars) >= 4:
-        recent_vol = bars[0].get('volume', 0)
-        prev_vols = [b.get('volume', 0) for b in bars[1:4]]
-        avg_prev = sum(prev_vols) / len(prev_vols) if prev_vols else 0
-
-        # All-zero = data absent, not volume decline — fall through to DexScreener
-        if not (avg_prev <= 0 and recent_vol <= 0):
-            if avg_prev <= 0:
-                vol_ratio = 999.0
-            else:
-                vol_ratio = recent_vol / avg_prev
-
-            tx = signal_tx24h or 0
-            if vol_ratio >= 2.0 and (tx == 0 or tx >= 300):
-                return 100, f'strong_volume ratio={vol_ratio:.1f} tx={tx}'
-            elif vol_ratio >= 1.2 and (tx == 0 or tx >= 100):
-                return 70, f'moderate_volume ratio={vol_ratio:.1f} tx={tx}'
-            elif vol_ratio >= 0.8:
-                return 40, f'flat_volume ratio={vol_ratio:.1f} tx={tx}'
-            else:
-                return 0, f'weak_volume ratio={vol_ratio:.1f} tx={tx}'
-    
-    # --- Path 2: DexScreener real-time volume ---
+    # --- Path 1: DexScreener real-time volume (via fetch_dexscreener_volume) ---
+    # NOTE: Path 1 (kline_cache bars volume) removed 2026-04-20.
+    # kline_cache.db was stale for 18+ days. Path 0 (DexScreener trend) is the
+    # primary source and always executes first. This path is the fallback.
     if token_ca:
         try:
             dex_data = _dex_volume_fn(token_ca) if callable(globals().get('_dex_volume_fn')) else None
@@ -238,9 +218,10 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     Matrix ③ — Price Strength
     Evaluates growth from signal price and recovery from observed dip.
 
-    Fix 4: For ATH tokens, use the LOWER of signal_price vs latest_ath_price as the
-    comparison anchor. This prevents ATH peak prices from making P permanently low
-    when the coin pulls back after an ATH signal.
+    latest_ath_price: preserved in function signature for backward compatibility
+    but not used in scoring. P score always compares against the original
+    signal_price anchor. Data audit (31 trades): P is the strongest predictor
+    (P=100: 50% win, P=30: 8% win).
 
     Returns: (score: int 0-100, reason: str)
     """
@@ -249,14 +230,7 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     if not signal_price or signal_price <= 0:
         return 50, 'no_signal_price'
 
-    # Fix 4: use the lower of the two as the anchor price so ATH pullbacks don't kill P
-    anchor_price = signal_price
-    if latest_ath_price and latest_ath_price > 0:
-        # If ATH is higher than original signal price, original signal_price is better anchor
-        # If coin dropped back below signal_price after ATH, use current lowest
-        anchor_price = signal_price  # always preserve original anchor
-
-    growth_pct = ((current_price - anchor_price) / anchor_price) * 100
+    growth_pct = ((current_price - signal_price) / signal_price) * 100
 
     recovery_pct = 0
     if lowest_price and lowest_price > 0:
