@@ -4283,6 +4283,15 @@ def run_monitor(db):
                             # A3: relay peak_ts for time-decay trail calculation
                             if hasattr(pos, 'peak_ts'):
                                 w_entry['_peak_ts'] = pos.peak_ts
+                            # Fix: write pool liquidity to w_entry for Thin Pool factor
+                            # Data chain was broken: ExitGuardian reads _dex_liquidity_usd but
+                            # nobody was writing it. 48% of pools are $10-20k (small).
+                            try:
+                                _dex_snap = fetch_dexscreener_trend_snapshot(pos.token_ca)
+                                if _dex_snap:
+                                    w_entry['_dex_liquidity_usd'] = _dex_snap.get('liquidity_usd', 0) or 0
+                            except Exception:
+                                pass
 
                         if not w_entry:
                             exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}
