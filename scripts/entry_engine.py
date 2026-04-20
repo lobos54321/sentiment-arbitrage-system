@@ -533,10 +533,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
     # Seed price_history from Matrix's accumulated observations.
     # MatrixEvaluator polls this token every 10-60s since it joined the watchlist,
     # so we typically have 5-30+ minutes of pre-existing price data.
-    # This means vel_30s and vel_60s work from round 1 — no cold-start delay.
+    # LIMIT TO 60s: stale highs from 2+ min ago cause false "big pullback" patterns
+    # that trigger GOOD_ENTRY on what's actually a downtrend continuation.
+    # Data: 42% of trades had peak=0% — likely caused by stale local_high.
     now = time.time()
     existing = MatrixEvaluator._price_history.get(token_ca, [])
-    price_history = [(t, p) for t, p in existing if now - t <= 120 and p > 0]
+    price_history = [(t, p) for t, p in existing if now - t <= 60 and p > 0]
     seed_count = len(price_history)
 
     last_dex_check = 0
@@ -695,11 +697,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
                 consecutive_momentum_rounds = 0
             # If data not fresh but still bullish → don't increment, don't reset
 
-            # Dynamic min wait based on signal strength:
-            # Extreme (buy_sell≥5 + pc_m5>20%): 10s — buyer domination, no need to wait
-            # Normal: 60s — let the momentum develop
+            # Re-entries need stronger confirmation: 5 rounds instead of 3
+            # Data: ETH re-entry#2 via momentum_direct → -6.5% (3 rounds wasn't enough)
+            _min_momentum_rounds = 5 if entry_count >= 1 else 3
             min_momentum_wait = 10 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
-            if (consecutive_momentum_rounds >= 3
+            if (consecutive_momentum_rounds >= _min_momentum_rounds
                     and elapsed > min_momentum_wait
                     and price and price > 0):
                 detail_str = (

@@ -199,8 +199,10 @@ class ExitGuardianThread(threading.Thread):
                         f"price={price:.10f} src={src} — confirming in 1s..."
                     )
 
-                    # Second check after 1 second delay
-                    time.sleep(1.0)
+                    # Second check after short delay (0.3s, not 1.0s)
+                    # Data: 1.0s delay cost avg -2.1% extra slippage on SL exits.
+                    # 0.3s is enough to detect Redis price glitches but reduces crash exposure.
+                    time.sleep(0.3)
                     price2, src2, age_ms2 = self.fetch_price(ca, pool)
 
                     if not price2 or price2 <= 0:
@@ -435,7 +437,31 @@ class ExitGuardianThread(threading.Thread):
                                 })
                             self._exit_pending.add(trade_id)
                             continue
-                    # === ATH Phase 1a: peak < 15% — velocity+volume crash brake ===
+                    # === ATH Phase 1a: peak >= 8% — trail with -8pp ===
+                    # Previously only crash_brake below 15%. FLASH peak=12.7% fell through
+                    # to crash_brake which requires vel < -5%/min — slow declines bypassed it.
+                    # Data: FLASH +12.7%→-11.5% (24.2%回吐), UNCEROID +7.9%→-0.7% (8.6%回吐)
+                    elif pos.peak_pnl >= 0.08:
+                        _base_margin = 0.08 * _decay_factor * _vel_tighten
+                        trail_floor = pos.peak_pnl - _base_margin + _thin_pool_bonus + _distrib_bonus
+                        if pnl < trail_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE1 TRAIL_8: "
+                                f"pnl={pnl*100:+.1f}% < floor={trail_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, -8pp+liq) price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_ath_phase1_trail_8 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -8pp)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+
+                    # === ATH Phase 1b: peak >= 5% — velocity+volume crash brake ===
                     # Previously "free run" — no protection at all. TripleUnch lost +11.9% → -6.9%.
                     # Now: use velocity and volume signals to detect crashes early.
                     if pos.peak_pnl >= 0.05:  # only if we've seen at least +5% peak
