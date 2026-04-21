@@ -3910,24 +3910,23 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane: T≥100 + V≥100 + S≥100 + M=100 + buy_sell≥2.0 + pc_m5>0 + ATH only
-                    # Restored to 67% period proven config (commit 67dbb4f3):
-                    #   "momentum_direct requires T=100 V=100 S=100 M=100 (all perfect except P)"
-                    # f6e3046e lowered V to 70 and removed S≥100 — this was never reverted.
+                    # Fast lane: T≥100 + V≥70 + M=100 + buy_sell≥2.0 + pc_m5>0 + ATH only
+                    # Reverted to ATH-only. Data:
+                    #   67% period: fast_lane ATH-only → 50% win rate (5/10)
+                    #   After opening NOT_ATH: NOT_ATH = 70% of trades, 25% win rate
+                    #   NOT_ATH tokens aren't golden dogs — momentum fades faster,
+                    #   they need SmartEntry's full 7-guard pullback-bounce confirmation.
                     # Re-entries NEVER get fast lane — must confirm pullback-bounce first.
                     _fl_sig_type = pending.get('signal_type', '?')
                     _fl_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
                         _m_score and _m_score >= 100
-                        and _t_score and _t_score >= 100
-                        and _v_score and _v_score >= 100  # was 70, restored to 100 (67% period)
-                        and _s_score and _s_score >= 100  # was removed, restored (67% period)
-                        and _fl_sig_type == 'ATH'
+                        and _t_score and _t_score >= 100 and _v_score and _v_score >= 70
+                        and _fl_sig_type == 'ATH'  # NOT_ATH must go through SmartEntry
                     ) else None
                     _fl_bs_ratio = (_fl_dex.get('buys_m5', 0) / max(_fl_dex.get('sells_m5', 1), 1)) if _fl_dex else 0
                     _fl_pc_m5 = _fl_dex.get('price_change_m5', 0) if _fl_dex else 0
                     _is_fast_lane = (_t_score and _t_score >= 100
-                                       and _v_score and _v_score >= 100
-                                       and _s_score and _s_score >= 100
+                                       and _v_score and _v_score >= 70
                                        and _m_score and _m_score >= 100
                                        and _fl_bs_ratio >= 2.0
                                        and _fl_pc_m5 > 0  # 5min price must be UP
