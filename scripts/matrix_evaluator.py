@@ -258,9 +258,12 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
         recovery_pct = ((current_price - lowest_price) / lowest_price) * 100
 
     # V-bounce from below signal price — must fully recover to entry line
-    # Intercept BEFORE P=100. If it had a deadly dip (>= 5%) and recovered back above water,
+    # Intercept BEFORE P=100. If it had a deep dip (>= 15%) and recovered back above water,
     # it is a V-bounce and gets penalized to 70 instead of 100.
-    if 0 <= growth_pct <= 40 and dip_from_signal >= 5.0:
+    # NOTE: 5% was too aggressive — meme tokens naturally dip 5-10% in first minutes.
+    #   Data: 7h overnight with 0 trades because every token triggered V-bounce at 5%.
+    #   15% catches only genuine crash-and-recover patterns.
+    if 0 <= growth_pct <= 40 and dip_from_signal >= 15.0:
         return 70, f'v_bounce growth={growth_pct:+.1f}% dipped={dip_from_signal:.1f}%'
 
     # Extremely healthy initial growth zone (0 - 40%)
