@@ -338,7 +338,7 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
 
     # Weak but valid: overall up by threshold, even with dips mid-way
     if pct_move >= MIN_MOMENTUM_MOVE_PCT and s_last > s_first:
-        return 60, f'choppy_up +{pct_move:.1f}% rises={rises}/4 [{snap_str}]', snapshots
+        return 60, f'choppy_up +{pct_move:.1f}% rises={rises}/2 [{snap_str}]', snapshots
 
     # Peak during window but ended lower (pump fading)
     if pct_max >= MIN_MOMENTUM_MOVE_PCT and pct_move < MIN_MOMENTUM_MOVE_PCT:
@@ -346,9 +346,9 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
 
     # Below threshold
     if pct_move > 0:
-        return 0, f'noise +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% rises={rises}/4 [{snap_str}]', snapshots
+        return 0, f'noise +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% rises={rises}/2 [{snap_str}]', snapshots
 
-    return 0, f'declining {pct_move:.2f}% rises={rises}/4 [{snap_str}]', snapshots
+    return 0, f'declining {pct_move:.2f}% rises={rises}/2 [{snap_str}]', snapshots
 
 
 

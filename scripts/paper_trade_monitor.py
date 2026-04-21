@@ -4786,10 +4786,14 @@ def run_monitor(db):
                 
                 # Update Watchlist Status
                 if w_entry:
-                    # Loss exits: 30-minute cooldown to prevent re-entering a dying token
-                    # Data: ASTROID re-entered 6 min after -9.1% exit → -20.4% again
-                    # Win exits: no cooldown — price-gate handles re-entry filtering
-                    _exit_cooldown = 1800 if (realized_pnl is not None and realized_pnl < 0) else 0
+                    # Loss exits: 30-minute cooldown — avoid dying-token re-entry
+                    #   Data: ASTROID re-entered 6 min after -9.1% exit → -20.4% again
+                    # Win exits: 5-minute cooldown — avoid immediate double-dip
+                    #   Data: ASTERWOJAK re-entered 2.5 min after +5.9% exit → -7.7%
+                    if realized_pnl is not None and realized_pnl < 0:
+                        _exit_cooldown = 1800  # 30 min
+                    else:
+                        _exit_cooldown = 300   # 5 min
                     watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=_exit_cooldown)
                 last_progress = time.time()
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'

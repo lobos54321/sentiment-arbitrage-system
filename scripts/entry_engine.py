@@ -531,6 +531,45 @@ def evaluate_entry_position(price_history, current_price):
 # SmartEntry checks this each round and uses fresh data for decisions.
 # Python dict assignment is atomic (GIL), so no lock needed.
 _smart_entry_signals = {}
+ 
+ 
+# pc_m5 peak cache — tracks highest pc_m5 observed per token across FIRE events.
+# Replaces the original G-1 momentum_fading loop state that Single-Pass refactor
+# lost. Used to detect "pump fading" pattern: pc_m5 peaked at +20%, now +8%.
+# Not covered by Matrix trend (absolute value only), 9s momentum (too short-term),
+# is_chasing_top (extreme chase), or below_high (price position).
+# TTL 10 min: after that, peak resets — a token may legitimately re-pump.
+_pc_m5_peak_cache = {}
+_PC_M5_PEAK_TTL_SEC = 600
+ 
+ 
+def _track_pc_m5_peak(token_ca, current_pc_m5):
+    """Update cached peak for this token and detect fading.
+ 
+    Returns: (peak_pc_m5, is_fading)
+      is_fading = True when peak >= 10% AND current < peak * 0.5
+    """
+    now = time.time()
+    cache = _pc_m5_peak_cache.get(token_ca)
+
+    # Reset cache if expired or missing
+    if not cache or now - cache['ts'] > _PC_M5_PEAK_TTL_SEC:
+        cache = {'peak': current_pc_m5, 'ts': now}
+    else:
+        # Update peak if current is higher
+        if current_pc_m5 > cache['peak']:
+            cache['peak'] = current_pc_m5
+        # Extend TTL on any activity
+        cache['ts'] = now
+
+    _pc_m5_peak_cache[token_ca] = cache
+    peak = cache['peak']
+
+    # Fading logic: If it was pumping hard (>= 10%) but now dropped by > 50%
+    # Data: peak +25%, current +10% -> fading. peak +8%, current +4% -> not fading (too small to care).
+    is_fading = (peak >= 10.0 and current_pc_m5 < peak * 0.5)
+
+    return peak, is_fading
 
 
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0):
@@ -588,15 +627,15 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
     position, detail = evaluate_entry_position(price_history, price)
     
     if position == 'GOOD_ENTRY':
-        # Guard -1: Momentum fading check
-        pc_m5_peak = 0.0
-        # Since we don't have 15m polling, we approximate peak from history
-        if existing:
-            # We don't have historical pc_m5, we just use current as peak assumption
-            # This guard becomes less relevant without the loop, but we keep it
-            # if we can track it.
-            pass
-
+        # Guard -1: momentum fading check
+        pc_m5 = cached_trend.get('price_change_m5', 0) if cached_trend else 0
+        pc_m5_peak, is_fading = _track_pc_m5_peak(token_ca, pc_m5)
+        
+        if is_fading:
+            detail_str = f"PUMP FADING: pc_m5 dropped from +{pc_m5_peak:.1f}% to +{pc_m5:.1f}% (>50% decay)"
+            log.info(f"[SmartEntry] 🚫 ${symbol} REJECT G-1: {detail_str}")
+            return False, 'momentum_fading', detail_str, None
+        
         pullback = detail.get('pullback_depth_pct', 0)
         bounce = detail.get('bounce_from_low_pct', 0)
         bounce_ratio = bounce / pullback if pullback > 0 else 0
