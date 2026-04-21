@@ -76,11 +76,15 @@ SMART_ENTRY_MAX_WAIT_SEC = 900       # 15-minute maximum wait
 SMART_ENTRY_MIN_PULLBACK_PCT = 2.0   # Minimum pullback depth to qualify
 SMART_ENTRY_MIN_BOUNCE_PCT = 2.0     # Minimum bounce from low to confirm
 SMART_ENTRY_MIN_BOUNCE_RATIO = 0.30  # bounce/pullback default (data: 25% let through Goose -14.8%)
-SMART_ENTRY_BOUNCE_RATIO_STRONG = 0.15   # strong signal: bs>=1.5 + vol>=2.0 + real_buying
+SMART_ENTRY_BOUNCE_RATIO_STRONG = 0.15   # strong signal: bs>=1.5 + vol>=2.0 + real_buying + below_high<10%
 SMART_ENTRY_BOUNCE_RATIO_MEDIUM = 0.20   # medium signal: bs>=1.3 + vol>=1.5
-SMART_ENTRY_MIN_VOL_RATIO = 2.0      # vol_ratio floor (data: ALL trades with vol<2.0 lost, 0W/6L on 2026-04-19)
-SMART_ENTRY_REENTRY_VOL_RATIO = 2.0  # same threshold for re-entries (data: no reason to be lenient)
-SMART_ENTRY_MIN_POINTS = 6            # Minimum price data points before entry (data: GREKT 4pt → instant -7.7% SL)
+SMART_ENTRY_MIN_VOL_RATIO = 1.5      # vol_ratio floor — lowered from 2.0 to 1.5 to resolve G1b/tier conflict
+                                      # (2.0 blocked medium tier vol>=1.5 range, making medium tier dead code)
+SMART_ENTRY_REENTRY_VOL_RATIO = 1.5  # same as MIN_VOL_RATIO
+SMART_ENTRY_MIN_POINTS = 8            # Raised from 6 → 8 (data: n_points≤10 was 0W/4L, PONYROID n=6 → -18.7%)
+SMART_ENTRY_MAX_BELOW_HIGH_PCT = 15.0 # Dead cat bounce filter: below_high > 15% → reject
+                                      # Data: 24+ samples, below_high>15% = zero win rate
+                                      # Originally commit b9bb618, reverted 8102bc8. Now restored with stronger evidence.
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
 
@@ -492,6 +496,14 @@ def evaluate_entry_position(price_history, current_price):
         'n_points': len(prices),
     }
 
+    # Dead cat bounce filter: if price is still >15% below peak, it's a
+    # mid-decline bounce, not a real reversal. Data: 24+ samples, 0 wins.
+    # Originally commit b9bb618, reverted 8102bc8 ("insufficient data").
+    # Now restored: 10 new samples confirmed below_high>15% = zero win rate.
+    if below_high > SMART_ENTRY_MAX_BELOW_HIGH_PCT:
+        detail['reject_reason'] = f'dead_cat_bounce below_high={below_high:.1f}%>{SMART_ENTRY_MAX_BELOW_HIGH_PCT}%'
+        return 'STILL_FALLING', detail
+
     # Good entry: pulled back enough AND bounced confirming bottom
     if (pullback_depth >= SMART_ENTRY_MIN_PULLBACK_PCT
             and bounce_from_low >= SMART_ENTRY_MIN_BOUNCE_PCT
@@ -803,7 +815,10 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
                 _br_vol_ratio = _br_vol_m5 / _br_h1_avg if _br_h1_avg > 0 else (5.0 if _br_vol_m5 > 0 else 0)
                 _br_is_real = 'real_buying' in trend_reason
 
-                if _br_bs >= 1.5 and _br_vol_ratio >= 2.0 and _br_is_real:
+                _below_high_pct = detail.get('below_high_pct', 100)
+                # Strong tier: requires below_high < 10% — all 3 strong entries with
+                # below_high > 20% lost (BANDIT -10.9%, PSYCHO -16.7%, ASTROID -20.4%)
+                if _br_bs >= 1.5 and _br_vol_ratio >= 2.0 and _br_is_real and _below_high_pct < 10.0:
                     _br_threshold = SMART_ENTRY_BOUNCE_RATIO_STRONG  # 15%
                     _br_tier = 'strong'
                 elif _br_bs >= 1.3 and _br_vol_ratio >= 1.5:
@@ -846,33 +861,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
                 time.sleep(interval)
                 continue
 
-            # Guard 2: trend downgrade — buying pressure fading
-            if trend_downgraded:
-                log.info(
-                    f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                    f"trend downgraded real_buying→moderate_buying, "
-                    f"buying pressure fading ({elapsed:.0f}s)"
-                )
-                time.sleep(interval)
-                continue
-
-            # Guard 3: overextension — coin already pumped too much
-            # If vel_60s > 20%/min, the "pullback bounce" is likely a crash beginning
-            if len(price_history) >= 4:
-                _now = time.time()
-                _pts_60 = [(t, p) for t, p in price_history if _now - t <= 60 and p > 0]
-                if len(_pts_60) >= 2:
-                    _dt = (_pts_60[-1][0] - _pts_60[0][0]) / 60.0
-                    if _dt > 0:
-                        _vel_60 = ((_pts_60[-1][1] - _pts_60[0][1]) / _pts_60[0][1] * 100) / _dt
-                        if _vel_60 > 20.0:
-                            log.info(
-                                f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                                f"overextended vel_60s={_vel_60:+.1f}%/min > 20%/min, "
-                                f"pullback likely crash not bounce ({elapsed:.0f}s)"
-                            )
-                            time.sleep(interval)
-                            continue
+            # Guard 2 (trend_downgrade) REMOVED — 0 triggers in 7h audit,
+            # fully covered by G-1 momentum_fading. Dead code.
+            #
+            # Guard 3 (overextension vel_60s>20%/min) REMOVED — 0 triggers in 7h audit,
+            # fully covered by is_chasing_top() multi-factor check. Dead code.
 
             trigger_price = price
             detail_str = (
