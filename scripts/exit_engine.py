@@ -69,8 +69,8 @@ def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
     if peak > 0.10:
         sl = max(sl, -0.03)
 
-    # Bounds: at most -15% (room), at least -3% (don't sit through bigger losses)
-    return max(-0.15, min(-0.03, sl))
+    # Bounds: at most -12.5% (hard cap), at least -3% (don't sit through bigger losses)
+    return max(-0.125, min(-0.03, sl))
 
 
 # ─── EXIT Guardian Thread ─────────────────────────────────────────────────────

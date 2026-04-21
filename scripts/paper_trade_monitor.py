@@ -3930,8 +3930,7 @@ def run_monitor(db):
                                        and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
                                        and _fl_bs_ratio >= 2.0
-                                       and _fl_pc_m5 > 0  # 5min price must be UP
-                                       and _entry_count == 0  # re-entries must go through SmartEntry
+                                       and _fl_pc_m5 > 15.0  # USER UPDATE: 5min price must be > 15.0%
                                        and _fl_sig_type == 'ATH')  # NOT_ATH → SmartEntry
 
                     if trigger_price and pending['attempts'] == 1 and not _is_fast_lane:
@@ -3942,7 +3941,7 @@ def run_monitor(db):
                             pending_entries.pop(lifecycle_id, None)
                             continue
                         # BUG FIX: Also reject if price DROPPED >10% — token likely crashing
-                        if live_price is not None and live_price < trigger_price * 0.90:
+                        if live_price is not None and live_price < trigger_price * 0.85:
                             _drop_pct = (live_price - trigger_price) / trigger_price * 100
                             log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: price_collapsed "
                                      f"live={live_price:.10f} dropped {_drop_pct:+.1f}% from trigger={trigger_price:.10f}")
@@ -3952,7 +3951,7 @@ def run_monitor(db):
                         # Fast lane: still do a price drop sanity check (漏洞2 fix)
                         # Skip SmartEntry but DON'T buy into a crash
                         _fl_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                        if _fl_price is not None and trigger_price and _fl_price < trigger_price * 0.90:
+                        if _fl_price is not None and trigger_price and _fl_price < trigger_price * 0.85:
                             _fl_drop = (_fl_price - trigger_price) / trigger_price * 100
                             log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast-lane ABORT: "
                                      f"price collapsed {_fl_drop:+.1f}% since FIRE "
@@ -4013,49 +4012,30 @@ def run_monitor(db):
                             # --- Async SmartEntry: submit to thread pool, check on next iteration ---
                             _se_future = pending.get('_smart_entry_future')
 
-                            if _se_future is None:
-                                # P=30 OVEREXTENDED GUARD: block P≤30 from SmartEntry path.
-                                # P=30 means price already 2x'd from signal (growth>100%).
-                                # Data: 12 ATH P=30 via SmartEntry = 8% win rate, -74.7% total.
-                                # Fast-lane bypasses SmartEntry, so golden dogs with P=30 still pass.
-                                _p_score = _scores.get('price', 50)
-                                if _p_score <= 30 and _p_score > 0:
-                                    _fl_last_log = pending.get('_p30_log_ts', 0)
-                                    if time.time() - _fl_last_log >= 30:
-                                        log.info(
-                                            f"  [SmartEntry] {pending['symbol']} BLOCKED: "
-                                            f"P={_p_score} overextended (growth>100%) — "
-                                            f"only Fast-lane can buy P≤30"
-                                        )
-                                        pending['_p30_log_ts'] = time.time()
-                                    pending_entries.pop(lifecycle_id, None)
-                                    continue
+                            _p_score = _scores.get('price', 50)
+                            if _p_score <= 30 and _p_score > 0:
+                                _fl_last_log = pending.get('_p30_log_ts', 0)
+                                if time.time() - _fl_last_log >= 30:
+                                    log.info(
+                                        f"  [SmartEntry] {pending['symbol']} BLOCKED: "
+                                        f"P={_p_score} overextended — only Fast-lane can buy"
+                                    )
+                                    pending['_p30_log_ts'] = time.time()
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
 
-                                # First time: submit SmartEntry to thread pool (non-blocking)
-                                _se_future = smart_entry_pool.submit(
-                                    evaluate_smart_entry,
+                            # Execute synchronous direct evaluation (No 15m wait loop)
+                            try:
+                                should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
                                     pending['token_ca'],
                                     symbol=pending['symbol'],
                                     pool_address=pending['pool'],
                                     entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
                                 )
-                                pending['_smart_entry_future'] = _se_future
-                                log.info(f"  [SmartEntry] {pending['symbol']} submitted to async thread pool")
-                                continue  # Move to next pending coin, don't block
-
-                            if not _se_future.done():
-                                # Still running in background — skip, process other coins
-                                continue
-
-                            # Future completed — collect result
-                            try:
-                                should_enter, timing_reason, timing_detail, timing_trigger_price = _se_future.result()
                             except Exception as _se_err:
-                                log.error(f"  [SmartEntry] {pending['symbol']} thread error: {_se_err}", exc_info=True)
+                                log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
                                 pending_entries.pop(lifecycle_id, None)
                                 continue
-                            finally:
-                                pending.pop('_smart_entry_future', None)  # Clean up future reference
 
                             if not should_enter:
                                 retry_count = pending.get('smart_entry_retries', 0)
@@ -4248,6 +4228,21 @@ def run_monitor(db):
                         f"mode={entry_mode} lifecycle={lifecycle_id} via quoted execution"
                     )
                     if 'watchlist_id' in pending:
+                        # Slippage-Adjusted Adaptive SL
+                        _base_sl = get_adaptive_stop_loss()
+                        if _spread > 0:
+                            # We bought higher than trigger, so SL must be pulled down to grant identical absolute room
+                            _slip_pct = _spread / 100.0
+                            _adj_sl = _base_sl - _slip_pct
+                            # User mandate: 5% max slippage allowed, max SL floor at -12.5%
+                            _final_sl = max(-0.125, _adj_sl)
+                            log.info(
+                                f"  [SL_ADJUST] {pending['symbol']} BaseSL={_base_sl*100:.1f}%, Slip={_spread:+.1f}% "
+                                f"→ AdoptedSL={_final_sl*100:.1f}%"
+                            )
+                        else:
+                            _final_sl = _base_sl
+                        
                         watchlist.mark_holding(
                             pending['watchlist_id'], 
                             price, 
@@ -4255,7 +4250,7 @@ def run_monitor(db):
                             token_amount_raw, 
                             token_decimals or 0, 
                             trade_id,
-                            initial_sl=get_adaptive_stop_loss(),  # A2: volatility-adjusted SL
+                            initial_sl=_final_sl,  # Private slip-adjusted SL
                         )
                     last_progress = time.time()
                     time.sleep(0.2)

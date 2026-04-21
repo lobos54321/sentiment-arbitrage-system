@@ -94,15 +94,20 @@ def score_trend(bars, symbol, token_ca=None, pool_address=None):
         _dex_detail = f'dex: pc_m5={_pc_m5:+.1f}% bs={_bs:.2f} buys={_buys} sells={_sells}'
 
         # Clear uptrend: price rising + buyers dominate
-        if _pc_m5 > 3.0 and _bs >= 1.2:
+        if _pc_m5 > 5.0 and _bs >= 1.5:
             # If we also have bars, cross-validate (belt & suspenders)
             if bars and len(bars) >= 3:
                 trend_ok, bar_reason, bar_detail = _trend_fn(bars, symbol)
                 if not trend_ok and bar_reason == 'downtrend':
                     # DexScreener says up but bars say down — trust DexScreener
-                    # (bars are slower to reflect real-time reversals)
-                    return 100, 'dex_trend_up', f'{_dex_detail} (bars disagree: {bar_detail}, trusting dex)'
-            return 100, 'dex_trend_up', _dex_detail
+                    return 100, 'dex_trend_strong', f'{_dex_detail} (bars disagree: {bar_detail})'
+            return 100, 'dex_trend_strong', _dex_detail
+            
+        if _pc_m5 > 3.0 and _bs >= 1.2:
+            return 80, 'dex_trend_up', _dex_detail
+            
+        if _pc_m5 > 2.0 and _bs >= 1.1:
+            return 60, 'dex_trend_mod_up', _dex_detail
 
         # Clear downtrend: price falling
         if _pc_m5 < -3.0:
@@ -180,8 +185,10 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
                     buys_h1 = trend_data.get('buys_h1', 0) or 0
                     sells_h1 = trend_data.get('sells_h1', 0) or 0
                     total_h1 = buys_h1 + sells_h1
-                    if total_h1 >= 200 and vol_h1 > 0:
-                        return 70, f'dex_h1_fallback h1_txns={total_h1} vol_h1=${vol_h1:.0f} (m5_txns={total_txns} too sparse)'
+                    if total_h1 >= 250 and vol_h1 > 0:
+                        return 70, f'dex_h1_strong h1_txns={total_h1} vol_h1=${vol_h1:.0f} (m5_txns={total_txns} too sparse)'
+                    elif total_h1 >= 200 and vol_h1 > 0:
+                        return 60, f'dex_h1_fallback h1_txns={total_h1} vol_h1=${vol_h1:.0f} (m5_txns={total_txns} too sparse)'
                     elif total_h1 >= 80 and vol_h1 > 0:
                         return 40, f'dex_h1_moderate h1_txns={total_h1} vol_h1=${vol_h1:.0f} (m5_txns={total_txns} too sparse)'
                     else:
@@ -248,16 +255,20 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
         recovery_pct = ((current_price - lowest_price) / lowest_price) * 100
 
     # Healthy growth + recovery from support
-    if 0 <= growth_pct <= 50 and recovery_pct >= 5:
+    if 0 <= growth_pct <= 40 and recovery_pct >= 5:
         return 100, f'healthy growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # Fast growth but acceptable
-    if 0 <= growth_pct <= 100 and recovery_pct >= 3:
-        return 70, f'fast_growth growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+    if 40 < growth_pct <= 80 and recovery_pct >= 3:
+        return 80, f'fast_growth growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # V-bounce from below signal price
-    if growth_pct < 0 and recovery_pct >= 10:
-        return 80, f'v_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+    if growth_pct < 0 and recovery_pct >= 100:
+        return 70, f'v_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+
+    # Excess growth limit
+    if 80 < growth_pct <= 100:
+        return 50, f'rapid_extension growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # Already doubled — high risk
     if growth_pct > 100:
@@ -271,27 +282,27 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
 
-MIN_MOMENTUM_MOVE_PCT = 1.5  # 12s minimum move: 1.5%
+MIN_MOMENTUM_MOVE_PCT = 1.5  # 9s minimum move: 1.5%
 # Data-driven: in 6h audit, all FIRE passes had <1% 6s move (noise), max observed
 # meme coin 6s move was +3.69%. 5% would block ALL entries including Wifejak (+484%).
 # 1.5% filters pure noise while allowing legitimate trend momentum through.
-# Upgraded: 5×3s=12s window (from 3×3s=6s) to catch pulsed meme coin moves.
+# Upgraded: 3×3s=9s window (accelerated from 5x3s to reduce system latency).
 
 
 def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     """
-    Matrix ④ — Realtime Momentum (5×3-second snapshots = 12s window)
+    Matrix ④ — Realtime Momentum (3×3-second snapshots = 9s window)
     Only called when matrices ①②③⑤ are already passing.
 
-    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (1.5%) over 12 seconds.
-    Uses 5 samples to better capture pulsed meme coin price action.
+    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (1.5%) over 9 seconds.
+    Uses 3 samples to dramatically cut entry latency.
 
     Returns: (score: int 0-100, reason: str, snapshots: list)
     """
     _lazy_import()
 
     snapshots = []
-    for i in range(5):
+    for i in range(3):
         if i > 0:
             time.sleep(interval_sec)
         price, src, age_ms = _price_fn(token_ca, pool_address)
@@ -317,12 +328,12 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     snap_str = ' '.join(f'{s:.10f}' for s in snapshots)
 
     # Strong ascending: mostly rising, last > first by threshold
-    if rises >= 3 and pct_move >= MIN_MOMENTUM_MOVE_PCT:
-        return 100, f'ascending +{pct_move:.1f}% rises={rises}/4 [{snap_str}]', snapshots
+    if rises >= 2 and pct_move >= MIN_MOMENTUM_MOVE_PCT:
+        return 100, f'ascending +{pct_move:.1f}% rises={rises}/2 [{snap_str}]', snapshots
 
     # Moderate: last > first by threshold, at least some rises
-    if pct_move >= MIN_MOMENTUM_MOVE_PCT and rises >= 2:
-        return 100, f'net_ascending +{pct_move:.1f}% rises={rises}/4 [{snap_str}]', snapshots
+    if pct_move >= MIN_MOMENTUM_MOVE_PCT and rises >= 1:
+        return 80, f'net_ascending +{pct_move:.1f}% rises={rises}/2 [{snap_str}]', snapshots
 
     # Weak but valid: overall up by threshold, even with dips mid-way
     if pct_move >= MIN_MOMENTUM_MOVE_PCT and s_last > s_first:
@@ -399,12 +410,12 @@ class MatrixEvaluator:
 
     # Thresholds for NOT_ATH entries
     NOT_ATH_THRESHOLDS = {
-        'trend_min': 50,    # must be at least fail-open
-        'volume_min': 40,   # at least not shrinking
-        'price_min': 70,    # healthy range
-        'signal_min': 40,   # 40 means survives even if >10m but <120m
+        'trend_min': 60,    # must pass >= 60
+        'volume_min': 70,   # must pass >= 70
+        'price_min': 70,    # must pass >= 70
+        'signal_min': 60,   # must pass >= 60
         'momentum_min': 60, # at least not declining
-        'min_passing': 4,   # at least 3 of 4 pre-matrices >= 60!
+        'min_passing': 4,   # at least 4 of 5 >= these minimums!
         'max_obs_minutes': 120,  # 2 hours max observation
     }
 
@@ -412,12 +423,12 @@ class MatrixEvaluator:
     # Data-validated 2026-04-15: P<=30 trades avg -16.8%. V=0 means zero liquidity.
     # Both are now hard-blocked. ATH still needs real buying momentum.
     ATH_THRESHOLDS = {
-        'trend_min': 50,    # must pass
-        'volume_min': 40,   # V=0 means no liquidity — hard block (was 0)
-        'price_min': 40,    # P<=30 = chasing a top → avg -16.8% (was 30)
+        'trend_min': 80,    # higher requirement
+        'volume_min': 70,   # higher requirement
+        'price_min': 0,     # Skipped for ATH
         'signal_min': 0,    # ATH = auto 100
-        'momentum_min': 60, # must not decline — this IS the real filter for ATH
-        'min_passing': 3,   # at least 3 of 5 >= 60
+        'momentum_min': 60, # required
+        'min_passing': 3,   # at least 3 of 5
         'max_obs_minutes': 120,  # 2h — allow consolidation
     }
 

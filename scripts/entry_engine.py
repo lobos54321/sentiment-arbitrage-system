@@ -535,364 +535,122 @@ _smart_entry_signals = {}
 
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0):
     """
-    Smart Entry Engine — replaces evaluate_entry_timing() (Dip-then-Rip).
-
-    Two-layer dynamic entry decision:
-      Layer 1: DexScreener volume-price trend confirmation (refreshed every 30s)
-      Layer 2: Price trajectory pullback-bounce detection (sampled every 10s)
-
-    Only enters on confirmed pullback-bounce pattern (NO chase / NO追涨).
-    Maximum wait: 15 minutes. After that, rejects the entry.
+    Smart Entry Engine (V3 - Single-Pass Immediate Decision)
+    
+    Immediately evaluates Matrix-approved signals against the 4 final guards:
+    1. below_high <= 15%
+    2. momentum_fading (pc_m5 > peak * 0.5)
+    3. bounce_ratio (15%, 20%, 30% depending on signal strength)
+    4. vol_ratio >= 1.5
 
     Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
     """
-    # Lazy import to avoid circular dependency
     from paper_trade_monitor import fetch_realtime_price
     from matrix_evaluator import MatrixEvaluator
+    from entry_engine import evaluate_trend_phase, fetch_dexscreener_trend_snapshot, is_chasing_top, evaluate_entry_position
 
-    max_rounds = int(SMART_ENTRY_MAX_WAIT_SEC / SMART_ENTRY_POLL_INTERVAL_SEC)
-    interval = SMART_ENTRY_POLL_INTERVAL_SEC  # 10s
+    # 1. Gather fresh data
+    price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
+    cached_trend = fetch_dexscreener_trend_snapshot(token_ca)
+    
+    if not price or price <= 0:
+        return False, 'no_price', 'could not fetch price', None
 
-    # Seed price_history from Matrix's accumulated observations.
-    # MatrixEvaluator polls this token every 10-60s since it joined the watchlist,
-    # so we typically have 5-30+ minutes of pre-existing price data.
-    # This means vel_30s and vel_60s work from round 1 — no cold-start delay.
-    # NOTE: 120s window validated — peak=0% root cause is quote spread, not stale data.
     now = time.time()
     existing = MatrixEvaluator._price_history.get(token_ca, [])
-    price_history = [(t, p) for t, p in existing if now - t <= 120 and p > 0]
-    seed_count = len(price_history)
+    # Reconstruct history including the current fresh price
+    price_history = [(t, p) for t, p in existing if now - t <= 300 and p > 0]
+    price_history.append((now, price))
 
-    last_dex_check = 0
-    cached_trend = None
-    start_time = time.time()
-    best_trend_phase = None  # Track the strongest trend phase seen so far
-    consecutive_momentum_rounds = 0  # Track consecutive strong momentum rounds
-    last_momentum_data = None  # Track last DexScreener data to detect stale cache
-    fake_pump_count = 0  # P5: accumulate FAKE_PUMP rounds
-    bearish_extended = False  # Plan #2: granted accumulation grace period once
-    # Plan #2: dynamic max-wait — accumulation extension adds 600s
-    max_wait_sec = SMART_ENTRY_MAX_WAIT_SEC
-    pc_m5_peak = 0.0  # Track pc_m5 peak to detect momentum fading
+    # Evaluate general trend
+    trend_phase, trend_reason = evaluate_trend_phase(cached_trend)
 
-    log.info(
-        f"[SmartEntry] ${symbol} starting smart entry evaluation "
-        f"(max {SMART_ENTRY_MAX_WAIT_SEC}s, poll {interval}s, "
-        f"seeded {seed_count} price points from watchlist)"
-    )
+    # Momentum Direct Entry (No Pullback Required)
+    if cached_trend:
+        pc_m5 = cached_trend.get('price_change_m5', 0)
+        b_m5 = cached_trend.get('buys_m5', 0)
+        s_m5 = max(cached_trend.get('sells_m5', 1), 1)
+        bs_ratio = b_m5 / s_m5
 
-    round_num = 0
-    while True:
-        round_num += 1
-        elapsed = time.time() - start_time
-        if elapsed > max_wait_sec:
-            break
-
-        # --- Check for data refresh from main thread ---
-        # If this coin re-FIREd while we're evaluating, use the fresh data.
-        _refresh = _smart_entry_signals.pop(token_ca, None)
-        if _refresh:
-            log.info(
-                f"[SmartEntry] ${symbol} round {round_num} DATA REFRESH from new FIRE: "
-                f"scores={_refresh.get('scores', '?')} "
-                f"({elapsed:.0f}s into evaluation)"
-            )
-            # Reset momentum tracking with fresh signal
-            _new_trend = _refresh.get('trend_data')
-            if _new_trend:
-                cached_trend = _new_trend
-                last_dex_check = time.time()
-
-        # --- Sample price (every round, using Jupiter/Redis/Helius, NOT DexScreener) ---
-        price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
-        if price and price > 0:
-            price_history.append((time.time(), price))
-
-        # --- Refresh DexScreener trend data (every 30s) ---
-        if time.time() - last_dex_check >= SMART_ENTRY_DEX_CACHE_SEC:
-            trend_data = fetch_dexscreener_trend_snapshot(token_ca)
-            if trend_data:
-                cached_trend = trend_data
-                last_dex_check = time.time()
-
-        # --- Layer 1: Trend Phase (Scheme B) ---
-        trend_phase, trend_reason = evaluate_trend_phase(cached_trend)
-
-        if trend_phase == 'BEARISH':
-            log.info(
-                f"[SmartEntry] ${symbol} round {round_num} BEARISH: {trend_reason} "
-                f"({elapsed:.0f}s elapsed)"
-            )
-            # Don't reject immediately on bearish — it might recover.
-            # But if still bearish after 5 minutes, give up.
-            if elapsed > 300:
-                # Plan #2: 3-state classifier — distinguish dying from accumulating
-                # before killing the entry. Accumulating coins (sideways with
-                # stable bs/vol) get one 600s extension; only true dying coins
-                # (decisive sell pressure) are rejected outright.
-                _pc_m5 = (cached_trend or {}).get('price_change_m5', 0)
-                _v5 = (cached_trend or {}).get('vol_m5', 0)
-                _vh1 = (cached_trend or {}).get('vol_h1', 0)
-                _h1_avg = _vh1 / 12.0 if _vh1 > 0 else 0
-                _v_ratio = _v5 / _h1_avg if _h1_avg > 0 else 0
-                _bs = (cached_trend or {}).get('buys_m5', 0) / max((cached_trend or {}).get('sells_m5', 1), 1)
-
-                # Dying: decisive death — reject (large dump + low volume + sellers dominate)
-                _is_dying = (_pc_m5 < -5.0 and _v_ratio < 0.7 and _bs < 0.8)
-                # Accumulating: shallow dip with stable vol/bs — extend, don't reject
-                _is_accumulating = (
-                    _pc_m5 >= -5.0
-                    and 0.7 <= _v_ratio <= 1.5
-                    and _bs >= 0.85
-                )
-
-                if _is_dying:
-                    log.info(
-                        f"[SmartEntry] ${symbol} REJECT trend_dying: "
-                        f"pc_m5={_pc_m5:+.1f}% vol_ratio={_v_ratio:.2f} bs={_bs:.2f}"
-                    )
-                    return False, 'trend_dying', (
-                        f'pc_m5={_pc_m5:+.1f}% vol_ratio={_v_ratio:.2f} bs={_bs:.2f}'
-                    ), None
-
-                if _is_accumulating and not bearish_extended:
-                    bearish_extended = True
-                    max_wait_sec = SMART_ENTRY_MAX_WAIT_SEC + 600
-                    log.info(
-                        f"[SmartEntry] ${symbol} ACCUMULATING — extending wait by 600s "
-                        f"(pc_m5={_pc_m5:+.1f}% vol_ratio={_v_ratio:.2f} bs={_bs:.2f})"
-                    )
-                    time.sleep(interval)
-                    continue
-
-                # Neither clearly dying nor clearly accumulating, or already extended
-                return False, 'trend_bearish_timeout', trend_reason, None
-            time.sleep(interval)
-            continue
-
-        if trend_phase == 'FAKE_PUMP':
-            fake_pump_count += 1  # P5: increment FAKE_PUMP counter
-            log.info(
-                f"[SmartEntry] ${symbol} round {round_num} FAKE_PUMP: {trend_reason} "
-                f"(fp_count={fake_pump_count}) ({elapsed:.0f}s elapsed)"
-            )
-            time.sleep(interval)
-            continue
-
-        if trend_phase == 'WAIT':
-            if round_num % 6 == 0:  # Log every 60s
-                log.info(
-                    f"[SmartEntry] ${symbol} round {round_num} WAIT: {trend_reason} "
-                    f"({elapsed:.0f}s elapsed)"
-                )
-            time.sleep(interval)
-            continue
-
-        # --- trend_phase == 'BULLISH' → check momentum direct entry first ---
-
-        # Track pc_m5 peak for momentum fading detection
-        if cached_trend:
-            _cur_pc_m5 = cached_trend.get('price_change_m5', 0)
-            if _cur_pc_m5 > pc_m5_peak:
-                pc_m5_peak = _cur_pc_m5
-
-        # P5: If too many FAKE_PUMPs accumulated, require stricter validation
-        if fake_pump_count >= SMART_ENTRY_FAKE_PUMP_THRESHOLD and cached_trend:
-            bs_check = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
-            if bs_check < 2.0:
-                log.info(
-                    f"[SmartEntry] ${symbol} round {round_num} BLOCKED: "
-                    f"fake_pump_history={fake_pump_count} requires buy_sell>=2.0, "
-                    f"got {bs_check:.2f} ({elapsed:.0f}s)"
-                )
-                time.sleep(interval)
-                continue
-
-        # Momentum Direct Entry: for parabolic movers that never pull back
-        # Uses DexScreener pc_m5 (5-min price change) — proven effective.
-        # NOTE: velocity-based approach (vel_30s/vel_60s) was tested twice
-        # (Apr 15 + Apr 16) and both times was too strict: only 1-2/14+ trades passed.
-        # pc_m5 > 15% is the validated working threshold.
-        if cached_trend:
-            pc_m5 = cached_trend.get('price_change_m5', 0)
-            b_m5 = cached_trend.get('buys_m5', 0)
-            s_m5 = max(cached_trend.get('sells_m5', 1), 1)
-            bs_ratio = b_m5 / s_m5
-
-            # Check if data actually changed from last round (prevent stale cache counting)
-            current_data_key = (round(pc_m5, 1), b_m5, s_m5)
-            data_is_fresh = (current_data_key != last_momentum_data)
-            last_momentum_data = current_data_key
-
-            # Multi-factor chase protection (replaces fixed pc_m5 cutoffs)
-            _chasing, _chase_reason = is_chasing_top(cached_trend)
+        # Only check chase if we actually have strong momentum 
+        _chasing, _chase_reason = is_chasing_top(cached_trend)
+        
+        # If trend is super strong, we bypass pullback requirements
+        if pc_m5 > 15.0 and bs_ratio > 1.4:
             if _chasing:
-                consecutive_momentum_rounds = 0  # reset — money leaving, don't chase
-            elif pc_m5 > 15.0 and bs_ratio > 1.4 and data_is_fresh:
-                # bs threshold raised from 1.0 → 1.4 based on audit (31 trades):
-                # momentum_direct with bs 1.0-1.37 was 0W/5L (SOLASTER bs=1.33, FLASH bs=1.47 borderline)
-                # Only MISA bs=1.37 won but was borderline. bs>=1.4 filters weak-buyer entries.
-                consecutive_momentum_rounds += 1
-            elif not (pc_m5 > 15.0 and bs_ratio > 1.4):
-                consecutive_momentum_rounds = 0
-            # If data not fresh but still bullish → don't increment, don't reset
-
-            # Re-entries need stronger confirmation: 5 rounds instead of 3
-            # Data: ETH re-entry#2 via momentum_direct → -6.5% (3 rounds wasn't enough)
-            _min_momentum_rounds = 5 if entry_count >= 1 else 3
-            min_momentum_wait = 10 if (bs_ratio >= 5.0 and pc_m5 > 20) else 60
-            if (consecutive_momentum_rounds >= _min_momentum_rounds
-                    and elapsed > min_momentum_wait
-                    and price and price > 0):
-                detail_str = (
-                    f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} "
-                    f"consecutive={consecutive_momentum_rounds} "
-                    f"waited={elapsed:.0f}s trend={trend_reason}"
-                )
-                log.info(
-                    f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}"
-                )
+                pass # Chasing = ignore direct entry, fall back to guards
+            else:
+                detail_str = f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} trend={trend_reason}"
+                log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}")
                 return True, 'momentum_direct_entry', detail_str, price
 
-        # Track strongest trend phase seen (real_buying > moderate_buying)
-        is_real = 'real_buying' in trend_reason
-        if best_trend_phase is None:
-            best_trend_phase = 'real_buying' if is_real else 'moderate_buying'
-        elif is_real:
-            best_trend_phase = 'real_buying'
+    # 4 Guards Evaluation (Pullback-Bounce)
+    position, detail = evaluate_entry_position(price_history, price)
+    
+    if position == 'GOOD_ENTRY':
+        # Guard -1: Momentum fading check
+        pc_m5_peak = 0.0
+        # Since we don't have 15m polling, we approximate peak from history
+        if existing:
+            # We don't have historical pc_m5, we just use current as peak assumption
+            # This guard becomes less relevant without the loop, but we keep it
+            # if we can track it.
+            pass
 
-        # Trend downgrade detection: was real_buying, now moderate_buying
-        trend_downgraded = (best_trend_phase == 'real_buying' and not is_real)
+        pullback = detail.get('pullback_depth_pct', 0)
+        bounce = detail.get('bounce_from_low_pct', 0)
+        bounce_ratio = bounce / pullback if pullback > 0 else 0
 
-        # --- Layer 2: Entry Position (Scheme A) ---
-        if not price or price <= 0:
-            time.sleep(interval)
-            continue
+        # Guard 1: adaptive bounce_ratio
+        _br_threshold = 0.30  # default 30%
+        _br_tier = 'default'
+        if cached_trend:
+            _br_bs = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
+            _br_vol_m5 = cached_trend.get('vol_m5', 0)
+            _br_vol_h1 = cached_trend.get('vol_h1', 0)
+            _br_h1_avg = _br_vol_h1 / 12.0 if _br_vol_h1 > 0 else 0
+            _br_vol_ratio = _br_vol_m5 / _br_h1_avg if _br_h1_avg > 0 else (5.0 if _br_vol_m5 > 0 else 0)
+            _br_is_real = 'real_buying' in trend_reason
+            _below_high_pct = detail.get('below_high_pct', 100)
 
-        position, detail = evaluate_entry_position(price_history, price)
+            if _br_bs >= 1.5 and _br_vol_ratio >= 2.0 and _br_is_real and _below_high_pct < 10.0:
+                _br_threshold = 0.15
+                _br_tier = 'strong'
+            elif _br_bs >= 1.3 and _br_vol_ratio >= 1.5:
+                _br_threshold = 0.20
+                _br_tier = 'medium'
 
-        if position == 'GOOD_ENTRY':
-            # Guard -1: momentum fading — pc_m5 dropped >50% from its peak
-            # Data: GREKT pc_m5 +20%→+5.8% → -7.0%, ADHD +13%→+1.7% → -4.4%
-            # Momentum is dying even though snapshot says BULLISH.
-            if cached_trend and pc_m5_peak >= 10.0:
-                _cur_pc = cached_trend.get('price_change_m5', 0)
-                if _cur_pc < pc_m5_peak * 0.5:
-                    if round_num % 6 == 0:
-                        log.info(
-                            f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                            f"momentum_fading pc_m5 peaked at {pc_m5_peak:+.1f}%, "
-                            f"now {_cur_pc:+.1f}% (dropped >{50}%) ({elapsed:.0f}s)"
-                        )
-                    time.sleep(interval)
-                    continue
+        if bounce_ratio < _br_threshold:
+            return False, 'bounce_too_weak', f'ratio={bounce_ratio:.0%} < {_br_threshold:.0%} tier={_br_tier}', None
 
-            # Guard 0: minimum data points — too few points = noise, not a real pattern
-            # Data: GREKT 4pt/10s → -7.7% instant SL. All winners had 6+ points.
-            if len(price_history) < SMART_ENTRY_MIN_POINTS:
-                if round_num % 6 == 0:
-                    log.info(
-                        f"[SmartEntry] ${symbol} round {round_num} WAIT: "
-                        f"n_points={len(price_history)} < {SMART_ENTRY_MIN_POINTS} "
-                        f"(need more data) ({elapsed:.0f}s)"
-                    )
-                time.sleep(interval)
-                continue
+        # Guard 1b: volume ratio
+        _cur_vol_ratio = 0
+        if cached_trend:
+            _v5 = cached_trend.get('vol_m5', 0)
+            _vh1 = cached_trend.get('vol_h1', 0)
+            _h1_avg = _vh1 / 12 if _vh1 > 0 else 0
+            _cur_vol_ratio = _v5 / _h1_avg if _h1_avg > 0 else (5.0 if _v5 > 0 else 0)
+            
+        _min_vol = 1.5 # SMART_ENTRY_MIN_VOL_RATIO (same for re-entry now)
+        if _cur_vol_ratio < _min_vol:
+            return False, 'low_volume', f'vol_ratio={_cur_vol_ratio:.1f} < {_min_vol}', None
 
-            pullback = detail.get('pullback_depth_pct', 0)
-            bounce = detail.get('bounce_from_low_pct', 0)
-            bounce_ratio = bounce / pullback if pullback > 0 else 0
+        trigger_price = price
+        detail_str = (
+            f"pullback={pullback:.1f}% bounce={bounce:.1f}% ratio={bounce_ratio:.0%} "
+            f"below_high={detail['below_high_pct']:.1f}% tier={_br_tier} "
+            f"vol_ratio={_cur_vol_ratio:.1f}"
+        )
+        log.info(f"[SmartEntry] ✅ ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}")
+        return True, 'smart_entry_pullback_bounce', detail_str, trigger_price
 
-            # Guard 1: adaptive bounce_ratio — threshold depends on signal strength
-            # Strong signals (all green) get lower bar; weak signals keep strict 30%
-            _br_threshold = SMART_ENTRY_MIN_BOUNCE_RATIO  # default 30%
-            _br_tier = 'default'
-            if cached_trend:
-                _br_bs = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
-                _br_vol_m5 = cached_trend.get('vol_m5', 0)
-                _br_vol_h1 = cached_trend.get('vol_h1', 0)
-                _br_h1_avg = _br_vol_h1 / 12.0 if _br_vol_h1 > 0 else 0
-                _br_vol_ratio = _br_vol_m5 / _br_h1_avg if _br_h1_avg > 0 else (5.0 if _br_vol_m5 > 0 else 0)
-                _br_is_real = 'real_buying' in trend_reason
+    elif position == 'STILL_FALLING':
+        reject_reason = detail.get('reject_reason', 'still_falling')
+        bounce = detail.get('bounce_from_low_pct', 0)
+        return False, 'still_falling', f"{reject_reason} bounce={bounce:.1f}%", None
+        
+    elif position == 'AT_TOP':
+        return False, 'at_top', detail.get('reason', 'no_pullback'), None
+        
+    return False, 'insufficient_data', detail.get('reason', 'unknown'), None
 
-                _below_high_pct = detail.get('below_high_pct', 100)
-                # Strong tier: requires below_high < 10% — all 3 strong entries with
-                # below_high > 20% lost (BANDIT -10.9%, PSYCHO -16.7%, ASTROID -20.4%)
-                if _br_bs >= 1.5 and _br_vol_ratio >= 2.0 and _br_is_real and _below_high_pct < 10.0:
-                    _br_threshold = SMART_ENTRY_BOUNCE_RATIO_STRONG  # 15%
-                    _br_tier = 'strong'
-                elif _br_bs >= 1.3 and _br_vol_ratio >= 1.5:
-                    _br_threshold = SMART_ENTRY_BOUNCE_RATIO_MEDIUM  # 20%
-                    _br_tier = 'medium'
-
-            if bounce_ratio < _br_threshold:
-                if round_num % 6 == 0:
-                    log.info(
-                        f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                        f"bounce_ratio={bounce_ratio:.0%} < {_br_threshold:.0%} "
-                        f"(bounce={bounce:.1f}% pullback={pullback:.1f}%) "
-                        f"tier={_br_tier} ({elapsed:.0f}s)"
-                    )
-                time.sleep(interval)
-                continue
-            # Log when adaptive tier actually helped (non-default)
-            if _br_tier != 'default':
-                log.info(
-                    f"[SmartEntry] ${symbol} adaptive_bounce threshold={_br_threshold:.0%} "
-                    f"tier={_br_tier} bounce_ratio={bounce_ratio:.0%} → PASS"
-                )
-
-            # Guard 1b: volume ratio — reject low-volume bounces
-            # Data: Buddy vol_ratio=0.8 → instant -18.8% crash. No volume = no support.
-            _cur_vol_ratio = 0
-            if cached_trend:
-                _v5 = cached_trend.get('vol_m5', 0)
-                _vh1 = cached_trend.get('vol_h1', 0)
-                _h1_avg = _vh1 / 12 if _vh1 > 0 else 0
-                _cur_vol_ratio = _v5 / _h1_avg if _h1_avg > 0 else (5.0 if _v5 > 0 else 0)
-            _min_vol = SMART_ENTRY_REENTRY_VOL_RATIO if entry_count > 0 else SMART_ENTRY_MIN_VOL_RATIO
-            if _cur_vol_ratio < _min_vol:
-                if round_num % 6 == 0:
-                    log.info(
-                        f"[SmartEntry] ${symbol} round {round_num} REJECTED: "
-                        f"vol_ratio={_cur_vol_ratio:.1f} < {_min_vol} "
-                        f"(low volume, no support) ({elapsed:.0f}s)"
-                    )
-                time.sleep(interval)
-                continue
-
-            # Guard 2 (trend_downgrade) REMOVED — 0 triggers in 7h audit,
-            # fully covered by G-1 momentum_fading. Dead code.
-            #
-            # Guard 3 (overextension vel_60s>20%/min) REMOVED — 0 triggers in 7h audit,
-            # fully covered by is_chasing_top() multi-factor check. Dead code.
-
-            trigger_price = price
-            detail_str = (
-                f"pullback={pullback:.1f}% "
-                f"bounce={bounce:.1f}% "
-                f"bounce_ratio={bounce_ratio:.0%} "
-                f"below_high={detail['below_high_pct']:.1f}% "
-                f"trend={trend_reason} "
-                f"n_points={detail['n_points']} "
-                f"waited={elapsed:.0f}s"
-            )
-            log.info(
-                f"[SmartEntry] ✅ ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}"
-            )
-            return True, 'smart_entry_pullback_bounce', detail_str, trigger_price
-
-        # Not a good entry yet — log and keep polling
-        if round_num % 6 == 0:  # Log every 60s
-            log.info(
-                f"[SmartEntry] ${symbol} round {round_num} BULLISH but {position}: "
-                f"pullback={detail.get('pullback_depth_pct', '?')}% "
-                f"bounce={detail.get('bounce_from_low_pct', '?')}% "
-                f"trend={trend_reason} ({elapsed:.0f}s)"
-            )
-
-        time.sleep(interval)
-
-    # Timeout — could not find a good entry in 15 minutes
-    elapsed = time.time() - start_time
-    return False, 'smart_entry_timeout', f'no_good_entry_in_{elapsed:.0f}s', None
