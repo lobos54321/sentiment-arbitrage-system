@@ -3909,7 +3909,7 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane: T≥100 + V≥70 + M=100 + buy_sell≥1.8 + pc_m5>0
+                    # Fast lane: T≥100 + V≥70 + M=100 + buy_sell≥2.0 + pc_m5>0
                     # Open to BOTH ATH and NOT_ATH. Data: trust (NOT_ATH +110%) had no
                     # fast-lane path and timed out in SmartEntry waiting for a pullback
                     # that never came. P is exempt (ATH naturally at highs, NOT_ATH may have P=80).
@@ -3923,7 +3923,7 @@ def run_monitor(db):
                     _is_fast_lane = (_t_score and _t_score >= 100
                                        and _v_score and _v_score >= 70
                                        and _m_score and _m_score >= 100
-                                       and _fl_bs_ratio >= 1.8  # Data: pooplana bs≈1.3-1.8 → missed +97%. 2.0 too strict.
+                                       and _fl_bs_ratio >= 2.0  # Reverted: bs=1.3-1.8 entries had poor overnight results. 2.0 = strong directional signal.
                                        and _fl_pc_m5 > 0  # 5min price must be UP
                                        and _entry_count == 0)  # re-entries must go through SmartEntry
 
@@ -3985,29 +3985,17 @@ def run_monitor(db):
                     if not pending.get('timing_passed'):
                         pending_w_entry = pending.get('w_entry')
                         if _is_fast_lane:
-                            # Fix 1: Instant price direction check (1s, 2 samples)
-                            # Data: 47% of Fast-lane entries had peak=0% — price was
-                            # already falling when we bought. M check was 15s ago.
-                            _fl_p1, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                            time.sleep(1.0)
-                            _fl_p2, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                            if _fl_p1 and _fl_p2 and _fl_p1 > 0 and _fl_p2 < _fl_p1 * 0.99:
-                                _fl_drop_1s = (_fl_p2 / _fl_p1 - 1) * 100
-                                log.info(f"  [FastLane] {pending['symbol']} DOWNGRADE: price dropping "
-                                         f"{_fl_drop_1s:+.1f}% in 1s ({_fl_p1:.10f}→{_fl_p2:.10f}) → SmartEntry")
-                                _is_fast_lane = False  # downgrade to SmartEntry
-                            # Fix 3: Liquidity floor — reject tiny pools
-                            # Data: ROCCO/hallelujah/drone had 20%+ slippage on exit
-                            # due to pool < $5000, contributing 55% of total losses
-                            if _is_fast_lane and _fl_dex:
+                            # Liquidity floor — reject tiny pools (safety net)
+                            # Even though MC>16K passes Node.js filter, the actual
+                            # DEX pool can be much smaller. Prevent catastrophic exit slippage.
+                            if _fl_dex:
                                 _fl_liq = _fl_dex.get('liquidity_usd', 0) or 0
                                 if 0 < _fl_liq < 5000:
                                     log.info(f"  [FastLane] {pending['symbol']} REJECT: liquidity=${_fl_liq:.0f} < $5000")
                                     pending_entries.pop(lifecycle_id, None)
                                     continue
 
-                            if _is_fast_lane:
-                                # Verified parabolic first entry — no pullback to wait for, just buy
+                            # Verified parabolic first entry — no pullback to wait for, just buy
                                 _fl_sig_type = pending.get('signal_type', '?')
                                 log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
                                 pending['timing_passed'] = True

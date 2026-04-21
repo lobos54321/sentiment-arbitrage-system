@@ -496,14 +496,6 @@ def evaluate_entry_position(price_history, current_price):
     if (pullback_depth >= SMART_ENTRY_MIN_PULLBACK_PCT
             and bounce_from_low >= SMART_ENTRY_MIN_BOUNCE_PCT
             and below_high >= 2.0):
-        # Dead cat bounce filter: if price is still >15% below the local high,
-        # the "bounce" is likely a trap within a larger downtrend.
-        # Data: 6/6 overnight trades with below_high>15% lost money:
-        #   drone -31%, KITTY -14.9%, GME -19.2%, Plumpshies -8%,
-        #   Human -1%, ELONBOAR -4%. below_high<10% had winners (SS +10.5%, GME +7.6%)
-        if below_high > 15.0:
-            detail['reject_reason'] = f'dead_cat_bounce below_high={below_high:.1f}%>15%'
-            return 'STILL_FALLING', detail
         return 'GOOD_ENTRY', detail
 
     # At or near the top — no significant pullback yet
