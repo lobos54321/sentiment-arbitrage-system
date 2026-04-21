@@ -26,7 +26,7 @@ def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
     pos:        Position object (uses .price_ring, .peak_pnl)
     dex_trend:  DexScreener trend snapshot dict (or None)
     base_sl:    starting SL (negative float, e.g. -0.07)
-    Returns float in range [-0.15, -0.03].
+    Returns float in range [-0.12, -0.05].
     """
     sl = base_sl
 
@@ -69,8 +69,8 @@ def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
     if peak > 0.10:
         sl = max(sl, -0.03)
 
-    # Bounds: at most -12.5% (hard cap), at least -3% (don't sit through bigger losses)
-    return max(-0.125, min(-0.03, sl))
+    # Bounds: at most -12% (hard cap), at least -5% (don't sit through bigger losses)
+    return max(-0.12, min(-0.05, sl))
 
 
 # ─── EXIT Guardian Thread ─────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ class ExitGuardianThread(threading.Thread):
                     log.info(
                         f"[ExitGuardian] ⚠️ {pos.symbol} SL CHECK #1: "
                         f"pnl={pnl*100:+.1f}% <= SL={hard_sl*100:.1f}% "
-                        f"price={price:.10f} src={src} — confirming in 1s..."
+                        f"price={price:.10f} src={src} — confirming in 0.3s..."
                     )
 
                     # Second check after short delay (0.3s, not 1.0s)
