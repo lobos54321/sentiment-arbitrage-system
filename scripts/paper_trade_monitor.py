@@ -3538,6 +3538,7 @@ def run_monitor(db):
         watchlist_store_ref=watchlist,
         exit_queue=guardian_exit_queue,
         fetch_price_fn=fetch_realtime_price,
+        simulate_exit_fn=simulate_exit_execution,
     )
     exit_guardian.start()
 

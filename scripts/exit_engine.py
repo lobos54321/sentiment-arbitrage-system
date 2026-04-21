@@ -89,7 +89,7 @@ class ExitGuardianThread(threading.Thread):
     """
 
     def __init__(self, positions_ref, positions_lock, watchlist_store_ref,
-                 exit_queue, fetch_price_fn):
+                 exit_queue, fetch_price_fn, simulate_exit_fn=None):
         super().__init__(daemon=True, name='exit-guardian')
         self.positions = positions_ref      # shared dict reference
         self.lock = positions_lock          # threading.Lock
@@ -98,6 +98,7 @@ class ExitGuardianThread(threading.Thread):
         self.exit_queue_lock = threading.Lock()
         self._exit_pending = set()           # trade_ids already queued (dedup)
         self.fetch_price = fetch_price_fn   # fetch_realtime_price function
+        self.simulate_exit = simulate_exit_fn  # simulate_exit_execution (for instant SL quotes)
         self.interval = 3  # seconds
         self._running = True
 
@@ -238,6 +239,21 @@ class ExitGuardianThread(threading.Thread):
                         f"Check#2: pnl={pnl2*100:+.1f}% src={src2} | "
                         f"divergence={price_divergence:.1%} — executing exit"
                     )
+                    # Instant exit quote: don't wait for main loop (was 30-94s delay!)
+                    # Data: drone SL at 19:25:58 but CLOSED at 19:26:29 (31s later, -31%)
+                    #       ROCCO SL at 19:51:12 but CLOSED at 19:52:46 (94s later, -39%)
+                    _instant_sim = None
+                    if self.simulate_exit:
+                        try:
+                            _sell_amount = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
+                            _instant_sim = self.simulate_exit(
+                                ca, str(_sell_amount),
+                                getattr(pos, 'token_decimals', 0) or 0,
+                                pos.strategy_stage
+                            )
+                            log.info(f"[ExitGuardian] ⚡ {pos.symbol} instant quote: {_instant_sim.get('quotedOutputSOL', '?') if _instant_sim else 'FAIL'}")
+                        except Exception as _e:
+                            log.warning(f"[ExitGuardian] {pos.symbol} instant quote failed: {_e}")
                     with self.exit_queue_lock:
                         self.exit_queue.append({
                             'trade_id': trade_id,
@@ -245,6 +261,7 @@ class ExitGuardianThread(threading.Thread):
                             'reason': f'guardian_hard_sl ({confirmed_pnl:.1%} <= {hard_sl:.1%})',
                             'trigger_price': confirmed_price,
                             'trigger_pnl': confirmed_pnl,
+                            '_instant_sim': _instant_sim,  # pre-fetched quote
                         })
                     self._exit_pending.add(trade_id)
                     continue
@@ -681,14 +698,21 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
             f"  [GUARDIAN_EXIT] 🚨 Processing {gx['symbol']}: {gx['reason']} "
             f"trigger_pnl={gx.get('trigger_pnl', 0)*100:+.1f}%"
         )
-        # Simulate exit execution
+        # Simulate exit execution — use instant quote if Guardian already got one
         gx_sell_amount = int(float(gx_pos.token_amount_raw)) if gx_pos.token_amount_raw else 0
-        gx_sim = simulate_exit_fn(
-            gx_pos.token_ca, str(gx_sell_amount),
-            getattr(gx_pos, 'token_decimals', 0) or 0,
-            gx_pos.strategy_stage, strategy_id=strategy_id,
-            lifecycle_id=gx_lifecycle_id
-        )
+        _instant_sim = gx.get('_instant_sim')
+        if _instant_sim and _instant_sim.get('success'):
+            # Guardian already got the quote at SL trigger time — use it (fresher!)
+            gx_sim = _instant_sim
+            log.info(f"  [GUARDIAN_EXIT] ⚡ Using instant quote for {gx['symbol']} (no delay)")
+        else:
+            # Fallback: get quote now (may be stale if main loop was blocked)
+            gx_sim = simulate_exit_fn(
+                gx_pos.token_ca, str(gx_sell_amount),
+                getattr(gx_pos, 'token_decimals', 0) or 0,
+                gx_pos.strategy_stage, strategy_id=strategy_id,
+                lifecycle_id=gx_lifecycle_id
+            )
         gx_trigger_pnl = gx.get('trigger_pnl', 0)
         to_close.append({
             'trade_id': gx_trade_id,
