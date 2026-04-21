@@ -3775,9 +3775,9 @@ def run_monitor(db):
                                 f"> last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
                             )
 
-                    # REENTRY-P-GATE: re-entry #2+ must have P>=70 (token not exhausted)
+                    # REENTRY-P-GATE: re-entry #1+ must have P>=70 (token not exhausted)
                     # Data: GREKT re-entry#2 P=30 → -7.7%, FLASH re-entry#2 P=30 → trigger=-11.5%
-                    if _entry_count >= 2:
+                    if _entry_count >= 1:
                         _p_score = eval_res.get('scores', {}).get('price', 0)
                         if _p_score < 70:
                             log.info(
@@ -3834,32 +3834,12 @@ def run_monitor(db):
                     # P7: Minimum position threshold — skip if Kelly gives floor value
                     # Data: 0.03 SOL trades have terrible risk/reward (avg loss -15%, wins earn 0.002 SOL)
                     _kelly_sol = pending_entries[lifecycle_id]['kelly_position_sol']
-                    # Matrix-conviction floor: if scores are strong enough to FIRE,
-                    # Kelly cold start shouldn't veto. Data: MITSUKI T100+V100+P100+M100
-                    # → Kelly=0.03 → SKIP → missed +114% golden dog.
-                    _matrix_scores = eval_res.get('scores', {})
-                    _matrix_strong = (
-                        _matrix_scores.get('trend', 0) >= 50
-                        and _matrix_scores.get('volume', 0) >= 70
-                        and _matrix_scores.get('price', 0) >= 70
-                        and _matrix_scores.get('momentum', 0) >= 60
-                    )
-                    # Always bump strong matrix to 0.1 
-                    if _kelly_sol < 0.1 and _matrix_strong:
-                        log.info(f"  [Kelly] {w_entry['symbol']} Matrix-conviction floor: Kelly={_kelly_sol:.3f} → 0.1 SOL (scores={_matrix_scores})")
+                    
+                    if _kelly_sol < 0.1:
+                        # Bump weak kelly up to system floor instead of rejecting.
+                        log.info(f"  [Kelly] {w_entry['symbol']} Bumping Kelly={_kelly_sol:.3f} to systemic floor 0.1 SOL")
                         _kelly_sol = 0.1
                         pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
-
-                    if _kelly_sol < 0.1:
-                        log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.1)")
-                        pending_entries.pop(lifecycle_id, None)
-                        # Set cooldown to prevent immediate re-FIRE on next eval
-                        # Data: geeked Kelly=0.030 cycled 52 times — wasted eval resources
-                        try:
-                            watchlist.mark_expired(w_entry['id'], f'kelly_too_small_{_kelly_sol:.3f}')
-                        except Exception:
-                            pass
-                        continue
 
                     # P8: Liquidity floor — reject tokens with tiny pools
                     # Data: ROCCO/hallelujah/drone had 20%+ exit slippage due to

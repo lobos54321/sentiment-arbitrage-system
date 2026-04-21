@@ -250,9 +250,18 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
 
     growth_pct = ((current_price - signal_price) / signal_price) * 100
 
+    dip_from_signal = 0
     recovery_pct = 0
+    if lowest_price and lowest_price > 0 and signal_price and signal_price > 0:
+        dip_from_signal = ((signal_price - lowest_price) / signal_price) * 100
     if lowest_price and lowest_price > 0:
         recovery_pct = ((current_price - lowest_price) / lowest_price) * 100
+
+    # V-bounce from below signal price — must fully recover to entry line
+    # Intercept BEFORE P=100. If it had a deadly dip (>= 5%) and recovered back above water,
+    # it is a V-bounce and gets penalized to 70 instead of 100.
+    if 0 <= growth_pct <= 40 and dip_from_signal >= 5.0:
+        return 70, f'v_bounce growth={growth_pct:+.1f}% dipped={dip_from_signal:.1f}%'
 
     # Extremely healthy initial growth zone (0 - 40%)
     if 0 <= growth_pct <= 40 and recovery_pct >= 5:
@@ -261,10 +270,6 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     # Fast growth (40 - 80%)
     if 40 < growth_pct <= 80 and recovery_pct >= 3:
         return 80, f'fast_growth growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
-
-    # V-bounce from below signal price — must fully recover to entry line
-    if growth_pct < 0 and recovery_pct >= 100:
-        return 70, f'v_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # Edge danger zone (80 - 100%)
     if 80 < growth_pct <= 100:
