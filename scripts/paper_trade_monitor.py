@@ -3859,6 +3859,19 @@ def run_monitor(db):
                             pass
                         continue
 
+                    # P8: Liquidity floor — reject tokens with tiny pools
+                    # Data: ROCCO/hallelujah/drone had 20%+ exit slippage due to
+                    # pool < $5000, contributing 55% of overnight total losses.
+                    try:
+                        _fire_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
+                        _fire_liq = (_fire_dex.get('liquidity_usd', 0) or 0) if _fire_dex else 0
+                        if 0 < _fire_liq < 5000:
+                            log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: liquidity=${_fire_liq:.0f} < $5000 (exit slippage risk)")
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                    except Exception:
+                        pass  # fail-open if DexScreener unavailable
+
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {_kelly_sol} SOL -> Pending queue")
                     last_progress = time.time()
                 else:
@@ -3972,14 +3985,36 @@ def run_monitor(db):
                     if not pending.get('timing_passed'):
                         pending_w_entry = pending.get('w_entry')
                         if _is_fast_lane:
-                            # Verified parabolic first entry — no pullback to wait for, just buy
-                            _fl_sig_type = pending.get('signal_type', '?')
-                            log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
-                            pending['timing_passed'] = True
-                            entry_mode = 'momentum_direct'
-                            pending['kelly_position_sol'] = calculate_kelly_position(
-                                pending_w_entry, entry_mode=entry_mode,
-                                matrix_scores=pending.get('matrix_scores'))
+                            # Fix 1: Instant price direction check (1s, 2 samples)
+                            # Data: 47% of Fast-lane entries had peak=0% — price was
+                            # already falling when we bought. M check was 15s ago.
+                            _fl_p1, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
+                            time.sleep(1.0)
+                            _fl_p2, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
+                            if _fl_p1 and _fl_p2 and _fl_p1 > 0 and _fl_p2 < _fl_p1 * 0.99:
+                                _fl_drop_1s = (_fl_p2 / _fl_p1 - 1) * 100
+                                log.info(f"  [FastLane] {pending['symbol']} DOWNGRADE: price dropping "
+                                         f"{_fl_drop_1s:+.1f}% in 1s ({_fl_p1:.10f}→{_fl_p2:.10f}) → SmartEntry")
+                                _is_fast_lane = False  # downgrade to SmartEntry
+                            # Fix 3: Liquidity floor — reject tiny pools
+                            # Data: ROCCO/hallelujah/drone had 20%+ slippage on exit
+                            # due to pool < $5000, contributing 55% of total losses
+                            if _is_fast_lane and _fl_dex:
+                                _fl_liq = _fl_dex.get('liquidity_usd', 0) or 0
+                                if 0 < _fl_liq < 5000:
+                                    log.info(f"  [FastLane] {pending['symbol']} REJECT: liquidity=${_fl_liq:.0f} < $5000")
+                                    pending_entries.pop(lifecycle_id, None)
+                                    continue
+
+                            if _is_fast_lane:
+                                # Verified parabolic first entry — no pullback to wait for, just buy
+                                _fl_sig_type = pending.get('signal_type', '?')
+                                log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
+                                pending['timing_passed'] = True
+                                entry_mode = 'momentum_direct'
+                                pending['kelly_position_sol'] = calculate_kelly_position(
+                                    pending_w_entry, entry_mode=entry_mode,
+                                    matrix_scores=pending.get('matrix_scores'))
                         else:
                             # --- Async SmartEntry: submit to thread pool, check on next iteration ---
                             _se_future = pending.get('_smart_entry_future')
