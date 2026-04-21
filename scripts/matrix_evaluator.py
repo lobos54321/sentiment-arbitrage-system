@@ -254,29 +254,30 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     if lowest_price and lowest_price > 0:
         recovery_pct = ((current_price - lowest_price) / lowest_price) * 100
 
-    # Healthy growth + recovery from support
+    # Extremely healthy initial growth zone (0 - 40%)
     if 0 <= growth_pct <= 40 and recovery_pct >= 5:
         return 100, f'healthy growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # Fast growth but acceptable
+    # Fast growth (40 - 80%)
     if 40 < growth_pct <= 80 and recovery_pct >= 3:
         return 80, f'fast_growth growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # V-bounce from below signal price
+    # V-bounce from below signal price — must fully recover to entry line
     if growth_pct < 0 and recovery_pct >= 100:
         return 70, f'v_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # Excess growth limit
+    # Edge danger zone (80 - 100%)
     if 80 < growth_pct <= 100:
         return 50, f'rapid_extension growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # Already doubled — high risk
+    # Overextended / Doubled (> 100%) - Will be blocked by 'min 50' barrier for NOT_ATH
+    # but still allowed for FastLane since they bypass Guards with 30 P-score acceptance.
     if growth_pct > 100:
         return 30, f'overextended growth={growth_pct:+.1f}%'
 
-    # Still at bottom
-    if growth_pct < 0 and recovery_pct < 5:
-        return 0, f'bottom growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+    # Still dropping / Not fully recovered to entry point
+    if growth_pct < 0 and recovery_pct < 100:
+        return 0, f'bottom_or_weak_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # Default: marginal
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'

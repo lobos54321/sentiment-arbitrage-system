@@ -3775,14 +3775,14 @@ def run_monitor(db):
                                 f"> last_entry={_last_entry_price:.10f} ({_price_vs_entry:+.1f}%)"
                             )
 
-                    # REENTRY-P-GATE: re-entry #2+ must have P>=50 (token not exhausted)
+                    # REENTRY-P-GATE: re-entry #2+ must have P>=70 (token not exhausted)
                     # Data: GREKT re-entry#2 P=30 → -7.7%, FLASH re-entry#2 P=30 → trigger=-11.5%
                     if _entry_count >= 2:
                         _p_score = eval_res.get('scores', {}).get('price', 0)
-                        if _p_score < 50:
+                        if _p_score < 70:
                             log.info(
                                 f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY-P-GATE: "
-                                f"re-entry #{_entry_count+1} P={_p_score}<50, token exhausted"
+                                f"re-entry #{_entry_count+1} P={_p_score}<70, token exhausted"
                             )
                             continue
 
@@ -3844,13 +3844,14 @@ def run_monitor(db):
                         and _matrix_scores.get('price', 0) >= 70
                         and _matrix_scores.get('momentum', 0) >= 60
                     )
+                    # Always bump strong matrix to 0.1 
                     if _kelly_sol < 0.1 and _matrix_strong:
                         log.info(f"  [Kelly] {w_entry['symbol']} Matrix-conviction floor: Kelly={_kelly_sol:.3f} → 0.1 SOL (scores={_matrix_scores})")
                         _kelly_sol = 0.1
                         pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
 
-                    if _kelly_sol <= 0.05:
-                        log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.05)")
+                    if _kelly_sol < 0.1:
+                        log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: Kelly={_kelly_sol:.3f} SOL too small (P7 min=0.1)")
                         pending_entries.pop(lifecycle_id, None)
                         # Set cooldown to prevent immediate re-FIRE on next eval
                         # Data: geeked Kelly=0.030 cycled 52 times — wasted eval resources
@@ -3976,7 +3977,7 @@ def run_monitor(db):
                         if _t_score < 100: _block_reasons.append(f"T={_t_score}<100")
                         if _fl_bs_ratio < 1.0: _block_reasons.append(f"bs={_fl_bs_ratio:.2f}<1.0")
                         if _fl_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_fl_pc_m5:+.1f}%<=0")
-                        if _entry_count > 0: _block_reasons.append(f"re-entry#{_entry_count+1}")
+                        # _entry_count block removed: Re-entries ARE allowed in V4 Fast Lane by user override
                         # Throttle this log: only every 30s (was every ~1s, flooding logs)
                         _fl_last_log = pending.get('_fl_blocked_log_ts', 0)
                         if time.time() - _fl_last_log >= 30:
