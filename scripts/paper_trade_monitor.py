@@ -3910,23 +3910,28 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane: T≥100 + V≥70 + M=100 + buy_sell≥2.0 + pc_m5>0
-                    # Open to BOTH ATH and NOT_ATH. Data: trust (NOT_ATH +110%) had no
-                    # fast-lane path and timed out in SmartEntry waiting for a pullback
-                    # that never came. P is exempt (ATH naturally at highs, NOT_ATH may have P=80).
+                    # Fast lane: T≥100 + V≥70 + M=100 + buy_sell≥2.0 + pc_m5>0 + ATH only
+                    # Reverted to ATH-only. Data:
+                    #   67% period: fast_lane ATH-only → 50% win rate (5/10)
+                    #   After opening NOT_ATH: NOT_ATH = 70% of trades, 25% win rate
+                    #   NOT_ATH tokens aren't golden dogs — momentum fades faster,
+                    #   they need SmartEntry's full 7-guard pullback-bounce confirmation.
                     # Re-entries NEVER get fast lane — must confirm pullback-bounce first.
+                    _fl_sig_type = pending.get('signal_type', '?')
                     _fl_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
                         _m_score and _m_score >= 100
                         and _t_score and _t_score >= 100 and _v_score and _v_score >= 70
+                        and _fl_sig_type == 'ATH'  # NOT_ATH must go through SmartEntry
                     ) else None
                     _fl_bs_ratio = (_fl_dex.get('buys_m5', 0) / max(_fl_dex.get('sells_m5', 1), 1)) if _fl_dex else 0
                     _fl_pc_m5 = _fl_dex.get('price_change_m5', 0) if _fl_dex else 0
                     _is_fast_lane = (_t_score and _t_score >= 100
                                        and _v_score and _v_score >= 70
                                        and _m_score and _m_score >= 100
-                                       and _fl_bs_ratio >= 2.0  # Reverted: bs=1.3-1.8 entries had poor overnight results. 2.0 = strong directional signal.
+                                       and _fl_bs_ratio >= 2.0
                                        and _fl_pc_m5 > 0  # 5min price must be UP
-                                       and _entry_count == 0)  # re-entries must go through SmartEntry
+                                       and _entry_count == 0  # re-entries must go through SmartEntry
+                                       and _fl_sig_type == 'ATH')  # NOT_ATH → SmartEntry
 
                     if trigger_price and pending['attempts'] == 1 and not _is_fast_lane:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
@@ -3997,13 +4002,12 @@ def run_monitor(db):
                                     continue
 
                             # Verified parabolic first entry — no pullback to wait for, just buy
-                                _fl_sig_type = pending.get('signal_type', '?')
-                                log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
-                                pending['timing_passed'] = True
-                                entry_mode = 'momentum_direct'
-                                pending['kelly_position_sol'] = calculate_kelly_position(
-                                    pending_w_entry, entry_mode=entry_mode,
-                                    matrix_scores=pending.get('matrix_scores'))
+                            log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
+                            pending['timing_passed'] = True
+                            entry_mode = 'momentum_direct'
+                            pending['kelly_position_sol'] = calculate_kelly_position(
+                                pending_w_entry, entry_mode=entry_mode,
+                                matrix_scores=pending.get('matrix_scores'))
                         else:
                             # --- Async SmartEntry: submit to thread pool, check on next iteration ---
                             _se_future = pending.get('_smart_entry_future')
