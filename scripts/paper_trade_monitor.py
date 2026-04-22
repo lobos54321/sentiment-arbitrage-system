@@ -3995,15 +3995,38 @@ def run_monitor(db):
 
                             _p_score = _scores.get('price', 50)
                             if _p_score <= 30 and _p_score > 0:
-                                _fl_last_log = pending.get('_p30_log_ts', 0)
-                                if time.time() - _fl_last_log >= 30:
-                                    log.info(
-                                        f"  [SmartEntry] {pending['symbol']} BLOCKED: "
-                                        f"P={_p_score} overextended — only Fast-lane can buy"
-                                    )
-                                    pending['_p30_log_ts'] = time.time()
-                                pending_entries.pop(lifecycle_id, None)
-                                continue
+                                # P=30 ATH bypass: for ATH signals with strong T+V+M,
+                                # "overextended" (>100% growth from signal) is expected
+                                # behavior — the breakout IS the signal.
+                                # Data: $TERMINAL blocked 15× with P=30 T=50~100 V=70
+                                # M=80~100 while going on to 5.7x. This bypass would
+                                # have captured it at T≥80 + V=70 + M≥80.
+                                _sig_type = pending.get('signal_type', '?')
+                                _ath_bypass = (
+                                    _sig_type == 'ATH'
+                                    and _t_score >= 80
+                                    and _v_score >= 70
+                                    and _m_score >= 80
+                                )
+                                if _ath_bypass:
+                                    _fl_last_log = pending.get('_p30_log_ts', 0)
+                                    if time.time() - _fl_last_log >= 30:
+                                        log.info(
+                                            f"  [SmartEntry] {pending['symbol']} P={_p_score} overextended "
+                                            f"BUT ATH+T{_t_score}+V{_v_score}+M{_m_score} → bypass to SmartEntry"
+                                        )
+                                        pending['_p30_log_ts'] = time.time()
+                                    # Fall through to SmartEntry evaluation
+                                else:
+                                    _fl_last_log = pending.get('_p30_log_ts', 0)
+                                    if time.time() - _fl_last_log >= 30:
+                                        log.info(
+                                            f"  [SmartEntry] {pending['symbol']} BLOCKED: "
+                                            f"P={_p_score} overextended — only Fast-lane can buy"
+                                        )
+                                        pending['_p30_log_ts'] = time.time()
+                                    pending_entries.pop(lifecycle_id, None)
+                                    continue
 
                             # Execute synchronous direct evaluation (No 15m wait loop)
                             try:

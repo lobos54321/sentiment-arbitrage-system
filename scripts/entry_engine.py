@@ -624,6 +624,31 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
                 return True, 'momentum_direct_entry', detail_str, price
 
     # 4 Guards Evaluation (Pullback-Bounce)
+    # PRE-CHECK 1: pullback_bounce only for first entry.
+    # Re-entries must use momentum_direct — catching a bounce on a coin
+    # that already failed once is "double-down on falling knife" behavior.
+    if entry_count > 0:
+        return False, 'pullback_reentry_blocked', f'entry_count={entry_count} — re-entry must use momentum_direct', None
+
+    # PRE-CHECK 2: Require strong trend (T≥80) for pullback_bounce.
+    # Data: 0W/5L overnight — all had "positive" trends (T>0) but none were
+    # strong enough to drive a real reversal. T≥80 = genuine uptrend, not noise.
+    # The Matrix T-score checks "is there a trend" — but pullback_bounce needs
+    # "is the trend strong enough to support a counter-trend bounce entry."
+    _pb_pc_m5 = cached_trend.get('price_change_m5', 0) if cached_trend else 0
+    if _pb_pc_m5 <= 0:
+        _pb_trend_strength = 0
+    elif _pb_pc_m5 <= 2:
+        _pb_trend_strength = 50
+    elif _pb_pc_m5 <= 5:
+        _pb_trend_strength = 60
+    elif _pb_pc_m5 <= 10:
+        _pb_trend_strength = 80
+    else:
+        _pb_trend_strength = 100
+    if _pb_trend_strength < 80:
+        return False, 'weak_trend_for_bounce', f'trend_T={_pb_trend_strength} pc_m5={_pb_pc_m5:+.1f}% — need T≥80 for pullback', None
+
     position, detail = evaluate_entry_position(price_history, price)
     
     if position == 'GOOD_ENTRY':
