@@ -444,149 +444,18 @@ def is_chasing_top(trend_data):
     # Tier 1 (0-15%): no chase restriction — Layer 1 BULLISH is sufficient
     return False, 'ok'
 
-
-def evaluate_entry_position(price_history, current_price):
-    """
-    Layer 2 (Scheme A): Determine if current price is a good entry position
-    based on pullback-bounce pattern. No "chase" — never buys at top.
-
-    price_history: list of (timestamp, price) tuples, sorted by time
-    current_price: latest price
-
-    Returns: (position: str, detail: dict)
-      position: 'GOOD_ENTRY' | 'AT_TOP' | 'STILL_FALLING' | 'INSUFFICIENT_DATA'
-    """
-    if not price_history or len(price_history) < 3:
-        return 'INSUFFICIENT_DATA', {
-            'reason': f'only {len(price_history) if price_history else 0} price points'
-        }
-
-    prices = [p for _, p in price_history]
-
-    # Find local high (highest point in history)
-    local_high = max(prices)
-    high_idx = prices.index(local_high)
-
-    # Find local low AFTER the high (the pullback bottom)
-    prices_after_high = prices[high_idx:]
-    if len(prices_after_high) < 2:
-        # No data after the peak — we might be AT the peak
-        return 'AT_TOP', {
-            'reason': 'at_or_near_peak',
-            'local_high': local_high,
-            'current': current_price,
-        }
-
-    local_low = min(prices_after_high)
-
-    if local_high <= 0 or local_low <= 0:
-        return 'INSUFFICIENT_DATA', {'reason': 'zero_prices'}
-
-    pullback_depth = (local_high - local_low) / local_high * 100
-    bounce_from_low = (current_price - local_low) / local_low * 100
-    below_high = (local_high - current_price) / local_high * 100
-
-    detail = {
-        'local_high': local_high,
-        'local_low': local_low,
-        'current': current_price,
-        'pullback_depth_pct': round(pullback_depth, 2),
-        'bounce_from_low_pct': round(bounce_from_low, 2),
-        'below_high_pct': round(below_high, 2),
-        'n_points': len(prices),
-    }
-
-    # Dead cat bounce filter: if price is still >15% below peak, it's a
-    # mid-decline bounce, not a real reversal. Data: 24+ samples, 0 wins.
-    # Originally commit b9bb618, reverted 8102bc8 ("insufficient data").
-    # Now restored: 10 new samples confirmed below_high>15% = zero win rate.
-    if below_high > SMART_ENTRY_MAX_BELOW_HIGH_PCT:
-        detail['reject_reason'] = f'dead_cat_bounce below_high={below_high:.1f}%>{SMART_ENTRY_MAX_BELOW_HIGH_PCT}%'
-        return 'STILL_FALLING', detail
-
-    # Good entry: pulled back enough AND bounced confirming bottom
-    if (pullback_depth >= SMART_ENTRY_MIN_PULLBACK_PCT
-            and bounce_from_low >= SMART_ENTRY_MIN_BOUNCE_PCT
-            and below_high >= 2.0):
-        return 'GOOD_ENTRY', detail
-
-    # At or near the top — no significant pullback yet
-    if pullback_depth < 1.0:
-        return 'AT_TOP', detail
-
-    # Pulled back but no bounce yet — still falling or at the bottom
-    if bounce_from_low < 1.0:
-        return 'STILL_FALLING', detail
-
-    # Bounced but almost back to the high — too late, risk of double-top
-    if below_high < 2.0:
-        return 'AT_TOP', detail
-
-    # Everything else: keep waiting
-    return 'STILL_FALLING', detail
-
-
-# Shared dict for cross-thread data refresh: main thread → SmartEntry thread.
-# When a coin re-FIREs while SmartEntry is running, main thread writes here.
-# SmartEntry checks this each round and uses fresh data for decisions.
-# Python dict assignment is atomic (GIL), so no lock needed.
-_smart_entry_signals = {}
- 
- 
-# pc_m5 peak cache — tracks highest pc_m5 observed per token across FIRE events.
-# Replaces the original G-1 momentum_fading loop state that Single-Pass refactor
-# lost. Used to detect "pump fading" pattern: pc_m5 peaked at +20%, now +8%.
-# Not covered by Matrix trend (absolute value only), 9s momentum (too short-term),
-# is_chasing_top (extreme chase), or below_high (price position).
-# TTL 10 min: after that, peak resets — a token may legitimately re-pump.
-_pc_m5_peak_cache = {}
-_PC_M5_PEAK_TTL_SEC = 600
- 
- 
-def _track_pc_m5_peak(token_ca, current_pc_m5):
-    """Update cached peak for this token and detect fading.
- 
-    Returns: (peak_pc_m5, is_fading)
-      is_fading = True when peak >= 10% AND current < peak * 0.5
-    """
-    now = time.time()
-    cache = _pc_m5_peak_cache.get(token_ca)
-
-    # Reset cache if expired or missing
-    if not cache or now - cache['ts'] > _PC_M5_PEAK_TTL_SEC:
-        cache = {'peak': current_pc_m5, 'ts': now}
-    else:
-        # Update peak if current is higher
-        if current_pc_m5 > cache['peak']:
-            cache['peak'] = current_pc_m5
-        # Extend TTL on any activity
-        cache['ts'] = now
-
-    _pc_m5_peak_cache[token_ca] = cache
-    peak = cache['peak']
-
-    # Fading logic: If it was pumping hard (>= 10%) but now dropped by > 50%
-    # Data: peak +25%, current +10% -> fading. peak +8%, current +4% -> not fading (too small to care).
-    is_fading = (peak >= 10.0 and current_pc_m5 < peak * 0.5)
-
-    return peak, is_fading
-
-
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0):
     """
     Smart Entry Engine (V3 - Single-Pass Immediate Decision)
     
-    Immediately evaluates Matrix-approved signals against the 4 final guards:
-    1. below_high <= 15%
-    2. momentum_fading (pc_m5 > peak * 0.5)
-    3. bounce_ratio (15%, 20%, 30% depending on signal strength)
-    4. vol_ratio >= 1.5
+    Immediately evaluates Matrix-approved signals. Pullback-bounce mode is disabled;
+    only momentum_direct entries are permitted.
 
     Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
     """
     from paper_trade_monitor import fetch_realtime_price
     from matrix_evaluator import MatrixEvaluator
-    from entry_engine import evaluate_trend_phase, fetch_dexscreener_trend_snapshot, is_chasing_top, evaluate_entry_position
+    from entry_engine import evaluate_trend_phase, fetch_dexscreener_trend_snapshot, is_chasing_top
 
     # 1. Gather fresh data
     price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
