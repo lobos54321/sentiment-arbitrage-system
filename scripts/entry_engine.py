@@ -444,60 +444,115 @@ def is_chasing_top(trend_data):
     # Tier 1 (0-15%): no chase restriction — Layer 1 BULLISH is sufficient
     return False, 'ok'
 
-def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0):
+def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
+                         momentum_snapshots=None, momentum_pct=0):
     """
-    Smart Entry Engine (V3 - Single-Pass Immediate Decision)
+    Smart Entry Engine (V4 - Momentum-Direct with Real-Time Direction Confirmation)
     
-    Immediately evaluates Matrix-approved signals. Pullback-bounce mode is disabled;
-    only momentum_direct entries are permitted.
+    Uses fresh 3×3s momentum data from the Matrix evaluator instead of DexScreener's
+    lagging pc_m5. Also performs a 1-second direction confirmation to ensure the coin
+    is still ascending at the moment of entry.
+
+    Parameters:
+        momentum_snapshots: list of [p1, p2, p3] from the 3×3s momentum check
+        momentum_pct: net % change over the 9s window (p3-p1)/p1*100
 
     Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
     """
     from paper_trade_monitor import fetch_realtime_price
-    from matrix_evaluator import MatrixEvaluator
-    from entry_engine import evaluate_trend_phase, fetch_dexscreener_trend_snapshot, is_chasing_top
+    from entry_engine import fetch_dexscreener_trend_snapshot, is_chasing_top
 
-    # 1. Gather fresh data
+    # 1. Gather fresh price for direction confirmation
     price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
     cached_trend = fetch_dexscreener_trend_snapshot(token_ca)
     
     if not price or price <= 0:
         return False, 'no_price', 'could not fetch price', None
 
-    now = time.time()
-    existing = MatrixEvaluator._price_history.get(token_ca, [])
-    # Reconstruct history including the current fresh price
-    price_history = [(t, p) for t, p in existing if now - t <= 300 and p > 0]
-    price_history.append((now, price))
-
-    # Evaluate general trend
-    trend_phase, trend_reason = evaluate_trend_phase(cached_trend)
-
-    # Momentum Direct Entry (No Pullback Required)
+    # 2. Get buy/sell ratio from DexScreener (we don't have our own b/s data)
+    bs_ratio = 1.0
+    pc_m5 = 0
     if cached_trend:
-        pc_m5 = cached_trend.get('price_change_m5', 0)
         b_m5 = cached_trend.get('buys_m5', 0)
         s_m5 = max(cached_trend.get('sells_m5', 1), 1)
         bs_ratio = b_m5 / s_m5
+        pc_m5 = cached_trend.get('price_change_m5', 0)
 
-        # Only check chase if we actually have strong momentum 
+    # 3. Check anti-chase guard
+    _chasing = False
+    if cached_trend:
         _chasing, _chase_reason = is_chasing_top(cached_trend)
-        
-        # If trend is super strong, we bypass pullback requirements
-        if pc_m5 > 15.0 and bs_ratio > 1.4:
-            if _chasing:
-                pass # Chasing = ignore direct entry, fall back to guards
-            else:
-                detail_str = f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} trend={trend_reason}"
-                log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}")
-                return True, 'momentum_direct_entry', detail_str, price
 
     # ──────────────────────────────────────────────────────────────────
-    # pullback_bounce DISABLED (2026-04-22)
-    # Track record: 0W/6L — systematically buys at the tail end of
-    # short-lived bounces on meme coins. By the time all matrix checks
-    # confirm the bounce, the bounce is already over.
-    # All entries now require momentum_direct (price_m5>15%, bs>1.4).
+    # STRATEGY: Use our own 3×3s momentum data as primary signal.
+    # The momentum check was done <1s ago by the Matrix evaluator.
+    # This is FAR more current than DexScreener's pc_m5 (5-min window,
+    # may be 1-5s stale from cache).
+    #
+    # Fallback: if no momentum data passed (shouldn't happen normally),
+    # use DexScreener's pc_m5 with higher threshold.
     # ──────────────────────────────────────────────────────────────────
-    return False, 'pullback_bounce_disabled', 'pullback_bounce disabled — only momentum_direct entries allowed', None
+
+    # Primary path: use 3×3s momentum data
+    if momentum_snapshots and len(momentum_snapshots) >= 2:
+        m_pct = momentum_pct  # net % change over 9s
+        m_last = momentum_snapshots[-1]
+        
+        # Check: momentum must show meaningful upward move
+        # (momentum_pct >= 1.5% is already guaranteed by matrix M score >= 60)
+        if m_pct >= 1.5 and bs_ratio >= 1.2:
+            if _chasing:
+                return False, 'chasing_top', f'momentum +{m_pct:.1f}% but chasing top', None
+
+            # ── DIRECTION CONFIRMATION ──
+            # Wait 1 second, re-check price. If price is falling from
+            # the momentum snapshot, the move has already peaked.
+            import time as _time
+            _time.sleep(1.0)
+            price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
+            
+            if price_confirm and price_confirm > 0:
+                # Compare confirm price to the last momentum snapshot
+                direction_pct = ((price_confirm - m_last) / m_last) * 100
+                
+                if price_confirm < m_last * 0.99:  # dropped > 1% from momentum snapshot
+                    detail_str = (
+                        f"momentum_9s=+{m_pct:.1f}% bs={bs_ratio:.2f} "
+                        f"but direction_1s={direction_pct:+.1f}% (price fell from "
+                        f"{m_last:.10f} to {price_confirm:.10f})"
+                    )
+                    log.info(f"[SmartEntry] ⚠️ ${symbol} MOMENTUM_REVERSAL: {detail_str}")
+                    return False, 'momentum_reversing', detail_str, None
+                
+                # Use confirmed price as trigger (most accurate)
+                trigger_price = price_confirm
+            else:
+                # Can't confirm → use momentum snapshot price
+                trigger_price = m_last
+
+            detail_str = (
+                f"momentum_9s=+{m_pct:.1f}% buy_sell={bs_ratio:.2f} "
+                f"pc_m5={pc_m5:+.1f}% snaps=[{', '.join(f'{s:.10f}' for s in momentum_snapshots)}]"
+            )
+            log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${trigger_price:.10f}: {detail_str}")
+            return True, 'momentum_direct_entry', detail_str, trigger_price
+
+        else:
+            # Momentum data present but below thresholds
+            detail_str = (
+                f"momentum_9s=+{m_pct:.1f}% (need ≥1.5%) "
+                f"bs={bs_ratio:.2f} (need ≥1.2)"
+            )
+            return False, 'momentum_weak', detail_str, None
+
+    # Fallback path: no momentum data (shouldn't happen in normal flow)
+    # Use DexScreener pc_m5 with original strict threshold
+    if cached_trend and pc_m5 > 15.0 and bs_ratio > 1.4:
+        if not _chasing:
+            from paper_trade_monitor import fetch_realtime_price as _frp
+            detail_str = f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} (dex_fallback)"
+            log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}")
+            return True, 'momentum_direct_entry', detail_str, price
+
+    return False, 'no_momentum_data', 'no momentum snapshots and DexScreener pc_m5 insufficient', None
 

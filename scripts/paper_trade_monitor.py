@@ -3826,6 +3826,10 @@ def run_monitor(db):
                         # and retry-counter writes don't latch onto whichever w_entry the outer
                         # watching_entries loop happened to land on last.
                         'w_entry': w_entry,
+                        # Fresh momentum data from 3×3s check (for SmartEntry to use
+                        # instead of DexScreener's lagging pc_m5)
+                        'momentum_snapshots': eval_res.get('momentum_snapshots', []),
+                        'momentum_pct': eval_res.get('momentum_pct', 0),
                     }
 
                     # Note: Kelly always returns >= 0.03 SOL (never vetoes).
@@ -4035,6 +4039,8 @@ def run_monitor(db):
                                     symbol=pending['symbol'],
                                     pool_address=pending['pool'],
                                     entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
+                                    momentum_snapshots=pending.get('momentum_snapshots', []),
+                                    momentum_pct=pending.get('momentum_pct', 0),
                                 )
                             except Exception as _se_err:
                                 log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)

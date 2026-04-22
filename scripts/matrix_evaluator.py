@@ -634,6 +634,8 @@ class MatrixEvaluator:
             )
             # Fix 2: record the final snapshot price as the confirmed trigger price
             momentum_final_price = snaps[-1] if snaps else current_price
+            # Compute momentum pct for SmartEntry to use (fresh, not DexScreener-lagged)
+            momentum_pct = ((snaps[-1] - snaps[0]) / snaps[0] * 100) if len(snaps) >= 2 and snaps[0] > 0 else 0
 
             if scores['momentum'] >= thresholds['momentum_min']:
                 action = 'fire'
@@ -646,9 +648,12 @@ class MatrixEvaluator:
                 action_reason = f"momentum check failed: {reasons['momentum']}"
                 log.info(f"[Matrix] ${symbol} momentum FAIL: {reasons['momentum']}")
                 momentum_final_price = None
+                momentum_pct = 0
 
         else:
             momentum_final_price = None
+            snaps = []
+            momentum_pct = 0
 
         return {
             'scores': scores,
@@ -658,6 +663,8 @@ class MatrixEvaluator:
             'action_reason': action_reason,
             'current_price': current_price,
             'momentum_final_price': momentum_final_price,  # Fix 2: accurate trigger price
+            'momentum_snapshots': snaps,  # 3×3s raw prices [p1, p2, p3]
+            'momentum_pct': momentum_pct,  # 9s net change %
         }
     def _check_pre_momentum_pass(self, scores, thresholds, signal_type='NOT_ATH'):
         """Check if matrices ①④ meet thresholds for momentum trigger.
