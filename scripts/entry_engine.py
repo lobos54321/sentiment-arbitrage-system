@@ -623,100 +623,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
                 log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}")
                 return True, 'momentum_direct_entry', detail_str, price
 
-    # 4 Guards Evaluation (Pullback-Bounce)
-    # PRE-CHECK 1: pullback_bounce only for first entry.
-    # Re-entries must use momentum_direct — catching a bounce on a coin
-    # that already failed once is "double-down on falling knife" behavior.
-    if entry_count > 0:
-        return False, 'pullback_reentry_blocked', f'entry_count={entry_count} — re-entry must use momentum_direct', None
-
-    # PRE-CHECK 2: Require strong trend (T≥80) for pullback_bounce.
-    # Data: 0W/5L overnight — all had "positive" trends (T>0) but none were
-    # strong enough to drive a real reversal. T≥80 = genuine uptrend, not noise.
-    # The Matrix T-score checks "is there a trend" — but pullback_bounce needs
-    # "is the trend strong enough to support a counter-trend bounce entry."
-    _pb_pc_m5 = cached_trend.get('price_change_m5', 0) if cached_trend else 0
-    if _pb_pc_m5 <= 0:
-        _pb_trend_strength = 0
-    elif _pb_pc_m5 <= 2:
-        _pb_trend_strength = 50
-    elif _pb_pc_m5 <= 5:
-        _pb_trend_strength = 60
-    elif _pb_pc_m5 <= 10:
-        _pb_trend_strength = 80
-    else:
-        _pb_trend_strength = 100
-    if _pb_trend_strength < 80:
-        return False, 'weak_trend_for_bounce', f'trend_T={_pb_trend_strength} pc_m5={_pb_pc_m5:+.1f}% — need T≥80 for pullback', None
-
-    position, detail = evaluate_entry_position(price_history, price)
-    
-    if position == 'GOOD_ENTRY':
-        # Guard -1: momentum fading check
-        pc_m5 = cached_trend.get('price_change_m5', 0) if cached_trend else 0
-        pc_m5_peak, is_fading = _track_pc_m5_peak(token_ca, pc_m5)
-        
-        if is_fading:
-            detail_str = f"PUMP FADING: pc_m5 dropped from +{pc_m5_peak:.1f}% to +{pc_m5:.1f}% (>50% decay)"
-            log.info(f"[SmartEntry] 🚫 ${symbol} REJECT G-1: {detail_str}")
-            return False, 'momentum_fading', detail_str, None
-        
-        pullback = detail.get('pullback_depth_pct', 0)
-        bounce = detail.get('bounce_from_low_pct', 0)
-        bounce_ratio = bounce / pullback if pullback > 0 else 0
-
-        # Guard 1: adaptive bounce_ratio
-        # Data: pullback_bounce 0W/5L overnight — default 30% too loose.
-        # Raised to 40% to require stronger recovery signal before entry.
-        _br_threshold = 0.40  # default 40% (was 30%)
-        _br_tier = 'default'
-        if cached_trend:
-            _br_bs = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)
-            _br_vol_m5 = cached_trend.get('vol_m5', 0)
-            _br_vol_h1 = cached_trend.get('vol_h1', 0)
-            _br_h1_avg = _br_vol_h1 / 12.0 if _br_vol_h1 > 0 else 0
-            _br_vol_ratio = _br_vol_m5 / _br_h1_avg if _br_h1_avg > 0 else (5.0 if _br_vol_m5 > 0 else 0)
-            _br_is_real = 'real_buying' in trend_reason
-            _below_high_pct = detail.get('below_high_pct', 100)
-
-            if _br_bs >= 1.5 and _br_vol_ratio >= 2.0 and _br_is_real and _below_high_pct < 10.0:
-                _br_threshold = 0.15
-                _br_tier = 'strong'
-            elif _br_bs >= 1.3 and _br_vol_ratio >= 1.5:
-                _br_threshold = 0.20
-                _br_tier = 'medium'
-
-        if bounce_ratio < _br_threshold:
-            return False, 'bounce_too_weak', f'ratio={bounce_ratio:.0%} < {_br_threshold:.0%} tier={_br_tier}', None
-
-        # Guard 1b: volume ratio
-        _cur_vol_ratio = 0
-        if cached_trend:
-            _v5 = cached_trend.get('vol_m5', 0)
-            _vh1 = cached_trend.get('vol_h1', 0)
-            _h1_avg = _vh1 / 12 if _vh1 > 0 else 0
-            _cur_vol_ratio = _v5 / _h1_avg if _h1_avg > 0 else (5.0 if _v5 > 0 else 0)
-            
-        _min_vol = 1.5 # SMART_ENTRY_MIN_VOL_RATIO (same for re-entry now)
-        if _cur_vol_ratio < _min_vol:
-            return False, 'low_volume', f'vol_ratio={_cur_vol_ratio:.1f} < {_min_vol}', None
-
-        trigger_price = price
-        detail_str = (
-            f"pullback={pullback:.1f}% bounce={bounce:.1f}% ratio={bounce_ratio:.0%} "
-            f"below_high={detail['below_high_pct']:.1f}% tier={_br_tier} "
-            f"vol_ratio={_cur_vol_ratio:.1f}"
-        )
-        log.info(f"[SmartEntry] ✅ ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}")
-        return True, 'smart_entry_pullback_bounce', detail_str, trigger_price
-
-    elif position == 'STILL_FALLING':
-        reject_reason = detail.get('reject_reason', 'still_falling')
-        bounce = detail.get('bounce_from_low_pct', 0)
-        return False, 'still_falling', f"{reject_reason} bounce={bounce:.1f}%", None
-        
-    elif position == 'AT_TOP':
-        return False, 'at_top', detail.get('reason', 'no_pullback'), None
-        
-    return False, 'insufficient_data', detail.get('reason', 'unknown'), None
+    # ──────────────────────────────────────────────────────────────────
+    # pullback_bounce DISABLED (2026-04-22)
+    # Track record: 0W/6L — systematically buys at the tail end of
+    # short-lived bounces on meme coins. By the time all matrix checks
+    # confirm the bounce, the bounce is already over.
+    # All entries now require momentum_direct (price_m5>15%, bs>1.4).
+    # ──────────────────────────────────────────────────────────────────
+    return False, 'pullback_bounce_disabled', 'pullback_bounce disabled — only momentum_direct entries allowed', None
 
