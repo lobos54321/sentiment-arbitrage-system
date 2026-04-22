@@ -3752,10 +3752,24 @@ def run_monitor(db):
                     if _any_ca_cooldown:
                         continue
 
+                    # REENTRY HARD CAP: No re-entries allowed.
+                    # Audit (26 trades, 7hrs 2026-04-22):
+                    #   9 re-entry trades: FLORK×3, Lilearth×3, M67GA×2, MTGA×1
+                    #   ALL 9 lost (0% win rate). Total re-entry loss: ~0.16 SOL (50% of total loss).
+                    #   Price-gate and P-gate were insufficient — tokens kept qualifying on
+                    #   new momentum spikes but fundamentally failed every time.
+                    _entry_count = w_entry.get('entry_count', 0) or 0
+                    if _entry_count >= 1:
+                        log.info(
+                            f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_CAP: "
+                            f"re-entry #{_entry_count+1} blocked (max 1 entry per token). "
+                            f"Data: 9/9 re-entries lost in audit."
+                        )
+                        continue
+
                     # PRICE-GATE: For re-entries, current price must be above last entry price.
                     # Data: 100% of dead cat bounces had price below entry during dip.
                     # Genuine second waves (SOLANA +1030%, Crashout +1140%) never dipped below entry.
-                    _entry_count = w_entry.get('entry_count', 0) or 0
                     _last_entry_price = w_entry.get('last_exit_price')  # stores entry_price of last trade
                     if _entry_count > 0 and _last_entry_price and _last_entry_price > 0:
                         _current_price = eval_res.get('current_price', 0) or 0
@@ -4153,13 +4167,16 @@ def run_monitor(db):
                         f"spread={_spread:+.1f}%)"
                     )
 
-                    # SPREAD GUARD: reject if fill price is >5% above SmartEntry trigger price.
+                    # SPREAD GUARD: reject if fill price is >2% above SmartEntry trigger price.
                     # Root cause: peak=0% trades caused by large quote spread eating SL buffer.
-                    # Backtest (31 trades):
-                    #   >3%: blocks 11L but also 5W (AGI +21.7%, Jared +14.3%) = net +46.5% but loses best trades
-                    #   >5%: blocks 5L (-44.3%), only misses 1W (-4.1%) = net +40.2% ← optimal
-                    #   >6%: blocks 1L only = too loose
-                    _SPREAD_GUARD_MAX_PCT = 5.0
+                    # Audit (26 trades, 7hrs 2026-04-22):
+                    #   slip ≤ 0%:  3 trades, 1 win (33%)
+                    #   slip 0-2%:  7 trades, 2 wins (29%)
+                    #   slip 2-4%: 12 trades, 0 wins (0%)  ← ALL lost
+                    #   slip > 4%:  4 trades, 0 wins (0%)  ← ALL lost
+                    # Conclusion: slippage >2% = 0% win rate (16/16 lost).
+                    # High slippage = low liquidity = likely a bad token.
+                    _SPREAD_GUARD_MAX_PCT = 2.0
                     if _spread > _SPREAD_GUARD_MAX_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] 🚫 {pending['symbol']} ABORT: "

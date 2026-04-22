@@ -504,6 +504,43 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             if _chasing:
                 return False, 'chasing_top', f'momentum +{m_pct:.1f}% but chasing top', None
 
+            # ── DATA-DRIVEN GUARD 1: Momentum Upper Bound ──
+            # Audit (26 trades): All 8 trades with m9s > 3.5% lost (0% win rate).
+            # These are violent micro-spikes where bots are distributing.
+            _M9S_UPPER = 3.5
+            if m_pct > _M9S_UPPER:
+                detail_str = (
+                    f"momentum_9s=+{m_pct:.1f}% EXCEEDS {_M9S_UPPER}% cap "
+                    f"(violent spike, likely distribution) bs={bs_ratio:.2f} pc_m5={pc_m5:+.1f}%"
+                )
+                log.info(f"[SmartEntry] 🚫 ${symbol} M9S_CAP_BLOCK: {detail_str}")
+                return False, 'm9s_cap_exceeded', detail_str, None
+
+            # ── DATA-DRIVEN GUARD 2: pc_m5 Sweet-Spot Band ──
+            # Audit (26 trades):
+            #   pc_m5 < 10%:  9 trades, 0 wins (0%) — trend too weak/early
+            #   pc_m5 10-20%: 8 trades, 3 wins (38%) — only profitable band
+            #   pc_m5 > 20%:  8 trades, 0 wins (0%) — overheated/distribution
+            # Exception: ATH tokens with S=100 can bypass the lower bound
+            # (they may be breaking out from a new signal).
+            _PC_M5_LOW = 10.0
+            _PC_M5_HIGH = 20.0
+            if pc_m5 < _PC_M5_LOW:
+                detail_str = (
+                    f"pc_m5={pc_m5:+.1f}% BELOW {_PC_M5_LOW}% floor "
+                    f"(trend not established) m9s=+{m_pct:.1f}% bs={bs_ratio:.2f}"
+                )
+                log.info(f"[SmartEntry] 🚫 ${symbol} PC_M5_LOW_BLOCK: {detail_str}")
+                return False, 'pc_m5_too_low', detail_str, None
+
+            if pc_m5 > _PC_M5_HIGH:
+                detail_str = (
+                    f"pc_m5={pc_m5:+.1f}% EXCEEDS {_PC_M5_HIGH}% ceiling "
+                    f"(overheated, distribution phase) m9s=+{m_pct:.1f}% bs={bs_ratio:.2f}"
+                )
+                log.info(f"[SmartEntry] 🚫 ${symbol} PC_M5_HIGH_BLOCK: {detail_str}")
+                return False, 'pc_m5_overheated', detail_str, None
+
             # ── DIRECTION CONFIRMATION ──
             # Wait 1 second, re-check price. If price is falling from
             # the momentum snapshot, the move has already peaked.
