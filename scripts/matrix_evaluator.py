@@ -62,76 +62,23 @@ def _lazy_import():
 
 def score_trend(bars, symbol, token_ca=None, pool_address=None):
     """
-    Matrix ① — Trend Direction
-
-    Data priority:
-      1. DexScreener pc_m5 + buy/sell ratio (PRIMARY — real-time chain data)
-      2. Synthetic K-line bars from price polling (FALLBACK — when DexScreener unavailable)
-
-    DexScreener is the ground truth: it aggregates actual on-chain trades in real-time.
-    Our synthetic bars are just us polling a price every 10s — lower quality, slower to build up.
-    For new tokens that just launched, DexScreener already has data while we're still
-    accumulating our first 3 bars (3+ minutes wait). This eliminates that bottleneck.
+    Matrix ① — Trend Direction (reverted to 84% win rate period)
+    
+    Uses OLS linear regression on K-line close prices (check_multi_bar_trend).
+    84% period scoring:
+      norm_slope > +0.15 → T=100 (clear uptrend, passed_shape)
+      norm_slope < -0.15 → T=0   (downtrend)
+      else               → T=50  (sideways / insufficient)
+    
+    Data source: synthetic K-line bars built from price polling (~10s intervals).
+    Each 1-minute bar gets ~6 price observations — enough for OHLC + regression.
 
     Returns: (score: int 0-100, reason: str, detail: str)
     """
     _lazy_import()
 
-    # === Primary: DexScreener real-time data ===
-    _dex = None
-    if token_ca and callable(_dex_trend_fn):
-        try:
-            _dex = _dex_trend_fn(token_ca)
-        except Exception:
-            pass
-
-    if _dex:
-        _pc_m5 = _dex.get('price_change_m5', 0) or 0
-        _buys = _dex.get('buys_m5', 0) or 0
-        _sells = max(_dex.get('sells_m5', 1) or 1, 1)
-        _bs = _buys / _sells
-
-        _dex_detail = f'dex: pc_m5={_pc_m5:+.1f}% bs={_bs:.2f} buys={_buys} sells={_sells}'
-
-        # Clear uptrend: price rising + buyers dominate
-        if _pc_m5 > 5.0 and _bs >= 1.5:
-            # If we also have bars, cross-validate (belt & suspenders)
-            if bars and len(bars) >= 3:
-                trend_ok, bar_reason, bar_detail = _trend_fn(bars, symbol)
-                if not trend_ok and bar_reason == 'downtrend':
-                    # DexScreener says up but bars say down — trust DexScreener
-                    return 100, 'dex_trend_strong', f'{_dex_detail} (bars disagree: {bar_detail})'
-            return 100, 'dex_trend_strong', _dex_detail
-            
-        if _pc_m5 > 3.0 and _bs >= 1.2:
-            return 80, 'dex_trend_up', _dex_detail
-            
-        if _pc_m5 > 2.0 and _bs >= 1.1:
-            return 60, 'dex_trend_mod_up', _dex_detail
-
-        # Clear downtrend: price falling
-        if _pc_m5 < -3.0:
-            return 0, 'dex_trend_down', _dex_detail
-
-        # Price up but weak buying (low bs or low volume) — suspicious
-        if _pc_m5 > 0 and _bs < 0.9:
-            return 0, 'dex_weak_pump', f'{_dex_detail} (price up but sellers dominate)'
-
-        # Sideways / ambiguous — use bars if available, otherwise fail-open
-        if bars and len(bars) >= 3:
-            trend_ok, reason, detail = _trend_fn(bars, symbol)
-            if trend_ok:
-                if reason == 'passed_shape':
-                    return 100, reason, f'{detail} | {_dex_detail}'
-                return 50, reason, f'{detail} | {_dex_detail}'
-            return 0, reason, f'{detail} | {_dex_detail}'
-
-        # Sideways on DexScreener, no bars — fail-open at 50
-        return 50, 'dex_sideways', _dex_detail
-
-    # === Fallback: synthetic K-line bars (no DexScreener data) ===
     if not bars or len(bars) < 3:
-        return 50, 'insufficient_bars', 'No DexScreener data and not enough bars (fail-open)'
+        return 50, 'insufficient_bars', 'not enough bars for regression (fail-open)'
 
     trend_ok, reason, detail = _trend_fn(bars, symbol)
 
