@@ -4714,6 +4714,10 @@ def run_monitor(db):
                                 pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT,
                                 failure_count_field=failure_count_field,
                             )
+                            # Fix: Ensure trapped tokens are also removed from the holding watchlist
+                            w_entry_trap = watchlist.get_by_ca(pos.token_ca)
+                            if w_entry_trap:
+                                watchlist.mark_expired(w_entry_trap['id'], trap_reason)
                             last_progress = time.time()
                             continue
                     log.warning(f"  Exit quote failed for {pos.symbol}/{pos.strategy_stage}: {failure_reason}")
@@ -4809,7 +4813,8 @@ def run_monitor(db):
                 db.commit()
                 
                 # Update Watchlist Status
-                if w_entry:
+                w_entry_close = watchlist.get_by_ca(pos.token_ca)
+                if w_entry_close:
                     # Loss exits: 30-minute cooldown — avoid dying-token re-entry
                     #   Data: ASTROID re-entered 6 min after -9.1% exit → -20.4% again
                     # Win exits: 5-minute cooldown — avoid immediate double-dip
@@ -4818,7 +4823,7 @@ def run_monitor(db):
                         _exit_cooldown = 1800  # 30 min
                     else:
                         _exit_cooldown = 300   # 5 min
-                    watchlist.mark_watching(w_entry['id'], realized_pnl, cooldown_sec=_exit_cooldown)
+                    watchlist.mark_watching(w_entry_close['id'], realized_pnl, cooldown_sec=_exit_cooldown)
                 last_progress = time.time()
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'
                 quoted_price_text = f"{effective_exit_price:.10f}" if effective_exit_price is not None else 'na'
