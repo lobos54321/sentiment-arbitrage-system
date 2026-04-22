@@ -233,13 +233,15 @@ def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_addr
 
 def score_price_strength(current_price, signal_price, lowest_price, latest_ath_price=None):
     """
-    Matrix ③ — Price Strength
-    Evaluates growth from signal price and recovery from observed dip.
-
-    latest_ath_price: preserved in function signature for backward compatibility
-    but not used in scoring. P score always compares against the original
-    signal_price anchor. Data audit (31 trades): P is the strongest predictor
-    (P=100: 50% win, P=30: 8% win).
+    Matrix ③ — Price Strength (reverted to 84% win rate period logic)
+    
+    84% period scoring:
+      0% ≤ growth ≤ 50%  + recovery ≥ 5%   → P = 100 (healthy)
+      0% ≤ growth ≤ 100% + recovery ≥ 3%   → P = 70  (fast)
+      growth < 0%         + recovery ≥ 10%  → P = 80  (V-bounce)
+      growth > 100%                         → P = 30  (overextended)
+      growth < 0%         + recovery < 5%   → P = 0   (bottom)
+      else                                  → P = 40  (marginal)
 
     Returns: (score: int 0-100, reason: str)
     """
@@ -250,45 +252,29 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
 
     growth_pct = ((current_price - signal_price) / signal_price) * 100
 
-    dip_from_signal = 0
     recovery_pct = 0
-    if lowest_price and lowest_price > 0 and signal_price and signal_price > 0:
-        dip_from_signal = ((signal_price - lowest_price) / signal_price) * 100
     if lowest_price and lowest_price > 0:
         recovery_pct = ((current_price - lowest_price) / lowest_price) * 100
 
-    # V-bounce from below signal price — must fully recover to entry line
-    # Intercept BEFORE P=100. If it had a deep dip (>= 15%) and recovered back above water,
-    # it is a V-bounce and gets penalized to 70 instead of 100.
-    # NOTE: 5% was too aggressive — meme tokens naturally dip 5-10% in first minutes.
-    #   Data: 7h overnight with 0 trades because every token triggered V-bounce at 5%.
-    #   15% catches only genuine crash-and-recover patterns.
-    if 0 <= growth_pct <= 40 and dip_from_signal >= 15.0:
-        return 70, f'v_bounce growth={growth_pct:+.1f}% dipped={dip_from_signal:.1f}%'
-
-    # Extremely healthy initial growth zone (0 - 40%)
-    if 0 <= growth_pct <= 40 and recovery_pct >= 5:
+    # Healthy initial growth zone (0 - 50%)
+    if 0 <= growth_pct <= 50 and recovery_pct >= 5:
         return 100, f'healthy growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # Fast growth (40 - 80%)
-    if 40 < growth_pct <= 80 and recovery_pct >= 3:
-        return 80, f'fast_growth growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+    # Fast growth (0 - 100%) — wider band than healthy
+    if 0 <= growth_pct <= 100 and recovery_pct >= 3:
+        return 70, f'fast_growth growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # Edge danger zone (80 - 100%)
-    if 80 < growth_pct <= 100:
-        return 50, f'rapid_extension growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+    # V-bounce from below signal price
+    if growth_pct < 0 and recovery_pct >= 10:
+        return 80, f'v_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
-    # Overextended / Doubled (> 100%) - Will be blocked by 'min 50' barrier for NOT_ATH
-    # but still allowed for FastLane since they bypass Guards with 30 P-score acceptance.
+    # Overextended (> 100%)
     if growth_pct > 100:
         return 30, f'overextended growth={growth_pct:+.1f}%'
 
-    # Still dropping / Not fully recovered to entry point
-    # Was recovery_pct < 100 — way too strict. 42% of all evals got P=0.
-    # Data: 7h overnight, 2546/6135 evals hit this → 0 trades executed.
-    # Relaxed to < 30: token must recover at least 30% from its dip to escape P=0.
-    if growth_pct < 0 and recovery_pct < 30:
-        return 0, f'bottom_or_weak_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
+    # Bottom / weak bounce
+    if growth_pct < 0 and recovery_pct < 5:
+        return 0, f'bottom growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # Default: marginal
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
@@ -420,28 +406,26 @@ class MatrixEvaluator:
         """Purges the in-memory kline cache to prevent indefinite memory growth."""
         cls._kline_cache.clear()
 
-    # Thresholds for NOT_ATH entries
+    # Thresholds for NOT_ATH entries (reverted to 84% win rate period)
     NOT_ATH_THRESHOLDS = {
-        'trend_min': 60,    # must pass >= 60
-        'volume_min': 70,   # must pass >= 70
-        'price_min': 70,    # must pass >= 70
-        'signal_min': 60,   # must pass >= 60
+        'trend_min': 50,    # 84% period: T≥50 (was 60)
+        'volume_min': 60,   # V≥60 counts as passing
+        'price_min': 70,    # P≥70 hard gate
+        'signal_min': 60,   # S≥60 counts as passing
         'momentum_min': 60, # at least not declining
-        'min_passing': 4,   # at least 4 of 5 >= these minimums!
+        'min_passing': 3,   # 84% period: 3 of 5 (was 4)
         'max_obs_minutes': 120,  # 2 hours max observation
     }
 
-    # Thresholds for ATH entries (more lenient)
-    # Data-validated 2026-04-15: P<=30 trades avg -16.8%. V=0 means zero liquidity.
-    # Both are now hard-blocked. ATH still needs real buying momentum.
+    # Thresholds for ATH entries (reverted to 84% win rate period)
     ATH_THRESHOLDS = {
-        'trend_min': 80,    # higher requirement
-        'volume_min': 70,   # higher requirement
-        'price_min': 0,     # Skipped for ATH
+        'trend_min': 50,    # 84% period: T=0 was soft warning, T≥50 passes
+        'volume_min': 60,   # V≥60 counts as passing
+        'price_min': 0,     # Skipped for ATH (ATH = price at highs)
         'signal_min': 0,    # ATH = auto 100
         'momentum_min': 60, # required
-        'min_passing': 3,   # at least 3 of 5
-        'max_obs_minutes': 120,  # 2h — allow consolidation
+        'min_passing': 3,   # 84% period: 3 of 5
+        'max_obs_minutes': 120,  # 2h
     }
 
     def evaluate(self, entry):
@@ -667,48 +651,33 @@ class MatrixEvaluator:
             'momentum_pct': momentum_pct,  # 9s net change %
         }
     def _check_pre_momentum_pass(self, scores, thresholds, signal_type='NOT_ATH'):
-        """Check if matrices ①④ meet thresholds for momentum trigger.
-        Volume (②) and Signal (⑤) are pure bonus — never block, only add passing count.
-        Only Trend (①) and Price (③) are structural hard-gates.
-
-        Exception: ATH + strong T/V → P hard-gate is bypassed (momentum_direct).
-        ATH coins naturally sit at price highs → P is always low. The real filter
-        for ATH is Matrix ④ momentum, not price position.
-
-        NOTE: P=30 (overextended) is NOT blocked here. It is blocked at SmartEntry
-        submission instead, so that Fast-lane (which bypasses SmartEntry) can still
-        catch golden dogs with P=30. Data: 12 ATH P=30 via SmartEntry = 8% win rate,
-        but Fast-lane P=30 with T100+V100+M100+bs≥2.0 is a genuine breakout.
+        """Check if matrices ①③ meet thresholds for momentum trigger.
+        Reverted to 84% win rate period logic:
+        - T≥50 counts as passing for ALL signal types (was only ATH before)
+        - V and S are pure bonuses — never block, only add passing count
+        - Only T and P are structural hard-gates
+        - ATH + T≥50 + V≥60 → P hard-gate is bypassed (momentum_direct)
         """
-        # Only real-time structural matrices that we can reliably measure
+        # Structural hard-gates: trend and price
         hard_checks = [
             ('trend', scores.get('trend', 0), thresholds['trend_min']),
             ('price', scores.get('price', 0), thresholds['price_min']),
         ]
 
-        # For ATH: T=50 counts as passing (not just >=60).
-        # ATH T score is very unreliable (e.g. $Rudi T=0 for 74% of evals).
-        # T=50 is the fail-open default. Requiring T=100 to reach M check
-        # wastes 3-7 minutes. Data: fuckface T=50 for 6 rounds (70s) before T=100.
-        if signal_type == 'ATH':
-            passing_count = sum(1 for name, val, _ in hard_checks
-                                if val >= 60 or (name == 'trend' and val >= 50))
-        else:
-            passing_count = sum(1 for _, val, _ in hard_checks if val >= 60)
+        # 84% period: T≥50 counts as passing for all signal types
+        passing_count = sum(1 for name, val, _ in hard_checks
+                            if val >= 60 or (name == 'trend' and val >= 50))
         hard_fails = any(val < mins for _, val, mins in hard_checks)
 
         if hard_fails:
-            # Momentum-direct bypass: ATH + T≥50 + V≥70 → let momentum check decide
-            # Data: ASTEROID T=100 V=100 S=100 P=30 — P blocked a real breakout.
-            # P is meaningless for ATH (price IS at highs). M check is the real guard.
+            # ATH momentum-direct bypass: ATH + T≥50 + V≥60 → bypass P hard-gate
             t_score = scores.get('trend', 0)
             v_score = scores.get('volume', 0)
-            if signal_type == 'ATH' and t_score >= 50 and v_score >= 70:
+            if signal_type == 'ATH' and t_score >= 50 and v_score >= 60:
                 log.info(
                     f"[Matrix] ATH momentum-direct bypass: T={t_score} V={v_score} "
                     f"P={scores.get('price', 0)} → bypassing P hard-gate, letting momentum decide"
                 )
-                # Still count passing matrices normally
             else:
                 return False
 
