@@ -641,7 +641,9 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0)
         bounce_ratio = bounce / pullback if pullback > 0 else 0
 
         # Guard 1: adaptive bounce_ratio
-        _br_threshold = 0.30  # default 30%
+        # Data: pullback_bounce 0W/5L overnight — default 30% too loose.
+        # Raised to 40% to require stronger recovery signal before entry.
+        _br_threshold = 0.40  # default 40% (was 30%)
         _br_tier = 'default'
         if cached_trend:
             _br_bs = cached_trend.get('buys_m5', 0) / max(cached_trend.get('sells_m5', 1), 1)

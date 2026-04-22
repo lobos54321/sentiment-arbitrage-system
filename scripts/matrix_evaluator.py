@@ -284,7 +284,10 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
         return 30, f'overextended growth={growth_pct:+.1f}%'
 
     # Still dropping / Not fully recovered to entry point
-    if growth_pct < 0 and recovery_pct < 100:
+    # Was recovery_pct < 100 — way too strict. 42% of all evals got P=0.
+    # Data: 7h overnight, 2546/6135 evals hit this → 0 trades executed.
+    # Relaxed to < 30: token must recover at least 30% from its dip to escape P=0.
+    if growth_pct < 0 and recovery_pct < 30:
         return 0, f'bottom_or_weak_bounce growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
     # Default: marginal
@@ -610,7 +613,7 @@ class MatrixEvaluator:
             log.info(
                 f"[Matrix] ${symbol} pre-momentum PASS: "
                 f"T={scores['trend']} V={scores['volume']} P={scores['price']} S={scores['signal']} "
-                f"→ running 5×3s momentum check..."
+                f"→ running 3×3s momentum check..."
             )
 
             # For re-entries: verify price > last exit price
