@@ -845,9 +845,11 @@ class ExitMatrixEvaluator:
         _decay = 1.0  # kept for downstream compat
 
         # === Hard Stop-Loss ===
-        # Default -7.5% — momentum entries that immediately drop 7.5% are bad signals.
-        # dynamic_sl can tighten this if trailing stop moves SL up.
-        hard_sl = entry.get('dynamic_sl', -0.075)
+        # Fixed -15% — reverted from AdaptiveSL (-5%~-7.5%) to match 84% win rate period.
+        # Audit (26 trades, 2026-04-22): Tight SL killed 22/26 trades at -7%~-10%,
+        # many of which had peaks of +3-4% (would have survived with -15% SL).
+        # Meme coin normal volatility is ±5-8%, so -5% SL = noise-level stop.
+        hard_sl = entry.get('dynamic_sl', -0.15)
         if current_pnl <= hard_sl:
             return {
                 'action': 'exit',
