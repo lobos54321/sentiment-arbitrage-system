@@ -3909,16 +3909,26 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane: DISABLED — reverted to 84% win rate period behavior.
-                    # 84% period (c6121922) had NO fast lane at all. All trades
-                    # went through SmartEntry (pullback-bounce or momentum_direct).
-                    # Audit: Fast-lane let "perfect score" coins skip SmartEntry,
-                    # but perfect scores often meant peak distribution phase.
+                    # Fast lane: ATH + T≥100 + V≥100 + S≥100 + M=100 + buy_sell≥2.0 + pc_m5>15%
+                    # User decision: keep Fast-lane active (was not in 84% period, but user wants it).
+                    # Only fetches DexScreener data when all matrix scores are perfect + ATH.
                     _fl_sig_type = pending.get('signal_type', '?')
-                    _fl_dex = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                    _fl_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
+                        _m_score and _m_score >= 100
+                        and _t_score and _t_score >= 100
+                        and _v_score and _v_score >= 100
+                        and _s_score and _s_score >= 100
+                        and _fl_sig_type == 'ATH'
+                    ) else None
                     _fl_bs_ratio = (_fl_dex.get('buys_m5', 0) / max(_fl_dex.get('sells_m5', 1), 1)) if _fl_dex else 0
                     _fl_pc_m5 = _fl_dex.get('price_change_m5', 0) if _fl_dex else 0
-                    _is_fast_lane = False  # DISABLED — all trades must pass SmartEntry
+                    _is_fast_lane = (_t_score and _t_score >= 100
+                                       and _v_score and _v_score >= 100
+                                       and _s_score and _s_score >= 100
+                                       and _m_score and _m_score >= 100
+                                       and _fl_bs_ratio >= 2.0
+                                       and _fl_pc_m5 > 15.0
+                                       and _fl_sig_type == 'ATH')
 
                     if trigger_price and pending['attempts'] == 1 and not _is_fast_lane:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])

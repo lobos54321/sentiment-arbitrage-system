@@ -375,12 +375,10 @@ def evaluate_trend_phase(trend_data):
 
 
 def is_chasing_top(trend_data):
-    """Multi-factor chase protection: decides if we're too late to enter.
-
-    Instead of a fixed pc_m5 cutoff, looks at whether money is still flowing IN:
-      - Higher pc_m5 → requires proportionally stronger buy pressure + volume
-      - If buyers still dominate and volume is surging, high pc_m5 is OK
-      - If buyers are fading or volume is dropping, even moderate pc_m5 is risky
+    """Simplified chase protection — only blocks extreme FOMO (>100% in 5min).
+    
+    84% period had NO chasing protection at all. We keep only the hard ceiling
+    to protect against truly extreme cases while allowing normal momentum entries.
 
     Returns: (too_late: bool, reason: str)
     """
@@ -388,54 +386,32 @@ def is_chasing_top(trend_data):
         return False, 'no_data'
 
     pc_m5 = trend_data.get('price_change_m5', 0)
-    vol_m5 = trend_data.get('vol_m5', 0)
-    vol_h1 = trend_data.get('vol_h1', 0)
-    buys_m5 = trend_data.get('buys_m5', 0)
     sells_m5 = max(trend_data.get('sells_m5', 1), 1)
-
-    h1_avg = vol_h1 / 12.0 if vol_h1 > 0 else 0
-    if h1_avg > 0:
-        vol_ratio = vol_m5 / h1_avg
-    elif vol_m5 > 0:
-        vol_ratio = 5.0  # has m5 volume but no h1 → brand new token, assume active
-    else:
-        vol_ratio = 0
+    buys_m5 = trend_data.get('buys_m5', 0)
     bs_ratio = buys_m5 / sells_m5
 
     # Hard ceiling: pc_m5 > 100% AND buyers not dominant → FOMO territory
     if pc_m5 > 100.0 and bs_ratio < 2.0:
         return True, (f'extreme_chase: pc_m5={pc_m5:+.0f}% '
-                      f'bs={bs_ratio:.1f}<2.0 vol={vol_ratio:.1f}')
+                      f'bs={bs_ratio:.1f}<2.0')
 
-    # Dynamic tiers: higher price surge → stricter funding requirements
-    # Tier 3 (50-100%): need strong buyer edge + volume surge
-    # Data: LOCKED bs=1.42 vol=2.5 at pc_m5=52% → was blocked by bs<1.5, missed +120%
-    # Adjusted: bs>=1.4 vol>=1.3 for smoother gradient from mid_chase tier
-    if pc_m5 > 50.0:
-        if bs_ratio < 1.4 or vol_ratio < 1.3:
-            return True, (f'high_chase: pc_m5={pc_m5:+.0f}% '
-                          f'needs bs>=1.4+vol>=1.3, '
-                          f'got bs={bs_ratio:.1f} vol={vol_ratio:.1f}')
-
-    # Tier 2 (15-50%): need moderate buyer edge + stable volume
-    elif pc_m5 > 15.0:
-        if bs_ratio < 1.2 or vol_ratio < 1.0:
-            return True, (f'mid_chase: pc_m5={pc_m5:+.0f}% '
-                          f'needs bs>=1.2+vol>=1.0, '
-                          f'got bs={bs_ratio:.1f} vol={vol_ratio:.1f}')
-
-    # Tier 1 (0-15%): no chase restriction — Layer 1 BULLISH is sufficient
     return False, 'ok'
 
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                          momentum_snapshots=None, momentum_pct=0):
     """
-    Smart Entry Engine (V4 - Momentum-Direct with Real-Time Direction Confirmation)
+    Smart Entry Engine (V5 — 84% Period Hybrid)
     
-    Uses fresh 3×3s momentum data from the Matrix evaluator instead of DexScreener's
-    lagging pc_m5. Also performs a 1-second direction confirmation to ensure the coin
-    is still ascending at the moment of entry.
-
+    Restores the proven 84% win rate entry logic:
+      PATH 1 (Primary): Pullback-Bounce — wait for 2% pullback, then 2% bounce
+      PATH 2 (Secondary): Momentum Direct — 9s momentum with data-driven guards
+    
+    Key differences from V4 (momentum-only):
+      - Pullback-bounce is checked FIRST (84% period's primary entry method)
+      - bs threshold lowered to > 1.0 (84% original, was >= 1.2 in V4)
+      - Only 2 guards for pullback path (bounce_ratio + trend_downgrade)
+      - Data-driven guards (m9s cap, pc_m5 band) applied to momentum path only
+    
     Parameters:
         momentum_snapshots: list of [p1, p2, p3] from the 3×3s momentum check
         momentum_pct: net % change over the 9s window (p3-p1)/p1*100
@@ -443,16 +419,16 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
     """
     from paper_trade_monitor import fetch_realtime_price
-    from entry_engine import fetch_dexscreener_trend_snapshot, is_chasing_top
+    from entry_engine import fetch_dexscreener_trend_snapshot, is_chasing_top, evaluate_trend_phase
 
-    # 1. Gather fresh price for direction confirmation
+    # 1. Gather current price and DexScreener data
     price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
     cached_trend = fetch_dexscreener_trend_snapshot(token_ca)
     
     if not price or price <= 0:
         return False, 'no_price', 'could not fetch price', None
 
-    # 2. Get buy/sell ratio from DexScreener (we don't have our own b/s data)
+    # 2. Parse DexScreener data
     bs_ratio = 1.0
     pc_m5 = 0
     if cached_trend:
@@ -461,35 +437,104 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         bs_ratio = b_m5 / s_m5
         pc_m5 = cached_trend.get('price_change_m5', 0)
 
-    # 3. Check anti-chase guard
+    # 3. Check anti-chase guard (simplified — only >100% hard ceiling)
     _chasing = False
     if cached_trend:
         _chasing, _chase_reason = is_chasing_top(cached_trend)
 
-    # ──────────────────────────────────────────────────────────────────
-    # STRATEGY: Use our own 3×3s momentum data as primary signal.
-    # The momentum check was done <1s ago by the Matrix evaluator.
-    # This is FAR more current than DexScreener's pc_m5 (5-min window,
-    # may be 1-5s stale from cache).
-    #
-    # Fallback: if no momentum data passed (shouldn't happen normally),
-    # use DexScreener's pc_m5 with higher threshold.
-    # ──────────────────────────────────────────────────────────────────
+    # 4. Layer 1: Determine trend phase
+    trend_phase, trend_reason = evaluate_trend_phase(cached_trend)
 
-    # Primary path: use 3×3s momentum data
+    # ══════════════════════════════════════════════════════════════════
+    # PATH 1 (PRIMARY): PULLBACK-BOUNCE ENTRY
+    # 84% win rate period's main entry method.
+    # Logic: price ran up → pulled back ≥2% → bounced ≥2% from low
+    # → still below high (not chasing) → buy the confirmed dip.
+    #
+    # Guards (84% period had only 2):
+    #   1. bounce_ratio >= 25%
+    #   2. trend must be BULLISH (not downgraded)
+    # ══════════════════════════════════════════════════════════════════
+    if momentum_snapshots and len(momentum_snapshots) >= 3:
+        snap_high = max(momentum_snapshots)
+        snap_low = min(momentum_snapshots)
+        snap_last = momentum_snapshots[-1]
+
+        if snap_high > 0 and snap_low > 0 and snap_last > 0:
+            pullback_pct = ((snap_high - snap_low) / snap_high) * 100
+            bounce_pct = ((snap_last - snap_low) / snap_low) * 100
+            below_high_pct = ((snap_high - snap_last) / snap_high) * 100
+            bounce_ratio_val = bounce_pct / pullback_pct if pullback_pct > 0 else 0
+
+            if (pullback_pct >= SMART_ENTRY_MIN_PULLBACK_PCT
+                    and bounce_pct >= SMART_ENTRY_MIN_BOUNCE_PCT
+                    and below_high_pct >= SMART_ENTRY_MIN_PULLBACK_PCT
+                    and bounce_ratio_val >= SMART_ENTRY_MIN_BOUNCE_RATIO):
+
+                # Guard 1: bounce_ratio must be >= 25%
+                if bounce_ratio_val < 0.25:
+                    detail_str = (
+                        f"pullback={pullback_pct:.1f}% bounce={bounce_pct:.1f}% "
+                        f"ratio={bounce_ratio_val:.0%} < 25%"
+                    )
+                    return False, 'bounce_ratio_weak', detail_str, None
+
+                # Guard 2: trend must be BULLISH
+                if trend_phase not in ('BULLISH',):
+                    detail_str = (
+                        f"pullback={pullback_pct:.1f}% bounce={bounce_pct:.1f}% "
+                        f"ratio={bounce_ratio_val:.0%} but trend={trend_phase}"
+                    )
+                    return False, 'trend_not_bullish', detail_str, None
+
+                # Chase check
+                if _chasing:
+                    return False, 'chasing_top', f'pullback-bounce but {_chase_reason}', None
+
+                # ✅ GOOD_ENTRY — pullback-bounce confirmed
+                # 1s direction confirmation before buying
+                import time as _time
+                _time.sleep(1.0)
+                price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
+                
+                if price_confirm and price_confirm > 0:
+                    if price_confirm < snap_last * 0.99:
+                        direction_pct = ((price_confirm - snap_last) / snap_last) * 100
+                        detail_str = (
+                            f"pullback-bounce confirmed but direction_1s={direction_pct:+.1f}% "
+                            f"(price fell {snap_last:.10f}→{price_confirm:.10f})"
+                        )
+                        log.info(f"[SmartEntry] ⚠️ ${symbol} PB_REVERSAL: {detail_str}")
+                        return False, 'pb_momentum_reversing', detail_str, None
+                    trigger_price = price_confirm
+                else:
+                    trigger_price = snap_last
+
+                detail_str = (
+                    f"PULLBACK_BOUNCE: pullback={pullback_pct:.1f}% bounce={bounce_pct:.1f}% "
+                    f"ratio={bounce_ratio_val:.0%} below_high={below_high_pct:.1f}% "
+                    f"trend={trend_phase} bs={bs_ratio:.2f} pc_m5={pc_m5:+.1f}%"
+                )
+                log.info(f"[SmartEntry] 🚀 ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}")
+                return True, 'pullback_bounce_entry', detail_str, trigger_price
+
+    # ══════════════════════════════════════════════════════════════════
+    # PATH 2 (SECONDARY): MOMENTUM DIRECT ENTRY
+    # When no pullback-bounce is available, use 9s momentum data.
+    # bs threshold: > 1.0 (84% period original, was >= 1.2 in V4).
+    # Data-driven guards from audit (m9s cap, pc_m5 band) still apply.
+    # ══════════════════════════════════════════════════════════════════
     if momentum_snapshots and len(momentum_snapshots) >= 2:
-        m_pct = momentum_pct  # net % change over 9s
+        m_pct = momentum_pct
         m_last = momentum_snapshots[-1]
         
-        # Check: momentum must show meaningful upward move
-        # (momentum_pct >= 1.5% is already guaranteed by matrix M score >= 60)
-        if m_pct >= 1.5 and bs_ratio >= 1.2:
+        # Base threshold: m9s >= 1.5% AND bs > 1.0 (84% period value)
+        if m_pct >= 1.5 and bs_ratio > 1.0:
             if _chasing:
                 return False, 'chasing_top', f'momentum +{m_pct:.1f}% but chasing top', None
 
             # ── DATA-DRIVEN GUARD 1: Momentum Upper Bound ──
             # Audit (26 trades): All 8 trades with m9s > 3.5% lost (0% win rate).
-            # These are violent micro-spikes where bots are distributing.
             _M9S_UPPER = 3.5
             if m_pct > _M9S_UPPER:
                 detail_str = (
@@ -501,11 +546,9 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
             # ── DATA-DRIVEN GUARD 2: pc_m5 Sweet-Spot Band ──
             # Audit (26 trades):
-            #   pc_m5 < 10%:  9 trades, 0 wins (0%) — trend too weak/early
+            #   pc_m5 < 10%:  9 trades, 0 wins — trend too weak
             #   pc_m5 10-20%: 8 trades, 3 wins (38%) — only profitable band
-            #   pc_m5 > 20%:  8 trades, 0 wins (0%) — overheated/distribution
-            # Exception: ATH tokens with S=100 can bypass the lower bound
-            # (they may be breaking out from a new signal).
+            #   pc_m5 > 20%:  8 trades, 0 wins — overheated
             _PC_M5_LOW = 10.0
             _PC_M5_HIGH = 20.0
             if pc_m5 < _PC_M5_LOW:
@@ -524,18 +567,15 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 log.info(f"[SmartEntry] 🚫 ${symbol} PC_M5_HIGH_BLOCK: {detail_str}")
                 return False, 'pc_m5_overheated', detail_str, None
 
-            # ── DIRECTION CONFIRMATION ──
-            # Wait 1 second, re-check price. If price is falling from
-            # the momentum snapshot, the move has already peaked.
+            # ── DIRECTION CONFIRMATION (1s) ──
             import time as _time
             _time.sleep(1.0)
             price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
             
             if price_confirm and price_confirm > 0:
-                # Compare confirm price to the last momentum snapshot
                 direction_pct = ((price_confirm - m_last) / m_last) * 100
                 
-                if price_confirm < m_last * 0.99:  # dropped > 1% from momentum snapshot
+                if price_confirm < m_last * 0.99:
                     detail_str = (
                         f"momentum_9s=+{m_pct:.1f}% bs={bs_ratio:.2f} "
                         f"but direction_1s={direction_pct:+.1f}% (price fell from "
@@ -544,10 +584,8 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                     log.info(f"[SmartEntry] ⚠️ ${symbol} MOMENTUM_REVERSAL: {detail_str}")
                     return False, 'momentum_reversing', detail_str, None
                 
-                # Use confirmed price as trigger (most accurate)
                 trigger_price = price_confirm
             else:
-                # Can't confirm → use momentum snapshot price
                 trigger_price = m_last
 
             detail_str = (
@@ -558,21 +596,20 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             return True, 'momentum_direct_entry', detail_str, trigger_price
 
         else:
-            # Momentum data present but below thresholds
             detail_str = (
                 f"momentum_9s=+{m_pct:.1f}% (need ≥1.5%) "
-                f"bs={bs_ratio:.2f} (need ≥1.2)"
+                f"bs={bs_ratio:.2f} (need >1.0)"
             )
             return False, 'momentum_weak', detail_str, None
 
-    # Fallback path: no momentum data (shouldn't happen in normal flow)
-    # Use DexScreener pc_m5 with original strict threshold
-    if cached_trend and pc_m5 > 15.0 and bs_ratio > 1.4:
+    # Fallback: no momentum data — use DexScreener pc_m5
+    # 84% period: pc_m5 > 15% + bs > 1.0
+    if cached_trend and pc_m5 > 15.0 and bs_ratio > 1.0:
         if not _chasing:
-            from paper_trade_monitor import fetch_realtime_price as _frp
             detail_str = f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} (dex_fallback)"
             log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}")
             return True, 'momentum_direct_entry', detail_str, price
 
-    return False, 'no_momentum_data', 'no momentum snapshots and DexScreener pc_m5 insufficient', None
+    return False, 'no_entry_signal', 'no pullback-bounce pattern and no momentum signal', None
+
 

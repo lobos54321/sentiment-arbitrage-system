@@ -21,12 +21,12 @@ log = logging.getLogger('paper_trade_monitor')
 #   - protect realized peak gains (never give back >15pp from a peak >20%)
 # Bounded to [-15%, -3%] so neither runaway widening nor over-tightening.
 
-def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
-    """4-factor dynamic SL.
+def compute_dynamic_sl(pos, dex_trend, base_sl=-0.15):
+    """4-factor dynamic SL centered around -15% (84% win rate period baseline).
     pos:        Position object (uses .price_ring, .peak_pnl)
     dex_trend:  DexScreener trend snapshot dict (or None)
-    base_sl:    starting SL (negative float, e.g. -0.07)
-    Returns float in range [-0.12, -0.05].
+    base_sl:    starting SL (negative float, default -0.15)
+    Returns float in range [-0.20, -0.10].
     """
     sl = base_sl
 
@@ -49,7 +49,6 @@ def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
             sl += 0.03   # tighten — interest collapsing
 
     # Factor 3: 3-bar momentum direction from price_ring
-    # Requires strict direction — flat bars are neutral (no adjustment).
     ring = list(getattr(pos, 'price_ring', []))
     if len(ring) >= 4:
         last_4 = [p for _, p in ring[-4:]]
@@ -61,16 +60,13 @@ def compute_dynamic_sl(pos, dex_trend, base_sl=-0.07):
             sl += 0.02   # 3 strict down bars — tighten
 
     # Factor 4: peak protection (sub-trail zone only)
-    # Scope: peak 10-50%, below Guardian's Phase 2 trail threshold.
-    # Above peak >= 50%, Guardian's ath_phase2/phase3 trail handles protection.
-    # Here we just tighten the hard SL so a modest winner doesn't retrace all
-    # the way to -7% before exiting.
     peak = getattr(pos, 'peak_pnl', 0) or 0
     if peak > 0.10:
-        sl = max(sl, -0.03)
+        sl = max(sl, -0.08)  # tighten to -8% once we've seen +10% (protect gains)
 
-    # Bounds: at most -12% (hard cap), at least -5% (don't sit through bigger losses)
-    return max(-0.12, min(-0.05, sl))
+    # Bounds: centered on -15%, range [-20%, -10%]
+    # 84% period used fixed -15%. Dynamic factors adjust ±5pp around that.
+    return max(-0.20, min(-0.10, sl))
 
 
 # ─── EXIT Guardian Thread ─────────────────────────────────────────────────────
@@ -174,10 +170,10 @@ class ExitGuardianThread(threading.Thread):
                 # --- Get watchlist entry for dynamic_sl ---
                 w_entry = self.store.get_by_ca(ca)
                 # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
-                # Base SL comes from AdaptiveSL (w_entry['dynamic_sl']) if set, else -0.07
-                base_sl = -0.07
+                # Base SL: -15% (84% win rate period). w_entry['dynamic_sl'] overrides.
+                base_sl = -0.15
                 if w_entry:
-                    base_sl = w_entry.get('dynamic_sl', -0.07)
+                    base_sl = w_entry.get('dynamic_sl', -0.15)
                 # Lazy import to avoid circular dependency
                 try:
                     from entry_engine import fetch_dexscreener_trend_snapshot
