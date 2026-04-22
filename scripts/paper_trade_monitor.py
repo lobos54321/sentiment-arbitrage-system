@@ -41,7 +41,7 @@ from matrix_evaluator import MatrixEvaluator, ExitMatrixEvaluator
 from entry_engine import (
     calculate_kelly_position, evaluate_smart_entry,
     fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
-    evaluate_entry_position, clear_dex_trend_cache,
+    clear_dex_trend_cache,
     get_liquidity_position_cap, get_adaptive_stop_loss,
     is_chasing_top,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
