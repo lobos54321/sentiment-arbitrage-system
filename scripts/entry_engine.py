@@ -180,14 +180,17 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     # With only 8+13 trades, neither sample is statistically significant (p=0.017/0.083),
     # so we neutralize entry_mode's effect on Kelly rather than reverse it.
 
-    # ─── Matrix crowding (avg pnl validated: ≤1 perfect=+5%, 2 perfect=-1.1%) ──
+    # ─── Matrix score alignment ──────────────────────────────────────
+    # V3 fix: Old "crowding penalty" (4/5 perfect → p×0.7) was empirically wrong.
+    # Live data (NOBIKO: 4/5 perfect, Score=115, +29.4% peak) proved high scores
+    # correlate with REAL momentum, not crowding.  The heavy penalty caused inverse
+    # position sizing: weakest signals got 0.478 SOL, strongest got 0.03 SOL.
+    # Now: only 5/5 perfect gets mild skepticism; 3-4/5 is neutral; ≤1 contrarian.
     if matrix_scores:
         perfect_count = sum(1 for v in matrix_scores.values() if v == 100)
-        if perfect_count >= 4:
-            p *= 0.7    # heavy crowding penalty
-            log.info(f"[Kelly] Matrix crowding: {perfect_count}/5 perfect → p×0.7")
-        elif perfect_count >= 3:
-            p *= 0.9    # mild penalty
+        if perfect_count >= 5:
+            p *= 0.9    # mild skepticism — all-perfect is rare, may be peak
+            log.info(f"[Kelly] Matrix all-perfect: {perfect_count}/5 → p×0.9")
         elif perfect_count <= 1:
             # Contrarian bonus — ONLY for first entry on fresh coins.
             # Data: Veteran② got contrarian ×1.2 on re-entry (decaying signal) → 0.775 SOL → -12.5%.
