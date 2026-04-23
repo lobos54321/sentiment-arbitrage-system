@@ -771,7 +771,7 @@ class ExitMatrixEvaluator:
         if current_pnl > 0:
             try:
                 from entry_engine import get_recent_synthetic_bars
-                _pos_bars = get_recent_synthetic_bars(entry.get('ca'), n_bars=2)
+                _pos_bars = get_recent_synthetic_bars(entry.get('ca'), n_bars=2, pool_address=entry.get('pool_address'))
                 if len(_pos_bars) >= 2:
                     _prev_low = _pos_bars[-2]['low']
                     # If current price breaks below the previous 1m candle low, exit immediately.

@@ -260,20 +260,28 @@ def get_liquidity_position_cap(token_ca, sol_price_usd, max_pool_pct=0.01):
         return None
 
 
-def calculate_ema_deviation(token_ca, current_price):
+def calculate_ema_deviation(token_ca, current_price, pool_address=None):
     """Calculate price deviation from 20-period EMA using in-memory price history.
+    Falls back to GeckoTerminal 1m K-lines if memory history is insufficient.
     
     Returns: (deviation_pct: float, ema_price: float) or (None, None) if insufficient data.
     Deviation > 0 means price is ABOVE EMA (overextended upward).
     """
     from matrix_evaluator import MatrixEvaluator
     history = MatrixEvaluator._price_history.get(token_ca, [])
+    prices = []
     
-    if len(history) < 10:  # Need at least 10 data points for meaningful EMA
+    if len(history) >= 10:
+        prices = [p for _, p in history[-20:]]
+    elif pool_address:
+        # Fallback to GeckoTerminal
+        from paper_trade_monitor import get_notath_bars
+        gt_bars = get_notath_bars(pool_address, limit=20)
+        if gt_bars and len(gt_bars) >= 10:
+            prices = [float(b['close']) for b in gt_bars]
+            
+    if len(prices) < 10:
         return None, None
-    
-    # Use last 20 prices (or all if < 20)
-    prices = [p for _, p in history[-20:]]
     
     # Calculate EMA with period = len(prices)
     k = 2.0 / (len(prices) + 1)
@@ -287,14 +295,23 @@ def calculate_ema_deviation(token_ca, current_price):
     deviation_pct = ((current_price - ema) / ema) * 100
     return deviation_pct, ema
 
-def get_recent_synthetic_bars(token_ca, n_bars=5):
+def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None):
     """Build recent 1-minute OHLC bars from in-memory price history.
+    Falls back to GeckoTerminal 1m K-lines if memory history is insufficient.
     
     Returns: list of {'open', 'high', 'low', 'close', 'ts'} (newest last)
     or empty list if insufficient data.
     """
     from matrix_evaluator import MatrixEvaluator
     history = MatrixEvaluator._price_history.get(token_ca, [])
+    
+    if len(history) < 3 and pool_address:
+        # Fallback to GeckoTerminal
+        from paper_trade_monitor import get_notath_bars
+        gt_bars = get_notath_bars(pool_address, limit=n_bars)
+        if gt_bars:
+            return sorted(gt_bars, key=lambda b: b['ts'])[-n_bars:] if len(gt_bars) >= n_bars else sorted(gt_bars, key=lambda b: b['ts'])
+            
     if len(history) < 3:
         return []
     
@@ -546,7 +563,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 # ── K-LINE BREAKOUT CONFIRMATION (Phase 4) ──
                 # Strategy 2 insight: only buy when price breaks above the previous candle's high.
                 # This confirms the pullback is OVER and buyers are back in control.
-                _recent_bars = get_recent_synthetic_bars(token_ca, n_bars=3)
+                _recent_bars = get_recent_synthetic_bars(token_ca, n_bars=3, pool_address=pool_address)
                 if len(_recent_bars) >= 2:
                     _prev_high = _recent_bars[-2]['high']
                     _curr_close = snap_last  # current price
@@ -619,7 +636,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             # Strategy 2 insight: when price is too far from its moving average,
             # the move is "exhausted" and reversal probability spikes.
             _EMA_DEV_MAX = 100.0 if sustained_ath else 50.0
-            _dev_pct, _ema_val = calculate_ema_deviation(token_ca, price)
+            _dev_pct, _ema_val = calculate_ema_deviation(token_ca, price, pool_address=pool_address)
             if _dev_pct is not None and _dev_pct > _EMA_DEV_MAX:
                 detail_str = (
                     f"price={price:.10f} is {_dev_pct:.0f}% above 20-EMA={_ema_val:.10f} "

@@ -4067,7 +4067,7 @@ def run_monitor(db):
                         from entry_engine import calculate_ema_deviation
                         _fl_current_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
                         if _fl_current_price:
-                            _dev_pct, _ema_val = calculate_ema_deviation(pending['token_ca'], _fl_current_price)
+                            _dev_pct, _ema_val = calculate_ema_deviation(pending['token_ca'], _fl_current_price, pool_address=pending['pool'])
                             _dev_max = 100.0 if _is_sustained_ath else 50.0
                             if _dev_pct is not None and _dev_pct > _dev_max:
                                 log.info(f"  [FastLane] 🚫 {pending['symbol']} EMA exhaustion: {_dev_pct:.0f}% > {_dev_max}%")
@@ -4470,7 +4470,7 @@ def run_monitor(db):
                             
                         # K-LINE STRUCTURAL STOP LOSS (Phase 5)
                         from entry_engine import get_recent_synthetic_bars
-                        _entry_bars = get_recent_synthetic_bars(pending['token_ca'], n_bars=3)
+                        _entry_bars = get_recent_synthetic_bars(pending['token_ca'], n_bars=3, pool_address=pending['pool'])
                         if _entry_bars:
                             _structure_low = min(b['low'] for b in _entry_bars)
                             _structure_sl_pct = ((price - _structure_low) / price) * -100
