@@ -4478,15 +4478,29 @@ def run_monitor(db):
                         _entry_bars = get_recent_synthetic_bars(pending['token_ca'], n_bars=3, pool_address=pending['pool'])
                         if _entry_bars:
                             _structure_low = min(b['low'] for b in _entry_bars)
-                            _structure_sl_pct = ((price - _structure_low) / price) * -100
-                            # Clamp: at least -3%, at most -15% (never wider than current fixed SL)
-                            _structure_sl = max(-15.0, min(-3.0, _structure_sl_pct))
-                            log.info(
-                                f"  [KLINE_SL] {pending['symbol']} structure_low={_structure_low:.10f} "
-                                f"→ SL={_structure_sl:.1f}% (vs fixed={_final_sl*100:.1f}%)"
-                            )
-                            # Use the TIGHTER of structure SL and fixed SL
-                            _final_sl = max(_final_sl, _structure_sl / 100.0)
+                            # Sanity: structure_low MUST be below entry price (it's a support level)
+                            # If it's above, the K-line data is bad (wrong pool, USD vs SOL, stale cache)
+                            if _structure_low >= price:
+                                log.warning(
+                                    f"  [KLINE_SL] {pending['symbol']} SKIP: structure_low={_structure_low:.10f} "
+                                    f">= price={price:.10f} (bad K-line data, using fixed SL={_final_sl*100:.1f}%)"
+                                )
+                            elif _structure_low <= price * 0.01:
+                                # structure_low is less than 1% of price — also garbage data
+                                log.warning(
+                                    f"  [KLINE_SL] {pending['symbol']} SKIP: structure_low={_structure_low:.10f} "
+                                    f"<< price={price:.10f} (stale/bad data, using fixed SL={_final_sl*100:.1f}%)"
+                                )
+                            else:
+                                _structure_sl_pct = ((price - _structure_low) / price) * -100
+                                # Clamp: at least -3%, at most -15% (never wider than current fixed SL)
+                                _structure_sl = max(-15.0, min(-3.0, _structure_sl_pct))
+                                log.info(
+                                    f"  [KLINE_SL] {pending['symbol']} structure_low={_structure_low:.10f} "
+                                    f"→ SL={_structure_sl:.1f}% (vs fixed={_final_sl*100:.1f}%)"
+                                )
+                                # Use the TIGHTER of structure SL and fixed SL
+                                _final_sl = max(_final_sl, _structure_sl / 100.0)
                         
                         watchlist.mark_holding(
                             pending['watchlist_id'], 
