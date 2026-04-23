@@ -687,8 +687,10 @@ class MatrixEvaluator:
         age_minutes = (now - entry.get('added_at', now)) / 60
 
         # Timeout
-        if age_minutes >= thresholds['max_obs_minutes']:
-            return f'timeout ({age_minutes:.0f}min >= {thresholds["max_obs_minutes"]}min)'
+        # SUSTAINED_ATH gets double timeout (240min) because it's a genuine multi-hour trend
+        _max_obs = 240 if entry.get('is_sustained_ath') else thresholds['max_obs_minutes']
+        if age_minutes >= _max_obs:
+            return f'timeout ({age_minutes:.0f}min >= {_max_obs}min)'
 
         # Price collapse: current << signal
         # Data-validated: -70% kills all truly dead coins (REDBULL -99%, COOKED -95%,

@@ -3759,6 +3759,16 @@ def run_monitor(db):
                     break
                 
                 wl_eval_count += 1
+                
+                # Inject SUSTAINED_ATH flag for matrix evaluator to use (e.g. for timeout extension)
+                _wl_sustained = False
+                if hasattr(watchlist, '_ath_history'):
+                    _wl_ca = w_entry.get('ca')
+                    _wl_hist = watchlist._ath_history.get(_wl_ca, [])
+                    if len(_wl_hist) >= 3 and _wl_hist[-1][1] > _wl_hist[0][1]:
+                        _wl_sustained = True
+                w_entry['is_sustained_ath'] = _wl_sustained
+                
                 eval_res = matrix_evaluator.evaluate(w_entry)
                 watchlist.update_scores(w_entry['id'], eval_res['scores'])
                 
@@ -4358,8 +4368,15 @@ def run_monitor(db):
                     # Pop immediately after commit — prevents ghost duplicate on next loop
                     pending_entries.pop(lifecycle_id, None)
 
+                    # Tighter trailing stop for SUSTAINED_ATH to lock in profits
+                    _custom_stage1_exit = dict(stage1_exit)
+                    if _is_sustained_ath:
+                        _custom_stage1_exit['trailStartPct'] = 10.0
+                        _custom_stage1_exit['trailFactor'] = 0.5
+                        log.info(f"  [SUSTAINED_ATH] {pending['symbol']} tight trail lock (10% start, 0.5x factor)")
+
                     pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
-                                   'stage1', lifecycle_id, stage1_exit, actual_position_size_sol, token_amount_raw, token_decimals or 0,
+                                   'stage1', lifecycle_id, _custom_stage1_exit, actual_position_size_sol, token_amount_raw, token_decimals or 0,
                                    monitor_state={
                                        'tokenCA': pending['token_ca'],
                                        'symbol': pending['symbol'],
