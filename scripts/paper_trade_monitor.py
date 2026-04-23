@@ -3655,12 +3655,16 @@ def run_monitor(db):
                             (ts, px) for ts, px in watchlist._ath_history[token_ca] if ts > _cutoff
                         ]
                         _ath_hist = watchlist._ath_history[token_ca]
-                        if len(_ath_hist) >= 3:
-                            # Check if prices are generally rising and time span is at least 30 minutes
+                        if len(_ath_hist) >= 2:
+                            # Check if prices are generally rising and time span is at least 15 minutes.
+                            # Fix (2026-04-23): Lowered from 3 registrations + 30 min → 2 + 15 min.
+                            # Audit showed SAM had 8 ATH registrations over 2h but sustained_ath
+                            # barely qualified late due to the strict window. Earlier qualification
+                            # unlocks relaxed m9s_cap (3.5%→6.0%) and RVol bypass.
                             _first_ts, _first_px = _ath_hist[0]
                             _last_ts, _last_px = _ath_hist[-1]
                             _time_span_min = (_last_ts - _first_ts) / 60
-                            if _last_px > _first_px and _time_span_min >= 30:
+                            if _last_px > _first_px and _time_span_min >= 15:
                                 _mult = _last_px / _first_px
                                 log.info(
                                     f"  [SUSTAINED_ATH] {symbol} QUALIFIED: "
@@ -4187,12 +4191,16 @@ def run_monitor(db):
                                 # "overextended" (>100% growth from signal) is expected
                                 # behavior — the breakout IS the signal.
                                 # Data: $TERMINAL blocked 15× with P=30 T=50~100 V=70
-                                # M=80~100 while going on to 5.7x. This bypass would
-                                # have captured it at T≥80 + V=70 + M≥80.
+                                # M=80~100 while going on to 5.7x.
+                                # Fix (2026-04-23): Lowered T threshold 80→50.
+                                # Cross-token log audit (SAM +2027%, SOCK +373%, FLORKINU +190%)
+                                # confirmed all had T=50 and were permanently blocked.
+                                # T=50 + ATH + V≥70 + M≥80 is already a strong signal;
+                                # SmartEntry's m9s_cap/RVol/EMA guards provide the real safety net.
                                 _sig_type = pending.get('signal_type', '?')
                                 _ath_bypass = (
                                     _sig_type == 'ATH'
-                                    and _t_score >= 80
+                                    and _t_score >= 50
                                     and _v_score >= 70
                                     and _m_score >= 80
                                 )
