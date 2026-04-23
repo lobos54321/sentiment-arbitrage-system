@@ -3619,6 +3619,16 @@ def run_monitor(db):
                     top10_pct = parse_top10_percent(sig['description'] or '')
                     if top10_pct is not None and top10_pct > top10_max:
                         log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: Top10 {top10_pct}% exceeds max allowed {top10_max}%, skipping")
+                        # FIX 3: Remember blocked CAs so Watchlist won't accept them later
+                        if not hasattr(watchlist, '_top10_blacklist'):
+                            watchlist._top10_blacklist = {}
+                        watchlist._top10_blacklist[token_ca] = top10_pct
+                        continue
+
+                    # FIX 3: Also block if this CA was previously flagged by PREBUY_FILTER
+                    if hasattr(watchlist, '_top10_blacklist') and token_ca in watchlist._top10_blacklist:
+                        _prev_top10 = watchlist._top10_blacklist[token_ca]
+                        log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: previously flagged Top10={_prev_top10}% (insider concentration memory), skipping")
                         continue
 
                     # Determine signal price immediately for reference
@@ -3728,10 +3738,30 @@ def run_monitor(db):
                 # Update price bounds if we got a price
                 if eval_res.get('current_price') and eval_res['current_price'] > 0:
                     watchlist.update_price_bounds(w_entry['id'], eval_res['current_price'])
-                
+
+                # FIX 1: Track P-score history for dead-cat-bounce detection
+                # If P ever hits 0, remember the timestamp — fast-lane should be blocked
+                _wl_id = w_entry['id']
+                if not hasattr(watchlist, '_p_zero_history'):
+                    watchlist._p_zero_history = {}  # {wl_id: last_p_zero_timestamp}
+                if not hasattr(watchlist, '_momentum_fail_counts'):
+                    watchlist._momentum_fail_counts = {}  # {wl_id: consecutive_fail_count}
+                _p_now = eval_res.get('scores', {}).get('price', 50)
+                if _p_now == 0:
+                    watchlist._p_zero_history[_wl_id] = time.time()
+
+                # FIX 2: Track consecutive momentum failures
+                if eval_res['action'] == 'fire':
+                    watchlist._momentum_fail_counts[_wl_id] = 0  # reset on success
+                elif eval_res.get('action_reason', '').startswith('momentum check failed'):
+                    watchlist._momentum_fail_counts[_wl_id] = watchlist._momentum_fail_counts.get(_wl_id, 0) + 1
+
                 if eval_res['action'] == 'remove':
                     watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
                     log.info(f"  [WATCHLIST] 🗑️ Removed {w_entry['symbol']}: {eval_res['action_reason']}")
+                    # Cleanup tracking dicts
+                    watchlist._p_zero_history.pop(_wl_id, None)
+                    watchlist._momentum_fail_counts.pop(_wl_id, None)
                 elif eval_res['action'] == 'fire':
                     # P3: Minimum age filter — skip tokens younger than 3 minutes
                     # pump.fun's most toxic dump window is 0-3 min after launch
@@ -3872,6 +3902,40 @@ def run_monitor(db):
                     except Exception:
                         pass  # fail-open if DexScreener unavailable
 
+                    # FIX 2: Consecutive momentum failure gate
+                    # boobcoin postmortem: 7 consecutive momentum failures = extreme volatility/manipulation.
+                    # After 5+ consecutive fails, require stronger buy pressure (bs>1.5) to proceed.
+                    _wl_id_fire = w_entry['id']
+                    _consec_m_fails = watchlist._momentum_fail_counts.get(_wl_id_fire, 0) if hasattr(watchlist, '_momentum_fail_counts') else 0
+                    if _consec_m_fails >= 5:
+                        # Token has been failing momentum for a long time — it's unstable
+                        # Only allow if DexScreener confirms strong buy pressure right now
+                        try:
+                            _mf_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
+                            _mf_bs = (_mf_dex.get('buys_m5', 0) / max(_mf_dex.get('sells_m5', 1), 1)) if _mf_dex else 0
+                            if _mf_bs < 1.5:
+                                log.info(
+                                    f"  [WATCHLIST] ⚠️ {w_entry['symbol']} MOMENTUM_INSTABILITY: "
+                                    f"{_consec_m_fails} consecutive momentum fails, bs={_mf_bs:.2f}<1.5 → extra caution, skip"
+                                )
+                                continue
+                            else:
+                                log.info(
+                                    f"  [WATCHLIST] ✅ {w_entry['symbol']} MOMENTUM_INSTABILITY: "
+                                    f"{_consec_m_fails} fails BUT bs={_mf_bs:.2f}≥1.5 → proceed with caution"
+                                )
+                        except Exception:
+                            pass  # fail-open
+
+                    # FIX 3: Top10 concentration gate — block if signal had Top10 > 45%
+                    _sig_top10 = w_entry.get('signal_top10', 0) or 0
+                    if _sig_top10 > 45:
+                        log.info(
+                            f"  [WATCHLIST] 🚫 {w_entry['symbol']} TOP10_BLOCK: "
+                            f"signal Top10={_sig_top10:.1f}% > 45% (insider concentration), skipping"
+                        )
+                        continue
+
                     log.info(f"  [WATCHLIST] 🚀 FIRE {w_entry['symbol']}! Scores: {eval_res['scores']} Kelly: {_kelly_sol} SOL -> Pending queue")
                     last_progress = time.time()
                 else:
@@ -3998,6 +4062,23 @@ def run_monitor(db):
                                     pending_entries.pop(lifecycle_id, None)
                                     continue
 
+                            # FIX 1: Dead-cat-bounce filter — block fast-lane if P was 0 in last 5 min
+                            # boobcoin postmortem: P oscillated 0↔100 seven times before "perfect" entry.
+                            # A real parabolic coin NEVER has P=0. If P was 0 recently, the "recovery"
+                            # is just a dead cat bounce after insider distribution.
+                            _pending_wl_id = pending_w_entry.get('id') if pending_w_entry else None
+                            if _pending_wl_id and hasattr(watchlist, '_p_zero_history'):
+                                _p_zero_ts = watchlist._p_zero_history.get(_pending_wl_id)
+                                if _p_zero_ts and (time.time() - _p_zero_ts) < 300:  # 5 minutes
+                                    _p_zero_ago = int(time.time() - _p_zero_ts)
+                                    log.info(
+                                        f"  [FastLane] 🚫 {pending['symbol']} DEAD_CAT_BOUNCE: "
+                                        f"P-score was 0 just {_p_zero_ago}s ago — likely distribution recovery. "
+                                        f"Downgrading to SmartEntry."
+                                    )
+                                    _is_fast_lane = False  # downgrade to SmartEntry
+
+                        if _is_fast_lane:
                             # Verified parabolic first entry — no pullback to wait for, just buy
                             log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
                             pending['timing_passed'] = True
