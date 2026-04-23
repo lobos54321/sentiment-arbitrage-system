@@ -4085,24 +4085,10 @@ def run_monitor(db):
                         matrix_scores=pending.get('matrix_scores'))
                     log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
-                    # Kelly position size: apply three-layer cap
-                    # Layer 1: Kelly formula output
+                    # Layer 1: Kelly formula output (Sustained ATH 1.5x boost is applied inside calculate_kelly_position)
                     # Layer 2: MAXposition 0.5 SOL hard cap
                     # Layer 3: A1 - max 1% of pool liquidity (prevents slippage in thin pools)
                     _kelly_raw = pending.get('kelly_position_sol') or position_size_sol
-                    
-                    # Kelly Position Boost: SUSTAINED_ATH tokens are validated high-conviction
-                    # multi-hour runners. They get a 1.5x multiplier to maximize profit on the run.
-                    _final_sustained = _is_sustained_ath if '_is_sustained_ath' in dir() else False
-                    if not _final_sustained and hasattr(watchlist, '_ath_history'):
-                        _se_ca = pending.get('token_ca')
-                        _se_hist = watchlist._ath_history.get(_se_ca, [])
-                        if len(_se_hist) >= 3 and _se_hist[-1][1] > _se_hist[0][1] and (_se_hist[-1][0] - _se_hist[0][0]) >= 1800:
-                            _final_sustained = True
-                            
-                    if _final_sustained:
-                        _kelly_raw *= 1.5
-                        log.info(f"  [SUSTAINED_ATH] {pending['symbol']} Kelly boosted 1.5x: {_kelly_raw/1.5:.3f} → {_kelly_raw:.3f} SOL")
 
                     _liq_cap = get_liquidity_position_cap(
                         pending['token_ca'],
@@ -4237,7 +4223,7 @@ def run_monitor(db):
 
                     # Tighter trailing stop for SUSTAINED_ATH to lock in profits
                     _custom_stage1_exit = dict(stage1_exit)
-                    if _is_sustained_ath:
+                    if pending_w_entry and pending_w_entry.get('is_sustained_ath'):
                         _custom_stage1_exit['trailStartPct'] = 10.0
                         _custom_stage1_exit['trailFactor'] = 0.5
                         log.info(f"  [SUSTAINED_ATH] {pending['symbol']} tight trail lock (10% start, 0.5x factor)")

@@ -353,15 +353,15 @@ class MatrixEvaluator:
         """Purges the in-memory kline cache to prevent indefinite memory growth."""
         cls._kline_cache.clear()
 
-    # Thresholds for NOT_ATH entries (reverted to 84% win rate period)
+    # Thresholds for NOT_ATH entries
     NOT_ATH_THRESHOLDS = {
-        'trend_min': 50,    # 84% period: T≥50 (was 60)
-        'volume_min': 60,   # V≥60 counts as passing
-        'price_min': 70,    # P≥70 hard gate
-        'signal_min': 60,   # S≥60 counts as passing
-        'momentum_min': 60, # at least not declining
-        'min_passing': 3,   # 84% period: 3 of 5 (was 4)
-        'max_obs_minutes': 120,  # 2 hours max observation
+        'trend_min': 50,
+        'volume_min': 60,
+        'price_min': 60,
+        'signal_min': 50,
+        'momentum_min': 60,
+        'min_passing': 4,   # V3: Requires 4 out of 5. T and S are mandatory, needs P or V to reach 3 pre-momentum.
+        'max_obs_minutes': 120,
     }
 
     # Thresholds for ATH entries (reverted to 84% win rate period)
