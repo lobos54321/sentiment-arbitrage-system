@@ -768,7 +768,8 @@ class ExitMatrixEvaluator:
         # === K-LINE TRAILING STOP (Phase 5) ===
         # Strategy 1 & 2 insight: ratchet SL up using previous candle's low.
         # "If the structure holds, stay in. If it breaks, get out."
-        if current_pnl > 0:
+        # Only activate after 10% profit to avoid being shaken out by 1m noise.
+        if current_pnl >= 0.10:
             try:
                 from entry_engine import get_recent_synthetic_bars
                 _pos_bars = get_recent_synthetic_bars(entry.get('ca'), n_bars=2, pool_address=entry.get('pool_address'))

@@ -260,25 +260,54 @@ def get_liquidity_position_cap(token_ca, sol_price_usd, max_pool_pct=0.01):
         return None
 
 
+# Module-level cache for GeckoTerminal K-line bars (shared by EMA and bar functions)
+_gt_bars_cache = {}  # {token_ca: (bars_list, fetch_timestamp)}
+_GT_BARS_CACHE_TTL = 30  # seconds
+
+
+def _fetch_gt_bars_cached(token_ca, pool_address, limit=20):
+    """Fetch GeckoTerminal 1m K-lines with 30s in-memory cache.
+    Returns list of bar dicts or None.
+    """
+    import time as _time
+    cached = _gt_bars_cache.get(token_ca)
+    if cached and _time.time() - cached[1] < _GT_BARS_CACHE_TTL:
+        return cached[0]
+    
+    try:
+        from paper_trade_monitor import get_notath_bars
+        gt_bars = get_notath_bars(pool_address, limit=limit)
+        if gt_bars:
+            _gt_bars_cache[token_ca] = (gt_bars, _time.time())
+            return gt_bars
+    except Exception:
+        pass
+    return None
+
+
 def calculate_ema_deviation(token_ca, current_price, pool_address=None):
-    """Calculate price deviation from 20-period EMA using in-memory price history.
-    Falls back to GeckoTerminal 1m K-lines if memory history is insufficient.
+    """Calculate price deviation from 20-period EMA.
+    Primary: GeckoTerminal real 1m K-lines (accurate OHLC from exchange).
+    Fallback: in-memory price history (synthetic, lower resolution).
     
     Returns: (deviation_pct: float, ema_price: float) or (None, None) if insufficient data.
     Deviation > 0 means price is ABOVE EMA (overextended upward).
     """
-    from matrix_evaluator import MatrixEvaluator
-    history = MatrixEvaluator._price_history.get(token_ca, [])
     prices = []
     
-    if len(history) >= 10:
-        prices = [p for _, p in history[-20:]]
-    elif pool_address:
-        # Fallback to GeckoTerminal
-        from paper_trade_monitor import get_notath_bars
-        gt_bars = get_notath_bars(pool_address, limit=20)
+    # Primary: GeckoTerminal real K-lines (30s cached)
+    if pool_address:
+        gt_bars = _fetch_gt_bars_cached(token_ca, pool_address, limit=20)
         if gt_bars and len(gt_bars) >= 10:
-            prices = [float(b['close']) for b in gt_bars]
+            sorted_gt = sorted(gt_bars, key=lambda b: b['ts'])
+            prices = [float(b['close']) for b in sorted_gt]
+    
+    # Fallback: synthetic from _price_history
+    if not prices:
+        from matrix_evaluator import MatrixEvaluator
+        history = MatrixEvaluator._price_history.get(token_ca, [])
+        if len(history) >= 10:
+            prices = [p for _, p in history[-20:]]
             
     if len(prices) < 10:
         return None, None
@@ -296,22 +325,23 @@ def calculate_ema_deviation(token_ca, current_price, pool_address=None):
     return deviation_pct, ema
 
 def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None):
-    """Build recent 1-minute OHLC bars from in-memory price history.
-    Falls back to GeckoTerminal 1m K-lines if memory history is insufficient.
+    """Get recent 1-minute OHLC bars.
+    Primary: GeckoTerminal real 1m K-lines (accurate OHLC from exchange).
+    Fallback: synthetic bars built from in-memory price history.
     
     Returns: list of {'open', 'high', 'low', 'close', 'ts'} (newest last)
     or empty list if insufficient data.
     """
+    # Primary: GeckoTerminal real K-lines (30s cached)
+    if pool_address:
+        gt_bars = _fetch_gt_bars_cached(token_ca, pool_address, limit=max(n_bars, 5))
+        if gt_bars and len(gt_bars) >= 2:
+            sorted_gt = sorted(gt_bars, key=lambda b: b['ts'])
+            return sorted_gt[-n_bars:] if len(sorted_gt) >= n_bars else sorted_gt
+
+    # Fallback: synthetic bars from _price_history
     from matrix_evaluator import MatrixEvaluator
     history = MatrixEvaluator._price_history.get(token_ca, [])
-    
-    if len(history) < 3 and pool_address:
-        # Fallback to GeckoTerminal
-        from paper_trade_monitor import get_notath_bars
-        gt_bars = get_notath_bars(pool_address, limit=n_bars)
-        if gt_bars:
-            return sorted(gt_bars, key=lambda b: b['ts'])[-n_bars:] if len(gt_bars) >= n_bars else sorted(gt_bars, key=lambda b: b['ts'])
-            
     if len(history) < 3:
         return []
     
@@ -559,6 +589,35 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 # Chase check
                 if _chasing:
                     return False, 'chasing_top', f'pullback-bounce but {_chase_reason}', None
+
+                # Guard 3: RVol — pullback bounce on no volume is a dead cat bounce
+                _pb_vol_m5 = cached_trend.get('vol_m5', 0) if cached_trend else 0
+                _pb_vol_h1 = cached_trend.get('vol_h1', 0) if cached_trend else 0
+                _pb_h1_avg = _pb_vol_h1 / 12.0 if _pb_vol_h1 > 0 else 0
+                if _pb_h1_avg > 0:
+                    _pb_rvol = _pb_vol_m5 / _pb_h1_avg
+                else:
+                    _pb_rvol = 999.0 if _pb_vol_m5 > 0 else 0
+
+                if _pb_rvol < 2.0 and not sustained_ath:
+                    detail_str = (
+                        f"pullback-bounce RVol={_pb_rvol:.1f}x < 2.0x "
+                        f"(vol_m5=${_pb_vol_m5:.0f} vs h1_avg=${_pb_h1_avg:.0f}) "
+                        f"— dead cat bounce, no volume support"
+                    )
+                    log.info(f"[SmartEntry] 🚫 ${symbol} PB_RVOL_LOW: {detail_str}")
+                    return False, 'pb_rvol_too_low', detail_str, None
+
+                # Guard 4: EMA exhaustion — don't buy the dip if price is still sky-high
+                _pb_ema_max = 100.0 if sustained_ath else 50.0
+                _pb_dev, _pb_ema = calculate_ema_deviation(token_ca, snap_last, pool_address=pool_address)
+                if _pb_dev is not None and _pb_dev > _pb_ema_max:
+                    detail_str = (
+                        f"pullback-bounce but price {snap_last:.10f} is {_pb_dev:.0f}% above "
+                        f"20-EMA={_pb_ema:.10f} (>{_pb_ema_max}%) — overextended, don't buy the dip"
+                    )
+                    log.info(f"[SmartEntry] 🚫 ${symbol} PB_EMA_EXHAUSTION: {detail_str}")
+                    return False, 'pb_ema_overextended', detail_str, None
 
                 # ── K-LINE BREAKOUT CONFIRMATION (Phase 4) ──
                 # Strategy 2 insight: only buy when price breaks above the previous candle's high.
