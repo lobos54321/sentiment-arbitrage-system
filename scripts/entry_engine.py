@@ -506,298 +506,181 @@ def is_chasing_top(trend_data):
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                          momentum_snapshots=None, momentum_pct=0, sustained_ath=False):
     """
-    Smart Entry Engine (V5 — 84% Period Hybrid)
-    
-    Restores the proven 84% win rate entry logic:
-      PATH 1 (Primary): Pullback-Bounce — wait for 2% pullback, then 2% bounce
-      PATH 2 (Secondary): Momentum Direct — 9s momentum with data-driven guards
-    
-    Key differences from V4 (momentum-only):
-      - Pullback-bounce is checked FIRST (84% period's primary entry method)
-      - bs threshold lowered to > 1.0 (84% original, was >= 1.2 in V4)
-      - Only 2 guards for pullback path (bounce_ratio + trend_downgrade)
-      - Data-driven guards (m9s cap, pc_m5 band) applied to momentum path only
-    
-    Parameters:
-        momentum_snapshots: list of [p1, p2, p3] from the 3×3s momentum check
-        momentum_pct: net % change over the 9s window (p3-p1)/p1*100
-
-    Returns: (should_enter: bool, reason: str, detail: str, trigger_price: float|None)
+    Smart Entry Engine (V6 — Unified Scoring System)
+    Replaces serial rejection with a 6-dimension scoring system (Total 100+ points).
     """
     from paper_trade_monitor import fetch_realtime_price
-    from entry_engine import fetch_dexscreener_trend_snapshot, is_chasing_top, evaluate_trend_phase
+    from entry_engine import fetch_dexscreener_trend_snapshot, is_chasing_top, evaluate_trend_phase, calculate_ema_deviation, get_recent_synthetic_bars
+    import time as _time
+    import logging
 
-    # 1. Gather current price and DexScreener data
+    log = logging.getLogger('smart_entry')
+
     price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
     cached_trend = fetch_dexscreener_trend_snapshot(token_ca)
     
     if not price or price <= 0:
         return False, 'no_price', 'could not fetch price', None
 
-    # 2. Parse DexScreener data
+    # Parse DexScreener data
     bs_ratio = 1.0
     pc_m5 = 0
+    vol_m5 = 0
+    vol_h1 = 0
     if cached_trend:
         b_m5 = cached_trend.get('buys_m5', 0)
         s_m5 = max(cached_trend.get('sells_m5', 1), 1)
         bs_ratio = b_m5 / s_m5
         pc_m5 = cached_trend.get('price_change_m5', 0)
+        vol_m5 = cached_trend.get('vol_m5', 0)
+        vol_h1 = cached_trend.get('vol_h1', 0)
 
-    # 3. Check anti-chase guard (simplified — only >100% hard ceiling)
-    _chasing = False
-    if cached_trend:
-        _chasing, _chase_reason = is_chasing_top(cached_trend)
+    # 1. ABSOLUTE HARD GATES (Touch and die)
+    _chasing, _chase_reason = is_chasing_top(cached_trend) if cached_trend else (False, '')
+    if _chasing:
+        log.info(f"[SmartEntry] 🚫  REJECT: chasing_top - {_chase_reason}")
+        return False, 'chasing_top', _chase_reason, None
 
-    # 4. Layer 1: Determine trend phase
-    trend_phase, trend_reason = evaluate_trend_phase(cached_trend)
+    liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
+    if cached_trend and 0 < liq_usd < 5000:
+        log.info(f"[SmartEntry] 🚫  REJECT: low_liquidity -  < 000")
+        return False, 'low_liquidity', f'liquidity= < 000', None
 
-    # ══════════════════════════════════════════════════════════════════
-    # PATH 1 (PRIMARY): PULLBACK-BOUNCE ENTRY
-    # 84% win rate period's main entry method.
-    # Logic: price ran up → pulled back ≥2% → bounced ≥2% from low
-    # → still below high (not chasing) → buy the confirmed dip.
-    #
-    # Guards (84% period had only 2):
-    #   1. bounce_ratio >= 25%
-    #   2. trend must be BULLISH (not downgraded)
-    # ══════════════════════════════════════════════════════════════════
+    _dev_pct, _ema_val = calculate_ema_deviation(token_ca, price, pool_address=pool_address)
+    if _dev_pct is not None and _dev_pct > 120.0:
+        log.info(f"[SmartEntry] 🚫  REJECT: ema_extreme (>{_dev_pct:.0f}%)")
+        return False, 'ema_extreme', f'deviation={_dev_pct:.0f}% > 120%', None
+
+    # 2. SCORING SYSTEM
+    total_score = 0
+    score_details = []
+
+    # Dim 1: bs_ratio (Max 25)
+    bs_score = 0
+    if bs_ratio >= 2.0: bs_score = 25
+    elif bs_ratio >= 1.5: bs_score = 20
+    elif bs_ratio >= 1.0: bs_score = 15
+    elif bs_ratio >= 0.7: bs_score = 8
+    total_score += bs_score
+    score_details.append(f"bs:{bs_score}")
+
+    # Dim 2: RVol (Max 20)
+    h1_avg = vol_h1 / 12.0 if vol_h1 > 0 else 0
+    rvol = (vol_m5 / h1_avg) if h1_avg > 0 else (999.0 if vol_m5 > 0 else 0)
+    rvol_score = 0
+    if rvol >= 3.0: rvol_score = 20
+    elif rvol >= 2.0: rvol_score = 16
+    elif rvol >= 1.5: rvol_score = 12
+    elif rvol >= 1.0: rvol_score = 7
+    total_score += rvol_score
+    score_details.append(f"rvol:{rvol_score}")
+
+    # Dim 3: pc_m5 (Max 15)
+    pc_score = 0
+    if 10 <= pc_m5 <= 20: pc_score = 15
+    elif 20 < pc_m5 <= 35: pc_score = 10
+    elif 5 <= pc_m5 < 10: pc_score = 8
+    elif 35 < pc_m5 <= 50: pc_score = 5
+    total_score += pc_score
+    score_details.append(f"pc:{pc_score}")
+
+    # Dim 4: m9s (Max 15)
+    m9s_score = 0
+    if 1.5 <= momentum_pct <= 3.5: m9s_score = 15
+    elif 3.5 < momentum_pct <= 6.0: m9s_score = 10
+    elif 0.5 <= momentum_pct < 1.5: m9s_score = 8
+    elif 6.0 < momentum_pct <= 10.0: m9s_score = 5
+    total_score += m9s_score
+    score_details.append(f"m9s:{m9s_score}")
+
+    # Dim 5: Trend Phase (Max 15)
+    trend_phase, _ = evaluate_trend_phase(cached_trend)
+    trend_score = 0
+    if trend_phase == 'BULLISH': trend_score = 15
+    elif trend_phase == 'WAIT': trend_score = 8
+    elif trend_phase == 'BEARISH': trend_score = 2
+    total_score += trend_score
+    score_details.append(f"tr:{trend_score}")
+
+    # Dim 6: EMA Deviation (Max 10)
+    ema_score = 0
+    if _dev_pct is not None:
+        if _dev_pct <= 25: ema_score = 10
+        elif _dev_pct <= 50: ema_score = 7
+        elif _dev_pct <= 75: ema_score = 4
+        elif _dev_pct <= 100: ema_score = 2
+    else:
+        ema_score = 10  # safe default if EMA unavailable
+    total_score += ema_score
+    score_details.append(f"ema:{ema_score}")
+
+    # 3. BONUSES
+    bonus_score = 0
+    if sustained_ath:
+        bonus_score += 8
+        score_details.append("b_ath:8")
+    
+    # Pullback-bounce check
     if momentum_snapshots and len(momentum_snapshots) >= 3:
         snap_high = max(momentum_snapshots)
         snap_low = min(momentum_snapshots)
         snap_last = momentum_snapshots[-1]
-
         if snap_high > 0 and snap_low > 0 and snap_last > 0:
             pullback_pct = ((snap_high - snap_low) / snap_high) * 100
             bounce_pct = ((snap_last - snap_low) / snap_low) * 100
-            below_high_pct = ((snap_high - snap_last) / snap_high) * 100
-            bounce_ratio_val = bounce_pct / pullback_pct if pullback_pct > 0 else 0
+            if pullback_pct >= 2.0 and bounce_pct >= 2.0:
+                bounce_ratio_val = bounce_pct / pullback_pct
+                if bounce_ratio_val >= 0.25:
+                    bonus_score += 10
+                    score_details.append("b_pb:10")
+    
+    # K-line breakout
+    try:
+        _recent_bars = get_recent_synthetic_bars(token_ca, n_bars=3, pool_address=pool_address, native_only=True)
+        if len(_recent_bars) >= 2:
+            _prev_high = _recent_bars[-2]['high']
+            if price > _prev_high:
+                bonus_score += 5
+                score_details.append("b_kline:5")
+    except Exception as e:
+        pass
 
-            if (pullback_pct >= SMART_ENTRY_MIN_PULLBACK_PCT
-                    and bounce_pct >= SMART_ENTRY_MIN_BOUNCE_PCT
-                    and below_high_pct >= SMART_ENTRY_MIN_PULLBACK_PCT
-                    and bounce_ratio_val >= SMART_ENTRY_MIN_BOUNCE_RATIO):
+    total_score += bonus_score
 
-                # Guard 1: bounce_ratio must be >= 25%
-                if bounce_ratio_val < 0.25:
-                    detail_str = (
-                        f"pullback={pullback_pct:.1f}% bounce={bounce_pct:.1f}% "
-                        f"ratio={bounce_ratio_val:.0%} < 25%"
-                    )
-                    return False, 'bounce_ratio_weak', detail_str, None
-
-                # Guard 2: trend must be BULLISH
-                if trend_phase not in ('BULLISH',):
-                    detail_str = (
-                        f"pullback={pullback_pct:.1f}% bounce={bounce_pct:.1f}% "
-                        f"ratio={bounce_ratio_val:.0%} but trend={trend_phase}"
-                    )
-                    return False, 'trend_not_bullish', detail_str, None
-
-                # Chase check
-                if _chasing:
-                    return False, 'chasing_top', f'pullback-bounce but {_chase_reason}', None
-
-                # Guard 3: RVol — pullback bounce on no volume is a dead cat bounce
-                _pb_vol_m5 = cached_trend.get('vol_m5', 0) if cached_trend else 0
-                _pb_vol_h1 = cached_trend.get('vol_h1', 0) if cached_trend else 0
-                _pb_h1_avg = _pb_vol_h1 / 12.0 if _pb_vol_h1 > 0 else 0
-                if _pb_h1_avg > 0:
-                    _pb_rvol = _pb_vol_m5 / _pb_h1_avg
-                else:
-                    _pb_rvol = 999.0 if _pb_vol_m5 > 0 else 0
-
-                if _pb_rvol < 2.0 and not sustained_ath:
-                    detail_str = (
-                        f"pullback-bounce RVol={_pb_rvol:.1f}x < 2.0x "
-                        f"(vol_m5=${_pb_vol_m5:.0f} vs h1_avg=${_pb_h1_avg:.0f}) "
-                        f"— dead cat bounce, no volume support"
-                    )
-                    log.info(f"[SmartEntry] 🚫 ${symbol} PB_RVOL_LOW: {detail_str}")
-                    return False, 'pb_rvol_too_low', detail_str, None
-
-                # Guard 4: EMA exhaustion — don't buy the dip if price is still sky-high
-                _pb_ema_max = 100.0 if sustained_ath else 50.0
-                _pb_dev, _pb_ema = calculate_ema_deviation(token_ca, snap_last, pool_address=pool_address)
-                if _pb_dev is not None and _pb_dev > _pb_ema_max:
-                    detail_str = (
-                        f"pullback-bounce but price {snap_last:.10f} is {_pb_dev:.0f}% above "
-                        f"20-EMA={_pb_ema:.10f} (>{_pb_ema_max}%) — overextended, don't buy the dip"
-                    )
-                    log.info(f"[SmartEntry] 🚫 ${symbol} PB_EMA_EXHAUSTION: {detail_str}")
-                    return False, 'pb_ema_overextended', detail_str, None
-
-                # ── K-LINE BREAKOUT CONFIRMATION (Phase 4) ──
-                # Strategy 2 insight: only buy when price breaks above the previous candle's high.
-                # This confirms the pullback is OVER and buyers are back in control.
-                _recent_bars = get_recent_synthetic_bars(token_ca, n_bars=3, pool_address=pool_address)
-                if len(_recent_bars) >= 2:
-                    _prev_high = _recent_bars[-2]['high']
-                    _curr_close = snap_last  # current price
-                    if _curr_close < _prev_high:
-                        detail_str = (
-                            f"pullback confirmed but price {_curr_close:.10f} still below "
-                            f"prev candle high {_prev_high:.10f} — buyers NOT in control yet"
-                        )
-                        return False, 'kline_breakout_pending', detail_str, None
-
-                # ✅ GOOD_ENTRY — pullback-bounce confirmed
-                # 1s direction confirmation before buying
-                import time as _time
-                _time.sleep(1.0)
-                price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
-                
-                if price_confirm and price_confirm > 0:
-                    if price_confirm < snap_last * 0.99:
-                        direction_pct = ((price_confirm - snap_last) / snap_last) * 100
-                        detail_str = (
-                            f"pullback-bounce confirmed but direction_1s={direction_pct:+.1f}% "
-                            f"(price fell {snap_last:.10f}→{price_confirm:.10f})"
-                        )
-                        log.info(f"[SmartEntry] ⚠️ ${symbol} PB_REVERSAL: {detail_str}")
-                        return False, 'pb_momentum_reversing', detail_str, None
-                    trigger_price = price_confirm
-                else:
-                    trigger_price = snap_last
-
-                detail_str = (
-                    f"PULLBACK_BOUNCE: pullback={pullback_pct:.1f}% bounce={bounce_pct:.1f}% "
-                    f"ratio={bounce_ratio_val:.0%} below_high={below_high_pct:.1f}% "
-                    f"trend={trend_phase} bs={bs_ratio:.2f} pc_m5={pc_m5:+.1f}%"
-                )
-                log.info(f"[SmartEntry] 🚀 ${symbol} GOOD_ENTRY at ${trigger_price:.10f}: {detail_str}")
-                return True, 'pullback_bounce_entry', detail_str, trigger_price
-
-    # ══════════════════════════════════════════════════════════════════
-    # PATH 2 (SECONDARY): MOMENTUM DIRECT ENTRY
-    # When no pullback-bounce is available, use 9s momentum data.
-    # bs threshold: > 1.0 (84% period original, was >= 1.2 in V4).
-    # Data-driven guards from audit (m9s cap, pc_m5 band) still apply.
-    # ══════════════════════════════════════════════════════════════════
-    if momentum_snapshots and len(momentum_snapshots) >= 2:
-        m_pct = momentum_pct
-        m_last = momentum_snapshots[-1]
-        
-        # Base threshold: m9s >= 1.5% AND bs > 1.0 (84% period value)
-        if m_pct >= 1.5 and bs_ratio > 1.0:
-            if _chasing:
-                return False, 'chasing_top', f'momentum +{m_pct:.1f}% but chasing top', None
-
-            # ── DATA-DRIVEN GUARD 0: Relative Volume (RVol) (Phase 1) ──
-            # Strategy 1 insight: volume must be abnormally high relative to its own baseline.
-            _vol_m5 = cached_trend.get('vol_m5', 0) if cached_trend else 0
-            _vol_h1 = cached_trend.get('vol_h1', 0) if cached_trend else 0
-            _h1_avg = _vol_h1 / 12.0 if _vol_h1 > 0 else 0
+    # 4. DECISION LOGIC
+    detail_str = f"Score={total_score} [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
+    
+    if total_score >= 70:
+        # Fast Lane Entry
+        # 1s Direction Confirmation for safety
+        _time.sleep(1.0)
+        price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
+        trigger_price = price
+        if price_confirm and price_confirm > 0:
+            if price_confirm < price * 0.85:
+                log.info(f"[SmartEntry] 🚫  REJECT: price_collapsed - fell >15% in 1s (live={price_confirm:.10f})")
+                return False, 'price_collapsed', f'fell >15% in 1s', None
+            trigger_price = price_confirm
             
-            if _h1_avg > 0:
-                _rvol = _vol_m5 / _h1_avg
-            else:
-                # If there's no 1h volume but we have 5m volume, it's a brand new explosive launch.
-                # Give it an artificially high RVol so it passes the filter.
-                _rvol = 999.0 if _vol_m5 > 0 else 0
+        log.info(f"[SmartEntry] 🚀  FAST_LANE: {detail_str}")
+        return True, 'fast_lane_entry', detail_str, trigger_price
 
-            if _rvol < 2.0 and not sustained_ath:
-                detail_str = (
-                    f"RVol={_rvol:.1f}x < 2.0x minimum "
-                    f"(vol_m5=${_vol_m5:.0f} vs h1_avg=${_h1_avg:.0f}) "
-                    f"— no abnormal volume, likely noise"
-                )
-                log.info(f"[SmartEntry] 🚫 ${symbol} RVOL_LOW: {detail_str}")
-                return False, 'rvol_too_low', detail_str, None
-
-            # ── EXHAUSTION GUARD: EMA Deviation (Phase 2) ──
-            # Strategy 2 insight: when price is too far from its moving average,
-            # the move is "exhausted" and reversal probability spikes.
-            _EMA_DEV_MAX = 100.0 if sustained_ath else 50.0
-            _dev_pct, _ema_val = calculate_ema_deviation(token_ca, price, pool_address=pool_address)
-            if _dev_pct is not None and _dev_pct > _EMA_DEV_MAX:
-                detail_str = (
-                    f"price={price:.10f} is {_dev_pct:.0f}% above 20-EMA={_ema_val:.10f} "
-                    f"(>{_EMA_DEV_MAX}% exhaustion threshold) — likely climax, DON'T BUY"
-                )
-                log.info(f"[SmartEntry] 🚫 ${symbol} EMA_EXHAUSTION: {detail_str}")
-                return False, 'ema_overextended', detail_str, None
-
-            # ── DATA-DRIVEN GUARD 1: Momentum Upper Bound ──
-            # Audit (26 trades): All 8 trades with m9s > 3.5% lost (0% win rate).
-            # SUSTAINED_ATH exemption: genuine multi-hour breakouts routinely hit 4-6% m9s.
-            _M9S_UPPER = 6.0 if sustained_ath else 3.5
-            if m_pct > _M9S_UPPER:
-                detail_str = (
-                    f"momentum_9s=+{m_pct:.1f}% EXCEEDS {_M9S_UPPER}% cap "
-                    f"{'(sustained_ath relaxed) ' if sustained_ath else ''}"
-                    f"(violent spike, likely distribution) bs={bs_ratio:.2f} pc_m5={pc_m5:+.1f}%"
-                )
-                log.info(f"[SmartEntry] 🚫 ${symbol} M9S_CAP_BLOCK: {detail_str}")
-                return False, 'm9s_cap_exceeded', detail_str, None
-
-            # ── DATA-DRIVEN GUARD 2: pc_m5 Sweet-Spot Band ──
-            # Audit (26 trades):
-            #   pc_m5 < 10%:  9 trades, 0 wins — trend too weak
-            #   pc_m5 10-20%: 8 trades, 3 wins (38%) — only profitable band
-            #   pc_m5 > 20%:  8 trades, 0 wins — overheated
-            # SUSTAINED_ATH exemption: genuine breakouts sustain 30-50% pc_m5 for hours.
-            _PC_M5_LOW = 10.0
-            _PC_M5_HIGH = 50.0 if sustained_ath else 20.0
-            if pc_m5 < _PC_M5_LOW:
-                detail_str = (
-                    f"pc_m5={pc_m5:+.1f}% BELOW {_PC_M5_LOW}% floor "
-                    f"(trend not established) m9s=+{m_pct:.1f}% bs={bs_ratio:.2f}"
-                )
-                log.info(f"[SmartEntry] 🚫 ${symbol} PC_M5_LOW_BLOCK: {detail_str}")
-                return False, 'pc_m5_too_low', detail_str, None
-
-            if pc_m5 > _PC_M5_HIGH:
-                detail_str = (
-                    f"pc_m5={pc_m5:+.1f}% EXCEEDS {_PC_M5_HIGH}% ceiling "
-                    f"{'(sustained_ath relaxed) ' if sustained_ath else ''}"
-                    f"(overheated, distribution phase) m9s=+{m_pct:.1f}% bs={bs_ratio:.2f}"
-                )
-                log.info(f"[SmartEntry] 🚫 ${symbol} PC_M5_HIGH_BLOCK: {detail_str}")
-                return False, 'pc_m5_overheated', detail_str, None
-
-            # ── DIRECTION CONFIRMATION (1s) ──
-            import time as _time
-            _time.sleep(1.0)
-            price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
+    elif total_score >= 50:
+        # Smart Entry
+        # 1s Direction Confirmation
+        _time.sleep(1.0)
+        price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
+        trigger_price = price
+        if price_confirm and price_confirm > 0:
+            if price_confirm < price * 0.99:
+                log.info(f"[SmartEntry] 🚫  REJECT: momentum_reversing - fell >1% in 1s (live={price_confirm:.10f})")
+                return False, 'momentum_reversing', f'fell >1% in 1s', None
+            trigger_price = price_confirm
             
-            if price_confirm and price_confirm > 0:
-                direction_pct = ((price_confirm - m_last) / m_last) * 100
-                
-                if price_confirm < m_last * 0.99:
-                    detail_str = (
-                        f"momentum_9s=+{m_pct:.1f}% bs={bs_ratio:.2f} "
-                        f"but direction_1s={direction_pct:+.1f}% (price fell from "
-                        f"{m_last:.10f} to {price_confirm:.10f})"
-                    )
-                    log.info(f"[SmartEntry] ⚠️ ${symbol} MOMENTUM_REVERSAL: {detail_str}")
-                    return False, 'momentum_reversing', detail_str, None
-                
-                trigger_price = price_confirm
-            else:
-                trigger_price = m_last
+        log.info(f"[SmartEntry] ✅  SMART_ENTRY: {detail_str}")
+        return True, 'smart_entry', detail_str, trigger_price
 
-            detail_str = (
-                f"momentum_9s=+{m_pct:.1f}% buy_sell={bs_ratio:.2f} "
-                f"pc_m5={pc_m5:+.1f}% snaps=[{', '.join(f'{s:.10f}' for s in momentum_snapshots)}]"
-            )
-            log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${trigger_price:.10f}: {detail_str}")
-            return True, 'momentum_direct_entry', detail_str, trigger_price
-
-        else:
-            detail_str = (
-                f"momentum_9s=+{m_pct:.1f}% (need ≥1.5%) "
-                f"bs={bs_ratio:.2f} (need >1.0)"
-            )
-            return False, 'momentum_weak', detail_str, None
-
-    # Fallback: no momentum data — use DexScreener pc_m5
-    # 84% period: pc_m5 > 15% + bs > 1.0
-    if cached_trend and pc_m5 > 15.0 and bs_ratio > 1.0:
-        if not _chasing:
-            detail_str = f"price_m5={pc_m5:+.1f}% buy_sell={bs_ratio:.2f} (dex_fallback)"
-            log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${price:.10f}: {detail_str}")
-            return True, 'momentum_direct_entry', detail_str, price
-
-    return False, 'no_entry_signal', 'no pullback-bounce pattern and no momentum signal', None
-
-
+    else:
+        # Reject
+        log.info(f"[SmartEntry] 🚫  REJECT: {detail_str}")
+        return False, 'score_too_low', detail_str, None

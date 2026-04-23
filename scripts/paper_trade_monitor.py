@@ -4028,257 +4028,62 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # Fast lane: ATH + T≥100 + V≥100 + S≥100 + M=100 + buy_sell≥2.0 + pc_m5>15%
-                    # User decision: keep Fast-lane active (was not in 84% period, but user wants it).
-                    # Only fetches DexScreener data when all matrix scores are perfect + ATH.
-                    _fl_sig_type = pending.get('signal_type', '?')
-                    _fl_dex = fetch_dexscreener_trend_snapshot(pending['token_ca']) if (
-                        _m_score and _m_score >= 100
-                        and _t_score and _t_score >= 100
-                        and _v_score and _v_score >= 100
-                        and _s_score and _s_score >= 100
-                        and _fl_sig_type == 'ATH'
-                    ) else None
-                    _fl_bs_ratio = (_fl_dex.get('buys_m5', 0) / max(_fl_dex.get('sells_m5', 1), 1)) if _fl_dex else 0
-                    _fl_pc_m5 = _fl_dex.get('price_change_m5', 0) if _fl_dex else 0
-                    # SUSTAINED_ATH check: relax bs from 2.0 to 1.3 for sustained breakouts
-                    _is_sustained_ath = False
+                    # === SmartEntry Unified Scoring V2 ===
+                    # All timing and entry decisions are now handled by evaluate_smart_entry
+                    _se_sustained = False
                     if hasattr(watchlist, '_ath_history'):
-                        _pending_ca = pending.get('token_ca')
-                        _ath_hist = watchlist._ath_history.get(_pending_ca, [])
-                        if len(_ath_hist) >= 3:
-                            _first_ts, _first_px = _ath_hist[0]
-                            _last_ts, _last_px = _ath_hist[-1]
+                        _se_ca = pending.get('token_ca')
+                        _se_hist = watchlist._ath_history.get(_se_ca, [])
+                        if len(_se_hist) >= 3:
+                            _first_ts, _first_px = _se_hist[0]
+                            _last_ts, _last_px = _se_hist[-1]
                             if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
-                                _is_sustained_ath = True
-
-                    _fl_bs_min = 1.5 if _is_sustained_ath else 2.0
-                    _fl_vol_m5 = _fl_dex.get('vol_m5', 0) if _fl_dex else 0
-                    _fl_vol_h1 = _fl_dex.get('vol_h1', 0) if _fl_dex else 0
-                    _fl_h1_avg = _fl_vol_h1 / 12.0 if _fl_vol_h1 > 0 else 0
-                    
-                    if _fl_h1_avg > 0:
-                        _fl_rvol = _fl_vol_m5 / _fl_h1_avg
-                    else:
-                        # Give brand new explosive coins a bypass RVol score
-                        _fl_rvol = 999.0 if _fl_vol_m5 > 0 else 0
-
-                    _is_fast_lane = (_t_score and _t_score >= 100
-                                       and _v_score and _v_score >= 100
-                                       and _s_score and _s_score >= 100
-                                       and _m_score and _m_score >= 100
-                                       and _fl_bs_ratio >= _fl_bs_min
-                                       and _fl_pc_m5 > 15.0
-                                       and _fl_sig_type == 'ATH'
-                                       and (_fl_rvol >= 3.0 or _is_sustained_ath))
-                                       
-                    if _is_fast_lane:
-                        from entry_engine import calculate_ema_deviation
-                        _fl_current_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                        if _fl_current_price:
-                            _dev_pct, _ema_val = calculate_ema_deviation(pending['token_ca'], _fl_current_price, pool_address=pending['pool'])
-                            _dev_max = 100.0 if _is_sustained_ath else 50.0
-                            if _dev_pct is not None and _dev_pct > _dev_max:
-                                log.info(f"  [FastLane] 🚫 {pending['symbol']} EMA exhaustion: {_dev_pct:.0f}% > {_dev_max}%")
-                                _is_fast_lane = False  # Downgrade to normal SmartEntry path
-                    if _is_sustained_ath and _is_fast_lane:
-                        log.info(
-                            f"  [FastLane] {pending['symbol']} SUSTAINED_ATH boost: "
-                            f"bs={_fl_bs_ratio:.2f} passes relaxed min={_fl_bs_min:.1f} "
-                            f"({len(_ath_hist)} ATH registrations)"
+                                _se_sustained = True
+                                
+                    try:
+                        should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
+                            pending['token_ca'],
+                            symbol=pending['symbol'],
+                            pool_address=pending['pool'],
+                            entry_count=_entry_count,
+                            momentum_snapshots=pending.get('momentum_snapshots', []),
+                            momentum_pct=pending.get('momentum_pct', 0),
+                            sustained_ath=_se_sustained,
                         )
+                    except Exception as _se_err:
+                        log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
 
-                    if trigger_price and pending['attempts'] == 1 and not _is_fast_lane:
-                        live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                        if live_price is not None and live_price > trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: entry_too_late "
-                                     f"live={live_price:.10f} > max_allowed={trigger_price * (1 + ENTRY_PREBUY_RECHECK_MAX_PCT / 100):.10f}")
+                    if not should_enter:
+                        retry_count = pending.get('smart_entry_retries', 0)
+                        max_retries = 3
+                        if retry_count >= max_retries:
+                            log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
                             pending_entries.pop(lifecycle_id, None)
-                            continue
-                        # BUG FIX: Also reject if price DROPPED >10% — token likely crashing
-                        if live_price is not None and live_price < trigger_price * 0.85:
-                            _drop_pct = (live_price - trigger_price) / trigger_price * 100
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} SKIP: price_collapsed "
-                                     f"live={live_price:.10f} dropped {_drop_pct:+.1f}% from trigger={trigger_price:.10f}")
-                            pending_entries.pop(lifecycle_id, None)
-                            continue
-                    elif _is_fast_lane:
-                        # Fast lane: still do a price drop sanity check (漏洞2 fix)
-                        # Skip SmartEntry but DON'T buy into a crash
-                        _fl_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
-                        if _fl_price is not None and trigger_price and _fl_price < trigger_price * 0.85:
-                            _fl_drop = (_fl_price - trigger_price) / trigger_price * 100
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast-lane ABORT: "
-                                     f"price collapsed {_fl_drop:+.1f}% since FIRE "
-                                     f"(live={_fl_price:.10f} vs trigger={trigger_price:.10f})")
-                            pending_entries.pop(lifecycle_id, None)
-                            continue
-                        # Chase protection: even with perfect scores, don't buy at extreme tops
-                        if _fl_dex:
-                            _fl_chasing, _fl_chase_reason = is_chasing_top(_fl_dex)
-                            if _fl_chasing:
-                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast lane BLOCKED by chase protection: {_fl_chase_reason} → SmartEntry required")
-                                _is_fast_lane = False  # downgrade to SmartEntry
-                            else:
-                                _fl_sig_type = pending.get('signal_type', '?')
-                                log.info(f"  [ENTRY_TIMING] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100+V{_v_score}+BS{_fl_bs_ratio:.1f}+pc_m5={_fl_pc_m5:+.1f}% → chase_check OK, buy ASAP")
                         else:
-                            _fl_sig_type = pending.get('signal_type', '?')
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100+V{_v_score}+BS{_fl_bs_ratio:.1f}+pc_m5={_fl_pc_m5:+.1f}% → price OK, buy ASAP")
-                    elif _m_score and _m_score >= 100 and _v_score and _v_score >= 70:
-                        # Has good M+V but missing T≥100 or bs or is re-entry or price_m5≤0 → fall through to SmartEntry
-                        _block_reasons = []
-                        if _t_score < 100: _block_reasons.append(f"T={_t_score}<100")
-                        if _fl_bs_ratio < 1.0: _block_reasons.append(f"bs={_fl_bs_ratio:.2f}<1.0")
-                        if _fl_pc_m5 <= 0: _block_reasons.append(f"pc_m5={_fl_pc_m5:+.1f}%<=0")
-                        # _entry_count block removed: Re-entries ARE allowed in V4 Fast Lane by user override
-                        # Throttle this log: only every 30s (was every ~1s, flooding logs)
-                        _fl_last_log = pending.get('_fl_blocked_log_ts', 0)
-                        if time.time() - _fl_last_log >= 30:
-                            log.info(f"  [ENTRY_TIMING] {pending['symbol']} fast lane BLOCKED: {', '.join(_block_reasons)} → SmartEntry required")
-                            pending['_fl_blocked_log_ts'] = time.time()
-
-                    # --- Smart Entry Engine (replaces Dip-then-Rip) ---
-                    # Layer 1: DexScreener volume-price trend confirmation
-                    # Layer 2: Price trajectory pullback-bounce detection
-                    # Max wait: 15 minutes. No chase — only pullback-bounce entries.
-                    # EXCEPTION: ATH + T≥100 + M=100 + first entry → skip SmartEntry (momentum_direct).
-                    if not pending.get('timing_passed'):
-                        pending_w_entry = pending.get('w_entry')
-                        if _is_fast_lane:
-                            # Liquidity floor — reject tiny pools (safety net)
-                            # Even though MC>16K passes Node.js filter, the actual
-                            # DEX pool can be much smaller. Prevent catastrophic exit slippage.
-                            if _fl_dex:
-                                _fl_liq = _fl_dex.get('liquidity_usd', 0) or 0
-                                if 0 < _fl_liq < 5000:
-                                    log.info(f"  [FastLane] {pending['symbol']} REJECT: liquidity=${_fl_liq:.0f} < $5000")
-                                    pending_entries.pop(lifecycle_id, None)
-                                    continue
-
-                            # FIX 1: Dead-cat-bounce filter — block fast-lane if P was 0 in last 5 min
-                            # boobcoin postmortem: P oscillated 0↔100 seven times before "perfect" entry.
-                            # A real parabolic coin NEVER has P=0. If P was 0 recently, the "recovery"
-                            # is just a dead cat bounce after insider distribution.
-                            _pending_wl_id = pending_w_entry.get('id') if pending_w_entry else None
-                            if _pending_wl_id and hasattr(watchlist, '_p_zero_history'):
-                                _p_zero_ts = watchlist._p_zero_history.get(_pending_wl_id)
-                                if _p_zero_ts and (time.time() - _p_zero_ts) < 300:  # 5 minutes
-                                    _p_zero_ago = int(time.time() - _p_zero_ts)
-                                    log.info(
-                                        f"  [FastLane] 🚫 {pending['symbol']} DEAD_CAT_BOUNCE: "
-                                        f"P-score was 0 just {_p_zero_ago}s ago — likely distribution recovery. "
-                                        f"Downgrading to SmartEntry."
-                                    )
-                                    _is_fast_lane = False  # downgrade to SmartEntry
-
-                        if _is_fast_lane:
-                            # Verified parabolic first entry — no pullback to wait for, just buy
-                            _fl_label = 'SUSTAINED_ATH' if _is_sustained_ath else _fl_sig_type
-                            log.info(f"  [SmartEntry] {pending['symbol']} {_fl_label}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
-                            pending['timing_passed'] = True
-                            entry_mode = 'momentum_direct'
-                            pending['kelly_position_sol'] = calculate_kelly_position(
-                                pending_w_entry, entry_mode=entry_mode,
-                                matrix_scores=pending.get('matrix_scores'))
-                        else:
-                            # --- Async SmartEntry: submit to thread pool, check on next iteration ---
-                            _se_future = pending.get('_smart_entry_future')
-
-                            _p_score = _scores.get('price', 50)
-                            if _p_score <= 30 and _p_score > 0:
-                                # P=30 ATH bypass: for ATH signals with strong T+V+M,
-                                # "overextended" (>100% growth from signal) is expected
-                                # behavior — the breakout IS the signal.
-                                # Data: $TERMINAL blocked 15× with P=30 T=50~100 V=70
-                                # M=80~100 while going on to 5.7x.
-                                # Fix (2026-04-23): Lowered T threshold 80→50.
-                                # Cross-token log audit (SAM +2027%, SOCK +373%, FLORKINU +190%)
-                                # confirmed all had T=50 and were permanently blocked.
-                                # T=50 + ATH + V≥70 + M≥80 is already a strong signal;
-                                # SmartEntry's m9s_cap/RVol/EMA guards provide the real safety net.
-                                _sig_type = pending.get('signal_type', '?')
-                                _ath_bypass = (
-                                    _sig_type == 'ATH'
-                                    and _t_score >= 50
-                                    and _v_score >= 70
-                                    and _m_score >= 80
-                                )
-                                if _ath_bypass:
-                                    _fl_last_log = pending.get('_p30_log_ts', 0)
-                                    if time.time() - _fl_last_log >= 30:
-                                        log.info(
-                                            f"  [SmartEntry] {pending['symbol']} P={_p_score} overextended "
-                                            f"BUT ATH+T{_t_score}+V{_v_score}+M{_m_score} → bypass to SmartEntry"
-                                        )
-                                        pending['_p30_log_ts'] = time.time()
-                                    # Fall through to SmartEntry evaluation
-                                else:
-                                    _fl_last_log = pending.get('_p30_log_ts', 0)
-                                    if time.time() - _fl_last_log >= 30:
-                                        log.info(
-                                            f"  [SmartEntry] {pending['symbol']} BLOCKED: "
-                                            f"P={_p_score} overextended — only Fast-lane can buy"
-                                        )
-                                        pending['_p30_log_ts'] = time.time()
-                                    pending_entries.pop(lifecycle_id, None)
-                                    continue
-
-                            # Execute synchronous direct evaluation (No 15m wait loop)
-                            # Check sustained ATH for SmartEntry even if not fast-lane
-                            # (coin might have T=50 instead of T=100, but still be a genuine trend)
-                            _se_sustained = _is_sustained_ath if '_is_sustained_ath' in dir() else False
-                            if not _se_sustained and hasattr(watchlist, '_ath_history'):
-                                _se_ca = pending.get('token_ca')
-                                _se_hist = watchlist._ath_history.get(_se_ca, [])
-                                if len(_se_hist) >= 3:
-                                    _first_ts, _first_px = _se_hist[0]
-                                    _last_ts, _last_px = _se_hist[-1]
-                                    if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
-                                        _se_sustained = True
-                            try:
-                                should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
-                                    pending['token_ca'],
-                                    symbol=pending['symbol'],
-                                    pool_address=pending['pool'],
-                                    entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
-                                    momentum_snapshots=pending.get('momentum_snapshots', []),
-                                    momentum_pct=pending.get('momentum_pct', 0),
-                                    sustained_ath=_se_sustained,
-                                )
-                            except Exception as _se_err:
-                                log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
-                                pending_entries.pop(lifecycle_id, None)
-                                continue
-
-                            if not should_enter:
-                                retry_count = pending.get('smart_entry_retries', 0)
-                                max_retries = 3
-                                if retry_count >= max_retries:
-                                    log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
-                                    pending_entries.pop(lifecycle_id, None)
-                                else:
-                                    # Return to watchlist for re-evaluation on next Matrix PASS
-                                    log.info(
-                                        f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
-                                        f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
-                                    )
-                                    # Store retry count, remove from pending so watchlist scanner picks it up again
-                                    if pending_w_entry:
-                                        pending_w_entry['_smart_entry_retries'] = retry_count + 1
-                                    pending_entries.pop(lifecycle_id, None)
-                                continue
-                            # Smart entry passed — update trigger price to the confirmed entry price
-                            pending['timing_passed'] = True
-                            if timing_trigger_price:
-                                pending['trigger_price'] = timing_trigger_price
-                            # Determine entry mode from SmartEntry result
-                            entry_mode = 'momentum_direct' if 'momentum' in (timing_reason or '').lower() else 'pullback_bounce'
-                            # Recalculate Kelly with entry mode + matrix scores
-                            pending['kelly_position_sol'] = calculate_kelly_position(
-                                pending_w_entry, entry_mode=entry_mode,
-                                matrix_scores=pending.get('matrix_scores'))
-                            log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
+                            # Return to watchlist for re-evaluation on next Matrix PASS
+                            log.info(
+                                f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
+                                f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                            )
+                            # Store retry count, remove from pending so watchlist scanner picks it up again
+                            if pending_w_entry:
+                                pending_w_entry['_smart_entry_retries'] = retry_count + 1
+                            pending_entries.pop(lifecycle_id, None)
+                        continue
+                        
+                    # Smart entry passed — update trigger price to the confirmed entry price
+                    pending['timing_passed'] = True
+                    if timing_trigger_price:
+                        pending['trigger_price'] = timing_trigger_price
+                    # Determine entry mode from SmartEntry result
+                    entry_mode = timing_reason
+                    # Recalculate Kelly with entry mode + matrix scores
+                    pending['kelly_position_sol'] = calculate_kelly_position(
+                        pending_w_entry, entry_mode=entry_mode,
+                        matrix_scores=pending.get('matrix_scores'))
+                    log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
                     # Kelly position size: apply three-layer cap
                     # Layer 1: Kelly formula output

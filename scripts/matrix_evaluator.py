@@ -598,43 +598,39 @@ class MatrixEvaluator:
             'momentum_pct': momentum_pct,  # 9s net change %
         }
     def _check_pre_momentum_pass(self, scores, thresholds, signal_type='NOT_ATH'):
-        """Check if matrices ①③ meet thresholds for momentum trigger.
-        Reverted to 84% win rate period logic:
-        - T≥50 counts as passing for ALL signal types (was only ATH before)
-        - V and S are pure bonuses — never block, only add passing count
-        - Only T and P are structural hard-gates
-        - ATH + T≥50 + V≥60 → P hard-gate is bypassed (momentum_direct)
         """
-        # Structural hard-gates: trend and price
-        hard_checks = [
-            ('trend', scores.get('trend', 0), thresholds['trend_min']),
-            ('price', scores.get('price', 0), thresholds['price_min']),
-        ]
+        Check if matrix scores meet thresholds for momentum trigger (FIRE).
+        V2 Data-Driven Logic:
+        - Signal Score (S) is the most predictive (bad coins S=20-40, good S=50-100).
+        - Price Score (P) is least predictive (good coins often get P=30).
+        - Trend Score (T) is a strong filter.
+        
+        Logic:
+        1. T must be >= 50 (Trend is established).
+        2. S must be >= 50 (Signal quality is acceptable).
+        3. P and V are bonuses. If P>=60 or V>=60, they boost confidence.
+        """
+        t_score = scores.get('trend', 0)
+        s_score = scores.get('signal', 0)
+        p_score = scores.get('price', 0)
+        v_score = scores.get('volume', 0)
 
-        # 84% period: T≥50 counts as passing for all signal types
-        passing_count = sum(1 for name, val, _ in hard_checks
-                            if val >= 60 or (name == 'trend' and val >= 50))
-        hard_fails = any(val < mins for _, val, mins in hard_checks)
+        # New data-driven hard gates: Trend and Signal Quality
+        if t_score < 50:
+            return False
+            
+        if s_score < 50:
+            log.info(f"[Matrix] Blocked by Signal Score (S={s_score} < 50) - likely fake pump/low conviction")
+            return False
 
-        if hard_fails:
-            # ATH momentum-direct bypass: ATH + T≥50 + V≥60 → bypass P hard-gate
-            t_score = scores.get('trend', 0)
-            v_score = scores.get('volume', 0)
-            if signal_type == 'ATH' and t_score >= 50 and v_score >= 60:
-                log.info(
-                    f"[Matrix] ATH momentum-direct bypass: T={t_score} V={v_score} "
-                    f"P={scores.get('price', 0)} → bypassing P hard-gate, letting momentum decide"
-                )
-            else:
-                return False
+        passing_count = 2 # T and S passed
 
-        # Volume and Signal are bonuses: if >= 60 they add to passing_count
-        if scores.get('volume', 0) >= 60:
+        if p_score >= 60:
             passing_count += 1
-        if scores.get('signal', 0) >= 60:
+        if v_score >= 60:
             passing_count += 1
 
-        return passing_count >= thresholds['min_passing'] - 1  # -1 because momentum hasn't been checked
+        return passing_count >= thresholds['min_passing'] - 1
 
     def _get_synthetic_bars(self, ca, bar_count=30):
         """Build synthetic 1-minute bars from accumulated price observations.
