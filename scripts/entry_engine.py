@@ -671,12 +671,13 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # 4. DECISION LOGIC
     detail_str = f"Score={total_score} [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
     
-    if total_score >= 70:
-        # Fast Lane Entry
-        # V3 fix: Tightened from 15% crash-only check to 3% momentum reversal.
-        # Live data: POSTER entered via FAST_LANE with pc_m5=+14.3% but price
-        # was already at the top. 15% threshold never catches gradual fades.
-        # Now checks that price is still rising (not falling >3% in 1s).
+    if total_score >= 90:
+        # Fast Lane Entry — reserved for TRUE 大金狗 (big golden dogs)
+        # V3 fix: Raised from 70→90.  At 70, bonuses (b_pb:10 + b_kline:5)
+        # let weak coins like POSTER (base=67+15=82) bypass the strict 1%
+        # momentum check.  At 90, only coins with base score ≥75 qualify.
+        # NOBIKO (base=100, total=115) still enters.  POSTER (82) doesn't.
+        # Direction check: 3% reversal threshold (tighter than old 15%).
         _time.sleep(1.0)
         price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
         trigger_price = price
