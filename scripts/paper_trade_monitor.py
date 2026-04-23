@@ -4262,7 +4262,7 @@ def run_monitor(db):
                     log.info(
                         f"  Entered {pending['symbol']}/stage1 @ {price:.10f} "
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
-                        f"mode={entry_mode} lifecycle={lifecycle_id} via quoted execution"
+                        f"mode={pending.get('entry_mode', 'default')} lifecycle={lifecycle_id} via quoted execution"
                     )
                     if 'watchlist_id' in pending:
                         # Slippage-Adjusted SL: base is now fixed -15% (84% period)
