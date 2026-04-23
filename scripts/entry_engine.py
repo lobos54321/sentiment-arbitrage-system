@@ -398,7 +398,7 @@ def is_chasing_top(trend_data):
     return False, 'ok'
 
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
-                         momentum_snapshots=None, momentum_pct=0):
+                         momentum_snapshots=None, momentum_pct=0, sustained_ath=False):
     """
     Smart Entry Engine (V5 — 84% Period Hybrid)
     
@@ -535,10 +535,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
             # ── DATA-DRIVEN GUARD 1: Momentum Upper Bound ──
             # Audit (26 trades): All 8 trades with m9s > 3.5% lost (0% win rate).
-            _M9S_UPPER = 3.5
+            # SUSTAINED_ATH exemption: genuine multi-hour breakouts routinely hit 4-6% m9s.
+            _M9S_UPPER = 6.0 if sustained_ath else 3.5
             if m_pct > _M9S_UPPER:
                 detail_str = (
                     f"momentum_9s=+{m_pct:.1f}% EXCEEDS {_M9S_UPPER}% cap "
+                    f"{'(sustained_ath relaxed) ' if sustained_ath else ''}"
                     f"(violent spike, likely distribution) bs={bs_ratio:.2f} pc_m5={pc_m5:+.1f}%"
                 )
                 log.info(f"[SmartEntry] 🚫 ${symbol} M9S_CAP_BLOCK: {detail_str}")
@@ -549,8 +551,9 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             #   pc_m5 < 10%:  9 trades, 0 wins — trend too weak
             #   pc_m5 10-20%: 8 trades, 3 wins (38%) — only profitable band
             #   pc_m5 > 20%:  8 trades, 0 wins — overheated
+            # SUSTAINED_ATH exemption: genuine breakouts sustain 30-50% pc_m5 for hours.
             _PC_M5_LOW = 10.0
-            _PC_M5_HIGH = 20.0
+            _PC_M5_HIGH = 50.0 if sustained_ath else 20.0
             if pc_m5 < _PC_M5_LOW:
                 detail_str = (
                     f"pc_m5={pc_m5:+.1f}% BELOW {_PC_M5_LOW}% floor "
@@ -562,6 +565,7 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             if pc_m5 > _PC_M5_HIGH:
                 detail_str = (
                     f"pc_m5={pc_m5:+.1f}% EXCEEDS {_PC_M5_HIGH}% ceiling "
+                    f"{'(sustained_ath relaxed) ' if sustained_ath else ''}"
                     f"(overheated, distribution phase) m9s=+{m_pct:.1f}% bs={bs_ratio:.2f}"
                 )
                 log.info(f"[SmartEntry] 🚫 ${symbol} PC_M5_HIGH_BLOCK: {detail_str}")

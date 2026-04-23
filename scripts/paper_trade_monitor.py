@@ -3641,6 +3641,32 @@ def run_monitor(db):
                     sig_price = sig_price_val if sig_price_val and sig_price_val > 0 else None
 
                     log.info(f"  [WATCHLIST] Registering {symbol} ({signal_type}) Super={super_idx} Price={sig_price}")
+
+                    # SUSTAINED_ATH: Record this ATH registration for trend tracking
+                    if sig.get('is_ath') and sig_price and sig_price > 0:
+                        if not hasattr(watchlist, '_ath_history'):
+                            watchlist._ath_history = {}
+                        if token_ca not in watchlist._ath_history:
+                            watchlist._ath_history[token_ca] = []
+                        watchlist._ath_history[token_ca].append((time.time(), sig_price))
+                        # Prune entries older than 120 minutes
+                        _cutoff = time.time() - 7200
+                        watchlist._ath_history[token_ca] = [
+                            (ts, px) for ts, px in watchlist._ath_history[token_ca] if ts > _cutoff
+                        ]
+                        _ath_hist = watchlist._ath_history[token_ca]
+                        if len(_ath_hist) >= 3:
+                            # Check if prices are generally rising (last > first)
+                            _first_px = _ath_hist[0][1]
+                            _last_px = _ath_hist[-1][1]
+                            if _last_px > _first_px:
+                                _mult = _last_px / _first_px
+                                log.info(
+                                    f"  [SUSTAINED_ATH] {symbol} QUALIFIED: "
+                                    f"{len(_ath_hist)} ATH registrations, "
+                                    f"price {_first_px:.10f} → {_last_px:.10f} ({_mult:.1f}x)"
+                                )
+
                     watchlist.register(
                         ca=token_ca,
                         symbol=symbol,
@@ -3698,6 +3724,7 @@ def run_monitor(db):
                                 _pending['_refresh_sent_at'] = time.time()
                                 # Also update matrix_scores in pending for downstream use
                                 _pending['matrix_scores'] = _refresh_scores
+
                     wl_skip_duplicate += 1
                     continue
                 
@@ -3986,13 +4013,29 @@ def run_monitor(db):
                     ) else None
                     _fl_bs_ratio = (_fl_dex.get('buys_m5', 0) / max(_fl_dex.get('sells_m5', 1), 1)) if _fl_dex else 0
                     _fl_pc_m5 = _fl_dex.get('price_change_m5', 0) if _fl_dex else 0
+                    # SUSTAINED_ATH check: relax bs from 2.0 to 1.3 for sustained breakouts
+                    _is_sustained_ath = False
+                    if hasattr(watchlist, '_ath_history'):
+                        _pending_ca = pending.get('token_ca')
+                        _ath_hist = watchlist._ath_history.get(_pending_ca, [])
+                        if (len(_ath_hist) >= 3
+                                and _ath_hist[-1][1] > _ath_hist[0][1]):
+                            _is_sustained_ath = True
+
+                    _fl_bs_min = 1.3 if _is_sustained_ath else 2.0
                     _is_fast_lane = (_t_score and _t_score >= 100
                                        and _v_score and _v_score >= 100
                                        and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
-                                       and _fl_bs_ratio >= 2.0
+                                       and _fl_bs_ratio >= _fl_bs_min
                                        and _fl_pc_m5 > 15.0
                                        and _fl_sig_type == 'ATH')
+                    if _is_sustained_ath and _is_fast_lane:
+                        log.info(
+                            f"  [FastLane] {pending['symbol']} SUSTAINED_ATH boost: "
+                            f"bs={_fl_bs_ratio:.2f} passes relaxed min={_fl_bs_min:.1f} "
+                            f"({len(_ath_hist)} ATH registrations)"
+                        )
 
                     if trigger_price and pending['attempts'] == 1 and not _is_fast_lane:
                         live_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
@@ -4080,7 +4123,8 @@ def run_monitor(db):
 
                         if _is_fast_lane:
                             # Verified parabolic first entry — no pullback to wait for, just buy
-                            log.info(f"  [SmartEntry] {pending['symbol']} {_fl_sig_type}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
+                            _fl_label = 'SUSTAINED_ATH' if _is_sustained_ath else _fl_sig_type
+                            log.info(f"  [SmartEntry] {pending['symbol']} {_fl_label}+T{_t_score}+M100 first entry → SKIP pullback wait, momentum_direct")
                             pending['timing_passed'] = True
                             entry_mode = 'momentum_direct'
                             pending['kelly_position_sol'] = calculate_kelly_position(
@@ -4126,6 +4170,14 @@ def run_monitor(db):
                                     continue
 
                             # Execute synchronous direct evaluation (No 15m wait loop)
+                            # Check sustained ATH for SmartEntry even if not fast-lane
+                            # (coin might have T=50 instead of T=100, but still be a genuine trend)
+                            _se_sustained = _is_sustained_ath if '_is_sustained_ath' in dir() else False
+                            if not _se_sustained and hasattr(watchlist, '_ath_history'):
+                                _se_ca = pending.get('token_ca')
+                                _se_hist = watchlist._ath_history.get(_se_ca, [])
+                                if len(_se_hist) >= 3 and _se_hist[-1][1] > _se_hist[0][1]:
+                                    _se_sustained = True
                             try:
                                 should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
                                     pending['token_ca'],
@@ -4134,6 +4186,7 @@ def run_monitor(db):
                                     entry_count=pending_w_entry.get('entry_count', 0) if pending_w_entry else 0,
                                     momentum_snapshots=pending.get('momentum_snapshots', []),
                                     momentum_pct=pending.get('momentum_pct', 0),
+                                    sustained_ath=_se_sustained,
                                 )
                             except Exception as _se_err:
                                 log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
