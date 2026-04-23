@@ -4028,62 +4028,70 @@ def run_monitor(db):
                     # Read the pinned w_entry for this pending slot — NEVER the outer loop variable.
                     pending_w_entry = pending.get('w_entry')
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
-                    # === SmartEntry Unified Scoring V2 ===
-                    # All timing and entry decisions are now handled by evaluate_smart_entry
-                    _se_sustained = False
-                    if hasattr(watchlist, '_ath_history'):
-                        _se_ca = pending.get('token_ca')
-                        _se_hist = watchlist._ath_history.get(_se_ca, [])
-                        if len(_se_hist) >= 3:
-                            _first_ts, _first_px = _se_hist[0]
-                            _last_ts, _last_px = _se_hist[-1]
-                            if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
-                                _se_sustained = True
-                                
-                    try:
-                        should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
-                            pending['token_ca'],
-                            symbol=pending['symbol'],
-                            pool_address=pending['pool'],
-                            entry_count=_entry_count,
-                            momentum_snapshots=pending.get('momentum_snapshots', []),
-                            momentum_pct=pending.get('momentum_pct', 0),
-                            sustained_ath=_se_sustained,
-                        )
-                    except Exception as _se_err:
-                        log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
-                        pending_entries.pop(lifecycle_id, None)
-                        continue
+                    # === SmartEntry Unified Scoring V2 (Async) ===
+                    if not pending.get('timing_passed'):
+                        _se_sustained = False
+                        if hasattr(watchlist, '_ath_history'):
+                            _se_ca = pending.get('token_ca')
+                            _se_hist = watchlist._ath_history.get(_se_ca, [])
+                            if len(_se_hist) >= 3:
+                                _first_ts, _first_px = _se_hist[0]
+                                _last_ts, _last_px = _se_hist[-1]
+                                if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
+                                    _se_sustained = True
 
-                    if not should_enter:
-                        retry_count = pending.get('smart_entry_retries', 0)
-                        max_retries = 3
-                        if retry_count >= max_retries:
-                            log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
-                            pending_entries.pop(lifecycle_id, None)
-                        else:
-                            # Return to watchlist for re-evaluation on next Matrix PASS
-                            log.info(
-                                f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
-                                f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                        _se_future = pending.get('_smart_entry_future')
+                        if _se_future is None:
+                            _se_future = smart_entry_executor.submit(
+                                evaluate_smart_entry,
+                                pending['token_ca'],
+                                symbol=pending['symbol'],
+                                pool_address=pending['pool'],
+                                entry_count=_entry_count,
+                                momentum_snapshots=pending.get('momentum_snapshots', []),
+                                momentum_pct=pending.get('momentum_pct', 0),
+                                sustained_ath=_se_sustained
                             )
-                            # Store retry count, remove from pending so watchlist scanner picks it up again
-                            if pending_w_entry:
-                                pending_w_entry['_smart_entry_retries'] = retry_count + 1
+                            pending['_smart_entry_future'] = _se_future
+                            continue
+
+                        if not _se_future.done():
+                            continue
+
+                        try:
+                            should_enter, timing_reason, timing_detail, timing_trigger_price = _se_future.result()
+                        except Exception as _se_err:
+                            log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
                             pending_entries.pop(lifecycle_id, None)
-                        continue
-                        
-                    # Smart entry passed — update trigger price to the confirmed entry price
-                    pending['timing_passed'] = True
-                    if timing_trigger_price:
-                        pending['trigger_price'] = timing_trigger_price
-                    # Determine entry mode from SmartEntry result
-                    entry_mode = timing_reason
+                            continue
+
+                        if not should_enter:
+                            retry_count = pending.get('smart_entry_retries', 0)
+                            max_retries = 3
+                            if retry_count >= max_retries:
+                                log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
+                                pending_entries.pop(lifecycle_id, None)
+                            else:
+                                log.info(
+                                    f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
+                                    f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                                )
+                                if pending_w_entry:
+                                    pending_w_entry['_smart_entry_retries'] = retry_count + 1
+                                pending_entries.pop(lifecycle_id, None)
+                            continue
+                            
+                        # Smart entry passed — update trigger price to the confirmed entry price
+                        pending['timing_passed'] = True
+                        if timing_trigger_price:
+                            pending['trigger_price'] = timing_trigger_price
+                        pending['entry_mode'] = timing_reason
+                        log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
+
                     # Recalculate Kelly with entry mode + matrix scores
                     pending['kelly_position_sol'] = calculate_kelly_position(
-                        pending_w_entry, entry_mode=entry_mode,
+                        pending_w_entry, entry_mode=pending.get('entry_mode', 'default'),
                         matrix_scores=pending.get('matrix_scores'))
-                    log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
                             
                     # Layer 1: Kelly formula output (Sustained ATH 1.5x boost is applied inside calculate_kelly_position)
                     # Layer 2: MAXposition 0.5 SOL hard cap
