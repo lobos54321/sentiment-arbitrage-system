@@ -223,10 +223,11 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     # Half-Kelly for safety
     position = base_capital * kelly_f * 0.5
 
-    # ─── Re-entry penalty: halve position (data: re-entries 50% win vs 64% first) ──
-    if entry_count > 0:
-        position *= 0.5
-        log.info(f"[Kelly] Re-entry #{entry_count+1} → position×0.5")
+    # ─── Sustained ATH Boost ────────────────────────────────────────
+    # Tokens holding ATH for >30 minutes show massive long-tail breakout potential.
+    if watchlist_entry.get('is_sustained_ath'):
+        position *= 1.5
+        log.info(f"[Kelly] Sustained ATH → position×1.5")
 
     # Hard limits: min 0.03 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
     pos = round(max(0.03, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
