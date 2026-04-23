@@ -621,7 +621,13 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             _vol_m5 = cached_trend.get('vol_m5', 0) if cached_trend else 0
             _vol_h1 = cached_trend.get('vol_h1', 0) if cached_trend else 0
             _h1_avg = _vol_h1 / 12.0 if _vol_h1 > 0 else 0
-            _rvol = _vol_m5 / _h1_avg if _h1_avg > 0 else 0
+            
+            if _h1_avg > 0:
+                _rvol = _vol_m5 / _h1_avg
+            else:
+                # If there's no 1h volume but we have 5m volume, it's a brand new explosive launch.
+                # Give it an artificially high RVol so it passes the filter.
+                _rvol = 999.0 if _vol_m5 > 0 else 0
 
             if _rvol < 2.0 and not sustained_ath:
                 detail_str = (

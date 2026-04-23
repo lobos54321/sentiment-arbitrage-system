@@ -4052,7 +4052,12 @@ def run_monitor(db):
                     _fl_vol_m5 = _fl_dex.get('vol_m5', 0) if _fl_dex else 0
                     _fl_vol_h1 = _fl_dex.get('vol_h1', 0) if _fl_dex else 0
                     _fl_h1_avg = _fl_vol_h1 / 12.0 if _fl_vol_h1 > 0 else 0
-                    _fl_rvol = _fl_vol_m5 / _fl_h1_avg if _fl_h1_avg > 0 else 0
+                    
+                    if _fl_h1_avg > 0:
+                        _fl_rvol = _fl_vol_m5 / _fl_h1_avg
+                    else:
+                        # Give brand new explosive coins a bypass RVol score
+                        _fl_rvol = 999.0 if _fl_vol_m5 > 0 else 0
 
                     _is_fast_lane = (_t_score and _t_score >= 100
                                        and _v_score and _v_score >= 100
