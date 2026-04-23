@@ -3720,12 +3720,6 @@ def run_monitor(db):
                             except Exception:
                                 pass
                             if _refresh_scores:
-                                from entry_engine import _smart_entry_signals
-                                _smart_entry_signals[w_entry['ca']] = {
-                                    'scores': _refresh_scores,
-                                    'trend_data': _refresh_trend,
-                                    'ts': time.time(),
-                                }
                                 _pending['_refresh_sent_at'] = time.time()
                                 # Also update matrix_scores in pending for downstream use
                                 _pending['matrix_scores'] = _refresh_scores
