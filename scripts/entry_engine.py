@@ -186,6 +186,7 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     # correlate with REAL momentum, not crowding.  The heavy penalty caused inverse
     # position sizing: weakest signals got 0.478 SOL, strongest got 0.03 SOL.
     # Now: only 5/5 perfect gets mild skepticism; 3-4/5 is neutral; ≤1 contrarian.
+    vp_cap = None  # V+P quality gate
     if matrix_scores:
         perfect_count = sum(1 for v in matrix_scores.values() if v == 100)
         if perfect_count >= 5:
@@ -201,6 +202,18 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
                 log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2")
             else:
                 log.info(f"[Kelly] Matrix low-perfect={perfect_count}/5 but entry_count={entry_count} age={entry_age_min:.0f}min → no contrarian bonus")
+
+        # ─── V+P Quality Gate ──────────────────────────────────────────
+        # Live data: KIZUNA (V=40+P=30=70, 0.478 SOL → -20%) and
+        # POSTER (V=40+P=30=70, 0.5 SOL → -16.6%) both had weak volume+price
+        # but got full-size positions.  Weak V+P = no real buying pressure.
+        # Cap position to 0.1 SOL when V+P ≤ 100.
+        v_score = matrix_scores.get('volume', 0)
+        p_score = matrix_scores.get('price', 0)
+        vp_sum = v_score + p_score
+        if vp_sum <= 100:
+            vp_cap = 0.1
+            log.info(f"[Kelly] V+P quality gate: V={v_score}+P={p_score}={vp_sum} ≤ 100 → cap 0.1 SOL")
 
     # ─── ATH confirmation (logical — new highs have momentum) ─────────
     ath_num = int(watchlist_entry.get('ath_num') or 0)
@@ -234,6 +247,10 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
 
     # Hard limits: min 0.03 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
     pos = round(max(0.03, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
+    # Apply V+P quality gate cap
+    if vp_cap is not None and pos > vp_cap:
+        log.info(f"[Kelly] V+P cap applied: {pos} → {vp_cap} SOL")
+        pos = vp_cap
     log.info(f"[Kelly] f*={kelly_f:.3f} → {pos} SOL | p={p:.3f} b={b:.2f} mode={entry_mode or 'default'}")
     return pos
 
@@ -656,14 +673,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     
     if total_score >= 70:
         # Fast Lane Entry
-        # 1s Direction Confirmation for safety
+        # V3 fix: Tightened from 15% crash-only check to 3% momentum reversal.
+        # Live data: POSTER entered via FAST_LANE with pc_m5=+14.3% but price
+        # was already at the top. 15% threshold never catches gradual fades.
+        # Now checks that price is still rising (not falling >3% in 1s).
         _time.sleep(1.0)
         price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
         trigger_price = price
         if price_confirm and price_confirm > 0:
-            if price_confirm < price * 0.85:
-                log.info(f"[SmartEntry] 🚫  REJECT: price_collapsed - fell >15% in 1s (live={price_confirm:.10f})")
-                return False, 'price_collapsed', f'fell >15% in 1s', None
+            drop_pct = (price - price_confirm) / price * 100
+            if drop_pct > 3.0:
+                log.info(f"[SmartEntry] 🚫  REJECT: fast_lane_reversal - fell {drop_pct:.1f}% in 1s (live={price_confirm:.10f})")
+                return False, 'fast_lane_reversal', f'fell {drop_pct:.1f}% in 1s', None
             trigger_price = price_confirm
             
         log.info(f"[SmartEntry] 🚀  FAST_LANE: {detail_str}")
