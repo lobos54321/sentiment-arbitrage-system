@@ -686,11 +686,14 @@ class MatrixEvaluator:
         now = time.time()
         age_minutes = (now - entry.get('added_at', now)) / 60
 
-        # Timeout
-        # SUSTAINED_ATH gets double timeout (240min) because it's a genuine multi-hour trend
-        _max_obs = 240 if entry.get('is_sustained_ath') else thresholds['max_obs_minutes']
-        if age_minutes >= _max_obs:
-            return f'timeout ({age_minutes:.0f}min >= {_max_obs}min)'
+        # Timeout: calculate idle time since the LAST valid activity (ATH registration)
+        # If it keeps hitting ATH, the timer resets, preventing premature removal of multi-hour runners
+        _base_ts = entry.get('last_ath_ts') or entry.get('added_at', now)
+        idle_minutes = (now - _base_ts) / 60
+        
+        _max_obs = thresholds['max_obs_minutes']
+        if idle_minutes >= _max_obs:
+            return f'timeout ({idle_minutes:.0f}min >= {_max_obs}min)'
 
         # Price collapse: current << signal
         # Data-validated: -70% kills all truly dead coins (REDBULL -99%, COOKED -95%,

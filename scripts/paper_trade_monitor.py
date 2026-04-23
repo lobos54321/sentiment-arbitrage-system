@@ -3656,14 +3656,15 @@ def run_monitor(db):
                         ]
                         _ath_hist = watchlist._ath_history[token_ca]
                         if len(_ath_hist) >= 3:
-                            # Check if prices are generally rising (last > first)
-                            _first_px = _ath_hist[0][1]
-                            _last_px = _ath_hist[-1][1]
-                            if _last_px > _first_px:
+                            # Check if prices are generally rising and time span is at least 30 minutes
+                            _first_ts, _first_px = _ath_hist[0]
+                            _last_ts, _last_px = _ath_hist[-1]
+                            _time_span_min = (_last_ts - _first_ts) / 60
+                            if _last_px > _first_px and _time_span_min >= 30:
                                 _mult = _last_px / _first_px
                                 log.info(
                                     f"  [SUSTAINED_ATH] {symbol} QUALIFIED: "
-                                    f"{len(_ath_hist)} ATH registrations, "
+                                    f"{len(_ath_hist)} ATH registrations over {_time_span_min:.0f}min, "
                                     f"price {_first_px:.10f} → {_last_px:.10f} ({_mult:.1f}x)"
                                 )
 
@@ -3765,8 +3766,13 @@ def run_monitor(db):
                 if hasattr(watchlist, '_ath_history'):
                     _wl_ca = w_entry.get('ca')
                     _wl_hist = watchlist._ath_history.get(_wl_ca, [])
-                    if len(_wl_hist) >= 3 and _wl_hist[-1][1] > _wl_hist[0][1]:
-                        _wl_sustained = True
+                    if _wl_hist:
+                        w_entry['last_ath_ts'] = _wl_hist[-1][0]
+                    if len(_wl_hist) >= 3:
+                        _first_ts, _first_px = _wl_hist[0]
+                        _last_ts, _last_px = _wl_hist[-1]
+                        if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
+                            _wl_sustained = True
                 w_entry['is_sustained_ath'] = _wl_sustained
                 
                 eval_res = matrix_evaluator.evaluate(w_entry)
@@ -4028,11 +4034,13 @@ def run_monitor(db):
                     if hasattr(watchlist, '_ath_history'):
                         _pending_ca = pending.get('token_ca')
                         _ath_hist = watchlist._ath_history.get(_pending_ca, [])
-                        if (len(_ath_hist) >= 3
-                                and _ath_hist[-1][1] > _ath_hist[0][1]):
-                            _is_sustained_ath = True
+                        if len(_ath_hist) >= 3:
+                            _first_ts, _first_px = _ath_hist[0]
+                            _last_ts, _last_px = _ath_hist[-1]
+                            if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
+                                _is_sustained_ath = True
 
-                    _fl_bs_min = 1.3 if _is_sustained_ath else 2.0
+                    _fl_bs_min = 1.5 if _is_sustained_ath else 2.0
                     _is_fast_lane = (_t_score and _t_score >= 100
                                        and _v_score and _v_score >= 100
                                        and _s_score and _s_score >= 100
@@ -4186,8 +4194,11 @@ def run_monitor(db):
                             if not _se_sustained and hasattr(watchlist, '_ath_history'):
                                 _se_ca = pending.get('token_ca')
                                 _se_hist = watchlist._ath_history.get(_se_ca, [])
-                                if len(_se_hist) >= 3 and _se_hist[-1][1] > _se_hist[0][1]:
-                                    _se_sustained = True
+                                if len(_se_hist) >= 3:
+                                    _first_ts, _first_px = _se_hist[0]
+                                    _last_ts, _last_px = _se_hist[-1]
+                                    if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
+                                        _se_sustained = True
                             try:
                                 should_enter, timing_reason, timing_detail, timing_trigger_price = evaluate_smart_entry(
                                     pending['token_ca'],
@@ -4237,6 +4248,20 @@ def run_monitor(db):
                     # Layer 2: MAXposition 0.5 SOL hard cap
                     # Layer 3: A1 - max 1% of pool liquidity (prevents slippage in thin pools)
                     _kelly_raw = pending.get('kelly_position_sol') or position_size_sol
+                    
+                    # Kelly Position Boost: SUSTAINED_ATH tokens are validated high-conviction
+                    # multi-hour runners. They get a 1.5x multiplier to maximize profit on the run.
+                    _final_sustained = _is_sustained_ath if '_is_sustained_ath' in dir() else False
+                    if not _final_sustained and hasattr(watchlist, '_ath_history'):
+                        _se_ca = pending.get('token_ca')
+                        _se_hist = watchlist._ath_history.get(_se_ca, [])
+                        if len(_se_hist) >= 3 and _se_hist[-1][1] > _se_hist[0][1] and (_se_hist[-1][0] - _se_hist[0][0]) >= 1800:
+                            _final_sustained = True
+                            
+                    if _final_sustained:
+                        _kelly_raw *= 1.5
+                        log.info(f"  [SUSTAINED_ATH] {pending['symbol']} Kelly boosted 1.5x: {_kelly_raw/1.5:.3f} → {_kelly_raw:.3f} SOL")
+
                     _liq_cap = get_liquidity_position_cap(
                         pending['token_ca'],
                         sol_price_usd=sol_price,
