@@ -769,10 +769,12 @@ class ExitMatrixEvaluator:
         # Strategy 1 & 2 insight: ratchet SL up using previous candle's low.
         # "If the structure holds, stay in. If it breaks, get out."
         # Only activate after 10% profit to avoid being shaken out by 1m noise.
+        # IMPORTANT: use native_only=True — current_price is SOL-native,
+        # GT/kline_db returns USD prices which would cause false exits.
         if current_pnl >= 0.10:
             try:
                 from entry_engine import get_recent_synthetic_bars
-                _pos_bars = get_recent_synthetic_bars(entry.get('ca'), n_bars=2, pool_address=entry.get('pool_address'))
+                _pos_bars = get_recent_synthetic_bars(entry.get('ca'), n_bars=2, pool_address=entry.get('pool_address'), native_only=True)
                 if len(_pos_bars) >= 2:
                     _prev_low = _pos_bars[-2]['low']
                     # If current price breaks below the previous 1m candle low, exit immediately.

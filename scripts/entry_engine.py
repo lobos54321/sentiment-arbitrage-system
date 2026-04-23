@@ -324,22 +324,28 @@ def calculate_ema_deviation(token_ca, current_price, pool_address=None):
     deviation_pct = ((current_price - ema) / ema) * 100
     return deviation_pct, ema
 
-def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None):
+def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None, native_only=False):
     """Get recent 1-minute OHLC bars.
     Primary: GeckoTerminal real 1m K-lines (accurate OHLC from exchange).
     Fallback: synthetic bars built from in-memory price history.
+    
+    Args:
+        native_only: If True, skip GeckoTerminal and use only _price_history.
+                     Use this when comparing with SOL-native entry/current prices
+                     (GT returns USD-denominated prices which can't be compared directly).
     
     Returns: list of {'open', 'high', 'low', 'close', 'ts'} (newest last)
     or empty list if insufficient data.
     """
     # Primary: GeckoTerminal real K-lines (30s cached)
-    if pool_address:
+    # SKIP when native_only=True — GT prices are in USD, not SOL-native
+    if pool_address and not native_only:
         gt_bars = _fetch_gt_bars_cached(token_ca, pool_address, limit=max(n_bars, 5))
         if gt_bars and len(gt_bars) >= 2:
             sorted_gt = sorted(gt_bars, key=lambda b: b['ts'])
             return sorted_gt[-n_bars:] if len(sorted_gt) >= n_bars else sorted_gt
 
-    # Fallback: synthetic bars from _price_history
+    # Fallback (or native_only): synthetic bars from _price_history (SOL-native)
     from matrix_evaluator import MatrixEvaluator
     history = MatrixEvaluator._price_history.get(token_ca, [])
     if len(history) < 3:
@@ -358,6 +364,7 @@ def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None):
     
     sorted_bars = sorted(bars.values(), key=lambda b: b['ts'])
     return sorted_bars[-n_bars:] if len(sorted_bars) >= n_bars else sorted_bars
+
 
 # ─── SmartEntry ───────────────────────────────────────────────────────────────
 

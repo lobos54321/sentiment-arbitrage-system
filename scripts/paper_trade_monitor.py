@@ -4474,8 +4474,10 @@ def run_monitor(db):
                             _final_sl = _base_sl
                             
                         # K-LINE STRUCTURAL STOP LOSS (Phase 5)
+                        # IMPORTANT: use native_only=True because entry price is SOL-native,
+                        # but GeckoTerminal/kline_db returns USD-denominated prices.
                         from entry_engine import get_recent_synthetic_bars
-                        _entry_bars = get_recent_synthetic_bars(pending['token_ca'], n_bars=3, pool_address=pending['pool'])
+                        _entry_bars = get_recent_synthetic_bars(pending['token_ca'], n_bars=3, pool_address=pending['pool'], native_only=True)
                         if _entry_bars:
                             _structure_low = min(b['low'] for b in _entry_bars)
                             # Sanity: structure_low MUST be below entry price (it's a support level)
