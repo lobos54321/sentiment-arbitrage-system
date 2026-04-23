@@ -4042,7 +4042,7 @@ def run_monitor(db):
 
                         _se_future = pending.get('_smart_entry_future')
                         if _se_future is None:
-                            _se_future = smart_entry_executor.submit(
+                            _se_future = smart_entry_pool.submit(
                                 evaluate_smart_entry,
                                 pending['token_ca'],
                                 symbol=pending['symbol'],
