@@ -3938,6 +3938,14 @@ def run_monitor(db):
                     try:
                         _fire_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
                         _fire_liq = (_fire_dex.get('liquidity_usd', 0) or 0) if _fire_dex else 0
+                        
+                        # Vol/MC Cross-Validation (Phase 3)
+                        _fire_mc = w_entry.get('signal_mc') or 0
+                        _fire_vol = _fire_dex.get('vol_m5', 0) if _fire_dex else 0
+                        _vol_mc_pct = (_fire_vol / _fire_mc * 100) if _fire_mc > 0 else 0
+                        if _vol_mc_pct > 0:
+                            log.info(f"  [FIRE] {w_entry['symbol']} Vol/MC={_vol_mc_pct:.1f}% (vol_m5=${_fire_vol:.0f} MC=${_fire_mc:.0f})")
+
                         if 0 < _fire_liq < 5000:
                             log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: liquidity=${_fire_liq:.0f} < $5000 (exit slippage risk)")
                             pending_entries.pop(lifecycle_id, None)
@@ -4041,13 +4049,29 @@ def run_monitor(db):
                                 _is_sustained_ath = True
 
                     _fl_bs_min = 1.5 if _is_sustained_ath else 2.0
+                    _fl_vol_m5 = _fl_dex.get('vol_m5', 0) if _fl_dex else 0
+                    _fl_vol_h1 = _fl_dex.get('vol_h1', 0) if _fl_dex else 0
+                    _fl_h1_avg = _fl_vol_h1 / 12.0 if _fl_vol_h1 > 0 else 0
+                    _fl_rvol = _fl_vol_m5 / _fl_h1_avg if _fl_h1_avg > 0 else 0
+
                     _is_fast_lane = (_t_score and _t_score >= 100
                                        and _v_score and _v_score >= 100
                                        and _s_score and _s_score >= 100
                                        and _m_score and _m_score >= 100
                                        and _fl_bs_ratio >= _fl_bs_min
                                        and _fl_pc_m5 > 15.0
-                                       and _fl_sig_type == 'ATH')
+                                       and _fl_sig_type == 'ATH'
+                                       and (_fl_rvol >= 3.0 or _is_sustained_ath))
+                                       
+                    if _is_fast_lane:
+                        from entry_engine import calculate_ema_deviation
+                        _fl_current_price, _, _ = fetch_realtime_price(pending['token_ca'], pending['pool'])
+                        if _fl_current_price:
+                            _dev_pct, _ema_val = calculate_ema_deviation(pending['token_ca'], _fl_current_price)
+                            _dev_max = 100.0 if _is_sustained_ath else 50.0
+                            if _dev_pct is not None and _dev_pct > _dev_max:
+                                log.info(f"  [FastLane] 🚫 {pending['symbol']} EMA exhaustion: {_dev_pct:.0f}% > {_dev_max}%")
+                                _is_fast_lane = False  # Downgrade to normal SmartEntry path
                     if _is_sustained_ath and _is_fast_lane:
                         log.info(
                             f"  [FastLane] {pending['symbol']} SUSTAINED_ATH boost: "
@@ -4443,6 +4467,21 @@ def run_monitor(db):
                             )
                         else:
                             _final_sl = _base_sl
+                            
+                        # K-LINE STRUCTURAL STOP LOSS (Phase 5)
+                        from entry_engine import get_recent_synthetic_bars
+                        _entry_bars = get_recent_synthetic_bars(pending['token_ca'], n_bars=3)
+                        if _entry_bars:
+                            _structure_low = min(b['low'] for b in _entry_bars)
+                            _structure_sl_pct = ((price - _structure_low) / price) * -100
+                            # Clamp: at least -3%, at most -15% (never wider than current fixed SL)
+                            _structure_sl = max(-15.0, min(-3.0, _structure_sl_pct))
+                            log.info(
+                                f"  [KLINE_SL] {pending['symbol']} structure_low={_structure_low:.10f} "
+                                f"→ SL={_structure_sl:.1f}% (vs fixed={_final_sl*100:.1f}%)"
+                            )
+                            # Use the TIGHTER of structure SL and fixed SL
+                            _final_sl = max(_final_sl, _structure_sl / 100.0)
                         
                         watchlist.mark_holding(
                             pending['watchlist_id'], 

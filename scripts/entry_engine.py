@@ -260,6 +260,58 @@ def get_liquidity_position_cap(token_ca, sol_price_usd, max_pool_pct=0.01):
         return None
 
 
+def calculate_ema_deviation(token_ca, current_price):
+    """Calculate price deviation from 20-period EMA using in-memory price history.
+    
+    Returns: (deviation_pct: float, ema_price: float) or (None, None) if insufficient data.
+    Deviation > 0 means price is ABOVE EMA (overextended upward).
+    """
+    from matrix_evaluator import MatrixEvaluator
+    history = MatrixEvaluator._price_history.get(token_ca, [])
+    
+    if len(history) < 10:  # Need at least 10 data points for meaningful EMA
+        return None, None
+    
+    # Use last 20 prices (or all if < 20)
+    prices = [p for _, p in history[-20:]]
+    
+    # Calculate EMA with period = len(prices)
+    k = 2.0 / (len(prices) + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = p * k + ema * (1 - k)
+    
+    if ema <= 0:
+        return None, None
+    
+    deviation_pct = ((current_price - ema) / ema) * 100
+    return deviation_pct, ema
+
+def get_recent_synthetic_bars(token_ca, n_bars=5):
+    """Build recent 1-minute OHLC bars from in-memory price history.
+    
+    Returns: list of {'open', 'high', 'low', 'close', 'ts'} (newest last)
+    or empty list if insufficient data.
+    """
+    from matrix_evaluator import MatrixEvaluator
+    history = MatrixEvaluator._price_history.get(token_ca, [])
+    if len(history) < 3:
+        return []
+    
+    # Group by minute
+    bars = {}
+    for ts, px in history:
+        minute_key = int(ts // 60) * 60
+        if minute_key not in bars:
+            bars[minute_key] = {'ts': minute_key, 'open': px, 'high': px, 'low': px, 'close': px}
+        else:
+            bars[minute_key]['high'] = max(bars[minute_key]['high'], px)
+            bars[minute_key]['low'] = min(bars[minute_key]['low'], px)
+            bars[minute_key]['close'] = px
+    
+    sorted_bars = sorted(bars.values(), key=lambda b: b['ts'])
+    return sorted_bars[-n_bars:] if len(sorted_bars) >= n_bars else sorted_bars
+
 # ─── SmartEntry ───────────────────────────────────────────────────────────────
 
 def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
@@ -491,6 +543,20 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 if _chasing:
                     return False, 'chasing_top', f'pullback-bounce but {_chase_reason}', None
 
+                # ── K-LINE BREAKOUT CONFIRMATION (Phase 4) ──
+                # Strategy 2 insight: only buy when price breaks above the previous candle's high.
+                # This confirms the pullback is OVER and buyers are back in control.
+                _recent_bars = get_recent_synthetic_bars(token_ca, n_bars=3)
+                if len(_recent_bars) >= 2:
+                    _prev_high = _recent_bars[-2]['high']
+                    _curr_close = snap_last  # current price
+                    if _curr_close < _prev_high:
+                        detail_str = (
+                            f"pullback confirmed but price {_curr_close:.10f} still below "
+                            f"prev candle high {_prev_high:.10f} — buyers NOT in control yet"
+                        )
+                        return False, 'kline_breakout_pending', detail_str, None
+
                 # ✅ GOOD_ENTRY — pullback-bounce confirmed
                 # 1s direction confirmation before buying
                 import time as _time
@@ -532,6 +598,35 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         if m_pct >= 1.5 and bs_ratio > 1.0:
             if _chasing:
                 return False, 'chasing_top', f'momentum +{m_pct:.1f}% but chasing top', None
+
+            # ── DATA-DRIVEN GUARD 0: Relative Volume (RVol) (Phase 1) ──
+            # Strategy 1 insight: volume must be abnormally high relative to its own baseline.
+            _vol_m5 = cached_trend.get('vol_m5', 0) if cached_trend else 0
+            _vol_h1 = cached_trend.get('vol_h1', 0) if cached_trend else 0
+            _h1_avg = _vol_h1 / 12.0 if _vol_h1 > 0 else 0
+            _rvol = _vol_m5 / _h1_avg if _h1_avg > 0 else 0
+
+            if _rvol < 2.0 and not sustained_ath:
+                detail_str = (
+                    f"RVol={_rvol:.1f}x < 2.0x minimum "
+                    f"(vol_m5=${_vol_m5:.0f} vs h1_avg=${_h1_avg:.0f}) "
+                    f"— no abnormal volume, likely noise"
+                )
+                log.info(f"[SmartEntry] 🚫 ${symbol} RVOL_LOW: {detail_str}")
+                return False, 'rvol_too_low', detail_str, None
+
+            # ── EXHAUSTION GUARD: EMA Deviation (Phase 2) ──
+            # Strategy 2 insight: when price is too far from its moving average,
+            # the move is "exhausted" and reversal probability spikes.
+            _EMA_DEV_MAX = 100.0 if sustained_ath else 50.0
+            _dev_pct, _ema_val = calculate_ema_deviation(token_ca, price)
+            if _dev_pct is not None and _dev_pct > _EMA_DEV_MAX:
+                detail_str = (
+                    f"price={price:.10f} is {_dev_pct:.0f}% above 20-EMA={_ema_val:.10f} "
+                    f"(>{_EMA_DEV_MAX}% exhaustion threshold) — likely climax, DON'T BUY"
+                )
+                log.info(f"[SmartEntry] 🚫 ${symbol} EMA_EXHAUSTION: {detail_str}")
+                return False, 'ema_overextended', detail_str, None
 
             # ── DATA-DRIVEN GUARD 1: Momentum Upper Bound ──
             # Audit (26 trades): All 8 trades with m9s > 3.5% lost (0% win rate).

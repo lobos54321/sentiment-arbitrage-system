@@ -765,6 +765,26 @@ class ExitMatrixEvaluator:
             _threat_tighten = min(_threat_score * 0.02, 0.06)
         _decay = 1.0  # kept for downstream compat
 
+        # === K-LINE TRAILING STOP (Phase 5) ===
+        # Strategy 1 & 2 insight: ratchet SL up using previous candle's low.
+        # "If the structure holds, stay in. If it breaks, get out."
+        if current_pnl > 0:
+            try:
+                from entry_engine import get_recent_synthetic_bars
+                _pos_bars = get_recent_synthetic_bars(entry.get('ca'), n_bars=2)
+                if len(_pos_bars) >= 2:
+                    _prev_low = _pos_bars[-2]['low']
+                    # If current price breaks below the previous 1m candle low, exit immediately.
+                    if current_price < _prev_low:
+                        return {
+                            'action': 'exit',
+                            'reason': f'kline_trail_broken (price={current_price:.10f} < prev_low={_prev_low:.10f})',
+                            'current_pnl': current_pnl,
+                            'trail_floor': None,
+                        }
+            except Exception:
+                pass  # Fallback to standard trailing stops
+
         # === Hard Stop-Loss ===
         # Fixed -15% — reverted from AdaptiveSL (-5%~-7.5%) to match 84% win rate period.
         # Audit (26 trades, 2026-04-22): Tight SL killed 22/26 trades at -7%~-10%,
