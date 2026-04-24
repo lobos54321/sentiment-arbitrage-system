@@ -1024,10 +1024,18 @@ class ExitMatrixEvaluator:
             trail_factor = max(base_factor, vel_factor, current_factor)
             trail_floor = peak_pnl * trail_factor + _threat_tighten
 
-            if current_pnl < trail_floor:
+            # Sell slippage buffer: meme coin exits typically lose 2-4% to slippage.
+            # Data (2026-04-24): 平平福双 trail triggered at +3% but sold at -1.2% (4.2% slippage).
+            # Bobina② trail triggered at -0.3% but sold at -0.7%.
+            # We LOWER the floor so trail_stop triggers later, giving more room.
+            # Otherwise we "protect profit" that gets eaten by slippage anyway.
+            _sell_slippage_buffer = 0.03  # 3% buffer
+            trail_floor_effective = trail_floor - _sell_slippage_buffer
+
+            if current_pnl < trail_floor_effective:
                 return {
                     'action': 'exit',
-                    'reason': f'trail_stop (pnl={current_pnl:.1%} < floor={trail_floor:.1%}, peak={peak_pnl:.1%}, factor={trail_factor:.2f}, vel={velocity:.1f}%/min)',
+                    'reason': f'trail_stop (pnl={current_pnl:.1%} < floor={trail_floor:.1%}-{_sell_slippage_buffer:.0%}buf={trail_floor_effective:.1%}, peak={peak_pnl:.1%}, factor={trail_factor:.2f}, vel={velocity:.1f}%/min)',
                     'current_pnl': current_pnl,
                     'trail_floor': trail_floor,
                     '_trail_factor': trail_factor,

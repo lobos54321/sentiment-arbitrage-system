@@ -3935,6 +3935,23 @@ def run_monitor(db):
                         _kelly_sol = 0.1
                         pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
 
+                    # T-SCORE KELLY DISCOUNT: weaker trend = smaller position
+                    # Data (8hr audit, 2026-04-24): X got 0.43 SOL at T=50 → -28% = -0.12 SOL loss.
+                    # All T=50 trades lost. Reduce exposure when trend is weak.
+                    _t_score_fire = eval_res.get('scores', {}).get('trend', 0)
+                    if _t_score_fire <= 60:
+                        _old_kelly = _kelly_sol
+                        _kelly_sol = round(_kelly_sol * 0.5, 3)
+                        _kelly_sol = max(_kelly_sol, 0.03)  # never below dust
+                        pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
+                        log.info(f"  [Kelly] {w_entry['symbol']} T={_t_score_fire} discount: {_old_kelly:.3f} → {_kelly_sol:.3f} SOL (×0.5)")
+                    elif _t_score_fire <= 80:
+                        _old_kelly = _kelly_sol
+                        _kelly_sol = round(_kelly_sol * 0.75, 3)
+                        _kelly_sol = max(_kelly_sol, 0.03)
+                        pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
+                        log.info(f"  [Kelly] {w_entry['symbol']} T={_t_score_fire} discount: {_old_kelly:.3f} → {_kelly_sol:.3f} SOL (×0.75)")
+
                     # P8: Liquidity floor — reject tokens with tiny pools
                     # Data: ROCCO/hallelujah/drone had 20%+ exit slippage due to
                     # pool < $5000, contributing 55% of overnight total losses.
