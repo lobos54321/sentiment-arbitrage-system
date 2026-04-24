@@ -577,6 +577,13 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         log.info(f"[SmartEntry] 🚫  REJECT: chasing_top - {_chase_reason}")
         return False, 'chasing_top', _chase_reason, None
 
+    # Hard gate: BS must be >= 1.05 (buyers must exceed sellers)
+    # Data: AIB entered with bs=0.94 (sellers > buyers) → -21.5% loss.
+    # All winning trades had bs >= 1.0.  Require slight buyer dominance.
+    if bs_ratio < 1.05:
+        log.info(f"[SmartEntry] 🚫  REJECT: weak_buying_pressure - bs={bs_ratio:.2f} < 1.05")
+        return False, 'weak_buying_pressure', f'bs={bs_ratio:.2f} < 1.05', None
+
     liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
     if cached_trend and 0 < liq_usd < 5000:
         log.info(f"[SmartEntry] 🚫  REJECT: low_liquidity -  < 000")
@@ -687,12 +694,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # 4. DECISION LOGIC
     detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
     
-    if base_score >= 85:
+    if base_score >= 90:
         # Fast Lane Entry — reserved for TRUE 大金狗 (big golden dogs)
-        # V3.1 fix: Gate on BASE score only (excluding bonuses).
+        # V3.1 fix: Gate on BASE score only (excluding bonuses), threshold=90.
         # Root cause: Untweeney (base=75+bonus=15=90) bypassed 1% direction
         # check via bonus inflation, entered at top → -13% loss with 0.5 SOL.
-        # Base ≥85 means ≥85% of core dimensions near max (100 total possible).
+        # Base ≥90 means nearly all core dimensions at max (100 total possible).
         # NOBIKO (base=100) still enters.  Untweeney (base=75) goes smart_entry.
         # Direction check: 3% reversal threshold (tighter than old 15%).
         _time.sleep(1.0)
