@@ -3915,6 +3915,11 @@ def run_monitor(db):
                         # instead of DexScreener's lagging pc_m5)
                         'momentum_snapshots': eval_res.get('momentum_snapshots', []),
                         'momentum_pct': eval_res.get('momentum_pct', 0),
+                        # Track first-fire pc_m5 for trend decay detection.
+                        # If this is the first FIRE, capture current pc_m5.
+                        # On subsequent FIREs (after SPREAD_GUARD abort), preserve original.
+                        'first_fire_pc_m5': w_entry.get('_first_fire_pc_m5'),
+                        'spread_abort_count': w_entry.get('_spread_abort_count', 0),
                     }
 
                     # Note: Kelly always returns >= 0.03 SOL (never vetoes).
@@ -4044,7 +4049,9 @@ def run_monitor(db):
                                 entry_count=_entry_count,
                                 momentum_snapshots=pending.get('momentum_snapshots', []),
                                 momentum_pct=pending.get('momentum_pct', 0),
-                                sustained_ath=_se_sustained
+                                sustained_ath=_se_sustained,
+                                first_fire_pc_m5=pending.get('first_fire_pc_m5'),
+                                spread_abort_count=pending.get('spread_abort_count', 0),
                             )
                             pending['_smart_entry_future'] = _se_future
                             continue
@@ -4181,6 +4188,22 @@ def run_monitor(db):
                             f"(fill={price:.12f} vs trigger={_trigger_str}). "
                             f"SL buffer would be eaten by spread."
                         )
+                        # Track SPREAD_GUARD aborts on watchlist entry so subsequent
+                        # FIRE→SmartEntry cycles know the price was at the top.
+                        if pending_w_entry:
+                            _prev_aborts = pending_w_entry.get('_spread_abort_count', 0)
+                            pending_w_entry['_spread_abort_count'] = _prev_aborts + 1
+                            # Capture first-fire pc_m5 if not yet set (for trend decay detection)
+                            if '_first_fire_pc_m5' not in pending_w_entry:
+                                try:
+                                    _ff_trend = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                                    if _ff_trend:
+                                        pending_w_entry['_first_fire_pc_m5'] = _ff_trend.get('price_change_m5', 0)
+                                except Exception:
+                                    pass
+                            log.info(
+                                f"  [SPREAD_GUARD] Abort #{pending_w_entry['_spread_abort_count']} for {pending['symbol']} "
+                                f"(first_pc_m5={pending_w_entry.get('_first_fire_pc_m5', 'N/A')})")
                         pending_entries.pop(lifecycle_id, None)
                         continue
 

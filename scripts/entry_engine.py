@@ -540,7 +540,8 @@ def is_chasing_top(trend_data):
     return False, 'ok'
 
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
-                         momentum_snapshots=None, momentum_pct=0, sustained_ath=False):
+                         momentum_snapshots=None, momentum_pct=0, sustained_ath=False,
+                         first_fire_pc_m5=None, spread_abort_count=0):
     """
     Smart Entry Engine (V6 — Unified Scoring System)
     Replaces serial rejection with a 6-dimension scoring system (Total 100+ points).
@@ -583,6 +584,28 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     if bs_ratio < 1.05:
         log.info(f"[SmartEntry] 🚫  REJECT: weak_buying_pressure - bs={bs_ratio:.2f} < 1.05")
         return False, 'weak_buying_pressure', f'bs={bs_ratio:.2f} < 1.05', None
+
+    # Trend decay detection: if pc_m5 has dropped significantly since first FIRE,
+    # it means the pump is fading and we'd be buying on the way down.
+    # BILLION case: pc_m5 went 17.6% → 10.0% → 1.2% across 3 FIRE attempts.
+    if first_fire_pc_m5 is not None and first_fire_pc_m5 > 3.0:
+        if pc_m5 < first_fire_pc_m5 * 0.5:
+            log.info(
+                f"[SmartEntry] 🚫  REJECT: momentum_fading - "
+                f"pc_m5 decayed {first_fire_pc_m5:+.1f}%→{pc_m5:+.1f}% "
+                f"(>{50}% drop since first FIRE)")
+            return False, 'momentum_fading', (
+                f'pc_m5 {first_fire_pc_m5:+.1f}%→{pc_m5:+.1f}% '
+                f'({((first_fire_pc_m5-pc_m5)/first_fire_pc_m5*100):.0f}% decay)'), None
+
+    # SPREAD_GUARD abort escalation: 2+ aborts means price was at the top
+    # and is now falling. Require stricter criteria to re-enter.
+    if spread_abort_count >= 2:
+        log.info(
+            f"[SmartEntry] 🚫  REJECT: post_spread_abort_cooldown - "
+            f"{spread_abort_count} consecutive spread aborts, price likely past peak")
+        return False, 'post_spread_abort', (
+            f'{spread_abort_count} spread aborts, likely past peak'), None
 
     liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
     if cached_trend and 0 < liq_usd < 5000:
