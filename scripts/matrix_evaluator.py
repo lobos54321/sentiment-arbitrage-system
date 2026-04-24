@@ -62,21 +62,56 @@ def _lazy_import():
 
 def score_trend(bars, symbol, token_ca=None, pool_address=None):
     """
-    Matrix ① — Trend Direction (reverted to 84% win rate period)
-    
-    Uses OLS linear regression on K-line close prices (check_multi_bar_trend).
-    84% period scoring:
-      norm_slope > +0.15 → T=100 (clear uptrend, passed_shape)
-      norm_slope < -0.15 → T=0   (downtrend)
-      else               → T=50  (sideways / insufficient)
-    
-    Data source: synthetic K-line bars built from price polling (~10s intervals).
-    Each 1-minute bar gets ~6 price observations — enough for OHLC + regression.
+    Matrix ① — Trend Direction (V3.2: DexScreener pc_m5 + bs primary)
+
+    Primary: DexScreener real-time data (pc_m5 price change + buy/sell ratio).
+      T=100: pc_m5 > 6%  AND bs >= 1.5  → 明确拉升
+      T=80:  pc_m5 > 4%  AND bs >= 1.2  → 健康上涨
+      T=60:  pc_m5 > 2%  AND bs >= 1.05 → 微微上涨
+      T=50:  everything else not clearly down → 横盘
+      T=0:   pc_m5 < -3% OR (pc_m5 > 0 but bs < 0.9) → 下跌或假泵
+
+    Fallback: K-line linear regression (when DexScreener unavailable).
 
     Returns: (score: int 0-100, reason: str, detail: str)
     """
     _lazy_import()
 
+    # === Primary: DexScreener pc_m5 + buy/sell ratio ===
+    if token_ca and callable(_dex_trend_fn):
+        try:
+            dex = _dex_trend_fn(token_ca)
+            if dex:
+                pc_m5 = dex.get('price_change_m5', 0) or 0
+                buys = dex.get('buys_m5', 0) or 0
+                sells = dex.get('sells_m5', 0) or 0
+                bs = buys / sells if sells > 0 else (2.0 if buys > 0 else 1.0)
+                detail = f'pc_m5={pc_m5:+.1f}% bs={bs:.2f} (buys={buys} sells={sells})'
+
+                # T=0: clearly bearish or fake pump
+                if pc_m5 < -3:
+                    return 0, 'dex_downtrend', detail
+                if pc_m5 > 0 and bs < 0.9:
+                    return 0, 'dex_fake_pump', detail
+
+                # T=100: strong uptrend with dominant buyers
+                if pc_m5 > 6 and bs >= 1.5:
+                    return 100, 'dex_strong_uptrend', detail
+
+                # T=80: healthy uptrend
+                if pc_m5 > 4 and bs >= 1.2:
+                    return 80, 'dex_healthy_uptrend', detail
+
+                # T=60: mild uptrend
+                if pc_m5 > 2 and bs >= 1.05:
+                    return 60, 'dex_mild_uptrend', detail
+
+                # T=50: sideways / unclear
+                return 50, 'dex_sideways', detail
+        except Exception:
+            pass  # fall through to K-line fallback
+
+    # === Fallback: K-line linear regression ===
     if not bars or len(bars) < 3:
         return 50, 'insufficient_bars', 'not enough bars for regression (fail-open)'
 
@@ -355,7 +390,7 @@ class MatrixEvaluator:
 
     # Thresholds for NOT_ATH entries
     NOT_ATH_THRESHOLDS = {
-        'trend_min': 50,
+        'trend_min': 60,    # V3.2: raised from 50, require at least mild uptrend (pc_m5>2% + bs>=1.05)
         'volume_min': 60,
         'price_min': 60,
         'signal_min': 50,
@@ -366,7 +401,7 @@ class MatrixEvaluator:
 
     # Thresholds for ATH entries (reverted to 84% win rate period)
     ATH_THRESHOLDS = {
-        'trend_min': 50,    # 84% period: T=0 was soft warning, T≥50 passes
+        'trend_min': 60,    # V3.2: raised from 50, ATH also needs mild uptrend
         'volume_min': 60,   # V≥60 counts as passing
         'price_min': 0,     # Skipped for ATH (ATH = price at highs)
         'signal_min': 0,    # ATH = auto 100
@@ -616,7 +651,7 @@ class MatrixEvaluator:
         v_score = scores.get('volume', 0)
 
         # New data-driven hard gates: Trend and Signal Quality
-        if t_score < 50:
+        if t_score < 60:
             return False
             
         if s_score < 50:

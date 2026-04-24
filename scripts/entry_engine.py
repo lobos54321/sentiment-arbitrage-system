@@ -612,6 +612,17 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         return False, 'post_spread_abort', (
             f'{spread_abort_count} spread abort(s), past peak'), None
 
+    # TREND GUARD: reject if 5-minute price change is negative.
+    # Data (8hr audit, 2026-04-24): 4 trades with pc_m5<0 → 1W/3L = 25% win rate.
+    # If the trend is declining, we're buying into a falling knife.
+    # Matrix T≥60 should already filter this, but SmartEntry runs later and
+    # DexScreener data may have shifted. This is the second safety net.
+    if pc_m5 is not None and pc_m5 < 0:
+        log.info(
+            f"[SmartEntry] 🚫  REJECT: negative_trend - "
+            f"pc_m5={pc_m5:+.1f}% (5min price declining, refusing to buy into downtrend)")
+        return False, 'negative_trend', f'pc_m5={pc_m5:+.1f}% < 0', None
+
     liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
     if cached_trend and 0 < liq_usd < 5000:
         log.info(f"[SmartEntry] 🚫  REJECT: low_liquidity -  < 000")
