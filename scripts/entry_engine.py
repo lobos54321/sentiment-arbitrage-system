@@ -598,14 +598,19 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 f'pc_m5 {first_fire_pc_m5:+.1f}%→{pc_m5:+.1f}% '
                 f'({((first_fire_pc_m5-pc_m5)/first_fire_pc_m5*100):.0f}% decay)'), None
 
-    # SPREAD_GUARD abort escalation: 2+ aborts means price was at the top
-    # and is now falling. Require stricter criteria to re-enter.
-    if spread_abort_count >= 2:
+    # SPREAD_GUARD abort guard: ANY prior abort means price was at the top.
+    # Data (9.5h, 5 tokens): 2/2 entries after spread abort = loss
+    #   casinu:  1 abort → entered 2min later → -15.4%
+    #   BILLION: 2 aborts → entered on 3rd try → -16.0%
+    # Tokens where SPREAD_GUARD blocked ALL attempts ($ORG 3x, TRIFECTA 7x)
+    # showed pc_m5 decay 70-85%, confirming the pump was over.
+    if spread_abort_count >= 1:
         log.info(
-            f"[SmartEntry] 🚫  REJECT: post_spread_abort_cooldown - "
-            f"{spread_abort_count} consecutive spread aborts, price likely past peak")
+            f"[SmartEntry] 🚫  REJECT: post_spread_abort - "
+            f"{spread_abort_count} spread abort(s), price likely past peak "
+            f"(data: 2/2 post-abort entries lost -15% to -16%)")
         return False, 'post_spread_abort', (
-            f'{spread_abort_count} spread aborts, likely past peak'), None
+            f'{spread_abort_count} spread abort(s), past peak'), None
 
     liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
     if cached_trend and 0 < liq_usd < 5000:
