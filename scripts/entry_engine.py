@@ -16,7 +16,7 @@ log = logging.getLogger('paper_trade_monitor')
 
 # ─── Kelly Criterion Constants ────────────────────────────────────────────────
 KELLY_BASE_CAPITAL_SOL = float(os.environ.get('KELLY_BASE_CAPITAL_SOL', '5.0'))
-KELLY_BASE_WIN_RATE    = 0.45   # Based on overnight data: 48% win rate (conservative)
+KELLY_BASE_WIN_RATE    = 0.50   # Adjusted: system targets ~50% win rate (was 0.45 conservative)
 KELLY_BASE_ODDS        = 5.0   # ~150% win / ~15% loss (ONLY used as fallback)
 KELLY_COLD_START_ODDS  = 2.0   # Based on overnight data: avg_win=16.3% / avg_loss=8%
 MAX_POSITION_SOL       = 0.5   # Hard cap: protect against Kelly outliers (was uncapped → 1.0 SOL)
@@ -216,6 +216,15 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
             log.info(f"[Kelly] V+P quality gate: V={v_score}+P={p_score}={vp_sum} ≤ 100 → cap 0.1 SOL")
 
     # ─── ATH confirmation (logical — new highs have momentum) ─────────
+    # V3.1 fix: ATH boost must NOT flip negative base EV to large position.
+    # Root cause: Untweeney had base f*=-0.55 (system in losing streak),
+    # but ATH boost pushed p from 0.50→0.675 → f*=0.286 → 0.5 SOL max bet.
+    # Fix: Calculate base Kelly FIRST. If base f*<=0, ATH can only give 0.1 SOL probe.
+    p_base = p  # save pre-ATH probability
+    b_base = b
+    base_q = 1.0 - p_base
+    base_f = (p_base * b_base - base_q) / b_base if b_base > 0 else -1.0
+
     ath_num = int(watchlist_entry.get('ath_num') or 0)
     if ath_num > 0:
         ath_boost = {1: 1.6, 2: 1.4, 3: 1.2}.get(ath_num, 1.1)
@@ -230,6 +239,12 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     # Kelly formula: f* = (p*b - q) / b
     q = 1.0 - p
     kelly_f = (p * b - q) / b if b > 0 else -1.0
+
+    # Negative base EV with ATH boost → cap at probe position (0.1 SOL)
+    # ATH alone should not override the system's losing-streak signal.
+    if base_f <= 0 and kelly_f > 0:
+        log.info(f"[Kelly] ATH boost CAPPED: base_f*={base_f:.3f}≤0 but boosted_f*={kelly_f:.3f}>0 → probe 0.1 SOL (ATH cannot flip negative EV to max bet)")
+        return 0.1
 
     # Negative EV → use minimum position (Kelly sizes, doesn't veto — Matrix decides trades)
     if kelly_f <= 0:
@@ -667,16 +682,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         pass
 
     total_score += bonus_score
+    base_score = total_score - bonus_score  # core dimensions only (no bonuses)
 
     # 4. DECISION LOGIC
-    detail_str = f"Score={total_score} [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
+    detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
     
-    if total_score >= 90:
+    if base_score >= 85:
         # Fast Lane Entry — reserved for TRUE 大金狗 (big golden dogs)
-        # V3 fix: Raised from 70→90.  At 70, bonuses (b_pb:10 + b_kline:5)
-        # let weak coins like POSTER (base=67+15=82) bypass the strict 1%
-        # momentum check.  At 90, only coins with base score ≥75 qualify.
-        # NOBIKO (base=100, total=115) still enters.  POSTER (82) doesn't.
+        # V3.1 fix: Gate on BASE score only (excluding bonuses).
+        # Root cause: Untweeney (base=75+bonus=15=90) bypassed 1% direction
+        # check via bonus inflation, entered at top → -13% loss with 0.5 SOL.
+        # Base ≥85 means ≥85% of core dimensions near max (100 total possible).
+        # NOBIKO (base=100) still enters.  Untweeney (base=75) goes smart_entry.
         # Direction check: 3% reversal threshold (tighter than old 15%).
         _time.sleep(1.0)
         price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
