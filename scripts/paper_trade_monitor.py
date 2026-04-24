@@ -4311,20 +4311,17 @@ def run_monitor(db):
                         f"mode={pending.get('entry_mode', 'default')} lifecycle={lifecycle_id} via quoted execution"
                     )
                     if 'watchlist_id' in pending:
-                        # Slippage-Adjusted SL: base is now fixed -15% (84% period)
+                        # Base SL is now fixed -15% (84% period)
+                        # We no longer adjust SL for slippage. The user wants the SL to be strictly based on the
+                        # actual execution price, not widened to compensate for a bad entry price.
                         _base_sl = get_adaptive_stop_loss()  # returns -0.15
+                        _final_sl = _base_sl
+                        
                         if _spread > 0:
-                            # We bought higher than trigger, so SL must be pulled down to grant identical absolute room
-                            _slip_pct = _spread / 100.0
-                            _adj_sl = _base_sl - _slip_pct
-                            # With 2% spread guard, max slippage is 2% → max adjusted SL = -17%
-                            _final_sl = max(-0.20, _adj_sl)
                             log.info(
-                                f"  [SL_ADJUST] {pending['symbol']} BaseSL={_base_sl*100:.1f}%, Slip={_spread:+.1f}% "
-                                f"→ AdoptedSL={_final_sl*100:.1f}%"
+                                f"  [SL_ADJUST] {pending['symbol']} BaseSL={_base_sl*100:.1f}%. "
+                                f"(Slippage was +{_spread:.1f}%, but we no longer widen SL for slippage)"
                             )
-                        else:
-                            _final_sl = _base_sl
                             
                         # K-LINE STRUCTURAL STOP LOSS (Phase 5)
                         # IMPORTANT: use native_only=True because entry price is SOL-native,

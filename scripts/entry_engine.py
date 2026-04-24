@@ -255,8 +255,8 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
 
     # Negative EV → use minimum position (Kelly sizes, doesn't veto — Matrix decides trades)
     if kelly_f <= 0:
-        log.info(f"[Kelly] f*={kelly_f:.3f} ≤ 0 → MIN position 0.03 SOL | p={p:.3f} b={b:.2f}")
-        return 0.03
+        log.info(f"[Kelly] f*={kelly_f:.3f} ≤ 0 → MIN position 0.1 SOL | p={p:.3f} b={b:.2f}")
+        return 0.1
 
     # Half-Kelly for safety
     position = base_capital * kelly_f * 0.5
@@ -267,8 +267,8 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
         position *= 1.5
         log.info(f"[Kelly] Sustained ATH → position×1.5")
 
-    # Hard limits: min 0.03 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
-    pos = round(max(0.03, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
+    # Hard limits: min 0.1 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
+    pos = round(max(0.1, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
     # Apply V+P quality gate cap
     if vp_cap is not None and pos > vp_cap:
         log.info(f"[Kelly] V+P cap applied: {pos} → {vp_cap} SOL")

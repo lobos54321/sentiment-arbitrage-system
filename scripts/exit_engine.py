@@ -110,6 +110,21 @@ class ExitGuardianThread(threading.Thread):
     def stop(self):
         self._running = False
 
+    def _get_instant_quote(self, pos, ca):
+        if not self.simulate_exit: return None
+        try:
+            _sell_amount = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
+            _instant_sim = self.simulate_exit(
+                ca, str(_sell_amount),
+                getattr(pos, 'token_decimals', 0) or 0,
+                pos.strategy_stage
+            )
+            log.info(f"[ExitGuardian] ⚡ {pos.symbol} instant quote: {_instant_sim.get('quotedOutputSOL', '?') if _instant_sim else 'FAIL'}")
+            return _instant_sim
+        except Exception as _e:
+            log.warning(f"[ExitGuardian] {pos.symbol} instant quote failed: {_e}")
+            return None
+
     def get_pending_exits(self):
         """Retrieve and clear pending exit signals (called by main loop)."""
         with self.exit_queue_lock:
@@ -238,18 +253,7 @@ class ExitGuardianThread(threading.Thread):
                     # Instant exit quote: don't wait for main loop (was 30-94s delay!)
                     # Data: drone SL at 19:25:58 but CLOSED at 19:26:29 (31s later, -31%)
                     #       ROCCO SL at 19:51:12 but CLOSED at 19:52:46 (94s later, -39%)
-                    _instant_sim = None
-                    if self.simulate_exit:
-                        try:
-                            _sell_amount = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
-                            _instant_sim = self.simulate_exit(
-                                ca, str(_sell_amount),
-                                getattr(pos, 'token_decimals', 0) or 0,
-                                pos.strategy_stage
-                            )
-                            log.info(f"[ExitGuardian] ⚡ {pos.symbol} instant quote: {_instant_sim.get('quotedOutputSOL', '?') if _instant_sim else 'FAIL'}")
-                        except Exception as _e:
-                            log.warning(f"[ExitGuardian] {pos.symbol} instant quote failed: {_e}")
+                    _instant_sim = self._get_instant_quote(pos, ca)
                     with self.exit_queue_lock:
                         self.exit_queue.append({
                             'trade_id': trade_id,
@@ -390,6 +394,8 @@ class ExitGuardianThread(threading.Thread):
                                 'reason': f'guardian_ath_phase3_moon (pnl={pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, -40pp)',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
+                            '_instant_sim': self._get_instant_quote(pos, ca),
+
                             })
                         self._exit_pending.add(trade_id)
                         continue
@@ -421,6 +427,8 @@ class ExitGuardianThread(threading.Thread):
                                     'reason': f'guardian_ath_phase2 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -20pp)',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+
                                 })
                             self._exit_pending.add(trade_id)
                             continue
@@ -442,6 +450,8 @@ class ExitGuardianThread(threading.Thread):
                                     'reason': f'guardian_ath_phase1_trail_25 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -15pp)',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+
                                 })
                             self._exit_pending.add(trade_id)
                             continue
@@ -461,6 +471,8 @@ class ExitGuardianThread(threading.Thread):
                                     'reason': f'guardian_ath_phase1_trail_15 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -10pp)',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+
                                 })
                             self._exit_pending.add(trade_id)
                             continue
@@ -484,6 +496,8 @@ class ExitGuardianThread(threading.Thread):
                                     'reason': f'guardian_ath_phase1_trail_8 (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, -8pp)',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+
                                 })
                             self._exit_pending.add(trade_id)
                             continue
@@ -521,6 +535,8 @@ class ExitGuardianThread(threading.Thread):
                                     'reason': f'guardian_ath_crash_brake ({_ath_crash_reason})',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+
                                 })
                             self._exit_pending.add(trade_id)
                             continue
@@ -573,6 +589,8 @@ class ExitGuardianThread(threading.Thread):
                                     'reason': f'guardian_trail_stop (pnl={pnl:.1%} < floor={trail_floor:.1%}, peak={pos.peak_pnl:.1%}, vel={use_vel:.1f}, tps={tps_smooth:.1f})',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+
                                 })
                             self._exit_pending.add(trade_id)
                             continue
@@ -601,6 +619,8 @@ class ExitGuardianThread(threading.Thread):
                             'reason': f'guardian_moon_breakeven (price <= entry)',
                             'trigger_price': price,
                             'trigger_pnl': pnl,
+                        '_instant_sim': self._get_instant_quote(pos, ca),
+
                         })
                     self._exit_pending.add(trade_id)
                     continue
@@ -627,6 +647,8 @@ class ExitGuardianThread(threading.Thread):
                                 'reason': f'guardian_moon_trail (pnl={pnl:.1%} < floor={moon_floor:.1%})',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
+                            '_instant_sim': self._get_instant_quote(pos, ca),
+
                             })
                         self._exit_pending.add(trade_id)
 
