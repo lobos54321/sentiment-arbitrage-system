@@ -835,22 +835,23 @@ class ExitMatrixEvaluator:
             }
 
         # === ATH Fast Lane: Three-Phase Exit Strategy ===
-        # Phase 1 (peak < 50%):  Free run — only Hard SL -7.5% (already checked above)
-        # Phase 2 (50-100%):     Trail with absolute -20pp floor
-        # Phase 3 (peak >= 100%): lock_profit → sell 50% (recover principal) → rest goes moon_bag
+        # Phase 1 (peak < 25%):  Free run with crash brakes
+        # Phase 2 (25-50%):      Trail with -15pp floor + tiered protection
+        # Phase 3 (peak >= 50%): lock_profit → sell 50% (recover principal) → rest goes moon_bag
+        # LOWERED from 100%→50% (2026-04-25): max peak in 8hr audit was +36%. Old threshold unreachable.
         _is_ath_entry = entry.get('type') == 'ATH' or entry.get('signal_type') == 'ATH'
         if _is_ath_entry:
             symbol = entry.get('symbol', '?')
 
-            # Phase 3: peak >= 100% → trigger lock_profit (sell 50% to recover principal)
-            if peak_pnl >= 1.0 and not entry.get('has_locked_profit'):
+            # Phase 3: peak >= 50% → trigger lock_profit (sell 50% to recover principal)
+            if peak_pnl >= 0.50 and not entry.get('has_locked_profit'):
                 log.info(
-                    f"[ExitMatrix] {symbol} ATH PHASE3: peak={peak_pnl:.1%} >= 100% "
+                    f"[ExitMatrix] {symbol} ATH PHASE3: peak={peak_pnl:.1%} >= 50% "
                     f"→ lock_profit (sell 50% to recover principal, rest → moon_bag)"
                 )
                 return {
                     'action': 'lock_profit',
-                    'reason': f'ath_phase3_lock (peak={peak_pnl:.1%} >= 100%, sell 50% → recover principal)',
+                    'reason': f'ath_phase3_lock (peak={peak_pnl:.1%} >= 50%, sell 50% → recover principal)',
                     'current_pnl': current_pnl,
                     'trail_floor': None,
                 }
@@ -947,25 +948,26 @@ class ExitMatrixEvaluator:
                 'trail_floor': None,
             }
 
-        # === Profit Lock at +50% (velocity-aware) ===
-        # B+C covers -15% to +50% with velocity+volume trail.
-        # Lock profit (sell 50% → moon bag) only at +50%+.
-        # Safety cap: always lock at +70% regardless of velocity.
-        if peak_pnl >= 0.50 and not entry.get('has_locked_profit'):
+        # === Profit Lock at +25% (velocity-aware) ===
+        # LOWERED from +50% (2026-04-25): 8hr audit showed max peak=+36%.
+        # +50% threshold was never reached → no moon bags → missed all 2x+ opportunities.
+        # Lock profit (sell 50% → moon bag) at +25%+.
+        # Safety cap: always lock at +40% regardless of velocity.
+        if peak_pnl >= 0.25 and not entry.get('has_locked_profit'):
 
             velocity = entry.get('_guardian_velocity', 0)
             helius_tps = entry.get('_helius_tps', 0)
             symbol = entry.get('symbol', '?')
 
-            # Safety cap: force lock at +70% no matter what
-            if peak_pnl >= 0.70:
+            # Safety cap: force lock at +40% no matter what
+            if peak_pnl >= 0.40:
                 log.info(
                     f"[ExitMatrix] {symbol} FORCE lock_profit: "
-                    f"peak={peak_pnl:.1%} >= 70% safety cap"
+                    f"peak={peak_pnl:.1%} >= 40% safety cap"
                 )
                 return {
                     'action': 'lock_profit',
-                    'reason': f'profit_lock_forced (peak={peak_pnl:.1%} >= 70%)',
+                    'reason': f'profit_lock_forced (peak={peak_pnl:.1%} >= 40%)',
                     'current_pnl': current_pnl,
                     'trail_floor': None,
                 }

@@ -4350,6 +4350,21 @@ def run_monitor(db):
                                 _structure_sl_pct = ((price - _structure_low) / price) * -100
                                 # Clamp: at least -3%, at most -15% (never wider than current fixed SL)
                                 _structure_sl = max(-15.0, min(-3.0, _structure_sl_pct))
+
+                                # HIGH-SCORE WIDENING: if Matrix scores sum ≥ 400
+                                # (avg 80/dimension), give 5pp extra room.
+                                # Data: OG (sum=420, Score=105) got KLINE_SL=-11.3% → shaken out,
+                                # then rallied 3x. With -16.3% SL, would have survived.
+                                _matrix_sum = sum((pending.get('matrix_scores') or {}).values())
+                                if _matrix_sum >= 400:
+                                    _structure_sl_widened = _structure_sl - 5.0  # widen by 5pp
+                                    _structure_sl_widened = max(-20.0, _structure_sl_widened)  # never wider than -20%
+                                    log.info(
+                                        f"  [KLINE_SL] {pending['symbol']} HIGH_SCORE widen: "
+                                        f"matrix_sum={_matrix_sum} → SL {_structure_sl:.1f}% → {_structure_sl_widened:.1f}%"
+                                    )
+                                    _structure_sl = _structure_sl_widened
+
                                 log.info(
                                     f"  [KLINE_SL] {pending['symbol']} structure_low={_structure_low:.10f} "
                                     f"→ SL={_structure_sl:.1f}% (vs fixed={_final_sl*100:.1f}%)"

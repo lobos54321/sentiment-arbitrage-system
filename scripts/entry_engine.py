@@ -193,15 +193,22 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
             p *= 0.9    # mild skepticism — all-perfect is rare, may be peak
             log.info(f"[Kelly] Matrix all-perfect: {perfect_count}/5 → p×0.9")
         elif perfect_count <= 1:
-            # Contrarian bonus — ONLY for first entry on fresh coins.
+            # Contrarian bonus — ONLY for first entry on fresh coins WITH strong trend.
             # Data: Veteran② got contrarian ×1.2 on re-entry (decaying signal) → 0.775 SOL → -12.5%.
-            # Low perfect_count on re-entry means signal decay, not contrarian opportunity.
+            # Data (2026-04-24): X got contrarian ×1.2 at T=50 (1/5 perfect) → 0.43 SOL → -28% = -0.12 SOL.
+            # In V3 (5 dimensions), low perfect_count usually = weak signal, not contrarian.
+            # Gate: require T≥80 so only strong-trend coins get the bonus.
             entry_age_min = (time.time() - watchlist_entry.get('added_at', time.time())) / 60
-            if entry_count == 0 and entry_age_min <= 5:
-                p *= 1.2    # contrarian bonus — less crowded, fresh signal
-                log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect → p×1.2")
+            _t_score_kelly = matrix_scores.get('trend', 0) if matrix_scores else 0
+            if entry_count == 0 and entry_age_min <= 5 and _t_score_kelly >= 80:
+                p *= 1.2    # contrarian bonus — less crowded, fresh signal, confirmed trend
+                log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect T={_t_score_kelly} → p×1.2")
             else:
-                log.info(f"[Kelly] Matrix low-perfect={perfect_count}/5 but entry_count={entry_count} age={entry_age_min:.0f}min → no contrarian bonus")
+                _skip_reason = []
+                if entry_count > 0: _skip_reason.append(f"reentry={entry_count}")
+                if entry_age_min > 5: _skip_reason.append(f"age={entry_age_min:.0f}min")
+                if _t_score_kelly < 80: _skip_reason.append(f"T={_t_score_kelly}<80")
+                log.info(f"[Kelly] Matrix low-perfect={perfect_count}/5 → no contrarian bonus ({', '.join(_skip_reason)})")
 
         # ─── V+P Quality Gate ──────────────────────────────────────────
         # Live data: KIZUNA (V=40+P=30=70, 0.478 SOL → -20%) and
