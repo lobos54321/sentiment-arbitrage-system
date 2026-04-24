@@ -4171,6 +4171,18 @@ def run_monitor(db):
                         f"spread={_spread:+.1f}%)"
                     )
 
+                    # POST-SPREAD-ABORT GUARD (redundant with SmartEntry, but catches race conditions)
+                    # Bug: Gas 2026-04-24 passed SmartEntry despite spread_abort_count=1
+                    # because the pending entry snapshot was stale. Read directly from live w_entry.
+                    _live_abort_count = pending_w_entry.get('_spread_abort_count', 0) if pending_w_entry else 0
+                    if _live_abort_count >= 1:
+                        log.info(
+                            f"  [POST_SPREAD_ABORT] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_live_abort_count} prior spread abort(s) on watchlist entry. "
+                            f"Refusing entry (data: 100% loss rate post-abort).")
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
                     # SPREAD GUARD: reject if fill price is >2% above SmartEntry trigger price.
                     # Root cause: peak=0% trades caused by large quote spread eating SL buffer.
                     # Audit (26 trades, 7hrs 2026-04-22):
