@@ -730,9 +730,34 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     total_score += bonus_score
     base_score = total_score - bonus_score  # core dimensions only (no bonuses)
 
-    # 4. DECISION LOGIC
+    # 4. PRE-BUY K-LINE TREND CONFIRMATION
+    # Architecture: DexScreener drove FIRE. Now confirm the trend is STILL ALIVE
+    # using the most recent 1-minute synthetic K-line (close > open = still bullish).
+    # This catches trend reversals that happened between FIRE and now.
+    # Only 1 bar needed — if the last minute was bearish, we don't buy.
+    try:
+        _kline_bars = get_recent_synthetic_bars(token_ca, n_bars=1, pool_address=pool_address, native_only=True)
+        if _kline_bars:
+            _last_bar = _kline_bars[-1]
+            _bar_open  = _last_bar.get('open', 0)
+            _bar_close = _last_bar.get('close', 0)
+            if _bar_open > 0 and _bar_close < _bar_open:
+                _bar_drop = (_bar_open - _bar_close) / _bar_open * 100
+                log.info(
+                    f"[SmartEntry] 🚫  REJECT: kline_trend_reversed - "
+                    f"last 1min bar bearish (open={_bar_open:.10f} → close={_bar_close:.10f}, "
+                    f"-{_bar_drop:.1f}%). Trend gone since FIRE.")
+                return False, 'kline_trend_reversed', f'last bar -{_bar_drop:.1f}% (bearish)', None
+            elif _bar_open > 0 and _bar_close >= _bar_open:
+                log.info(
+                    f"[SmartEntry] ✅  KLINE_OK: last 1min bar bullish "
+                    f"(+{(_bar_close-_bar_open)/_bar_open*100:.1f}%)")
+    except Exception:
+        pass  # If K-line unavailable, don't block the trade
+
+    # 5. DECISION LOGIC
     detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
-    
+
     if base_score >= 90:
         # Fast Lane Entry — reserved for TRUE 大金狗 (big golden dogs)
         # V3.1 fix: Gate on BASE score only (excluding bonuses), threshold=90.

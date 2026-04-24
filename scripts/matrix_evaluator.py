@@ -62,85 +62,69 @@ def _lazy_import():
 
 def score_trend(bars, symbol, token_ca=None, pool_address=None):
     """
-    Matrix ① — Trend Direction (V3.2: Hybrid K-line + DexScreener)
+    Matrix ① — Trend Direction (V3.2: DexScreener pc_m5 + bs)
 
-    Primary: K-line regression slope (real-time, 10s polling) + DexScreener bs (buy/sell ratio).
-      T=100: slope uptrend  AND bs >= 1.5  → 明确拉升
-      T=80:  slope uptrend  AND bs >= 1.2  → 健康上涨
-      T=60:  slope uptrend  AND bs >= 1.05 → 微微上涨 (or sideways + strong bs)
-      T=50:  sideways or insufficient bs   → 横盘
-      T=0:   slope downtrend OR (uptrend but bs < 0.9) → 下跌或假泵
+    Architecture decision: DexScreener is the ONLY primary source here.
+    Reason: meme coins fire within 0-3 minutes of registration. During that window
+    we have < 3 synthetic K-line bars, so K-line regression is unavailable.
+    DexScreener's 5-min rolling data is always available immediately.
 
-    Fallback: DexScreener pc_m5 + bs (when K-line data unavailable).
+    K-line confirmation is done separately as a PRE-BUY gate in SmartEntry
+    (last 1-minute bar close > open) — where it actually matters.
+
+    Scoring:
+      T=100: pc_m5 > 6%  AND bs >= 1.5  → 明确拉升
+      T=80:  pc_m5 > 4%  AND bs >= 1.2  → 健康上涨
+      T=60:  pc_m5 > 2%  AND bs >= 1.05 → 微微上涨
+      T=50:  sideways / unclear          → 横盘 (FIRE blocked by T>=60 gate)
+      T=0:   pc_m5 < -3% OR fake pump   → 下跌或假泵
+
+    Fallback: K-line regression (when DexScreener unavailable).
 
     Returns: (score: int 0-100, reason: str, detail: str)
     """
     _lazy_import()
 
-    # Get DexScreener buy/sell ratio (needed for both primary and fallback)
-    bs = 1.0  # default neutral
-    pc_m5 = 0
-    _dex_available = False
+    # === Primary: DexScreener pc_m5 + buy/sell ratio ===
     if token_ca and callable(_dex_trend_fn):
         try:
             dex = _dex_trend_fn(token_ca)
             if dex:
-                _dex_available = True
                 pc_m5 = dex.get('price_change_m5', 0) or 0
-                buys = dex.get('buys_m5', 0) or 0
+                buys  = dex.get('buys_m5', 0) or 0
                 sells = dex.get('sells_m5', 0) or 0
-                bs = buys / sells if sells > 0 else (2.0 if buys > 0 else 1.0)
+                bs    = buys / sells if sells > 0 else (2.0 if buys > 0 else 1.0)
+                detail = f'pc_m5={pc_m5:+.1f}% bs={bs:.2f} (buys={buys} sells={sells})'
+
+                # T=0: clearly bearish or fake pump (price up but sellers dominate)
+                if pc_m5 < -3:
+                    return 0, 'dex_downtrend', detail
+                if pc_m5 > 0 and bs < 0.9:
+                    return 0, 'dex_fake_pump', detail
+
+                # T=100: strong uptrend + dominant buyers
+                if pc_m5 > 6 and bs >= 1.5:
+                    return 100, 'dex_strong_uptrend', detail
+                # T=80: healthy uptrend
+                if pc_m5 > 4 and bs >= 1.2:
+                    return 80, 'dex_healthy_uptrend', detail
+                # T=60: mild uptrend (minimum to pass FIRE gate)
+                if pc_m5 > 2 and bs >= 1.05:
+                    return 60, 'dex_mild_uptrend', detail
+
+                # T=50: sideways — will be blocked by T>=60 FIRE gate
+                return 50, 'dex_sideways', detail
         except Exception:
-            pass
+            pass  # fall through to K-line fallback
 
-    # === Primary: K-line regression slope + DexScreener bs ===
-    if bars and len(bars) >= 3:
-        trend_ok, reason, detail = _trend_fn(bars, symbol)
-        detail_full = f'{detail} | bs={bs:.2f} pc_m5={pc_m5:+.1f}%'
+    # === Fallback: K-line linear regression (DexScreener unavailable) ===
+    if not bars or len(bars) < 3:
+        return 50, 'no_trend_data', 'fail-open (no dex, no kline)'
 
-        if trend_ok and reason == 'passed_shape':
-            # K-line says uptrend — score by buying pressure strength
-            if bs >= 1.5:
-                return 100, 'kline_strong_uptrend', detail_full
-            elif bs >= 1.2:
-                return 80, 'kline_healthy_uptrend', detail_full
-            elif bs >= 1.05:
-                return 60, 'kline_mild_uptrend', detail_full
-            elif bs < 0.9:
-                # Uptrend on chart but sellers dominate → fake pump
-                return 0, 'kline_fake_pump', detail_full
-            else:
-                return 50, 'kline_uptrend_weak_bs', detail_full
-
-        elif trend_ok and reason == 'sideways':
-            # K-line says sideways — only pass if DexScreener shows strong buying
-            if bs >= 1.5 and pc_m5 > 2:
-                return 60, 'sideways_strong_buying', detail_full
-            else:
-                return 50, 'kline_sideways', detail_full
-
-        else:
-            # K-line says downtrend
-            return 0, 'kline_downtrend', detail_full
-
-    # === Fallback: DexScreener pc_m5 + bs (no K-line data) ===
-    if _dex_available:
-        detail = f'pc_m5={pc_m5:+.1f}% bs={bs:.2f} (no kline, dex fallback)'
-
-        if pc_m5 < -3:
-            return 0, 'dex_downtrend', detail
-        if pc_m5 > 0 and bs < 0.9:
-            return 0, 'dex_fake_pump', detail
-        if pc_m5 > 6 and bs >= 1.5:
-            return 100, 'dex_strong_uptrend', detail
-        if pc_m5 > 4 and bs >= 1.2:
-            return 80, 'dex_healthy_uptrend', detail
-        if pc_m5 > 2 and bs >= 1.05:
-            return 60, 'dex_mild_uptrend', detail
-        return 50, 'dex_sideways', detail
-
-    # === No data at all ===
-    return 50, 'no_trend_data', 'fail-open (no kline, no dex)'
+    trend_ok, reason, detail = _trend_fn(bars, symbol)
+    if trend_ok:
+        return (100 if reason == 'passed_shape' else 50), reason, detail
+    return 0, reason, detail
 
 
 def score_volume(bars, signal_tx24h=0, signal_vol24h=0, token_ca=None, pool_address=None):
