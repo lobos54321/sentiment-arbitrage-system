@@ -4180,7 +4180,7 @@ def run_monitor(db):
                     #   slip > 4%:  4 trades, 0 wins (0%)  ← ALL lost
                     # Conclusion: slippage >2% = 0% win rate (16/16 lost).
                     # High slippage = low liquidity = likely a bad token.
-                    _SPREAD_GUARD_MAX_PCT = 3.0
+                    _SPREAD_GUARD_MAX_PCT = 5.0  # Raised from 3.0: $ORG (3.8% spread) was a +20% winner we missed
                     if _spread > _SPREAD_GUARD_MAX_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] 🚫 {pending['symbol']} ABORT: "
