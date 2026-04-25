@@ -513,97 +513,112 @@ def init_paper_db(db_path=None):
     """Create paper_trades table if not exists."""
     path = db_path or PAPER_DB
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS paper_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            strategy_id TEXT DEFAULT 'notath-selective-v1',
-            strategy_role TEXT DEFAULT 'selective_challenger',
-            strategy_stage TEXT DEFAULT 'stage1',
-            stage_outcome TEXT,
-            token_ca TEXT NOT NULL,
-            symbol TEXT,
-            signal_ts INTEGER NOT NULL,
-            entry_price REAL NOT NULL,
-            entry_ts INTEGER NOT NULL,
-            exit_price REAL,
-            exit_ts INTEGER,
-            exit_reason TEXT,
-            pnl_pct REAL,
-            bars_held INTEGER,
-            market_regime TEXT,
-            replay_source TEXT DEFAULT 'live_monitor',
-            peak_pnl REAL DEFAULT 0,
-            trailing_active INTEGER DEFAULT 0,
-            position_size_sol REAL,
-            token_amount_raw TEXT,
-            token_decimals INTEGER DEFAULT 0,
-            entry_execution_json TEXT,
-            exit_execution_json TEXT,
-            monitor_state_json TEXT,
-            entry_execution_audit_json TEXT,
-            exit_execution_audit_json TEXT,
-            exit_quote_failures INTEGER DEFAULT 0,
-            last_exit_quote_failure TEXT,
-            premium_signal_id INTEGER,
-            signal_type TEXT,
-            strategy_outcome TEXT,
-            execution_availability TEXT,
-            accounting_outcome TEXT,
-            synthetic_close INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pt_token ON paper_trades(token_ca)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit ON paper_trades(exit_reason)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_ts ON paper_trades(entry_ts)")
-    for column_sql in [
-        "ALTER TABLE paper_trades ADD COLUMN strategy_id TEXT DEFAULT 'notath-selective-v1'",
-        "ALTER TABLE paper_trades ADD COLUMN strategy_role TEXT DEFAULT 'selective_challenger'",
-        "ALTER TABLE paper_trades ADD COLUMN strategy_stage TEXT DEFAULT 'stage1'",
-        "ALTER TABLE paper_trades ADD COLUMN stage_outcome TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN replay_source TEXT DEFAULT 'live_monitor'",
-        "ALTER TABLE paper_trades ADD COLUMN lifecycle_id TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN parent_trade_id INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN stage_seq INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN trigger_ts INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN trigger_price REAL",
-        "ALTER TABLE paper_trades ADD COLUMN armed_ts INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN first_peak_pct REAL",
-        "ALTER TABLE paper_trades ADD COLUMN rolling_low_price REAL",
-        "ALTER TABLE paper_trades ADD COLUMN rolling_low_ts INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN reentry_source TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN stage3_peak_price REAL",
-        "ALTER TABLE paper_trades ADD COLUMN stage3_qualifying_exit_ts INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN stage3_dormant INTEGER DEFAULT 0",
-        "ALTER TABLE paper_trades ADD COLUMN stage3_blacklisted INTEGER DEFAULT 0",
-        "ALTER TABLE paper_trades ADD COLUMN position_size_sol REAL",
-        "ALTER TABLE paper_trades ADD COLUMN token_amount_raw TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN token_decimals INTEGER DEFAULT 0",
-        "ALTER TABLE paper_trades ADD COLUMN entry_execution_json TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN exit_execution_json TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN monitor_state_json TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN entry_execution_audit_json TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN exit_execution_audit_json TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN exit_quote_failures INTEGER DEFAULT 0",
-        "ALTER TABLE paper_trades ADD COLUMN last_exit_quote_failure TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN premium_signal_id INTEGER",
-        "ALTER TABLE paper_trades ADD COLUMN signal_type TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN strategy_outcome TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN execution_availability TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN accounting_outcome TEXT",
-        "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
-    ]:
+    
+    def _create_schema(db_conn):
+        db_conn.row_factory = sqlite3.Row
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy_id TEXT DEFAULT 'notath-selective-v1',
+                strategy_role TEXT DEFAULT 'selective_challenger',
+                strategy_stage TEXT DEFAULT 'stage1',
+                stage_outcome TEXT,
+                token_ca TEXT NOT NULL,
+                symbol TEXT,
+                signal_ts INTEGER NOT NULL,
+                entry_price REAL NOT NULL,
+                entry_ts INTEGER NOT NULL,
+                exit_price REAL,
+                exit_ts INTEGER,
+                exit_reason TEXT,
+                pnl_pct REAL,
+                bars_held INTEGER,
+                market_regime TEXT,
+                replay_source TEXT DEFAULT 'live_monitor',
+                peak_pnl REAL DEFAULT 0,
+                trailing_active INTEGER DEFAULT 0,
+                position_size_sol REAL,
+                token_amount_raw TEXT,
+                token_decimals INTEGER DEFAULT 0,
+                entry_execution_json TEXT,
+                exit_execution_json TEXT,
+                monitor_state_json TEXT,
+                entry_execution_audit_json TEXT,
+                exit_execution_audit_json TEXT,
+                exit_quote_failures INTEGER DEFAULT 0,
+                last_exit_quote_failure TEXT,
+                premium_signal_id INTEGER,
+                signal_type TEXT,
+                strategy_outcome TEXT,
+                execution_availability TEXT,
+                accounting_outcome TEXT,
+                synthetic_close INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_token ON paper_trades(token_ca)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit ON paper_trades(exit_reason)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_ts ON paper_trades(entry_ts)")
+        for column_sql in [
+            "ALTER TABLE paper_trades ADD COLUMN strategy_id TEXT DEFAULT 'notath-selective-v1'",
+            "ALTER TABLE paper_trades ADD COLUMN strategy_role TEXT DEFAULT 'selective_challenger'",
+            "ALTER TABLE paper_trades ADD COLUMN strategy_stage TEXT DEFAULT 'stage1'",
+            "ALTER TABLE paper_trades ADD COLUMN stage_outcome TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN replay_source TEXT DEFAULT 'live_monitor'",
+            "ALTER TABLE paper_trades ADD COLUMN lifecycle_id TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN parent_trade_id INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN stage_seq INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN trigger_ts INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN trigger_price REAL",
+            "ALTER TABLE paper_trades ADD COLUMN armed_ts INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN first_peak_pct REAL",
+            "ALTER TABLE paper_trades ADD COLUMN rolling_low_price REAL",
+            "ALTER TABLE paper_trades ADD COLUMN rolling_low_ts INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN reentry_source TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN stage3_peak_price REAL",
+            "ALTER TABLE paper_trades ADD COLUMN stage3_qualifying_exit_ts INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN stage3_dormant INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN stage3_blacklisted INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN position_size_sol REAL",
+            "ALTER TABLE paper_trades ADD COLUMN token_amount_raw TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN token_decimals INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN entry_execution_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN exit_execution_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN monitor_state_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN entry_execution_audit_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN exit_execution_audit_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN exit_quote_failures INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN last_exit_quote_failure TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN premium_signal_id INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN signal_type TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN strategy_outcome TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN execution_availability TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN accounting_outcome TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
+        ]:
+            try:
+                db_conn.execute(column_sql)
+            except sqlite3.OperationalError:
+                pass
         try:
-            db.execute(column_sql)
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_stage ON paper_trades(token_ca, signal_ts, strategy_stage)")
         except sqlite3.OperationalError:
             pass
+        db_conn.commit()
+    
     try:
-        db.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_stage ON paper_trades(token_ca, signal_ts, strategy_stage)")
-    except sqlite3.OperationalError:
-        pass
-    db.commit()
+        db = sqlite3.connect(path)
+        _create_schema(db)
+    except sqlite3.DatabaseError as e:
+        if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
+            logging.getLogger('paper_trade').warning(f"Paper DB corrupted ({e}), recreating {path}")
+            if os.path.exists(path):
+                os.remove(path)
+            db = sqlite3.connect(path)
+            _create_schema(db)
+        else:
+            raise
+            
     return db
 
 

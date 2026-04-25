@@ -68,9 +68,20 @@ log = logging.getLogger('lifecycle')
 def init_db(db_path=None):
     path = db_path or LIFECYCLE_DB
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    db = sqlite3.connect(path)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.row_factory = sqlite3.Row
+    try:
+        db = sqlite3.connect(path)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.row_factory = sqlite3.Row
+    except sqlite3.DatabaseError as e:
+        if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
+            logging.getLogger('lifecycle').warning(f"DB corrupted ({e}), recreating {path}")
+            if os.path.exists(path):
+                os.remove(path)
+            db = sqlite3.connect(path)
+            db.execute("PRAGMA journal_mode=WAL")
+            db.row_factory = sqlite3.Row
+        else:
+            raise
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS tracks (

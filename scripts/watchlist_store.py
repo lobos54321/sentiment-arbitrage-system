@@ -111,9 +111,20 @@ class WatchlistStore:
     def __init__(self, db_path=None):
         self.db_path = db_path or WATCHLIST_DB
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self.db = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
-        self._init_schema()
+        try:
+            self.db = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
+            self._init_schema()
+        except sqlite3.DatabaseError as e:
+            if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
+                log.warning(f"[WatchlistStore] DB corrupted ({e}), deleting and recreating {self.db_path}")
+                if os.path.exists(self.db_path):
+                    os.remove(self.db_path)
+                self.db = sqlite3.connect(self.db_path, check_same_thread=False)
+                self.db.row_factory = sqlite3.Row
+                self._init_schema()
+            else:
+                raise
         log.info(f"[WatchlistStore] initialized: {self.db_path}")
 
     def _init_schema(self):
