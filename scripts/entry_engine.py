@@ -395,6 +395,7 @@ def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None, native_only
         return []
     
     # Group by minute
+    import time as _time_mod
     bars = {}
     for ts, px in history:
         minute_key = int(ts // 60) * 60
@@ -404,6 +405,14 @@ def get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=None, native_only
             bars[minute_key]['high'] = max(bars[minute_key]['high'], px)
             bars[minute_key]['low'] = min(bars[minute_key]['low'], px)
             bars[minute_key]['close'] = px
+    
+    # Mark each bar as 'complete' (closed) or 'partial' (still in progress).
+    # Root cause fix for KLINE_FLAT: the current-minute bar is always partial
+    # and usually has open==close (+0.0%), making trend confirmation useless.
+    # 8hr audit: 21/22 trades used partial bars → all showed +0.0% KLINE_OK.
+    current_minute_key = int(_time_mod.time() // 60) * 60
+    for mk, bar in bars.items():
+        bar['complete'] = (mk < current_minute_key)
     
     sorted_bars = sorted(bars.values(), key=lambda b: b['ts'])
     return sorted_bars[-n_bars:] if len(sorted_bars) >= n_bars else sorted_bars
@@ -739,41 +748,62 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
     # 4. PRE-BUY K-LINE TREND CONFIRMATION
     # Architecture: DexScreener drove FIRE. Now confirm the trend is STILL ALIVE
-    # using the most recent 1-minute synthetic K-line (close > open = still bullish).
-    # This catches trend reversals that happened between FIRE and now.
-    # Only 1 bar needed — if the last minute was bearish, we don't buy.
+    # using the most recent COMPLETE (closed) 1-minute synthetic K-line.
+    # Root cause fix: Previously used the last bar (which is always the current
+    # in-progress minute bar). That bar almost always has open==close (+0.0%)
+    # because it just started, making the entire check useless.
+    # 8hr audit proof: 21/22 trades had +0.0% KLINE_OK from partial bars.
+    # Fix: Use only COMPLETE (closed) bars. If none exist, report insufficient.
+    _kline_confirmed = False  # Track whether kline gave real bullish signal
     try:
-        _kline_bars = get_recent_synthetic_bars(token_ca, n_bars=1, pool_address=pool_address, native_only=True)
-        if _kline_bars:
-            _last_bar = _kline_bars[-1]
+        _kline_bars = get_recent_synthetic_bars(token_ca, n_bars=5, pool_address=pool_address, native_only=True)
+        # Find the last COMPLETE bar (not the current in-progress minute)
+        _complete_bars = [b for b in _kline_bars if b.get('complete', False)] if _kline_bars else []
+        if _complete_bars:
+            _last_bar = _complete_bars[-1]
             _bar_open  = _last_bar.get('open', 0)
             _bar_close = _last_bar.get('close', 0)
             if _bar_open > 0 and _bar_close < _bar_open:
                 _bar_drop = (_bar_open - _bar_close) / _bar_open * 100
                 log.info(
                     f"[SmartEntry] 🚫  REJECT: kline_trend_reversed - "
-                    f"last 1min bar bearish (open={_bar_open:.10f} → close={_bar_close:.10f}, "
+                    f"last closed 1min bar bearish (open={_bar_open:.10f} → close={_bar_close:.10f}, "
                     f"-{_bar_drop:.1f}%). Trend gone since FIRE.")
                 return False, 'kline_trend_reversed', f'last bar -{_bar_drop:.1f}% (bearish)', None
             elif _bar_open > 0 and _bar_close > _bar_open:
                 _bar_gain = (_bar_close - _bar_open) / _bar_open * 100
                 if _bar_gain >= 1.0:
+                    _kline_confirmed = True
                     log.info(
-                        f"[SmartEntry] ✅  KLINE_OK: last 1min bar bullish "
+                        f"[SmartEntry] ✅  KLINE_OK: last closed 1min bar bullish "
                         f"(+{_bar_gain:.1f}%)")
                 else:
-                    # 0.0-0.99%: too weak to confirm trend, log but don't give kline bonus
                     log.info(
-                        f"[SmartEntry] ⚠️  KLINE_WEAK: last 1min bar flat "
+                        f"[SmartEntry] ⚠️  KLINE_WEAK: last closed 1min bar "
                         f"(+{_bar_gain:.1f}% < 1.0%), no kline confirmation")
             elif _bar_open > 0 and _bar_close == _bar_open:
-                # Doji / flat bar — NOT bullish confirmation
-                # 8hr audit: 21/22 trades had +0.0% KLINE_OK, making the check useless
                 log.info(
-                    f"[SmartEntry] ⚠️  KLINE_FLAT: last 1min bar is doji "
+                    f"[SmartEntry] ⚠️  KLINE_FLAT: last closed 1min bar is doji "
                     f"(+0.0%), cannot confirm trend")
+        else:
+            # No complete bars available — token too new, kline data insufficient
+            log.info(
+                f"[SmartEntry] ⚠️  KLINE_INSUFFICIENT: no closed 1min bars yet "
+                f"(token too new for kline confirmation)")
     except Exception:
         pass  # If K-line unavailable, don't block the trade
+
+    # 4b. COMPOUND WEAKNESS GATE
+    # If kline did NOT confirm bullish trend AND rvol is low → hard reject.
+    # Backtested (22 trades): filters 4 DOA (-68.4%) at cost of 2 marginal
+    # wins (+5.4%), net EV +63%. Preserves Dogcoin (rvol=2.8x) and
+    # BensHouse (rvol=5.3x) which had genuine volume behind the move.
+    if not _kline_confirmed and rvol < 2.0:
+        log.info(
+            f"[SmartEntry] 🚫  REJECT: no_kline_low_volume - "
+            f"kline not confirmed + rvol={rvol:.1f}x < 2.0x "
+            f"(compound weakness: no trend proof + no volume surge)")
+        return False, 'no_kline_low_volume', f'kline_unconfirmed + rvol={rvol:.1f}x < 2.0', None
 
     # 5. DECISION LOGIC
     detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
