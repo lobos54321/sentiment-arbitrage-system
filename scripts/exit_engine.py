@@ -543,6 +543,23 @@ class ExitGuardianThread(threading.Thread):
 
                 else:
                     # === Standard (non-ATH) Trail ===
+                    # RACE GUARD: if peak >= 25% and not yet profit-locked, DON'T trail_stop here.
+                    # Let ExitMatrix handle it with lock_profit (sell 50% + moon bag) instead of
+                    # Guardian doing a full exit. Without this, Guardian fires trail_stop at peak=25%
+                    # before ExitMatrix can create the moon bag → we sell 100% instead of 50%.
+                    _has_locked = w_entry.get('_profit_locked', False) if w_entry else False
+                    if pos.peak_pnl >= 0.25 and not is_moon and not _has_locked:
+                        # Defer to ExitMatrix lock_profit — but still fire on CRASH velocity
+                        if raw_vel_30s < -8.0 and pnl <= 0:
+                            log.info(
+                                f"[ExitGuardian] 🚨 {pos.symbol} CRASH override lock_profit defer: "
+                                f"vel={raw_vel_30s:.1f} pnl={pnl:.1%} — full exit (crash > moon bag)"
+                            )
+                            # Fall through to trail logic below
+                        else:
+                            # Normal case: defer to ExitMatrix lock_profit
+                            pass  # skip trail_stop entirely
+                            continue
                     if pos.peak_pnl >= 0.05:
                         # Tiered base factor by peak level (synced with matrix_evaluator)
                         if pos.peak_pnl >= 0.50:
