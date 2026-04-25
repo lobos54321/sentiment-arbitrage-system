@@ -755,10 +755,23 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                     f"last 1min bar bearish (open={_bar_open:.10f} → close={_bar_close:.10f}, "
                     f"-{_bar_drop:.1f}%). Trend gone since FIRE.")
                 return False, 'kline_trend_reversed', f'last bar -{_bar_drop:.1f}% (bearish)', None
-            elif _bar_open > 0 and _bar_close >= _bar_open:
+            elif _bar_open > 0 and _bar_close > _bar_open:
+                _bar_gain = (_bar_close - _bar_open) / _bar_open * 100
+                if _bar_gain >= 1.0:
+                    log.info(
+                        f"[SmartEntry] ✅  KLINE_OK: last 1min bar bullish "
+                        f"(+{_bar_gain:.1f}%)")
+                else:
+                    # 0.0-0.99%: too weak to confirm trend, log but don't give kline bonus
+                    log.info(
+                        f"[SmartEntry] ⚠️  KLINE_WEAK: last 1min bar flat "
+                        f"(+{_bar_gain:.1f}% < 1.0%), no kline confirmation")
+            elif _bar_open > 0 and _bar_close == _bar_open:
+                # Doji / flat bar — NOT bullish confirmation
+                # 8hr audit: 21/22 trades had +0.0% KLINE_OK, making the check useless
                 log.info(
-                    f"[SmartEntry] ✅  KLINE_OK: last 1min bar bullish "
-                    f"(+{(_bar_close-_bar_open)/_bar_open*100:.1f}%)")
+                    f"[SmartEntry] ⚠️  KLINE_FLAT: last 1min bar is doji "
+                    f"(+0.0%), cannot confirm trend")
     except Exception:
         pass  # If K-line unavailable, don't block the trade
 
@@ -788,15 +801,32 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
     elif total_score >= 50:
         # Smart Entry
-        # 1s Direction Confirmation
-        _time.sleep(1.0)
-        price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
+        # 3s Direction Confirmation (upgraded from 1s single-check)
+        # 8hr audit: 1s was too short to catch fake pumps that reverse at 2-5s
+        # Now: 3 samples @ 1s intervals, require at least 2/3 at or above entry price
         trigger_price = price
-        if price_confirm and price_confirm > 0:
-            if price_confirm < price * 0.99:
-                log.info(f"[SmartEntry] 🚫  REJECT: momentum_reversing - fell >1% in 1s (live={price_confirm:.10f})")
-                return False, 'momentum_reversing', f'fell >1% in 1s', None
-            trigger_price = price_confirm
+        _direction_samples = []
+        for _si in range(3):
+            _time.sleep(1.0)
+            _sp, _, _ = fetch_realtime_price(token_ca, pool_address)
+            if _sp and _sp > 0:
+                _direction_samples.append(_sp)
+        if _direction_samples:
+            # Hard reject: if last sample dropped >2%
+            _last_sample = _direction_samples[-1]
+            if _last_sample < price * 0.98:
+                log.info(f"[SmartEntry] 🚫  REJECT: momentum_reversing - "
+                         f"fell >{(price-_last_sample)/price*100:.1f}% in {len(_direction_samples)}s "
+                         f"samples={[f'{s:.10f}' for s in _direction_samples]}")
+                return False, 'momentum_reversing', f'fell >2% in 3s', None
+            # Soft reject: if fewer than 2/3 samples are at or above entry price
+            _rising = sum(1 for s in _direction_samples if s >= price * 0.995)
+            if _rising < 2:
+                log.info(f"[SmartEntry] 🚫  REJECT: direction_not_sustained - "
+                         f"only {_rising}/3 samples above entry "
+                         f"samples={[f'{s:.10f}' for s in _direction_samples]}")
+                return False, 'direction_not_sustained', f'only {_rising}/3 above entry', None
+            trigger_price = _last_sample
             
         log.info(f"[SmartEntry] ✅  SMART_ENTRY: {detail_str}")
         return True, 'smart_entry', detail_str, trigger_price
