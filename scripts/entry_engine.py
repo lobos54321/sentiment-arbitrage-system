@@ -261,6 +261,19 @@ def calculate_kelly_position(watchlist_entry, base_capital=None, description=Non
     # Half-Kelly for safety
     position = base_capital * kelly_f * 0.5
 
+    # ─── V3.4: Matrix Score Tier Sizing ────────────────────────────
+    # Score>85 = full confidence, 65-85 = half position, <65 = minimal (reduce DOA damage)
+    if matrix_scores:
+        _composite = sum(matrix_scores.values()) / len(matrix_scores) if matrix_scores else 0
+        if _composite >= 85:
+            log.info(f"[Kelly] Score tier: composite={_composite:.0f} ≥85 → full position")
+        elif _composite >= 65:
+            position *= 0.5
+            log.info(f"[Kelly] Score tier: composite={_composite:.0f} 65-84 → half position (0.5×)")
+        else:
+            position *= 0.25
+            log.info(f"[Kelly] Score tier: composite={_composite:.0f} <65 → minimal position (0.25×)")
+
     # ─── Sustained ATH Boost ────────────────────────────────────────
     # Tokens holding ATH for >30 minutes show massive long-tail breakout potential.
     if watchlist_entry.get('is_sustained_ath'):

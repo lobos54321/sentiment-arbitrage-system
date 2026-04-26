@@ -394,7 +394,7 @@ class MatrixEvaluator:
         'trend_min': 60,    # V3.2: raised from 50, require at least mild uptrend (pc_m5>2% + bs>=1.05)
         'volume_min': 60,
         'price_min': 60,
-        'signal_min': 35,  # V3.3: lowered from 50, too restrictive for emerging signals
+        'signal_min': 45,  # V3.4: split-tier filter — non-ATH stricter (45), ATH looser (40)
         'momentum_min': 60,
         'min_passing': 4,   # V3: Requires 4 out of 5. T and S are mandatory, needs P or V to reach 3 pre-momentum.
         'max_obs_minutes': 120,
@@ -405,7 +405,7 @@ class MatrixEvaluator:
         'trend_min': 60,    # V3.2: raised from 50, ATH also needs mild uptrend
         'volume_min': 60,   # V≥60 counts as passing
         'price_min': 0,     # Skipped for ATH (ATH = price at highs)
-        'signal_min': 0,    # ATH = auto 100
+        'signal_min': 40,  # V3.4: split-tier — ATH gets 40 (looser than non-ATH 45)
         'momentum_min': 60, # required
         'min_passing': 3,   # 84% period: 3 of 5
         'max_obs_minutes': 120,  # 2h
