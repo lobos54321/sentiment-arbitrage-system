@@ -21,7 +21,7 @@ log = logging.getLogger('paper_trade_monitor')
 #   - protect realized peak gains (never give back >15pp from a peak >20%)
 # Bounded to [-15%, -3%] so neither runaway widening nor over-tightening.
 
-def compute_dynamic_sl(pos, dex_trend, base_sl=-0.15):
+def compute_dynamic_sl(pos, dex_trend, base_sl=-0.10):  # V3.3: -0.15→-0.10
     """4-factor dynamic SL centered around -15% (84% win rate period baseline).
     pos:        Position object (uses .price_ring, .peak_pnl)
     dex_trend:  DexScreener trend snapshot dict (or None)
@@ -185,10 +185,10 @@ class ExitGuardianThread(threading.Thread):
                 # --- Get watchlist entry for dynamic_sl ---
                 w_entry = self.store.get_by_ca(ca)
                 # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
-                # Base SL: -15% (84% win rate period). w_entry['dynamic_sl'] overrides.
-                base_sl = -0.15
-                if w_entry:
-                    base_sl = w_entry.get('dynamic_sl', -0.15)
+                # Base SL: -10% (V3.3 tightened from -15%). w_entry['dynamic_sl'] overrides.
+ base_sl = -0.10  # V3.3: tightened from -0.15 (-15%→-10%)
+ if w_entry:
+ base_sl = w_entry.get('dynamic_sl', -0.10)
                 # Lazy import to avoid circular dependency
                 try:
                     from entry_engine import fetch_dexscreener_trend_snapshot
@@ -415,20 +415,20 @@ class ExitGuardianThread(threading.Thread):
                             f"peak={pos.peak_pnl*100:+.1f}% >= 2% confirmed"
                         )
                     else:
-                        # Phase 0 trail active — floor = peak * 0.40
-                        _p0_floor = pos.peak_pnl * 0.40
+ # Phase 0 trail active — floor = peak * 0.55
+ _p0_floor = pos.peak_pnl * 0.55
                         if pnl < _p0_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} PHASE0 TRAIL: "
                                 f"pnl={pnl*100:+.1f}% < floor={_p0_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, 40% factor) "
+                                f"(peak={pos.peak_pnl*100:.1f}%, 55% factor) "
                                 f"price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
                                     'trade_id': trade_id,
                                     'symbol': pos.symbol,
-                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 40%)',
+                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 55%)',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
                                     '_instant_sim': self._get_instant_quote(pos, ca),

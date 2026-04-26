@@ -263,10 +263,10 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
 
-MIN_MOMENTUM_MOVE_PCT = 1.5  # 9s minimum move: 1.5%
+MIN_MOMENTUM_MOVE_PCT = 0.8 # 9s minimum move: 0.8% (lowered from 1.5%)
 # Data-driven: in 6h audit, all FIRE passes had <1% 6s move (noise), max observed
 # meme coin 6s move was +3.69%. 5% would block ALL entries including Wifejak (+484%).
-# 1.5% filters pure noise while allowing legitimate trend momentum through.
+# 0.8% filters pure noise while allowing legitimate trend momentum through.
 # Upgraded: 3×3s=9s window (accelerated from 5x3s to reduce system latency).
 
 
@@ -275,7 +275,7 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
     Matrix ④ — Realtime Momentum (3×3-second snapshots = 9s window)
     Only called when matrices ①②③⑤ are already passing.
 
-    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (1.5%) over 9 seconds.
+    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (0.8%) over 9 seconds.
     Uses 3 samples to dramatically cut entry latency.
 
     Returns: (score: int 0-100, reason: str, snapshots: list)
@@ -394,7 +394,7 @@ class MatrixEvaluator:
         'trend_min': 60,    # V3.2: raised from 50, require at least mild uptrend (pc_m5>2% + bs>=1.05)
         'volume_min': 60,
         'price_min': 60,
-        'signal_min': 50,
+        'signal_min': 35,  # V3.3: lowered from 50, too restrictive for emerging signals
         'momentum_min': 60,
         'min_passing': 4,   # V3: Requires 4 out of 5. T and S are mandatory, needs P or V to reach 3 pre-momentum.
         'max_obs_minutes': 120,
@@ -825,7 +825,7 @@ class ExitMatrixEvaluator:
         # Audit (26 trades, 2026-04-22): Tight SL killed 22/26 trades at -7%~-10%,
         # many of which had peaks of +3-4% (would have survived with -15% SL).
         # Meme coin normal volatility is ±5-8%, so -5% SL = noise-level stop.
-        hard_sl = entry.get('dynamic_sl', -0.15)
+        hard_sl = entry.get('dynamic_sl', -0.10)  # V3.3: -0.15→-0.10
         if current_pnl <= hard_sl:
             return {
                 'action': 'exit',
