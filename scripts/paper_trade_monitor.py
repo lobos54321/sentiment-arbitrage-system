@@ -3567,39 +3567,40 @@ def run_monitor(db):
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
 
- if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
- freshness = get_signal_freshness()
- wl_watching = len(watchlist.get_watching())
- wl_holding = watchlist.get_active_count()
- # --- Memory monitor (detect OOM before SIGKILL) ---
- try:
- import resource as _resource
- # ru_maxrss: KB on Linux, bytes on macOS — normalize to MB
- _raw_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
- _rss_mb = _raw_rss / 1024 if _raw_rss > 100000 else _raw_rss / (1024 * 1024)  # Linux vs macOS
- # Also try /proc/meminfo for container memory limit
- _container_mem = ""
- try:
- with open('/proc/meminfo', 'r') as _f:
- for _line in _f:
- if _line.startswith('MemAvailable:'):
- _avail_kb = int(_line.split()[1])
- _container_mem = f" avail_mb={_avail_kb // 1024}"
- elif _line.startswith('MemTotal:'):
- _total_kb = int(_line.split()[1])
- _container_mem += f" total_mb={_total_kb // 1024}"
- except Exception:
- pass
- _mem_info = f" rss_mb={_rss_mb:.0f}{_container_mem}"
- if _rss_mb > 400:
- log.warning(f"[MEMORY] RSS={_rss_mb:.0f}MB — approaching OOM limit! Forcing gc...")
- import gc; gc.collect()
- except Exception:
- _mem_info = ""
- log.info(
- f"[heartbeat] signals={freshness.get('total', 0)} source={freshness.get('source', 'unknown')} "
- f"age_min={freshness.get('age_minutes')} watching={wl_watching} holding={wl_holding} active_positions={len(positions)} pending={len(pending_entries)}{_mem_info}"
- )
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+            freshness = get_signal_freshness()
+            wl_watching = len(watchlist.get_watching())
+            wl_holding = watchlist.get_active_count()
+            # --- Memory monitor (detect OOM before SIGKILL) ---
+            _mem_info = ''
+            try:
+                import resource as _resource
+                # ru_maxrss: KB on Linux, bytes on macOS -- normalize to MB
+                _raw_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+                _rss_mb = _raw_rss / 1024 if _raw_rss > 100000 else _raw_rss / (1024 * 1024)  # Linux vs macOS
+                # Also try /proc/meminfo for container memory limit
+                _container_mem = ''
+                try:
+                    with open('/proc/meminfo', 'r') as _f:
+                        for _line in _f:
+                            if _line.startswith('MemAvailable:'):
+                                _avail_kb = int(_line.split()[1])
+                                _container_mem = f' avail_mb={_avail_kb // 1024}'
+                            elif _line.startswith('MemTotal:'):
+                                _total_kb = int(_line.split()[1])
+                                _container_mem += f' total_mb={_total_kb // 1024}'
+                except Exception:
+                    pass
+                _mem_info = f' rss_mb={_rss_mb:.0f}{_container_mem}'
+                if _rss_mb > 400:
+                    log.warning(f'[MEMORY] RSS={_rss_mb:.0f}MB -- approaching OOM limit! Forcing gc...')
+                    import gc; gc.collect()
+            except Exception:
+                pass
+            log.info(
+                f'[heartbeat] signals={freshness.get("total", 0)} source={freshness.get("source", "unknown")} '
+                f'age_min={freshness.get("age_minutes")} watching={wl_watching} holding={wl_holding} active_positions={len(positions)} pending={len(pending_entries)}{_mem_info}'
+            )
             last_heartbeat = now
 
         if now - last_progress >= HEARTBEAT_INTERVAL_SEC * 2:
