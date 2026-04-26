@@ -2504,6 +2504,7 @@ class Position:
         '_guardian_velocity', '_guardian_tick_vol',  # Written by Guardian thread
         '_guardian_threat_tighten',  # Threat score tightening (Guardian → EXIT_MATRIX relay)
         'peak_ts', '_initial_tick_vol',  # A3 (time-decay) and A4 (flat-top) fields
+        '_prev_guardian_pnl', '_phase0_confirmed',  # V7: Gap detector and Phase 0 trail
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
