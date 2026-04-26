@@ -3838,20 +3838,42 @@ def run_monitor(db):
                     if _any_ca_cooldown:
                         continue
 
-                    # REENTRY HARD CAP: No re-entries allowed.
-                    # Audit (26 trades, 7hrs 2026-04-22):
-                    #   9 re-entry trades: FLORK×3, Lilearth×3, M67GA×2, MTGA×1
-                    #   ALL 9 lost (0% win rate). Total re-entry loss: ~0.16 SOL (50% of total loss).
-                    #   Price-gate and P-gate were insufficient — tokens kept qualifying on
-                    #   new momentum spikes but fundamentally failed every time.
+                    # REENTRY CAP V7: Conditional re-entry (max 2 entries per token).
+                    # V3 data (9/9 re-entries lost) was under old entry logic with no SmartEntry.
+                    # V7: allow 1 re-entry IF last exit was not a crash AND momentum is strong.
+                    # Conditions:
+                    #   1. entry_count < 2 (max 2 entries total)
+                    #   2. last_exit_pnl > -5% (small shakeout OK, crash exit blocked)
+                    #   3. momentum score >= 80 (not borderline)
+                    #   4. 5min cooldown (already enforced by per-CA cooldown above)
                     _entry_count = w_entry.get('entry_count', 0) or 0
-                    if _entry_count >= 1:
+                    if _entry_count >= 2:
                         log.info(
                             f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_CAP: "
-                            f"re-entry #{_entry_count+1} blocked (max 1 entry per token). "
-                            f"Data: 9/9 re-entries lost in audit."
+                            f"re-entry #{_entry_count+1} blocked (max 2 entries per token)."
                         )
                         continue
+                    if _entry_count >= 1:
+                        _last_exit_pnl = w_entry.get('last_exit_pnl')
+                        _m_score = (eval_res.get('scores') or {}).get('momentum', 0) or 0
+                        if _last_exit_pnl is not None and _last_exit_pnl < -0.05:
+                            log.info(
+                                f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
+                                f"re-entry #{_entry_count+1}, last_exit_pnl={_last_exit_pnl:.1%} < -5% "
+                                f"(crash exit, too risky to re-enter)"
+                            )
+                            continue
+                        if _m_score < 80:
+                            log.info(
+                                f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
+                                f"re-entry #{_entry_count+1}, M={_m_score} < 80 "
+                                f"(momentum not strong enough for re-entry)"
+                            )
+                            continue
+                        log.info(
+                            f"  [WATCHLIST] ✅ {w_entry['symbol']} REENTRY ALLOWED: "
+                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%} > -5%, M={_m_score} >= 80"
+                        )
 
                     # PRICE-GATE: For re-entries, current price must be above last entry price.
                     # Data: 100% of dead cat bounces had price below entry during dip.
@@ -4381,8 +4403,13 @@ def run_monitor(db):
                                     f"  [KLINE_SL] {pending['symbol']} structure_low={_structure_low:.10f} "
                                     f"→ SL={_structure_sl:.1f}% (vs fixed={_final_sl*100:.1f}%)"
                                 )
-                                # Use the TIGHTER of structure SL and fixed SL
-                                _final_sl = max(_final_sl, _structure_sl / 100.0)
+                                # Use the WIDER (more lenient) of structure SL and fixed SL.
+                                # BUG FIX (2026-04-25): was max() which picked TIGHTER SL.
+                                # For negative numbers: max(-0.15, -0.05) = -0.05 (tighter!).
+                                # This caused 154 to be stopped out at -5% (3-bar low was close to
+                                # entry price → structure_sl = -5%). Meme coins need the WIDER SL
+                                # to survive normal volatility. min(-0.15, -0.05) = -0.15 (wider).
+                                _final_sl = min(_final_sl, _structure_sl / 100.0)
                         
                         watchlist.mark_holding(
                             pending['watchlist_id'], 

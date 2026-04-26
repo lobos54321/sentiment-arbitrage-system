@@ -461,6 +461,9 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
         'price_usd': float(best.get('priceUsd', 0) or 0),
         # A1: Pool liquidity for position sizing — prevent oversized entries in thin pools
         'liquidity_usd': float(liquidity.get('usd', 0) or 0),
+        # V7: MC/FDV for Vol/MC ratio (escape hatch for high-volume tokens with low rvol)
+        'fdv': float(best.get('fdv', 0) or 0),
+        'market_cap': float(best.get('marketCap', 0) or 0),
     }
 
     _dex_trend_cache[token_ca] = {'data': result, 'fetched_at': now}
@@ -765,11 +768,28 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             _bar_close = _last_bar.get('close', 0)
             if _bar_open > 0 and _bar_close < _bar_open:
                 _bar_drop = (_bar_open - _bar_close) / _bar_open * 100
-                log.info(
-                    f"[SmartEntry] 🚫  REJECT: kline_trend_reversed - "
-                    f"last closed 1min bar bearish (open={_bar_open:.10f} → close={_bar_close:.10f}, "
-                    f"-{_bar_drop:.1f}%). Trend gone since FIRE.")
-                return False, 'kline_trend_reversed', f'last bar -{_bar_drop:.1f}% (bearish)', None
+                # Tiered kline rejection (V7 fix, 2026-04-26):
+                # Old: ANY red candle = REJECT. Killed TOLY (-2%, later +149%).
+                # New: <3% = noise (allow), 3-8% = warning (allow+penalty), >8% = REJECT.
+                if _bar_drop > 8.0:
+                    # Genuine reversal — hard reject
+                    log.info(
+                        f"[SmartEntry] 🚫  REJECT: kline_trend_reversed - "
+                        f"last closed 1min bar crashed (open={_bar_open:.10f} → close={_bar_close:.10f}, "
+                        f"-{_bar_drop:.1f}% > 8%). Genuine reversal.")
+                    return False, 'kline_trend_reversed', f'last bar -{_bar_drop:.1f}% (crash >8%)', None
+                elif _bar_drop > 3.0:
+                    # Warning zone — allow but penalize score
+                    total_score -= 5
+                    score_details.append(f"kpen:-5")
+                    log.info(
+                        f"[SmartEntry] ⚠️  KLINE_WARN: last closed 1min bar bearish "
+                        f"(-{_bar_drop:.1f}%, 3-8% zone). Allowing with -5 score penalty.")
+                else:
+                    # Noise (<3%) — normal meme coin volatility, ignore
+                    log.info(
+                        f"[SmartEntry] ℹ️  KLINE_NOISE: last closed 1min bar "
+                        f"(-{_bar_drop:.1f}% < 3%). Normal volatility, ignoring.")
             elif _bar_open > 0 and _bar_close > _bar_open:
                 _bar_gain = (_bar_close - _bar_open) / _bar_open * 100
                 if _bar_gain >= 1.0:
@@ -798,12 +818,20 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # Backtested (22 trades): filters 4 DOA (-68.4%) at cost of 2 marginal
     # wins (+5.4%), net EV +63%. Preserves Dogcoin (rvol=2.8x) and
     # BensHouse (rvol=5.3x) which had genuine volume behind the move.
-    if not _kline_confirmed and rvol < 2.0:
+    # V7: Vol/MC escape hatch — if Vol/MC > 30%, token IS heavily traded
+    # regardless of rvol. KITTENGER had rvol 0.2x but Vol/MC=60-80% (massive).
+    _mc = cached_trend.get('fdv', 0) or cached_trend.get('market_cap', 0) if cached_trend else 0
+    _vol_mc = (vol_m5 / _mc) if _mc > 0 else 0
+    if not _kline_confirmed and rvol < 2.0 and _vol_mc < 0.30:
         log.info(
             f"[SmartEntry] 🚫  REJECT: no_kline_low_volume - "
-            f"kline not confirmed + rvol={rvol:.1f}x < 2.0x "
+            f"kline not confirmed + rvol={rvol:.1f}x < 2.0x + vol/mc={_vol_mc:.1%} < 30% "
             f"(compound weakness: no trend proof + no volume surge)")
-        return False, 'no_kline_low_volume', f'kline_unconfirmed + rvol={rvol:.1f}x < 2.0', None
+        return False, 'no_kline_low_volume', f'kline_unconfirmed + rvol={rvol:.1f}x + vol/mc={_vol_mc:.1%}', None
+    elif not _kline_confirmed and rvol < 2.0 and _vol_mc >= 0.30:
+        log.info(
+            f"[SmartEntry] ✅  VOL_MC_BYPASS: kline not confirmed + rvol={rvol:.1f}x < 2.0x "
+            f"BUT vol/mc={_vol_mc:.1%} >= 30% — token is heavily traded, allowing entry")
 
     # 5. DECISION LOGIC
     detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
@@ -842,13 +870,15 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             if _sp and _sp > 0:
                 _direction_samples.append(_sp)
         if _direction_samples:
-            # Hard reject: if last sample dropped >2%
+            # Hard reject: if last sample dropped >4%
+            # V7 fix (2026-04-26): was 2%, too tight for meme coins (2-3% drops are noise).
+            # Data: 3/4 rejects were 2.6-3.4% (normal). 'US' at 4.8% was real crash.
             _last_sample = _direction_samples[-1]
-            if _last_sample < price * 0.98:
+            if _last_sample < price * 0.96:
                 log.info(f"[SmartEntry] 🚫  REJECT: momentum_reversing - "
                          f"fell >{(price-_last_sample)/price*100:.1f}% in {len(_direction_samples)}s "
                          f"samples={[f'{s:.10f}' for s in _direction_samples]}")
-                return False, 'momentum_reversing', f'fell >2% in 3s', None
+                return False, 'momentum_reversing', f'fell >4% in 3s', None
             # Soft reject: if fewer than 2/3 samples are at or above entry price
             _rising = sum(1 for s in _direction_samples if s >= price * 0.995)
             if _rising < 2:

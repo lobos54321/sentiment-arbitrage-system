@@ -990,6 +990,19 @@ class ExitMatrixEvaluator:
                     'trail_floor': None,
                 }
 
+        # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%) ===
+        # Mirrors Guardian Phase 0. Fills gap where peak < 5% had no protection.
+        # Data: SLAB +4.8%→-15.4%, lol +3.0%→-20.7% (no trail in old code)
+        if peak_pnl >= 0.02:
+            _p0_floor = peak_pnl * 0.40
+            if current_pnl < _p0_floor:
+                return {
+                    'action': 'exit',
+                    'reason': f'phase0_trail (pnl={current_pnl:.1%} < floor={_p0_floor:.1%}, peak={peak_pnl:.1%}, 40%)',
+                    'current_pnl': current_pnl,
+                    'trail_floor': _p0_floor,
+                }
+
         # === Trailing Stop (velocity-aware, like Moon Bag) ===
         # Data: old fixed 0.5/0.6 factor only preserved 34% of peak profit.
         # New: velocity-based ratchet — fast moves lock more profit.

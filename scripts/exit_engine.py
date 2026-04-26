@@ -372,6 +372,70 @@ class ExitGuardianThread(threading.Thread):
                 # which EXIT_MATRIX can't compute because it lacks price_ring)
                 pos._guardian_threat_tighten = _threat_tighten
 
+                # === V7: GAP DETECTOR — catch single-tick PnL crashes ===
+                # ASTERDOGE: +9.7% → -7.6% in one tick (17.3pp gap). No trail can catch this.
+                # If PnL drops >8pp in a single Guardian tick (3s), exit immediately.
+                _prev_pnl = getattr(pos, '_prev_guardian_pnl', None)
+                pos._prev_guardian_pnl = pnl  # store for next tick
+                if _prev_pnl is not None:
+                    _pnl_drop = _prev_pnl - pnl  # positive = PnL fell
+                    if _pnl_drop > 0.08 and _prev_pnl > 0:  # >8pp drop AND was profitable
+                        log.info(
+                            f"[ExitGuardian] 💥 {pos.symbol} GAP CRASH: "
+                            f"pnl dropped {_pnl_drop*100:+.1f}pp in 1 tick "
+                            f"({_prev_pnl*100:+.1f}% → {pnl*100:+.1f}%) — immediate exit"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': f'guardian_gap_crash ({_pnl_drop:.1%} drop in 1 tick, {_prev_pnl:.1%}→{pnl:.1%})',
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
+                        continue
+
+                # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%, 1-tick confirm) ===
+                # Fills the gap where peak < 5% had NO trail protection.
+                # Data: SLAB peak=4.8% → -15.4% (20.2pp drawdown, free_run had no floor)
+                #        lol peak=3.0% → -20.7% (23.7pp drawdown)
+                # Design: 2% threshold + 1-tick confirm + floor = peak * 0.40
+                #   SLAB:  tick#5 confirm, floor=1.9%, exit at -4.8% (saves 10.6pp)
+                #   lol:   tick#5 confirm, floor=1.2%, exit at -6.6% (saves 14.1pp)
+                #   FIRSTMAN: peak >> 2%, not affected (handled by higher-tier trails)
+                if pos.peak_pnl >= 0.02:
+                    _p0_confirmed = getattr(pos, '_phase0_confirmed', False)
+                    if not _p0_confirmed:
+                        # 1-tick confirm: peak >= 2% seen once → confirmed
+                        pos._phase0_confirmed = True
+                        log.info(
+                            f"[ExitGuardian] 🛡️ {pos.symbol} PHASE0 ACTIVATED: "
+                            f"peak={pos.peak_pnl*100:+.1f}% >= 2% confirmed"
+                        )
+                    else:
+                        # Phase 0 trail active — floor = peak * 0.40
+                        _p0_floor = pos.peak_pnl * 0.40
+                        if pnl < _p0_floor:
+                            log.info(
+                                f"[ExitGuardian] 📉 {pos.symbol} PHASE0 TRAIL: "
+                                f"pnl={pnl*100:+.1f}% < floor={_p0_floor*100:.1f}% "
+                                f"(peak={pos.peak_pnl*100:.1f}%, 40% factor) "
+                                f"price={price:.10f} src={src}"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 40%)',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                    '_instant_sim': self._get_instant_quote(pos, ca),
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
+
                 # === Trail Floor Check (3s, velocity+volume driven, FULL RANGE) ===
                 # ATH Fast Lane: three-phase — mirrors matrix_evaluator logic
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
