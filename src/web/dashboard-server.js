@@ -11,6 +11,7 @@ import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
+import { exec } from 'child_process';
 
 dotenv.config();
 
@@ -2226,11 +2227,15 @@ const server = http.createServer(async (req, res) => {
     const tailLines = parseInt(url.searchParams?.get('lines') || '500');
     if (fs.existsSync(paperTraderLogPath)) {
       try {
-        const content = fs.readFileSync(paperTraderLogPath, 'utf-8');
-        const lines = content.split('\n');
-        const tail = lines.slice(-tailLines).join('\n');
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end(tail);
+        exec(`tail -n ${tailLines} ${paperTraderLogPath}`, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+          if (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: error.message }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(stdout);
+        });
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
