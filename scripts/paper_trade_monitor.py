@@ -2180,6 +2180,21 @@ def _normalize_signal_rows(rows):
         elif not record.get('signal_type') and 'New Trending' in desc:
             record['signal_type'] = 'NEW_TRENDING'
             
+        # V8: Extract market_cap from description if missing (especially for NEW_TRENDING)
+        if not record.get('market_cap'):
+            import re
+            mc_match = re.search(r'🏦 \*\*MC:\*\* ([\d\.]+)([KMB]?)', desc)
+            if mc_match:
+                val_str, unit = mc_match.groups()
+                try:
+                    mc_val = float(val_str)
+                    if unit == 'K': mc_val *= 1000
+                    elif unit == 'M': mc_val *= 1000000
+                    elif unit == 'B': mc_val *= 1000000000
+                    record['market_cap'] = mc_val
+                except ValueError:
+                    pass
+            
         normalized.append(record)
     return normalized
 
@@ -4034,6 +4049,31 @@ def run_monitor(db):
                             log.info(f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: liquidity=${_fire_liq:.0f} < $5000 (exit slippage risk)")
                             pending_entries.pop(lifecycle_id, None)
                             continue
+
+                        # === V8: MC CAP GATE ===
+                        # Strategic audit: system is 4th-in-line buyer at MC $100K-$300K.
+                        # At MC >$150K, upside is capped at 5-50% but spread eats 5-8%.
+                        # At MC <$150K, upside is 50-500% — enough to offset losses.
+                        # Data: 60% of ATH signals have MC <$100K (good), but Land ($410K)
+                        # and meanpippin ($265K) were chasing tops.
+                        # Uses real-time DexScreener FDV (most accurate), falls back to signal_mc.
+                        # Fail-open: NEW_TRENDING signals have MC=0 (no data), always allowed.
+                        MC_CAP = 150_000  # $150K — balances signal volume with entry quality
+                        _realtime_mc = 0
+                        if _fire_dex:
+                            _realtime_mc = _fire_dex.get('fdv', 0) or _fire_dex.get('market_cap', 0) or 0
+                        if _realtime_mc <= 0:
+                            _realtime_mc = _fire_mc  # fallback to signal_mc
+                        if _realtime_mc > MC_CAP:
+                            log.info(
+                                f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: MC=${_realtime_mc:,.0f} > ${MC_CAP:,.0f} "
+                                f"(chasing top — upside capped, spread will eat profits)"
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        elif _realtime_mc > 0:
+                            log.info(f"  [FIRE] {w_entry['symbol']} MC_OK: ${_realtime_mc:,.0f} < ${MC_CAP:,.0f}")
+
                     except Exception:
                         pass  # fail-open if DexScreener unavailable
 
