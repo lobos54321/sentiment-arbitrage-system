@@ -186,9 +186,9 @@ class ExitGuardianThread(threading.Thread):
                 w_entry = self.store.get_by_ca(ca)
                 # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
                 # Base SL: -10% (V3.3 tightened from -15%). w_entry['dynamic_sl'] overrides.
- base_sl = -0.10  # V3.3: tightened from -0.15 (-15%→-10%)
- if w_entry:
- base_sl = w_entry.get('dynamic_sl', -0.10)
+                base_sl = -0.10  # V3.3: tightened from -0.15 (-15%→-10%)
+                if w_entry:
+                    base_sl = w_entry.get('dynamic_sl', -0.10)
                 # Lazy import to avoid circular dependency
                 try:
                     from entry_engine import fetch_dexscreener_trend_snapshot
@@ -395,42 +395,42 @@ class ExitGuardianThread(threading.Thread):
                                 'trigger_pnl': pnl,
                                 '_instant_sim': self._get_instant_quote(pos, ca),
                             })
-            self._exit_pending.add(trade_id)
-            continue
+                        self._exit_pending.add(trade_id)
+                        continue
 
-        # === V3.4: Early Red Flag — entry <1min and pnl <0 → instant trail ===
-        # Audit: DOA trades (CHONKERS, ELO, hope) never went positive.
-        # If a position is red within 60s of entry, activate tight trail immediately
-        # instead of waiting for hard_sl to wipe out capital.
-        _entry_age = time.time() - getattr(pos, 'entry_ts', time.time())
-        if _entry_age < 60 and pnl < 0 and pnl > hard_sl:
-            _early_floor = pnl * 0.5  # allow half the current loss, then exit
-            if pnl < _early_floor:
-                log.info(
-                    f"[ExitGuardian] 🚨 {pos.symbol} EARLY RED FLAG: "
-                    f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% < floor={_early_floor*100:.1f}% "
-                    f"→ trail exit (DOA protection)"
-                )
-                with self.exit_queue_lock:
-                    self.exit_queue.append({
-                        'trade_id': trade_id,
-                        'symbol': pos.symbol,
-                        'reason': f'guardian_early_red (age={_entry_age:.0f}s, pnl={pnl:.1%} < floor={_early_floor:.1%})',
-                        'trigger_price': price,
-                        'trigger_pnl': pnl,
-                        '_instant_sim': self._get_instant_quote(pos, ca),
-                    })
-                self._exit_pending.add(trade_id)
-                continue
-            # Position is red but not yet at floor — flag it for next tick
-            if not getattr(pos, '_early_red_flagged', False):
-                pos._early_red_flagged = True
-                log.info(
-                    f"[ExitGuardian] ⚠️ {pos.symbol} EARLY RED WATCH: "
-                    f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% — trail active, floor={_early_floor*100:.1f}%"
-                )
+                # === V3.4: Early Red Flag — entry <1min and pnl <0 → instant trail ===
+                # Audit: DOA trades (CHONKERS, ELO, hope) never went positive.
+                # If a position is red within 60s of entry, activate tight trail immediately
+                # instead of waiting for hard_sl to wipe out capital.
+                _entry_age = time.time() - getattr(pos, 'entry_ts', time.time())
+                if _entry_age < 60 and pnl < 0 and pnl > hard_sl:
+                    _early_floor = pnl * 0.5  # allow half the current loss, then exit
+                    if pnl < _early_floor:
+                        log.info(
+                            f"[ExitGuardian] 🚨 {pos.symbol} EARLY RED FLAG: "
+                            f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% < floor={_early_floor*100:.1f}% "
+                            f"→ trail exit (DOA protection)"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': f'guardian_early_red (age={_entry_age:.0f}s, pnl={pnl:.1%} < floor={_early_floor:.1%})',
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
+                        continue
+                    # Position is red but not yet at floor — flag it for next tick
+                    if not getattr(pos, '_early_red_flagged', False):
+                        pos._early_red_flagged = True
+                        log.info(
+                            f"[ExitGuardian] ⚠️ {pos.symbol} EARLY RED WATCH: "
+                            f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% — trail active, floor={_early_floor*100:.1f}%"
+                        )
 
-        # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%, 1-tick confirm) ===
+                # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%, 1-tick confirm) ===
                 # Fills the gap where peak < 5% had NO trail protection.
                 # Data: SLAB peak=4.8% → -15.4% (20.2pp drawdown, free_run had no floor)
                 #        lol peak=3.0% → -20.7% (23.7pp drawdown)
@@ -448,8 +448,8 @@ class ExitGuardianThread(threading.Thread):
                             f"peak={pos.peak_pnl*100:+.1f}% >= 2% confirmed"
                         )
                     else:
- # Phase 0 trail active — floor = peak * 0.55
- _p0_floor = pos.peak_pnl * 0.55
+                        # Phase 0 trail active — floor = peak * 0.55
+                        _p0_floor = pos.peak_pnl * 0.55
                         if pnl < _p0_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} PHASE0 TRAIL: "
