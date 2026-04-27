@@ -760,9 +760,14 @@ class PremiumChannelSystem {
     };
   }
 
-  async start() {
-    const isLive = process.env.SHADOW_MODE === 'false';
-    const premiumMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_PREMIUM');
+    async start() {
+        // V3.4: Start dashboard FIRST so Zeabur health check passes immediately.
+        // Previously this was at the end of start(), but Telegram listener init
+        // could take 30-60s, causing Zeabur to kill the container before port 3000 responded.
+        startDashboardServer();
+
+        const isLive = process.env.SHADOW_MODE === 'false';
+        const premiumMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_PREMIUM');
 
     try {
       if (isLive) {
@@ -865,9 +870,8 @@ class PremiumChannelSystem {
       this.autonomySidecar.start();
     }
 
-    // 启动 Dashboard Server（Zeabur 健康检查 + /premium 页面）
-    startDashboardServer();
-  }
+        // Dashboard Server already started at the top of start() for Zeabur health check
+    }
 
   async stop() {
     await this.listener.stop();
