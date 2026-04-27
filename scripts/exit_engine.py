@@ -418,7 +418,8 @@ class ExitGuardianThread(threading.Thread):
                 # 2% threshold was killing small winners (Jewcoin peak=0% killed at -3.5%).
                 # 8% means the token has shown REAL momentum before we start protecting.
                 # Floor = peak * 0.50 (aligned with ExitMatrix's Phase 0).
-                if pos.peak_pnl >= 0.08:
+                # SKIP for LOTTO — wider phase-based trail (peak * 0.35) handles this.
+                if not _is_lotto_entry and pos.peak_pnl >= 0.08:
                     _p0_confirmed = getattr(pos, '_phase0_confirmed', False)
                     if not _p0_confirmed:
                         # 1-tick confirm: peak >= 8% seen once → confirmed

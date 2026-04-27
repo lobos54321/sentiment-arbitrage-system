@@ -3662,28 +3662,48 @@ def run_monitor(db):
                     symbol = sig['symbol'] or token_ca[:8]
                     super_idx = parse_super_index(sig['description'] or '')
 
+                    # === LOTTO classification (must happen BEFORE filters that could block) ===
+                    # NEW_TRENDING + MC<$30K + signal<30min old → LOTTO fast-lane.
+                    # Bypasses super_idx and top10 filters since fresh tokens are too young
+                    # to have built up super_idx>70, and concentrated holders is normal at <$30K MC.
+                    _raw_mc = sig.get('market_cap') or 0
+                    _signal_age_sec = time.time() - (signal_ts or time.time())
+                    _is_lotto_signal = (
+                        not sig.get('is_ath')
+                        and (sig.get('signal_type') or '').upper() == 'NEW_TRENDING'
+                        and 0 < _raw_mc < 30_000
+                        and _signal_age_sec < 1800
+                    )
+
                     # Super Score filter:
                     # NOT_ATH: must have Super > min_super_index (config=70)
                     # ATH: no Super Score (None), skip this filter — ATH uses own pipeline
-                    if not sig.get('is_ath') and (super_idx is None or super_idx <= min_super_index):
-                        continue                    
+                    # LOTTO: bypass — fresh tokens haven't built super_idx yet
+                    if not sig.get('is_ath') and not _is_lotto_signal and (super_idx is None or super_idx <= min_super_index):
+                        continue
                     top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)
                     # Config might have 100 as default from old JSON schema, if it's 100 we override to 45 for safety or honor it?
                     # Since user wants it active, let's strictly use 45.0 if it's 100 or missing, to enforce safety easily without JSON patching.
                     if top10_max >= 100.0:
                         top10_max = 45.0
-                        
+
+                    # LOTTO uses a relaxed 70% threshold (concentrated holders normal at <$30K MC)
+                    _effective_top10_max = 70.0 if _is_lotto_signal else top10_max
+
                     top10_pct = parse_top10_percent(sig['description'] or '')
-                    if top10_pct is not None and top10_pct > top10_max:
-                        log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: Top10 {top10_pct}% exceeds max allowed {top10_max}%, skipping")
+                    if top10_pct is not None and top10_pct > _effective_top10_max:
+                        log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: Top10 {top10_pct}% exceeds max allowed {_effective_top10_max}%, skipping")
                         # FIX 3: Remember blocked CAs so Watchlist won't accept them later
-                        if not hasattr(watchlist, '_top10_blacklist'):
-                            watchlist._top10_blacklist = {}
-                        watchlist._top10_blacklist[token_ca] = top10_pct
+                        # (only blacklist on the strict 45% threshold, not the LOTTO 70%)
+                        if not _is_lotto_signal:
+                            if not hasattr(watchlist, '_top10_blacklist'):
+                                watchlist._top10_blacklist = {}
+                            watchlist._top10_blacklist[token_ca] = top10_pct
                         continue
 
                     # FIX 3: Also block if this CA was previously flagged by PREBUY_FILTER
-                    if hasattr(watchlist, '_top10_blacklist') and token_ca in watchlist._top10_blacklist:
+                    # (exempt LOTTO — its own threshold is more permissive)
+                    if not _is_lotto_signal and hasattr(watchlist, '_top10_blacklist') and token_ca in watchlist._top10_blacklist:
                         _prev_top10 = watchlist._top10_blacklist[token_ca]
                         log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: previously flagged Top10={_prev_top10}% (insider concentration memory), skipping")
                         continue
@@ -3729,20 +3749,13 @@ def run_monitor(db):
                                     f"price {_first_px:.10f} → {_last_px:.10f} ({_mult:.1f}x)"
                                 )
 
-                    # LOTTO: NEW_TRENDING + MC<$30K + signal<30min old → fast-lane track
-                    _raw_mc = sig.get('market_cap') or 0
-                    _signal_age_sec = time.time() - (signal_ts or time.time())
-                    _is_lotto_signal = (
-                        not sig.get('is_ath')
-                        and (sig.get('signal_type') or '').upper() == 'NEW_TRENDING'
-                        and 0 < _raw_mc < 30_000
-                        and _signal_age_sec < 1800
-                    )
+                    # LOTTO classification was determined earlier (above the super_idx filter).
+                    # Reuse _is_lotto_signal computed at line ~3671.
                     _wl_type = 'ATH' if sig.get('is_ath') else ('LOTTO' if _is_lotto_signal else 'NOT_ATH')
                     if _is_lotto_signal:
                         log.info(
                             f"  [LOTTO] 🎰 {symbol} classified as LOTTO: "
-                            f"MC=${_raw_mc:,.0f} age={_signal_age_sec:.0f}s"
+                            f"MC=${_raw_mc:,.0f} age={_signal_age_sec:.0f}s super_idx={super_idx}"
                         )
 
                     watchlist.register(
