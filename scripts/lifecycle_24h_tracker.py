@@ -68,76 +68,78 @@ log = logging.getLogger('lifecycle')
 def init_db(db_path=None):
     path = db_path or LIFECYCLE_DB
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    
+    def _setup_schema(conn):
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracks (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_ca        TEXT NOT NULL,
+                symbol          TEXT,
+                signal_ts       INTEGER NOT NULL,
+                entry_price     REAL NOT NULL,
+                entry_ts        INTEGER NOT NULL,
+                pool_address    TEXT,
+                status          TEXT DEFAULT 'active',  -- active|completed|dead|expired
+                complete_ts     INTEGER,
+                complete_reason TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(token_ca, signal_ts)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS price_samples (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id    INTEGER NOT NULL,
+                ts          INTEGER NOT NULL,
+                price       REAL,
+                volume      REAL,
+                -- ohlcv if available
+                open_       REAL,
+                high        REAL,
+                low         REAL,
+                close       REAL,
+                FOREIGN KEY (track_id) REFERENCES tracks(id),
+                UNIQUE(track_id, ts)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_results (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id        INTEGER NOT NULL,
+                strategy        TEXT NOT NULL,  -- A|B|C|D
+                entry_price     REAL NOT NULL,
+                exit_price      REAL,
+                exit_ts        INTEGER,
+                exit_reason    TEXT,
+                pnl_pct        REAL,
+                peak_pnl       REAL,
+                bars_held      INTEGER,
+                FOREIGN KEY (track_id) REFERENCES tracks(id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_track_token  ON tracks(token_ca)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_track_status ON tracks(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sample_track ON price_samples(track_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_strat_track  ON strategy_results(track_id)")
+        conn.commit()
+
     try:
         db = sqlite3.connect(path)
-        db.execute("PRAGMA journal_mode=WAL")
-        db.row_factory = sqlite3.Row
+        _setup_schema(db)
     except sqlite3.DatabaseError as e:
         if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
             logging.getLogger('lifecycle').warning(f"DB corrupted ({e}), recreating {path}")
+            if db:
+                db.close()
             if os.path.exists(path):
                 os.remove(path)
             db = sqlite3.connect(path)
-            db.execute("PRAGMA journal_mode=WAL")
-            db.row_factory = sqlite3.Row
+            _setup_schema(db)
         else:
             raise
 
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS tracks (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_ca        TEXT NOT NULL,
-            symbol          TEXT,
-            signal_ts       INTEGER NOT NULL,
-            entry_price     REAL NOT NULL,
-            entry_ts        INTEGER NOT NULL,
-            pool_address    TEXT,
-            status          TEXT DEFAULT 'active',  -- active|completed|dead|expired
-            complete_ts     INTEGER,
-            complete_reason TEXT,
-            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(token_ca, signal_ts)
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS price_samples (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id    INTEGER NOT NULL,
-            ts          INTEGER NOT NULL,
-            price       REAL,
-            volume      REAL,
-            -- ohlcv if available
-            open_       REAL,
-            high        REAL,
-            low         REAL,
-            close       REAL,
-            FOREIGN KEY (track_id) REFERENCES tracks(id),
-            UNIQUE(track_id, ts)
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS strategy_results (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id        INTEGER NOT NULL,
-            strategy        TEXT NOT NULL,  -- A|B|C|D
-            entry_price     REAL NOT NULL,
-            exit_price      REAL,
-            exit_ts        INTEGER,
-            exit_reason    TEXT,
-            pnl_pct        REAL,
-            peak_pnl       REAL,
-            bars_held      INTEGER,
-            FOREIGN KEY (track_id) REFERENCES tracks(id)
-        )
-    """)
-
-    db.execute("CREATE INDEX IF NOT EXISTS idx_track_token  ON tracks(token_ca)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_track_status ON tracks(status)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_sample_track ON price_samples(track_id)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_strat_track  ON strategy_results(track_id)")
-    db.commit()
     return db
 
 
