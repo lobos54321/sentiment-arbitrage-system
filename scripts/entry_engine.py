@@ -153,141 +153,20 @@ def _get_historical_odds(min_trades=20, default_b=None):
 def calculate_kelly_position(watchlist_entry, base_capital=None, description=None, matrix_scores=None,
                               entry_mode=None):
     """
-    Compute position size using Kelly Criterion.
+    V8: Fixed position sizing — Kelly DISABLED.
 
-    Simplified based on 23-trade backtest (2026-04-15):
-      - Only entry_mode and ATH are data-validated predictors
-      - Matrix crowding, sub-indices, signal velocity, DexBoost: NOT predictive → removed
-      - momentum_direct: 62% win rate → full position
-      - pullback_bounce: 43% win rate → p × 0.85
+    Reason: Historical data is poisoned (11W/39L from buggy V3-V7 period).
+    Kelly computes base_f*=-0.10 (negative EV) → always returns minimum 0.1 SOL anyway.
+    Fixed mode removes the DB query overhead and makes the behavior explicit.
 
-    Returns position size in SOL (min 0.03, max 20% of base_capital).
+    Re-enable Kelly once V8 accumulates 30+ clean trades with positive win rate.
+    The full Kelly logic is preserved in git history (commit 609c4523).
+
+    Returns: 0.1 SOL (fixed)
     """
-    if base_capital is None:
-        base_capital = KELLY_BASE_CAPITAL_SOL
-
-    p = KELLY_BASE_WIN_RATE
-    b = _get_historical_odds()  # historical avg_win/avg_loss, capped at 3.0
-
-    entry_count = int(watchlist_entry.get('entry_count') or 0)
-
-    # ─── Entry mode adjustment ──────────────────────────────────────
-    # REMOVED: pullback_bounce penalty (p *= 0.85) was based on assumed 62% vs 43% win rates.
-    # Deep audit (31 trades, commit 71be6ec5) found the OPPOSITE:
-    #   momentum_direct: 12% win rate (1W/7L, -42.3%)
-    #   pullback_bounce: 31% win rate (4W/9L, -34.3%)
-    # Penalizing pullback_bounce was making things worse.
-    # With only 8+13 trades, neither sample is statistically significant (p=0.017/0.083),
-    # so we neutralize entry_mode's effect on Kelly rather than reverse it.
-
-    # ─── Matrix score alignment ──────────────────────────────────────
-    # V3 fix: Old "crowding penalty" (4/5 perfect → p×0.7) was empirically wrong.
-    # Live data (NOBIKO: 4/5 perfect, Score=115, +29.4% peak) proved high scores
-    # correlate with REAL momentum, not crowding.  The heavy penalty caused inverse
-    # position sizing: weakest signals got 0.478 SOL, strongest got 0.03 SOL.
-    # Now: only 5/5 perfect gets mild skepticism; 3-4/5 is neutral; ≤1 contrarian.
-    vp_cap = None  # V+P quality gate
-    if matrix_scores:
-        perfect_count = sum(1 for v in matrix_scores.values() if v == 100)
-        if perfect_count >= 5:
-            p *= 0.9    # mild skepticism — all-perfect is rare, may be peak
-            log.info(f"[Kelly] Matrix all-perfect: {perfect_count}/5 → p×0.9")
-        elif perfect_count <= 1:
-            # Contrarian bonus — ONLY for first entry on fresh coins WITH strong trend.
-            # Data: Veteran② got contrarian ×1.2 on re-entry (decaying signal) → 0.775 SOL → -12.5%.
-            # Data (2026-04-24): X got contrarian ×1.2 at T=50 (1/5 perfect) → 0.43 SOL → -28% = -0.12 SOL.
-            # In V3 (5 dimensions), low perfect_count usually = weak signal, not contrarian.
-            # Gate: require T≥80 so only strong-trend coins get the bonus.
-            entry_age_min = (time.time() - watchlist_entry.get('added_at', time.time())) / 60
-            _t_score_kelly = matrix_scores.get('trend', 0) if matrix_scores else 0
-            if entry_count == 0 and entry_age_min <= 5 and _t_score_kelly >= 80:
-                p *= 1.2    # contrarian bonus — less crowded, fresh signal, confirmed trend
-                log.info(f"[Kelly] Matrix contrarian: {perfect_count}/5 perfect T={_t_score_kelly} → p×1.2")
-            else:
-                _skip_reason = []
-                if entry_count > 0: _skip_reason.append(f"reentry={entry_count}")
-                if entry_age_min > 5: _skip_reason.append(f"age={entry_age_min:.0f}min")
-                if _t_score_kelly < 80: _skip_reason.append(f"T={_t_score_kelly}<80")
-                log.info(f"[Kelly] Matrix low-perfect={perfect_count}/5 → no contrarian bonus ({', '.join(_skip_reason)})")
-
-        # ─── V+P Quality Gate ──────────────────────────────────────────
-        # Live data: KIZUNA (V=40+P=30=70, 0.478 SOL → -20%) and
-        # POSTER (V=40+P=30=70, 0.5 SOL → -16.6%) both had weak volume+price
-        # but got full-size positions.  Weak V+P = no real buying pressure.
-        # Cap position to 0.1 SOL when V+P ≤ 100.
-        v_score = matrix_scores.get('volume', 0)
-        p_score = matrix_scores.get('price', 0)
-        vp_sum = v_score + p_score
-        if vp_sum <= 100:
-            vp_cap = 0.1
-            log.info(f"[Kelly] V+P quality gate: V={v_score}+P={p_score}={vp_sum} ≤ 100 → cap 0.1 SOL")
-
-    # ─── ATH confirmation (logical — new highs have momentum) ─────────
-    # V3.1 fix: ATH boost must NOT flip negative base EV to large position.
-    # Root cause: Untweeney had base f*=-0.55 (system in losing streak),
-    # but ATH boost pushed p from 0.50→0.675 → f*=0.286 → 0.5 SOL max bet.
-    # Fix: Calculate base Kelly FIRST. If base f*<=0, ATH can only give 0.1 SOL probe.
-    p_base = p  # save pre-ATH probability
-    b_base = b
-    base_q = 1.0 - p_base
-    base_f = (p_base * b_base - base_q) / b_base if b_base > 0 else -1.0
-
-    ath_num = int(watchlist_entry.get('ath_num') or 0)
-    if ath_num > 0:
-        ath_boost = {1: 1.6, 2: 1.4, 3: 1.2}.get(ath_num, 1.1)
-        p *= ath_boost
-        log.info(f"[Kelly] ATH#{ath_num} → p×{ath_boost} → p={p:.3f}")
-    elif watchlist_entry.get('has_ath') or watchlist_entry.get('type') == 'ATH':
-        p *= 1.5
-        b *= 1.3
-
-    p = min(p, 0.65)  # cap probability
-
-    # Kelly formula: f* = (p*b - q) / b
-    q = 1.0 - p
-    kelly_f = (p * b - q) / b if b > 0 else -1.0
-
-    # Negative base EV with ATH boost → cap at probe position (0.1 SOL)
-    # ATH alone should not override the system's losing-streak signal.
-    if base_f <= 0 and kelly_f > 0:
-        log.info(f"[Kelly] ATH boost CAPPED: base_f*={base_f:.3f}≤0 but boosted_f*={kelly_f:.3f}>0 → probe 0.1 SOL (ATH cannot flip negative EV to max bet)")
-        return 0.1
-
-    # Negative EV → use minimum position (Kelly sizes, doesn't veto — Matrix decides trades)
-    if kelly_f <= 0:
-        log.info(f"[Kelly] f*={kelly_f:.3f} ≤ 0 → MIN position 0.1 SOL | p={p:.3f} b={b:.2f}")
-        return 0.1
-
-    # Half-Kelly for safety
-    position = base_capital * kelly_f * 0.5
-
-    # ─── V3.4: Matrix Score Tier Sizing ────────────────────────────
-    # Score>85 = full confidence, 65-85 = half position, <65 = minimal (reduce DOA damage)
-    if matrix_scores:
-        _composite = sum(matrix_scores.values()) / len(matrix_scores) if matrix_scores else 0
-        if _composite >= 85:
-            log.info(f"[Kelly] Score tier: composite={_composite:.0f} ≥85 → full position")
-        elif _composite >= 65:
-            position *= 0.5
-            log.info(f"[Kelly] Score tier: composite={_composite:.0f} 65-84 → half position (0.5×)")
-        else:
-            position *= 0.25
-            log.info(f"[Kelly] Score tier: composite={_composite:.0f} <65 → minimal position (0.25×)")
-
-    # ─── Sustained ATH Boost ────────────────────────────────────────
-    # Tokens holding ATH for >30 minutes show massive long-tail breakout potential.
-    if watchlist_entry.get('is_sustained_ath'):
-        position *= 1.5
-        log.info(f"[Kelly] Sustained ATH → position×1.5")
-
-    # Hard limits: min 0.1 SOL, max 20% of capital, absolute cap MAX_POSITION_SOL
-    pos = round(max(0.1, min(position, base_capital * 0.20, MAX_POSITION_SOL)), 3)
-    # Apply V+P quality gate cap
-    if vp_cap is not None and pos > vp_cap:
-        log.info(f"[Kelly] V+P cap applied: {pos} → {vp_cap} SOL")
-        pos = vp_cap
-    log.info(f"[Kelly] f*={kelly_f:.3f} → {pos} SOL | p={p:.3f} b={b:.2f} mode={entry_mode or 'default'}")
-    return pos
+    FIXED_POSITION_SOL = 0.1
+    log.info(f"[Kelly] FIXED MODE: {FIXED_POSITION_SOL} SOL (Kelly disabled until V8 proves win rate)")
+    return FIXED_POSITION_SOL
 
 
 def get_liquidity_position_cap(token_ca, sol_price_usd, max_pool_pct=0.01):
