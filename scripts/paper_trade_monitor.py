@@ -4051,28 +4051,20 @@ def run_monitor(db):
                             continue
 
                         # === V8: MC CAP GATE ===
-                        # Strategic audit: system is 4th-in-line buyer at MC $100K-$300K.
-                        # At MC >$150K, upside is capped at 5-50% but spread eats 5-8%.
-                        # At MC <$150K, upside is 50-500% — enough to offset losses.
-                        # Data: 60% of ATH signals have MC <$100K (good), but Land ($410K)
-                        # and meanpippin ($265K) were chasing tops.
-                        # Uses real-time DexScreener FDV (most accurate), falls back to signal_mc.
-                        # Fail-open: NEW_TRENDING signals have MC=0 (no data), always allowed.
+                        # Use signal_mc (MC at signal time, parsed from Telegram message).
+                        # Simpler and more reliable than DexScreener FDV — no extra API call,
+                        # no NULL/zero ambiguity from FDV fields.
+                        # Fail-open: if signal had no MC data (signal_mc=0), always allow.
                         MC_CAP = 150_000  # $150K — balances signal volume with entry quality
-                        _realtime_mc = 0
-                        if _fire_dex:
-                            _realtime_mc = _fire_dex.get('fdv', 0) or _fire_dex.get('market_cap', 0) or 0
-                        if _realtime_mc <= 0:
-                            _realtime_mc = _fire_mc  # fallback to signal_mc
-                        if _realtime_mc > MC_CAP:
+                        if _fire_mc > MC_CAP:
                             log.info(
-                                f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: MC=${_realtime_mc:,.0f} > ${MC_CAP:,.0f} "
+                                f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: signal_mc=${_fire_mc:,.0f} > ${MC_CAP:,.0f} "
                                 f"(chasing top — upside capped, spread will eat profits)"
                             )
                             pending_entries.pop(lifecycle_id, None)
                             continue
-                        elif _realtime_mc > 0:
-                            log.info(f"  [FIRE] {w_entry['symbol']} MC_OK: ${_realtime_mc:,.0f} < ${MC_CAP:,.0f}")
+                        elif _fire_mc > 0:
+                            log.info(f"  [FIRE] {w_entry['symbol']} MC_OK: signal_mc=${_fire_mc:,.0f} < ${MC_CAP:,.0f}")
 
                     except Exception:
                         pass  # fail-open if DexScreener unavailable
