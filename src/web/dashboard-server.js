@@ -2538,23 +2538,23 @@ function renderPremiumDashboard() {
 /**
  * 启动服务器
  */
-export function startDashboardServer(retryCount = 0) {
-  const currentPort = parseInt(PORT) + retryCount;
-  
-  // Remove all previous error listeners to avoid memory leaks on retry
+export function startDashboardServer(attempt = 0) {
+  // Always use the configured PORT — never increment. On cloud platforms (Zeabur),
+  // PORT is fixed and health checks only probe that exact port. Binding to PORT+N
+  // means health checks fail, causing an infinite restart loop.
+  const targetPort = parseInt(PORT);
+  const MAX_ATTEMPTS = 10;
+  const retryDelayMs = Math.min(3000 * (attempt + 1), 15000);
+
   server.removeAllListeners('error');
-  
+
   server.on('error', (error) => {
     if (error?.code === 'EADDRINUSE' || error?.code === 'EPERM') {
-      console.warn(`⚠️ Dashboard server port ${currentPort} failed (${error.code}).`);
-      
-      // If we are likely on a cloud platform (like Zeabur) that injected a specific PORT,
-      // and we failed to bind to it, we might be in trouble. But let's try a few times.
-      if (retryCount < 5) {
-        console.log(`🔄 Retrying dashboard server on port ${currentPort + 1}...`);
-        setTimeout(() => startDashboardServer(retryCount + 1), 1000);
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(`⚠️ Port ${targetPort} in use (${error.code}), retry ${attempt + 1}/${MAX_ATTEMPTS} in ${retryDelayMs}ms...`);
+        setTimeout(() => startDashboardServer(attempt + 1), retryDelayMs);
       } else {
-        console.error(`❌ Failed to bind dashboard server after multiple attempts.`);
+        console.error(`❌ Failed to bind port ${targetPort} after ${MAX_ATTEMPTS} attempts — health checks will fail.`);
       }
       return;
     }
@@ -2562,8 +2562,8 @@ export function startDashboardServer(retryCount = 0) {
   });
 
   try {
-    server.listen(currentPort, '0.0.0.0', () => {
-      console.log(`🌐 Dashboard server running at http://0.0.0.0:${currentPort}`);
+    server.listen(targetPort, '0.0.0.0', () => {
+      console.log(`🌐 Dashboard server running at http://0.0.0.0:${targetPort}`);
     });
   } catch (error) {
     console.error(`❌ Sync listen error:`, error);
