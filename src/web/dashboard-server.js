@@ -1606,7 +1606,11 @@ function getRejectedSignalsData(windowDays = 7) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  if (url.pathname === '/' || url.pathname === '/dashboard') {
+  if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', message: 'Sentiment Arbitrage API Running', timestamp: Date.now() }));
+    return;
+  } else if (url.pathname === '/dashboard') {
     res.writeHead(302, { 'Location': '/premium' });
     res.end();
   } else if (url.pathname === '/api/status') {
@@ -2534,25 +2538,35 @@ function renderPremiumDashboard() {
 /**
  * 启动服务器
  */
-export function startDashboardServer() {
+export function startDashboardServer(retryCount = 0) {
+  const currentPort = parseInt(PORT) + retryCount;
+  
+  // Remove all previous error listeners to avoid memory leaks on retry
+  server.removeAllListeners('error');
+  
   server.on('error', (error) => {
-    if (error?.code === 'EADDRINUSE') {
-      console.warn(`⚠️ Dashboard server port ${PORT} already in use, skipping dashboard startup`);
+    if (error?.code === 'EADDRINUSE' || error?.code === 'EPERM') {
+      console.warn(`⚠️ Dashboard server port ${currentPort} failed (${error.code}).`);
+      
+      // If we are likely on a cloud platform (like Zeabur) that injected a specific PORT,
+      // and we failed to bind to it, we might be in trouble. But let's try a few times.
+      if (retryCount < 5) {
+        console.log(`🔄 Retrying dashboard server on port ${currentPort + 1}...`);
+        setTimeout(() => startDashboardServer(retryCount + 1), 1000);
+      } else {
+        console.error(`❌ Failed to bind dashboard server after multiple attempts.`);
+      }
       return;
     }
     console.error(`❌ Dashboard server error: ${error.message}`);
   });
 
   try {
-    server.listen(PORT, () => {
-      console.log(`🌐 Dashboard server running at http://localhost:${PORT}`);
+    server.listen(currentPort, '0.0.0.0', () => {
+      console.log(`🌐 Dashboard server running at http://0.0.0.0:${currentPort}`);
     });
   } catch (error) {
-    if (error?.code === 'EADDRINUSE') {
-      console.warn(`⚠️ Dashboard server port ${PORT} already in use, skipping dashboard startup`);
-      return null;
-    }
-    throw error;
+    console.error(`❌ Sync listen error:`, error);
   }
 
   return server;
