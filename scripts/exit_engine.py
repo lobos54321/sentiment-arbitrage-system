@@ -398,37 +398,43 @@ class ExitGuardianThread(threading.Thread):
                         self._exit_pending.add(trade_id)
                         continue
 
-                # === V3.4: Early Red Flag — entry <1min and pnl <0 → instant trail ===
+                # === V3.4: Early Red Flag — entry <1min and pnl <0 → DOA protection ===
                 # Audit: DOA trades (CHONKERS, ELO, hope) never went positive.
-                # If a position is red within 60s of entry, activate tight trail immediately
-                # instead of waiting for hard_sl to wipe out capital.
+                # Design: record first-red baseline PnL, exit only if loss DEEPENS 5pp from baseline.
+                # 10s cooldown prevents spread/slippage kills (memes commonly dip 3-5% on entry).
+                # BUG FIX: previous `floor = pnl * 0.5` always triggered (negative < half-negative).
                 _entry_age = time.time() - getattr(pos, 'entry_ts', time.time())
-                if _entry_age < 60 and pnl < 0 and pnl > hard_sl:
-                    _early_floor = pnl * 0.5  # allow half the current loss, then exit
-                    if pnl < _early_floor:
-                        log.info(
-                            f"[ExitGuardian] 🚨 {pos.symbol} EARLY RED FLAG: "
-                            f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% < floor={_early_floor*100:.1f}% "
-                            f"→ trail exit (DOA protection)"
-                        )
-                        with self.exit_queue_lock:
-                            self.exit_queue.append({
-                                'trade_id': trade_id,
-                                'symbol': pos.symbol,
-                                'reason': f'guardian_early_red (age={_entry_age:.0f}s, pnl={pnl:.1%} < floor={_early_floor:.1%})',
-                                'trigger_price': price,
-                                'trigger_pnl': pnl,
-                                '_instant_sim': self._get_instant_quote(pos, ca),
-                            })
-                        self._exit_pending.add(trade_id)
-                        continue
-                    # Position is red but not yet at floor — flag it for next tick
-                    if not getattr(pos, '_early_red_flagged', False):
+                if _entry_age > 10 and _entry_age < 60 and pnl < 0 and pnl > hard_sl:
+                    _baseline = getattr(pos, '_early_red_baseline', None)
+                    if _baseline is None:
+                        # First red tick after 10s: record baseline and flag
+                        pos._early_red_baseline = pnl
                         pos._early_red_flagged = True
                         log.info(
                             f"[ExitGuardian] ⚠️ {pos.symbol} EARLY RED WATCH: "
-                            f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% — trail active, floor={_early_floor*100:.1f}%"
+                            f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% — baseline set, "
+                            f"will exit if drops 5pp further to {(pnl - 0.05)*100:.1f}%"
                         )
+                    else:
+                        # Subsequent ticks: exit if PnL worsened 5pp from baseline
+                        _early_floor = _baseline - 0.05  # 5pp worse than first-red
+                        if pnl < _early_floor:
+                            log.info(
+                                f"[ExitGuardian] 🚨 {pos.symbol} EARLY RED FLAG: "
+                                f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% < floor={_early_floor*100:.1f}% "
+                                f"(baseline={_baseline*100:.1f}% + 5pp buffer) → exit"
+                            )
+                            with self.exit_queue_lock:
+                                self.exit_queue.append({
+                                    'trade_id': trade_id,
+                                    'symbol': pos.symbol,
+                                    'reason': f'guardian_early_red (age={_entry_age:.0f}s, pnl={pnl:.1%} < floor={_early_floor:.1%}, base={_baseline:.1%})',
+                                    'trigger_price': price,
+                                    'trigger_pnl': pnl,
+                                    '_instant_sim': self._get_instant_quote(pos, ca),
+                                })
+                            self._exit_pending.add(trade_id)
+                            continue
 
                 # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%, 1-tick confirm) ===
                 # Fills the gap where peak < 5% had NO trail protection.
