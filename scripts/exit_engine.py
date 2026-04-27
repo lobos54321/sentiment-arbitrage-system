@@ -398,76 +398,42 @@ class ExitGuardianThread(threading.Thread):
                         self._exit_pending.add(trade_id)
                         continue
 
-                # === V3.4: Early Red Flag — entry <1min and pnl <0 → DOA protection ===
-                # Audit: DOA trades (CHONKERS, ELO, hope) never went positive.
-                # Design: record first-red baseline PnL, exit only if loss DEEPENS 5pp from baseline.
-                # 10s cooldown prevents spread/slippage kills (memes commonly dip 3-5% on entry).
-                # BUG FIX: previous `floor = pnl * 0.5` always triggered (negative < half-negative).
-                _entry_age = time.time() - getattr(pos, 'entry_ts', time.time())
-                if _entry_age > 10 and _entry_age < 60 and pnl < 0 and pnl > hard_sl:
-                    _baseline = getattr(pos, '_early_red_baseline', None)
-                    if _baseline is None:
-                        # First red tick after 10s: record baseline and flag
-                        pos._early_red_baseline = pnl
-                        pos._early_red_flagged = True
-                        log.info(
-                            f"[ExitGuardian] ⚠️ {pos.symbol} EARLY RED WATCH: "
-                            f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% — baseline set, "
-                            f"will exit if drops 5pp further to {(pnl - 0.05)*100:.1f}%"
-                        )
-                    else:
-                        # Subsequent ticks: exit if PnL worsened 5pp from baseline
-                        _early_floor = _baseline - 0.05  # 5pp worse than first-red
-                        if pnl < _early_floor:
-                            log.info(
-                                f"[ExitGuardian] 🚨 {pos.symbol} EARLY RED FLAG: "
-                                f"age={_entry_age:.0f}s pnl={pnl*100:+.1f}% < floor={_early_floor*100:.1f}% "
-                                f"(baseline={_baseline*100:.1f}% + 5pp buffer) → exit"
-                            )
-                            with self.exit_queue_lock:
-                                self.exit_queue.append({
-                                    'trade_id': trade_id,
-                                    'symbol': pos.symbol,
-                                    'reason': f'guardian_early_red (age={_entry_age:.0f}s, pnl={pnl:.1%} < floor={_early_floor:.1%}, base={_baseline:.1%})',
-                                    'trigger_price': price,
-                                    'trigger_pnl': pnl,
-                                    '_instant_sim': self._get_instant_quote(pos, ca),
-                                })
-                            self._exit_pending.add(trade_id)
-                            continue
+                # === V3.4: Early Red Flag — DISABLED (V8 audit) ===
+                # Reason: redundant with hard_sl (-10%). Meme coins commonly dip 3-5%
+                # on entry spread. This feature killed Jewcoin at -5.5% after just 3s.
+                # Hard SL already covers DOA protection at -10%.
+                # Original bug: floor=pnl*0.5 always triggered (negative < half-negative).
+                # Even after fix, this adds no value over existing hard_sl + Phase 0.
 
-                # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%, 1-tick confirm) ===
-                # Fills the gap where peak < 5% had NO trail protection.
-                # Data: SLAB peak=4.8% → -15.4% (20.2pp drawdown, free_run had no floor)
-                #        lol peak=3.0% → -20.7% (23.7pp drawdown)
-                # Design: 2% threshold + 1-tick confirm + floor = peak * 0.40
-                #   SLAB:  tick#5 confirm, floor=1.9%, exit at -4.8% (saves 10.6pp)
-                #   lol:   tick#5 confirm, floor=1.2%, exit at -6.6% (saves 14.1pp)
-                #   FIRSTMAN: peak >> 2%, not affected (handled by higher-tier trails)
-                if pos.peak_pnl >= 0.02:
+                # === V8: PHASE 0 MICRO-TRAIL (peak >= 8%, 1-tick confirm) ===
+                # V8 audit: raised from 2%→8%. Meme coins swing ±5% as noise.
+                # 2% threshold was killing small winners (Jewcoin peak=0% killed at -3.5%).
+                # 8% means the token has shown REAL momentum before we start protecting.
+                # Floor = peak * 0.50 (aligned with ExitMatrix's Phase 0).
+                if pos.peak_pnl >= 0.08:
                     _p0_confirmed = getattr(pos, '_phase0_confirmed', False)
                     if not _p0_confirmed:
-                        # 1-tick confirm: peak >= 2% seen once → confirmed
+                        # 1-tick confirm: peak >= 8% seen once → confirmed
                         pos._phase0_confirmed = True
                         log.info(
                             f"[ExitGuardian] 🛡️ {pos.symbol} PHASE0 ACTIVATED: "
-                            f"peak={pos.peak_pnl*100:+.1f}% >= 2% confirmed"
+                            f"peak={pos.peak_pnl*100:+.1f}% >= 8% confirmed"
                         )
                     else:
-                        # Phase 0 trail active — floor = peak * 0.55
-                        _p0_floor = pos.peak_pnl * 0.55
+                        # Phase 0 trail active — floor = peak * 0.50
+                        _p0_floor = pos.peak_pnl * 0.50
                         if pnl < _p0_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} PHASE0 TRAIL: "
                                 f"pnl={pnl*100:+.1f}% < floor={_p0_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, 55% factor) "
+                                f"(peak={pos.peak_pnl*100:.1f}%, 50% factor) "
                                 f"price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
                                     'trade_id': trade_id,
                                     'symbol': pos.symbol,
-                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 55%)',
+                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 50%)',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
                                     '_instant_sim': self._get_instant_quote(pos, ca),

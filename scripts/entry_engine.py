@@ -690,11 +690,14 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     score_details.append(f"rvol:{rvol_score}")
 
     # Dim 3: pc_m5 (Max 15)
+    # V8 fix: parabolic moves (>50%) were getting 0 points. These are often
+    # the strongest signals. Now: sweet spot at 10-20%, still positive above.
     pc_score = 0
-    if 10 <= pc_m5 <= 20: pc_score = 15
+    if 10 <= pc_m5 <= 20: pc_score = 15  # sweet spot
     elif 20 < pc_m5 <= 35: pc_score = 10
     elif 5 <= pc_m5 < 10: pc_score = 8
     elif 35 < pc_m5 <= 50: pc_score = 5
+    elif pc_m5 > 50: pc_score = 3  # V8: was 0, parabolic still valid
     total_score += pc_score
     score_details.append(f"pc:{pc_score}")
 
@@ -872,35 +875,19 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
     elif total_score >= 50:
         # Smart Entry
-        # 3s Direction Confirmation (upgraded from 1s single-check)
-        # 8hr audit: 1s was too short to catch fake pumps that reverse at 2-5s
-        # Now: 3 samples @ 1s intervals, require at least 2/3 at or above entry price
+        # V8: Reduced from 3×1s (3s) to single 1s confirmation.
+        # Momentum check (2×2s=4s) already confirms price direction.
+        # This single check catches only extreme reversals (>5% crash in 1s).
         trigger_price = price
-        _direction_samples = []
-        for _si in range(3):
-            _time.sleep(1.0)
-            _sp, _, _ = fetch_realtime_price(token_ca, pool_address)
-            if _sp and _sp > 0:
-                _direction_samples.append(_sp)
-        if _direction_samples:
-            # Hard reject: if last sample dropped >4%
-            # V7 fix (2026-04-26): was 2%, too tight for meme coins (2-3% drops are noise).
-            # Data: 3/4 rejects were 2.6-3.4% (normal). 'US' at 4.8% was real crash.
-            _last_sample = _direction_samples[-1]
-            if _last_sample < price * 0.96:
+        _time.sleep(1.0)
+        _sp, _, _ = fetch_realtime_price(token_ca, pool_address)
+        if _sp and _sp > 0:
+            if _sp < price * 0.95:
                 log.info(f"[SmartEntry] 🚫  REJECT: momentum_reversing - "
-                         f"fell >{(price-_last_sample)/price*100:.1f}% in {len(_direction_samples)}s "
-                         f"samples={[f'{s:.10f}' for s in _direction_samples]}")
-                return False, 'momentum_reversing', f'fell >4% in 3s', None
-            # Soft reject: if fewer than 2/3 samples are at or above entry price
-            _rising = sum(1 for s in _direction_samples if s >= price * 0.995)
-            if _rising < 2:
-                log.info(f"[SmartEntry] 🚫  REJECT: direction_not_sustained - "
-                         f"only {_rising}/3 samples above entry "
-                         f"samples={[f'{s:.10f}' for s in _direction_samples]}")
-                return False, 'direction_not_sustained', f'only {_rising}/3 above entry', None
-            trigger_price = _last_sample
-            
+                         f"fell >{(price-_sp)/price*100:.1f}% in 1s")
+                return False, 'momentum_reversing', f'fell >5% in 1s', None
+            trigger_price = _sp
+
         log.info(f"[SmartEntry] ✅  SMART_ENTRY: {detail_str}")
         return True, 'smart_entry', detail_str, trigger_price
 

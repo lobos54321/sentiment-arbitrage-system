@@ -263,72 +263,54 @@ def score_price_strength(current_price, signal_price, lowest_price, latest_ath_p
     return 40, f'marginal growth={growth_pct:+.1f}% recovery={recovery_pct:.1f}%'
 
 
-MIN_MOMENTUM_MOVE_PCT = 0.8 # 9s minimum move: 0.8% (lowered from 1.5%)
+MIN_MOMENTUM_MOVE_PCT = 0.8 # 4s minimum move: 0.8%
 # Data-driven: in 6h audit, all FIRE passes had <1% 6s move (noise), max observed
 # meme coin 6s move was +3.69%. 5% would block ALL entries including Wifejak (+484%).
-# 0.8% filters pure noise while allowing legitimate trend momentum through.
-# Upgraded: 3×3s=9s window (accelerated from 5x3s to reduce system latency).
+# V8: Accelerated from 3×3s=9s to 2×2s=4s. Every second of entry delay costs ~0.5% spread.
+# The direction confirmation in SmartEntry was removed (redundant with this check).
 
 
-def score_realtime_momentum(token_ca, pool_address, interval_sec=3):
+def score_realtime_momentum(token_ca, pool_address, interval_sec=2):
     """
-    Matrix ④ — Realtime Momentum (3×3-second snapshots = 9s window)
+    Matrix ④ — Realtime Momentum (2×2-second snapshots = 4s window)
     Only called when matrices ①②③⑤ are already passing.
 
-    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (0.8%) over 9 seconds.
-    Uses 3 samples to dramatically cut entry latency.
+    V8: Accelerated from 3×3s=9s to 2×2s=4s.
+    Requires: price must move UP by at least MIN_MOMENTUM_MOVE_PCT (0.8%) over 4 seconds.
 
     Returns: (score: int 0-100, reason: str, snapshots: list)
     """
     _lazy_import()
 
     snapshots = []
-    for i in range(3):
+    for i in range(2):
         if i > 0:
             time.sleep(interval_sec)
         price, src, age_ms = _price_fn(token_ca, pool_address)
         if price and price > 0:
             snapshots.append(price)
 
-    if len(snapshots) < 3:
+    if len(snapshots) < 2:
         return 0, 'insufficient_snapshots', snapshots
 
     s_first = snapshots[0]
     s_last = snapshots[-1]
-    s_max = max(snapshots)
-    s_min = min(snapshots)
 
     if s_first <= 0:
         return 0, 'zero_base_price', snapshots
 
     pct_move = ((s_last - s_first) / s_first) * 100
-    pct_max = ((s_max - s_first) / s_first) * 100
-
-    # Count how many consecutive rises we see
-    rises = sum(1 for i in range(1, len(snapshots)) if snapshots[i] > snapshots[i-1])
     snap_str = ' '.join(f'{s:.10f}' for s in snapshots)
 
-    # Strong ascending: mostly rising, last > first by threshold
-    if rises >= 2 and pct_move >= MIN_MOMENTUM_MOVE_PCT:
-        return 100, f'ascending +{pct_move:.1f}% rises={rises}/2 [{snap_str}]', snapshots
+    # Strong ascending: last > first by threshold
+    if pct_move >= MIN_MOMENTUM_MOVE_PCT:
+        return 100, f'ascending +{pct_move:.1f}% [{snap_str}]', snapshots
 
-    # Moderate: last > first by threshold, at least some rises
-    if pct_move >= MIN_MOMENTUM_MOVE_PCT and rises >= 1:
-        return 80, f'net_ascending +{pct_move:.1f}% rises={rises}/2 [{snap_str}]', snapshots
-
-    # Weak but valid: overall up by threshold, even with dips mid-way
-    if pct_move >= MIN_MOMENTUM_MOVE_PCT and s_last > s_first:
-        return 60, f'choppy_up +{pct_move:.1f}% rises={rises}/2 [{snap_str}]', snapshots
-
-    # Peak during window but ended lower (pump fading)
-    if pct_max >= MIN_MOMENTUM_MOVE_PCT and pct_move < MIN_MOMENTUM_MOVE_PCT:
-        return 0, f'fading peak={pct_max:+.1f}% end={pct_move:+.2f}% [{snap_str}]', snapshots
-
-    # Below threshold
+    # Below threshold but positive
     if pct_move > 0:
-        return 0, f'noise +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% rises={rises}/2 [{snap_str}]', snapshots
+        return 0, f'noise +{pct_move:.2f}% < {MIN_MOMENTUM_MOVE_PCT}% [{snap_str}]', snapshots
 
-    return 0, f'declining {pct_move:.2f}% rises={rises}/2 [{snap_str}]', snapshots
+    return 0, f'declining {pct_move:.2f}% [{snap_str}]', snapshots
 
 
 
@@ -990,15 +972,15 @@ class ExitMatrixEvaluator:
                     'trail_floor': None,
                 }
 
-        # === V7: PHASE 0 MICRO-TRAIL (peak >= 2%) ===
-        # Mirrors Guardian Phase 0. Fills gap where peak < 5% had no protection.
-        # Data: SLAB +4.8%→-15.4%, lol +3.0%→-20.7% (no trail in old code)
-        if peak_pnl >= 0.02:
-            _p0_floor = peak_pnl * 0.40
+        # === V8: PHASE 0 MICRO-TRAIL (peak >= 8%) ===
+        # V8 audit: raised from 2%→8%. Meme coins swing ±5% as noise.
+        # Aligned with Guardian Phase 0 (both use 8% threshold, 50% floor).
+        if peak_pnl >= 0.08:
+            _p0_floor = peak_pnl * 0.50
             if current_pnl < _p0_floor:
                 return {
                     'action': 'exit',
-                    'reason': f'phase0_trail (pnl={current_pnl:.1%} < floor={_p0_floor:.1%}, peak={peak_pnl:.1%}, 40%)',
+                    'reason': f'phase0_trail (pnl={current_pnl:.1%} < floor={_p0_floor:.1%}, peak={peak_pnl:.1%}, 50%)',
                     'current_pnl': current_pnl,
                     'trail_floor': _p0_floor,
                 }
