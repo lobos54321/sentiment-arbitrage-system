@@ -184,18 +184,26 @@ class ExitGuardianThread(threading.Thread):
 
                 # --- Get watchlist entry for dynamic_sl ---
                 w_entry = self.store.get_by_ca(ca)
-                # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
-                # Base SL: -10% (V3.3 tightened from -15%). w_entry['dynamic_sl'] overrides.
-                base_sl = -0.10  # V3.3: tightened from -0.15 (-15%→-10%)
-                if w_entry:
-                    base_sl = w_entry.get('dynamic_sl', -0.10)
+                _is_lotto_entry = w_entry and w_entry.get('type') == 'LOTTO'
+
                 # Lazy import to avoid circular dependency
                 try:
                     from entry_engine import fetch_dexscreener_trend_snapshot
                     _dex_trend = fetch_dexscreener_trend_snapshot(ca)
                 except Exception:
                     _dex_trend = None
-                hard_sl = compute_dynamic_sl(pos, _dex_trend, base_sl=base_sl)
+
+                if _is_lotto_entry:
+                    # LOTTO: wider hard SL — these tokens are naturally volatile early on.
+                    # -25% is the rug signal: genuine pumps never see -25% from entry.
+                    hard_sl = -0.25
+                else:
+                    # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
+                    # Base SL: -10% (V3.3 tightened from -15%). w_entry['dynamic_sl'] overrides.
+                    base_sl = -0.10  # V3.3: tightened from -0.15 (-15%→-10%)
+                    if w_entry:
+                        base_sl = w_entry.get('dynamic_sl', -0.10)
+                    hard_sl = compute_dynamic_sl(pos, _dex_trend, base_sl=base_sl)
 
                 # === Hard Stop Loss (Double-Tap Confirmation) ===
                 # P0 Fix: A single bad price read from Redis killed Coco (+73% → -20.8%).
@@ -446,7 +454,43 @@ class ExitGuardianThread(threading.Thread):
                 is_moon = w_entry and w_entry.get('status') == 'moon_bag'
                 _is_ath_entry = w_entry and (w_entry.get('type') == 'ATH' or w_entry.get('signal_type') == 'ATH')
 
-                if _is_ath_entry and is_moon:
+                # === LOTTO Phase-Based Trail ===
+                # Wide floors to let ultra-early tokens run 10x-100x without getting shaken out.
+                # Phase 0 (peak <50%):   floor = peak × 0.35 — allow 65% pullback, meme chop is normal
+                # Phase 1 (50-200%):     floor = peak × 0.50 — tighten once momentum confirmed
+                # Phase 2 (>200%):       floor = peak × 0.65 — lock in >65% of peak at this point
+                if _is_lotto_entry and not is_moon and pos.peak_pnl >= 0.08:
+                    if pos.peak_pnl >= 2.00:
+                        _lotto_factor = 0.65
+                        _lotto_phase = 'phase2_200pct'
+                    elif pos.peak_pnl >= 0.50:
+                        _lotto_factor = 0.50
+                        _lotto_phase = 'phase1_50pct'
+                    else:
+                        _lotto_factor = 0.35
+                        _lotto_phase = 'phase0_early'
+
+                    _lotto_floor = pos.peak_pnl * _lotto_factor
+                    if pnl < _lotto_floor:
+                        log.info(
+                            f"[ExitGuardian] 📉 {pos.symbol} LOTTO TRAIL ({_lotto_phase}): "
+                            f"pnl={pnl*100:+.1f}% < floor={_lotto_floor*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}% × {_lotto_factor}) "
+                            f"price={price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': f'guardian_lotto_trail_{_lotto_phase} (pnl={pnl:.1%} < floor={_lotto_floor:.1%}, peak={pos.peak_pnl:.1%}, ×{_lotto_factor})',
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
+                        continue
+
+                elif _is_ath_entry and is_moon:
                     # === ATH Phase 3 Moon Bag: absolute -40pp trail ===
                     moon_peak = pos.peak_pnl
                     moon_floor = moon_peak - 0.40

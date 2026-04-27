@@ -3729,10 +3729,26 @@ def run_monitor(db):
                                     f"price {_first_px:.10f} → {_last_px:.10f} ({_mult:.1f}x)"
                                 )
 
+                    # LOTTO: NEW_TRENDING + MC<$30K + signal<30min old → fast-lane track
+                    _raw_mc = sig.get('market_cap') or 0
+                    _signal_age_sec = time.time() - (signal_ts or time.time())
+                    _is_lotto_signal = (
+                        not sig.get('is_ath')
+                        and (sig.get('signal_type') or '').upper() == 'NEW_TRENDING'
+                        and 0 < _raw_mc < 30_000
+                        and _signal_age_sec < 1800
+                    )
+                    _wl_type = 'ATH' if sig.get('is_ath') else ('LOTTO' if _is_lotto_signal else 'NOT_ATH')
+                    if _is_lotto_signal:
+                        log.info(
+                            f"  [LOTTO] 🎰 {symbol} classified as LOTTO: "
+                            f"MC=${_raw_mc:,.0f} age={_signal_age_sec:.0f}s"
+                        )
+
                     watchlist.register(
                         ca=token_ca,
                         symbol=symbol,
-                        signal_type='ATH' if sig.get('is_ath') else 'NOT_ATH',
+                        signal_type=_wl_type,
                         pool_address=pool,
                         signal_ts=signal_ts,
                         premium_signal_id=premium_signal_id,
@@ -3815,7 +3831,70 @@ def run_monitor(db):
                     break
                 
                 wl_eval_count += 1
-                
+
+                # === LOTTO FAST-LANE ===
+                # NEW_TRENDING + MC<$30K signals skip matrix evaluation entirely.
+                # Quick rug filter only: top10 < 70%, liq > $3K. Fire in <5s.
+                if w_entry.get('type') == 'LOTTO':
+                    _lotto_age_sec = time.time() - w_entry.get('added_at', time.time())
+                    if _lotto_age_sec > 1800:
+                        watchlist.mark_expired(w_entry['id'], 'lotto_stale_30min')
+                        log.info(f"  [LOTTO] 🗑️ {w_entry['symbol']} expired: stale ({_lotto_age_sec:.0f}s > 30min)")
+                        continue
+
+                    # Quick rug filter — DexScreener for liquidity
+                    try:
+                        _lotto_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
+                        _lotto_liq = (_lotto_dex.get('liquidity_usd', 0) or 0) if _lotto_dex else 0
+                    except Exception:
+                        _lotto_liq = 0
+
+                    _lotto_top10 = w_entry.get('signal_top10', 0) or 0
+                    if _lotto_top10 > 70:
+                        watchlist.mark_expired(w_entry['id'], f'lotto_top10_{_lotto_top10:.0f}pct')
+                        log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: top10={_lotto_top10:.0f}% > 70% (insider dump risk)")
+                        continue
+                    if 0 < _lotto_liq < 3000:
+                        watchlist.mark_expired(w_entry['id'], f'lotto_liq_low_{_lotto_liq:.0f}')
+                        log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: liq=${_lotto_liq:.0f} < $3K (slippage risk)")
+                        continue
+
+                    _lotto_lc_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
+                    if _lotto_lc_id not in pending_entries:
+                        _lotto_lotto_count = sum(1 for p in pending_entries.values() if p.get('is_lotto'))
+                        if _lotto_lotto_count >= 5:
+                            log.info(f"  [LOTTO] {w_entry['symbol']} SKIP: LOTTO slots full ({_lotto_lotto_count}/5)")
+                        else:
+                            log.info(
+                                f"  [LOTTO] 🎰 FIRE {w_entry['symbol']}! "
+                                f"MC=${w_entry.get('signal_mc', 0) or 0:.0f} "
+                                f"liq=${_lotto_liq:.0f} top10={_lotto_top10:.0f}% "
+                                f"age={_lotto_age_sec:.0f}s"
+                            )
+                            pending_entries[_lotto_lc_id] = {
+                                'token_ca': w_entry['ca'],
+                                'symbol': w_entry['symbol'],
+                                'signal_ts': w_entry['signal_ts'],
+                                'premium_signal_id': w_entry['premium_signal_id'],
+                                'signal_type': 'LOTTO',
+                                'pool': w_entry['pool_address'],
+                                'staged_at': time.time(),
+                                'trigger_price': None,
+                                'watchlist_id': w_entry['id'],
+                                'kelly_position_sol': 0.05,
+                                'matrix_scores': {},
+                                'is_lotto': True,
+                                'timing_passed': True,
+                                'w_entry': w_entry,
+                                'momentum_snapshots': [],
+                                'momentum_pct': 0,
+                                'first_fire_pc_m5': None,
+                                'spread_abort_count': 0,
+                                'smart_entry_retries': 0,
+                            }
+                            last_progress = time.time()
+                    continue
+
                 # Inject SUSTAINED_ATH flag for matrix evaluator to use (e.g. for timeout extension)
                 _wl_sustained = False
                 if hasattr(watchlist, '_ath_history'):
@@ -4202,27 +4281,32 @@ def run_monitor(db):
                         pending['entry_mode'] = timing_reason
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
 
-                    # Recalculate Kelly with entry mode + matrix scores
-                    pending['kelly_position_sol'] = calculate_kelly_position(
-                        pending_w_entry, entry_mode=pending.get('entry_mode', 'default'),
-                        matrix_scores=pending.get('matrix_scores'))
-                            
-                    # Layer 1: Kelly formula output (Sustained ATH 1.5x boost is applied inside calculate_kelly_position)
-                    # Layer 2: MAXposition 0.5 SOL hard cap
-                    # Layer 3: A1 - max 1% of pool liquidity (prevents slippage in thin pools)
-                    _kelly_raw = pending.get('kelly_position_sol') or position_size_sol
+                    # LOTTO: fixed 0.05 SOL, skip Kelly and liquidity cap
+                    if pending.get('is_lotto'):
+                        actual_position_size_sol = 0.05
+                        log.info(f"  [LOTTO] {pending['symbol']} fixed size: {actual_position_size_sol} SOL")
+                    else:
+                        # Recalculate Kelly with entry mode + matrix scores
+                        pending['kelly_position_sol'] = calculate_kelly_position(
+                            pending_w_entry, entry_mode=pending.get('entry_mode', 'default'),
+                            matrix_scores=pending.get('matrix_scores'))
 
-                    _liq_cap = get_liquidity_position_cap(
-                        pending['token_ca'],
-                        sol_price_usd=sol_price,
-                    )
-                    actual_position_size_sol = min(
-                        _kelly_raw,
-                        0.5,  # hard cap
-                        _liq_cap if _liq_cap is not None else 0.5,
-                    )
-                    if _liq_cap is not None and actual_position_size_sol < _kelly_raw:
-                        log.info(f"  [ENTRY_SIZE] {pending['symbol']} kelly={_kelly_raw:.3f} → liq_cap={actual_position_size_sol:.3f} SOL (pool liquidity limit)")
+                        # Layer 1: Kelly formula output (Sustained ATH 1.5x boost is applied inside calculate_kelly_position)
+                        # Layer 2: MAXposition 0.5 SOL hard cap
+                        # Layer 3: A1 - max 1% of pool liquidity (prevents slippage in thin pools)
+                        _kelly_raw = pending.get('kelly_position_sol') or position_size_sol
+
+                        _liq_cap = get_liquidity_position_cap(
+                            pending['token_ca'],
+                            sol_price_usd=sol_price,
+                        )
+                        actual_position_size_sol = min(
+                            _kelly_raw,
+                            0.5,  # hard cap
+                            _liq_cap if _liq_cap is not None else 0.5,
+                        )
+                        if _liq_cap is not None and actual_position_size_sol < _kelly_raw:
+                            log.info(f"  [ENTRY_SIZE] {pending['symbol']} kelly={_kelly_raw:.3f} → liq_cap={actual_position_size_sol:.3f} SOL (pool liquidity limit)")
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,
