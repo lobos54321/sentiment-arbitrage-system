@@ -807,7 +807,11 @@ class ExitMatrixEvaluator:
         # Audit (26 trades, 2026-04-22): Tight SL killed 22/26 trades at -7%~-10%,
         # many of which had peaks of +3-4% (would have survived with -15% SL).
         # Meme coin normal volatility is ±5-8%, so -5% SL = noise-level stop.
-        hard_sl = entry.get('dynamic_sl', -0.10)  # V3.3: -0.15→-0.10
+        _is_lotto_entry = entry.get('type') == 'LOTTO'
+        if _is_lotto_entry:
+            hard_sl = -0.25  # LOTTO: wider SL, matches exit_guardian and mark_holding
+        else:
+            hard_sl = entry.get('dynamic_sl', -0.10)  # V3.3: -0.15→-0.10
         if current_pnl <= hard_sl:
             return {
                 'action': 'exit',
@@ -975,7 +979,9 @@ class ExitMatrixEvaluator:
         # === V8: PHASE 0 MICRO-TRAIL (peak >= 8%) ===
         # V8 audit: raised from 2%→8%. Meme coins swing ±5% as noise.
         # Aligned with Guardian Phase 0 (both use 8% threshold, 50% floor).
-        if peak_pnl >= 0.08:
+        # LOTTO bypass: LOTTO phase-based trail in exit_guardian uses wider 35% floor.
+        # Applying 50% phase0 here would over-ride that and cut LOTTO positions too early.
+        if not _is_lotto_entry and peak_pnl >= 0.08:
             _p0_floor = peak_pnl * 0.50
             if current_pnl < _p0_floor:
                 return {
@@ -983,6 +989,26 @@ class ExitMatrixEvaluator:
                     'reason': f'phase0_trail (pnl={current_pnl:.1%} < floor={_p0_floor:.1%}, peak={peak_pnl:.1%}, 50%)',
                     'current_pnl': current_pnl,
                     'trail_floor': _p0_floor,
+                }
+
+        # === LOTTO Phase-Based Trail (mirrors exit_guardian logic) ===
+        # LOTTO tokens need a wider trail in the early phase to survive normal volatility.
+        # exit_guardian handles this for real-time 3s checks, but EXIT_MATRIX also needs it
+        # for the slower position-monitoring loop.
+        if _is_lotto_entry and peak_pnl >= 0.08:
+            if peak_pnl >= 2.00:
+                _lotto_factor = 0.65
+            elif peak_pnl >= 0.50:
+                _lotto_factor = 0.50
+            else:
+                _lotto_factor = 0.35
+            _lotto_floor = peak_pnl * _lotto_factor
+            if current_pnl < _lotto_floor:
+                return {
+                    'action': 'exit',
+                    'reason': f'lotto_trail (pnl={current_pnl:.1%} < floor={_lotto_floor:.1%}, peak={peak_pnl:.1%}, {_lotto_factor:.0%})',
+                    'current_pnl': current_pnl,
+                    'trail_floor': _lotto_floor,
                 }
 
         # === Trailing Stop (velocity-aware, like Moon Bag) ===
