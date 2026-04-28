@@ -3729,7 +3729,9 @@ def run_monitor(db):
                     # Bypasses super_idx and top10 filters since fresh tokens are too young
                     # to have built up super_idx>70, and concentrated holders is normal at <$30K MC.
                     _raw_mc = sig.get('market_cap') or 0
-                    _signal_age_sec = time.time() - (signal_ts or time.time())
+                    # signal_ts from DB is in milliseconds; time.time() is seconds — must normalize.
+                    _sig_ts_sec = (signal_ts // 1000) if signal_ts and signal_ts > 1e12 else (signal_ts or time.time())
+                    _signal_age_sec = time.time() - _sig_ts_sec
                     _is_lotto_signal = (
                         not sig.get('is_ath')
                         and (sig.get('signal_type') or '').upper() == 'NEW_TRENDING'
@@ -3930,7 +3932,9 @@ def run_monitor(db):
                         watchlist.mark_expired(w_entry['id'], f'lotto_top10_{_lotto_top10:.0f}pct')
                         log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: signal-time top10={_lotto_top10:.0f}% > 70%")
                         continue
-                    if 0 < _lotto_liq < 3000:
+                    if _lotto_liq < 3000:
+                        # Block both zero-liquidity ($0 = DexScreener returned nothing = bad sign)
+                        # and genuinely thin pools (<$3K = catastrophic slippage)
                         watchlist.mark_expired(w_entry['id'], f'lotto_liq_low_{_lotto_liq:.0f}')
                         log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: liq=${_lotto_liq:.0f} < $3K (slippage risk)")
                         continue
@@ -4604,10 +4608,14 @@ def run_monitor(db):
                         f"mode={pending.get('entry_mode', 'default')} lifecycle={lifecycle_id} via quoted execution"
                     )
                     if 'watchlist_id' in pending:
-                        # Base SL is now fixed -15% (84% period)
-                        # We no longer adjust SL for slippage. The user wants the SL to be strictly based on the
-                        # actual execution price, not widened to compensate for a bad entry price.
-                        _base_sl = get_adaptive_stop_loss()  # returns -0.15
+                        if pending.get('is_lotto'):
+                            # LOTTO: wider SL stored in watchlist so EXIT_MATRIX respects it too.
+                            # Exit_guardian already uses -0.25 for LOTTO, but EXIT_MATRIX reads
+                            # dynamic_sl from the watchlist — must set it here or EXIT_MATRIX fires
+                            # at the default -0.15 before the guardian can protect the position.
+                            _base_sl = -0.25
+                        else:
+                            _base_sl = get_adaptive_stop_loss()  # returns -0.15
                         _final_sl = _base_sl
                         
                         if _spread > 0:
