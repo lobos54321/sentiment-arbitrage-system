@@ -70,6 +70,7 @@ export class PremiumSignalEngine {
     this._klinePrimeMinGapMs = parseInt(process.env.KLINE_PRIME_MIN_GAP_MS || '30000', 10);
     this._klineLocalFreshnessSec = parseInt(process.env.KLINE_LOCAL_FRESHNESS_SEC || '120', 10);
     this._klineProviderFreshnessSec = parseInt(process.env.KLINE_PROVIDER_FRESHNESS_SEC || '120', 10);
+    this._notAthPrebuyUnknownDataFailClosed = process.env.NOT_ATH_PREBUY_UNKNOWN_DATA_FAIL_OPEN !== 'true';
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -1272,7 +1273,8 @@ export class PremiumSignalEngine {
       const structuralFailures = new Set(['not_red_bar', 'support_break', 'high_vol', 'high_vol_calm', 'inactive']);
       const gateDecision = klineCheck?.gateStatus || (klineCheck?.passed ? 'PASS' : 'UNKNOWN_DATA');
       const blockedStructural = gateDecision === 'BLOCK' && structuralFailures.has(klineCheck?.reason);
-      const decisionContinuedToBuy = gateDecision !== 'BLOCK';
+      const unknownDataBlocked = gateDecision === 'UNKNOWN_DATA' && this._notAthPrebuyUnknownDataFailClosed;
+      const decisionContinuedToBuy = gateDecision !== 'BLOCK' && !unknownDataBlocked;
       const normalizeUnknownReason = (reason, check, backfillResult, waitState) => {
         if (gateDecision !== 'UNKNOWN_DATA') return reason || 'unknown';
         if (reason === 'RATE_LIMITED') return backfillResult?.reason === 'RATE_LIMITED' ? 'backfill_rate_limited' : 'provider_rate_limited';
@@ -1306,6 +1308,7 @@ export class PremiumSignalEngine {
         momFromLag1: Number.isFinite(klineCheck?.momFromLag1) ? klineCheck.momFromLag1 : null,
         decisionContinuedToBuy,
         blockedStructural,
+        unknownDataBlocked,
         observability: {
           backfillAttempted: Boolean(backfill),
           backfillEnough: Boolean(backfill?.enough),
@@ -1315,6 +1318,7 @@ export class PremiumSignalEngine {
           dataSource: klineCheck?.provider || backfill?.provider || null,
           truthSource: klineCheck?.truthSource || null,
           failOpenPrevented: Boolean(klineCheck?.failOpenPrevented),
+          failClosedApplied: unknownDataBlocked,
           providerDataState: gateDecision === 'UNKNOWN_DATA' ? normalizedUnknownReason : 'scored',
         },
         backfill: backfill ? {
@@ -1344,6 +1348,7 @@ export class PremiumSignalEngine {
         `reason=${prebuyGateResult.gateReason}`,
         `continue=${decisionContinuedToBuy ? 1 : 0}`,
         `blockedStructural=${blockedStructural ? 1 : 0}`,
+        unknownDataBlocked ? 'unknownDataBlocked=1' : null,
         prebuyGateResult.provider ? `provider=${prebuyGateResult.provider}` : 'provider=-',
         prebuyGateResult.poolAddress ? `poolAddress=${prebuyGateResult.poolAddress}` : 'poolAddress=-',
         Number.isFinite(prebuyGateResult.freshnessSec) ? `freshnessSec=${prebuyGateResult.freshnessSec}` : 'freshnessSec=-',
@@ -1372,9 +1377,17 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: klineCheck.reason };
       }
 
+      if (unknownDataBlocked) {
+        this.stats.not_ath_prebuy_kline_block++;
+        console.log(logParts);
+        this.saveSignalRecord(signal, 'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED', null, false, { gateResult: prebuyGateResult });
+        return { action: 'SKIP', reason: `prebuy_unknown_data:${normalizedUnknownReason}` };
+      }
+
       console.log(logParts);
     } catch (error) {
       this.stats.not_ath_prebuy_kline_unknown_data++;
+      const unknownDataBlocked = this._notAthPrebuyUnknownDataFailClosed;
       const prebuyGateResult = {
         gateName: 'NOT_ATH_PREBUY_KLINE',
         gateDecision: 'UNKNOWN_DATA',
@@ -1387,8 +1400,9 @@ export class PremiumSignalEngine {
         supportBreakPct: null,
         avgVol3: null,
         momFromLag1: null,
-        decisionContinuedToBuy: true,
+        decisionContinuedToBuy: !unknownDataBlocked,
         blockedStructural: false,
+        unknownDataBlocked,
         observability: {
           backfillAttempted: false,
           backfillEnough: false,
@@ -1396,6 +1410,7 @@ export class PremiumSignalEngine {
           localWaitTimedOut: false,
           localWaitError: error.message,
           dataSource: null,
+          failClosedApplied: unknownDataBlocked,
           providerDataState: 'prebuy_exception',
         },
         backfill: null,
@@ -1410,11 +1425,17 @@ export class PremiumSignalEngine {
         `token=${ca}`,
         'decision=UNKNOWN_DATA',
         'reason=prebuy_exception',
-        'continue=1',
+        `continue=${unknownDataBlocked ? 0 : 1}`,
         'blockedStructural=0',
+        unknownDataBlocked ? 'unknownDataBlocked=1' : null,
         `signalTsSec=${signalTsSec}`,
         `error=${JSON.stringify(error.message)}`,
-      ].join(' '));
+      ].filter(Boolean).join(' '));
+      if (unknownDataBlocked) {
+        this.stats.not_ath_prebuy_kline_block++;
+        this.saveSignalRecord(signal, 'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED', null, false, { gateResult: prebuyGateResult });
+        return { action: 'SKIP', reason: 'prebuy_exception' };
+      }
     }
 
     // 执行 Shadow Buy

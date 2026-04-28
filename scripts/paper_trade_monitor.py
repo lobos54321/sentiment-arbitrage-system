@@ -14,9 +14,14 @@ Monitors premium_signals for new entries, enters at live price via GeckoTerminal
 tracks staged lifecycle positions, records results to paper_trades.db.
 
 Usage:
-    python3 scripts/paper_trade_monitor.py              # live monitor
-    python3 scripts/paper_trade_monitor.py --dry-run    # dry run from recent signals
-    python3 scripts/paper_trade_monitor.py --stats      # print daily stats
+    Live monitor:
+      python3 scripts/paper_trade_monitor.py
+    Dry run from recent signals:
+      python3 scripts/paper_trade_monitor.py --dry-run
+    Cumulative stats:
+      python3 scripts/paper_trade_monitor.py --stats
+    Filtered stats:
+      python3 scripts/paper_trade_monitor.py --stats --stats-min-id 1322
 """
 
 import sqlite3
@@ -512,7 +517,9 @@ def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
 def init_paper_db(db_path=None):
     """Create paper_trades table if not exists."""
     path = db_path or PAPER_DB
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    db_dir = os.path.dirname(path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     
     def _create_schema(db_conn):
         db_conn.row_factory = sqlite3.Row
@@ -2970,16 +2977,22 @@ def print_daily_report(db, date_str=None):
     log.info(f"{'='*60}")
 
 
-def print_all_stats(db):
+def print_all_stats(db, min_id=None):
     """Print cumulative stats across all dates."""
+    where_clauses = ["exit_reason IS NOT NULL"]
+    params = []
+    if min_id is not None:
+        where_clauses.append("id >= ?")
+        params.append(min_id)
+
     rows = db.execute("""
         SELECT pnl_pct, exit_reason, market_regime, replay_source, bars_held,
                strategy_stage, stage_outcome, reentry_source, lifecycle_id,
                date(exit_ts, 'unixepoch') as exit_date
         FROM paper_trades
-        WHERE exit_reason IS NOT NULL
+        WHERE {where_sql}
         ORDER BY exit_ts
-    """).fetchall()
+    """.format(where_sql=" AND ".join(where_clauses)), params).fetchall()
 
     if not rows:
         log.info("No completed paper trades yet.")
@@ -2990,6 +3003,8 @@ def print_all_stats(db):
 
     log.info(f"{'='*60}")
     log.info(f"  Cumulative Paper Trade Stats")
+    if min_id is not None:
+        log.info(f"  Filter: id >= {min_id}")
     log.info(f"{'='*60}")
     print_summary_block('All trades', rows)
     print_summary_block('Live monitor', live_rows)
@@ -3054,7 +3069,15 @@ def print_all_stats(db):
         log.info(f"    {stage_count} stage(s): {lifecycle_count}")
 
     # Open positions
-    open_count = db.execute("SELECT COUNT(*) as c FROM paper_trades WHERE exit_reason IS NULL").fetchone()['c']
+    open_params = []
+    open_where_clauses = ["exit_reason IS NULL"]
+    if min_id is not None:
+        open_where_clauses.append("id >= ?")
+        open_params.append(min_id)
+    open_count = db.execute(
+        "SELECT COUNT(*) as c FROM paper_trades WHERE " + " AND ".join(open_where_clauses),
+        open_params,
+    ).fetchone()['c']
     if open_count:
         log.info(f"")
         log.info(f"  Open positions: {open_count}")
@@ -5308,7 +5331,18 @@ def main():
     if '--dry-run' in sys.argv:
         dry_run(db)
     elif '--stats' in sys.argv:
-        print_all_stats(db)
+        min_id = None
+        if '--stats-min-id' in sys.argv:
+            idx = sys.argv.index('--stats-min-id')
+            if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith('-'):
+                log.error("--stats-min-id requires an integer value")
+                sys.exit(2)
+            try:
+                min_id = int(sys.argv[idx + 1])
+            except ValueError:
+                log.error("--stats-min-id requires an integer value")
+                sys.exit(2)
+        print_all_stats(db, min_id=min_id)
     elif '--daily' in sys.argv:
         date = None
         idx = sys.argv.index('--daily')
