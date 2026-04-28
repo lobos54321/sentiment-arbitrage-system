@@ -53,6 +53,7 @@ from entry_engine import (
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
 from exit_engine import ExitGuardianThread, process_guardian_exits
+from paper_decision_audit import init_decision_audit, record_decision_event, signal_payload
 from signal_router import route_signal
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -634,6 +635,7 @@ def init_paper_db(db_path=None):
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_signal_route ON paper_trades(signal_route)")
         except sqlite3.OperationalError:
             pass
+        init_decision_audit(db_conn)
         db_conn.commit()
     
     try:
@@ -3754,12 +3756,61 @@ def run_monitor(db):
                     premium_signal_id = sig.get('id')
                     signal_type = sig.get('signal_type') or 'NEW_TRENDING'
                     lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
+                    symbol = sig['symbol'] or token_ca[:8]
+
+                    record_decision_event(
+                        db,
+                        component='signal_ingest',
+                        event_type='signal_received',
+                        decision='received',
+                        reason=signal_type,
+                        token_ca=token_ca,
+                        symbol=symbol,
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=signal_ts,
+                        signal_id=premium_signal_id,
+                        data_source='premium_signals',
+                        payload=signal_payload(sig),
+                    )
 
                     if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
+                        record_decision_event(
+                            db,
+                            component='dedupe',
+                            event_type='signal_skip',
+                            decision='skip',
+                            reason='lifecycle_already_active',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            payload={'pending': lifecycle_id in pending_entries},
+                        )
                         continue
 
                     existing_w_entry = watchlist.get_by_ca(token_ca)
                     route_decision = route_signal(sig, now=time.time(), existing_entry=existing_w_entry)
+                    record_decision_event(
+                        db,
+                        component='signal_router',
+                        event_type='route_decision',
+                        decision=route_decision.route,
+                        reason=route_decision.reason,
+                        token_ca=token_ca,
+                        symbol=symbol,
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=signal_ts,
+                        signal_id=premium_signal_id,
+                        route=route_decision.route,
+                        data_source='premium_signals',
+                        payload={
+                            **signal_payload(sig),
+                            'signal_age_sec': route_decision.signal_age_sec,
+                            'existing_watchlist_status': existing_w_entry.get('status') if existing_w_entry else None,
+                            'existing_watchlist_type': existing_w_entry.get('type') if existing_w_entry else None,
+                        },
+                    )
                     if route_decision.is_lotto_boost and existing_w_entry:
                         boost_updates = build_ath_boost_updates(
                             existing_w_entry,
@@ -3796,10 +3847,38 @@ def run_monitor(db):
                             f"count={boost_updates['ath_count']} mc=${boost_updates['last_ath_mc']:,.0f} "
                             f"lockout_until={int(boost_updates['trail_lockout_until'])}"
                         )
+                        record_decision_event(
+                            db,
+                            component='lotto_ath_feedback',
+                            event_type='ath_boost',
+                            decision='boost_hold',
+                            reason=route_decision.reason,
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route='LOTTO',
+                            payload=boost_updates,
+                        )
                         last_progress = time.time()
                         continue
 
                     if len(positions) + len(pending_entries) >= max_positions:
+                        record_decision_event(
+                            db,
+                            component='portfolio_guard',
+                            event_type='signal_skip',
+                            decision='skip',
+                            reason='max_positions_reached',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route=route_decision.route,
+                            payload={'positions': len(positions), 'pending': len(pending_entries), 'max_positions': max_positions},
+                        )
                         continue
 
                     existing = db.execute(
@@ -3807,9 +3886,22 @@ def run_monitor(db):
                         (lifecycle_id, token_ca, signal_ts)
                     ).fetchone()
                     if existing:
+                        record_decision_event(
+                            db,
+                            component='dedupe',
+                            event_type='signal_skip',
+                            decision='skip',
+                            reason='paper_trade_exists',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route=route_decision.route,
+                            payload={'paper_trade_id': existing['id']},
+                        )
                         continue
 
-                    symbol = sig['symbol'] or token_ca[:8]
                     super_idx = parse_super_index(sig['description'] or '')
 
                     # === LOTTO classification (must happen BEFORE filters that could block) ===
@@ -3825,6 +3917,20 @@ def run_monitor(db):
                     # ATH: no Super Score (None), skip this filter — ATH uses own pipeline
                     # LOTTO: bypass — fresh tokens haven't built super_idx yet
                     if not sig.get('is_ath') and not _is_lotto_signal and (super_idx is None or super_idx <= min_super_index):
+                        record_decision_event(
+                            db,
+                            component='prebuy_filter',
+                            event_type='signal_reject',
+                            decision='reject',
+                            reason='super_idx_below_min',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route=route_decision.route,
+                            payload={'super_idx': super_idx, 'min_super_index': min_super_index},
+                        )
                         continue
                     top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)
                     # Config might have 100 as default from old JSON schema, if it's 100 we override to 45 for safety or honor it?
@@ -3838,6 +3944,20 @@ def run_monitor(db):
                     top10_pct = parse_top10_percent(sig['description'] or '')
                     if top10_pct is not None and top10_pct > _effective_top10_max:
                         log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: Top10 {top10_pct}% exceeds max allowed {_effective_top10_max}%, skipping")
+                        record_decision_event(
+                            db,
+                            component='prebuy_filter',
+                            event_type='signal_reject',
+                            decision='reject',
+                            reason='top10_pct_above_max',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route=route_decision.route,
+                            payload={'top10_pct': top10_pct, 'max_top10_pct': _effective_top10_max},
+                        )
                         # FIX 3: Remember blocked CAs so Watchlist won't accept them later
                         # (only blacklist on the strict 45% threshold, not the LOTTO 70%)
                         if not _is_lotto_signal:
@@ -3851,12 +3971,41 @@ def run_monitor(db):
                     if not _is_lotto_signal and hasattr(watchlist, '_top10_blacklist') and token_ca in watchlist._top10_blacklist:
                         _prev_top10 = watchlist._top10_blacklist[token_ca]
                         log.info(f"  [PREBUY_FILTER] {symbol} BLOCKED: previously flagged Top10={_prev_top10}% (insider concentration memory), skipping")
+                        record_decision_event(
+                            db,
+                            component='prebuy_filter',
+                            event_type='signal_reject',
+                            decision='reject',
+                            reason='top10_blacklist_memory',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route=route_decision.route,
+                            payload={'previous_top10_pct': _prev_top10},
+                        )
                         continue
 
                     # Determine signal price immediately for reference
                     pool = get_pool_address(token_ca)
                     if not pool:
                         log.warning(f"  Could not find pool for {symbol}, skipping")
+                        record_decision_event(
+                            db,
+                            component='data_source',
+                            event_type='pool_lookup',
+                            decision='reject',
+                            reason='pool_not_found',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route=route_decision.route,
+                            data_source='pool_lookup',
+                            payload={'token_ca': token_ca},
+                        )
                         continue
                     time.sleep(0.1)
                     sig_price_val, _, _ = fetch_realtime_price(token_ca, pool, max_age_ms=15000)
@@ -3921,6 +4070,28 @@ def run_monitor(db):
                     )
                     if _is_lotto_signal and registered_entry:
                         watchlist.update_position_state(registered_entry['id'], signal_route='LOTTO')
+                    record_decision_event(
+                        db,
+                        component='watchlist',
+                        event_type='register',
+                        decision='registered',
+                        reason=_wl_type,
+                        token_ca=token_ca,
+                        symbol=symbol,
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=signal_ts,
+                        signal_id=premium_signal_id,
+                        route='LOTTO' if _is_lotto_signal else _wl_type,
+                        data_source='realtime_price',
+                        payload={
+                            'watchlist_id': registered_entry.get('id') if registered_entry else None,
+                            'watchlist_type': _wl_type,
+                            'pool': pool,
+                            'signal_price': sig_price,
+                            'super_idx': super_idx,
+                            'top10_pct': top10_pct,
+                        },
+                    )
                     last_progress = time.time()
             except Exception as e:
                 log.error(f"Signal check error: {e}")
@@ -4020,6 +4191,21 @@ def run_monitor(db):
 
                     _lotto_lc_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                     if _lotto_lc_id not in pending_entries:
+                        record_decision_event(
+                            db,
+                            component='lotto_entry_gate',
+                            event_type='entry_gate',
+                            decision=_lotto_decision.action,
+                            reason=_lotto_decision.reason,
+                            token_ca=w_entry['ca'],
+                            symbol=w_entry['symbol'],
+                            lifecycle_id=_lotto_lc_id,
+                            signal_ts=w_entry['signal_ts'],
+                            signal_id=w_entry.get('premium_signal_id'),
+                            route='LOTTO',
+                            data_source='dexscreener+helius+signal',
+                            payload=_lotto_detail,
+                        )
                         if _lotto_decision.expire:
                             watchlist.mark_expired(w_entry['id'], _lotto_decision.reason)
                             log.info(
@@ -4047,6 +4233,20 @@ def run_monitor(db):
                                 _lotto_lc_id,
                                 detail=_lotto_detail,
                             )
+                            record_decision_event(
+                                db,
+                                component='lotto_entry_gate',
+                                event_type='pending_entry',
+                                decision='pending',
+                                reason='lotto_fast_lane_ok',
+                                token_ca=w_entry['ca'],
+                                symbol=w_entry['symbol'],
+                                lifecycle_id=_lotto_lc_id,
+                                signal_ts=w_entry['signal_ts'],
+                                signal_id=w_entry.get('premium_signal_id'),
+                                route='LOTTO',
+                                payload={'position_size_sol': LOTTO_POSITION_SIZE_SOL, **_lotto_detail},
+                            )
                             last_progress = time.time()
                     continue
 
@@ -4066,6 +4266,26 @@ def run_monitor(db):
                 
                 eval_res = matrix_evaluator.evaluate(w_entry)
                 watchlist.update_scores(w_entry['id'], eval_res['scores'])
+                record_decision_event(
+                    db,
+                    component='matrix_evaluator',
+                    event_type='matrix_decision',
+                    decision=eval_res.get('action', 'unknown'),
+                    reason=eval_res.get('action_reason'),
+                    token_ca=w_entry['ca'],
+                    symbol=w_entry['symbol'],
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=w_entry['signal_ts'],
+                    signal_id=w_entry.get('premium_signal_id'),
+                    route=w_entry.get('type'),
+                    data_source='matrix_inputs',
+                    payload={
+                        'scores': eval_res.get('scores'),
+                        'reasons': eval_res.get('reasons'),
+                        'current_price': eval_res.get('current_price'),
+                        'momentum_pct': eval_res.get('momentum_pct'),
+                    },
+                )
                 
                 # Update price bounds if we got a price
                 if eval_res.get('current_price') and eval_res['current_price'] > 0:
@@ -4416,6 +4636,25 @@ def run_monitor(db):
                         if not should_enter:
                             retry_count = pending.get('smart_entry_retries', 0)
                             max_retries = 3
+                            record_decision_event(
+                                db,
+                                component='smart_entry',
+                                event_type='timing_decision',
+                                decision='reject',
+                                reason=timing_reason,
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                payload={
+                                    'detail': timing_detail,
+                                    'retry_count': retry_count,
+                                    'max_retries': max_retries,
+                                    'trigger_price': timing_trigger_price,
+                                },
+                            )
                             if retry_count >= max_retries:
                                 log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
                                 pending_entries.pop(lifecycle_id, None)
@@ -4434,6 +4673,20 @@ def run_monitor(db):
                         if timing_trigger_price:
                             pending['trigger_price'] = timing_trigger_price
                         pending['entry_mode'] = timing_reason
+                        record_decision_event(
+                            db,
+                            component='smart_entry',
+                            event_type='timing_decision',
+                            decision='pass',
+                            reason=timing_reason,
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            route=pending.get('signal_route') or pending.get('signal_type'),
+                            payload={'detail': timing_detail, 'trigger_price': timing_trigger_price},
+                        )
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
 
                     _pending_strategy_id = pending.get('strategy_id') or strategy_id
@@ -4479,6 +4732,22 @@ def run_monitor(db):
                     )
                     if not execution.get('success'):
                         failure_reason = execution.get('failureReason') or 'entry_quote_failed'
+                        record_decision_event(
+                            db,
+                            component='execution_api',
+                            event_type='entry_quote',
+                            decision='fail',
+                            reason=failure_reason,
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='jupiter_quote',
+                            payload=execution,
+                        )
                         log_pending_entry_issue(
                             pending,
                             f"entry quote failed reason={failure_reason} route={execution.get('routeAvailable')}",
@@ -4496,6 +4765,22 @@ def run_monitor(db):
                     token_amount_raw = execution.get('quotedOutAmountRaw')
                     token_decimals = execution.get('outputDecimals')
                     if quote_price_sol is None or quote_price_sol <= 0 or not token_amount_raw:
+                        record_decision_event(
+                            db,
+                            component='execution_api',
+                            event_type='entry_quote',
+                            decision='fail',
+                            reason='invalid_entry_quote_payload',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='jupiter_quote',
+                            payload=execution,
+                        )
                         log_pending_entry_issue(
                             pending,
                             f"invalid entry execution price={quote_price_sol} out={token_amount_raw}",
@@ -4540,6 +4825,21 @@ def run_monitor(db):
                             f"  [POST_SPREAD_ABORT] 🚫 {pending['symbol']} BLOCKED: "
                             f"{_live_abort_count} prior spread abort(s) on watchlist entry. "
                             f"Refusing entry (data: 100% loss rate post-abort).")
+                        record_decision_event(
+                            db,
+                            component='execution_guard',
+                            event_type='entry_abort',
+                            decision='abort',
+                            reason='post_spread_abort_memory',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            payload={'spread_abort_count': _live_abort_count},
+                        )
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
@@ -4559,6 +4859,26 @@ def run_monitor(db):
                             f"fill spread {_spread:+.1f}% > {_SPREAD_GUARD_MAX_PCT}% max "
                             f"(fill={price:.12f} vs trigger={_trigger_str}). "
                             f"SL buffer would be eaten by spread."
+                        )
+                        record_decision_event(
+                            db,
+                            component='execution_guard',
+                            event_type='entry_abort',
+                            decision='abort',
+                            reason='spread_guard',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            payload={
+                                'spread_pct': _spread,
+                                'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
+                                'quote_price': price,
+                                'trigger_price': trigger_price_val,
+                            },
                         )
                         # Track SPREAD_GUARD aborts on watchlist entry so subsequent
                         # FIRE→SmartEntry cycles know the price was at the top.
@@ -4622,6 +4942,29 @@ def run_monitor(db):
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
+                    record_decision_event(
+                        db,
+                        component='execution_api',
+                        event_type='entry_quote',
+                        decision='filled_paper',
+                        reason='entry_quote_success',
+                        token_ca=pending['token_ca'],
+                        symbol=pending['symbol'],
+                        lifecycle_id=lifecycle_id,
+                        trade_id=trade_id,
+                        signal_ts=pending['signal_ts'],
+                        signal_id=pending.get('premium_signal_id'),
+                        strategy_stage=_pending_strategy_stage,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        data_source='jupiter_quote',
+                        payload={
+                            'entry_price': price,
+                            'trigger_price': trigger_price_val,
+                            'spread_pct': _spread,
+                            'position_size_sol': actual_position_size_sol,
+                            'execution': execution,
+                        },
+                    )
 
                     # Pop immediately after commit — prevents ghost duplicate on next loop
                     pending_entries.pop(lifecycle_id, None)
@@ -4832,6 +5175,30 @@ def run_monitor(db):
                             f"action={exit_matrix['action']} pnl={pnl_pct:+.1f}% "
                             f"held={held_min}min reason={exit_matrix.get('reason', '-')} "
                             f"price={pre_price:.10f} trail={exit_matrix.get('trail_floor', '-')}"
+                        )
+                        record_decision_event(
+                            db,
+                            component='exit_strategy',
+                            event_type='exit_decision',
+                            decision=exit_matrix.get('action', 'unknown'),
+                            reason=exit_matrix.get('reason'),
+                            token_ca=pos.token_ca,
+                            symbol=pos.symbol,
+                            lifecycle_id=pos.lifecycle_id,
+                            trade_id=pos.trade_id,
+                            signal_ts=pos.signal_ts,
+                            signal_id=getattr(pos, 'premium_signal_id', None),
+                            strategy_stage=pos.strategy_stage,
+                            route=(w_entry or {}).get('signal_route') or (pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                            data_source=pre_src,
+                            payload={
+                                'current_price': pre_price,
+                                'current_pnl': exit_matrix.get('current_pnl'),
+                                'peak_pnl': exit_matrix.get('peak_pnl', pos.peak_pnl),
+                                'trail_floor': exit_matrix.get('trail_floor'),
+                                'held_min': held_min,
+                                'price_age_ms': pre_age_ms,
+                            },
                         )
                             
                         if exit_matrix.get('action') == 'tighten_sl':
@@ -5162,6 +5529,23 @@ def run_monitor(db):
                         )
                     )
                     db.commit()
+                    record_decision_event(
+                        db,
+                        component='execution_api',
+                        event_type='exit_quote',
+                        decision='fail',
+                        reason=failure_reason,
+                        token_ca=pos.token_ca,
+                        symbol=pos.symbol,
+                        lifecycle_id=pos.lifecycle_id,
+                        trade_id=pos.trade_id,
+                        signal_ts=pos.signal_ts,
+                        signal_id=getattr(pos, 'premium_signal_id', None),
+                        strategy_stage=pos.strategy_stage,
+                        route=(pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                        data_source='jupiter_quote',
+                        payload=exit_execution,
+                    )
                     if trap_failure_reason:
                         held_minutes = max(0, int((time.time() - pos.entry_ts) / 60))
                         threshold_key = 'noRouteFailureThreshold' if trap_failure_reason == 'no_route' else 'tokenNotTradableFailureThreshold'
@@ -5276,6 +5660,30 @@ def run_monitor(db):
                     pos.trade_id,
                 ))
                 db.commit()
+                record_decision_event(
+                    db,
+                    component='trade_lifecycle',
+                    event_type='position_closed',
+                    decision='closed',
+                    reason=reason,
+                    token_ca=pos.token_ca,
+                    symbol=pos.symbol,
+                    lifecycle_id=pos.lifecycle_id,
+                    trade_id=pos.trade_id,
+                    signal_ts=pos.signal_ts,
+                    signal_id=getattr(pos, 'premium_signal_id', None),
+                    strategy_stage=pos.strategy_stage,
+                    route=(pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                    data_source=mark_source,
+                    payload={
+                        'realized_pnl': realized_pnl,
+                        'trigger_pnl': trigger_pnl,
+                        'peak_pnl': pos.peak_pnl,
+                        'bars_held': pos.bars_held,
+                        'accounting_source': accounting_source,
+                        'execution_availability': 'unavailable' if is_force_timeout else 'available',
+                    },
+                )
                 
                 # Update Watchlist Status
                 w_entry_close = watchlist.get_by_ca(pos.token_ca)
