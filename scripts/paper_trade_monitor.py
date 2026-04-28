@@ -53,7 +53,12 @@ from entry_engine import (
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
 from exit_engine import ExitGuardianThread, process_guardian_exits
-from paper_decision_audit import init_decision_audit, record_decision_event, signal_payload
+from paper_decision_audit import (
+    init_decision_audit,
+    record_decision_event,
+    signal_payload,
+    update_due_missed_attributions,
+)
 from signal_router import route_signal
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -3142,6 +3147,49 @@ def get_kline_bars(kline_db, token_ca, start_ts, limit=120):
     return [dict(row) for row in rows]
 
 
+def fetch_kline_close_at_or_after(token_ca, target_ts, max_lag_sec=180):
+    """Return a cached 1m close near target_ts for attribution; never uses shadow data."""
+    try:
+        target_ts = int(target_ts)
+    except (TypeError, ValueError):
+        return None
+    try:
+        with sqlite3.connect(KLINE_DB) as kdb:
+            kdb.row_factory = sqlite3.Row
+            row = kdb.execute(
+                """
+                SELECT timestamp, close, provider
+                FROM kline_1m
+                WHERE token_ca = ? AND timestamp >= ?
+                ORDER BY timestamp ASC
+                LIMIT 1
+                """,
+                (token_ca, target_ts),
+            ).fetchone()
+            if not row or not row["close"] or row["close"] <= 0:
+                return None
+            if row["timestamp"] and (row["timestamp"] - target_ts) > max_lag_sec:
+                return None
+            return float(row["close"]), f"kline_1m:{row['provider'] or 'unknown'}", int(row["timestamp"])
+    except Exception:
+        return None
+
+
+def fetch_live_price_for_attribution(token_ca):
+    """Best-effort live price fallback for very fresh missed-signal attribution."""
+    try:
+        pool = get_pool_address(token_ca)
+        if not pool:
+            return None
+        price, source, age_ms = fetch_realtime_price(token_ca, pool, max_age_ms=60_000)
+        if not price or price <= 0:
+            return None
+        ts = int(time.time() - ((age_ms or 0) / 1000.0))
+        return float(price), f"live:{source or 'unknown'}", ts
+    except Exception:
+        return None
+
+
 # === Dry Run Mode ===
 
 def dry_run(db):
@@ -3520,6 +3568,7 @@ def run_monitor(db):
     smart_entry_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='SmartEntry')
     lifecycles = restore_lifecycles(db)
     sanitized_monitor_states = 0
+    last_missed_attribution_update = 0.0
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
@@ -3728,6 +3777,21 @@ def run_monitor(db):
                 f'age_min={freshness.get("age_minutes")} watching={wl_watching} holding={wl_holding} active_positions={len(positions)} pending={len(pending_entries)}{_mem_info}'
             )
             last_heartbeat = now
+
+        if now - last_missed_attribution_update >= 60:
+            try:
+                _missed_updated = update_due_missed_attributions(
+                    db,
+                    historical_price_fetcher=fetch_kline_close_at_or_after,
+                    live_price_fetcher=fetch_live_price_for_attribution,
+                    now=now,
+                    limit=100,
+                )
+                if _missed_updated:
+                    log.info(f"  [MISSED_ATTRIBUTION] updated={_missed_updated}")
+            except Exception as _missed_err:
+                log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
+            last_missed_attribution_update = now
 
         if now - last_progress >= HEARTBEAT_INTERVAL_SEC * 2:
             freshness = get_signal_freshness()
@@ -4509,7 +4573,7 @@ def run_monitor(db):
                         # Simpler and more reliable than DexScreener FDV — no extra API call,
                         # no NULL/zero ambiguity from FDV fields.
                         # Fail-open: if signal had no MC data (signal_mc=0), always allow.
-                        MC_CAP = 150_000  # $150K — balances signal volume with entry quality
+                        MC_CAP = 200_000  # $200K — real K-line review shows >$200K ATH/NT loses convexity
                         if _fire_mc > MC_CAP:
                             log.info(
                                 f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: signal_mc=${_fire_mc:,.0f} > ${MC_CAP:,.0f} "
@@ -4843,16 +4907,39 @@ def run_monitor(db):
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
-                    # SPREAD GUARD: reject if fill price is >2% above SmartEntry trigger price.
-                    # Root cause: peak=0% trades caused by large quote spread eating SL buffer.
-                    # Audit (26 trades, 7hrs 2026-04-22):
-                    #   slip ≤ 0%:  3 trades, 1 win (33%)
-                    #   slip 0-2%:  7 trades, 2 wins (29%)
-                    #   slip 2-4%: 12 trades, 0 wins (0%)  ← ALL lost
-                    #   slip > 4%:  4 trades, 0 wins (0%)  ← ALL lost
-                    # Conclusion: slippage >2% = 0% win rate (16/16 lost).
-                    # High slippage = low liquidity = likely a bad token.
-                    _SPREAD_GUARD_MAX_PCT = 15.0  # Extreme safety net only; liquidity checked separately
+                    # SPREAD GUARD:
+                    # Latest real paper fills show 2% is too tight for this venue, but
+                    # 15% lets the spread eat most of the stop buffer. Treat >2% as an
+                    # attribution warning and abort >5%.
+                    _SPREAD_WARN_PCT = 2.0
+                    _SPREAD_GUARD_MAX_PCT = 5.0
+                    if _spread > _SPREAD_WARN_PCT:
+                        log.info(
+                            f"  [SPREAD_GUARD] ⚠️ {pending['symbol']} WARN: "
+                            f"fill spread {_spread:+.1f}% > {_SPREAD_WARN_PCT}% warn "
+                            f"(abort at {_SPREAD_GUARD_MAX_PCT}%)."
+                        )
+                        record_decision_event(
+                            db,
+                            component='execution_guard',
+                            event_type='entry_spread_warning',
+                            decision='warn',
+                            reason='spread_warning',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            payload={
+                                'spread_pct': _spread,
+                                'warn_spread_pct': _SPREAD_WARN_PCT,
+                                'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
+                                'quote_price': price,
+                                'trigger_price': trigger_price_val,
+                            },
+                        )
                     if _spread > _SPREAD_GUARD_MAX_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] 🚫 {pending['symbol']} ABORT: "

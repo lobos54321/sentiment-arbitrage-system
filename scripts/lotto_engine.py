@@ -18,10 +18,13 @@ LOTTO_POSITION_SIZE_SOL = float(os.environ.get("LOTTO_POSITION_SIZE_SOL", "0.05"
 LOTTO_MAX_CONCURRENT = int(os.environ.get("LOTTO_MAX_CONCURRENT", "10"))
 LOTTO_ENTRY_STALE_SEC = float(os.environ.get("LOTTO_ENTRY_STALE_SEC", str(30 * 60)))
 LOTTO_MC_MAX_USD = float(os.environ.get("LOTTO_MC_MAX_USD", "30000"))
-LOTTO_MIN_HOLDERS = int(os.environ.get("LOTTO_MIN_HOLDERS", "50"))
+LOTTO_MIN_HOLDERS = int(os.environ.get("LOTTO_MIN_HOLDERS", "30"))
+LOTTO_NORMAL_HOLDERS = int(os.environ.get("LOTTO_NORMAL_HOLDERS", "50"))
 LOTTO_TOP10_MAX_PCT = float(os.environ.get("LOTTO_TOP10_MAX_PCT", "70"))
 LOTTO_MIN_LIQUIDITY_USD = float(os.environ.get("LOTTO_MIN_LIQUIDITY_USD", "5000"))
 LOTTO_MIN_VOL24H_USD = float(os.environ.get("LOTTO_MIN_VOL24H_USD", "10000"))
+LOTTO_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_MIN_VOL_M5_USD", "1000"))
+LOTTO_MIN_M5_TXNS = int(os.environ.get("LOTTO_MIN_M5_TXNS", "6"))
 LOTTO_LIVE_TOP1_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP1_MAX_PCT", "35"))
 LOTTO_LIVE_TOP10_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_MAX_PCT", "85"))
 
@@ -98,20 +101,40 @@ def evaluate_lotto_entry(
 
     holders = int(w_entry.get("signal_holders") or 0)
     detail["holders"] = holders
-    if holders < LOTTO_MIN_HOLDERS:
+    if holders <= 0:
+        detail["holders_tier"] = "missing"
+    elif holders < LOTTO_MIN_HOLDERS:
         return LottoDecision("expire", f"lotto_holders_{holders}", detail)
+    elif holders < LOTTO_NORMAL_HOLDERS:
+        detail["holders_tier"] = "low_confidence"
+    else:
+        detail["holders_tier"] = "normal"
 
     vol24h = float(w_entry.get("signal_vol24h") or 0)
     detail["vol24h"] = vol24h
-    if vol24h < LOTTO_MIN_VOL24H_USD:
-        return LottoDecision("expire", f"lotto_vol24h_{vol24h:.0f}", detail)
+    dex_snapshot = dex_snapshot or {}
+    vol_m5 = float(dex_snapshot.get("vol_m5") or 0)
+    buys_m5 = int(dex_snapshot.get("buys_m5") or 0)
+    sells_m5 = int(dex_snapshot.get("sells_m5") or 0)
+    detail["vol_m5"] = vol_m5
+    detail["tx_m5"] = buys_m5 + sells_m5
+    if (
+        vol24h < LOTTO_MIN_VOL24H_USD
+        and vol_m5 < LOTTO_MIN_VOL_M5_USD
+        and (buys_m5 + sells_m5) < LOTTO_MIN_M5_TXNS
+    ):
+        return LottoDecision(
+            "wait",
+            f"lotto_volume_unconfirmed_v24_{vol24h:.0f}_m5_{vol_m5:.0f}_tx_{buys_m5 + sells_m5}",
+            detail,
+        )
 
     top10 = float(w_entry.get("signal_top10") or 0)
     detail["top10_pct"] = top10
     if top10 > LOTTO_TOP10_MAX_PCT:
         return LottoDecision("expire", f"lotto_top10_{top10:.0f}pct", detail)
 
-    liquidity = float((dex_snapshot or {}).get("liquidity_usd") or 0)
+    liquidity = float(dex_snapshot.get("liquidity_usd") or 0)
     detail["liquidity_usd"] = liquidity
     if liquidity < LOTTO_MIN_LIQUIDITY_USD:
         return LottoDecision("expire", f"lotto_liq_low_{liquidity:.0f}", detail)

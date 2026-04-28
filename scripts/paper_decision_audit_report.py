@@ -140,6 +140,43 @@ def main():
                 f"{row['component']} {row['decision']} reason={row['reason']}{extra}"
             )
 
+    has_missed = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'paper_missed_signal_attribution'"
+    ).fetchone()
+    if has_missed:
+        print("\nMissed-dog attribution:")
+        missed_rows = db.execute(
+            """
+            SELECT
+                COALESCE(route, '-') AS route,
+                component,
+                reject_reason,
+                COUNT(*) AS n,
+                SUM(CASE WHEN pnl_60m >= 0.5 THEN 1 ELSE 0 END) AS dog50_60m,
+                SUM(CASE WHEN pnl_60m >= 1.0 THEN 1 ELSE 0 END) AS dog100_60m,
+                AVG(pnl_5m) AS avg_5m,
+                AVG(pnl_15m) AS avg_15m,
+                AVG(pnl_60m) AS avg_60m,
+                AVG(pnl_24h) AS avg_24h,
+                SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) AS complete_n
+            FROM paper_missed_signal_attribution
+            GROUP BY COALESCE(route, '-'), component, reject_reason
+            ORDER BY dog100_60m DESC, dog50_60m DESC, n DESC
+            LIMIT ?
+            """,
+            (args.limit,),
+        ).fetchall()
+        for row in missed_rows:
+            def fmt(value):
+                return "na" if value is None else f"{value * 100:+.1f}%"
+            print(
+                f"  n={row['n']:4d} complete={row['complete_n']:4d} "
+                f"60m>=50%={row['dog50_60m'] or 0:3d} 60m>=100%={row['dog100_60m'] or 0:3d} "
+                f"avg5={fmt(row['avg_5m'])} avg15={fmt(row['avg_15m'])} "
+                f"avg60={fmt(row['avg_60m'])} avg24h={fmt(row['avg_24h'])} "
+                f"{row['route']} {row['component']} reason={row['reject_reason']}"
+            )
+
 
 if __name__ == "__main__":
     main()

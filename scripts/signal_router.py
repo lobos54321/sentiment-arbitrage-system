@@ -20,6 +20,8 @@ ROUTE_REJECT = "REJECT"
 
 
 LOTTO_MC_MAX_USD = float(os.environ.get("LOTTO_MC_MAX_USD", "30000"))
+WATCHLIST_MC_MAX_USD = float(os.environ.get("WATCHLIST_MC_MAX_USD", "80000"))
+MATRIX_ATH_MC_MAX_USD = float(os.environ.get("MATRIX_ATH_MC_MAX_USD", "200000"))
 LOTTO_SIGNAL_MAX_AGE_SEC = float(os.environ.get("LOTTO_SIGNAL_MAX_AGE_SEC", "30"))
 
 
@@ -96,6 +98,26 @@ def route_signal(sig, *, now=None, existing_entry=None):
         return RouteDecision(
             ROUTE_WATCHLIST,
             f"lotto_signal_stale_{signal_age_sec:.0f}s",
+            signal_age_sec,
+            market_cap,
+        )
+
+    if (
+        not is_ath
+        and sig_type == "NEW_TRENDING"
+        and LOTTO_MC_MAX_USD <= market_cap < WATCHLIST_MC_MAX_USD
+    ):
+        return RouteDecision(
+            ROUTE_WATCHLIST,
+            "new_trending_30k_80k_watchlist_matrix_light",
+            signal_age_sec,
+            market_cap,
+        )
+
+    if is_ath and market_cap >= MATRIX_ATH_MC_MAX_USD:
+        return RouteDecision(
+            ROUTE_WATCHLIST,
+            "ath_high_mc_watch_only",
             signal_age_sec,
             market_cap,
         )
