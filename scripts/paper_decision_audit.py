@@ -323,11 +323,13 @@ def update_due_missed_attributions(
         if not baseline_price or baseline_price <= 0:
             continue
 
-        changes = {
-            "baseline_price": float(baseline_price),
-            "baseline_source": baseline_source,
-            "baseline_ts": int(base_ts),
-        }
+        changes = {}
+        if row["baseline_price"] is None:
+            changes["baseline_price"] = float(baseline_price)
+        if row["baseline_source"] is None and baseline_source:
+            changes["baseline_source"] = baseline_source
+        if row["baseline_ts"] is None:
+            changes["baseline_ts"] = int(base_ts)
         pnl_values = []
         for name, offset in MISSED_HORIZONS.items():
             price_col = f"price_{name}"
@@ -362,14 +364,22 @@ def update_due_missed_attributions(
                 pnl_values.append(float(existing))
 
         if pnl_values:
-            changes["max_pnl_recorded"] = max(pnl_values)
-            changes["min_pnl_recorded"] = min(pnl_values)
+            max_pnl = max(pnl_values)
+            min_pnl = min(pnl_values)
+            if row["max_pnl_recorded"] is None or abs(float(row["max_pnl_recorded"]) - max_pnl) > 1e-12:
+                changes["max_pnl_recorded"] = max_pnl
+            if row["min_pnl_recorded"] is None or abs(float(row["min_pnl_recorded"]) - min_pnl) > 1e-12:
+                changes["min_pnl_recorded"] = min_pnl
 
         complete = all(
             (changes.get(f"price_{name}") is not None or row[f"price_{name}"] is not None)
             for name in MISSED_HORIZONS
         )
-        changes["status"] = "complete" if complete else "pending"
+        next_status = "complete" if complete else "pending"
+        if row["status"] != next_status:
+            changes["status"] = next_status
+        if not changes:
+            continue
         changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         set_clause = ", ".join(f"{key} = ?" for key in changes)

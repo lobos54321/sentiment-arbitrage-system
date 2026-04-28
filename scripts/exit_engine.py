@@ -12,6 +12,10 @@ import threading
 
 log = logging.getLogger('paper_trade_monitor')
 
+GUARDIAN_DOA_EXIT_SEC = 15
+GUARDIAN_DOA_PEAK_MAX = 0.001
+GUARDIAN_DOA_PNL_MAX = -0.05
+
 
 # ─── Plan #3: Dynamic Stop-Loss (4-factor) ────────────────────────────────────
 # Adjusts the base SL per-tick based on live market state instead of using
@@ -204,6 +208,33 @@ class ExitGuardianThread(threading.Thread):
                     if w_entry:
                         base_sl = w_entry.get('dynamic_sl', -0.10)
                     hard_sl = compute_dynamic_sl(pos, _dex_trend, base_sl=base_sl)
+
+                # Early DOA cut for MATRIX/ATH: if the trade never goes green and
+                # is already meaningfully red, do not wait for a full -20% hard SL.
+                # This targets the overnight MPGA/BEAR pattern: peak≈0, then rug.
+                held_sec = max(0.0, time.time() - float(getattr(pos, 'entry_ts', time.time()) or time.time()))
+                if (
+                    not _is_lotto_entry
+                    and held_sec >= GUARDIAN_DOA_EXIT_SEC
+                    and max(float(getattr(pos, 'peak_pnl', 0) or 0), pnl) <= GUARDIAN_DOA_PEAK_MAX
+                    and pnl <= GUARDIAN_DOA_PNL_MAX
+                ):
+                    log.info(
+                        f"[ExitGuardian] 🧯 {pos.symbol} DOA FAST EXIT: "
+                        f"held={held_sec:.0f}s peak={getattr(pos, 'peak_pnl', 0)*100:+.1f}% "
+                        f"pnl={pnl*100:+.1f}% — queued before hard SL"
+                    )
+                    with self.exit_queue_lock:
+                        self.exit_queue.append({
+                            'trade_id': trade_id,
+                            'symbol': pos.symbol,
+                            'reason': f'guardian_doa_fast_exit (held={held_sec:.0f}s peak={getattr(pos, "peak_pnl", 0):.1%} pnl={pnl:.1%})',
+                            'trigger_price': price,
+                            'trigger_pnl': pnl,
+                            '_instant_sim': self._get_instant_quote(pos, ca),
+                        })
+                    self._exit_pending.add(trade_id)
+                    continue
 
                 # === Hard Stop Loss (Double-Tap Confirmation) ===
                 # P0 Fix: A single bad price read from Redis killed Coco (+73% → -20.8%).

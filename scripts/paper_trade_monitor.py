@@ -93,6 +93,11 @@ EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
 DEFAULT_STAGE1_EXIT = {'stopLossPct': 7.5, 'trailStartPct': 15, 'trailFactor': 0.6, 'timeoutMinutes': 120}
+MATRIX_SPREAD_WARN_PCT = float(os.environ.get('MATRIX_SPREAD_WARN_PCT', '2.0'))
+MATRIX_SPREAD_ABORT_PCT = float(os.environ.get('MATRIX_SPREAD_ABORT_PCT', '4.5'))
+MATRIX_DOA_EXIT_SEC = float(os.environ.get('MATRIX_DOA_EXIT_SEC', '30'))
+MATRIX_DOA_PEAK_MAX = float(os.environ.get('MATRIX_DOA_PEAK_MAX', '0.001'))
+MATRIX_DOA_PNL_MAX = float(os.environ.get('MATRIX_DOA_PNL_MAX', '-0.03'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -4911,8 +4916,8 @@ def run_monitor(db):
                     # Latest real paper fills show 2% is too tight for this venue, but
                     # 15% lets the spread eat most of the stop buffer. Treat >2% as an
                     # attribution warning and abort >5%.
-                    _SPREAD_WARN_PCT = 2.0
-                    _SPREAD_GUARD_MAX_PCT = 5.0
+                    _SPREAD_WARN_PCT = MATRIX_SPREAD_WARN_PCT
+                    _SPREAD_GUARD_MAX_PCT = 5.0 if pending.get('is_lotto') else MATRIX_SPREAD_ABORT_PCT
                     if _spread > _SPREAD_WARN_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] ⚠️ {pending['symbol']} WARN: "
@@ -5253,6 +5258,32 @@ def run_monitor(db):
                             exit_matrix = exit_matrix_evaluator.evaluate_moon_bag(w_entry, pre_price)
                         else:
                             exit_matrix = exit_matrix_evaluator.evaluate_exit(w_entry, pre_price)
+
+                        if w_entry and not is_lotto_position(pos, w_entry) and w_entry.get('status') != 'moon_bag':
+                            _held_sec = max(0.0, time.time() - float(pos.entry_ts or time.time()))
+                            _current_pnl = exit_matrix.get('current_pnl')
+                            _peak_now = max(
+                                float(pos.peak_pnl or 0),
+                                float(w_entry.get('peak_pnl') or 0),
+                                float(_current_pnl or 0),
+                            )
+                            if (
+                                _held_sec >= MATRIX_DOA_EXIT_SEC
+                                and _peak_now <= MATRIX_DOA_PEAK_MAX
+                                and _current_pnl is not None
+                                and _current_pnl <= MATRIX_DOA_PNL_MAX
+                            ):
+                                exit_matrix = {
+                                    'action': 'exit',
+                                    'reason': (
+                                        f"matrix_doa_fast_exit "
+                                        f"(held={_held_sec:.0f}s peak={_peak_now:.1%} "
+                                        f"pnl={_current_pnl:.1%})"
+                                    ),
+                                    'current_pnl': _current_pnl,
+                                    'peak_pnl': _peak_now,
+                                    'trail_floor': None,
+                                }
                         
                         # Log every exit evaluation
                         held_min = int((time.time() - pos.entry_ts) / 60)

@@ -177,6 +177,37 @@ def main():
                 f"{row['route']} {row['component']} reason={row['reject_reason']}"
             )
 
+        print("\nTop missed dogs:")
+        dog_rows = db.execute(
+            """
+            SELECT
+                symbol,
+                token_ca,
+                route,
+                component,
+                reject_reason,
+                pnl_5m,
+                pnl_15m,
+                pnl_60m,
+                pnl_24h,
+                max_pnl_recorded,
+                status
+            FROM paper_missed_signal_attribution
+            WHERE COALESCE(max_pnl_recorded, pnl_60m, pnl_24h, pnl_15m, pnl_5m) >= 0.5
+            ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m) DESC
+            LIMIT ?
+            """,
+            (args.limit,),
+        ).fetchall()
+        for row in dog_rows:
+            token = row["symbol"] or (row["token_ca"] or "")[:8]
+            print(
+                f"  {token:12s} max={fmt(row['max_pnl_recorded'])} "
+                f"5m={fmt(row['pnl_5m'])} 15m={fmt(row['pnl_15m'])} "
+                f"60m={fmt(row['pnl_60m'])} 24h={fmt(row['pnl_24h'])} "
+                f"{row['route']} {row['component']} reason={row['reject_reason']} status={row['status']}"
+            )
+
 
 if __name__ == "__main__":
     main()
