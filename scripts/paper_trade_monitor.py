@@ -994,6 +994,68 @@ def poll_helius_volume(trade_id, pool_address, interval=30):
     except Exception:
         return cache.get('tps_smooth', cache.get('tps', 0.0)) if cache else 0.0
 
+def helius_token_concentration(token_ca, timeout=2.5):
+    """LIVE on-chain top1/top10 concentration via Helius RPC.
+
+    Critical for LOTTO rug prevention: signal-time top10 is stale by the
+    minute we evaluate. If insiders accumulated AFTER the signal (e.g. top10
+    went 40% → 80%), we want to detect that BEFORE firing.
+
+    Returns dict {'top1_pct', 'top10_pct', 'top_n_visible'} or None on failure.
+    Fail-open: caller treats None as "no data, allow".
+    """
+    if not HELIUS_API_KEY or 'your' in HELIUS_API_KEY.lower():
+        return None
+
+    try:
+        # Step 1: get top largest token accounts (max 20 per RPC call)
+        largest_payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTokenLargestAccounts",
+            "params": [token_ca, {"commitment": "confirmed"}]
+        }
+        l_status, l_data = _post_json(HELIUS_RPC_URL, largest_payload, timeout)
+        if l_status != 200 or 'result' not in l_data:
+            return None
+        accounts = (l_data.get('result') or {}).get('value') or []
+        if not accounts:
+            return None
+
+        # Step 2: total supply
+        supply_payload = {
+            "jsonrpc": "2.0", "id": 2,
+            "method": "getTokenSupply",
+            "params": [token_ca, {"commitment": "confirmed"}]
+        }
+        s_status, s_data = _post_json(HELIUS_RPC_URL, supply_payload, timeout)
+        if s_status != 200 or 'result' not in s_data:
+            return None
+        supply_value = (s_data.get('result') or {}).get('value') or {}
+        try:
+            total_supply = float(supply_value.get('amount') or 0)
+        except (TypeError, ValueError):
+            return None
+        if total_supply <= 0:
+            return None
+
+        def _amt(a):
+            try:
+                return float((a.get('amount') if isinstance(a, dict) else 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        top1_amt = _amt(accounts[0])
+        top10_amt = sum(_amt(a) for a in accounts[:10])
+
+        return {
+            'top1_pct': (top1_amt / total_supply) * 100.0,
+            'top10_pct': (top10_amt / total_supply) * 100.0,
+            'top_n_visible': len(accounts),
+        }
+    except Exception:
+        return None
+
+
 def get_recent_signatures(token_ca, limit=100):
     """Fetch recent signatures using Helius RPC to count momentum"""
     if not HELIUS_API_KEY or 'your' in HELIUS_API_KEY.lower():
@@ -3862,15 +3924,49 @@ def run_monitor(db):
                     except Exception:
                         _lotto_liq = 0
 
+                    # Signal-time top10 (stale by minutes)
                     _lotto_top10 = w_entry.get('signal_top10', 0) or 0
                     if _lotto_top10 > 70:
                         watchlist.mark_expired(w_entry['id'], f'lotto_top10_{_lotto_top10:.0f}pct')
-                        log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: top10={_lotto_top10:.0f}% > 70% (insider dump risk)")
+                        log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: signal-time top10={_lotto_top10:.0f}% > 70%")
                         continue
                     if 0 < _lotto_liq < 3000:
                         watchlist.mark_expired(w_entry['id'], f'lotto_liq_low_{_lotto_liq:.0f}')
                         log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: liq=${_lotto_liq:.0f} < $3K (slippage risk)")
                         continue
+
+                    # LIVE on-chain top10 via Helius — catches insider accumulation that
+                    # happened AFTER signal time. Most powerful single rug indicator we have.
+                    _lotto_live = helius_token_concentration(w_entry['ca'])
+                    if _lotto_live is not None:
+                        _live_top1 = _lotto_live.get('top1_pct') or 0
+                        _live_top10 = _lotto_live.get('top10_pct') or 0
+                        # NOTE: Raydium pool LP tokens often hold large % of supply but are
+                        # benign (LP-locked liquidity). We can't easily distinguish here, so
+                        # we use thresholds tuned for "insider concentration vs. LP":
+                        #   top1 > 35% → likely a single insider/team wallet (dangerous)
+                        #   top10 > 85% → almost no float (rug or pre-snipe army)
+                        if _live_top1 > 35:
+                            watchlist.mark_expired(w_entry['id'], f'lotto_live_top1_{_live_top1:.0f}pct')
+                            log.info(
+                                f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: LIVE top1={_live_top1:.0f}% > 35% "
+                                f"(single-wallet dump risk; signal-time top10 was {_lotto_top10:.0f}%)"
+                            )
+                            continue
+                        if _live_top10 > 85:
+                            watchlist.mark_expired(w_entry['id'], f'lotto_live_top10_{_live_top10:.0f}pct')
+                            log.info(
+                                f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: LIVE top10={_live_top10:.0f}% > 85% "
+                                f"(no float; signal-time top10 was {_lotto_top10:.0f}%)"
+                            )
+                            continue
+                        log.info(
+                            f"  [LOTTO] ✅ {w_entry['symbol']} LIVE check: "
+                            f"top1={_live_top1:.0f}% top10={_live_top10:.0f}% (signal had {_lotto_top10:.0f}%)"
+                        )
+                    else:
+                        # Fail-open: Helius down/rate-limited → trust signal-time data
+                        log.info(f"  [LOTTO] {w_entry['symbol']} Helius live-check unavailable, using signal-time top10")
 
                     _lotto_lc_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                     if _lotto_lc_id not in pending_entries:
@@ -3878,10 +3974,14 @@ def run_monitor(db):
                         if _lotto_lotto_count >= 5:
                             log.info(f"  [LOTTO] {w_entry['symbol']} SKIP: LOTTO slots full ({_lotto_lotto_count}/5)")
                         else:
+                            _live_summary = (
+                                f" live_top1={_lotto_live['top1_pct']:.0f}% live_top10={_lotto_live['top10_pct']:.0f}%"
+                                if _lotto_live else ""
+                            )
                             log.info(
                                 f"  [LOTTO] 🎰 FIRE {w_entry['symbol']}! "
                                 f"MC=${w_entry.get('signal_mc', 0) or 0:.0f} "
-                                f"liq=${_lotto_liq:.0f} top10={_lotto_top10:.0f}% "
+                                f"liq=${_lotto_liq:.0f} top10={_lotto_top10:.0f}%{_live_summary} "
                                 f"age={_lotto_age_sec:.0f}s"
                             )
                             pending_entries[_lotto_lc_id] = {
