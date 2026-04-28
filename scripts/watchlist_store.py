@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
     moon_trail_factor REAL DEFAULT 0.2,                -- P4: dynamic trail factor (velocity ratchet)
     consecutive_losses INTEGER DEFAULT 0,              -- P2: consecutive loss count for cooldown
     last_loss_time  REAL DEFAULT 0,                    -- P2: timestamp of last loss
+    signal_route    TEXT DEFAULT '',                   -- LOTTO | MATRIX | WATCHLIST
+    ath_count       INTEGER DEFAULT 0,                 -- LOTTO ATH feedback count
+    last_ath_ts     REAL DEFAULT 0,
+    last_ath_mc     REAL DEFAULT 0,
+    trail_lockout_until REAL DEFAULT 0,
 
     -- Lifecycle
     status          TEXT NOT NULL DEFAULT 'watching',  -- watching | pending_momentum | holding | moon_bag | expired
@@ -143,6 +148,11 @@ class WatchlistStore:
             ("ALTER TABLE watchlist ADD COLUMN consecutive_losses INTEGER DEFAULT 0", None),
             ("ALTER TABLE watchlist ADD COLUMN last_loss_time REAL DEFAULT 0", None),
             ("ALTER TABLE watchlist ADD COLUMN last_exit_price REAL DEFAULT NULL", None),
+            ("ALTER TABLE watchlist ADD COLUMN signal_route TEXT DEFAULT ''", None),
+            ("ALTER TABLE watchlist ADD COLUMN ath_count INTEGER DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN last_ath_ts REAL DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN last_ath_mc REAL DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN trail_lockout_until REAL DEFAULT 0", None),
         ]
         for col_sql, _ in _migrate_columns:
             try:
@@ -173,6 +183,11 @@ class WatchlistStore:
                 updates['latest_super'] = signal_super
             if signal_type == 'ATH':
                 updates['has_ath'] = 1
+                updates['ath_count'] = (existing.get('ath_count') or 0) + 1
+                if signal_ts:
+                    updates['last_ath_ts'] = signal_ts
+                if signal_mc:
+                    updates['last_ath_mc'] = signal_mc
                 # Fix 4: record ATH peak price separately — never overwrite original signal_price
                 # so score_price always compares current price to the NOT_ATH anchor
                 if signal_price and signal_price > 0:
@@ -453,7 +468,9 @@ class WatchlistStore:
         allowed = {
             'peak_pnl', 'trailing_active', 'dynamic_sl',
             'zero_vol_count', 'moon_peak_pnl', 'moon_trend_zero_count',
-            'last_matrix_check',
+            'last_matrix_check', 'moon_trail_factor',
+            'signal_route', 'ath_count', 'last_ath_ts', 'last_ath_mc',
+            'trail_lockout_until',
         }
         filtered = {k: v for k, v in kwargs.items() if k in allowed}
         if filtered:

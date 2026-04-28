@@ -809,7 +809,7 @@ class ExitMatrixEvaluator:
         # Meme coin normal volatility is ±5-8%, so -5% SL = noise-level stop.
         _is_lotto_entry = entry.get('type') == 'LOTTO'
         if _is_lotto_entry:
-            hard_sl = -0.25  # LOTTO: wider SL, matches exit_guardian and mark_holding
+            hard_sl = -0.18  # LOTTO: normal failure stop; disaster floor is handled separately by lotto_engine
         else:
             hard_sl = entry.get('dynamic_sl', -0.10)  # V3.3: -0.15→-0.10
         if current_pnl <= hard_sl:
@@ -991,17 +991,24 @@ class ExitMatrixEvaluator:
                     'trail_floor': _p0_floor,
                 }
 
-        # === LOTTO Phase-Based Trail (mirrors exit_guardian logic) ===
+        # === LOTTO Phase-Based Trail (fallback; primary rules live in lotto_engine) ===
         # LOTTO tokens need a wider trail in the early phase to survive normal volatility.
         # exit_guardian handles this for real-time 3s checks, but EXIT_MATRIX also needs it
         # for the slower position-monitoring loop.
         if _is_lotto_entry and peak_pnl >= 0.08:
-            if peak_pnl >= 2.00:
-                _lotto_factor = 0.65
+            if peak_pnl >= 5.00:
+                _lotto_factor = 0.72
+            elif peak_pnl >= 2.00:
+                _lotto_factor = 0.60
             elif peak_pnl >= 0.50:
-                _lotto_factor = 0.50
+                _lotto_factor = 0.45
             else:
-                _lotto_factor = 0.35
+                return {
+                    'action': 'hold',
+                    'reason': f'lotto_verify (peak={peak_pnl:.1%} < 50%)',
+                    'current_pnl': current_pnl,
+                    'trail_floor': None,
+                }
             _lotto_floor = peak_pnl * _lotto_factor
             if current_pnl < _lotto_floor:
                 return {

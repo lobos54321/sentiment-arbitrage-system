@@ -53,6 +53,18 @@ from entry_engine import (
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
 from exit_engine import ExitGuardianThread, process_guardian_exits
+from signal_router import route_signal
+from lotto_engine import (
+    LOTTO_POSITION_SIZE_SOL,
+    LOTTO_STRATEGY_ID,
+    LOTTO_MAX_CONCURRENT,
+    active_lotto_count,
+    build_ath_boost_updates,
+    build_lotto_pending,
+    evaluate_lotto_entry,
+    evaluate_lotto_exit,
+    is_lotto_position,
+)
 
 try:
     import redis
@@ -556,6 +568,11 @@ def init_paper_db(db_path=None):
                 last_exit_quote_failure TEXT,
                 premium_signal_id INTEGER,
                 signal_type TEXT,
+                signal_route TEXT,
+                lotto_state_json TEXT,
+                ath_boost_count INTEGER DEFAULT 0,
+                last_ath_ts INTEGER,
+                last_ath_mc REAL,
                 strategy_outcome TEXT,
                 execution_availability TEXT,
                 accounting_outcome TEXT,
@@ -602,6 +619,11 @@ def init_paper_db(db_path=None):
             "ALTER TABLE paper_trades ADD COLUMN execution_availability TEXT",
             "ALTER TABLE paper_trades ADD COLUMN accounting_outcome TEXT",
             "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN signal_route TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN lotto_state_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN ath_boost_count INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN last_ath_ts INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN last_ath_mc REAL",
         ]:
             try:
                 db_conn.execute(column_sql)
@@ -609,6 +631,7 @@ def init_paper_db(db_path=None):
                 pass
         try:
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_stage ON paper_trades(token_ca, signal_ts, strategy_stage)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_signal_route ON paper_trades(signal_route)")
         except sqlite3.OperationalError:
             pass
         db_conn.commit()
@@ -2636,7 +2659,7 @@ def build_lifecycle_id(token_ca, signal_ts):
 
 
 def stage_seq(stage_name):
-    return {'stage1': 1, 'stage2A': 2, 'stage3': 3}.get(stage_name, 0)
+    return {'stage1': 1, 'lotto': 1, 'stage2A': 2, 'stage3': 3}.get(stage_name, 0)
 
 
 def effective_lifecycle_id(token_ca, signal_ts, lifecycle_id=None):
@@ -3464,6 +3487,7 @@ def run_monitor(db):
     log.info(f"  strategy registry: {REGISTRY_JSON}")
     log.info(f"  paper execution size: {position_size_sol} SOL")
     log.info(f"  max open positions: {max_positions}")
+    log.info(f"  LOTTO: size={LOTTO_POSITION_SIZE_SOL} SOL max_concurrent={LOTTO_MAX_CONCURRENT} strategy={LOTTO_STRATEGY_ID}")
     log.info(
         f"  paper execution: mode={paper_execution['executionMode']} entry={paper_execution['entryPriceSource']} "
         f"exit={paper_execution['exitPriceSource']} retries={paper_execution['quoteRetries']} "
@@ -3734,6 +3758,47 @@ def run_monitor(db):
                     if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
                         continue
 
+                    existing_w_entry = watchlist.get_by_ca(token_ca)
+                    route_decision = route_signal(sig, now=time.time(), existing_entry=existing_w_entry)
+                    if route_decision.is_lotto_boost and existing_w_entry:
+                        boost_updates = build_ath_boost_updates(
+                            existing_w_entry,
+                            signal_ts=signal_ts,
+                            signal_market_cap=sig.get('market_cap') or 0,
+                            now=time.time(),
+                        )
+                        watchlist.update_position_state(existing_w_entry['id'], **boost_updates)
+                        with positions_lock:
+                            for pos in positions.values():
+                                if pos.token_ca == token_ca and is_lotto_position(pos, existing_w_entry):
+                                    pos.monitor_state = pos.monitor_state or {}
+                                    pos.monitor_state['athBoostCount'] = boost_updates['ath_count']
+                                    pos.monitor_state['lastAthTs'] = boost_updates['last_ath_ts']
+                                    pos.monitor_state['lastAthMc'] = boost_updates['last_ath_mc']
+                                    pos.monitor_state['lottoTrailLockoutUntil'] = boost_updates['trail_lockout_until']
+                                    db.execute(
+                                        """
+                                        UPDATE paper_trades
+                                        SET ath_boost_count = ?, last_ath_ts = ?, last_ath_mc = ?, monitor_state_json = ?
+                                        WHERE id = ?
+                                        """,
+                                        (
+                                            boost_updates['ath_count'],
+                                            boost_updates['last_ath_ts'],
+                                            boost_updates['last_ath_mc'],
+                                            json.dumps(pos.monitor_state),
+                                            pos.trade_id,
+                                        )
+                                    )
+                        db.commit()
+                        log.info(
+                            f"  [LOTTO] ATH boost {sig.get('symbol') or token_ca[:8]}: "
+                            f"count={boost_updates['ath_count']} mc=${boost_updates['last_ath_mc']:,.0f} "
+                            f"lockout_until={int(boost_updates['trail_lockout_until'])}"
+                        )
+                        last_progress = time.time()
+                        continue
+
                     if len(positions) + len(pending_entries) >= max_positions:
                         continue
 
@@ -3748,19 +3813,12 @@ def run_monitor(db):
                     super_idx = parse_super_index(sig['description'] or '')
 
                     # === LOTTO classification (must happen BEFORE filters that could block) ===
-                    # NEW_TRENDING + MC<$30K + signal<30min old → LOTTO fast-lane.
-                    # Bypasses super_idx and top10 filters since fresh tokens are too young
-                    # to have built up super_idx>70, and concentrated holders is normal at <$30K MC.
+                    # The router sends fresh NEW_TRENDING + MC<$30K signals to LOTTO.
+                    # LOTTO bypasses super_idx because early tokens often have not built
+                    # complete matrix data yet.
                     _raw_mc = sig.get('market_cap') or 0
-                    # signal_ts from DB is in milliseconds; time.time() is seconds — must normalize.
-                    _sig_ts_sec = (signal_ts // 1000) if signal_ts and signal_ts > 1e12 else (signal_ts or time.time())
-                    _signal_age_sec = time.time() - _sig_ts_sec
-                    _is_lotto_signal = (
-                        not sig.get('is_ath')
-                        and (sig.get('signal_type') or '').upper() == 'NEW_TRENDING'
-                        and 0 < _raw_mc < 30_000
-                        and _signal_age_sec < 1800
-                    )
+                    _signal_age_sec = route_decision.signal_age_sec
+                    _is_lotto_signal = route_decision.is_lotto
 
                     # Super Score filter:
                     # NOT_ATH: must have Super > min_super_index (config=70)
@@ -3842,10 +3900,11 @@ def run_monitor(db):
                     if _is_lotto_signal:
                         log.info(
                             f"  [LOTTO] 🎰 {symbol} classified as LOTTO: "
-                            f"MC=${_raw_mc:,.0f} age={_signal_age_sec:.0f}s super_idx={super_idx}"
+                            f"MC=${_raw_mc:,.0f} age={_signal_age_sec:.0f}s "
+                            f"reason={route_decision.reason} super_idx={super_idx}"
                         )
 
-                    watchlist.register(
+                    registered_entry = watchlist.register(
                         ca=token_ca,
                         symbol=symbol,
                         signal_type=_wl_type,
@@ -3860,6 +3919,8 @@ def run_monitor(db):
                         signal_tx24h=0, # not readily available in this row, evaluate_matrix gets recent bars anyway
                         signal_top10=top10_pct or 0
                     )
+                    if _is_lotto_signal and registered_entry:
+                        watchlist.update_position_state(registered_entry['id'], signal_route='LOTTO')
                     last_progress = time.time()
             except Exception as e:
                 log.error(f"Signal check error: {e}")
@@ -3934,72 +3995,42 @@ def run_monitor(db):
 
                 # === LOTTO FAST-LANE ===
                 # NEW_TRENDING + MC<$30K signals skip matrix evaluation entirely.
-                # Quick rug filter only: top10 < 70%, liq > $3K. Fire in <5s.
+                # Quick defense only: holders/volume/top10/liquidity/live concentration.
                 if w_entry.get('type') == 'LOTTO':
-                    _lotto_age_sec = time.time() - w_entry.get('added_at', time.time())
-                    if _lotto_age_sec > 1800:
-                        watchlist.mark_expired(w_entry['id'], 'lotto_stale_30min')
-                        log.info(f"  [LOTTO] 🗑️ {w_entry['symbol']} expired: stale ({_lotto_age_sec:.0f}s > 30min)")
-                        continue
-
-                    # Quick rug filter — DexScreener for liquidity
                     try:
                         _lotto_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
-                        _lotto_liq = (_lotto_dex.get('liquidity_usd', 0) or 0) if _lotto_dex else 0
                     except Exception:
-                        _lotto_liq = 0
+                        _lotto_dex = None
 
-                    # Signal-time top10 (stale by minutes)
-                    _lotto_top10 = w_entry.get('signal_top10', 0) or 0
-                    if _lotto_top10 > 70:
-                        watchlist.mark_expired(w_entry['id'], f'lotto_top10_{_lotto_top10:.0f}pct')
-                        log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: signal-time top10={_lotto_top10:.0f}% > 70%")
-                        continue
-                    if _lotto_liq < 3000:
-                        # Block both zero-liquidity ($0 = DexScreener returned nothing = bad sign)
-                        # and genuinely thin pools (<$3K = catastrophic slippage)
-                        watchlist.mark_expired(w_entry['id'], f'lotto_liq_low_{_lotto_liq:.0f}')
-                        log.info(f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: liq=${_lotto_liq:.0f} < $3K (slippage risk)")
-                        continue
-
-                    # LIVE on-chain top10 via Helius — catches insider accumulation that
-                    # happened AFTER signal time. Most powerful single rug indicator we have.
                     _lotto_live = helius_token_concentration(w_entry['ca'])
-                    if _lotto_live is not None:
-                        _live_top1 = _lotto_live.get('top1_pct') or 0
-                        _live_top10 = _lotto_live.get('top10_pct') or 0
-                        # NOTE: Raydium pool LP tokens often hold large % of supply but are
-                        # benign (LP-locked liquidity). We can't easily distinguish here, so
-                        # we use thresholds tuned for "insider concentration vs. LP":
-                        #   top1 > 35% → likely a single insider/team wallet (dangerous)
-                        #   top10 > 85% → almost no float (rug or pre-snipe army)
-                        if _live_top1 > 35:
-                            watchlist.mark_expired(w_entry['id'], f'lotto_live_top1_{_live_top1:.0f}pct')
-                            log.info(
-                                f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: LIVE top1={_live_top1:.0f}% > 35% "
-                                f"(single-wallet dump risk; signal-time top10 was {_lotto_top10:.0f}%)"
-                            )
-                            continue
-                        if _live_top10 > 85:
-                            watchlist.mark_expired(w_entry['id'], f'lotto_live_top10_{_live_top10:.0f}pct')
-                            log.info(
-                                f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: LIVE top10={_live_top10:.0f}% > 85% "
-                                f"(no float; signal-time top10 was {_lotto_top10:.0f}%)"
-                            )
-                            continue
-                        log.info(
-                            f"  [LOTTO] ✅ {w_entry['symbol']} LIVE check: "
-                            f"top1={_live_top1:.0f}% top10={_live_top10:.0f}% (signal had {_lotto_top10:.0f}%)"
-                        )
-                    else:
-                        # Fail-open: Helius down/rate-limited → trust signal-time data
-                        log.info(f"  [LOTTO] {w_entry['symbol']} Helius live-check unavailable, using signal-time top10")
+                    with positions_lock:
+                        _current_lotto_count = active_lotto_count(positions, pending_entries)
+                    _lotto_decision = evaluate_lotto_entry(
+                        w_entry,
+                        dex_snapshot=_lotto_dex,
+                        live_concentration=_lotto_live,
+                        current_lotto_count=_current_lotto_count,
+                        data_health_ok=True,
+                        now=time.time(),
+                    )
+                    _lotto_detail = _lotto_decision.detail
+                    _lotto_liq = _lotto_detail.get('liquidity_usd', 0) or 0
+                    _lotto_top10 = _lotto_detail.get('top10_pct', w_entry.get('signal_top10', 0) or 0)
+                    _lotto_age_sec = _lotto_detail.get('age_sec', time.time() - w_entry.get('added_at', time.time()))
 
                     _lotto_lc_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                     if _lotto_lc_id not in pending_entries:
-                        _lotto_lotto_count = sum(1 for p in pending_entries.values() if p.get('is_lotto'))
-                        if _lotto_lotto_count >= 5:
-                            log.info(f"  [LOTTO] {w_entry['symbol']} SKIP: LOTTO slots full ({_lotto_lotto_count}/5)")
+                        if _lotto_decision.expire:
+                            watchlist.mark_expired(w_entry['id'], _lotto_decision.reason)
+                            log.info(
+                                f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: {_lotto_decision.reason} "
+                                f"detail={_lotto_detail}"
+                            )
+                        elif not _lotto_decision.allow:
+                            log.info(
+                                f"  [LOTTO] {w_entry['symbol']} WAIT: {_lotto_decision.reason} "
+                                f"detail={_lotto_detail}"
+                            )
                         else:
                             _live_summary = (
                                 f" live_top1={_lotto_live['top1_pct']:.0f}% live_top10={_lotto_live['top10_pct']:.0f}%"
@@ -4011,27 +4042,11 @@ def run_monitor(db):
                                 f"liq=${_lotto_liq:.0f} top10={_lotto_top10:.0f}%{_live_summary} "
                                 f"age={_lotto_age_sec:.0f}s"
                             )
-                            pending_entries[_lotto_lc_id] = {
-                                'token_ca': w_entry['ca'],
-                                'symbol': w_entry['symbol'],
-                                'signal_ts': w_entry['signal_ts'],
-                                'premium_signal_id': w_entry['premium_signal_id'],
-                                'signal_type': 'LOTTO',
-                                'pool': w_entry['pool_address'],
-                                'staged_at': time.time(),
-                                'trigger_price': None,
-                                'watchlist_id': w_entry['id'],
-                                'kelly_position_sol': 0.05,
-                                'matrix_scores': {},
-                                'is_lotto': True,
-                                'timing_passed': True,
-                                'w_entry': w_entry,
-                                'momentum_snapshots': [],
-                                'momentum_pct': 0,
-                                'first_fire_pc_m5': None,
-                                'spread_abort_count': 0,
-                                'smart_entry_retries': 0,
-                            }
+                            pending_entries[_lotto_lc_id] = build_lotto_pending(
+                                w_entry,
+                                _lotto_lc_id,
+                                detail=_lotto_detail,
+                            )
                             last_progress = time.time()
                     continue
 
@@ -4421,9 +4436,17 @@ def run_monitor(db):
                         pending['entry_mode'] = timing_reason
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
 
-                    # LOTTO: fixed 0.05 SOL, skip Kelly and liquidity cap
+                    _pending_strategy_id = pending.get('strategy_id') or strategy_id
+                    _pending_strategy_stage = pending.get('strategy_stage') or 'stage1'
+                    _pending_stage_outcome = pending.get('stage_outcome') or f"{_pending_strategy_stage}_entered"
+                    _pending_replay_source = pending.get('replay_source') or 'live_monitor'
+                    _pending_signal_route = pending.get('signal_route') or ('LOTTO' if pending.get('is_lotto') else None)
+                    _pending_lotto_state = pending.get('lotto_state') or None
+                    _pending_exit_strategy = pending.get('exit_strategy') or 'NOT_ATH'
+
+                    # LOTTO: fixed paper size, skip Kelly and liquidity cap
                     if pending.get('is_lotto'):
-                        actual_position_size_sol = 0.05
+                        actual_position_size_sol = LOTTO_POSITION_SIZE_SOL
                         log.info(f"  [LOTTO] {pending['symbol']} fixed size: {actual_position_size_sol} SOL")
                     else:
                         # Recalculate Kelly with entry mode + matrix scores
@@ -4450,8 +4473,8 @@ def run_monitor(db):
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,
-                        'stage1',
-                        strategy_id=strategy_id,
+                        _pending_strategy_stage,
+                        strategy_id=_pending_strategy_id,
                         lifecycle_id=lifecycle_id,
                     )
                     if not execution.get('success'):
@@ -4557,6 +4580,20 @@ def run_monitor(db):
                         continue
 
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                    _monitor_state = {
+                        'tokenCA': pending['token_ca'],
+                        'symbol': pending['symbol'],
+                        'entryPrice': price,
+                        'entrySol': actual_position_size_sol,
+                        'tokenAmount': int(token_amount_raw),
+                        'tokenDecimals': int(token_decimals or 0),
+                        'entryTime': int(entry_ts) * 1000,
+                        'exitStrategy': _pending_exit_strategy,
+                    }
+                    if _pending_signal_route:
+                        _monitor_state['signalRoute'] = _pending_signal_route
+                    if _pending_lotto_state:
+                        _monitor_state['lottoState'] = _pending_lotto_state
                     db.execute("""
                         INSERT INTO paper_trades
                             (strategy_id, strategy_role, strategy_stage, stage_outcome,
@@ -4565,29 +4602,23 @@ def run_monitor(db):
                              lifecycle_id, stage_seq, trigger_ts, trigger_price,
                              position_size_sol, token_amount_raw, token_decimals,
                              entry_execution_json, entry_execution_audit_json, monitor_state_json,
-                             premium_signal_id, signal_type, strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live_monitor', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                             premium_signal_id, signal_type, signal_route, lotto_state_json,
+                             strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """, (
-                        strategy_id, strategy_role, 'stage1', 'stage1_entered',
+                        _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
-                        regime, lifecycle_id, stage_seq('stage1'), entry_ts, price,
+                        regime, _pending_replay_source, lifecycle_id, stage_seq(_pending_strategy_stage), entry_ts, price,
                         actual_position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
                             'auditVersion': 1,
-                            'stage': 'stage1',
+                            'stage': _pending_strategy_stage,
                             'lifecycleId': lifecycle_id,
                             'entryPriceUsd': price,
                             'positionSizeSol': actual_position_size_sol,
-                        })), json.dumps({
-                            'tokenCA': pending['token_ca'],
-                            'symbol': pending['symbol'],
-                            'entryPrice': price,
-                            'entrySol': actual_position_size_sol,
-                            'tokenAmount': int(token_amount_raw),
-                            'tokenDecimals': int(token_decimals or 0),
-                            'entryTime': int(entry_ts) * 1000,
-                            'exitStrategy': 'NOT_ATH',
-                        }),
-                        pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING', 'entered', 'available', 'open'
+                        })), json.dumps(_monitor_state),
+                        pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
+                        _pending_signal_route, json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
+                        'entered', 'available', 'open'
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
@@ -4603,17 +4634,10 @@ def run_monitor(db):
                         log.info(f"  [SUSTAINED_ATH] {pending['symbol']} tight trail lock (10% start, 0.5x factor)")
 
                     pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
-                                   'stage1', lifecycle_id, _custom_stage1_exit, actual_position_size_sol, token_amount_raw, token_decimals or 0,
-                                   monitor_state={
-                                       'tokenCA': pending['token_ca'],
-                                       'symbol': pending['symbol'],
-                                       'entryPrice': price,
-                                       'entrySol': actual_position_size_sol,
-                                       'tokenAmount': int(token_amount_raw),
-                                       'tokenDecimals': int(token_decimals or 0),
-                                       'entryTime': int(entry_ts) * 1000,
-                                       'exitStrategy': 'NOT_ATH',
-                                   })
+                                   _pending_strategy_stage, lifecycle_id, _custom_stage1_exit, actual_position_size_sol, token_amount_raw, token_decimals or 0,
+                                   monitor_state=_monitor_state)
+                    pos.premium_signal_id = pending.get('premium_signal_id')
+                    pos.signal_type = pending.get('signal_type') or 'NEW_TRENDING'
                     with positions_lock:
                         positions[pos.trade_id] = pos
 
@@ -4626,17 +4650,14 @@ def run_monitor(db):
                     lc['stage1_trade_id'] = trade_id
 
                     log.info(
-                        f"  Entered {pending['symbol']}/stage1 @ {price:.10f} "
+                        f"  Entered {pending['symbol']}/{_pending_strategy_stage} @ {price:.10f} "
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
                         f"mode={pending.get('entry_mode', 'default')} lifecycle={lifecycle_id} via quoted execution"
                     )
                     if 'watchlist_id' in pending:
                         if pending.get('is_lotto'):
-                            # LOTTO: wider SL stored in watchlist so EXIT_MATRIX respects it too.
-                            # Exit_guardian already uses -0.25 for LOTTO, but EXIT_MATRIX reads
-                            # dynamic_sl from the watchlist — must set it here or EXIT_MATRIX fires
-                            # at the default -0.15 before the guardian can protect the position.
-                            _base_sl = -0.25
+                            # LOTTO has its own time-validation exit and -18% normal stop.
+                            _base_sl = -0.18
                         else:
                             _base_sl = get_adaptive_stop_loss()  # returns -0.15
                         _final_sl = _base_sl
@@ -4794,7 +4815,9 @@ def run_monitor(db):
                             if hasattr(pos, '_guardian_threat_tighten'):
                                 w_entry['_guardian_threat_tighten'] = pos._guardian_threat_tighten
 
-                        if not w_entry:
+                        if w_entry and is_lotto_position(pos, w_entry):
+                            exit_matrix = evaluate_lotto_exit(pos, w_entry, pre_price, now=time.time())
+                        elif not w_entry:
                             exit_matrix = {'action': 'hold', 'reason': 'no_watchlist_entry'}
                         elif w_entry['status'] == 'moon_bag':
                             exit_matrix = exit_matrix_evaluator.evaluate_moon_bag(w_entry, pre_price)
@@ -4823,11 +4846,18 @@ def run_monitor(db):
                         
                         # Persist peak_pnl (critical for trail stop + lock profit)
                         if 'peak_pnl' in exit_matrix and exit_matrix.get('current_pnl') is not None:
-                            new_peak = max(w_entry.get('peak_pnl', 0) or 0, exit_matrix['current_pnl'])
+                            new_peak = max(
+                                w_entry.get('peak_pnl', 0) or 0,
+                                exit_matrix.get('peak_pnl') or 0,
+                                exit_matrix['current_pnl'],
+                            )
                             state_updates['peak_pnl'] = new_peak
                         elif exit_matrix.get('current_pnl') is not None:
                             new_peak = max(w_entry.get('peak_pnl', 0) or 0, exit_matrix['current_pnl'])
                             state_updates['peak_pnl'] = new_peak
+                        if state_updates.get('peak_pnl') is not None and state_updates['peak_pnl'] > pos.peak_pnl:
+                            pos.peak_pnl = state_updates['peak_pnl']
+                            pos.peak_ts = int(time.time())
                         
                         # Persist moon_peak_pnl (critical for moon trail)
                         if exit_matrix.get('moon_peak_pnl') is not None:
@@ -4865,7 +4895,8 @@ def run_monitor(db):
                         }
                         
                         if exit_matrix['action'] in ('exit', 'lock_profit'):
-                            sell_pct = 0.5 if exit_matrix['action'] == 'lock_profit' else 1.0
+                            sell_pct = float(exit_matrix.get('sell_pct', 0.5)) if exit_matrix['action'] == 'lock_profit' else 1.0
+                            sell_pct = min(1.0, max(0.0, sell_pct))
                             sell_amount_raw = int(float(pos.token_amount_raw) * sell_pct) if pos.token_amount_raw else 0
                             
                             simulate_res = simulate_exit_execution(
@@ -4929,7 +4960,7 @@ def run_monitor(db):
                                     exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
                                     
                                     if exit_matrix['action'] == 'lock_profit':
-                                        log.info(f"  [EXIT_MATRIX] 🌙 {pos.symbol} LOCK PROFIT! Selling 50%, rest → Moon Bag")
+                                        log.info(f"  [EXIT_MATRIX] 🌙 {pos.symbol} LOCK PROFIT! Selling {sell_pct*100:.0f}%, rest → Moon Bag")
                                     else:
                                         log.info(f"  [EXIT_MATRIX] 🔔 {pos.symbol} EXIT triggered: {exit_matrix.get('reason')}")
                                     
@@ -4938,6 +4969,10 @@ def run_monitor(db):
                                         rem_amount = int(float(pos.token_amount_raw) - sell_amount_raw)
                                         exit_eval['updatedState'] = (pos.monitor_state or {}).copy()
                                         exit_eval['updatedState']['tokenAmount'] = rem_amount
+                                        prev_sold_pct = _safe_float(exit_eval['updatedState'].get('soldPct'), 0.0)
+                                        exit_eval['updatedState']['soldPct'] = min(1.0, prev_sold_pct + sell_pct)
+                                        exit_eval['updatedState']['lockedPnl'] = exit_matrix.get('current_pnl', 0.0)
+                                        exit_eval['updatedState']['moonbag'] = True
                             else:
                                 exit_eval['ok'] = False
                                 exit_eval['failureReason'] = simulate_res.get('failureReason', 'quote_failed')

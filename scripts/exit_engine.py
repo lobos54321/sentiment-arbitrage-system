@@ -194,9 +194,9 @@ class ExitGuardianThread(threading.Thread):
                     _dex_trend = None
 
                 if _is_lotto_entry:
-                    # LOTTO: wider hard SL — these tokens are naturally volatile early on.
-                    # -25% is the rug signal: genuine pumps never see -25% from entry.
-                    hard_sl = -0.25
+                    # LOTTO: normal failure stop. The disaster floor is handled by
+                    # lotto_engine in the slower paper monitor loop.
+                    hard_sl = -0.18
                 else:
                     # Plan #3: 4-factor dynamic SL (bs/vol/momentum/peak)
                     # Base SL: -10% (V3.3 tightened from -15%). w_entry['dynamic_sl'] overrides.
@@ -457,19 +457,19 @@ class ExitGuardianThread(threading.Thread):
 
                 # === LOTTO Phase-Based Trail ===
                 # Wide floors to let ultra-early tokens run 10x-100x without getting shaken out.
-                # Phase 0 (peak <50%):   floor = peak × 0.35 — allow 65% pullback, meme chop is normal
-                # Phase 1 (50-200%):     floor = peak × 0.50 — tighten once momentum confirmed
-                # Phase 2 (>200%):       floor = peak × 0.65 — lock in >65% of peak at this point
-                if _is_lotto_entry and not is_moon and pos.peak_pnl >= 0.08:
-                    if pos.peak_pnl >= 2.00:
-                        _lotto_factor = 0.65
+                # Phase 1 (50-200%):     floor = peak x 0.45
+                # Phase 2 (200-500%):    floor = peak x 0.60
+                # Phase 3 (>500%):       floor = peak x 0.72
+                if _is_lotto_entry and not is_moon and pos.peak_pnl >= 0.50:
+                    if pos.peak_pnl >= 5.00:
+                        _lotto_factor = 0.72
+                        _lotto_phase = 'phase3_500pct'
+                    elif pos.peak_pnl >= 2.00:
+                        _lotto_factor = 0.60
                         _lotto_phase = 'phase2_200pct'
-                    elif pos.peak_pnl >= 0.50:
-                        _lotto_factor = 0.50
-                        _lotto_phase = 'phase1_50pct'
                     else:
-                        _lotto_factor = 0.35
-                        _lotto_phase = 'phase0_early'
+                        _lotto_factor = 0.45
+                        _lotto_phase = 'phase1_50pct'
 
                     _lotto_floor = pos.peak_pnl * _lotto_factor
                     if pnl < _lotto_floor:
