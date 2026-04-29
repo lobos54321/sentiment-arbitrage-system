@@ -494,6 +494,8 @@ def sync_position_from_monitor_state(pos, allow_token_amount_override=False):
 def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, final_exit_sol=None, has_partial_history=False):
     monitor_state = state if isinstance(state, dict) else {}
     entry_sol = _safe_float(monitor_state.get('entrySol'), fallback_position_size_sol)
+    partial_realized_sol = _safe_float(monitor_state.get('partialRealizedSol'), None)
+    partial_cost_basis_sol = _safe_float(monitor_state.get('partialCostBasisSol'), None)
     total_sol_received = _safe_float(monitor_state.get('totalSolReceived'), None)
     final_exit_total_sol = _safe_float(final_exit_sol, None)
 
@@ -502,14 +504,20 @@ def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, fin
         return None, total_sol_received if has_partial_history else final_exit_total_sol, entry_sol, accounting_source
 
     if has_partial_history:
-        # BUG FIX: When partial history exists, totalSolReceived accumulates ALL previous
-        # partial exit amounts across the lifecycle. Using it for pnl_pct would double-count
-        # previous exits and produce wildly inflated PnL numbers (e.g. +86% on a loser).
-        # The correct approach: compute pnl only from this final exit's received SOL vs entry.
+        # Partial locks sell only part of the position. Final PnL must blend
+        # previously realized SOL with the final sale of the remaining tokens.
+        prior_realized_sol = partial_realized_sol
+        if prior_realized_sol is None:
+            prior_realized_sol = total_sol_received
+        if prior_realized_sol is None:
+            prior_realized_sol = 0.0
         if final_exit_total_sol is not None and entry_sol > 0:
-            pnl = (final_exit_total_sol - entry_sol) / entry_sol
-            return pnl, final_exit_total_sol, entry_sol, 'final_exit_vs_entry_sol'
-        # Fallback: if we have no final exit amount, report as unknown
+            total_realized = prior_realized_sol + final_exit_total_sol
+            pnl = (total_realized - entry_sol) / entry_sol
+            source = 'blended_partial_plus_final_sol'
+            if partial_cost_basis_sol is None:
+                source = 'blended_total_sol_received_plus_final_sol'
+            return pnl, total_realized, entry_sol, source
         if total_sol_received is None:
             return None, total_sol_received, entry_sol, 'monitor_state_total_sol_received'
         return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol, 'monitor_state_total_sol_received'
@@ -519,6 +527,141 @@ def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, fin
     if total_sol_received is not None:
         return ((total_sol_received - entry_sol) / entry_sol), total_sol_received, entry_sol, 'monitor_state_total_sol_received'
     return None, final_exit_total_sol, entry_sol, 'final_exit_only'
+
+
+def apply_partial_accounting_state(state, execution, *, entry_sol, prev_sold_pct, sell_pct_delta, trigger_pnl, peak_pnl, reason, ts):
+    updated = dict(state or {})
+    entry_sol = _safe_float(updated.get('entrySol'), entry_sol)
+    prev_sold_pct = max(0.0, min(1.0, _safe_float(prev_sold_pct, 0.0)))
+    sell_pct_delta = max(0.0, min(1.0 - prev_sold_pct, _safe_float(sell_pct_delta, 0.0)))
+    total_sold_pct = max(prev_sold_pct, min(1.0, _safe_float(updated.get('soldPct'), prev_sold_pct + sell_pct_delta)))
+    if total_sold_pct > prev_sold_pct:
+        sell_pct_delta = total_sold_pct - prev_sold_pct
+
+    partial_out_sol = _safe_float((execution or {}).get('quotedOutAmount'), None)
+    prev_realized_sol = _safe_float(updated.get('partialRealizedSol'), _safe_float(updated.get('totalSolReceived'), 0.0))
+    prev_cost_basis_sol = _safe_float(updated.get('partialCostBasisSol'), entry_sol * prev_sold_pct if entry_sol else 0.0)
+    partial_cost_sol = entry_sol * sell_pct_delta if entry_sol else None
+
+    updated['soldPct'] = total_sold_pct
+    updated['remainingPct'] = max(0.0, 1.0 - total_sold_pct)
+    updated['partialLockCount'] = _safe_int(updated.get('partialLockCount'), 0) + 1
+    updated['lastPartialLockTs'] = _safe_int(ts, int(time.time()))
+    updated['lastPartialLockPnl'] = _safe_float(trigger_pnl, None)
+    updated['lastPartialLockPeak'] = _safe_float(peak_pnl, None)
+
+    if partial_out_sol is not None and partial_cost_sol is not None:
+        realized_sol = prev_realized_sol + partial_out_sol
+        cost_basis_sol = prev_cost_basis_sol + partial_cost_sol
+        realized_pnl_on_sold = (
+            (realized_sol - cost_basis_sol) / cost_basis_sol
+            if cost_basis_sol and cost_basis_sol > 0 else None
+        )
+        realized_pnl_contribution = (
+            (realized_sol - cost_basis_sol) / entry_sol
+            if entry_sol and entry_sol > 0 else None
+        )
+        updated['partialRealizedSol'] = realized_sol
+        updated['partialCostBasisSol'] = cost_basis_sol
+        updated['totalSolReceived'] = realized_sol
+        updated['partialRealizedPnlOnSold'] = realized_pnl_on_sold
+        updated['partialRealizedPnlContribution'] = realized_pnl_contribution
+        updated['remainingCostBasisSol'] = max(0.0, entry_sol - cost_basis_sol) if entry_sol else None
+
+    history = updated.get('partialLockHistory')
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        'ts': _safe_int(ts, int(time.time())),
+        'reason': reason,
+        'sellPct': sell_pct_delta,
+        'soldPctAfter': total_sold_pct,
+        'triggerPnl': _safe_float(trigger_pnl, None),
+        'peakPnl': _safe_float(peak_pnl, None),
+        'outSol': partial_out_sol,
+        'costBasisSol': partial_cost_sol,
+    })
+    updated['partialLockHistory'] = history[-12:]
+    return updated
+
+
+def blended_mark_pnl_from_state(state, mark_pnl):
+    monitor_state = state if isinstance(state, dict) else {}
+    entry_sol = _safe_float(monitor_state.get('entrySol'), 0.0)
+    sold_pct = max(0.0, min(1.0, _safe_float(monitor_state.get('soldPct'), 0.0)))
+    partial_realized_sol = _safe_float(
+        monitor_state.get('partialRealizedSol'),
+        _safe_float(monitor_state.get('totalSolReceived'), 0.0),
+    )
+    partial_cost_basis_sol = _safe_float(monitor_state.get('partialCostBasisSol'), entry_sol * sold_pct if entry_sol else 0.0)
+    mark_pnl = _safe_float(mark_pnl, None)
+    if mark_pnl is None or entry_sol <= 0:
+        return None
+    partial_contribution = (partial_realized_sol - partial_cost_basis_sol) / entry_sol
+    remaining_contribution = max(0.0, 1.0 - sold_pct) * mark_pnl
+    return partial_contribution + remaining_contribution
+
+
+def blended_quote_pnl_from_state(state, final_exit_sol):
+    monitor_state = state if isinstance(state, dict) else {}
+    entry_sol = _safe_float(monitor_state.get('entrySol'), 0.0)
+    final_exit_sol = _safe_float(final_exit_sol, None)
+    if entry_sol <= 0 or final_exit_sol is None:
+        return None
+    partial_realized_sol = _safe_float(
+        monitor_state.get('partialRealizedSol'),
+        _safe_float(monitor_state.get('totalSolReceived'), 0.0),
+    )
+    return ((partial_realized_sol + final_exit_sol) - entry_sol) / entry_sol
+
+
+def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, mark_pnl, mark_source, quote_execution=None, peak_pnl=None):
+    execution = quote_execution if isinstance(quote_execution, dict) else {}
+    quote_price = _safe_float(execution.get('effectivePrice'), None)
+    quote_out_sol = _safe_float(execution.get('quotedOutAmount'), None)
+    quote_pnl = None
+    if quote_price is not None and quote_price > 0 and pos.entry_price and pos.entry_price > 0:
+        quote_pnl = (quote_price - pos.entry_price) / pos.entry_price
+    state = pos.monitor_state or {}
+    payload = build_execution_audit(execution) if execution else {}
+    db.execute(
+        """
+        INSERT INTO paper_trade_path_samples
+            (trade_id, lifecycle_id, token_ca, symbol, strategy_stage, sample_ts,
+             action, reason, mark_price, mark_pnl, quote_price, quote_pnl,
+             peak_pnl, sold_pct, token_amount_raw, mark_source, quote_success,
+             quote_failure_reason, quote_out_sol, partial_realized_sol,
+             remaining_cost_basis_sol, blended_mark_pnl, blended_quote_pnl,
+             payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            pos.trade_id,
+            pos.lifecycle_id,
+            pos.token_ca,
+            pos.symbol,
+            pos.strategy_stage,
+            _safe_int(sample_ts, int(time.time())),
+            action,
+            reason,
+            _safe_float(mark_price, None),
+            _safe_float(mark_pnl, None),
+            quote_price,
+            quote_pnl,
+            _safe_float(peak_pnl if peak_pnl is not None else pos.peak_pnl, None),
+            _safe_float(state.get('soldPct'), 0.0),
+            str(pos.token_amount_raw) if pos.token_amount_raw is not None else None,
+            mark_source,
+            1 if execution.get('success') else 0 if execution else None,
+            execution.get('failureReason'),
+            quote_out_sol,
+            _safe_float(state.get('partialRealizedSol'), _safe_float(state.get('totalSolReceived'), None)),
+            _safe_float(state.get('remainingCostBasisSol'), None),
+            blended_mark_pnl_from_state(state, mark_pnl),
+            blended_quote_pnl_from_state(state, quote_out_sol) if action in ('exit', 'close') else None,
+            json.dumps(payload) if payload else None,
+        ),
+    )
 
 
 
@@ -598,6 +741,38 @@ def init_paper_db(db_path=None):
         db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_token ON paper_trades(token_ca)")
         db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit ON paper_trades(exit_reason)")
         db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_ts ON paper_trades(entry_ts)")
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trade_path_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER NOT NULL,
+                lifecycle_id TEXT,
+                token_ca TEXT,
+                symbol TEXT,
+                strategy_stage TEXT,
+                sample_ts INTEGER NOT NULL,
+                action TEXT,
+                reason TEXT,
+                mark_price REAL,
+                mark_pnl REAL,
+                quote_price REAL,
+                quote_pnl REAL,
+                peak_pnl REAL,
+                sold_pct REAL DEFAULT 0,
+                token_amount_raw TEXT,
+                mark_source TEXT,
+                quote_success INTEGER,
+                quote_failure_reason TEXT,
+                quote_out_sol REAL,
+                partial_realized_sol REAL,
+                remaining_cost_basis_sol REAL,
+                blended_mark_pnl REAL,
+                blended_quote_pnl REAL,
+                payload_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_ptps_trade_ts ON paper_trade_path_samples(trade_id, sample_ts)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_ptps_token_ts ON paper_trade_path_samples(token_ca, sample_ts)")
         for column_sql in [
             "ALTER TABLE paper_trades ADD COLUMN strategy_id TEXT DEFAULT 'notath-selective-v1'",
             "ALTER TABLE paper_trades ADD COLUMN strategy_role TEXT DEFAULT 'selective_challenger'",
@@ -5651,6 +5826,7 @@ def run_monitor(db):
                                     exit_eval['action'] = 'partial_sell' if exit_matrix['action'] == 'lock_profit' else 'exit'
                                     exit_eval['exitReason'] = exit_matrix.get('reason', 'matrix_exit')
                                     exit_eval['execution'] = simulate_res
+                                    exit_eval['sellPct'] = sell_pct if exit_matrix['action'] == 'lock_profit' else 1.0
                                     exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
                                     
                                     if exit_matrix['action'] == 'lock_profit':
@@ -5710,7 +5886,7 @@ def run_monitor(db):
                     mark_quote_reason = exit_eval.get('quoteFailureReason')
                     mark_quote_route = exit_eval.get('routeAvailable')
                     mark_quote_price = mark_execution.get('effectivePrice')
-                    mark_quote_out = exit_eval.get('quotedOutAmount')
+                    mark_quote_out = mark_execution.get('quotedOutAmount', exit_eval.get('quotedOutAmount'))
                     price = exit_eval.get('currentPrice')
                     bar_ts = int(exit_eval.get('quoteTsSec') or 0)
                     mark_source = exit_eval.get('markSource') or 'fallback'
@@ -5734,6 +5910,18 @@ def run_monitor(db):
                     trigger_pnl = float(exit_eval.get('triggerPnl') or 0.0)
                     lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
+                    record_trade_path_sample(
+                        db,
+                        pos,
+                        sample_ts=bar_ts,
+                        action=action,
+                        reason=reason,
+                        mark_price=price,
+                        mark_pnl=trigger_pnl,
+                        mark_source=mark_source,
+                        quote_execution=mark_execution if action in ('partial_sell', 'exit', 'close') or should_exit else None,
+                        peak_pnl=pos.peak_pnl,
+                    )
                     db.execute("""
                         UPDATE paper_trades
                         SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?, first_peak_pct = ?, monitor_state_json = ?
@@ -5787,8 +5975,38 @@ def run_monitor(db):
                 pos = positions.get(trade_id)
                 if pos is None:
                     continue
+                if mark_source in ('exit_guardian', 'force_timeout'):
+                    record_trade_path_sample(
+                        db,
+                        pos,
+                        sample_ts=exit_ts,
+                        action=exit_eval.get('action') or 'exit',
+                        reason=reason,
+                        mark_price=exit_price,
+                        mark_pnl=trigger_pnl,
+                        mark_source=mark_source,
+                        quote_execution=exit_eval.get('execution'),
+                        peak_pnl=pos.peak_pnl,
+                    )
                 if exit_eval.get('action') == 'partial_sell':
-                    pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
+                    prev_state = dict(pos.monitor_state or {})
+                    updated_state = exit_eval.get('updatedState') or pos.monitor_state
+                    prev_sold_pct = _safe_float(prev_state.get('soldPct'), 0.0)
+                    next_sold_pct = _safe_float((updated_state or {}).get('soldPct'), prev_sold_pct)
+                    sell_pct_delta = max(0.0, next_sold_pct - prev_sold_pct)
+                    if sell_pct_delta <= 0:
+                        sell_pct_delta = _safe_float(exit_eval.get('sellPct'), 0.0)
+                    pos.monitor_state = apply_partial_accounting_state(
+                        updated_state,
+                        exit_eval.get('execution'),
+                        entry_sol=pos.position_size_sol,
+                        prev_sold_pct=prev_sold_pct,
+                        sell_pct_delta=sell_pct_delta,
+                        trigger_pnl=trigger_pnl,
+                        peak_pnl=pos.peak_pnl,
+                        reason=reason,
+                        ts=exit_ts,
+                    )
                     sync_position_from_monitor_state(pos, allow_token_amount_override=True)
                     db.execute(
                         """
@@ -5820,7 +6038,9 @@ def run_monitor(db):
                     db.commit()
                     log.info(
                         f"  PARTIAL {pos.symbol}/{pos.strategy_stage}: {exit_eval.get('tpName')} "
-                        f"trigger_pnl={trigger_pnl*100:+.1f}% remaining_raw={pos.token_amount_raw} lifecycle={pos.lifecycle_id}"
+                        f"trigger_pnl={trigger_pnl*100:+.1f}% sold_pct={_safe_float(pos.monitor_state.get('soldPct'), 0.0)*100:.0f}% "
+                        f"partial_realized_sol={_safe_float(pos.monitor_state.get('partialRealizedSol'), None)} "
+                        f"remaining_raw={pos.token_amount_raw} lifecycle={pos.lifecycle_id}"
                     )
                     last_progress = time.time()
                     continue
@@ -5946,6 +6166,16 @@ def run_monitor(db):
                         realized_pnl = trigger_pnl
                         accounting_source = f'trigger_pnl_override(was={accounting_source})'
 
+                pos.monitor_state = dict(pos.monitor_state or {})
+                pos.monitor_state['closed'] = True
+                pos.monitor_state['exitReason'] = reason
+                pos.monitor_state['finalExitSol'] = _safe_float(actual_out, None)
+                pos.monitor_state['totalRealizedSol'] = _safe_float(total_realized_sol, None)
+                pos.monitor_state['blendedRealizedPnl'] = _safe_float(realized_pnl, None)
+                pos.monitor_state['accountingSource'] = accounting_source
+                if total_realized_sol is not None:
+                    pos.monitor_state['totalSolReceived'] = _safe_float(total_realized_sol, None)
+
                 log.info(
                     f"ACCOUNTING_SOURCE trade_id={pos.trade_id} lifecycle={pos.lifecycle_id} stage={pos.strategy_stage} "
                     f"source={accounting_source} partialHistory={1 if has_partial_history else 0} "
@@ -5958,7 +6188,8 @@ def run_monitor(db):
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
                         peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
                         exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
-                        strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0
+                        strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0,
+                        monitor_state_json = ?
                     WHERE id = ?
                 """, (
                     effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
@@ -5975,6 +6206,10 @@ def run_monitor(db):
                         'totalRealizedSol': _safe_float(total_realized_sol, None),
                         'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
                         'accountingSource': accounting_source,
+                        'partialRealizedSol': _safe_float((pos.monitor_state or {}).get('partialRealizedSol'), None),
+                        'partialCostBasisSol': _safe_float((pos.monitor_state or {}).get('partialCostBasisSol'), None),
+                        'partialRealizedPnlContribution': _safe_float((pos.monitor_state or {}).get('partialRealizedPnlContribution'), None),
+                        'soldPct': _safe_float((pos.monitor_state or {}).get('soldPct'), None),
                         'preExitTotalSolReceived': _safe_float(exit_eval.get('preExitTotalSolReceived', exit_execution.get('preExitTotalSolReceived')), None),
                         'exitSolReceived': _safe_float(exit_eval.get('exitSolReceived', exit_execution.get('exitSolReceived')), None),
                         'postExitTotalSolReceived': _safe_float(exit_eval.get('postExitTotalSolReceived', exit_execution.get('postExitTotalSolReceived')), None),
@@ -5984,6 +6219,7 @@ def run_monitor(db):
                     'force_timeout' if is_force_timeout else reason,
                     'unavailable' if is_force_timeout else 'available',
                     'closed_force_timeout' if is_force_timeout else 'closed_real',
+                    json.dumps(pos.monitor_state),
                     pos.trade_id,
                 ))
                 db.commit()

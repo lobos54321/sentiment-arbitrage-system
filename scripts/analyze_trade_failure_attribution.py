@@ -393,6 +393,74 @@ def print_selection_quality(rows, db, since_ts, limit):
         )
 
 
+def print_path_sample_quality(db, since_ts, limit):
+    if not table_exists(db, "paper_trade_path_samples"):
+        return
+    summary = db.execute(
+        """
+        SELECT
+          COUNT(*) AS samples,
+          COUNT(DISTINCT trade_id) AS trades,
+          SUM(CASE WHEN quote_pnl IS NOT NULL THEN 1 ELSE 0 END) AS quote_samples,
+          AVG(mark_pnl) AS avg_mark_pnl,
+          AVG(quote_pnl) AS avg_quote_pnl,
+          AVG(CASE WHEN quote_pnl IS NOT NULL THEN quote_pnl - mark_pnl END) AS avg_quote_gap,
+          MAX(ABS(CASE WHEN quote_pnl IS NOT NULL THEN quote_pnl - mark_pnl END)) AS max_abs_quote_gap
+        FROM paper_trade_path_samples
+        WHERE sample_ts >= ?
+        """,
+        (since_ts,),
+    ).fetchone()
+    print("\nPath Sample Quality")
+    print(
+        f"  samples={summary['samples'] or 0} trades={summary['trades'] or 0} "
+        f"quote_samples={summary['quote_samples'] or 0} "
+        f"avg_mark={pct(summary['avg_mark_pnl'])} avg_quote={pct(summary['avg_quote_pnl'])} "
+        f"avg_quote_gap={pp(summary['avg_quote_gap'])} max_abs_quote_gap={pp(summary['max_abs_quote_gap'])}"
+    )
+
+    rows = db.execute(
+        """
+        SELECT
+          trade_id,
+          symbol,
+          action,
+          reason,
+          sample_ts,
+          mark_pnl,
+          quote_pnl,
+          quote_pnl - mark_pnl AS quote_gap,
+          peak_pnl,
+          sold_pct,
+          partial_realized_sol,
+          blended_mark_pnl,
+          blended_quote_pnl
+        FROM paper_trade_path_samples
+        WHERE sample_ts >= ?
+          AND (quote_pnl IS NOT NULL OR sold_pct > 0 OR blended_mark_pnl IS NOT NULL)
+        ORDER BY ABS(COALESCE(quote_pnl - mark_pnl, 0)) DESC, sample_ts DESC
+        LIMIT ?
+        """,
+        (since_ts, limit),
+    ).fetchall()
+    if rows:
+        print("  Notable path samples:")
+        for row in rows:
+            print(
+                f"    #{row['trade_id']} {str(row['symbol'] or '?')[:12]:<12} {row['action']:<12} "
+                f"mark={pct(row['mark_pnl'])} quote={pct(row['quote_pnl'])} gap={pp(row['quote_gap'])} "
+                f"peak={pct(row['peak_pnl'])} sold={_fmt_pct_plain(row['sold_pct'])} "
+                f"blend_mark={pct(row['blended_mark_pnl'])} blend_quote={pct(row['blended_quote_pnl'])} "
+                f"{str(row['reason'] or '-')[:70]}"
+            )
+
+
+def _fmt_pct_plain(value):
+    if value is None:
+        return "n/a"
+    return f"{float(value) * 100:.0f}%"
+
+
 def print_decision_read(rows, db, since_ts):
     closed = [r for r in rows if r["exit_ts"] is not None]
     tags = Counter()
@@ -453,6 +521,7 @@ def main():
     print_decision_events(db, since_ts, args.limit)
     print_missed_attribution(db, since_ts, args.limit)
     print_selection_quality(rows, db, since_ts, args.limit)
+    print_path_sample_quality(db, since_ts, args.limit)
     print_decision_read(rows, db, since_ts)
 
 

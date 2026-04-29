@@ -1070,6 +1070,7 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                     'action': 'partial_sell',
                     'execution': gx_sim,
                     'tpName': gx.get('tp_name') or 'PHASE0_LOCK',
+                    'sellPct': gx_sell_pct,
                     'updatedState': updated_state,
                 },
             })
