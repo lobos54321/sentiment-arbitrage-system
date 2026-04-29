@@ -194,6 +194,8 @@ class WatchlistStore:
                     updates['latest_ath_price'] = signal_price
                 if existing['type'] == 'NOT_ATH':
                     updates['type'] = 'ATH'  # upgrade type
+            elif signal_type == 'LOTTO' and existing['type'] == 'NOT_ATH':
+                updates['type'] = 'LOTTO'
             self._update(existing['id'], **updates)
             log.info(
                 f"[WL] Updated ${symbol} signal_count={updates.get('signal_count')} "

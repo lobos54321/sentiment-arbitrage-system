@@ -3903,6 +3903,114 @@ def run_monitor(db):
                             f"status={hard_gate_status} MC=${sig.get('market_cap') or 0:,.0f} "
                             f"Vol=${sig.get('volume_24h') or 0:,.0f}"
                         )
+                        if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
+                            record_decision_event(
+                                db,
+                                component='lotto_second_pass',
+                                event_type='observe_skip',
+                                decision='skip',
+                                reason='lifecycle_already_active',
+                                token_ca=token_ca,
+                                symbol=symbol,
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=signal_ts,
+                                signal_id=premium_signal_id,
+                                route='LOTTO',
+                                payload={'pending': lifecycle_id in pending_entries},
+                            )
+                            continue
+
+                        existing = db.execute(
+                            "SELECT id FROM paper_trades WHERE lifecycle_id = ? OR (token_ca = ? AND signal_ts = ?)",
+                            (lifecycle_id, token_ca, signal_ts)
+                        ).fetchone()
+                        if existing:
+                            record_decision_event(
+                                db,
+                                component='lotto_second_pass',
+                                event_type='observe_skip',
+                                decision='skip',
+                                reason='paper_trade_exists',
+                                token_ca=token_ca,
+                                symbol=symbol,
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=signal_ts,
+                                signal_id=premium_signal_id,
+                                route='LOTTO',
+                                payload={'paper_trade_id': existing['id']},
+                            )
+                            continue
+
+                        pool = get_pool_address(token_ca)
+                        if not pool:
+                            record_decision_event(
+                                db,
+                                component='lotto_second_pass',
+                                event_type='observe_reject',
+                                decision='reject',
+                                reason='pool_not_found',
+                                token_ca=token_ca,
+                                symbol=symbol,
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=signal_ts,
+                                signal_id=premium_signal_id,
+                                route='LOTTO',
+                                data_source='pool_lookup',
+                                payload=signal_payload(sig),
+                            )
+                            log.info(f"  [LOTTO_OBSERVE] {symbol} not added to LOTTO watchlist: pool_not_found")
+                            continue
+
+                        time.sleep(0.1)
+                        sig_price_val, _, _ = fetch_realtime_price(token_ca, pool, max_age_ms=15000)
+                        sig_price = sig_price_val if sig_price_val and sig_price_val > 0 else None
+                        top10_pct = parse_top10_percent(sig.get('description') or '')
+                        super_idx = parse_super_index(sig.get('description') or '')
+                        registered_entry = watchlist.register(
+                            ca=token_ca,
+                            symbol=symbol,
+                            signal_type='LOTTO',
+                            pool_address=pool,
+                            signal_ts=signal_ts,
+                            premium_signal_id=premium_signal_id,
+                            signal_price=sig_price,
+                            signal_mc=sig.get('market_cap'),
+                            signal_super=super_idx or 0,
+                            signal_holders=sig.get('holders') or 0,
+                            signal_vol24h=sig.get('volume_24h') or 0,
+                            signal_tx24h=0,
+                            signal_top10=top10_pct or 0,
+                        )
+                        if registered_entry:
+                            watchlist.update_position_state(registered_entry['id'], signal_route='LOTTO')
+                        record_decision_event(
+                            db,
+                            component='lotto_second_pass',
+                            event_type='observe_register',
+                            decision='registered',
+                            reason=hard_gate_status.lower(),
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route='LOTTO',
+                            data_source='premium_signals+realtime_price',
+                            payload={
+                                **signal_payload(sig),
+                                'watchlist_id': registered_entry.get('id') if registered_entry else None,
+                                'pool': pool,
+                                'signal_price': sig_price,
+                                'super_idx': super_idx,
+                                'top10_pct': top10_pct,
+                            },
+                        )
+                        log.info(
+                            f"  [LOTTO_OBSERVE] {symbol} added to LOTTO watchlist for second-pass filtering: "
+                            f"status={hard_gate_status} MC=${sig.get('market_cap') or 0:,.0f} "
+                            f"Vol=${sig.get('volume_24h') or 0:,.0f}"
+                        )
+                        last_progress = time.time()
                         continue
 
                     if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
