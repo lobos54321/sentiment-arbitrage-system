@@ -19,6 +19,10 @@ GUARDIAN_DOA_PNL_MAX = -0.05
 PHASE0_PARTIAL_LOCK_PEAK = float(os.environ.get("PHASE0_PARTIAL_LOCK_PEAK", "0.15"))
 PHASE0_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("PHASE0_PARTIAL_LOCK_MIN_PNL", "0.12"))
 PHASE0_PARTIAL_LOCK_SELL_PCT = float(os.environ.get("PHASE0_PARTIAL_LOCK_SELL_PCT", "0.25"))
+PHASE0_BREAKEVEN_PEAK = float(os.environ.get("PHASE0_BREAKEVEN_PEAK", "0.08"))
+PHASE0_BREAKEVEN_EXIT_PNL = float(os.environ.get("PHASE0_BREAKEVEN_EXIT_PNL", "0.02"))
+PHASE0_STRONG_BREAKEVEN_PEAK = float(os.environ.get("PHASE0_STRONG_BREAKEVEN_PEAK", "0.12"))
+PHASE0_STRONG_BREAKEVEN_EXIT_PNL = float(os.environ.get("PHASE0_STRONG_BREAKEVEN_EXIT_PNL", "0.03"))
 
 
 # ─── Plan #3: Dynamic Stop-Loss (4-factor) ────────────────────────────────────
@@ -455,7 +459,7 @@ class ExitGuardianThread(threading.Thread):
                 # 8% means the token has shown REAL momentum before we start protecting.
                 # Floor = peak * 0.50 (aligned with ExitMatrix's Phase 0).
                 # SKIP for LOTTO — wider phase-based trail (peak * 0.35) handles this.
-                if not _is_lotto_entry and pos.peak_pnl >= 0.08:
+                if not _is_lotto_entry and pos.peak_pnl >= PHASE0_BREAKEVEN_PEAK:
                     _phase0_lock_state = pos.monitor_state or {}
                     _phase0_partial_locked = (
                         getattr(pos, '_phase0_partial_locked', False)
@@ -495,6 +499,33 @@ class ExitGuardianThread(threading.Thread):
                                     pos, ca, sell_pct=PHASE0_PARTIAL_LOCK_SELL_PCT
                                 ),
                             })
+                        continue
+
+                    _breakeven_floor = (
+                        PHASE0_STRONG_BREAKEVEN_EXIT_PNL
+                        if pos.peak_pnl >= PHASE0_STRONG_BREAKEVEN_PEAK
+                        else PHASE0_BREAKEVEN_EXIT_PNL
+                    )
+                    if pnl <= _breakeven_floor:
+                        log.info(
+                            f"[ExitGuardian] 🧯 {pos.symbol} PHASE0 BREAKEVEN FLOOR: "
+                            f"pnl={pnl*100:+.1f}% <= floor={_breakeven_floor*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}%) price={price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': (
+                                    f'guardian_phase0_breakeven_floor '
+                                    f'(pnl={pnl:.1%} <= floor={_breakeven_floor:.1%}, '
+                                    f'peak={pos.peak_pnl:.1%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
                         continue
 
                     _p0_confirmed = getattr(pos, '_phase0_confirmed', False)
