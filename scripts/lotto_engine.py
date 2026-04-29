@@ -25,6 +25,8 @@ LOTTO_MIN_LIQUIDITY_USD = float(os.environ.get("LOTTO_MIN_LIQUIDITY_USD", "5000"
 LOTTO_MIN_VOL24H_USD = float(os.environ.get("LOTTO_MIN_VOL24H_USD", "10000"))
 LOTTO_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_MIN_VOL_M5_USD", "1000"))
 LOTTO_MIN_M5_TXNS = int(os.environ.get("LOTTO_MIN_M5_TXNS", "6"))
+LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_VOL_M5_USD", "1000"))
+LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_M5_TXNS = int(os.environ.get("LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_M5_TXNS", "20"))
 LOTTO_LIVE_TOP1_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP1_MAX_PCT", "35"))
 LOTTO_LIVE_TOP10_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_MAX_PCT", "85"))
 
@@ -136,8 +138,25 @@ def evaluate_lotto_entry(
 
     liquidity = float(dex_snapshot.get("liquidity_usd") or 0)
     detail["liquidity_usd"] = liquidity
+    detail["liquidity_unknown"] = bool(dex_snapshot.get("liquidity_unknown"))
+    detail["dex_id"] = dex_snapshot.get("dex_id") or ""
+    detail["pair_address"] = dex_snapshot.get("pair_address") or ""
     if liquidity < LOTTO_MIN_LIQUIDITY_USD:
-        return LottoDecision("expire", f"lotto_liq_low_{liquidity:.0f}", detail)
+        if detail["liquidity_unknown"] and detail["dex_id"] == "pumpfun":
+            has_pumpfun_activity = (
+                vol_m5 >= LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_VOL_M5_USD
+                and (buys_m5 + sells_m5) >= LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_M5_TXNS
+            )
+            if has_pumpfun_activity:
+                detail["liquidity_tier"] = "pumpfun_unknown_activity_confirmed"
+            else:
+                return LottoDecision(
+                    "wait",
+                    f"lotto_liq_unknown_pumpfun_wait_m5_{vol_m5:.0f}_tx_{buys_m5 + sells_m5}",
+                    detail,
+                )
+        else:
+            return LottoDecision("expire", f"lotto_liq_low_{liquidity:.0f}", detail)
 
     if live_concentration:
         live_top1 = float(live_concentration.get("top1_pct") or 0)

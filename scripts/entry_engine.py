@@ -339,7 +339,9 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
     volume = best.get('volume', {}) or {}
     txns = best.get('txns', {}) or {}
     price_change = best.get('priceChange', {}) or {}
-    liquidity = best.get('liquidity', {}) or {}
+    liquidity_raw = best.get('liquidity')
+    liquidity = liquidity_raw if isinstance(liquidity_raw, dict) else {}
+    liquidity_unknown = not isinstance(liquidity_raw, dict) or liquidity_raw.get('usd') in (None, '')
 
     result = {
         'vol_m5': float(volume.get('m5', 0) or 0),
@@ -353,6 +355,9 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5):
         'price_usd': float(best.get('priceUsd', 0) or 0),
         # A1: Pool liquidity for position sizing — prevent oversized entries in thin pools
         'liquidity_usd': float(liquidity.get('usd', 0) or 0),
+        'liquidity_unknown': liquidity_unknown,
+        'dex_id': best.get('dexId') or '',
+        'pair_address': best.get('pairAddress') or '',
         # V7: MC/FDV for Vol/MC ratio (escape hatch for high-volume tokens with low rvol)
         'fdv': float(best.get('fdv', 0) or 0),
         'market_cap': float(best.get('marketCap', 0) or 0),
