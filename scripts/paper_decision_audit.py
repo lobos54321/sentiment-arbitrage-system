@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS paper_decision_events (
     decision TEXT NOT NULL,
     reason TEXT,
     data_source TEXT,
+    lifecycle_state TEXT,
+    vitality_score REAL,
+    entry_bias TEXT,
+    lifecycle_features_json TEXT,
     payload_json TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
@@ -75,6 +79,10 @@ CREATE TABLE IF NOT EXISTS paper_missed_signal_attribution (
     max_pnl_recorded REAL,
     min_pnl_recorded REAL,
     status TEXT DEFAULT 'pending',
+    lifecycle_state TEXT,
+    vitality_score REAL,
+    entry_bias TEXT,
+    lifecycle_features_json TEXT,
     payload_json TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -105,6 +113,22 @@ def init_decision_audit(db):
     db.execute(CREATE_MISSED_ATTRIBUTION_SQL)
     for sql in CREATE_MISSED_ATTRIBUTION_INDEXES:
         db.execute(sql)
+    for table_name in ("paper_decision_events", "paper_missed_signal_attribution"):
+        for column_sql in [
+            f"ALTER TABLE {table_name} ADD COLUMN lifecycle_state TEXT",
+            f"ALTER TABLE {table_name} ADD COLUMN vitality_score REAL",
+            f"ALTER TABLE {table_name} ADD COLUMN entry_bias TEXT",
+            f"ALTER TABLE {table_name} ADD COLUMN lifecycle_features_json TEXT",
+        ]:
+            try:
+                db.execute(column_sql)
+            except Exception:
+                pass
+    try:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pde_lifecycle_state ON paper_decision_events(lifecycle_state)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pmsa_lifecycle_state ON paper_missed_signal_attribution(lifecycle_state)")
+    except Exception:
+        pass
     db.commit()
 
 
@@ -136,13 +160,15 @@ def record_decision_event(
 ):
     """Best-effort audit write. Never break trading because audit failed."""
     try:
+        lifecycle = _extract_lifecycle_payload(payload or {})
         cur = db.execute(
             """
             INSERT INTO paper_decision_events
                 (event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
                  signal_ts, strategy_stage, route, component, event_type,
-                 decision, reason, data_source, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 decision, reason, data_source, lifecycle_state, vitality_score,
+                 entry_bias, lifecycle_features_json, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_ts or time.time(),
@@ -159,6 +185,10 @@ def record_decision_event(
                 decision,
                 reason,
                 data_source,
+                lifecycle.get("lifecycle_state"),
+                lifecycle.get("vitality_score"),
+                lifecycle.get("entry_bias"),
+                json.dumps(lifecycle.get("lifecycle_features") or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
                 json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
             ),
         )
@@ -215,6 +245,19 @@ def _extract_baseline_price(payload):
     return None, None
 
 
+def _extract_lifecycle_payload(payload):
+    payload = payload or {}
+    lifecycle = payload.get("lifecycle")
+    if not isinstance(lifecycle, dict):
+        lifecycle = payload
+    return {
+        "lifecycle_state": lifecycle.get("lifecycle_state"),
+        "vitality_score": lifecycle.get("vitality_score"),
+        "entry_bias": lifecycle.get("entry_bias"),
+        "lifecycle_features": lifecycle.get("lifecycle_features") or {},
+    }
+
+
 def _should_track_missed(*, component, event_type=None, decision=None, route=None):
     route_u = (route or "").upper()
     component = component or ""
@@ -251,6 +294,7 @@ def _maybe_record_missed_attribution(
         return
 
     baseline_price, baseline_source = _extract_baseline_price(payload or {})
+    lifecycle = _extract_lifecycle_payload(payload or {})
     signal_ts_sec = _normalize_signal_ts_seconds(signal_ts)
     baseline_ts = signal_ts_sec or int(event_ts)
     db.execute(
@@ -258,8 +302,9 @@ def _maybe_record_missed_attribution(
         INSERT OR IGNORE INTO paper_missed_signal_attribution
             (decision_event_id, created_event_ts, token_ca, symbol, lifecycle_id,
              signal_id, signal_ts, route, component, decision, reject_reason,
-             baseline_price, baseline_source, baseline_ts, payload_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             baseline_price, baseline_source, baseline_ts, lifecycle_state,
+             vitality_score, entry_bias, lifecycle_features_json, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             decision_event_id,
@@ -276,6 +321,10 @@ def _maybe_record_missed_attribution(
             baseline_price,
             baseline_source,
             baseline_ts,
+            lifecycle.get("lifecycle_state"),
+            lifecycle.get("vitality_score"),
+            lifecycle.get("entry_bias"),
+            json.dumps(lifecycle.get("lifecycle_features") or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
             json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
         ),
     )

@@ -85,6 +85,13 @@ def table_exists(db, name):
     ).fetchone())
 
 
+def column_exists(db, table_name, column_name):
+    try:
+        return any(row["name"] == column_name for row in db.execute(f"PRAGMA table_info({table_name})").fetchall())
+    except Exception:
+        return False
+
+
 def get_trades(db, since_ts):
     db.row_factory = sqlite3.Row
     return db.execute(
@@ -461,6 +468,62 @@ def _fmt_pct_plain(value):
     return f"{float(value) * 100:.0f}%"
 
 
+def print_lifecycle_quality(rows, db, since_ts, limit):
+    has_trade_state = bool(rows and "lifecycle_state" in rows[0].keys())
+    has_missed_state = (
+        table_exists(db, "paper_missed_signal_attribution")
+        and column_exists(db, "paper_missed_signal_attribution", "lifecycle_state")
+    )
+    if not has_trade_state and not has_missed_state:
+        return
+
+    print("\nLifecycle Quality")
+    if has_trade_state:
+        groups = defaultdict(list)
+        for row in rows:
+            groups[row["lifecycle_state"] or "UNKNOWN"].append(row)
+        print("  Traded by lifecycle_state")
+        print(f"  {'state':<24} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'avg_peak':>9}")
+        for state, group in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)[:limit]:
+            gm = trade_metrics(group)
+            win_rate = (gm["wins"] / gm["closed"] * 100.0) if gm.get("closed") else 0
+            print(
+                f"  {state:<24} {gm['entries']:>4} {gm['closed']:>6} "
+                f"{win_rate:>4.0f}% {pct(gm.get('avg_pnl')):>9} {pct(gm.get('avg_peak')):>9}"
+            )
+
+    if has_missed_state:
+        missed = db.execute(
+            """
+            SELECT
+              COALESCE(lifecycle_state, 'UNKNOWN') AS lifecycle_state,
+              COUNT(*) AS n,
+              SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.00 THEN 1 ELSE 0 END) AS gold,
+              SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50 THEN 1 ELSE 0 END) AS dog50,
+              SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.25 THEN 1 ELSE 0 END) AS dog25,
+              AVG(vitality_score) AS avg_vitality,
+              AVG(pnl_15m) AS avg_15m,
+              AVG(pnl_60m) AS avg_60m
+            FROM paper_missed_signal_attribution
+            WHERE signal_ts >= ?
+            GROUP BY COALESCE(lifecycle_state, 'UNKNOWN')
+            ORDER BY gold DESC, dog50 DESC, dog25 DESC, n DESC
+            LIMIT ?
+            """,
+            (since_ts, limit),
+        ).fetchall()
+        if missed:
+            print("  Missed by lifecycle_state")
+            print(f"  {'state':<24} {'n':>4} {'25p+':>5} {'50p+':>5} {'100p+':>6} {'vital':>7} {'avg15':>8} {'avg60':>8}")
+            for row in missed:
+                vital = "n/a" if row["avg_vitality"] is None else f"{row['avg_vitality']:.1f}"
+                print(
+                    f"  {row['lifecycle_state']:<24} {row['n']:>4} {row['dog25'] or 0:>5} "
+                    f"{row['dog50'] or 0:>5} {row['gold'] or 0:>6} {vital:>7} "
+                    f"{pct(row['avg_15m']):>8} {pct(row['avg_60m']):>8}"
+                )
+
+
 def print_decision_read(rows, db, since_ts):
     closed = [r for r in rows if r["exit_ts"] is not None]
     tags = Counter()
@@ -522,6 +585,7 @@ def main():
     print_missed_attribution(db, since_ts, args.limit)
     print_selection_quality(rows, db, since_ts, args.limit)
     print_path_sample_quality(db, since_ts, args.limit)
+    print_lifecycle_quality(rows, db, since_ts, args.limit)
     print_decision_read(rows, db, since_ts)
 
 

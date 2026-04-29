@@ -59,6 +59,7 @@ from paper_decision_audit import (
     signal_payload,
     update_due_missed_attributions,
 )
+from lifecycle_classifier import classify_lifecycle
 from signal_router import route_signal
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -664,6 +665,44 @@ def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, 
     )
 
 
+def lifecycle_payload_for(*, signal=None, watchlist_entry=None, dex_snapshot=None, live_concentration=None,
+                          route=None, signal_ts=None, signal_price=None, quote_available=None,
+                          mark_quote_gap=None, current_pnl=None, peak_pnl=None, now=None):
+    try:
+        return classify_lifecycle(
+            signal=signal,
+            watchlist_entry=watchlist_entry,
+            dex_snapshot=dex_snapshot,
+            live_concentration=live_concentration,
+            route=route,
+            signal_ts=signal_ts,
+            signal_price=signal_price,
+            quote_available=quote_available,
+            mark_quote_gap=mark_quote_gap,
+            current_pnl=current_pnl,
+            peak_pnl=peak_pnl,
+            now=now,
+        ).to_payload()
+    except Exception as exc:
+        return {
+            'lifecycle_state': 'UNKNOWN',
+            'vitality_score': None,
+            'entry_bias': 'OBSERVE',
+            'lifecycle_features': {'error': str(exc)},
+            'lifecycle_reasons': ['classifier_error'],
+        }
+
+
+def with_lifecycle_payload(payload, lifecycle):
+    data = dict(payload or {})
+    if lifecycle:
+        data['lifecycle'] = lifecycle
+        data['lifecycle_state'] = lifecycle.get('lifecycle_state')
+        data['vitality_score'] = lifecycle.get('vitality_score')
+        data['entry_bias'] = lifecycle.get('entry_bias')
+    return data
+
+
 
 def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
     trigger_pct = _safe_float(trigger_pnl * 100.0, None)
@@ -728,6 +767,10 @@ def init_paper_db(db_path=None):
                 signal_type TEXT,
                 signal_route TEXT,
                 lotto_state_json TEXT,
+                lifecycle_state TEXT,
+                vitality_score REAL,
+                entry_bias TEXT,
+                lifecycle_features_json TEXT,
                 ath_boost_count INTEGER DEFAULT 0,
                 last_ath_ts INTEGER,
                 last_ath_mc REAL,
@@ -811,6 +854,10 @@ def init_paper_db(db_path=None):
             "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
             "ALTER TABLE paper_trades ADD COLUMN signal_route TEXT",
             "ALTER TABLE paper_trades ADD COLUMN lotto_state_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN lifecycle_state TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN vitality_score REAL",
+            "ALTER TABLE paper_trades ADD COLUMN entry_bias TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN lifecycle_features_json TEXT",
             "ALTER TABLE paper_trades ADD COLUMN ath_boost_count INTEGER DEFAULT 0",
             "ALTER TABLE paper_trades ADD COLUMN last_ath_ts INTEGER",
             "ALTER TABLE paper_trades ADD COLUMN last_ath_mc REAL",
@@ -822,6 +869,7 @@ def init_paper_db(db_path=None):
         try:
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_stage ON paper_trades(token_ca, signal_ts, strategy_stage)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_signal_route ON paper_trades(signal_route)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_state ON paper_trades(lifecycle_state)")
         except sqlite3.OperationalError:
             pass
         init_decision_audit(db_conn)
@@ -4036,6 +4084,12 @@ def run_monitor(db):
                     hard_gate_status = (sig.get('hard_gate_status') or '').upper()
                     lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
                     symbol = sig['symbol'] or token_ca[:8]
+                    signal_lifecycle = lifecycle_payload_for(
+                        signal=sig,
+                        route=signal_type,
+                        signal_ts=signal_ts,
+                        now=now,
+                    )
 
                     record_decision_event(
                         db,
@@ -4049,7 +4103,7 @@ def run_monitor(db):
                         signal_ts=signal_ts,
                         signal_id=premium_signal_id,
                         data_source='premium_signals',
-                        payload=signal_payload(sig),
+                        payload=with_lifecycle_payload(signal_payload(sig), signal_lifecycle),
                     )
 
                     if signal_type == 'NEW_TRENDING' and hard_gate_status in {
@@ -4071,7 +4125,7 @@ def run_monitor(db):
                             signal_id=premium_signal_id,
                             route='LOTTO',
                             data_source='premium_signals',
-                            payload=signal_payload(sig),
+                            payload=with_lifecycle_payload(signal_payload(sig), signal_lifecycle),
                         )
                         log.info(
                             f"  [UPSTREAM_ATTR] {symbol} tracked as missed LOTTO candidate: "
@@ -4091,7 +4145,7 @@ def run_monitor(db):
                                 signal_ts=signal_ts,
                                 signal_id=premium_signal_id,
                                 route='LOTTO',
-                                payload={'pending': lifecycle_id in pending_entries},
+                                payload=with_lifecycle_payload({'pending': lifecycle_id in pending_entries}, signal_lifecycle),
                             )
                             continue
 
@@ -4112,7 +4166,7 @@ def run_monitor(db):
                                 signal_ts=signal_ts,
                                 signal_id=premium_signal_id,
                                 route='LOTTO',
-                                payload={'paper_trade_id': existing['id']},
+                                payload=with_lifecycle_payload({'paper_trade_id': existing['id']}, signal_lifecycle),
                             )
                             continue
 
@@ -4131,7 +4185,7 @@ def run_monitor(db):
                                 signal_id=premium_signal_id,
                                 route='LOTTO',
                                 data_source='pool_lookup',
-                                payload=signal_payload(sig),
+                                payload=with_lifecycle_payload(signal_payload(sig), signal_lifecycle),
                             )
                             log.info(f"  [LOTTO_OBSERVE] {symbol} not added to LOTTO watchlist: pool_not_found")
                             continue
@@ -4139,6 +4193,19 @@ def run_monitor(db):
                         time.sleep(0.1)
                         sig_price_val, _, _ = fetch_realtime_price(token_ca, pool, max_age_ms=15000)
                         sig_price = sig_price_val if sig_price_val and sig_price_val > 0 else None
+                        try:
+                            observe_dex = fetch_dexscreener_trend_snapshot(token_ca)
+                        except Exception:
+                            observe_dex = None
+                        observe_lifecycle = lifecycle_payload_for(
+                            signal=sig,
+                            dex_snapshot=observe_dex,
+                            route='LOTTO',
+                            signal_ts=signal_ts,
+                            signal_price=sig_price,
+                            quote_available=bool(sig_price),
+                            now=now,
+                        )
                         top10_pct = parse_top10_percent(sig.get('description') or '')
                         super_idx = parse_super_index(sig.get('description') or '')
                         registered_entry = watchlist.register(
@@ -4171,14 +4238,14 @@ def run_monitor(db):
                             signal_id=premium_signal_id,
                             route='LOTTO',
                             data_source='premium_signals+realtime_price',
-                            payload={
+                            payload=with_lifecycle_payload({
                                 **signal_payload(sig),
                                 'watchlist_id': registered_entry.get('id') if registered_entry else None,
                                 'pool': pool,
                                 'signal_price': sig_price,
                                 'super_idx': super_idx,
                                 'top10_pct': top10_pct,
-                            },
+                            }, observe_lifecycle),
                         )
                         log.info(
                             f"  [LOTTO_OBSERVE] {symbol} added to LOTTO watchlist for second-pass filtering: "
@@ -4206,6 +4273,13 @@ def run_monitor(db):
 
                     existing_w_entry = watchlist.get_by_ca(token_ca)
                     route_decision = route_signal(sig, now=time.time(), existing_entry=existing_w_entry)
+                    routed_lifecycle = lifecycle_payload_for(
+                        signal=sig,
+                        watchlist_entry=existing_w_entry,
+                        route=route_decision.route,
+                        signal_ts=signal_ts,
+                        now=now,
+                    )
                     record_decision_event(
                         db,
                         component='signal_router',
@@ -4219,12 +4293,12 @@ def run_monitor(db):
                         signal_id=premium_signal_id,
                         route=route_decision.route,
                         data_source='premium_signals',
-                        payload={
+                        payload=with_lifecycle_payload({
                             **signal_payload(sig),
                             'signal_age_sec': route_decision.signal_age_sec,
                             'existing_watchlist_status': existing_w_entry.get('status') if existing_w_entry else None,
                             'existing_watchlist_type': existing_w_entry.get('type') if existing_w_entry else None,
-                        },
+                        }, routed_lifecycle),
                     )
                     if route_decision.is_lotto_boost and existing_w_entry:
                         boost_updates = build_ath_boost_updates(
@@ -4344,7 +4418,7 @@ def run_monitor(db):
                             signal_ts=signal_ts,
                             signal_id=premium_signal_id,
                             route=route_decision.route,
-                            payload={'super_idx': super_idx, 'min_super_index': min_super_index},
+                            payload=with_lifecycle_payload({'super_idx': super_idx, 'min_super_index': min_super_index}, routed_lifecycle),
                         )
                         continue
                     top10_max = (strategy_config.get('signalFilters') or {}).get('top10PctPrimaryMax', 45.0)
@@ -4371,7 +4445,7 @@ def run_monitor(db):
                             signal_ts=signal_ts,
                             signal_id=premium_signal_id,
                             route=route_decision.route,
-                            payload={'top10_pct': top10_pct, 'max_top10_pct': _effective_top10_max},
+                            payload=with_lifecycle_payload({'top10_pct': top10_pct, 'max_top10_pct': _effective_top10_max}, routed_lifecycle),
                         )
                         # FIX 3: Remember blocked CAs so Watchlist won't accept them later
                         # (only blacklist on the strict 45% threshold, not the LOTTO 70%)
@@ -4398,7 +4472,7 @@ def run_monitor(db):
                             signal_ts=signal_ts,
                             signal_id=premium_signal_id,
                             route=route_decision.route,
-                            payload={'previous_top10_pct': _prev_top10},
+                            payload=with_lifecycle_payload({'previous_top10_pct': _prev_top10}, routed_lifecycle),
                         )
                         continue
 
@@ -4419,7 +4493,7 @@ def run_monitor(db):
                             signal_id=premium_signal_id,
                             route=route_decision.route,
                             data_source='pool_lookup',
-                            payload={'token_ca': token_ca},
+                            payload=with_lifecycle_payload({'token_ca': token_ca}, routed_lifecycle),
                         )
                         continue
                     time.sleep(0.1)
@@ -4485,6 +4559,15 @@ def run_monitor(db):
                     )
                     if _is_lotto_signal and registered_entry:
                         watchlist.update_position_state(registered_entry['id'], signal_route='LOTTO')
+                    watch_lifecycle = lifecycle_payload_for(
+                        signal=sig,
+                        watchlist_entry=registered_entry,
+                        route='LOTTO' if _is_lotto_signal else _wl_type,
+                        signal_ts=signal_ts,
+                        signal_price=sig_price,
+                        quote_available=bool(sig_price),
+                        now=now,
+                    )
                     record_decision_event(
                         db,
                         component='watchlist',
@@ -4498,14 +4581,14 @@ def run_monitor(db):
                         signal_id=premium_signal_id,
                         route='LOTTO' if _is_lotto_signal else _wl_type,
                         data_source='realtime_price',
-                        payload={
+                        payload=with_lifecycle_payload({
                             'watchlist_id': registered_entry.get('id') if registered_entry else None,
                             'watchlist_type': _wl_type,
                             'pool': pool,
                             'signal_price': sig_price,
                             'super_idx': super_idx,
                             'top10_pct': top10_pct,
-                        },
+                        }, watch_lifecycle),
                     )
                     last_progress = time.time()
             except Exception as e:
@@ -4603,6 +4686,14 @@ def run_monitor(db):
                     _lotto_liq = _lotto_detail.get('liquidity_usd', 0) or 0
                     _lotto_top10 = _lotto_detail.get('top10_pct', w_entry.get('signal_top10', 0) or 0)
                     _lotto_age_sec = _lotto_detail.get('age_sec', time.time() - w_entry.get('added_at', time.time()))
+                    _lotto_lifecycle = lifecycle_payload_for(
+                        watchlist_entry=w_entry,
+                        dex_snapshot=_lotto_dex,
+                        live_concentration=_lotto_live,
+                        route='LOTTO',
+                        signal_ts=w_entry['signal_ts'],
+                        now=now,
+                    )
 
                     _lotto_lc_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                     if _lotto_lc_id not in pending_entries:
@@ -4619,7 +4710,7 @@ def run_monitor(db):
                             signal_id=w_entry.get('premium_signal_id'),
                             route='LOTTO',
                             data_source='dexscreener+helius+signal',
-                            payload=_lotto_detail,
+                            payload=with_lifecycle_payload(_lotto_detail, _lotto_lifecycle),
                         )
                         if _lotto_decision.expire:
                             watchlist.mark_expired(w_entry['id'], _lotto_decision.reason)
@@ -4660,7 +4751,7 @@ def run_monitor(db):
                                 signal_ts=w_entry['signal_ts'],
                                 signal_id=w_entry.get('premium_signal_id'),
                                 route='LOTTO',
-                                payload={'position_size_sol': LOTTO_POSITION_SIZE_SOL, **_lotto_detail},
+                                payload=with_lifecycle_payload({'position_size_sol': LOTTO_POSITION_SIZE_SOL, **_lotto_detail}, _lotto_lifecycle),
                             )
                             last_progress = time.time()
                     continue
@@ -5375,6 +5466,20 @@ def run_monitor(db):
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
+                    try:
+                        _entry_dex_snapshot = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                    except Exception:
+                        _entry_dex_snapshot = None
+                    _entry_lifecycle = lifecycle_payload_for(
+                        watchlist_entry=pending_w_entry,
+                        dex_snapshot=_entry_dex_snapshot,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        signal_ts=pending['signal_ts'],
+                        signal_price=price,
+                        quote_available=True,
+                        mark_quote_gap=(_spread / 100.0) if _spread is not None else None,
+                        now=now,
+                    )
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                     _monitor_state = {
                         'tokenCA': pending['token_ca'],
@@ -5385,6 +5490,9 @@ def run_monitor(db):
                         'tokenDecimals': int(token_decimals or 0),
                         'entryTime': int(entry_ts) * 1000,
                         'exitStrategy': _pending_exit_strategy,
+                        'lifecycleState': _entry_lifecycle.get('lifecycle_state'),
+                        'vitalityScore': _entry_lifecycle.get('vitality_score'),
+                        'entryBias': _entry_lifecycle.get('entry_bias'),
                     }
                     if _pending_signal_route:
                         _monitor_state['signalRoute'] = _pending_signal_route
@@ -5399,8 +5507,9 @@ def run_monitor(db):
                              position_size_sol, token_amount_raw, token_decimals,
                              entry_execution_json, entry_execution_audit_json, monitor_state_json,
                              premium_signal_id, signal_type, signal_route, lotto_state_json,
+                             lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
                              strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """, (
                         _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
                         pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
@@ -5414,6 +5523,8 @@ def run_monitor(db):
                         })), json.dumps(_monitor_state),
                         pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
                         _pending_signal_route, json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
+                        _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
+                        _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
                         'entered', 'available', 'open'
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
@@ -5433,13 +5544,13 @@ def run_monitor(db):
                         strategy_stage=_pending_strategy_stage,
                         route=_pending_signal_route or pending.get('signal_type'),
                         data_source='jupiter_quote',
-                        payload={
+                        payload=with_lifecycle_payload({
                             'entry_price': price,
                             'trigger_price': trigger_price_val,
                             'spread_pct': _spread,
                             'position_size_sol': actual_position_size_sol,
                             'execution': execution,
-                        },
+                        }, _entry_lifecycle),
                     )
 
                     # Pop immediately after commit — prevents ghost duplicate on next loop
