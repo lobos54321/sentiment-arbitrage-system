@@ -49,6 +49,17 @@ def pp(value):
     return f"{value * 100:.2f}pp"
 
 
+def dog_tier(max_pnl):
+    value = float(max_pnl or 0.0)
+    if value >= 1.00:
+        return "gold_100p"
+    if value >= 0.50:
+        return "silver_50_100p"
+    if value >= 0.25:
+        return "bronze_25_50p"
+    return "sub25"
+
+
 def parse_since(value):
     if not value:
         return 0
@@ -292,6 +303,96 @@ def print_missed_attribution(db, since_ts, limit):
         )
 
 
+def print_selection_quality(rows, db, since_ts, limit):
+    if not table_exists(db, "paper_missed_signal_attribution"):
+        return
+
+    traded_tiers = Counter()
+    traded_dogs = []
+    for row in rows:
+        peak = float(row["peak_pnl"] or 0.0)
+        tier = dog_tier(peak)
+        traded_tiers[tier] += 1
+        if tier != "sub25":
+            traded_dogs.append((peak, row))
+
+    missed_rows = db.execute(
+        """
+        SELECT
+          symbol,
+          COALESCE(route, '-') AS route,
+          component,
+          reject_reason,
+          pnl_5m,
+          pnl_15m,
+          pnl_60m,
+          COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) AS max_pnl
+        FROM paper_missed_signal_attribution
+        WHERE signal_ts >= ?
+        """,
+        (since_ts,),
+    ).fetchall()
+
+    missed_tiers = Counter()
+    gate_tiers = defaultdict(Counter)
+    missed_dogs = []
+    for row in missed_rows:
+        max_pnl = float(row["max_pnl"] or 0.0)
+        tier = dog_tier(max_pnl)
+        missed_tiers[tier] += 1
+        gate_tiers[(row["route"], row["component"], row["reject_reason"])][tier] += 1
+        if tier != "sub25":
+            missed_dogs.append((max_pnl, row))
+
+    print("\nSelection Quality")
+    print("  dog tiers: gold>=100%, silver=50-100%, bronze=25-50% peak/max recorded")
+    print(f"{'source':<8} {'gold':>5} {'silver':>6} {'bronze':>6} {'sub25':>6} {'25p+':>6} {'50p+':>6} {'100p+':>6}")
+    for source, tiers in (("traded", traded_tiers), ("missed", missed_tiers)):
+        bronze_plus = tiers["bronze_25_50p"] + tiers["silver_50_100p"] + tiers["gold_100p"]
+        silver_plus = tiers["silver_50_100p"] + tiers["gold_100p"]
+        print(
+            f"{source:<8} {tiers['gold_100p']:>5} {tiers['silver_50_100p']:>6} "
+            f"{tiers['bronze_25_50p']:>6} {tiers['sub25']:>6} "
+            f"{bronze_plus:>6} {silver_plus:>6} {tiers['gold_100p']:>6}"
+        )
+
+    print("\nSelection Miss Hotspots")
+    print(f"{'route':<7} {'component':<18} {'gold':>5} {'silver':>6} {'bronze':>6} reason")
+    for (route, component, reason), tiers in sorted(
+        gate_tiers.items(),
+        key=lambda item: (
+            item[1]["gold_100p"],
+            item[1]["silver_50_100p"],
+            item[1]["bronze_25_50p"],
+            sum(item[1].values()),
+        ),
+        reverse=True,
+    )[:limit]:
+        if not (tiers["gold_100p"] or tiers["silver_50_100p"] or tiers["bronze_25_50p"]):
+            continue
+        print(
+            f"{route:<7} {component:<18} {tiers['gold_100p']:>5} "
+            f"{tiers['silver_50_100p']:>6} {tiers['bronze_25_50p']:>6} {str(reason or '-')[:90]}"
+        )
+
+    print("\nTop Missed Selection Dogs")
+    print(f"{'symbol':<12} {'tier':<14} {'max':>8} {'5m':>8} {'15m':>8} {'60m':>8} gate")
+    for max_pnl, row in sorted(missed_dogs, key=lambda item: item[0], reverse=True)[:limit]:
+        print(
+            f"{str(row['symbol'] or '?')[:12]:<12} {dog_tier(max_pnl):<14} "
+            f"{pct(max_pnl):>8} {pct(row['pnl_5m']):>8} {pct(row['pnl_15m']):>8} {pct(row['pnl_60m']):>8} "
+            f"{row['route']}/{row['component']} {str(row['reject_reason'] or '-')[:70]}"
+        )
+
+    print("\nTop Traded Selection Dogs")
+    print(f"{'symbol':<12} {'tier':<14} {'peak':>8} {'pnl':>8} reason")
+    for peak, row in sorted(traded_dogs, key=lambda item: item[0], reverse=True)[:limit]:
+        print(
+            f"{str(row['symbol'] or '?')[:12]:<12} {dog_tier(peak):<14} "
+            f"{pct(peak):>8} {pct(row['pnl_pct']):>8} {str(row['exit_reason'] or 'open')[:90]}"
+        )
+
+
 def print_decision_read(rows, db, since_ts):
     closed = [r for r in rows if r["exit_ts"] is not None]
     tags = Counter()
@@ -351,6 +452,7 @@ def main():
     print_failure_buckets(rows, args.limit)
     print_decision_events(db, since_ts, args.limit)
     print_missed_attribution(db, since_ts, args.limit)
+    print_selection_quality(rows, db, since_ts, args.limit)
     print_decision_read(rows, db, since_ts)
 
 
