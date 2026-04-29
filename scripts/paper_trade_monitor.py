@@ -2348,18 +2348,20 @@ def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
     return _normalize_signal_rows(rows)
 
 
+OBSERVABLE_NEW_TRENDING_STATUSES = {
+    'PASS',
+    'RISK_BLOCKED',
+    'LOTTO_OBSERVE_LOW_MC_VOL',
+    'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
+    'NOT_ATH_V17',
+    'ILLIQUID_JUNK',
+}
+
+
 def _is_paper_trade_signal(record):
     status = (record.get('hard_gate_status') or '').upper()
     description = record.get('description') or ''
     signal_type = (record.get('signal_type') or '').upper()
-    observable_new_trending_statuses = {
-        'PASS',
-        'RISK_BLOCKED',
-        'LOTTO_OBSERVE_LOW_MC_VOL',
-        'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
-        'NOT_ATH_V17',
-        'ILLIQUID_JUNK',
-    }
     
     is_ath = signal_type == 'ATH' or 'New ATH' in description or 'ATH' in description or 'All Time High' in description
     is_new_trending = signal_type == 'NEW_TRENDING' or 'New Trending' in description
@@ -2369,7 +2371,7 @@ def _is_paper_trade_signal(record):
         # to allow the Python Matrix evaluator to handle the full breakout lifecycle logic.
         return True
     if is_new_trending:
-        return status in observable_new_trending_statuses
+        return status in OBSERVABLE_NEW_TRENDING_STATUSES
         
     return False
 
@@ -2391,14 +2393,10 @@ def _query_local_new_signals(last_signal_id):
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
         FROM premium_signals
         WHERE id > ?
-          AND (
-              (hard_gate_status IN ('PASS', 'RISK_BLOCKED') AND description LIKE '%New Trending%')
-              OR description LIKE '%New ATH%' OR description LIKE '%ATH%' OR description LIKE '%All Time High%'
-          )
         ORDER BY id ASC
     """, (last_signal_id,)).fetchall()
     sdb.close()
-    return _normalize_signal_rows(rows)
+    return [r for r in _normalize_signal_rows(rows) if _is_paper_trade_signal(r)]
 
 
 def _query_local_recent_signals(limit=20):
@@ -2409,13 +2407,12 @@ def _query_local_recent_signals(limit=20):
     rows = sdb.execute(f"""
         SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
         FROM premium_signals
-        WHERE (hard_gate_status IN ('PASS', 'RISK_BLOCKED') AND description LIKE '%New Trending%')
-           OR description LIKE '%New ATH%' OR description LIKE '%ATH%' OR description LIKE '%All Time High%'
         ORDER BY id DESC
         LIMIT ?
-    """, (limit,)).fetchall()
+    """, (max(limit * 5, 100),)).fetchall()
     sdb.close()
-    return list(reversed(_normalize_signal_rows(rows)))
+    filtered = [r for r in _normalize_signal_rows(rows) if _is_paper_trade_signal(r)]
+    return list(reversed(filtered[:limit]))
 
 
 def get_new_signals(last_signal_id):
