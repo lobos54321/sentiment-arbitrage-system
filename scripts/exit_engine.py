@@ -9,12 +9,16 @@ All sell-side monitoring and execution logic lives here.
 import time
 import logging
 import threading
+import os
 
 log = logging.getLogger('paper_trade_monitor')
 
 GUARDIAN_DOA_EXIT_SEC = 15
 GUARDIAN_DOA_PEAK_MAX = 0.001
 GUARDIAN_DOA_PNL_MAX = -0.05
+PHASE0_PARTIAL_LOCK_PEAK = float(os.environ.get("PHASE0_PARTIAL_LOCK_PEAK", "0.15"))
+PHASE0_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("PHASE0_PARTIAL_LOCK_MIN_PNL", "0.12"))
+PHASE0_PARTIAL_LOCK_SELL_PCT = float(os.environ.get("PHASE0_PARTIAL_LOCK_SELL_PCT", "0.25"))
 
 
 # ─── Plan #3: Dynamic Stop-Loss (4-factor) ────────────────────────────────────
@@ -114,10 +118,11 @@ class ExitGuardianThread(threading.Thread):
     def stop(self):
         self._running = False
 
-    def _get_instant_quote(self, pos, ca):
+    def _get_instant_quote(self, pos, ca, sell_pct=1.0):
         if not self.simulate_exit: return None
         try:
-            _sell_amount = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
+            _sell_pct = min(1.0, max(0.0, float(sell_pct or 1.0)))
+            _sell_amount = int(float(pos.token_amount_raw) * _sell_pct) if pos.token_amount_raw else 0
             _instant_sim = self.simulate_exit(
                 ca, str(_sell_amount),
                 getattr(pos, 'token_decimals', 0) or 0,
@@ -451,6 +456,47 @@ class ExitGuardianThread(threading.Thread):
                 # Floor = peak * 0.50 (aligned with ExitMatrix's Phase 0).
                 # SKIP for LOTTO — wider phase-based trail (peak * 0.35) handles this.
                 if not _is_lotto_entry and pos.peak_pnl >= 0.08:
+                    _phase0_lock_state = pos.monitor_state or {}
+                    _phase0_partial_locked = (
+                        getattr(pos, '_phase0_partial_locked', False)
+                        or bool(_phase0_lock_state.get('phase0PartialLocked'))
+                    )
+                    if (
+                        not _phase0_partial_locked
+                        and pos.peak_pnl >= PHASE0_PARTIAL_LOCK_PEAK
+                        and pnl >= PHASE0_PARTIAL_LOCK_MIN_PNL
+                    ):
+                        pos._phase0_partial_locked = True
+                        if pos.monitor_state is None:
+                            pos.monitor_state = {}
+                        pos.monitor_state['phase0PartialLocked'] = True
+                        pos.monitor_state['phase0PartialLockPnl'] = pnl
+                        pos.monitor_state['phase0PartialLockPeak'] = pos.peak_pnl
+                        log.info(
+                            f"[ExitGuardian] 🔒 {pos.symbol} PHASE0 PARTIAL LOCK: "
+                            f"peak={pos.peak_pnl*100:+.1f}% pnl={pnl*100:+.1f}% "
+                            f"sell={PHASE0_PARTIAL_LOCK_SELL_PCT*100:.0f}%"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'action': 'partial_sell',
+                                'sell_pct': PHASE0_PARTIAL_LOCK_SELL_PCT,
+                                'tp_name': 'PHASE0_LOCK',
+                                'reason': (
+                                    f'guardian_phase0_partial_lock '
+                                    f'(pnl={pnl:.1%}, peak={pos.peak_pnl:.1%}, '
+                                    f'sell={PHASE0_PARTIAL_LOCK_SELL_PCT:.0%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(
+                                    pos, ca, sell_pct=PHASE0_PARTIAL_LOCK_SELL_PCT
+                                ),
+                            })
+                        continue
+
                     _p0_confirmed = getattr(pos, '_phase0_confirmed', False)
                     if not _p0_confirmed:
                         # 1-tick confirm: peak >= 8% seen once → confirmed
@@ -878,6 +924,55 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
             f"  [GUARDIAN_EXIT] 🚨 Processing {gx['symbol']}: {gx['reason']} "
             f"trigger_pnl={gx.get('trigger_pnl', 0)*100:+.1f}%"
         )
+
+        gx_action = gx.get('action') or 'exit'
+        gx_trigger_pnl = gx.get('trigger_pnl', 0)
+        if gx_action == 'partial_sell':
+            gx_sell_pct = min(1.0, max(0.0, float(gx.get('sell_pct') or 0.0)))
+            gx_sell_amount = int(float(gx_pos.token_amount_raw) * gx_sell_pct) if gx_pos.token_amount_raw else 0
+            _instant_sim = gx.get('_instant_sim')
+            if _instant_sim and _instant_sim.get('success'):
+                gx_sim = _instant_sim
+                log.info(f"  [GUARDIAN_EXIT] ⚡ Using instant partial quote for {gx['symbol']}")
+            else:
+                gx_sim = simulate_exit_fn(
+                    gx_pos.token_ca, str(gx_sell_amount),
+                    getattr(gx_pos, 'token_decimals', 0) or 0,
+                    gx_pos.strategy_stage, strategy_id=strategy_id,
+                    lifecycle_id=gx_lifecycle_id
+                )
+            if not gx_sim or not gx_sim.get('success'):
+                log.warning(
+                    f"  [GUARDIAN_EXIT] partial lock skipped for {gx['symbol']}: "
+                    f"{(gx_sim or {}).get('failureReason', 'quote_failed')}"
+                )
+                continue
+
+            updated_state = (gx_pos.monitor_state or {}).copy()
+            remaining_raw = max(0, int(float(gx_pos.token_amount_raw or 0)) - gx_sell_amount)
+            updated_state['tokenAmount'] = remaining_raw
+            updated_state['phase0PartialLocked'] = True
+            updated_state['phase0PartialLockPnl'] = gx_trigger_pnl
+            updated_state['phase0PartialLockPeak'] = max(float(getattr(gx_pos, 'peak_pnl', 0) or 0), gx_trigger_pnl)
+            updated_state['soldPct'] = min(1.0, float(updated_state.get('soldPct') or 0.0) + gx_sell_pct)
+            updated_state['lockedPnl'] = gx_trigger_pnl
+            to_close.append({
+                'trade_id': gx_trade_id,
+                'reason': gx['reason'],
+                'pnl': gx_trigger_pnl,
+                'trigger_pnl': gx_trigger_pnl,
+                'exit_price': gx.get('trigger_price', gx_pos.entry_price),
+                'exit_ts': int(time.time()),
+                'mark_source': 'exit_guardian',
+                'exit_eval': {
+                    'action': 'partial_sell',
+                    'execution': gx_sim,
+                    'tpName': gx.get('tp_name') or 'PHASE0_LOCK',
+                    'updatedState': updated_state,
+                },
+            })
+            continue
+
         # Simulate exit execution — use instant quote if Guardian already got one
         gx_sell_amount = int(float(gx_pos.token_amount_raw)) if gx_pos.token_amount_raw else 0
         _instant_sim = gx.get('_instant_sim')
@@ -893,7 +988,6 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 gx_pos.strategy_stage, strategy_id=strategy_id,
                 lifecycle_id=gx_lifecycle_id
             )
-        gx_trigger_pnl = gx.get('trigger_pnl', 0)
         to_close.append({
             'trade_id': gx_trade_id,
             'reason': gx['reason'],

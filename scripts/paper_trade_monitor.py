@@ -2552,7 +2552,7 @@ def has_partial_state_gap(token_amount_raw, entry_execution, monitor_state):
         return False
     if remaining_token_amount_raw >= original_token_amount_raw:
         return False
-    partial_state_fields = ('tp1', 'tp2', 'tp3', 'tp4', 'soldPct', 'lockedPnl', 'moonbag')
+    partial_state_fields = ('tp1', 'tp2', 'tp3', 'tp4', 'soldPct', 'lockedPnl', 'moonbag', 'phase0PartialLocked')
     return not any(state.get(field) not in (None, False, 0, 0.0, '') for field in partial_state_fields)
 
 
@@ -2632,7 +2632,7 @@ class Position:
         '_guardian_velocity', '_guardian_tick_vol',  # Written by Guardian thread
         '_guardian_threat_tighten',  # Threat score tightening (Guardian → EXIT_MATRIX relay)
         'peak_ts', '_initial_tick_vol',  # A3 (time-decay) and A4 (flat-top) fields
-        '_prev_guardian_pnl', '_phase0_confirmed',  # V7: Gap detector and Phase 0 trail
+        '_prev_guardian_pnl', '_phase0_confirmed', '_phase0_partial_locked',  # V7 + Phase 0 protection
     ]
 
     def __init__(self, trade_id, token_ca, symbol, signal_ts, entry_price, entry_ts, pool_address, strategy_stage, lifecycle_id, exit_rules, position_size_sol=0.06, token_amount_raw=0, token_decimals=0, exit_quote_failures=0, last_exit_quote_failure=None, monitor_state=None, entry_execution_json=None):
