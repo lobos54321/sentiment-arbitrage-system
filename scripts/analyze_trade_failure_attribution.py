@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""
+End-to-end paper trading attribution report.
+
+This report combines:
+- executed paper trades
+- decision audit events
+- missed-signal attribution
+
+It is designed to answer: are we losing because of missed gold/silver/bronze
+dogs, entry timing, trend control, execution/slippage, or exits?
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB = ROOT / "data" / "paper_trades.db"
+TRIGGER_PNL_RE = re.compile(r"pnl=([+-]?\d+(?:\.\d+)?)%")
+
+
+def load_json(value):
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
+
+
+def pct(value):
+    if value is None:
+        return "n/a"
+    return f"{value * 100:+.2f}%"
+
+
+def pp(value):
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.2f}pp"
+
+
+def parse_since(value):
+    if not value:
+        return 0
+    if value.isdigit():
+        return int(value)
+    dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
+def parse_trigger_pnl(reason):
+    if not reason:
+        return None
+    match = TRIGGER_PNL_RE.search(reason)
+    if not match:
+        return None
+    return float(match.group(1)) / 100.0
+
+
+def table_exists(db, name):
+    return bool(db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone())
+
+
+def get_trades(db, since_ts):
+    db.row_factory = sqlite3.Row
+    return db.execute(
+        """
+        SELECT *
+        FROM paper_trades
+        WHERE entry_ts >= ?
+        ORDER BY entry_ts ASC
+        """,
+        (since_ts,),
+    ).fetchall()
+
+
+def classify_trade(row):
+    pnl = float(row["pnl_pct"] or 0.0)
+    peak = float(row["peak_pnl"] or 0.0)
+    reason = row["exit_reason"] or ""
+    signal_type = row["signal_type"] or "-"
+    route = row["signal_route"] or signal_type
+    giveback = peak - pnl
+    trigger_pnl = parse_trigger_pnl(reason)
+    trigger_to_actual_gap = (trigger_pnl - pnl) if trigger_pnl is not None else None
+    monitor_state = load_json(row["monitor_state_json"])
+    sold_pct = float(monitor_state.get("soldPct") or 0.0)
+
+    tags = []
+
+    if row["exit_ts"] is None:
+        tags.append("open_position")
+        if peak >= 0.20:
+            tags.append("open_high_peak")
+        return tags
+
+    if "no_follow" in reason:
+        tags.append("entry_no_follow")
+    if "doa" in reason:
+        tags.append("entry_doa")
+    if "hard_sl" in reason or "lotto_sl" in reason or "_sl" in reason:
+        tags.append("stop_loss_or_rug")
+    if "gap_crash" in reason:
+        tags.append("gap_crash")
+    if "breakeven_floor" in reason:
+        tags.append("breakeven_floor")
+    if "trail" in reason:
+        tags.append("trail_exit")
+
+    if peak >= 0.08 and pnl <= 0:
+        tags.append("positive_peak_to_loss")
+    if peak >= 0.12 and pnl < 0.03:
+        tags.append("peak12_to_under3")
+    if peak >= 0.20 and pnl < peak * 0.50:
+        tags.append("poor_peak_capture")
+    if giveback >= 0.15:
+        tags.append("large_giveback_15pp")
+    if giveback >= 0.30:
+        tags.append("extreme_giveback_30pp")
+    if trigger_to_actual_gap is not None and trigger_to_actual_gap >= 0.08:
+        tags.append("execution_mark_gap_8pp")
+    if sold_pct > 0 and pnl <= 0:
+        tags.append("partial_lock_still_lost")
+
+    if route == "LOTTO" and peak < 0.05 and pnl <= -0.10:
+        tags.append("lotto_bad_entry_quality")
+    if signal_type == "ATH" and peak < 0.05 and pnl <= -0.08:
+        tags.append("matrix_bad_entry_quality")
+
+    return tags or ["uncategorized"]
+
+
+def trade_metrics(rows):
+    if not rows:
+        return {}
+    closed = [r for r in rows if r["exit_ts"] is not None]
+    wins = [r for r in closed if float(r["pnl_pct"] or 0.0) > 0]
+    pnls = [float(r["pnl_pct"] or 0.0) for r in closed]
+    peaks = [float(r["peak_pnl"] or 0.0) for r in closed]
+    return {
+        "entries": len(rows),
+        "closed": len(closed),
+        "open": len(rows) - len(closed),
+        "wins": len(wins),
+        "losses": len(closed) - len(wins),
+        "avg_pnl": sum(pnls) / len(pnls) if pnls else None,
+        "sum_pnl": sum(pnls) if pnls else None,
+        "avg_peak": sum(peaks) / len(peaks) if peaks else None,
+    }
+
+
+def print_trade_summary(rows):
+    m = trade_metrics(rows)
+    print("Trade Summary")
+    print(
+        f"  entries={m.get('entries', 0)} closed={m.get('closed', 0)} open={m.get('open', 0)} "
+        f"wins={m.get('wins', 0)} losses={m.get('losses', 0)} "
+        f"avg_pnl={pct(m.get('avg_pnl'))} sum_pnl={pct(m.get('sum_pnl'))} avg_peak={pct(m.get('avg_peak'))}"
+    )
+
+    by_route = defaultdict(list)
+    for row in rows:
+        by_route[(row["signal_type"] or "-", row["signal_route"] or "-", row["strategy_stage"] or "-")].append(row)
+    print("\nBy Route")
+    print(f"{'signal':<10} {'route':<8} {'stage':<8} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'avg_peak':>9}")
+    for (signal, route, stage), group in sorted(by_route.items(), key=lambda item: len(item[1]), reverse=True):
+        gm = trade_metrics(group)
+        win_rate = (gm["wins"] / gm["closed"] * 100.0) if gm.get("closed") else 0
+        print(
+            f"{signal:<10} {route:<8} {stage:<8} {gm['entries']:>4} {gm['closed']:>6} "
+            f"{win_rate:>4.0f}% {pct(gm.get('avg_pnl')):>9} {pct(gm.get('avg_peak')):>9}"
+        )
+
+
+def print_failure_buckets(rows, limit):
+    bucket_rows = defaultdict(list)
+    for row in rows:
+        for tag in classify_trade(row):
+            bucket_rows[tag].append(row)
+
+    print("\nFailure / Attribution Buckets")
+    print(f"{'bucket':<28} {'n':>4} {'avg_pnl':>9} {'sum_pnl':>9} {'avg_peak':>9} examples")
+    for tag, group in sorted(bucket_rows.items(), key=lambda item: len(item[1]), reverse=True):
+        closed = [r for r in group if r["exit_ts"] is not None]
+        pnls = [float(r["pnl_pct"] or 0.0) for r in closed]
+        peaks = [float(r["peak_pnl"] or 0.0) for r in closed]
+        examples = ", ".join((r["symbol"] or "?") for r in group[-5:])
+        print(
+            f"{tag:<28} {len(group):>4} "
+            f"{pct(sum(pnls) / len(pnls) if pnls else None):>9} "
+            f"{pct(sum(pnls) if pnls else None):>9} "
+            f"{pct(sum(peaks) / len(peaks) if peaks else None):>9} {examples}"
+        )
+
+    print("\nWorst Trades")
+    closed = [r for r in rows if r["exit_ts"] is not None]
+    closed.sort(key=lambda r: float(r["pnl_pct"] or 0.0))
+    print(f"{'id':>5} {'symbol':<12} {'route':<8} {'pnl':>8} {'peak':>8} {'giveback':>9} reason")
+    for row in closed[:limit]:
+        pnl = float(row["pnl_pct"] or 0.0)
+        peak = float(row["peak_pnl"] or 0.0)
+        route = row["signal_route"] or row["signal_type"] or "-"
+        print(
+            f"{int(row['id']):>5} {str(row['symbol'] or '?')[:12]:<12} {route:<8} "
+            f"{pct(pnl):>8} {pct(peak):>8} {pp(peak - pnl):>9} {str(row['exit_reason'] or '')[:90]}"
+        )
+
+
+def print_decision_events(db, since_ts, limit):
+    if not table_exists(db, "paper_decision_events"):
+        return
+    rows = db.execute(
+        """
+        SELECT component, event_type, decision, reason, COUNT(*) AS n
+        FROM paper_decision_events
+        WHERE event_ts >= ?
+        GROUP BY component, event_type, decision, reason
+        ORDER BY n DESC
+        LIMIT ?
+        """,
+        (since_ts, limit),
+    ).fetchall()
+    print("\nDecision Event Hotspots")
+    for row in rows:
+        print(
+            f"  n={row['n']:4d} {row['component']}/{row['event_type']} "
+            f"{row['decision']} reason={row['reason']}"
+        )
+
+
+def print_missed_attribution(db, since_ts, limit):
+    if not table_exists(db, "paper_missed_signal_attribution"):
+        return
+    rows = db.execute(
+        """
+        SELECT
+          COALESCE(route, '-') AS route,
+          component,
+          reject_reason,
+          COUNT(*) AS n,
+          SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50 THEN 1 ELSE 0 END) AS dog50,
+          SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.00 THEN 1 ELSE 0 END) AS dog100,
+          AVG(pnl_5m) AS avg_5m,
+          AVG(pnl_15m) AS avg_15m,
+          AVG(pnl_60m) AS avg_60m
+        FROM paper_missed_signal_attribution
+        WHERE signal_ts >= ?
+        GROUP BY COALESCE(route, '-'), component, reject_reason
+        ORDER BY dog100 DESC, dog50 DESC, n DESC
+        LIMIT ?
+        """,
+        (since_ts, limit),
+    ).fetchall()
+    print("\nMissed-Dog Attribution")
+    for row in rows:
+        print(
+            f"  n={row['n']:4d} dog50={row['dog50'] or 0:3d} dog100={row['dog100'] or 0:3d} "
+            f"avg5={pct(row['avg_5m'])} avg15={pct(row['avg_15m'])} avg60={pct(row['avg_60m'])} "
+            f"{row['route']} {row['component']} reason={row['reject_reason']}"
+        )
+
+    dogs = db.execute(
+        """
+        SELECT symbol, route, component, reject_reason, max_pnl_recorded, pnl_5m, pnl_15m, pnl_60m
+        FROM paper_missed_signal_attribution
+        WHERE signal_ts >= ?
+          AND COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50
+        ORDER BY COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) DESC
+        LIMIT ?
+        """,
+        (since_ts, limit),
+    ).fetchall()
+    print("\nTop Missed Dogs In Window")
+    for row in dogs:
+        print(
+            f"  {str(row['symbol'] or '?')[:12]:<12} max={pct(row['max_pnl_recorded'])} "
+            f"5m={pct(row['pnl_5m'])} 15m={pct(row['pnl_15m'])} 60m={pct(row['pnl_60m'])} "
+            f"{row['route']} {row['component']} reason={row['reject_reason']}"
+        )
+
+
+def print_decision_read(rows, db, since_ts):
+    closed = [r for r in rows if r["exit_ts"] is not None]
+    tags = Counter()
+    for row in rows:
+        tags.update(classify_trade(row))
+
+    missed_dogs = 0
+    if table_exists(db, "paper_missed_signal_attribution"):
+        missed_dogs = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM paper_missed_signal_attribution
+            WHERE signal_ts >= ?
+              AND COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50
+            """,
+            (since_ts,),
+        ).fetchone()[0]
+
+    print("\nClarify-Reason-Act Read")
+    print("  Restated question: which mechanism explains current bad results with the fewest assumptions?")
+    print("  Key unknown: exact intra-trade path is still incomplete; use peak/final/trigger gaps as proxy.")
+    if tags["execution_mark_gap_8pp"] or tags["positive_peak_to_loss"]:
+        print(
+            "  Simplest hypothesis: exit execution/mark-to-fill gap plus late protection is the largest live-trade problem."
+        )
+    elif tags["entry_no_follow"] + tags["entry_doa"] > len(closed) * 0.4:
+        print("  Simplest hypothesis: entry quality/timing is the main problem; many trades never get follow-through.")
+    elif missed_dogs:
+        print("  Simplest hypothesis: missed-dog gates are still leaving material upside outside the entry lane.")
+    else:
+        print("  Simplest hypothesis: no single dominant bucket yet; keep collecting path-level samples.")
+
+    print("  Smallest next action:")
+    print("    1. Persist per-trade price samples: trade_id, ts, mark_pnl, quote_pnl, peak_pnl, sold_pct.")
+    print("    2. For partial locks, report blended realized+unrealized PnL separately from remaining-position PnL.")
+    print("    3. Gate any route whose last-N attribution bucket is dominated by entry_no_follow/DOA.")
+    print("  Decision rule:")
+    print("    Continue threshold tuning only if execution_mark_gap and positive_peak_to_loss fall after path logging.")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default=os.environ.get("PAPER_DB", str(DEFAULT_DB)))
+    parser.add_argument("--since", default="2026-04-29 08:48:00")
+    parser.add_argument("--limit", type=int, default=12)
+    args = parser.parse_args()
+
+    since_ts = parse_since(args.since)
+    db = sqlite3.connect(args.db)
+    db.row_factory = sqlite3.Row
+
+    rows = get_trades(db, since_ts)
+    print(f"DB: {args.db}")
+    print(f"Window: entry_ts >= {args.since} ({since_ts})")
+    print()
+    print_trade_summary(rows)
+    print_failure_buckets(rows, args.limit)
+    print_decision_events(db, since_ts, args.limit)
+    print_missed_attribution(db, since_ts, args.limit)
+    print_decision_read(rows, db, since_ts)
+
+
+if __name__ == "__main__":
+    main()
