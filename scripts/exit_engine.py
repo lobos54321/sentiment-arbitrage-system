@@ -23,6 +23,12 @@ PHASE0_BREAKEVEN_PEAK = float(os.environ.get("PHASE0_BREAKEVEN_PEAK", "0.08"))
 PHASE0_BREAKEVEN_EXIT_PNL = float(os.environ.get("PHASE0_BREAKEVEN_EXIT_PNL", "0.02"))
 PHASE0_STRONG_BREAKEVEN_PEAK = float(os.environ.get("PHASE0_STRONG_BREAKEVEN_PEAK", "0.12"))
 PHASE0_STRONG_BREAKEVEN_EXIT_PNL = float(os.environ.get("PHASE0_STRONG_BREAKEVEN_EXIT_PNL", "0.03"))
+LOTTO_BREAKEVEN_PEAK = float(os.environ.get("LOTTO_BREAKEVEN_PEAK", "0.10"))
+LOTTO_BREAKEVEN_EXIT_PNL = float(os.environ.get("LOTTO_BREAKEVEN_EXIT_PNL", "0.02"))
+LOTTO_PARTIAL_LOCK_PEAK = float(os.environ.get("LOTTO_PARTIAL_LOCK_PEAK", "0.20"))
+LOTTO_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("LOTTO_PARTIAL_LOCK_MIN_PNL", "0.15"))
+LOTTO_PARTIAL_SELL_PCT = float(os.environ.get("LOTTO_PARTIAL_SELL_PCT", "0.25"))
+LOTTO_EPSILON = 1e-9
 
 
 # ─── Plan #3: Dynamic Stop-Loss (4-factor) ────────────────────────────────────
@@ -568,6 +574,71 @@ class ExitGuardianThread(threading.Thread):
                 # Phase 1 (50-200%):     floor = peak x 0.45
                 # Phase 2 (200-500%):    floor = peak x 0.60
                 # Phase 3 (>500%):       floor = peak x 0.72
+                if _is_lotto_entry:
+                    _lotto_state = pos.monitor_state or {}
+                    _lotto_partial_locked = (
+                        bool(_lotto_state.get('lottoPartialLocked'))
+                        or bool(_lotto_state.get('phase0PartialLocked'))
+                        or float(_lotto_state.get('soldPct') or 0.0) > 0
+                        or bool(w_entry and w_entry.get('has_locked_profit'))
+                    )
+                    if (
+                        not _lotto_partial_locked
+                        and pos.peak_pnl >= LOTTO_PARTIAL_LOCK_PEAK
+                        and pnl >= LOTTO_PARTIAL_LOCK_MIN_PNL
+                    ):
+                        if pos.monitor_state is None:
+                            pos.monitor_state = {}
+                        pos.monitor_state['lottoPartialLocked'] = True
+                        pos.monitor_state['lottoPartialLockPnl'] = pnl
+                        pos.monitor_state['lottoPartialLockPeak'] = pos.peak_pnl
+                        log.info(
+                            f"[ExitGuardian] 🔒 {pos.symbol} LOTTO PARTIAL LOCK: "
+                            f"peak={pos.peak_pnl*100:+.1f}% pnl={pnl*100:+.1f}% "
+                            f"sell={LOTTO_PARTIAL_SELL_PCT*100:.0f}%"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'action': 'partial_sell',
+                                'sell_pct': LOTTO_PARTIAL_SELL_PCT,
+                                'tp_name': 'LOTTO_LOCK',
+                                'reason': (
+                                    f'guardian_lotto_partial_lock '
+                                    f'(pnl={pnl:.1%}, peak={pos.peak_pnl:.1%}, '
+                                    f'sell={LOTTO_PARTIAL_SELL_PCT:.0%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(
+                                    pos, ca, sell_pct=LOTTO_PARTIAL_SELL_PCT
+                                ),
+                            })
+                        continue
+
+                    if pos.peak_pnl >= LOTTO_BREAKEVEN_PEAK and pnl <= LOTTO_BREAKEVEN_EXIT_PNL + LOTTO_EPSILON:
+                        log.info(
+                            f"[ExitGuardian] 🧯 {pos.symbol} LOTTO BREAKEVEN FLOOR: "
+                            f"pnl={pnl*100:+.1f}% <= floor={LOTTO_BREAKEVEN_EXIT_PNL*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}%) price={price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': (
+                                    f'guardian_lotto_breakeven_floor '
+                                    f'(pnl={pnl:.1%} <= floor={LOTTO_BREAKEVEN_EXIT_PNL:.1%}, '
+                                    f'peak={pos.peak_pnl:.1%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
+                        continue
+
                 if _is_lotto_entry and not is_moon and pos.peak_pnl >= 0.50:
                     if pos.peak_pnl >= 5.00:
                         _lotto_factor = 0.72

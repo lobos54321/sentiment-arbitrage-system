@@ -34,8 +34,12 @@ LOTTO_TIME_EXIT_60S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_60S_PEAK", "0.0
 LOTTO_TIME_EXIT_120S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_120S_PEAK", "0.10"))
 LOTTO_STOP_LOSS = float(os.environ.get("LOTTO_STOP_LOSS", "-0.18"))
 LOTTO_HARD_FLOOR = float(os.environ.get("LOTTO_HARD_FLOOR", "-0.30"))
-LOTTO_PARTIAL_LOCK_PEAK = float(os.environ.get("LOTTO_PARTIAL_LOCK_PEAK", "1.00"))
+LOTTO_BREAKEVEN_PEAK = float(os.environ.get("LOTTO_BREAKEVEN_PEAK", "0.10"))
+LOTTO_BREAKEVEN_EXIT_PNL = float(os.environ.get("LOTTO_BREAKEVEN_EXIT_PNL", "0.02"))
+LOTTO_PARTIAL_LOCK_PEAK = float(os.environ.get("LOTTO_PARTIAL_LOCK_PEAK", "0.20"))
+LOTTO_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("LOTTO_PARTIAL_LOCK_MIN_PNL", "0.15"))
 LOTTO_PARTIAL_SELL_PCT = float(os.environ.get("LOTTO_PARTIAL_SELL_PCT", "0.25"))
+LOTTO_EPSILON = 1e-9
 
 
 @dataclass(frozen=True)
@@ -249,6 +253,15 @@ def evaluate_lotto_exit(pos, w_entry, current_price, *, now=None):
             "trail_floor": None,
         }
 
+    if peak_pnl >= LOTTO_BREAKEVEN_PEAK and current_pnl <= LOTTO_BREAKEVEN_EXIT_PNL + LOTTO_EPSILON:
+        return {
+            "action": "exit",
+            "reason": f"lotto_breakeven_floor (pnl={current_pnl:.1%} <= floor={LOTTO_BREAKEVEN_EXIT_PNL:.1%}, peak={peak_pnl:.1%})",
+            "current_pnl": current_pnl,
+            "peak_pnl": peak_pnl,
+            "trail_floor": LOTTO_BREAKEVEN_EXIT_PNL,
+        }
+
     if current_pnl <= LOTTO_STOP_LOSS:
         return {
             "action": "exit",
@@ -276,10 +289,14 @@ def evaluate_lotto_exit(pos, w_entry, current_price, *, now=None):
             "trail_floor": None,
         }
 
-    if peak_pnl >= LOTTO_PARTIAL_LOCK_PEAK and not (w_entry or {}).get("has_locked_profit"):
+    if (
+        peak_pnl >= LOTTO_PARTIAL_LOCK_PEAK
+        and current_pnl >= LOTTO_PARTIAL_LOCK_MIN_PNL
+        and not (w_entry or {}).get("has_locked_profit")
+    ):
         return {
             "action": "lock_profit",
-            "reason": f"lotto_partial_lock (peak={peak_pnl:.1%} >= {LOTTO_PARTIAL_LOCK_PEAK:.1%})",
+            "reason": f"lotto_partial_lock (pnl={current_pnl:.1%}, peak={peak_pnl:.1%}, sell={LOTTO_PARTIAL_SELL_PCT:.0%})",
             "current_pnl": current_pnl,
             "peak_pnl": peak_pnl,
             "trail_floor": None,
