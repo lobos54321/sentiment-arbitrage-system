@@ -2056,6 +2056,78 @@ const server = http.createServer(async (req, res) => {
     const fileStream = fs.createReadStream(klineDbPath);
     fileStream.pipe(res);
     return;
+  } else if (url.pathname === '/api/paper/missed-attribution') {
+    // Paper missed-dog attribution summary — 需要 token 认证
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '25', 10) || 25, 200));
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const hasTable = paperDb.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_missed_signal_attribution'"
+      ).get();
+      if (!hasTable) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
+        return;
+      }
+      const topDogs = paperDb.prepare(`
+        SELECT
+          symbol,
+          token_ca,
+          route,
+          component,
+          reject_reason,
+          pnl_5m,
+          pnl_15m,
+          pnl_60m,
+          pnl_24h,
+          max_pnl_recorded,
+          min_pnl_recorded,
+          status,
+          updated_at
+        FROM paper_missed_signal_attribution
+        ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999) DESC
+        LIMIT ?
+      `).all(limit);
+      const byGate = paperDb.prepare(`
+        SELECT
+          COALESCE(route, '-') AS route,
+          component,
+          reject_reason,
+          COUNT(*) AS n,
+          SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.5 THEN 1 ELSE 0 END) AS dog50_n,
+          SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.0 THEN 1 ELSE 0 END) AS dog100_n,
+          AVG(pnl_5m) AS avg_5m,
+          AVG(pnl_15m) AS avg_15m,
+          AVG(pnl_60m) AS avg_60m,
+          AVG(pnl_24h) AS avg_24h
+        FROM paper_missed_signal_attribution
+        GROUP BY COALESCE(route, '-'), component, reject_reason
+        ORDER BY dog100_n DESC, dog50_n DESC, n DESC
+        LIMIT ?
+      `).all(limit);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        limit,
+        top_dogs: topDogs,
+        by_gate: byGate,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/download/paper_trades') {
     // Paper trades数据库下载 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;

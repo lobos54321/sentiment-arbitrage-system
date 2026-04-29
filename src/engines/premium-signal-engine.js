@@ -380,6 +380,10 @@ export class PremiumSignalEngine {
     console.log('═'.repeat(60));
 
     try {
+      // Always observe parsed premium signals before any gate can return.
+      // This keeps LOTTO_OBSERVE and upstream rejects attributable later.
+      this._trackForKline(ca, signal.symbol || shortCA);
+
       // ─── Step 1: 去重 + 冷却检查 (全内存, ~0ms) ───────────────
       const history = this.signalHistory.get(ca);
       if (history) {
@@ -416,14 +420,26 @@ export class PremiumSignalEngine {
         return { action: 'SKIP', reason: 'exit_cooldown' };
       }
 
-      // ─── Step 1.5: 体积过滤 (剔除无效垃圾盘) ───
-      // 对于 MC < 16k 且 Volume < 38k 的情况，流动性极差且滑点极高，直接拦截
+      // ─── Step 1.5: 体积过滤 ───
+      // MC < 16k + Vol < 38k is too thin for automatic upstream buying, but it
+      // must remain visible to the paper LOTTO attribution path. Roger showed
+      // this gate can sit right on the edge of valid early dogs.
       if ((signal.market_cap !== null && signal.market_cap < 16000) && 
           (signal.volume_24h !== null && signal.volume_24h < 38000)) {
         this.stats.precheck_failed = (this.stats.precheck_failed || 0) + 1;
-        console.log(`⏭️ [体积过滤] $${signal.symbol} MC=$${signal.market_cap} Vol=$${signal.volume_24h} (MC<16K 且 Vol<38K) → 跳过极低流动性盘`);
-        this.saveSignalRecord(signal, 'ILLIQUID_JUNK', null);
-        return { action: 'SKIP', reason: 'illiquid_junk' };
+        console.log(`👀 [LOTTO_OBSERVE] $${signal.symbol} MC=$${signal.market_cap} Vol=$${signal.volume_24h} (MC<16K 且 Vol<38K) → 不实盘买入，保留给LOTTO回溯`);
+        this.saveSignalRecord(signal, 'LOTTO_OBSERVE_LOW_MC_VOL', null, false, {
+          gateResult: {
+            gateDecision: 'observe',
+            gateReason: 'low_mc_low_volume_lotto_observe',
+            lottoObserve: true,
+            marketCap: signal.market_cap || null,
+            volume24h: signal.volume_24h || null,
+            holders: signal.holders || null,
+            top10Pct: signal.top10_pct || null,
+          },
+        });
+        return { action: 'SKIP', reason: 'lotto_observe_low_mc_vol' };
       }
 
       // ─── Step 2: ATH 检查 — 最先过滤，非ATH检查 super_index (~0ms) ───
@@ -436,7 +452,6 @@ export class PremiumSignalEngine {
         if (superIndex < 70) {
           console.log(`⏭️ [NOT_ATH] $${signal.symbol} Super=${superIndex}<70 → 跳过`);
           this.saveSignalRecord(signal, 'NOT_ATH_V17', null);
-          this._trackForKline(ca, signal.symbol);
           return { action: 'SKIP', reason: 'not_ath_v17' };
         }
         // NOT_ATH + super>=80：独立执行路径 — 红K + vol≥2000

@@ -98,6 +98,10 @@ MATRIX_SPREAD_ABORT_PCT = float(os.environ.get('MATRIX_SPREAD_ABORT_PCT', '4.5')
 MATRIX_DOA_EXIT_SEC = float(os.environ.get('MATRIX_DOA_EXIT_SEC', '30'))
 MATRIX_DOA_PEAK_MAX = float(os.environ.get('MATRIX_DOA_PEAK_MAX', '0.001'))
 MATRIX_DOA_PNL_MAX = float(os.environ.get('MATRIX_DOA_PNL_MAX', '-0.03'))
+MATRIX_ATH_FULL_MC_MAX = float(os.environ.get('MATRIX_ATH_FULL_MC_MAX', '80000'))
+MATRIX_ATH_HALF_MC_MAX = float(os.environ.get('MATRIX_ATH_HALF_MC_MAX', '200000'))
+MATRIX_ATH_FULL_SIZE_SOL = float(os.environ.get('MATRIX_ATH_FULL_SIZE_SOL', '0.08'))
+MATRIX_ATH_HALF_SIZE_SOL = float(os.environ.get('MATRIX_ATH_HALF_SIZE_SOL', '0.04'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -2348,6 +2352,14 @@ def _is_paper_trade_signal(record):
     status = (record.get('hard_gate_status') or '').upper()
     description = record.get('description') or ''
     signal_type = (record.get('signal_type') or '').upper()
+    observable_new_trending_statuses = {
+        'PASS',
+        'RISK_BLOCKED',
+        'LOTTO_OBSERVE_LOW_MC_VOL',
+        'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
+        'NOT_ATH_V17',
+        'ILLIQUID_JUNK',
+    }
     
     is_ath = signal_type == 'ATH' or 'New ATH' in description or 'ATH' in description or 'All Time High' in description
     is_new_trending = signal_type == 'NEW_TRENDING' or 'New Trending' in description
@@ -2357,7 +2369,7 @@ def _is_paper_trade_signal(record):
         # to allow the Python Matrix evaluator to handle the full breakout lifecycle logic.
         return True
     if is_new_trending:
-        return status in {'PASS', 'RISK_BLOCKED'}
+        return status in observable_new_trending_statuses
         
     return False
 
@@ -3794,6 +3806,31 @@ def run_monitor(db):
                 )
                 if _missed_updated:
                     log.info(f"  [MISSED_ATTRIBUTION] updated={_missed_updated}")
+                    try:
+                        _top_missed = db.execute(
+                            """
+                            SELECT symbol, route, component, reject_reason, max_pnl_recorded, pnl_5m, pnl_15m, pnl_60m, pnl_24h
+                            FROM paper_missed_signal_attribution
+                            WHERE COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m) >= 0.5
+                            ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m) DESC
+                            LIMIT 5
+                            """
+                        ).fetchall()
+                        if _top_missed:
+                            _parts = []
+                            for _row in _top_missed:
+                                _maxp = _row['max_pnl_recorded']
+                                _best = _maxp if _maxp is not None else next(
+                                    (v for v in (_row['pnl_24h'], _row['pnl_60m'], _row['pnl_15m'], _row['pnl_5m']) if v is not None),
+                                    None,
+                                )
+                                _parts.append(
+                                    f"{_row['symbol']} max={(_best or 0)*100:+.1f}% "
+                                    f"{_row['route']}/{_row['component']} reason={_row['reject_reason']}"
+                                )
+                            log.info("  [TOP_MISSED_DOGS] " + " | ".join(_parts))
+                    except Exception as _top_err:
+                        log.debug(f"  [TOP_MISSED_DOGS] query failed: {_top_err}")
             except Exception as _missed_err:
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
@@ -3824,6 +3861,7 @@ def run_monitor(db):
                     signal_ts = sig['timestamp']
                     premium_signal_id = sig.get('id')
                     signal_type = sig.get('signal_type') or 'NEW_TRENDING'
+                    hard_gate_status = (sig.get('hard_gate_status') or '').upper()
                     lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
                     symbol = sig['symbol'] or token_ca[:8]
 
@@ -3841,6 +3879,34 @@ def run_monitor(db):
                         data_source='premium_signals',
                         payload=signal_payload(sig),
                     )
+
+                    if signal_type == 'NEW_TRENDING' and hard_gate_status in {
+                        'LOTTO_OBSERVE_LOW_MC_VOL',
+                        'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
+                        'NOT_ATH_V17',
+                        'ILLIQUID_JUNK',
+                    }:
+                        record_decision_event(
+                            db,
+                            component='upstream_gate',
+                            event_type='signal_skip',
+                            decision='skip',
+                            reason=hard_gate_status.lower(),
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=signal_ts,
+                            signal_id=premium_signal_id,
+                            route='LOTTO',
+                            data_source='premium_signals',
+                            payload=signal_payload(sig),
+                        )
+                        log.info(
+                            f"  [UPSTREAM_ATTR] {symbol} tracked as missed LOTTO candidate: "
+                            f"status={hard_gate_status} MC=${sig.get('market_cap') or 0:,.0f} "
+                            f"Vol=${sig.get('volume_24h') or 0:,.0f}"
+                        )
+                        continue
 
                     if any(pos.lifecycle_id == lifecycle_id for pos in positions.values()) or lifecycle_id in pending_entries:
                         record_decision_event(
@@ -4531,8 +4597,41 @@ def run_monitor(db):
                     # Data: 0.03 SOL trades have terrible risk/reward (avg loss -15%, wins earn 0.002 SOL)
                     _kelly_sol = pending_entries[lifecycle_id]['kelly_position_sol']
                     
-                    if _kelly_sol < 0.1:
-                        # Bump weak kelly up to system floor instead of rejecting.
+                    _fire_mc_for_size = float(w_entry.get('signal_mc') or 0)
+                    _is_matrix_ath_fire = (w_entry.get('type') == 'ATH')
+                    if _is_matrix_ath_fire:
+                        if _fire_mc_for_size >= MATRIX_ATH_HALF_MC_MAX:
+                            log.info(
+                                f"  [Kelly] {w_entry['symbol']} ATH observe-only: "
+                                f"signal_mc=${_fire_mc_for_size:,.0f} >= ${MATRIX_ATH_HALF_MC_MAX:,.0f}"
+                            )
+                            record_decision_event(
+                                db,
+                                component='matrix_ath_sizing',
+                                event_type='signal_reject',
+                                decision='reject',
+                                reason='ath_high_mc_observe_only',
+                                token_ca=w_entry['ca'],
+                                symbol=w_entry['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=w_entry['signal_ts'],
+                                signal_id=w_entry.get('premium_signal_id'),
+                                route='ATH',
+                                payload={'signal_mc': _fire_mc_for_size, 'mc_cap': MATRIX_ATH_HALF_MC_MAX},
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        _ath_cap = MATRIX_ATH_HALF_SIZE_SOL if _fire_mc_for_size >= MATRIX_ATH_FULL_MC_MAX else MATRIX_ATH_FULL_SIZE_SOL
+                        _old_kelly = _kelly_sol
+                        _kelly_sol = _ath_cap
+                        pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
+                        log.info(
+                            f"  [Kelly] {w_entry['symbol']} ATH size tier: "
+                            f"MC=${_fire_mc_for_size:,.0f} cap={_ath_cap:.3f} SOL "
+                            f"Kelly {_old_kelly:.3f} → {_kelly_sol:.3f}"
+                        )
+                    elif _kelly_sol < 0.1:
+                        # Non-ATH MATRIX keeps the old systemic floor.
                         log.info(f"  [Kelly] {w_entry['symbol']} Bumping Kelly={_kelly_sol:.3f} to systemic floor 0.1 SOL")
                         _kelly_sol = 0.1
                         pending_entries[lifecycle_id]['kelly_position_sol'] = _kelly_sol
@@ -4541,7 +4640,12 @@ def run_monitor(db):
                     # Data (8hr audit, 2026-04-24): X got 0.43 SOL at T=50 → -28% = -0.12 SOL loss.
                     # All T=50 trades lost. Reduce exposure when trend is weak.
                     _t_score_fire = eval_res.get('scores', {}).get('trend', 0)
-                    if _t_score_fire <= 60:
+                    if _is_matrix_ath_fire:
+                        log.info(
+                            f"  [Kelly] {w_entry['symbol']} ATH fixed tier size; "
+                            f"skip T-score discount T={_t_score_fire}"
+                        )
+                    elif _t_score_fire <= 60:
                         _old_kelly = _kelly_sol
                         _kelly_sol = round(_kelly_sol * 0.5, 3)
                         _kelly_sol = max(_kelly_sol, 0.03)  # never below dust
