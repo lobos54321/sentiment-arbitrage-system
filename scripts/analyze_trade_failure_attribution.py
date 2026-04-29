@@ -492,6 +492,37 @@ def print_lifecycle_quality(rows, db, since_ts, limit):
                 f"{win_rate:>4.0f}% {pct(gm.get('avg_pnl')):>9} {pct(gm.get('avg_peak')):>9}"
             )
 
+        bias_groups = defaultdict(list)
+        for row in rows:
+            bias_groups[row["entry_bias"] or "UNKNOWN"].append(row)
+        print("  Traded by shadow entry_bias")
+        print(f"  {'bias':<10} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'sum_pnl':>9} {'avg_peak':>9}")
+        for bias, group in sorted(bias_groups.items(), key=lambda item: len(item[1]), reverse=True):
+            gm = trade_metrics(group)
+            win_rate = (gm["wins"] / gm["closed"] * 100.0) if gm.get("closed") else 0
+            print(
+                f"  {bias:<10} {gm['entries']:>4} {gm['closed']:>6} "
+                f"{win_rate:>4.0f}% {pct(gm.get('avg_pnl')):>9} {pct(gm.get('sum_pnl')):>9} {pct(gm.get('avg_peak')):>9}"
+            )
+
+        counterfactual = {
+            "would_take_probe": [r for r in rows if (r["entry_bias"] or "").upper() == "PROBE"],
+            "would_avoid_reject": [r for r in rows if (r["entry_bias"] or "").upper() == "REJECT"],
+            "would_wait_or_observe": [
+                r for r in rows if (r["entry_bias"] or "").upper() in {"WAIT", "OBSERVE", "UNKNOWN", ""}
+            ],
+        }
+        print("  Lifecycle Shadow Gate")
+        for name, group in counterfactual.items():
+            gm = trade_metrics(group)
+            if not gm:
+                continue
+            win_rate = (gm["wins"] / gm["closed"] * 100.0) if gm.get("closed") else 0
+            print(
+                f"    {name:<20} n={gm['entries']:>3} closed={gm['closed']:>3} "
+                f"win={win_rate:>4.0f}% sum={pct(gm.get('sum_pnl')):>9} avg={pct(gm.get('avg_pnl')):>9} peak={pct(gm.get('avg_peak')):>9}"
+            )
+
     if has_missed_state:
         missed = db.execute(
             """
@@ -522,6 +553,37 @@ def print_lifecycle_quality(rows, db, since_ts, limit):
                     f"{row['dog50'] or 0:>5} {row['gold'] or 0:>6} {vital:>7} "
                     f"{pct(row['avg_15m']):>8} {pct(row['avg_60m']):>8}"
                 )
+
+        if column_exists(db, "paper_missed_signal_attribution", "entry_bias"):
+            missed_bias = db.execute(
+                """
+                SELECT
+                  COALESCE(entry_bias, 'UNKNOWN') AS entry_bias,
+                  COUNT(*) AS n,
+                  SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.25 THEN 1 ELSE 0 END) AS dog25,
+                  SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50 THEN 1 ELSE 0 END) AS dog50,
+                  SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.00 THEN 1 ELSE 0 END) AS gold,
+                  AVG(vitality_score) AS avg_vitality,
+                  AVG(pnl_15m) AS avg_15m,
+                  AVG(pnl_60m) AS avg_60m
+                FROM paper_missed_signal_attribution
+                WHERE signal_ts >= ?
+                GROUP BY COALESCE(entry_bias, 'UNKNOWN')
+                ORDER BY gold DESC, dog50 DESC, dog25 DESC, n DESC
+                LIMIT ?
+                """,
+                (since_ts, limit),
+            ).fetchall()
+            if missed_bias:
+                print("  Missed by shadow entry_bias")
+                print(f"  {'bias':<10} {'n':>4} {'25p+':>5} {'50p+':>5} {'100p+':>6} {'vital':>7} {'avg15':>8} {'avg60':>8}")
+                for row in missed_bias:
+                    vital = "n/a" if row["avg_vitality"] is None else f"{row['avg_vitality']:.1f}"
+                    print(
+                        f"  {row['entry_bias']:<10} {row['n']:>4} {row['dog25'] or 0:>5} "
+                        f"{row['dog50'] or 0:>5} {row['gold'] or 0:>6} {vital:>7} "
+                        f"{pct(row['avg_15m']):>8} {pct(row['avg_60m']):>8}"
+                    )
 
 
 def print_decision_read(rows, db, since_ts):
