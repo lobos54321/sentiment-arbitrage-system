@@ -55,6 +55,7 @@ from entry_engine import (
 from exit_engine import ExitGuardianThread, process_guardian_exits
 from paper_decision_audit import (
     init_decision_audit,
+    missed_attribution_coverage,
     record_decision_event,
     signal_payload,
     update_due_missed_attributions,
@@ -530,7 +531,7 @@ def lifecycle_realized_pnl_from_state(state, fallback_position_size_sol=0.0, fin
     return None, final_exit_total_sol, entry_sol, 'final_exit_only'
 
 
-def apply_partial_accounting_state(state, execution, *, entry_sol, prev_sold_pct, sell_pct_delta, trigger_pnl, peak_pnl, reason, ts):
+def apply_partial_accounting_state(state, execution, *, entry_sol, prev_sold_pct, sell_pct_delta, trigger_pnl, peak_pnl, reason, ts, quote_pnl=None, quote_mark_gap=None, quote_sanity_status=None):
     updated = dict(state or {})
     entry_sol = _safe_float(updated.get('entrySol'), entry_sol)
     prev_sold_pct = max(0.0, min(1.0, _safe_float(prev_sold_pct, 0.0)))
@@ -550,6 +551,10 @@ def apply_partial_accounting_state(state, execution, *, entry_sol, prev_sold_pct
     updated['lastPartialLockTs'] = _safe_int(ts, int(time.time()))
     updated['lastPartialLockPnl'] = _safe_float(trigger_pnl, None)
     updated['lastPartialLockPeak'] = _safe_float(peak_pnl, None)
+    updated['lastPartialQuotePnl'] = _safe_float(quote_pnl, None)
+    updated['lastPartialQuoteMarkGap'] = _safe_float(quote_mark_gap, None)
+    if quote_sanity_status:
+        updated['lastPartialQuoteSanity'] = quote_sanity_status
 
     if partial_out_sol is not None and partial_cost_sol is not None:
         realized_sol = prev_realized_sol + partial_out_sol
@@ -579,6 +584,9 @@ def apply_partial_accounting_state(state, execution, *, entry_sol, prev_sold_pct
         'soldPctAfter': total_sold_pct,
         'triggerPnl': _safe_float(trigger_pnl, None),
         'peakPnl': _safe_float(peak_pnl, None),
+        'quotePnl': _safe_float(quote_pnl, None),
+        'quoteMarkGap': _safe_float(quote_mark_gap, None),
+        'quoteSanity': quote_sanity_status,
         'outSol': partial_out_sol,
         'costBasisSol': partial_cost_sol,
     })
@@ -614,6 +622,16 @@ def blended_quote_pnl_from_state(state, final_exit_sol):
         _safe_float(monitor_state.get('totalSolReceived'), 0.0),
     )
     return ((partial_realized_sol + final_exit_sol) - entry_sol) / entry_sol
+
+
+def quote_pnl_from_execution(execution, entry_price):
+    if not isinstance(execution, dict):
+        return None
+    quote_price = _safe_float(execution.get('effectivePrice'), None)
+    entry_price = _safe_float(entry_price, None)
+    if quote_price is None or entry_price is None or entry_price <= 0:
+        return None
+    return (quote_price - entry_price) / entry_price
 
 
 def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, mark_pnl, mark_source, quote_execution=None, peak_pnl=None):
@@ -4022,7 +4040,7 @@ def run_monitor(db):
                     historical_price_fetcher=fetch_kline_close_at_or_after,
                     live_price_fetcher=fetch_live_price_for_attribution,
                     now=now,
-                    limit=100,
+                    limit=250,
                 )
                 if _missed_updated:
                     log.info(f"  [MISSED_ATTRIBUTION] updated={_missed_updated}")
@@ -4051,6 +4069,23 @@ def run_monitor(db):
                             log.info("  [TOP_MISSED_DOGS] " + " | ".join(_parts))
                     except Exception as _top_err:
                         log.debug(f"  [TOP_MISSED_DOGS] query failed: {_top_err}")
+                try:
+                    _coverage = missed_attribution_coverage(db, since_ts=now - 2 * 60 * 60)
+                    _total = _coverage.get('total', 0)
+                    if _total:
+                        _baseline_pct = (_coverage.get('baseline_n', 0) / _total) * 100.0
+                        _p5_pct = (_coverage.get('pnl_5m_n', 0) / _total) * 100.0
+                        _level = log.warning if _baseline_pct < 80.0 else log.info
+                        _level(
+                            f"  [MISSED_ATTRIBUTION_COVERAGE] window=2h total={_total} "
+                            f"baseline={_coverage.get('baseline_n', 0)}({_baseline_pct:.0f}%) "
+                            f"pnl5={_coverage.get('pnl_5m_n', 0)}({_p5_pct:.0f}%) "
+                            f"pnl15={_coverage.get('pnl_15m_n', 0)} "
+                            f"pnl60={_coverage.get('pnl_60m_n', 0)} "
+                            f"baseline_missing={_coverage.get('baseline_missing_n', 0)}"
+                        )
+                except Exception as _coverage_err:
+                    log.debug(f"  [MISSED_ATTRIBUTION_COVERAGE] query failed: {_coverage_err}")
             except Exception as _missed_err:
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
@@ -5895,15 +5930,42 @@ def run_monitor(db):
                                 # Before committing to an exit, verify the trigger PNL against
                                 # the actual DEX quote price.
                                 sanity_override = False
-                                if exit_matrix['action'] == 'exit':
-                                    quote_eff_sol = simulate_res.get('effectivePrice')
-                                    if (quote_eff_sol and quote_eff_sol > 0 and
-                                            pos.entry_price and pos.entry_price > 0):
-                                        # SOL pricing: entry_price is SOL, quote_eff_sol is SOL — compare directly
-                                        quote_pnl = (quote_eff_sol - pos.entry_price) / pos.entry_price
-                                        trigger_pnl = exit_matrix.get('current_pnl', 0.0)
-                                        divergence = abs(quote_pnl - trigger_pnl)
+                                quote_pnl = quote_pnl_from_execution(simulate_res, pos.entry_price)
+                                trigger_pnl = exit_matrix.get('current_pnl', 0.0)
+                                quote_mark_gap = (
+                                    quote_pnl - trigger_pnl
+                                    if quote_pnl is not None and trigger_pnl is not None else None
+                                )
+                                quote_sanity_status = 'quote_unavailable' if quote_pnl is None else 'quote_checked'
+                                if quote_pnl is not None and trigger_pnl is not None:
+                                    divergence = abs(quote_pnl - trigger_pnl)
+                                    if divergence > 0.05:
+                                        log.info(
+                                            f"  [QUOTE_SANITY] {pos.symbol} mark/quote gap: "
+                                            f"action={exit_matrix['action']} mark={trigger_pnl:+.1%} "
+                                            f"quote={quote_pnl:+.1%} gap={quote_mark_gap:+.1%}"
+                                        )
 
+                                if exit_matrix['action'] == 'lock_profit':
+                                    if quote_pnl is None:
+                                        quote_sanity_status = 'partial_lock_quote_missing'
+                                        log.warning(
+                                            f"  [QUOTE_SANITY] {pos.symbol} partial lock skipped — "
+                                            f"missing quote PnL for mark={trigger_pnl:+.1%}"
+                                        )
+                                        sanity_override = True
+                                    elif quote_pnl < 0:
+                                        quote_sanity_status = 'partial_lock_quote_negative'
+                                        log.warning(
+                                            f"  [QUOTE_SANITY] {pos.symbol} partial lock skipped — "
+                                            f"mark={trigger_pnl:+.1%} but quote={quote_pnl:+.1%}; "
+                                            f"not treating mark profit as lockable."
+                                        )
+                                        sanity_override = True
+
+                                if exit_matrix['action'] == 'exit':
+                                    if quote_pnl is not None and trigger_pnl is not None:
+                                        divergence = abs(quote_pnl - trigger_pnl)
                                         if divergence > 0.05:  # >5% price source disagreement
                                             reason = exit_matrix.get('reason', '')
                                             cancel = False
@@ -5924,6 +5986,7 @@ def run_monitor(db):
                                                     f"(divergence={divergence:.1%}, src={pre_src}). "
                                                     f"Trigger price was unreliable, holding position."
                                                 )
+                                                quote_sanity_status = 'exit_cancelled_quote_better'
                                                 sanity_override = True
                                             else:
                                                 log.info(
@@ -5931,6 +5994,7 @@ def run_monitor(db):
                                                     f"trigger={trigger_pnl:+.1%} quote={quote_pnl:+.1%} "
                                                     f"(gap={divergence:.1%}) — exit confirmed by quote"
                                                 )
+                                                quote_sanity_status = 'exit_confirmed_quote_diverged'
 
                                 if not sanity_override:
                                     exit_eval['shouldExit'] = True
@@ -5939,6 +6003,9 @@ def run_monitor(db):
                                     exit_eval['execution'] = simulate_res
                                     exit_eval['sellPct'] = sell_pct if exit_matrix['action'] == 'lock_profit' else 1.0
                                     exit_eval['tpName'] = 'MOON_LOCK' if exit_matrix['action'] == 'lock_profit' else None
+                                    exit_eval['quotePnl'] = _safe_float(quote_pnl, None)
+                                    exit_eval['quoteMarkGap'] = _safe_float(quote_mark_gap, None)
+                                    exit_eval['quoteSanityStatus'] = quote_sanity_status
                                     
                                     if exit_matrix['action'] == 'lock_profit':
                                         log.info(f"  [EXIT_MATRIX] 🌙 {pos.symbol} LOCK PROFIT! Selling {sell_pct*100:.0f}%, rest → Moon Bag")
@@ -6110,6 +6177,12 @@ def run_monitor(db):
                     sell_pct_delta = max(0.0, next_sold_pct - prev_sold_pct)
                     if sell_pct_delta <= 0:
                         sell_pct_delta = _safe_float(exit_eval.get('sellPct'), 0.0)
+                    partial_quote_pnl = exit_eval.get('quotePnl')
+                    if partial_quote_pnl is None:
+                        partial_quote_pnl = quote_pnl_from_execution(exit_eval.get('execution'), pos.entry_price)
+                    partial_quote_mark_gap = exit_eval.get('quoteMarkGap')
+                    if partial_quote_mark_gap is None and partial_quote_pnl is not None:
+                        partial_quote_mark_gap = partial_quote_pnl - trigger_pnl
                     pos.monitor_state = apply_partial_accounting_state(
                         updated_state,
                         exit_eval.get('execution'),
@@ -6120,6 +6193,9 @@ def run_monitor(db):
                         peak_pnl=pos.peak_pnl,
                         reason=reason,
                         ts=exit_ts,
+                        quote_pnl=partial_quote_pnl,
+                        quote_mark_gap=partial_quote_mark_gap,
+                        quote_sanity_status=exit_eval.get('quoteSanityStatus'),
                     )
                     sync_position_from_monitor_state(pos, allow_token_amount_override=True)
                     db.execute(
@@ -6143,6 +6219,9 @@ def run_monitor(db):
                                 'decisionType': exit_eval.get('action'),
                                 'tpName': exit_eval.get('tpName'),
                                 'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                                'quotePnlPct': _safe_float(partial_quote_pnl * 100.0 if partial_quote_pnl is not None else None, None),
+                                'quoteMarkGapPct': _safe_float(partial_quote_mark_gap * 100.0 if partial_quote_mark_gap is not None else None, None),
+                                'quoteSanityStatus': exit_eval.get('quoteSanityStatus'),
                                 'markSource': mark_source,
                             })),
                             json.dumps(pos.monitor_state),
@@ -6244,6 +6323,11 @@ def run_monitor(db):
                 quoted_exit_price = exit_execution.get('effectivePrice')
                 # SOL pricing: quoted_exit_price is already SOL/token from Jupiter
                 effective_exit_price = quoted_exit_price if quoted_exit_price is not None else exit_price
+                exit_quote_pnl = quote_pnl_from_execution(exit_execution, pos.entry_price)
+                exit_quote_mark_gap = (
+                    exit_quote_pnl - trigger_pnl
+                    if exit_quote_pnl is not None and trigger_pnl is not None else None
+                )
                 realized_pnl = pnl
                 actual_out = exit_execution.get('quotedOutAmount')
                 has_partial_history = not has_partial_state_gap(
@@ -6287,6 +6371,9 @@ def run_monitor(db):
                 pos.monitor_state['totalRealizedSol'] = _safe_float(total_realized_sol, None)
                 pos.monitor_state['blendedRealizedPnl'] = _safe_float(realized_pnl, None)
                 pos.monitor_state['accountingSource'] = accounting_source
+                pos.monitor_state['exitQuotePnl'] = _safe_float(exit_quote_pnl, None)
+                pos.monitor_state['exitQuoteMarkGap'] = _safe_float(exit_quote_mark_gap, None)
+                pos.monitor_state['exitQuoteSanity'] = exit_eval.get('quoteSanityStatus')
                 if total_realized_sol is not None:
                     pos.monitor_state['totalSolReceived'] = _safe_float(total_realized_sol, None)
 
@@ -6320,6 +6407,9 @@ def run_monitor(db):
                         'totalRealizedSol': _safe_float(total_realized_sol, None),
                         'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
                         'accountingSource': accounting_source,
+                        'quotePnlPct': _safe_float(exit_quote_pnl * 100.0 if exit_quote_pnl is not None else None, None),
+                        'quoteMarkGapPct': _safe_float(exit_quote_mark_gap * 100.0 if exit_quote_mark_gap is not None else None, None),
+                        'quoteSanityStatus': exit_eval.get('quoteSanityStatus'),
                         'partialRealizedSol': _safe_float((pos.monitor_state or {}).get('partialRealizedSol'), None),
                         'partialCostBasisSol': _safe_float((pos.monitor_state or {}).get('partialCostBasisSol'), None),
                         'partialRealizedPnlContribution': _safe_float((pos.monitor_state or {}).get('partialRealizedPnlContribution'), None),

@@ -29,6 +29,37 @@ LOTTO_PARTIAL_LOCK_PEAK = float(os.environ.get("LOTTO_PARTIAL_LOCK_PEAK", "0.20"
 LOTTO_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("LOTTO_PARTIAL_LOCK_MIN_PNL", "0.15"))
 LOTTO_PARTIAL_SELL_PCT = float(os.environ.get("LOTTO_PARTIAL_SELL_PCT", "0.25"))
 LOTTO_EPSILON = 1e-9
+QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
+
+
+def _quote_pnl_from_sim(sim, entry_price):
+    try:
+        quote_price = float((sim or {}).get('effectivePrice') or 0)
+        entry_price = float(entry_price or 0)
+    except (TypeError, ValueError):
+        return None
+    if quote_price <= 0 or entry_price <= 0:
+        return None
+    return (quote_price - entry_price) / entry_price
+
+
+def _clear_pending_partial_lock(pos, tp_name):
+    state = getattr(pos, 'monitor_state', None)
+    if not isinstance(state, dict):
+        return
+    tp_name = (tp_name or '').upper()
+    if tp_name == 'LOTTO_LOCK':
+        state.pop('lottoPartialLocked', None)
+        state.pop('lottoPartialLockPnl', None)
+        state.pop('lottoPartialLockPeak', None)
+    else:
+        state.pop('phase0PartialLocked', None)
+        state.pop('phase0PartialLockPnl', None)
+        state.pop('phase0PartialLockPeak', None)
+        try:
+            pos._phase0_partial_locked = False
+        except Exception:
+            pass
 
 
 # ─── Plan #3: Dynamic Stop-Loss (4-factor) ────────────────────────────────────
@@ -1044,11 +1075,41 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                     lifecycle_id=gx_lifecycle_id
                 )
             if not gx_sim or not gx_sim.get('success'):
+                _clear_pending_partial_lock(gx_pos, gx.get('tp_name'))
                 log.warning(
                     f"  [GUARDIAN_EXIT] partial lock skipped for {gx['symbol']}: "
                     f"{(gx_sim or {}).get('failureReason', 'quote_failed')}"
                 )
                 continue
+            gx_quote_pnl = _quote_pnl_from_sim(gx_sim, gx_pos.entry_price)
+            gx_quote_mark_gap = (
+                gx_quote_pnl - gx_trigger_pnl
+                if gx_quote_pnl is not None and gx_trigger_pnl is not None else None
+            )
+            gx_quote_sanity = 'quote_checked'
+            if gx_quote_pnl is None:
+                gx_quote_sanity = 'partial_lock_quote_missing'
+                _clear_pending_partial_lock(gx_pos, gx.get('tp_name'))
+                log.warning(
+                    f"  [GUARDIAN_EXIT] partial lock skipped for {gx['symbol']}: "
+                    f"missing quote PnL for mark={gx_trigger_pnl:+.1%}"
+                )
+                continue
+            if gx_quote_pnl < QUOTE_SANITY_PARTIAL_MIN_PNL:
+                gx_quote_sanity = 'partial_lock_quote_below_floor'
+                _clear_pending_partial_lock(gx_pos, gx.get('tp_name'))
+                log.warning(
+                    f"  [GUARDIAN_EXIT] partial lock skipped for {gx['symbol']}: "
+                    f"mark={gx_trigger_pnl:+.1%} quote={gx_quote_pnl:+.1%} "
+                    f"floor={QUOTE_SANITY_PARTIAL_MIN_PNL:+.1%}"
+                )
+                continue
+            if gx_quote_mark_gap is not None and abs(gx_quote_mark_gap) > 0.05:
+                log.info(
+                    f"  [GUARDIAN_EXIT] quote sanity for {gx['symbol']}: "
+                    f"mark={gx_trigger_pnl:+.1%} quote={gx_quote_pnl:+.1%} "
+                    f"gap={gx_quote_mark_gap:+.1%}"
+                )
 
             updated_state = (gx_pos.monitor_state or {}).copy()
             remaining_raw = max(0, int(float(gx_pos.token_amount_raw or 0)) - gx_sell_amount)
@@ -1073,6 +1134,9 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                     'tpName': gx.get('tp_name') or 'PHASE0_LOCK',
                     'sellPct': gx_sell_pct,
                     'prevSoldPct': prev_sold_pct,
+                    'quotePnl': gx_quote_pnl,
+                    'quoteMarkGap': gx_quote_mark_gap,
+                    'quoteSanityStatus': gx_quote_sanity,
                     'updatedState': updated_state,
                 },
             })
@@ -1093,6 +1157,11 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 gx_pos.strategy_stage, strategy_id=strategy_id,
                 lifecycle_id=gx_lifecycle_id
             )
+        gx_quote_pnl = _quote_pnl_from_sim(gx_sim, gx_pos.entry_price) if gx_sim else None
+        gx_quote_mark_gap = (
+            gx_quote_pnl - gx_trigger_pnl
+            if gx_quote_pnl is not None and gx_trigger_pnl is not None else None
+        )
         to_close.append({
             'trade_id': gx_trade_id,
             'reason': gx['reason'],
@@ -1104,6 +1173,9 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
             'exit_eval': {
                 'action': 'close',
                 'execution': gx_sim if (gx_sim and gx_sim.get('success')) else {'success': True, 'synthetic': True},
+                'quotePnl': gx_quote_pnl,
+                'quoteMarkGap': gx_quote_mark_gap,
+                'quoteSanityStatus': 'quote_checked' if gx_quote_pnl is not None else 'quote_unavailable',
             },
         })
         # IMPORTANT: Do NOT pop positions[gx_trade_id] here!

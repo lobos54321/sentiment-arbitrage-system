@@ -106,6 +106,9 @@ MISSED_HORIZONS = {
 }
 
 
+MISSED_BASELINE_LIVE_GRACE_SEC = 5 * 60
+
+
 def init_decision_audit(db):
     db.execute(CREATE_DECISION_AUDIT_SQL)
     for sql in CREATE_DECISION_AUDIT_INDEXES:
@@ -227,21 +230,36 @@ def _normalize_signal_ts_seconds(value):
 
 
 def _extract_baseline_price(payload):
-    for key in (
+    payload = payload or {}
+    candidate_paths = [(key,) for key in (
         "signal_price",
         "current_price",
         "trigger_price",
         "momentum_final_price",
         "quote_price",
         "entry_price",
-    ):
-        value = (payload or {}).get(key)
+    )]
+    candidate_paths.extend([
+        ("lifecycle", "lifecycle_features", "signal_price"),
+        ("lifecycle", "lifecycle_features", "current_price"),
+        ("lifecycle", "lifecycle_features", "trigger_price"),
+        ("lifecycle_features", "signal_price"),
+        ("lifecycle_features", "current_price"),
+        ("lifecycle_features", "trigger_price"),
+    ])
+    for path in candidate_paths:
+        cursor = payload
+        for key in path:
+            if not isinstance(cursor, dict):
+                cursor = None
+                break
+            cursor = cursor.get(key)
         try:
-            price = float(value)
+            price = float(cursor)
         except (TypeError, ValueError):
             continue
         if price > 0:
-            return price, key
+            return price, ".".join(path)
     return None, None
 
 
@@ -345,13 +363,21 @@ def update_due_missed_attributions(
         SELECT *
         FROM paper_missed_signal_attribution
         WHERE status != 'complete'
-        ORDER BY id ASC
+        ORDER BY
+          CASE
+            WHEN baseline_price IS NULL AND status = 'pending' THEN 0
+            WHEN baseline_price IS NOT NULL THEN 1
+            ELSE 2
+          END,
+          datetime(COALESCE(updated_at, created_at)) ASC,
+          id ASC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
 
     updated = 0
+    touched = 0
     for row in rows:
         token_ca = row["token_ca"]
         base_ts = row["baseline_ts"] or row["signal_ts"] or int(row["created_event_ts"])
@@ -363,13 +389,27 @@ def update_due_missed_attributions(
             if hist:
                 baseline_price, baseline_source = hist[0], hist[1]
 
-        if not baseline_price and live_price_fetcher:
+        if not baseline_price and live_price_fetcher and now - int(base_ts or now) <= MISSED_BASELINE_LIVE_GRACE_SEC:
             live = live_price_fetcher(token_ca)
             if live:
                 baseline_price, baseline_source = live[0], live[1]
                 base_ts = int(live[2] or now)
 
         if not baseline_price or baseline_price <= 0:
+            changes = {}
+            if now - int(base_ts or now) > MISSED_BASELINE_LIVE_GRACE_SEC and row["status"] != "baseline_missing":
+                changes["status"] = "baseline_missing"
+                changes["baseline_source"] = baseline_source or "missing:no_price_source"
+            changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            set_clause = ", ".join(f"{key} = ?" for key in changes)
+            db.execute(
+                f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
+                [*changes.values(), row["id"]],
+            )
+            if len(changes) > 1:
+                updated += 1
+            else:
+                touched += 1
             continue
 
         changes = {}
@@ -428,6 +468,11 @@ def update_due_missed_attributions(
         if row["status"] != next_status:
             changes["status"] = next_status
         if not changes:
+            db.execute(
+                "UPDATE paper_missed_signal_attribution SET updated_at = ? WHERE id = ?",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+            )
+            touched += 1
             continue
         changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -438,9 +483,41 @@ def update_due_missed_attributions(
         )
         updated += 1
 
-    if updated:
+    if updated or touched:
         db.commit()
     return updated
+
+
+def missed_attribution_coverage(db, *, since_ts=None):
+    where = ""
+    params = []
+    if since_ts is not None:
+        where = "WHERE created_event_ts >= ?"
+        params.append(float(since_ts))
+    row = db.execute(
+        f"""
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN baseline_price IS NOT NULL THEN 1 ELSE 0 END) AS baseline_n,
+          SUM(CASE WHEN pnl_5m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_5m_n,
+          SUM(CASE WHEN pnl_15m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_15m_n,
+          SUM(CASE WHEN pnl_60m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_60m_n,
+          SUM(CASE WHEN status = 'baseline_missing' THEN 1 ELSE 0 END) AS baseline_missing_n
+        FROM paper_missed_signal_attribution
+        {where}
+        """,
+        params,
+    ).fetchone()
+    if not row:
+        return {}
+    return {
+        "total": int(row["total"] or 0),
+        "baseline_n": int(row["baseline_n"] or 0),
+        "pnl_5m_n": int(row["pnl_5m_n"] or 0),
+        "pnl_15m_n": int(row["pnl_15m_n"] or 0),
+        "pnl_60m_n": int(row["pnl_60m_n"] or 0),
+        "baseline_missing_n": int(row["baseline_missing_n"] or 0),
+    }
 
 
 def signal_payload(sig):
