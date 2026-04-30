@@ -1052,11 +1052,12 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
 
             updated_state = (gx_pos.monitor_state or {}).copy()
             remaining_raw = max(0, int(float(gx_pos.token_amount_raw or 0)) - gx_sell_amount)
+            prev_sold_pct = float(updated_state.get('soldPct') or 0.0)
             updated_state['tokenAmount'] = remaining_raw
             updated_state['phase0PartialLocked'] = True
             updated_state['phase0PartialLockPnl'] = gx_trigger_pnl
             updated_state['phase0PartialLockPeak'] = max(float(getattr(gx_pos, 'peak_pnl', 0) or 0), gx_trigger_pnl)
-            updated_state['soldPct'] = min(1.0, float(updated_state.get('soldPct') or 0.0) + gx_sell_pct)
+            updated_state['soldPct'] = min(1.0, prev_sold_pct + gx_sell_pct)
             updated_state['lockedPnl'] = gx_trigger_pnl
             to_close.append({
                 'trade_id': gx_trade_id,
@@ -1071,6 +1072,7 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                     'execution': gx_sim,
                     'tpName': gx.get('tp_name') or 'PHASE0_LOCK',
                     'sellPct': gx_sell_pct,
+                    'prevSoldPct': prev_sold_pct,
                     'updatedState': updated_state,
                 },
             })

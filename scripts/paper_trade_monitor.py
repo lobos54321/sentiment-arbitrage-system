@@ -5951,6 +5951,7 @@ def run_monitor(db):
                                         exit_eval['updatedState'] = (pos.monitor_state or {}).copy()
                                         exit_eval['updatedState']['tokenAmount'] = rem_amount
                                         prev_sold_pct = _safe_float(exit_eval['updatedState'].get('soldPct'), 0.0)
+                                        exit_eval['prevSoldPct'] = prev_sold_pct
                                         exit_eval['updatedState']['soldPct'] = min(1.0, prev_sold_pct + sell_pct)
                                         exit_eval['updatedState']['lockedPnl'] = exit_matrix.get('current_pnl', 0.0)
                                         exit_eval['updatedState']['moonbag'] = True
@@ -6005,6 +6006,9 @@ def run_monitor(db):
                         continue
                     action = exit_eval.get('action') or 'hold'
                     should_exit = bool(exit_eval.get('shouldExit'))
+                    prev_monitor_state_for_eval = dict(pos.monitor_state or {})
+                    if action == 'partial_sell' and exit_eval.get('prevSoldPct') is None:
+                        exit_eval['prevSoldPct'] = _safe_float(prev_monitor_state_for_eval.get('soldPct'), 0.0)
                     pos.monitor_state = exit_eval.get('updatedState') or pos.monitor_state
                     sync_position_from_monitor_state(pos, allow_token_amount_override=(action == 'partial_sell'))
                     reason = exit_eval.get('exitReason') or exit_eval.get('lifecycleReason')
@@ -6100,9 +6104,8 @@ def run_monitor(db):
                         peak_pnl=pos.peak_pnl,
                     )
                 if exit_eval.get('action') == 'partial_sell':
-                    prev_state = dict(pos.monitor_state or {})
                     updated_state = exit_eval.get('updatedState') or pos.monitor_state
-                    prev_sold_pct = _safe_float(prev_state.get('soldPct'), 0.0)
+                    prev_sold_pct = _safe_float(exit_eval.get('prevSoldPct'), 0.0)
                     next_sold_pct = _safe_float((updated_state or {}).get('soldPct'), prev_sold_pct)
                     sell_pct_delta = max(0.0, next_sold_pct - prev_sold_pct)
                     if sell_pct_delta <= 0:
