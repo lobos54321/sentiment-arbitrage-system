@@ -153,6 +153,10 @@ LOTTO_PHASE_POLICY_LIVE_EXIT = os.environ.get('LOTTO_PHASE_POLICY_LIVE_EXIT', 't
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
+LOTTO_REAL_PROBE_ENABLED = os.environ.get('LOTTO_REAL_PROBE_ENABLED', 'true').lower() != 'false'
+LOTTO_REAL_PROBE_MIN_MAX_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_MAX_PNL', '0.25'))
+LOTTO_REAL_PROBE_MIN_15M_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_15M_PNL', '0.15'))
+LOTTO_REAL_PROBE_SIZE_SOL = float(os.environ.get('LOTTO_REAL_PROBE_SIZE_SOL', '0.03'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
 
@@ -769,6 +773,161 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
         )
         recorded += 1
     return recorded
+
+
+def find_lotto_real_probe_candidates(db, *, now_ts, limit=3):
+    if not LOTTO_REAL_PROBE_ENABLED:
+        return []
+    return db.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                m.*,
+                COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS best_pnl,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.token_ca
+                    ORDER BY COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC,
+                             m.created_event_ts DESC
+                ) AS rn
+            FROM paper_missed_signal_attribution m
+            WHERE m.route = 'LOTTO'
+              AND m.baseline_price IS NOT NULL
+              AND m.pnl_15m IS NOT NULL
+              AND COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) >= ?
+              AND m.pnl_15m >= ?
+              AND LOWER(COALESCE(m.reject_reason, '')) NOT LIKE '%stale%'
+              AND m.created_event_ts >= ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM paper_decision_events e
+                  WHERE e.component = 'lotto_probe_live'
+                    AND e.token_ca = m.token_ca
+                    AND e.event_type IN ('pending_entry', 'skip')
+              )
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY best_pnl DESC, pnl_15m DESC
+        LIMIT ?
+        """,
+        (
+            LOTTO_REAL_PROBE_MIN_MAX_PNL,
+            LOTTO_REAL_PROBE_MIN_15M_PNL,
+            now_ts - 2 * 60 * 60,
+            limit,
+        ),
+    ).fetchall()
+
+
+def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, positions, *, now_ts, limit=2, max_positions=None):
+    if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+        return 0
+    rows = find_lotto_real_probe_candidates(db, now_ts=now_ts, limit=limit)
+    enqueued = 0
+    for row in rows:
+        token_ca = row['token_ca']
+        symbol = row['symbol'] or token_ca[:8]
+        lifecycle_id = build_lifecycle_id(token_ca, row['signal_ts'] or int(row['created_event_ts']))
+        if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+            break
+        if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+            record_decision_event(
+                db,
+                component='lotto_probe_live',
+                event_type='skip',
+                decision='skip',
+                reason='already_pending_or_holding',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='LOTTO',
+                payload={'missed_attribution_id': row['id']},
+                event_ts=now_ts,
+            )
+            continue
+
+        pool = get_pool_address(token_ca)
+        if not pool:
+            record_decision_event(
+                db,
+                component='lotto_probe_live',
+                event_type='skip',
+                decision='skip',
+                reason='pool_not_found',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='LOTTO',
+                payload={'missed_attribution_id': row['id']},
+                event_ts=now_ts,
+            )
+            continue
+
+        features = {}
+        try:
+            features = json.loads(row['lifecycle_features_json'] or '{}')
+        except Exception:
+            features = {}
+        w_entry = watchlist.register(
+            ca=token_ca,
+            symbol=symbol,
+            signal_type='LOTTO',
+            pool_address=pool,
+            signal_ts=row['signal_ts'] or int(row['created_event_ts']),
+            premium_signal_id=row['signal_id'],
+            signal_price=row['baseline_price'],
+            signal_mc=features.get('market_cap') or 0,
+            signal_super=0,
+            signal_holders=0,
+            signal_vol24h=features.get('vol_h1') or 0,
+            signal_tx24h=0,
+            signal_top10=0,
+        )
+        if not w_entry:
+            continue
+        watchlist.update_position_state(w_entry['id'], signal_route='LOTTO')
+        w_entry = watchlist.get_by_id(w_entry['id']) or w_entry
+        detail = {
+            'probe': True,
+            'probe_source': 'missed_attribution',
+            'missed_attribution_id': row['id'],
+            'source_component': row['component'],
+            'source_reject_reason': row['reject_reason'],
+            'best_pnl': row['best_pnl'],
+            'pnl_5m': row['pnl_5m'],
+            'pnl_15m': row['pnl_15m'],
+            'pnl_60m': row['pnl_60m'],
+            'position_size_sol': LOTTO_REAL_PROBE_SIZE_SOL,
+        }
+        pending_entries[lifecycle_id] = build_lotto_pending(w_entry, lifecycle_id, detail=detail)
+        pending_entries[lifecycle_id]['kelly_position_sol'] = LOTTO_REAL_PROBE_SIZE_SOL
+        pending_entries[lifecycle_id]['entry_mode'] = 'lotto_real_probe'
+        pending_entries[lifecycle_id]['replay_source'] = 'live_monitor_lotto_probe'
+        pending_entries[lifecycle_id]['stage_outcome'] = 'lotto_probe_entered'
+        pending_entries[lifecycle_id]['lotto_state']['probe'] = True
+        pending_entries[lifecycle_id]['lotto_state']['probeSource'] = 'missed_attribution'
+        record_decision_event(
+            db,
+            component='lotto_probe_live',
+            event_type='pending_entry',
+            decision='pending',
+            reason='missed_confirmed_15m_probe',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='LOTTO',
+            payload=detail,
+            event_ts=now_ts,
+        )
+        enqueued += 1
+    return enqueued
 
 
 def should_block_lotto_falling_knife(lotto_detail, lotto_lifecycle):
@@ -4218,6 +4377,26 @@ def run_monitor(db):
                         )
                 except Exception as _probe_shadow_err:
                     log.debug(f"  [LOTTO_PROBE_SHADOW] scan failed: {_probe_shadow_err}")
+                try:
+                    with positions_lock:
+                        _probe_live_n = enqueue_lotto_real_probe_candidates(
+                            db,
+                            watchlist,
+                            pending_entries,
+                            dict(positions),
+                            now_ts=now,
+                            limit=1,
+                            max_positions=max_positions,
+                        )
+                    if _probe_live_n:
+                        log.info(
+                            f"  [LOTTO_PROBE_LIVE] pending={_probe_live_n} "
+                            f"minMax={LOTTO_REAL_PROBE_MIN_MAX_PNL:.0%} "
+                            f"min15m={LOTTO_REAL_PROBE_MIN_15M_PNL:.0%} "
+                            f"size={LOTTO_REAL_PROBE_SIZE_SOL:.3f}SOL"
+                        )
+                except Exception as _probe_live_err:
+                    log.debug(f"  [LOTTO_PROBE_LIVE] scan failed: {_probe_live_err}")
             except Exception as _missed_err:
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
@@ -5421,7 +5600,7 @@ def run_monitor(db):
 
                     # LOTTO: fixed paper size, skip Kelly and liquidity cap
                     if pending.get('is_lotto'):
-                        actual_position_size_sol = LOTTO_POSITION_SIZE_SOL
+                        actual_position_size_sol = float(pending.get('kelly_position_sol') or LOTTO_POSITION_SIZE_SOL)
                         log.info(f"  [LOTTO] {pending['symbol']} fixed size: {actual_position_size_sol} SOL")
                     else:
                         # Recalculate Kelly with entry mode + matrix scores

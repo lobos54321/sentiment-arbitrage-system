@@ -99,11 +99,39 @@ def test_missing_baseline_becomes_explicit_and_does_not_block_fresh_rows():
     assert coverage["baseline_missing_n"] == 1
 
 
+def test_matrix_wait_records_once_for_attribution():
+    db = new_db()
+    for event_ts in (1000, 1005):
+        record_decision_event(
+            db,
+            component="matrix_evaluator",
+            event_type="matrix_decision",
+            decision="wait",
+            reason="matrices not yet aligned",
+            token_ca="AthWaitToken",
+            symbol="ATHWAIT",
+            route="ATH",
+            signal_ts=900,
+            payload={"current_price": 0.25},
+            event_ts=event_ts,
+        )
+    rows = db.execute(
+        "SELECT route, component, decision, reject_reason, baseline_price FROM paper_missed_signal_attribution"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["route"] == "ATH"
+    assert rows[0]["component"] == "matrix_evaluator"
+    assert rows[0]["decision"] == "wait"
+    assert rows[0]["reject_reason"] == "matrices not yet aligned"
+    assert rows[0]["baseline_price"] == 0.25
+
+
 def run_tests():
     tests = [
         test_extracts_nested_lifecycle_baseline,
         test_upstream_reject_records_baseline_when_payload_has_price,
         test_missing_baseline_becomes_explicit_and_does_not_block_fresh_rows,
+        test_matrix_wait_records_once_for_attribution,
     ]
     for test in tests:
         test()

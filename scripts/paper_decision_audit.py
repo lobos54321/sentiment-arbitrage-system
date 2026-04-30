@@ -283,6 +283,8 @@ def _should_track_missed(*, component, event_type=None, decision=None, route=Non
 
     if route_u not in {"LOTTO", "MATRIX", "ATH", "NOT_ATH", "WATCHLIST"}:
         return False
+    if decision == "wait" and component == "matrix_evaluator" and route_u in {"MATRIX", "ATH", "NOT_ATH"}:
+        return True
     if decision not in {"reject", "skip", "abort", "remove", "expire"}:
         return False
     if component in {"signal_ingest", "trade_lifecycle"}:
@@ -315,6 +317,22 @@ def _maybe_record_missed_attribution(
     lifecycle = _extract_lifecycle_payload(payload or {})
     signal_ts_sec = _normalize_signal_ts_seconds(signal_ts)
     baseline_ts = signal_ts_sec or int(event_ts)
+    existing = db.execute(
+        """
+        SELECT 1
+        FROM paper_missed_signal_attribution
+        WHERE token_ca = ?
+          AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
+          AND COALESCE(route, '') = COALESCE(?, '')
+          AND component = ?
+          AND decision = ?
+          AND COALESCE(reject_reason, '') = COALESCE(?, '')
+        LIMIT 1
+        """,
+        (token_ca, signal_ts_sec, route, component, decision, reason),
+    ).fetchone()
+    if existing:
+        return
     db.execute(
         """
         INSERT OR IGNORE INTO paper_missed_signal_attribution
