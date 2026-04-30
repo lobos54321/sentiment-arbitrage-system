@@ -586,6 +586,62 @@ def print_lifecycle_quality(rows, db, since_ts, limit):
                     )
 
 
+def print_phase_policy_shadow(db, since_ts, limit):
+    if not table_exists(db, "paper_decision_events"):
+        return
+    rows = db.execute(
+        """
+        SELECT trade_id, symbol, decision, reason, payload_json, event_ts
+        FROM paper_decision_events
+        WHERE event_ts >= ?
+          AND component = 'phase_policy'
+          AND event_type = 'shadow_decision'
+        ORDER BY event_ts ASC
+        """,
+        (since_ts,),
+    ).fetchall()
+    if not rows:
+        return
+
+    groups = defaultdict(list)
+    actions = Counter()
+    high_rug = []
+    for row in rows:
+        payload = load_json(row["payload_json"])
+        phase = payload.get("phase_state") or "UNKNOWN"
+        action = row["decision"] or payload.get("shadow_action") or "UNKNOWN"
+        kline = payload.get("kline_position_state") or "UNKNOWN"
+        groups[(phase, action, kline)].append((row, payload))
+        actions[action] += 1
+        rug = float(payload.get("rug_risk_score") or 0.0)
+        if rug >= 50:
+            high_rug.append((rug, row, payload))
+
+    print("\nPhase Policy Shadow")
+    print(f"  samples={len(rows)} trades={len(set(r['trade_id'] for r in rows if r['trade_id'] is not None))}")
+    print("  Actions: " + ", ".join(f"{k}={v}" for k, v in actions.most_common()))
+    print(f"  {'phase':<20} {'action':<12} {'kline':<20} {'n':>4} {'avg_ev':>7} {'avg_rug':>8} examples")
+    for (phase, action, kline), group in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)[:limit]:
+        evs = [float(p.get("ev_score") or 0.0) for _, p in group]
+        rugs = [float(p.get("rug_risk_score") or 0.0) for _, p in group]
+        examples = ", ".join(str((r["symbol"] or "?"))[:10] for r, _ in group[-4:])
+        print(
+            f"  {phase:<20} {action:<12} {kline:<20} {len(group):>4} "
+            f"{(sum(evs) / len(evs) if evs else 0):>7.1f} "
+            f"{(sum(rugs) / len(rugs) if rugs else 0):>8.1f} {examples}"
+        )
+
+    if high_rug:
+        print("  High Rug-Risk Samples")
+        for rug, row, payload in sorted(high_rug, key=lambda item: item[0], reverse=True)[:limit]:
+            print(
+                f"    #{row['trade_id']} {str(row['symbol'] or '?')[:12]:<12} "
+                f"rug={rug:>5.1f} phase={payload.get('phase_state')} action={row['decision']} "
+                f"mark={pct(payload.get('current_pnl'))} peak={pct(payload.get('peak_pnl'))} "
+                f"kline={payload.get('kline_position_state')} reason={row['reason']}"
+            )
+
+
 def print_decision_read(rows, db, since_ts):
     closed = [r for r in rows if r["exit_ts"] is not None]
     tags = Counter()
@@ -648,6 +704,7 @@ def main():
     print_selection_quality(rows, db, since_ts, args.limit)
     print_path_sample_quality(db, since_ts, args.limit)
     print_lifecycle_quality(rows, db, since_ts, args.limit)
+    print_phase_policy_shadow(db, since_ts, args.limit)
     print_decision_read(rows, db, since_ts)
 
 

@@ -49,6 +49,7 @@ from entry_engine import (
     clear_dex_trend_cache,
     get_liquidity_position_cap, get_adaptive_stop_loss,
     is_chasing_top,
+    get_recent_synthetic_bars,
     KELLY_BASE_CAPITAL_SOL, KELLY_BASE_WIN_RATE, KELLY_BASE_ODDS, KELLY_COLD_START_ODDS,
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
@@ -61,6 +62,7 @@ from paper_decision_audit import (
     update_due_missed_attributions,
 )
 from lifecycle_classifier import classify_lifecycle
+from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -634,7 +636,7 @@ def quote_pnl_from_execution(execution, entry_price):
     return (quote_price - entry_price) / entry_price
 
 
-def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, mark_pnl, mark_source, quote_execution=None, peak_pnl=None):
+def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, mark_pnl, mark_source, quote_execution=None, peak_pnl=None, phase_policy=None):
     execution = quote_execution if isinstance(quote_execution, dict) else {}
     quote_price = _safe_float(execution.get('effectivePrice'), None)
     quote_out_sol = _safe_float(execution.get('quotedOutAmount'), None)
@@ -643,6 +645,8 @@ def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, 
         quote_pnl = (quote_price - pos.entry_price) / pos.entry_price
     state = pos.monitor_state or {}
     payload = build_execution_audit(execution) if execution else {}
+    if phase_policy:
+        payload['phase_policy'] = phase_policy
     db.execute(
         """
         INSERT INTO paper_trade_path_samples
@@ -5751,6 +5755,7 @@ def run_monitor(db):
                         
                         # --- POST-ENTRY EXIT MATRIX ENGINE ---
                         w_entry = watchlist.get_by_ca(pos.token_ca)
+                        _dex_snap = None
 
                         # B+C: Poll Helius for real TPS (30s interval, cached)
                         if w_entry:
@@ -6092,6 +6097,57 @@ def run_monitor(db):
                     trigger_pnl = float(exit_eval.get('triggerPnl') or 0.0)
                     lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                     lifecycle['first_peak_pct'] = max(lifecycle.get('first_peak_pct') or 0.0, pos.peak_pnl * 100.0)
+                    phase_policy_payload = None
+                    try:
+                        _phase_bars = get_recent_synthetic_bars(
+                            pos.token_ca,
+                            n_bars=25,
+                            pool_address=pos.pool_address or pos_pool,
+                            native_only=True,
+                        )
+                        if _dex_snap is None:
+                            try:
+                                _dex_snap = fetch_dexscreener_trend_snapshot(pos.token_ca)
+                            except Exception:
+                                _dex_snap = None
+                        _phase_decision = evaluate_phase_policy(
+                            route=(w_entry or {}).get('signal_route') or (pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                            current_pnl=trigger_pnl,
+                            peak_pnl=pos.peak_pnl,
+                            held_sec=max(0.0, time.time() - float(pos.entry_ts or time.time())),
+                            sold_pct=_safe_float((pos.monitor_state or {}).get('soldPct'), 0.0),
+                            dex_snapshot=_dex_snap,
+                            kline_bars=_phase_bars,
+                            current_price=price,
+                            quote_pnl=exit_eval.get('quotePnl'),
+                            lifecycle_state=(pos.monitor_state or {}).get('lifecycleState'),
+                            vitality_score=(pos.monitor_state or {}).get('vitalityScore'),
+                        )
+                        phase_policy_payload = _phase_decision.to_payload()
+                        record_decision_event(
+                            db,
+                            component='phase_policy',
+                            event_type='shadow_decision',
+                            decision=phase_policy_payload.get('shadow_action'),
+                            reason=phase_policy_payload.get('reason'),
+                            token_ca=pos.token_ca,
+                            symbol=pos.symbol,
+                            lifecycle_id=pos.lifecycle_id,
+                            trade_id=pos.trade_id,
+                            signal_ts=pos.signal_ts,
+                            signal_id=getattr(pos, 'premium_signal_id', None),
+                            strategy_stage=pos.strategy_stage,
+                            route=(w_entry or {}).get('signal_route') or (pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                            data_source='phase_policy_shadow',
+                            payload={
+                                **phase_policy_payload,
+                                'current_pnl': trigger_pnl,
+                                'peak_pnl': pos.peak_pnl,
+                                'held_sec': max(0.0, time.time() - float(pos.entry_ts or time.time())),
+                            },
+                        )
+                    except Exception as _phase_err:
+                        log.debug(f"  [PHASE_POLICY] shadow eval failed for {pos.symbol}: {_phase_err}")
                     record_trade_path_sample(
                         db,
                         pos,
@@ -6103,6 +6159,7 @@ def run_monitor(db):
                         mark_source=mark_source,
                         quote_execution=mark_execution if action in ('partial_sell', 'exit', 'close') or should_exit else None,
                         peak_pnl=pos.peak_pnl,
+                        phase_policy=phase_policy_payload,
                     )
                     db.execute("""
                         UPDATE paper_trades
