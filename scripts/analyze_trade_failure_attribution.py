@@ -642,6 +642,38 @@ def print_phase_policy_shadow(db, since_ts, limit):
             )
 
 
+def print_lotto_probe_shadow(db, since_ts, limit):
+    if not table_exists(db, "paper_decision_events"):
+        return
+    rows = db.execute(
+        """
+        SELECT symbol, reason, payload_json, event_ts
+        FROM paper_decision_events
+        WHERE event_ts >= ?
+          AND component = 'lotto_probe_shadow'
+          AND event_type = 'probe_candidate'
+        ORDER BY event_ts DESC
+        LIMIT ?
+        """,
+        (since_ts, limit),
+    ).fetchall()
+    if not rows:
+        return
+
+    print("\nLOTTO Probe Shadow")
+    print(f"  candidates={len(rows)}")
+    print(f"  {'symbol':<12} {'5m':>8} {'15m':>8} {'60m':>8} {'source':<18} reason")
+    for row in rows:
+        payload = load_json(row["payload_json"])
+        source = payload.get("source_component") or "?"
+        source_reason = payload.get("source_reject_reason") or row["reason"]
+        print(
+            f"  {str(row['symbol'] or '?')[:12]:<12} "
+            f"{pct(payload.get('pnl_5m')):>8} {pct(payload.get('pnl_15m')):>8} "
+            f"{pct(payload.get('pnl_60m')):>8} {source:<18} {source_reason}"
+        )
+
+
 def print_decision_read(rows, db, since_ts):
     closed = [r for r in rows if r["exit_ts"] is not None]
     tags = Counter()
@@ -675,11 +707,11 @@ def print_decision_read(rows, db, since_ts):
         print("  Simplest hypothesis: no single dominant bucket yet; keep collecting path-level samples.")
 
     print("  Smallest next action:")
-    print("    1. Persist per-trade price samples: trade_id, ts, mark_pnl, quote_pnl, peak_pnl, sold_pct.")
-    print("    2. For partial locks, report blended realized+unrealized PnL separately from remaining-position PnL.")
-    print("    3. Gate any route whose last-N attribution bucket is dominated by entry_no_follow/DOA.")
+    print("    1. Compare phase_policy/control_decision exits against LOTTO hard_floor/sl losses.")
+    print("    2. Compare lotto_probe_shadow candidates against missed 25p/50p/100p dogs.")
+    print("    3. Only promote probe to real paper if its shadow drawdown is lower than main LOTTO.")
     print("  Decision rule:")
-    print("    Continue threshold tuning only if execution_mark_gap and positive_peak_to_loss fall after path logging.")
+    print("    Continue if LOTTO hard losses fall without killing 25p+ winners; otherwise tighten entry before adding probe buys.")
 
 
 def main():
@@ -705,6 +737,7 @@ def main():
     print_path_sample_quality(db, since_ts, args.limit)
     print_lifecycle_quality(rows, db, since_ts, args.limit)
     print_phase_policy_shadow(db, since_ts, args.limit)
+    print_lotto_probe_shadow(db, since_ts, args.limit)
     print_decision_read(rows, db, since_ts)
 
 

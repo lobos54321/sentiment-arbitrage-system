@@ -148,6 +148,10 @@ NO_ROUTE_TRAP_MINUTES = max(1, int(os.environ.get('NO_ROUTE_TRAP_MINUTES', '15')
 TRAPPED_NO_ROUTE_PNL_PCT = float(os.environ.get('TRAPPED_NO_ROUTE_PNL_PCT', '-1.0'))
 ENTRY_QUOTE_MAX_ATTEMPTS = max(1, int(os.environ.get('ENTRY_QUOTE_MAX_ATTEMPTS', '5')))
 ENTRY_QUOTE_MAX_AGE_SEC = max(30, int(os.environ.get('ENTRY_QUOTE_MAX_AGE_SEC', '180')))
+LOTTO_PHASE_POLICY_LIVE_EXIT = os.environ.get('LOTTO_PHASE_POLICY_LIVE_EXIT', 'true').lower() != 'false'
+LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
+LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
+LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
 
 REDIS_URL = os.environ.get('REDIS_URL', '').strip()
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
@@ -685,6 +689,82 @@ def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, 
             json.dumps(payload) if payload else None,
         ),
     )
+
+
+def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
+    """Record missed LOTTO rows that would qualify for a tiny second-pass probe.
+
+    This is intentionally attribution-only. It creates audit events that let us
+    compare "would probe" candidates against the existing missed-dog outcomes
+    before changing entry behavior.
+    """
+    if not LOTTO_PROBE_SHADOW_ENABLED:
+        return 0
+    rows = db.execute(
+        """
+        SELECT
+            m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
+            m.route, m.component, m.reject_reason, m.baseline_price, m.pnl_5m,
+            m.pnl_15m, m.pnl_60m, m.max_pnl_recorded, m.lifecycle_state,
+            m.vitality_score, m.entry_bias
+        FROM paper_missed_signal_attribution m
+        WHERE m.route = 'LOTTO'
+          AND m.baseline_price IS NOT NULL
+          AND m.pnl_5m IS NOT NULL
+          AND m.pnl_5m >= ?
+          AND m.created_event_ts >= ?
+          AND m.component IN ('upstream_gate', 'lotto_entry_gate')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM paper_decision_events e
+              WHERE e.component = 'lotto_probe_shadow'
+                AND e.token_ca = m.token_ca
+                AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
+                AND e.reason = m.reject_reason
+          )
+        ORDER BY m.pnl_5m DESC, COALESCE(m.max_pnl_recorded, m.pnl_5m) DESC
+        LIMIT ?
+        """,
+        (LOTTO_PROBE_SHADOW_MIN_5M_PNL, now_ts - 2 * 60 * 60, limit),
+    ).fetchall()
+    recorded = 0
+    for row in rows:
+        reason = f"missed_reaccelerated_5m_{LOTTO_PROBE_SHADOW_MIN_5M_PNL:.0%}"
+        payload = {
+            'missed_attribution_id': row['id'],
+            'source_component': row['component'],
+            'source_reject_reason': row['reject_reason'],
+            'baseline_price': row['baseline_price'],
+            'pnl_5m': row['pnl_5m'],
+            'pnl_15m': row['pnl_15m'],
+            'pnl_60m': row['pnl_60m'],
+            'max_pnl_recorded': row['max_pnl_recorded'],
+            'suggested_position_size_sol': LOTTO_PROBE_SHADOW_SIZE_SOL,
+            'probe_mode': 'shadow_only',
+            'lifecycle': {
+                'lifecycle_state': row['lifecycle_state'],
+                'vitality_score': row['vitality_score'],
+                'entry_bias': row['entry_bias'],
+            },
+        }
+        record_decision_event(
+            db,
+            component='lotto_probe_shadow',
+            event_type='probe_candidate',
+            decision='PROBE_SHADOW',
+            reason=reason,
+            token_ca=row['token_ca'],
+            symbol=row['symbol'],
+            lifecycle_id=row['lifecycle_id'],
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='LOTTO',
+            data_source='missed_attribution',
+            payload=payload,
+            event_ts=now_ts,
+        )
+        recorded += 1
+    return recorded
 
 
 def lifecycle_payload_for(*, signal=None, watchlist_entry=None, dex_snapshot=None, live_concentration=None,
@@ -4090,6 +4170,16 @@ def run_monitor(db):
                         )
                 except Exception as _coverage_err:
                     log.debug(f"  [MISSED_ATTRIBUTION_COVERAGE] query failed: {_coverage_err}")
+                try:
+                    _probe_shadow_n = record_lotto_probe_shadow_candidates(db, now_ts=now, limit=30)
+                    if _probe_shadow_n:
+                        log.info(
+                            f"  [LOTTO_PROBE_SHADOW] candidates={_probe_shadow_n} "
+                            f"min5m={LOTTO_PROBE_SHADOW_MIN_5M_PNL:.0%} "
+                            f"size={LOTTO_PROBE_SHADOW_SIZE_SOL:.3f}SOL"
+                        )
+                except Exception as _probe_shadow_err:
+                    log.debug(f"  [LOTTO_PROBE_SHADOW] scan failed: {_probe_shadow_err}")
             except Exception as _missed_err:
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
@@ -6148,6 +6238,99 @@ def run_monitor(db):
                         )
                     except Exception as _phase_err:
                         log.debug(f"  [PHASE_POLICY] shadow eval failed for {pos.symbol}: {_phase_err}")
+
+                    if (
+                        LOTTO_PHASE_POLICY_LIVE_EXIT
+                        and phase_policy_payload
+                        and action not in ('partial_sell', 'exit')
+                        and not should_exit
+                    ):
+                        _policy_route = (
+                            (w_entry or {}).get('signal_route')
+                            or (pos.monitor_state or {}).get('signalRoute')
+                            or getattr(pos, 'signal_type', None)
+                        )
+                        _is_lotto_policy_route = (
+                            str(_policy_route or '').upper() == 'LOTTO'
+                            or (w_entry is not None and is_lotto_position(pos, w_entry))
+                        )
+                        _phase_state = phase_policy_payload.get('phase_state')
+                        _phase_action = phase_policy_payload.get('shadow_action')
+                        _phase_reason = phase_policy_payload.get('reason')
+                        _live_reason = None
+                        if _is_lotto_policy_route and _phase_action == 'EXIT':
+                            if _phase_state == 'RUG_DEFENSE':
+                                _live_reason = f"phase_rug_defense_exit ({_phase_reason})"
+                            elif _phase_reason == 'no_follow_fast_fail_30s':
+                                _live_reason = "phase_no_follow_fast_fail_30s"
+
+                        if _live_reason:
+                            _sell_amount_raw = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
+                            _phase_sim = simulate_exit_execution(
+                                pos.token_ca,
+                                str(_sell_amount_raw),
+                                getattr(pos, 'token_decimals', 0) or 0,
+                                pos.strategy_stage,
+                                strategy_id=strategy_id,
+                                lifecycle_id=pos.lifecycle_id,
+                            )
+                            _phase_quote_pnl = quote_pnl_from_execution(_phase_sim, pos.entry_price)
+                            _phase_quote_gap = (
+                                _phase_quote_pnl - trigger_pnl
+                                if _phase_quote_pnl is not None and trigger_pnl is not None else None
+                            )
+                            exit_eval.update({
+                                'shouldExit': True,
+                                'action': 'exit',
+                                'exitReason': _live_reason,
+                                'execution': _phase_sim,
+                                'sellPct': 1.0,
+                                'quotePnl': _safe_float(_phase_quote_pnl, None),
+                                'quoteMarkGap': _safe_float(_phase_quote_gap, None),
+                                'quoteSanityStatus': 'phase_policy_live_quote_checked' if _phase_quote_pnl is not None else 'phase_policy_live_quote_missing',
+                                'markSource': 'phase_policy_live',
+                                'actionReason': _phase_reason,
+                            })
+                            action = 'exit'
+                            should_exit = True
+                            reason = _live_reason
+                            mark_source = 'phase_policy_live'
+                            mark_execution = _phase_sim
+                            mark_quote_reason = _phase_sim.get('failureReason')
+                            mark_quote_route = _phase_sim.get('routeAvailable')
+                            mark_quote_price = _phase_sim.get('effectivePrice')
+                            mark_quote_out = _phase_sim.get('quotedOutAmount', exit_eval.get('quotedOutAmount'))
+                            record_decision_event(
+                                db,
+                                component='phase_policy',
+                                event_type='control_decision',
+                                decision='exit',
+                                reason=_live_reason,
+                                token_ca=pos.token_ca,
+                                symbol=pos.symbol,
+                                lifecycle_id=pos.lifecycle_id,
+                                trade_id=pos.trade_id,
+                                signal_ts=pos.signal_ts,
+                                signal_id=getattr(pos, 'premium_signal_id', None),
+                                strategy_stage=pos.strategy_stage,
+                                route='LOTTO',
+                                data_source='phase_policy_live',
+                                payload={
+                                    **phase_policy_payload,
+                                    'current_pnl': trigger_pnl,
+                                    'peak_pnl': pos.peak_pnl,
+                                    'quote_pnl': _phase_quote_pnl,
+                                    'quote_mark_gap': _phase_quote_gap,
+                                    'execution_success': bool(_phase_sim.get('success')),
+                                },
+                            )
+                            log.info(
+                                f"  [PHASE_POLICY_LIVE] {pos.symbol}/{pos.strategy_stage} EXIT "
+                                f"reason={_live_reason} mark={trigger_pnl:+.1%} "
+                                f"quote={_phase_quote_pnl:+.1%}" if _phase_quote_pnl is not None else
+                                f"  [PHASE_POLICY_LIVE] {pos.symbol}/{pos.strategy_stage} EXIT "
+                                f"reason={_live_reason} mark={trigger_pnl:+.1%} quote=na"
+                            )
                     record_trade_path_sample(
                         db,
                         pos,
