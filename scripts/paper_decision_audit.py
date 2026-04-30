@@ -9,6 +9,7 @@ route, source, and the exact payload used at the time.
 
 import json
 import logging
+import os
 import time
 
 
@@ -78,6 +79,19 @@ CREATE TABLE IF NOT EXISTS paper_missed_signal_attribution (
     pnl_24h REAL,
     max_pnl_recorded REAL,
     min_pnl_recorded REAL,
+    tradability_version TEXT,
+    tradability_status TEXT,
+    tradability_reason TEXT,
+    tradable_missed INTEGER,
+    tradable_peak_pnl REAL,
+    tradable_peak_horizon TEXT,
+    time_to_peak_sec INTEGER,
+    mae_before_peak_pnl REAL,
+    would_stop_before_peak INTEGER,
+    stop_floor_pnl REAL,
+    first_tradable_ts INTEGER,
+    first_tradable_horizon TEXT,
+    first_tradable_pnl REAL,
     status TEXT DEFAULT 'pending',
     lifecycle_state TEXT,
     vitality_score REAL,
@@ -107,6 +121,13 @@ MISSED_HORIZONS = {
 
 
 MISSED_BASELINE_LIVE_GRACE_SEC = 5 * 60
+MISSED_TRADABILITY_VERSION = "v1_horizon_samples"
+MISSED_TRADABLE_MIN_PEAK_PNL = float(os.environ.get("MISSED_TRADABLE_MIN_PEAK_PNL", "0.25"))
+MISSED_TRADABLE_RECLAIM_PNL = float(os.environ.get("MISSED_TRADABLE_RECLAIM_PNL", "0.15"))
+MISSED_TRADABLE_MAX_PEAK_SEC = int(os.environ.get("MISSED_TRADABLE_MAX_PEAK_SEC", str(60 * 60)))
+MISSED_TRADABLE_STOP_DEFAULT = float(os.environ.get("MISSED_TRADABLE_STOP_DEFAULT", "-0.08"))
+MISSED_TRADABLE_STOP_LOTTO = float(os.environ.get("MISSED_TRADABLE_STOP_LOTTO", "-0.08"))
+MISSED_TRADABLE_STOP_MATRIX = float(os.environ.get("MISSED_TRADABLE_STOP_MATRIX", "-0.075"))
 
 
 def init_decision_audit(db):
@@ -130,6 +151,29 @@ def init_decision_audit(db):
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_pde_lifecycle_state ON paper_decision_events(lifecycle_state)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pmsa_lifecycle_state ON paper_missed_signal_attribution(lifecycle_state)")
+    except Exception:
+        pass
+    for column_sql in [
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradability_version TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradability_status TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradability_reason TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradable_missed INTEGER",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradable_peak_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradable_peak_horizon TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN time_to_peak_sec INTEGER",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN mae_before_peak_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN would_stop_before_peak INTEGER",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN stop_floor_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN first_tradable_ts INTEGER",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN first_tradable_horizon TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN first_tradable_pnl REAL",
+    ]:
+        try:
+            db.execute(column_sql)
+        except Exception:
+            pass
+    try:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pmsa_tradable ON paper_missed_signal_attribution(tradable_missed, tradability_status)")
     except Exception:
         pass
     db.commit()
@@ -274,6 +318,144 @@ def _extract_lifecycle_payload(payload):
         "entry_bias": lifecycle.get("entry_bias"),
         "lifecycle_features": lifecycle.get("lifecycle_features") or {},
     }
+
+
+def _float_or_none(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _route_stop_floor(route):
+    route_u = (route or "").upper()
+    if route_u == "LOTTO":
+        return MISSED_TRADABLE_STOP_LOTTO
+    if route_u in {"MATRIX", "ATH", "NOT_ATH"}:
+        return MISSED_TRADABLE_STOP_MATRIX
+    return MISSED_TRADABLE_STOP_DEFAULT
+
+
+def _missed_horizon_points(row, changes):
+    points = []
+    for name, offset in sorted(MISSED_HORIZONS.items(), key=lambda item: item[1]):
+        pnl_col = f"pnl_{name}"
+        pnl = changes.get(pnl_col)
+        if pnl is None:
+            pnl = row[pnl_col]
+        pnl = _float_or_none(pnl)
+        if pnl is None:
+            continue
+        points.append({
+            "horizon": name,
+            "offset": int(offset),
+            "pnl": pnl,
+        })
+    return points
+
+
+def evaluate_missed_tradability(route, points, *, base_ts=None):
+    """Classify whether a missed dog was actually tradable under current risk.
+
+    v1 uses the same horizon samples already stored for missed attribution
+    (5m/15m/60m/24h). It is conservative and intentionally marks path precision
+    in tradability_version so later tick-level versions can replace it.
+    """
+    stop_floor = _route_stop_floor(route)
+    result = {
+        "tradability_version": MISSED_TRADABILITY_VERSION,
+        "tradability_status": "pending_insufficient_path",
+        "tradability_reason": "no_horizon_pnl_yet",
+        "tradable_missed": 0,
+        "tradable_peak_pnl": None,
+        "tradable_peak_horizon": None,
+        "time_to_peak_sec": None,
+        "mae_before_peak_pnl": None,
+        "would_stop_before_peak": 0,
+        "stop_floor_pnl": stop_floor,
+        "first_tradable_ts": None,
+        "first_tradable_horizon": None,
+        "first_tradable_pnl": None,
+    }
+    if not points:
+        return result
+
+    peak = max(points, key=lambda point: (point["pnl"], -point["offset"]))
+    prior_points = [point for point in points if point["offset"] < peak["offset"]]
+    prior_pnls = [0.0] + [point["pnl"] for point in prior_points]
+    mae_before_peak = min(prior_pnls)
+    would_stop = mae_before_peak <= stop_floor
+
+    first_tradable = None
+    min_seen = 0.0
+    for point in points:
+        min_seen = min(min_seen, point["pnl"])
+        if min_seen <= stop_floor:
+            break
+        if point["pnl"] >= MISSED_TRADABLE_RECLAIM_PNL:
+            first_tradable = point
+            break
+
+    result.update({
+        "tradable_peak_pnl": peak["pnl"],
+        "tradable_peak_horizon": peak["horizon"],
+        "time_to_peak_sec": peak["offset"],
+        "mae_before_peak_pnl": mae_before_peak,
+        "would_stop_before_peak": 1 if would_stop else 0,
+    })
+    if first_tradable:
+        result.update({
+            "first_tradable_ts": int(base_ts) + int(first_tradable["offset"]) if base_ts else None,
+            "first_tradable_horizon": first_tradable["horizon"],
+            "first_tradable_pnl": first_tradable["pnl"],
+        })
+
+    if peak["pnl"] < MISSED_TRADABLE_MIN_PEAK_PNL:
+        result.update({
+            "tradability_status": "not_material_peak",
+            "tradability_reason": f"peak_below_{MISSED_TRADABLE_MIN_PEAK_PNL:.0%}",
+        })
+    elif would_stop:
+        result.update({
+            "tradability_status": "would_stop_before_peak",
+            "tradability_reason": f"mae_before_peak_{mae_before_peak:.1%}_lte_stop_{stop_floor:.1%}",
+        })
+    elif peak["offset"] > MISSED_TRADABLE_MAX_PEAK_SEC:
+        result.update({
+            "tradability_status": "delayed_peak_after_window",
+            "tradability_reason": f"peak_after_{MISSED_TRADABLE_MAX_PEAK_SEC}s_window",
+        })
+    elif not first_tradable:
+        result.update({
+            "tradability_status": "no_executable_reclaim_sample",
+            "tradability_reason": f"no_sample_reached_{MISSED_TRADABLE_RECLAIM_PNL:.0%}_before_stop",
+        })
+    else:
+        result.update({
+            "tradability_status": "tradable_reclaim",
+            "tradability_reason": (
+                f"first_{first_tradable['horizon']}_{first_tradable['pnl']:.1%}_"
+                f"peak_{peak['horizon']}_{peak['pnl']:.1%}"
+            ),
+            "tradable_missed": 1,
+        })
+    return result
+
+
+def _apply_tradability_changes(row, changes, tradability):
+    for key, value in tradability.items():
+        try:
+            old_value = changes.get(key, row[key])
+        except Exception:
+            old_value = None
+        if isinstance(value, float):
+            old_float = _float_or_none(old_value)
+            if old_float is None or abs(old_float - value) > 1e-12:
+                changes[key] = value
+        elif old_value != value:
+            changes[key] = value
 
 
 def _should_track_missed(*, component, event_type=None, decision=None, route=None):
@@ -478,6 +660,13 @@ def update_due_missed_attributions(
             if row["min_pnl_recorded"] is None or abs(float(row["min_pnl_recorded"]) - min_pnl) > 1e-12:
                 changes["min_pnl_recorded"] = min_pnl
 
+        points = _missed_horizon_points(row, changes)
+        _apply_tradability_changes(
+            row,
+            changes,
+            evaluate_missed_tradability(row["route"], points, base_ts=base_ts),
+        )
+
         complete = all(
             (changes.get(f"price_{name}") is not None or row[f"price_{name}"] is not None)
             for name in MISSED_HORIZONS
@@ -520,7 +709,10 @@ def missed_attribution_coverage(db, *, since_ts=None):
           SUM(CASE WHEN pnl_5m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_5m_n,
           SUM(CASE WHEN pnl_15m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_15m_n,
           SUM(CASE WHEN pnl_60m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_60m_n,
-          SUM(CASE WHEN status = 'baseline_missing' THEN 1 ELSE 0 END) AS baseline_missing_n
+          SUM(CASE WHEN status = 'baseline_missing' THEN 1 ELSE 0 END) AS baseline_missing_n,
+          SUM(CASE WHEN tradability_status IS NOT NULL THEN 1 ELSE 0 END) AS tradability_n,
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_missed_n,
+          SUM(CASE WHEN tradability_status = 'would_stop_before_peak' THEN 1 ELSE 0 END) AS stop_before_peak_n
         FROM paper_missed_signal_attribution
         {where}
         """,
@@ -535,6 +727,9 @@ def missed_attribution_coverage(db, *, since_ts=None):
         "pnl_15m_n": int(row["pnl_15m_n"] or 0),
         "pnl_60m_n": int(row["pnl_60m_n"] or 0),
         "baseline_missing_n": int(row["baseline_missing_n"] or 0),
+        "tradability_n": int(row["tradability_n"] or 0),
+        "tradable_missed_n": int(row["tradable_missed_n"] or 0),
+        "stop_before_peak_n": int(row["stop_before_peak_n"] or 0),
     }
 
 

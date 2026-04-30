@@ -2077,6 +2077,38 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
         return;
       }
+      const missedCols = new Set(
+        paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
+      );
+      const hasTradability = missedCols.has('tradable_missed');
+      const tradabilitySelect = hasTradability ? `
+          tradable_missed,
+          tradability_status,
+          tradability_reason,
+          tradable_peak_pnl,
+          tradable_peak_horizon,
+          time_to_peak_sec,
+          mae_before_peak_pnl,
+          would_stop_before_peak,
+          stop_floor_pnl,
+          first_tradable_horizon,
+          first_tradable_pnl,` : `
+          NULL AS tradable_missed,
+          NULL AS tradability_status,
+          NULL AS tradability_reason,
+          NULL AS tradable_peak_pnl,
+          NULL AS tradable_peak_horizon,
+          NULL AS time_to_peak_sec,
+          NULL AS mae_before_peak_pnl,
+          NULL AS would_stop_before_peak,
+          NULL AS stop_floor_pnl,
+          NULL AS first_tradable_horizon,
+          NULL AS first_tradable_pnl,`;
+      const tradabilityAgg = hasTradability ? `
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradability_status = 'would_stop_before_peak' THEN 1 ELSE 0 END) AS stop_before_peak_n,` : `
+          NULL AS tradable_n,
+          NULL AS stop_before_peak_n,`;
       const topDogs = paperDb.prepare(`
         SELECT
           symbol,
@@ -2090,6 +2122,7 @@ const server = http.createServer(async (req, res) => {
           pnl_24h,
           max_pnl_recorded,
           min_pnl_recorded,
+          ${tradabilitySelect}
           status,
           updated_at
         FROM paper_missed_signal_attribution
@@ -2104,6 +2137,7 @@ const server = http.createServer(async (req, res) => {
           COUNT(*) AS n,
           SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.5 THEN 1 ELSE 0 END) AS dog50_n,
           SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.0 THEN 1 ELSE 0 END) AS dog100_n,
+          ${tradabilityAgg}
           AVG(pnl_5m) AS avg_5m,
           AVG(pnl_15m) AS avg_15m,
           AVG(pnl_60m) AS avg_60m,

@@ -5,6 +5,7 @@ sys.path.insert(0, "scripts")
 
 from paper_decision_audit import (  # noqa: E402
     _extract_baseline_price,
+    evaluate_missed_tradability,
     init_decision_audit,
     missed_attribution_coverage,
     record_decision_event,
@@ -126,12 +127,84 @@ def test_matrix_wait_records_once_for_attribution():
     assert rows[0]["baseline_price"] == 0.25
 
 
+def test_missed_tradability_marks_stop_before_peak():
+    result = evaluate_missed_tradability(
+        "LOTTO",
+        [
+            {"horizon": "5m", "offset": 300, "pnl": -0.10},
+            {"horizon": "15m", "offset": 900, "pnl": 0.50},
+        ],
+        base_ts=1000,
+    )
+    assert result["tradable_missed"] == 0
+    assert result["tradability_status"] == "would_stop_before_peak"
+    assert result["would_stop_before_peak"] == 1
+    assert result["mae_before_peak_pnl"] == -0.10
+
+
+def test_missed_tradability_marks_reclaim_before_stop():
+    result = evaluate_missed_tradability(
+        "LOTTO",
+        [
+            {"horizon": "5m", "offset": 300, "pnl": -0.05},
+            {"horizon": "15m", "offset": 900, "pnl": 0.35},
+        ],
+        base_ts=1000,
+    )
+    assert result["tradable_missed"] == 1
+    assert result["tradability_status"] == "tradable_reclaim"
+    assert result["first_tradable_ts"] == 1900
+    assert result["time_to_peak_sec"] == 900
+
+
+def test_update_due_missed_attributions_writes_tradability_fields():
+    db = new_db()
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, route, component, decision,
+             reject_reason, baseline_price, baseline_ts, status)
+        VALUES (1000, 'TradableToken', 'TRAD', 'LOTTO', 'upstream_gate', 'skip',
+                'not_ath_v17', 1.0, 1000, 'pending')
+        """
+    )
+    db.commit()
+
+    prices = {
+        ("TradableToken", 1300): (0.95, "test:5m", 1300),
+        ("TradableToken", 1900): (1.35, "test:15m", 1900),
+    }
+    update_due_missed_attributions(
+        db,
+        historical_price_fetcher=lambda token_ca, ts: prices.get((token_ca, ts)),
+        now=2000,
+        limit=5,
+    )
+    row = db.execute(
+        """
+        SELECT tradable_missed, tradability_status, tradable_peak_pnl,
+               time_to_peak_sec, mae_before_peak_pnl, first_tradable_horizon
+        FROM paper_missed_signal_attribution
+        WHERE token_ca = 'TradableToken'
+        """
+    ).fetchone()
+    assert row["tradable_missed"] == 1
+    assert row["tradability_status"] == "tradable_reclaim"
+    assert round(row["tradable_peak_pnl"], 4) == 0.35
+    assert row["time_to_peak_sec"] == 900
+    assert round(row["mae_before_peak_pnl"], 4) == -0.05
+    assert row["first_tradable_horizon"] == "15m"
+
+
 def run_tests():
     tests = [
         test_extracts_nested_lifecycle_baseline,
         test_upstream_reject_records_baseline_when_payload_has_price,
         test_missing_baseline_becomes_explicit_and_does_not_block_fresh_rows,
         test_matrix_wait_records_once_for_attribution,
+        test_missed_tradability_marks_stop_before_peak,
+        test_missed_tradability_marks_reclaim_before_stop,
+        test_update_due_missed_attributions_writes_tradability_fields,
     ]
     for test in tests:
         test()

@@ -4474,7 +4474,8 @@ def run_monitor(db):
                     try:
                         _top_missed = db.execute(
                             """
-                            SELECT symbol, route, component, reject_reason, max_pnl_recorded, pnl_5m, pnl_15m, pnl_60m, pnl_24h
+                            SELECT symbol, route, component, reject_reason, max_pnl_recorded, pnl_5m, pnl_15m, pnl_60m, pnl_24h,
+                                   tradable_missed, tradability_status, mae_before_peak_pnl, time_to_peak_sec
                             FROM paper_missed_signal_attribution
                             WHERE COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m) >= 0.5
                             ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m) DESC
@@ -4491,6 +4492,7 @@ def run_monitor(db):
                                 )
                                 _parts.append(
                                     f"{_row['symbol']} max={(_best or 0)*100:+.1f}% "
+                                    f"tradable={_row['tradable_missed'] or 0} status={_row['tradability_status'] or 'n/a'} "
                                     f"{_row['route']}/{_row['component']} reason={_row['reject_reason']}"
                                 )
                             log.info("  [TOP_MISSED_DOGS] " + " | ".join(_parts))
@@ -4509,7 +4511,9 @@ def run_monitor(db):
                             f"pnl5={_coverage.get('pnl_5m_n', 0)}({_p5_pct:.0f}%) "
                             f"pnl15={_coverage.get('pnl_15m_n', 0)} "
                             f"pnl60={_coverage.get('pnl_60m_n', 0)} "
-                            f"baseline_missing={_coverage.get('baseline_missing_n', 0)}"
+                            f"baseline_missing={_coverage.get('baseline_missing_n', 0)} "
+                            f"tradable={_coverage.get('tradable_missed_n', 0)} "
+                            f"stop_before_peak={_coverage.get('stop_before_peak_n', 0)}"
                         )
                 except Exception as _coverage_err:
                     log.debug(f"  [MISSED_ATTRIBUTION_COVERAGE] query failed: {_coverage_err}")

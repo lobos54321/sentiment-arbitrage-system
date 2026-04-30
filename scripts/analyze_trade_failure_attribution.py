@@ -262,8 +262,20 @@ def print_decision_events(db, since_ts, limit):
 def print_missed_attribution(db, since_ts, limit):
     if not table_exists(db, "paper_missed_signal_attribution"):
         return
-    rows = db.execute(
+    has_tradability = column_exists(db, "paper_missed_signal_attribution", "tradable_missed")
+    tradability_select = (
         """
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradability_status = 'would_stop_before_peak' THEN 1 ELSE 0 END) AS stop_before_peak_n,
+        """
+        if has_tradability else
+        """
+          NULL AS tradable_n,
+          NULL AS stop_before_peak_n,
+        """
+    )
+    rows = db.execute(
+        f"""
         SELECT
           COALESCE(route, '-') AS route,
           component,
@@ -271,6 +283,7 @@ def print_missed_attribution(db, since_ts, limit):
           COUNT(*) AS n,
           SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50 THEN 1 ELSE 0 END) AS dog50,
           SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.00 THEN 1 ELSE 0 END) AS dog100,
+          {tradability_select}
           AVG(pnl_5m) AS avg_5m,
           AVG(pnl_15m) AS avg_15m,
           AVG(pnl_60m) AS avg_60m
@@ -286,13 +299,16 @@ def print_missed_attribution(db, since_ts, limit):
     for row in rows:
         print(
             f"  n={row['n']:4d} dog50={row['dog50'] or 0:3d} dog100={row['dog100'] or 0:3d} "
+            f"tradable={row['tradable_n'] if row['tradable_n'] is not None else 'n/a'} "
+            f"stopFirst={row['stop_before_peak_n'] if row['stop_before_peak_n'] is not None else 'n/a'} "
             f"avg5={pct(row['avg_5m'])} avg15={pct(row['avg_15m'])} avg60={pct(row['avg_60m'])} "
             f"{row['route']} {row['component']} reason={row['reject_reason']}"
         )
 
     dogs = db.execute(
-        """
+        f"""
         SELECT symbol, route, component, reject_reason, max_pnl_recorded, pnl_5m, pnl_15m, pnl_60m
+               {', tradable_missed, tradability_status, mae_before_peak_pnl, time_to_peak_sec' if has_tradability else ''}
         FROM paper_missed_signal_attribution
         WHERE signal_ts >= ?
           AND COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.50
@@ -303,16 +319,23 @@ def print_missed_attribution(db, since_ts, limit):
     ).fetchall()
     print("\nTop Missed Dogs In Window")
     for row in dogs:
+        tradability = ""
+        if has_tradability:
+            tradability = (
+                f" tradable={row['tradable_missed'] or 0}/{row['tradability_status'] or 'n/a'}"
+                f" mae={pct(row['mae_before_peak_pnl'])} tPeak={row['time_to_peak_sec'] or 'n/a'}s"
+            )
         print(
             f"  {str(row['symbol'] or '?')[:12]:<12} max={pct(row['max_pnl_recorded'])} "
             f"5m={pct(row['pnl_5m'])} 15m={pct(row['pnl_15m'])} 60m={pct(row['pnl_60m'])} "
-            f"{row['route']} {row['component']} reason={row['reject_reason']}"
+            f"{row['route']} {row['component']}{tradability} reason={row['reject_reason']}"
         )
 
 
 def print_selection_quality(rows, db, since_ts, limit):
     if not table_exists(db, "paper_missed_signal_attribution"):
         return
+    has_tradability = column_exists(db, "paper_missed_signal_attribution", "tradable_missed")
 
     traded_tiers = Counter()
     traded_dogs = []
@@ -324,7 +347,7 @@ def print_selection_quality(rows, db, since_ts, limit):
             traded_dogs.append((peak, row))
 
     missed_rows = db.execute(
-        """
+        f"""
         SELECT
           symbol,
           COALESCE(route, '-') AS route,
@@ -333,6 +356,7 @@ def print_selection_quality(rows, db, since_ts, limit):
           pnl_5m,
           pnl_15m,
           pnl_60m,
+          {'tradable_missed, tradability_status, mae_before_peak_pnl, time_to_peak_sec,' if has_tradability else ''}
           COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) AS max_pnl
         FROM paper_missed_signal_attribution
         WHERE signal_ts >= ?
@@ -341,12 +365,15 @@ def print_selection_quality(rows, db, since_ts, limit):
     ).fetchall()
 
     missed_tiers = Counter()
+    tradable_tiers = Counter()
     gate_tiers = defaultdict(Counter)
     missed_dogs = []
     for row in missed_rows:
         max_pnl = float(row["max_pnl"] or 0.0)
         tier = dog_tier(max_pnl)
         missed_tiers[tier] += 1
+        if has_tradability and row["tradable_missed"]:
+            tradable_tiers[tier] += 1
         gate_tiers[(row["route"], row["component"], row["reject_reason"])][tier] += 1
         if tier != "sub25":
             missed_dogs.append((max_pnl, row))
@@ -361,6 +388,14 @@ def print_selection_quality(rows, db, since_ts, limit):
             f"{source:<8} {tiers['gold_100p']:>5} {tiers['silver_50_100p']:>6} "
             f"{tiers['bronze_25_50p']:>6} {tiers['sub25']:>6} "
             f"{bronze_plus:>6} {silver_plus:>6} {tiers['gold_100p']:>6}"
+        )
+    if has_tradability:
+        bronze_plus = tradable_tiers["bronze_25_50p"] + tradable_tiers["silver_50_100p"] + tradable_tiers["gold_100p"]
+        silver_plus = tradable_tiers["silver_50_100p"] + tradable_tiers["gold_100p"]
+        print(
+            f"{'tradable':<8} {tradable_tiers['gold_100p']:>5} {tradable_tiers['silver_50_100p']:>6} "
+            f"{tradable_tiers['bronze_25_50p']:>6} {tradable_tiers['sub25']:>6} "
+            f"{bronze_plus:>6} {silver_plus:>6} {tradable_tiers['gold_100p']:>6}"
         )
 
     print("\nSelection Miss Hotspots")
@@ -383,12 +418,16 @@ def print_selection_quality(rows, db, since_ts, limit):
         )
 
     print("\nTop Missed Selection Dogs")
-    print(f"{'symbol':<12} {'tier':<14} {'max':>8} {'5m':>8} {'15m':>8} {'60m':>8} gate")
+    tradable_header = " tradability" if has_tradability else ""
+    print(f"{'symbol':<12} {'tier':<14} {'max':>8} {'5m':>8} {'15m':>8} {'60m':>8}{tradable_header} gate")
     for max_pnl, row in sorted(missed_dogs, key=lambda item: item[0], reverse=True)[:limit]:
+        tradability = ""
+        if has_tradability:
+            tradability = f" {row['tradable_missed'] or 0}/{str(row['tradability_status'] or 'n/a')[:18]}"
         print(
             f"{str(row['symbol'] or '?')[:12]:<12} {dog_tier(max_pnl):<14} "
             f"{pct(max_pnl):>8} {pct(row['pnl_5m']):>8} {pct(row['pnl_15m']):>8} {pct(row['pnl_60m']):>8} "
-            f"{row['route']}/{row['component']} {str(row['reject_reason'] or '-')[:70]}"
+            f"{tradability} {row['route']}/{row['component']} {str(row['reject_reason'] or '-')[:70]}"
         )
 
     print("\nTop Traded Selection Dogs")
