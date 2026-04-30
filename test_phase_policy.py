@@ -67,11 +67,11 @@ def test_high_rug_risk_overrides_phase():
     assert decision.shadow_action == "EXIT"
 
 
-def test_no_follow_fast_fail_exits_after_30s():
+def test_no_follow_fast_fail_exits_after_20s():
     decision = evaluate_phase_policy(
-        current_pnl=-0.12,
+        current_pnl=-0.09,
         peak_pnl=0.02,
-        held_sec=35,
+        held_sec=22,
         sold_pct=0.0,
         dex_snapshot={"buys_m5": 8, "sells_m5": 9, "liquidity_usd": 20_000},
         kline_bars=rising_bars(),
@@ -79,7 +79,7 @@ def test_no_follow_fast_fail_exits_after_30s():
     )
     assert decision.phase_state == "NO_FOLLOW"
     assert decision.shadow_action == "EXIT"
-    assert decision.reason == "no_follow_fast_fail_30s"
+    assert decision.reason == "no_follow_fast_fail_20s"
 
 
 def run_tests():
@@ -88,7 +88,7 @@ def run_tests():
         test_principal_recovery_sell_pct_matches_profit_level,
         test_peak_25_to_50_recommends_recover_principal,
         test_high_rug_risk_overrides_phase,
-        test_no_follow_fast_fail_exits_after_30s,
+        test_no_follow_fast_fail_exits_after_20s,
     ]
     for test in tests:
         test()

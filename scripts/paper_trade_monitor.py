@@ -721,6 +721,7 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
                 AND e.token_ca = m.token_ca
                 AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
                 AND e.reason = m.reject_reason
+                AND e.payload_json LIKE '%"source_component": "' || m.component || '"%'
           )
         ORDER BY m.pnl_5m DESC, COALESCE(m.max_pnl_recorded, m.pnl_5m) DESC
         LIMIT ?
@@ -729,9 +730,9 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
     ).fetchall()
     recorded = 0
     for row in rows:
-        reason = f"missed_reaccelerated_5m_{LOTTO_PROBE_SHADOW_MIN_5M_PNL:.0%}"
         payload = {
             'missed_attribution_id': row['id'],
+            'probe_trigger': f"missed_reaccelerated_5m_{LOTTO_PROBE_SHADOW_MIN_5M_PNL:.0%}",
             'source_component': row['component'],
             'source_reject_reason': row['reject_reason'],
             'baseline_price': row['baseline_price'],
@@ -752,7 +753,7 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
             component='lotto_probe_shadow',
             event_type='probe_candidate',
             decision='PROBE_SHADOW',
-            reason=reason,
+            reason=row['reject_reason'],
             token_ca=row['token_ca'],
             symbol=row['symbol'],
             lifecycle_id=row['lifecycle_id'],
@@ -6261,8 +6262,8 @@ def run_monitor(db):
                         if _is_lotto_policy_route and _phase_action == 'EXIT':
                             if _phase_state == 'RUG_DEFENSE':
                                 _live_reason = f"phase_rug_defense_exit ({_phase_reason})"
-                            elif _phase_reason == 'no_follow_fast_fail_30s':
-                                _live_reason = "phase_no_follow_fast_fail_30s"
+                            elif _phase_reason == 'no_follow_fast_fail_20s':
+                                _live_reason = "phase_no_follow_fast_fail_20s"
 
                         if _live_reason:
                             _sell_amount_raw = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
