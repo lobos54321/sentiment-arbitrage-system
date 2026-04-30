@@ -4,9 +4,12 @@ import sqlite3
 sys.path.insert(0, "scripts")
 
 from paper_decision_audit import init_decision_audit  # noqa: E402
+from lotto_engine import build_lotto_pending  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     find_lotto_real_probe_candidates,
     should_block_lotto_falling_knife,
+    should_block_lotto_lifecycle_entry,
+    token_quarantine_state,
 )
 
 
@@ -79,12 +82,88 @@ def test_real_probe_requires_non_stale_15m_strength():
     assert [row["symbol"] for row in candidates] == ["BlueBuck"]
 
 
+def test_lotto_lifecycle_blocks_deep_reset_reject():
+    blocked, reason, detail = should_block_lotto_lifecycle_entry({
+        "lifecycle_state": "ATH_DEEP_RESET",
+        "entry_bias": "REJECT",
+        "lifecycle_features": {"price_change_m5": -63.79},
+    })
+    assert blocked is True
+    assert reason == "lotto_lifecycle_entry_bias_reject"
+    assert detail["lifecycle_state"] == "ATH_DEEP_RESET"
+
+
+def test_lotto_lifecycle_blocks_negative_m5():
+    blocked, reason, detail = should_block_lotto_lifecycle_entry({
+        "lifecycle_state": "FIRST_PUMP",
+        "entry_bias": "PROBE",
+        "lifecycle_features": {"price_change_m5": -12.0},
+    })
+    assert blocked is True
+    assert reason == "lotto_timing_negative_m5"
+    assert detail["price_change_m5"] == -12.0
+
+
+def test_token_quarantine_blocks_recent_same_ca_failure():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            exit_ts REAL,
+            pnl_pct REAL,
+            exit_reason TEXT,
+            replay_source TEXT,
+            signal_route TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_trades
+            (token_ca, symbol, exit_ts, pnl_pct, exit_reason, replay_source, signal_route)
+        VALUES ('TokenA', 'TOKA', 1000, -0.12, 'guardian_lotto_fast_fail_20s',
+                'live_monitor_lotto', 'LOTTO')
+        """
+    )
+    db.commit()
+    state = token_quarantine_state(db, "TokenA", now_ts=1100)
+    assert state["blocked"] is True
+    assert state["reason"] == "token_quarantine_recent_failure"
+    assert state["severe_failure_count"] == 1
+
+
+def test_lotto_pending_defaults_to_timing_gate():
+    pending = build_lotto_pending(
+        {
+            "ca": "TokenA",
+            "symbol": "TOKA",
+            "signal_ts": 1000,
+            "premium_signal_id": 1,
+            "pool_address": "PoolA",
+            "id": 7,
+        },
+        "TokenA:1000",
+        detail={"price_change_m5": 18.0},
+    )
+    assert pending["timing_passed"] is False
+    assert pending["entry_mode"] == "lotto_fast_arm"
+    assert pending["first_fire_pc_m5"] == 18.0
+
+
 def run_tests():
     tests = [
         test_blocks_newborn_low_liq_m5_down_falling_knife,
         test_allows_newborn_low_liq_without_m5_downtrend,
         test_allows_non_newborn_even_when_low_liq_m5_down,
         test_real_probe_requires_non_stale_15m_strength,
+        test_lotto_lifecycle_blocks_deep_reset_reject,
+        test_lotto_lifecycle_blocks_negative_m5,
+        test_token_quarantine_blocks_recent_same_ca_failure,
+        test_lotto_pending_defaults_to_timing_gate,
     ]
     for test in tests:
         test()

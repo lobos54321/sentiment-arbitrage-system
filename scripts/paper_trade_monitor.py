@@ -159,6 +159,21 @@ LOTTO_REAL_PROBE_MIN_15M_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_15M_PN
 LOTTO_REAL_PROBE_SIZE_SOL = float(os.environ.get('LOTTO_REAL_PROBE_SIZE_SOL', '0.03'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
+TOKEN_RISK_QUARANTINE_ENABLED = os.environ.get('TOKEN_RISK_QUARANTINE_ENABLED', 'true').lower() != 'false'
+TOKEN_RISK_LOSS_THRESHOLD = float(os.environ.get('TOKEN_RISK_LOSS_THRESHOLD', '-0.08'))
+TOKEN_RISK_FAILURE_WINDOW_SEC = int(os.environ.get('TOKEN_RISK_FAILURE_WINDOW_SEC', str(3 * 60 * 60)))
+TOKEN_RISK_BASE_COOLDOWN_SEC = int(os.environ.get('TOKEN_RISK_BASE_COOLDOWN_SEC', str(45 * 60)))
+TOKEN_RISK_REPEAT_FAILURE_COUNT = int(os.environ.get('TOKEN_RISK_REPEAT_FAILURE_COUNT', '2'))
+TOKEN_RISK_REPEAT_COOLDOWN_SEC = int(os.environ.get('TOKEN_RISK_REPEAT_COOLDOWN_SEC', str(2 * 60 * 60)))
+LOTTO_LIFECYCLE_BLOCK_STATES = {
+    s.strip().upper()
+    for s in os.environ.get(
+        'LOTTO_LIFECYCLE_BLOCK_STATES',
+        'ATH_DEEP_RESET,DEAD_CAT_BOUNCE,DISTRIBUTION,DEAD'
+    ).split(',')
+    if s.strip()
+}
+LOTTO_TIMING_BLOCK_M5_PCT = float(os.environ.get('LOTTO_TIMING_BLOCK_M5_PCT', '-10'))
 
 REDIS_URL = os.environ.get('REDIS_URL', '').strip()
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
@@ -187,6 +202,7 @@ _KLINE_DB_FAILED = False
 _SHARED_MARKET_DATA_RUNTIME = {}
 _SHARED_POOL_CACHE = {}
 _SHARED_SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
+_LOTTO_TIMING_RETRY_MEMORY = {}
 
 
 def get_kline_db():
@@ -802,7 +818,7 @@ def find_lotto_real_probe_candidates(db, *, now_ts, limit=3):
                   FROM paper_decision_events e
                   WHERE e.component = 'lotto_probe_live'
                     AND e.token_ca = m.token_ca
-                    AND e.event_type IN ('pending_entry', 'skip')
+                    AND e.event_type IN ('pending_entry', 'reentry_armed', 'skip')
               )
         )
         SELECT *
@@ -895,6 +911,8 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
         detail = {
             'probe': True,
             'probe_source': 'missed_attribution',
+            'timing_passed': False,
+            'timing_gate': 'lotto_probe_reentry',
             'missed_attribution_id': row['id'],
             'source_component': row['component'],
             'source_reject_reason': row['reject_reason'],
@@ -906,17 +924,19 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
         }
         pending_entries[lifecycle_id] = build_lotto_pending(w_entry, lifecycle_id, detail=detail)
         pending_entries[lifecycle_id]['kelly_position_sol'] = LOTTO_REAL_PROBE_SIZE_SOL
-        pending_entries[lifecycle_id]['entry_mode'] = 'lotto_real_probe'
+        pending_entries[lifecycle_id]['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
+        pending_entries[lifecycle_id]['entry_mode'] = 'lotto_real_probe_reentry_arm'
         pending_entries[lifecycle_id]['replay_source'] = 'live_monitor_lotto_probe'
-        pending_entries[lifecycle_id]['stage_outcome'] = 'lotto_probe_entered'
+        pending_entries[lifecycle_id]['stage_outcome'] = 'lotto_probe_reentry_armed'
         pending_entries[lifecycle_id]['lotto_state']['probe'] = True
         pending_entries[lifecycle_id]['lotto_state']['probeSource'] = 'missed_attribution'
+        pending_entries[lifecycle_id]['lotto_state']['probeEntryMode'] = 'reentry_timing_gate'
         record_decision_event(
             db,
             component='lotto_probe_live',
-            event_type='pending_entry',
+            event_type='reentry_armed',
             decision='pending',
-            reason='missed_confirmed_15m_probe',
+            reason='missed_confirmed_reentry_armed',
             token_ca=token_ca,
             symbol=symbol,
             lifecycle_id=lifecycle_id,
@@ -961,6 +981,132 @@ def should_block_lotto_falling_knife(lotto_detail, lotto_lifecycle):
         'price_change_m5': price_change_m5,
         'liq_threshold': LOTTO_FALLING_KNIFE_LIQ_USD,
         'm5_threshold': LOTTO_FALLING_KNIFE_M5_PCT,
+    }
+
+
+TOKEN_RISK_DANGER_REASON_PATTERNS = (
+    'hard_sl',
+    'hard_floor',
+    'no_follow',
+    'fast_fail',
+    'gap_crash',
+    'doa',
+    'lotto_sl',
+    'stop_loss',
+)
+
+
+def token_quarantine_state(db, token_ca, *, now_ts=None):
+    """Return a global same-CA entry block after recent severe failed exits."""
+    if not TOKEN_RISK_QUARANTINE_ENABLED or not token_ca:
+        return {'blocked': False, 'reason': 'disabled'}
+    now_ts = float(now_ts or time.time())
+    cutoff = now_ts - TOKEN_RISK_FAILURE_WINDOW_SEC
+    rows = db.execute(
+        """
+        SELECT id, symbol, exit_ts, pnl_pct, exit_reason, replay_source, signal_route
+        FROM paper_trades
+        WHERE token_ca = ?
+          AND exit_ts IS NOT NULL
+          AND exit_ts >= ?
+        ORDER BY exit_ts DESC
+        """,
+        (token_ca, cutoff),
+    ).fetchall()
+    severe = []
+    for row in rows:
+        pnl = _safe_float(row['pnl_pct'], 0.0)
+        reason = (row['exit_reason'] or '').lower()
+        danger_reason = any(pattern in reason for pattern in TOKEN_RISK_DANGER_REASON_PATTERNS)
+        if pnl <= TOKEN_RISK_LOSS_THRESHOLD or danger_reason:
+            severe.append(row)
+
+    if not severe:
+        return {
+            'blocked': False,
+            'recent_exit_count': len(rows),
+            'severe_failure_count': 0,
+            'loss_threshold': TOKEN_RISK_LOSS_THRESHOLD,
+        }
+
+    latest = severe[0]
+    latest_exit_ts = _safe_float(latest['exit_ts'], 0.0)
+    failure_count = len(severe)
+    cooldown_sec = (
+        TOKEN_RISK_REPEAT_COOLDOWN_SEC
+        if failure_count >= TOKEN_RISK_REPEAT_FAILURE_COUNT
+        else TOKEN_RISK_BASE_COOLDOWN_SEC
+    )
+    until_ts = latest_exit_ts + cooldown_sec
+    if now_ts >= until_ts:
+        return {
+            'blocked': False,
+            'recent_exit_count': len(rows),
+            'severe_failure_count': failure_count,
+            'cooldown_expired': True,
+            'last_failure_exit_ts': latest_exit_ts,
+            'last_failure_age_sec': now_ts - latest_exit_ts,
+        }
+
+    worst_pnl = min((_safe_float(row['pnl_pct'], 0.0) for row in severe), default=None)
+    reason = (
+        'token_quarantine_repeat_failure'
+        if failure_count >= TOKEN_RISK_REPEAT_FAILURE_COUNT
+        else 'token_quarantine_recent_failure'
+    )
+    return {
+        'blocked': True,
+        'reason': reason,
+        'until_ts': until_ts,
+        'remaining_sec': max(0.0, until_ts - now_ts),
+        'recent_exit_count': len(rows),
+        'severe_failure_count': failure_count,
+        'last_failure_trade_id': latest['id'],
+        'last_failure_exit_ts': latest_exit_ts,
+        'last_failure_pnl': _safe_float(latest['pnl_pct'], None),
+        'last_failure_reason': latest['exit_reason'],
+        'worst_failure_pnl': worst_pnl,
+        'loss_threshold': TOKEN_RISK_LOSS_THRESHOLD,
+        'base_cooldown_sec': TOKEN_RISK_BASE_COOLDOWN_SEC,
+        'repeat_cooldown_sec': TOKEN_RISK_REPEAT_COOLDOWN_SEC,
+    }
+
+
+def should_block_lotto_lifecycle_entry(lotto_lifecycle):
+    lifecycle = lotto_lifecycle or {}
+    features = lifecycle.get('lifecycle_features') or {}
+    state = str(lifecycle.get('lifecycle_state') or 'UNKNOWN').upper()
+    entry_bias = str(lifecycle.get('entry_bias') or '').upper()
+    try:
+        price_change_m5 = float(features.get('price_change_m5') or 0.0)
+    except (TypeError, ValueError):
+        price_change_m5 = 0.0
+
+    if entry_bias == 'REJECT':
+        return True, 'lotto_lifecycle_entry_bias_reject', {
+            'lifecycle_state': state,
+            'entry_bias': entry_bias,
+            'price_change_m5': price_change_m5,
+        }
+    if state in LOTTO_LIFECYCLE_BLOCK_STATES:
+        return True, f'lotto_lifecycle_block_{state.lower()}', {
+            'lifecycle_state': state,
+            'entry_bias': entry_bias,
+            'price_change_m5': price_change_m5,
+            'blocked_states': sorted(LOTTO_LIFECYCLE_BLOCK_STATES),
+        }
+    if price_change_m5 <= LOTTO_TIMING_BLOCK_M5_PCT:
+        return True, 'lotto_timing_negative_m5', {
+            'lifecycle_state': state,
+            'entry_bias': entry_bias,
+            'price_change_m5': price_change_m5,
+            'm5_threshold': LOTTO_TIMING_BLOCK_M5_PCT,
+        }
+    return False, 'lotto_lifecycle_timing_ok', {
+        'lifecycle_state': state,
+        'entry_bias': entry_bias,
+        'price_change_m5': price_change_m5,
+        'm5_threshold': LOTTO_TIMING_BLOCK_M5_PCT,
     }
 
 
@@ -5044,11 +5190,29 @@ def run_monitor(db):
                         _lotto_detail,
                         _lotto_lifecycle,
                     )
+                    _lifecycle_blocked, _lifecycle_block_reason, _lifecycle_block_detail = should_block_lotto_lifecycle_entry(
+                        _lotto_lifecycle,
+                    )
                     if _falling_knife_blocked and _lotto_decision.allow:
                         _lotto_decision = LottoDecision(
                             "expire",
                             "lotto_newborn_falling_knife_low_liq",
                             {**_lotto_detail, **_falling_knife_detail},
+                        )
+                        _lotto_detail = _lotto_decision.detail
+                    elif _lifecycle_blocked and _lotto_decision.allow:
+                        _lotto_decision = LottoDecision(
+                            "wait",
+                            _lifecycle_block_reason,
+                            {**_lotto_detail, **_lifecycle_block_detail},
+                        )
+                        _lotto_detail = _lotto_decision.detail
+                    _token_risk = token_quarantine_state(db, w_entry['ca'], now_ts=now)
+                    if _token_risk.get('blocked') and _lotto_decision.allow:
+                        _lotto_decision = LottoDecision(
+                            "wait",
+                            _token_risk.get('reason') or 'token_quarantine',
+                            {**_lotto_detail, 'token_risk': _token_risk},
                         )
                         _lotto_detail = _lotto_decision.detail
 
@@ -5069,6 +5233,10 @@ def run_monitor(db):
                             data_source='dexscreener+helius+signal',
                             payload=with_lifecycle_payload(_lotto_detail, _lotto_lifecycle),
                         )
+                        try:
+                            watchlist.update_scores(w_entry['id'], {}, eval_time=time.time())
+                        except Exception:
+                            pass
                         if _lotto_decision.expire:
                             watchlist.mark_expired(w_entry['id'], _lotto_decision.reason)
                             log.info(
@@ -5096,6 +5264,7 @@ def run_monitor(db):
                                 _lotto_lc_id,
                                 detail=_lotto_detail,
                             )
+                            pending_entries[_lotto_lc_id]['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(_lotto_lc_id, 0)
                             record_decision_event(
                                 db,
                                 component='lotto_entry_gate',
@@ -5537,6 +5706,8 @@ def run_monitor(db):
                         if not should_enter:
                             retry_count = pending.get('smart_entry_retries', 0)
                             max_retries = 3
+                            if pending.get('is_lotto'):
+                                _LOTTO_TIMING_RETRY_MEMORY[lifecycle_id] = retry_count + 1
                             record_decision_event(
                                 db,
                                 component='smart_entry',
@@ -5558,6 +5729,7 @@ def run_monitor(db):
                             )
                             if retry_count >= max_retries:
                                 log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
+                                _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
                                 pending_entries.pop(lifecycle_id, None)
                             else:
                                 log.info(
@@ -5571,6 +5743,7 @@ def run_monitor(db):
                             
                         # Smart entry passed — update trigger price to the confirmed entry price
                         pending['timing_passed'] = True
+                        _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
                         if timing_trigger_price:
                             pending['trigger_price'] = timing_trigger_price
                         pending['entry_mode'] = timing_reason
@@ -5597,6 +5770,72 @@ def run_monitor(db):
                     _pending_signal_route = pending.get('signal_route') or ('LOTTO' if pending.get('is_lotto') else None)
                     _pending_lotto_state = pending.get('lotto_state') or None
                     _pending_exit_strategy = pending.get('exit_strategy') or 'NOT_ATH'
+
+                    _token_risk = token_quarantine_state(db, pending['token_ca'], now_ts=now)
+                    if _token_risk.get('blocked'):
+                        record_decision_event(
+                            db,
+                            component='token_risk',
+                            event_type='entry_block',
+                            decision='block',
+                            reason=_token_risk.get('reason') or 'token_quarantine',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='paper_trade_history',
+                            payload=_token_risk,
+                        )
+                        log.info(
+                            f"  [TOKEN_RISK] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_token_risk.get('reason')} remaining={_token_risk.get('remaining_sec', 0):.0f}s "
+                            f"failures={_token_risk.get('severe_failure_count')}"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
+                    if pending.get('is_lotto'):
+                        try:
+                            _lotto_timing_dex = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                        except Exception:
+                            _lotto_timing_dex = None
+                        _lotto_timing_lifecycle = lifecycle_payload_for(
+                            watchlist_entry=pending_w_entry,
+                            dex_snapshot=_lotto_timing_dex,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            signal_ts=pending['signal_ts'],
+                            quote_available=None,
+                            now=now,
+                        )
+                        _lotto_timing_blocked, _lotto_timing_reason, _lotto_timing_detail = should_block_lotto_lifecycle_entry(
+                            _lotto_timing_lifecycle,
+                        )
+                        if _lotto_timing_blocked:
+                            record_decision_event(
+                                db,
+                                component='lotto_timing_gate',
+                                event_type='entry_block',
+                                decision='block',
+                                reason=_lotto_timing_reason,
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='lifecycle+dexscreener',
+                                payload=with_lifecycle_payload(_lotto_timing_detail, _lotto_timing_lifecycle),
+                            )
+                            log.info(
+                                f"  [LOTTO_TIMING] 🚫 {pending['symbol']} BLOCKED: "
+                                f"{_lotto_timing_reason} detail={_lotto_timing_detail}"
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
 
                     # LOTTO: fixed paper size, skip Kelly and liquidity cap
                     if pending.get('is_lotto'):

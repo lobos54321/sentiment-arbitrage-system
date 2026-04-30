@@ -177,6 +177,7 @@ def evaluate_lotto_entry(
 
 def build_lotto_pending(w_entry, lifecycle_id, detail=None):
     detail = detail or {}
+    timing_passed = bool(detail.get("timing_passed", False))
     return {
         "token_ca": w_entry["ca"],
         "symbol": w_entry["symbol"],
@@ -195,9 +196,9 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         "strategy_stage": LOTTO_STRATEGY_STAGE,
         "stage_outcome": "lotto_entered",
         "replay_source": "live_monitor_lotto",
-        "entry_mode": "lotto_fast_lane",
+        "entry_mode": "lotto_fast_arm" if not timing_passed else "lotto_fast_lane",
         "exit_strategy": "LOTTO",
-        "timing_passed": True,
+        "timing_passed": timing_passed,
         "w_entry": w_entry,
         "lotto_state": {
             "route": "LOTTO",
@@ -207,9 +208,9 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         },
         "momentum_snapshots": [],
         "momentum_pct": 0,
-        "first_fire_pc_m5": None,
+        "first_fire_pc_m5": detail.get("price_change_m5"),
         "spread_abort_count": 0,
-        "smart_entry_retries": 0,
+        "smart_entry_retries": int(w_entry.get("_smart_entry_retries", 0) or 0),
     }
 
 
