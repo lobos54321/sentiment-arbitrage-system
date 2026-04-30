@@ -68,6 +68,7 @@ from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
     LOTTO_STRATEGY_ID,
     LOTTO_MAX_CONCURRENT,
+    LottoDecision,
     active_lotto_count,
     build_ath_boost_updates,
     build_lotto_pending,
@@ -152,6 +153,8 @@ LOTTO_PHASE_POLICY_LIVE_EXIT = os.environ.get('LOTTO_PHASE_POLICY_LIVE_EXIT', 't
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
+LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
+LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
 
 REDIS_URL = os.environ.get('REDIS_URL', '').strip()
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1').strip()
@@ -766,6 +769,40 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
         )
         recorded += 1
     return recorded
+
+
+def should_block_lotto_falling_knife(lotto_detail, lotto_lifecycle):
+    features = (lotto_lifecycle or {}).get('lifecycle_features') or {}
+    lifecycle_state = (lotto_lifecycle or {}).get('lifecycle_state')
+    try:
+        liquidity = float(features.get('liquidity_usd') if features.get('liquidity_usd') is not None else lotto_detail.get('liquidity_usd') or 0)
+    except (TypeError, ValueError):
+        liquidity = 0.0
+    try:
+        price_change_m5 = float(features.get('price_change_m5') if features.get('price_change_m5') is not None else lotto_detail.get('price_change_m5') or 0)
+    except (TypeError, ValueError):
+        price_change_m5 = 0.0
+
+    if (
+        lifecycle_state == 'NEWBORN_LAUNCH'
+        and liquidity > 0
+        and liquidity < LOTTO_FALLING_KNIFE_LIQ_USD
+        and price_change_m5 <= LOTTO_FALLING_KNIFE_M5_PCT
+    ):
+        return True, {
+            'lifecycle_state': lifecycle_state,
+            'liquidity_usd': liquidity,
+            'price_change_m5': price_change_m5,
+            'liq_threshold': LOTTO_FALLING_KNIFE_LIQ_USD,
+            'm5_threshold': LOTTO_FALLING_KNIFE_M5_PCT,
+        }
+    return False, {
+        'lifecycle_state': lifecycle_state,
+        'liquidity_usd': liquidity,
+        'price_change_m5': price_change_m5,
+        'liq_threshold': LOTTO_FALLING_KNIFE_LIQ_USD,
+        'm5_threshold': LOTTO_FALLING_KNIFE_M5_PCT,
+    }
 
 
 def lifecycle_payload_for(*, signal=None, watchlist_entry=None, dex_snapshot=None, live_concentration=None,
@@ -4824,6 +4861,17 @@ def run_monitor(db):
                         signal_ts=w_entry['signal_ts'],
                         now=now,
                     )
+                    _falling_knife_blocked, _falling_knife_detail = should_block_lotto_falling_knife(
+                        _lotto_detail,
+                        _lotto_lifecycle,
+                    )
+                    if _falling_knife_blocked and _lotto_decision.allow:
+                        _lotto_decision = LottoDecision(
+                            "expire",
+                            "lotto_newborn_falling_knife_low_liq",
+                            {**_lotto_detail, **_falling_knife_detail},
+                        )
+                        _lotto_detail = _lotto_decision.detail
 
                     _lotto_lc_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                     if _lotto_lc_id not in pending_entries:
