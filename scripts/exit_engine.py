@@ -29,6 +29,9 @@ LOTTO_PARTIAL_LOCK_PEAK = float(os.environ.get("LOTTO_PARTIAL_LOCK_PEAK", "0.20"
 LOTTO_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("LOTTO_PARTIAL_LOCK_MIN_PNL", "0.15"))
 LOTTO_PARTIAL_SELL_PCT = float(os.environ.get("LOTTO_PARTIAL_SELL_PCT", "0.25"))
 LOTTO_EPSILON = 1e-9
+LOTTO_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_SEC", "20"))
+LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.03"))
+LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.08"))
 QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
 
 
@@ -275,6 +278,33 @@ class ExitGuardianThread(threading.Thread):
                             'trade_id': trade_id,
                             'symbol': pos.symbol,
                             'reason': f'guardian_doa_fast_exit (held={held_sec:.0f}s peak={getattr(pos, "peak_pnl", 0):.1%} pnl={pnl:.1%})',
+                            'trigger_price': price,
+                            'trigger_pnl': pnl,
+                            '_instant_sim': self._get_instant_quote(pos, ca),
+                        })
+                    self._exit_pending.add(trade_id)
+                    continue
+
+                # LOTTO fast-fail must live in Guardian, not only the main
+                # monitor loop. The main loop can be delayed by watchlist scans
+                # and attribution work; Guardian is the independent 3s safety
+                # path for peak=0 rugs.
+                if (
+                    _is_lotto_entry
+                    and held_sec >= LOTTO_GUARDIAN_FAST_FAIL_SEC
+                    and max(float(getattr(pos, 'peak_pnl', 0) or 0), pnl) <= LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX
+                    and pnl <= LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX
+                ):
+                    log.info(
+                        f"[ExitGuardian] 🧯 {pos.symbol} LOTTO FAST FAIL: "
+                        f"held={held_sec:.0f}s peak={getattr(pos, 'peak_pnl', 0)*100:+.1f}% "
+                        f"pnl={pnl*100:+.1f}% — queued before hard SL"
+                    )
+                    with self.exit_queue_lock:
+                        self.exit_queue.append({
+                            'trade_id': trade_id,
+                            'symbol': pos.symbol,
+                            'reason': f'guardian_lotto_fast_fail_20s (held={held_sec:.0f}s peak={getattr(pos, "peak_pnl", 0):.1%} pnl={pnl:.1%})',
                             'trigger_price': price,
                             'trigger_pnl': pnl,
                             '_instant_sim': self._get_instant_quote(pos, ca),
