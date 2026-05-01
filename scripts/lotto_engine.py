@@ -28,7 +28,8 @@ LOTTO_MIN_M5_TXNS = int(os.environ.get("LOTTO_MIN_M5_TXNS", "6"))
 LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_VOL_M5_USD", "1000"))
 LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_M5_TXNS = int(os.environ.get("LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_M5_TXNS", "20"))
 LOTTO_LIVE_TOP1_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP1_MAX_PCT", "35"))
-LOTTO_LIVE_TOP10_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_MAX_PCT", "85"))
+LOTTO_LIVE_TOP10_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_MAX_PCT", "70"))
+LOTTO_LIVE_TOP10_RISKY_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_RISKY_MAX_PCT", "50"))
 
 LOTTO_TIME_EXIT_60S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_60S_PEAK", "0.05"))
 LOTTO_TIME_EXIT_120S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_120S_PEAK", "0.10"))
@@ -167,9 +168,13 @@ def evaluate_lotto_entry(
         live_top10 = float(live_concentration.get("top10_pct") or 0)
         detail["live_top1_pct"] = live_top1
         detail["live_top10_pct"] = live_top10
+        live_top10_max = LOTTO_LIVE_TOP10_MAX_PCT
+        if detail["liquidity_unknown"] or detail["dex_id"] == "pumpfun":
+            live_top10_max = min(live_top10_max, LOTTO_LIVE_TOP10_RISKY_MAX_PCT)
+        detail["live_top10_max_pct"] = live_top10_max
         if live_top1 > LOTTO_LIVE_TOP1_MAX_PCT:
             return LottoDecision("expire", f"lotto_live_top1_{live_top1:.0f}pct", detail)
-        if live_top10 > LOTTO_LIVE_TOP10_MAX_PCT:
+        if live_top10 > live_top10_max:
             return LottoDecision("expire", f"lotto_live_top10_{live_top10:.0f}pct", detail)
 
     return LottoDecision("allow", "lotto_fast_lane_ok", detail)

@@ -63,9 +63,32 @@ try {
   }
 } catch (e) { /* ignore */ }
 
+function formatLogArg(arg) {
+  if (arg instanceof Error) {
+    const detail = {
+      name: arg.name,
+      message: arg.message,
+      stack: arg.stack,
+    };
+    if (arg.code) detail.code = arg.code;
+    if (arg.cause) detail.cause = arg.cause instanceof Error
+      ? { name: arg.cause.name, message: arg.cause.message, stack: arg.cause.stack }
+      : arg.cause;
+    return JSON.stringify(detail);
+  }
+  if (typeof arg === 'object' && arg !== null) {
+    try {
+      return JSON.stringify(arg);
+    } catch (e) {
+      return String(arg);
+    }
+  }
+  return String(arg);
+}
+
 function captureLog(level, args) {
   const timestamp = new Date().toISOString();
-  const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  const message = args.map(formatLogArg).join(' ');
   const logLine = { timestamp, level, message };
 
   // 内存缓冲

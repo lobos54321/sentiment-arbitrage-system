@@ -33,6 +33,58 @@ LOTTO_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_SE
 LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.03"))
 LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.08"))
 QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
+PARTIAL_IDEMPOTENCY_EPSILON = 1e-9
+
+
+def _pct(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp_pct(value, default=0.0):
+    return min(1.0, max(0.0, _pct(value, default)))
+
+
+def _partial_target_from_command(command, *, prev_sold_pct, sell_pct):
+    target = command.get('target_sold_pct')
+    if target is None:
+        target = command.get('targetSoldPct')
+    if target is None:
+        queued_prev = command.get('queued_sold_pct')
+        if queued_prev is None:
+            queued_prev = command.get('queuedSoldPct')
+        if queued_prev is not None:
+            target = _clamp_pct(queued_prev) + sell_pct
+    if target is None:
+        target = prev_sold_pct + sell_pct
+    return _clamp_pct(target)
+
+
+def _partial_delta_from_command(command, *, current_sold_pct):
+    sell_pct = _clamp_pct(command.get('sell_pct') if command.get('sell_pct') is not None else command.get('sellPct'))
+    current_sold_pct = _clamp_pct(current_sold_pct)
+    target_sold_pct = _partial_target_from_command(
+        command,
+        prev_sold_pct=current_sold_pct,
+        sell_pct=sell_pct,
+    )
+    remaining_to_target = max(0.0, target_sold_pct - current_sold_pct)
+    sell_pct_delta = min(sell_pct, remaining_to_target)
+    return sell_pct_delta, target_sold_pct
+
+
+def _raw_amount_for_absolute_partial(token_amount_raw, *, current_sold_pct, sell_pct_delta):
+    try:
+        token_amount_raw = float(token_amount_raw or 0)
+    except (TypeError, ValueError):
+        token_amount_raw = 0.0
+    current_sold_pct = _clamp_pct(current_sold_pct)
+    sell_pct_delta = _clamp_pct(sell_pct_delta)
+    remaining_pct = max(PARTIAL_IDEMPOTENCY_EPSILON, 1.0 - current_sold_pct)
+    fraction_of_remaining = min(1.0, sell_pct_delta / remaining_pct)
+    return int(token_amount_raw * fraction_of_remaining)
 
 
 def _quote_pnl_from_sim(sim, entry_price):
@@ -549,11 +601,15 @@ class ExitGuardianThread(threading.Thread):
                             f"sell={PHASE0_PARTIAL_LOCK_SELL_PCT*100:.0f}%"
                         )
                         with self.exit_queue_lock:
+                            _queued_sold_pct = _clamp_pct((pos.monitor_state or {}).get('soldPct'))
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
                                 'action': 'partial_sell',
                                 'sell_pct': PHASE0_PARTIAL_LOCK_SELL_PCT,
+                                'queued_sold_pct': _queued_sold_pct,
+                                'target_sold_pct': min(1.0, _queued_sold_pct + PHASE0_PARTIAL_LOCK_SELL_PCT),
+                                'partial_type': 'PHASE0_LOCK',
                                 'tp_name': 'PHASE0_LOCK',
                                 'reason': (
                                     f'guardian_phase0_partial_lock '
@@ -659,11 +715,15 @@ class ExitGuardianThread(threading.Thread):
                             f"sell={LOTTO_PARTIAL_SELL_PCT*100:.0f}%"
                         )
                         with self.exit_queue_lock:
+                            _queued_sold_pct = _clamp_pct((pos.monitor_state or {}).get('soldPct'))
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
                                 'action': 'partial_sell',
                                 'sell_pct': LOTTO_PARTIAL_SELL_PCT,
+                                'queued_sold_pct': _queued_sold_pct,
+                                'target_sold_pct': min(1.0, _queued_sold_pct + LOTTO_PARTIAL_SELL_PCT),
+                                'partial_type': 'LOTTO_LOCK',
                                 'tp_name': 'LOTTO_LOCK',
                                 'reason': (
                                     f'guardian_lotto_partial_lock '
@@ -1108,10 +1168,31 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
         gx_action = gx.get('action') or 'exit'
         gx_trigger_pnl = gx.get('trigger_pnl', 0)
         if gx_action == 'partial_sell':
-            gx_sell_pct = min(1.0, max(0.0, float(gx.get('sell_pct') or 0.0)))
-            gx_sell_amount = int(float(gx_pos.token_amount_raw) * gx_sell_pct) if gx_pos.token_amount_raw else 0
+            updated_state = (gx_pos.monitor_state or {}).copy()
+            prev_sold_pct = _clamp_pct(updated_state.get('soldPct'))
+            gx_sell_pct, gx_target_sold_pct = _partial_delta_from_command(
+                gx,
+                current_sold_pct=prev_sold_pct,
+            )
+            if gx_sell_pct <= PARTIAL_IDEMPOTENCY_EPSILON:
+                log.info(
+                    f"  [GUARDIAN_EXIT] partial lock skipped for {gx['symbol']}: "
+                    f"stale queued partial, soldPct={prev_sold_pct:.0%} "
+                    f"targetSoldPct={gx_target_sold_pct:.0%} already reached"
+                )
+                continue
+            gx_sell_amount = _raw_amount_for_absolute_partial(
+                gx_pos.token_amount_raw,
+                current_sold_pct=prev_sold_pct,
+                sell_pct_delta=gx_sell_pct,
+            )
+            gx_command_sell_pct = _clamp_pct(gx.get('sell_pct') if gx.get('sell_pct') is not None else gx.get('sellPct'))
             _instant_sim = gx.get('_instant_sim')
-            if _instant_sim and _instant_sim.get('success'):
+            if (
+                _instant_sim
+                and _instant_sim.get('success')
+                and abs(gx_sell_pct - gx_command_sell_pct) <= PARTIAL_IDEMPOTENCY_EPSILON
+            ):
                 gx_sim = _instant_sim
                 log.info(f"  [GUARDIAN_EXIT] ⚡ Using instant partial quote for {gx['symbol']}")
             else:
@@ -1158,14 +1239,12 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                     f"gap={gx_quote_mark_gap:+.1%}"
                 )
 
-            updated_state = (gx_pos.monitor_state or {}).copy()
             remaining_raw = max(0, int(float(gx_pos.token_amount_raw or 0)) - gx_sell_amount)
-            prev_sold_pct = float(updated_state.get('soldPct') or 0.0)
             updated_state['tokenAmount'] = remaining_raw
             updated_state['phase0PartialLocked'] = True
             updated_state['phase0PartialLockPnl'] = gx_trigger_pnl
             updated_state['phase0PartialLockPeak'] = max(float(getattr(gx_pos, 'peak_pnl', 0) or 0), gx_trigger_pnl)
-            updated_state['soldPct'] = min(1.0, prev_sold_pct + gx_sell_pct)
+            updated_state['soldPct'] = min(gx_target_sold_pct, prev_sold_pct + gx_sell_pct)
             updated_state['lockedPnl'] = gx_trigger_pnl
             to_close.append({
                 'trade_id': gx_trade_id,
@@ -1181,6 +1260,8 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                     'tpName': gx.get('tp_name') or 'PHASE0_LOCK',
                     'sellPct': gx_sell_pct,
                     'prevSoldPct': prev_sold_pct,
+                    'targetSoldPct': gx_target_sold_pct,
+                    'partialType': gx.get('partial_type') or gx.get('tp_name') or 'PHASE0_LOCK',
                     'quotePnl': gx_quote_pnl,
                     'quoteMarkGap': gx_quote_mark_gap,
                     'quoteSanityStatus': gx_quote_sanity,

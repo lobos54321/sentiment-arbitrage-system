@@ -4,10 +4,20 @@ import sqlite3
 sys.path.insert(0, "scripts")
 
 from paper_decision_audit import init_decision_audit  # noqa: E402
-from lotto_engine import build_lotto_pending  # noqa: E402
+from lotto_engine import build_lotto_pending, evaluate_lotto_entry  # noqa: E402
+from exit_engine import (  # noqa: E402
+    _partial_delta_from_command,
+    _raw_amount_for_absolute_partial,
+)
+from matrix_evaluator import (  # noqa: E402
+    ath_flat_momentum_allowed,
+    ath_structural_reentry_allowed,
+)
 from paper_trade_monitor import (  # noqa: E402
+    evaluate_entry_edge_budget,
     evaluate_token_reclaim,
     find_lotto_real_probe_candidates,
+    normalize_price_age_ms,
     should_block_lotto_falling_knife,
     should_block_lotto_lifecycle_entry,
     token_quarantine_state,
@@ -101,6 +111,29 @@ def test_real_probe_requires_tradable_reclaim_not_reason_text():
     assert [row["symbol"] for row in candidates] == ["BlueBuck"]
 
 
+def test_real_probe_rejects_stale_missed_opportunity():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, signal_ts, route, component,
+             decision, reject_reason, baseline_price, baseline_ts,
+             pnl_5m, pnl_15m, max_pnl_recorded, status,
+             tradable_missed, tradability_status, would_stop_before_peak,
+             first_tradable_pnl, tradable_peak_pnl)
+        VALUES (1000, 'OldToken', 'OLD', 900, 'LOTTO', 'lotto_entry_gate',
+                'expire', 'lotto_stale_3600s', 1.0, 900,
+                0.70, 0.60, 0.70, 'pending',
+                1, 'tradable_reclaim', 0, 0.60, 0.70)
+        """
+    )
+    db.commit()
+    candidates = find_lotto_real_probe_candidates(db, now_ts=5000, limit=5)
+    assert candidates == []
+
+
 def test_lotto_lifecycle_blocks_deep_reset_reject():
     blocked, reason, detail = should_block_lotto_lifecycle_entry({
         "lifecycle_state": "ATH_DEEP_RESET",
@@ -134,6 +167,7 @@ def test_token_quarantine_blocks_recent_same_ca_failure():
             symbol TEXT,
             exit_ts REAL,
             pnl_pct REAL,
+            peak_pnl REAL,
             exit_reason TEXT,
             replay_source TEXT,
             signal_route TEXT
@@ -143,8 +177,8 @@ def test_token_quarantine_blocks_recent_same_ca_failure():
     db.execute(
         """
         INSERT INTO paper_trades
-            (token_ca, symbol, exit_ts, pnl_pct, exit_reason, replay_source, signal_route)
-        VALUES ('TokenA', 'TOKA', 1000, -0.12, 'guardian_lotto_fast_fail_20s',
+            (token_ca, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route)
+        VALUES ('TokenA', 'TOKA', 1000, -0.12, 0.0, 'guardian_lotto_fast_fail_20s',
                 'live_monitor_lotto', 'LOTTO')
         """
     )
@@ -166,6 +200,7 @@ def test_token_quarantine_requires_reclaim_after_cooldown():
             symbol TEXT,
             exit_ts REAL,
             pnl_pct REAL,
+            peak_pnl REAL,
             exit_reason TEXT,
             replay_source TEXT,
             signal_route TEXT
@@ -175,8 +210,8 @@ def test_token_quarantine_requires_reclaim_after_cooldown():
     db.execute(
         """
         INSERT INTO paper_trades
-            (token_ca, symbol, exit_ts, pnl_pct, exit_reason, replay_source, signal_route)
-        VALUES ('TokenA', 'TOKA', 1000, -0.12, 'guardian_lotto_fast_fail_20s',
+            (token_ca, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route)
+        VALUES ('TokenA', 'TOKA', 1000, -0.12, 0.0, 'guardian_lotto_fast_fail_20s',
                 'live_monitor_lotto', 'LOTTO')
         """
     )
@@ -236,6 +271,194 @@ def test_evaluate_token_reclaim_requires_current_strength():
     assert weak["reason"] == "reclaim_m5_too_low"
 
 
+def test_entry_edge_budget_blocks_lotto_spread_over_budget():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.93e-7,
+        quote_price=1.9883383588344e-7,
+        lifecycle={"lifecycle_features": {"liquidity_unknown": True, "live_top1_pct": 31.6}},
+        pending={"is_lotto": True},
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["profile"] == "lotto_risky"
+
+
+def test_entry_edge_budget_allows_favorable_lotto_fill():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=3.72e-7,
+        quote_price=3.4071349202664e-7,
+        lifecycle={"lifecycle_features": {"liquidity_unknown": True, "live_top1_pct": 44.4}},
+        pending={"is_lotto": True},
+    )
+    assert budget["pass"] is True
+    assert budget["spread_pct"] < 0
+
+
+def test_positive_gap_crash_is_waterfall_memory_not_loss_failure():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            exit_ts REAL,
+            pnl_pct REAL,
+            peak_pnl REAL,
+            exit_reason TEXT,
+            replay_source TEXT,
+            signal_route TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_trades
+            (token_ca, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route)
+        VALUES ('LifeCA', 'Life', 1000, 0.581, 0.970,
+                'guardian_gap_crash (28.7% drop in 1 tick, 96.5%→67.8%)',
+                'live_monitor_lotto', 'LOTTO')
+        """
+    )
+    db.commit()
+
+    state = token_quarantine_state(db, "LifeCA", now_ts=1100)
+    assert state["blocked"] is True
+    assert state["reason"] == "token_quarantine_waterfall_memory"
+    assert state["severe_failure_count"] == 0
+    assert state["risk_memory_count"] == 1
+    assert state["risk_profile"] == "waterfall_memory"
+
+
+def test_waterfall_memory_requires_stronger_reclaim_after_cooldown():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            exit_ts REAL,
+            pnl_pct REAL,
+            peak_pnl REAL,
+            exit_reason TEXT,
+            replay_source TEXT,
+            signal_route TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_trades
+            (token_ca, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route)
+        VALUES ('LifeCA', 'Life', 1000, 0.581, 0.970,
+                'guardian_gap_crash (28.7% drop in 1 tick, 96.5%→67.8%)',
+                'live_monitor_lotto', 'LOTTO')
+        """
+    )
+    db.commit()
+
+    weak = token_quarantine_state(
+        db,
+        "LifeCA",
+        now_ts=5000,
+        reclaim={
+            "reclaim_confirmed": True,
+            "route": "LOTTO",
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "price_change_m5": 20,
+            "buy_sell_ratio": 1.33,
+            "tx_m5": 100,
+            "liquidity_usd": 10000,
+            "relative_volume": 0.2,
+        },
+    )
+    assert weak["blocked"] is True
+    assert weak["reason"] == "token_quarantine_reclaim_required"
+    assert weak["risk_profile"] == "waterfall_memory"
+
+    strong = token_quarantine_state(
+        db,
+        "LifeCA",
+        now_ts=5000,
+        reclaim={
+            "reclaim_confirmed": True,
+            "route": "LOTTO",
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "price_change_m5": 40,
+            "buy_sell_ratio": 1.7,
+            "tx_m5": 100,
+            "liquidity_usd": 10000,
+            "relative_volume": 2.0,
+        },
+    )
+    assert strong["blocked"] is False
+    assert strong["reclaim_unlocked"] is True
+
+
+def test_guardian_partial_command_skips_when_target_already_reached():
+    sell_delta, target = _partial_delta_from_command(
+        {
+            "action": "partial_sell",
+            "sell_pct": 0.25,
+            "queued_sold_pct": 0.0,
+            "target_sold_pct": 0.25,
+            "partial_type": "LOTTO_LOCK",
+        },
+        current_sold_pct=0.25,
+    )
+    assert sell_delta == 0.0
+    assert target == 0.25
+
+
+def test_guardian_partial_command_sells_only_remaining_delta_to_target():
+    sell_delta, target = _partial_delta_from_command(
+        {
+            "action": "partial_sell",
+            "sell_pct": 0.25,
+            "queued_sold_pct": 0.0,
+            "target_sold_pct": 0.25,
+            "partial_type": "LOTTO_LOCK",
+        },
+        current_sold_pct=0.10,
+    )
+    assert round(sell_delta, 6) == 0.15
+    assert target == 0.25
+
+
+def test_guardian_partial_raw_amount_uses_remaining_position_fraction():
+    raw_amount = _raw_amount_for_absolute_partial(
+        900,
+        current_sold_pct=0.10,
+        sell_pct_delta=0.15,
+    )
+    assert raw_amount == 150
+
+
+def test_price_age_clamps_small_clock_skew_and_rejects_future_quote():
+    clamped_age, clamped_status = normalize_price_age_ms(
+        10_000,
+        10_900,
+        max_future_ms=1500,
+    )
+    assert clamped_age == 0
+    assert clamped_status == "clock_skew_clamped"
+
+    future_age, future_status = normalize_price_age_ms(
+        10_000,
+        12_000,
+        max_future_ms=1500,
+    )
+    assert future_age == -2000
+    assert future_status == "future_quote"
+
+
 def test_lotto_pending_defaults_to_timing_gate():
     pending = build_lotto_pending(
         {
@@ -254,18 +477,95 @@ def test_lotto_pending_defaults_to_timing_gate():
     assert pending["first_fire_pc_m5"] == 18.0
 
 
+def test_lotto_blocks_pumpfun_liquidity_unknown_live_top10_over_risky_limit():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 10000,
+            "signal_holders": 80,
+            "signal_vol24h": 20000,
+            "signal_top10": 45,
+        },
+        dex_snapshot={
+            "liquidity_unknown": True,
+            "dex_id": "pumpfun",
+            "vol_m5": 2000,
+            "buys_m5": 30,
+            "sells_m5": 10,
+        },
+        live_concentration={"top1_pct": 25, "top10_pct": 54.6},
+        now=1100,
+    )
+    assert decision.expire is True
+    assert decision.reason == "lotto_live_top10_55pct"
+    assert decision.detail["live_top10_max_pct"] == 50.0
+
+
+def test_lotto_allows_pumpfun_liquidity_unknown_live_top10_under_risky_limit():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 10000,
+            "signal_holders": 80,
+            "signal_vol24h": 20000,
+            "signal_top10": 45,
+        },
+        dex_snapshot={
+            "liquidity_unknown": True,
+            "dex_id": "pumpfun",
+            "vol_m5": 2000,
+            "buys_m5": 30,
+            "sells_m5": 10,
+        },
+        live_concentration={"top1_pct": 25, "top10_pct": 46.8},
+        now=1100,
+    )
+    assert decision.allow is True
+
+
+def test_ath_structural_reentry_can_bypass_last_exit_price_gate():
+    allowed, reason = ath_structural_reentry_allowed(
+        "ATH",
+        {"trend": 100, "volume": 80, "signal": 60},
+        current_price=0.90,
+        last_exit_price=1.00,
+    )
+    assert allowed is True
+    assert reason == "ath_structural_reentry_below_last_exit"
+
+
+def test_ath_structural_reentry_rejects_weak_structure_below_last_exit():
+    allowed, reason = ath_structural_reentry_allowed(
+        "ATH",
+        {"trend": 60, "volume": 80, "signal": 60},
+        current_price=0.90,
+        last_exit_price=1.00,
+    )
+    assert allowed is False
+    assert reason == "reentry_trend_too_low"
+
+
+def test_ath_flat_momentum_allowed_only_with_strong_structure():
+    allowed, pct_move = ath_flat_momentum_allowed(
+        "ATH",
+        {"trend": 100, "volume": 80, "signal": 60},
+        [1.0, 1.0001],
+    )
+    assert allowed is True
+    assert abs(pct_move) <= 0.05
+
+    weak_allowed, _ = ath_flat_momentum_allowed(
+        "ATH",
+        {"trend": 60, "volume": 80, "signal": 60},
+        [1.0, 1.0001],
+    )
+    assert weak_allowed is False
+
+
 def run_tests():
     tests = [
-        test_blocks_newborn_low_liq_m5_down_falling_knife,
-        test_allows_newborn_low_liq_without_m5_downtrend,
-        test_allows_non_newborn_even_when_low_liq_m5_down,
-        test_real_probe_requires_tradable_reclaim_not_reason_text,
-        test_lotto_lifecycle_blocks_deep_reset_reject,
-        test_lotto_lifecycle_blocks_negative_m5,
-        test_token_quarantine_blocks_recent_same_ca_failure,
-        test_token_quarantine_requires_reclaim_after_cooldown,
-        test_evaluate_token_reclaim_requires_current_strength,
-        test_lotto_pending_defaults_to_timing_gate,
+        obj for name, obj in sorted(globals().items())
+        if name.startswith("test_") and callable(obj)
     ]
     for test in tests:
         test()

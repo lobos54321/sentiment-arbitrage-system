@@ -100,6 +100,10 @@ DEFAULT_STRATEGY_ROLE = 'selective_challenger'
 DEFAULT_STAGE1_EXIT = {'stopLossPct': 7.5, 'trailStartPct': 15, 'trailFactor': 0.6, 'timeoutMinutes': 120}
 MATRIX_SPREAD_WARN_PCT = float(os.environ.get('MATRIX_SPREAD_WARN_PCT', '2.0'))
 MATRIX_SPREAD_ABORT_PCT = float(os.environ.get('MATRIX_SPREAD_ABORT_PCT', '4.5'))
+ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT', '2.0'))
+ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT', '1.5'))
+ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '1.0'))
+ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
 MATRIX_DOA_EXIT_SEC = float(os.environ.get('MATRIX_DOA_EXIT_SEC', '30'))
 MATRIX_DOA_PEAK_MAX = float(os.environ.get('MATRIX_DOA_PEAK_MAX', '0.001'))
 MATRIX_DOA_PNL_MAX = float(os.environ.get('MATRIX_DOA_PNL_MAX', '-0.03'))
@@ -157,6 +161,9 @@ LOTTO_REAL_PROBE_ENABLED = os.environ.get('LOTTO_REAL_PROBE_ENABLED', 'true').lo
 LOTTO_REAL_PROBE_MIN_MAX_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_MAX_PNL', '0.25'))
 LOTTO_REAL_PROBE_MIN_15M_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_15M_PNL', '0.15'))
 LOTTO_REAL_PROBE_SIZE_SOL = float(os.environ.get('LOTTO_REAL_PROBE_SIZE_SOL', '0.03'))
+LOTTO_REAL_PROBE_MAX_AGE_SEC = int(os.environ.get('LOTTO_REAL_PROBE_MAX_AGE_SEC', str(30 * 60)))
+LOTTO_REAL_PROBE_DECAY_FACTOR = float(os.environ.get('LOTTO_REAL_PROBE_DECAY_FACTOR', '0.5'))
+LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
 TOKEN_RISK_QUARANTINE_ENABLED = os.environ.get('TOKEN_RISK_QUARANTINE_ENABLED', 'true').lower() != 'false'
@@ -170,6 +177,12 @@ TOKEN_RISK_RECLAIM_M5_PCT = float(os.environ.get('TOKEN_RISK_RECLAIM_M5_PCT', '1
 TOKEN_RISK_RECLAIM_BS_RATIO = float(os.environ.get('TOKEN_RISK_RECLAIM_BS_RATIO', '1.25'))
 TOKEN_RISK_RECLAIM_MIN_TX_M5 = int(os.environ.get('TOKEN_RISK_RECLAIM_MIN_TX_M5', '20'))
 TOKEN_RISK_RECLAIM_MIN_LIQ_USD = float(os.environ.get('TOKEN_RISK_RECLAIM_MIN_LIQ_USD', '5000'))
+TOKEN_RISK_NO_FOLLOW_RECLAIM_M5_PCT = float(os.environ.get('TOKEN_RISK_NO_FOLLOW_RECLAIM_M5_PCT', '25'))
+TOKEN_RISK_NO_FOLLOW_RECLAIM_BS_RATIO = float(os.environ.get('TOKEN_RISK_NO_FOLLOW_RECLAIM_BS_RATIO', '1.4'))
+TOKEN_RISK_NO_FOLLOW_RECLAIM_MIN_RVOL = float(os.environ.get('TOKEN_RISK_NO_FOLLOW_RECLAIM_MIN_RVOL', '1.0'))
+TOKEN_RISK_WATERFALL_RECLAIM_M5_PCT = float(os.environ.get('TOKEN_RISK_WATERFALL_RECLAIM_M5_PCT', '35'))
+TOKEN_RISK_WATERFALL_RECLAIM_BS_RATIO = float(os.environ.get('TOKEN_RISK_WATERFALL_RECLAIM_BS_RATIO', '1.6'))
+TOKEN_RISK_WATERFALL_RECLAIM_MIN_RVOL = float(os.environ.get('TOKEN_RISK_WATERFALL_RECLAIM_MIN_RVOL', '1.5'))
 LOTTO_REAL_PROBE_MIN_RECLAIM_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_RECLAIM_PNL', '0.15'))
 LOTTO_LIFECYCLE_BLOCK_STATES = {
     s.strip().upper()
@@ -797,10 +810,117 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
     return recorded
 
 
+def normalize_signal_ts_seconds(value):
+    if value is None:
+        return None
+    try:
+        ts = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if ts > 1_000_000_000_000:
+        return ts // 1000
+    return ts
+
+
+def calculate_entry_spread_pct(trigger_price, quote_price):
+    try:
+        trigger = float(trigger_price or 0)
+        quote = float(quote_price or 0)
+    except (TypeError, ValueError):
+        return None
+    if trigger <= 0 or quote <= 0:
+        return None
+    return (quote - trigger) / trigger * 100.0
+
+
+def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=None,
+                               lifecycle=None, pending=None, token_risk=None):
+    """Last-mile entry contract: the fill cannot consume the trade's edge budget."""
+    lifecycle = lifecycle or {}
+    pending = pending or {}
+    features = lifecycle.get('lifecycle_features') or {}
+    route_name = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    is_lotto = route_name == 'LOTTO' or bool(pending.get('is_lotto'))
+    lotto_state = pending.get('lotto_state') or {}
+    is_probe = (
+        bool(lotto_state.get('probe'))
+        or pending.get('replay_source') == 'live_monitor_lotto_probe'
+        or pending.get('entry_mode') == 'lotto_real_probe_reentry_arm'
+    )
+    spread_pct = calculate_entry_spread_pct(trigger_price, quote_price)
+
+    def _feature_float(name, default=None):
+        value = features.get(name)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    liquidity_unknown = bool(features.get('liquidity_unknown'))
+    live_top1_pct = _feature_float('live_top1_pct')
+    max_spread_pct = MATRIX_SPREAD_ABORT_PCT
+    profile = 'matrix'
+    if is_lotto:
+        max_spread_pct = ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT
+        profile = 'lotto'
+        if is_probe:
+            max_spread_pct = ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT
+            profile = 'lotto_probe'
+        elif liquidity_unknown or (live_top1_pct is not None and live_top1_pct >= 30.0):
+            max_spread_pct = ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT
+            profile = 'lotto_risky'
+
+    risk_penalty_pct = 0.0
+    if token_risk and token_risk.get('risk_profile') == 'waterfall_memory':
+        risk_penalty_pct = 0.5
+    effective_max_spread_pct = max(0.0, max_spread_pct - risk_penalty_pct)
+
+    detail = {
+        'pass': True,
+        'profile': profile,
+        'route': route_name,
+        'trigger_price': trigger_price,
+        'quote_price': quote_price,
+        'spread_pct': spread_pct,
+        'warn_spread_pct': MATRIX_SPREAD_WARN_PCT,
+        'max_spread_pct': effective_max_spread_pct,
+        'base_max_spread_pct': max_spread_pct,
+        'risk_penalty_pct': risk_penalty_pct,
+        'required_follow_peak_pct': ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT,
+        'remaining_follow_budget_pct': (
+            ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT - max(spread_pct or 0.0, 0.0)
+            if spread_pct is not None else None
+        ),
+        'liquidity_unknown': liquidity_unknown,
+        'live_top1_pct': live_top1_pct,
+        'is_probe': is_probe,
+        'reason': 'entry_edge_budget_ok',
+    }
+    if spread_pct is None:
+        detail['reason'] = 'entry_edge_no_trigger_or_quote'
+        return detail
+    if spread_pct > effective_max_spread_pct:
+        detail['pass'] = False
+        detail['reason'] = 'entry_edge_spread_too_high'
+    return detail
+
+
+def _real_probe_decayed(row, *, now_ts):
+    age_sec = float(now_ts) - float(row['created_event_ts'] or 0)
+    if age_sec > LOTTO_REAL_PROBE_MAX_AGE_SEC:
+        return True, f'real_probe_stale_{int(age_sec)}s'
+    pnl_5m = _safe_float(row['pnl_5m'], None)
+    pnl_15m = _safe_float(row['pnl_15m'], None)
+    if pnl_5m is not None and pnl_5m > 0 and pnl_15m is not None:
+        if pnl_15m < pnl_5m * LOTTO_REAL_PROBE_DECAY_FACTOR:
+            return True, 'real_probe_decay_15m_vs_5m'
+    return False, 'ok'
+
+
 def find_lotto_real_probe_candidates(db, *, now_ts, limit=3):
     if not LOTTO_REAL_PROBE_ENABLED:
         return []
-    return db.execute(
+    rows = db.execute(
         """
         WITH ranked AS (
             SELECT
@@ -838,10 +958,14 @@ def find_lotto_real_probe_candidates(db, *, now_ts, limit=3):
         (
             LOTTO_REAL_PROBE_MIN_MAX_PNL,
             LOTTO_REAL_PROBE_MIN_RECLAIM_PNL,
-            now_ts - 2 * 60 * 60,
+            now_ts - LOTTO_REAL_PROBE_MAX_AGE_SEC,
             limit,
         ),
     ).fetchall()
+    return [
+        row for row in rows
+        if not _real_probe_decayed(row, now_ts=now_ts)[0]
+    ]
 
 
 def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, positions, *, now_ts, limit=2, max_positions=None):
@@ -1039,6 +1163,19 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
         pending_entries[lifecycle_id]['lotto_state']['probe'] = True
         pending_entries[lifecycle_id]['lotto_state']['probeSource'] = 'missed_attribution'
         pending_entries[lifecycle_id]['lotto_state']['probeEntryMode'] = 'reentry_timing_gate'
+        pending_entries[lifecycle_id]['lotto_state']['realProbe'] = {
+            'missed_id': row['id'],
+            'created_event_ts': row['created_event_ts'],
+            'age_sec': max(0.0, float(now_ts) - float(row['created_event_ts'] or now_ts)),
+            'source_component': row['component'],
+            'reject_reason': row['reject_reason'],
+            'best_pnl': row['best_pnl'],
+            'reclaim_pnl': row['reclaim_pnl'],
+            'pnl_5m': row['pnl_5m'],
+            'pnl_15m': row['pnl_15m'],
+            'pnl_60m': row['pnl_60m'],
+            'current_reclaim': current_reclaim,
+        }
         record_decision_event(
             db,
             component='lotto_probe_live',
@@ -1092,7 +1229,7 @@ def should_block_lotto_falling_knife(lotto_detail, lotto_lifecycle):
     }
 
 
-def evaluate_token_reclaim(dex_snapshot=None, lifecycle=None, route=None):
+def evaluate_token_reclaim(dex_snapshot=None, lifecycle=None, route=None, risk_profile=None):
     """Require a failed CA to prove current strength before any route can re-enter."""
     dex_snapshot = dex_snapshot or {}
     lifecycle = lifecycle or {}
@@ -1122,10 +1259,34 @@ def evaluate_token_reclaim(dex_snapshot=None, lifecycle=None, route=None):
         buy_sell_ratio = buys_m5 / max(sells_m5 or 0, 1)
     liquidity_usd = _pick_number('liquidity_usd', 0.0)
     liquidity_unknown = bool(features.get('liquidity_unknown') or dex_snapshot.get('liquidity_unknown'))
+    relative_volume = _pick_number('relative_volume')
+    if relative_volume is None:
+        relative_volume = _pick_number('rvol')
+    if relative_volume is None:
+        relative_volume = _pick_number('volume_accel')
+    if relative_volume is None:
+        vol_m5 = _pick_number('vol_m5')
+        vol_h1 = _pick_number('vol_h1')
+        if vol_m5 is not None and vol_h1 and vol_h1 > 0:
+            relative_volume = vol_m5 / max(vol_h1 / 12.0, 1e-9)
+
+    profile = str(risk_profile or 'base').lower()
+    m5_threshold = TOKEN_RISK_RECLAIM_M5_PCT
+    bs_threshold = TOKEN_RISK_RECLAIM_BS_RATIO
+    rvol_threshold = None
+    if profile in {'no_follow_failure', 'doa_failure', 'spread_chase_failure'}:
+        m5_threshold = TOKEN_RISK_NO_FOLLOW_RECLAIM_M5_PCT
+        bs_threshold = TOKEN_RISK_NO_FOLLOW_RECLAIM_BS_RATIO
+        rvol_threshold = TOKEN_RISK_NO_FOLLOW_RECLAIM_MIN_RVOL
+    elif profile in {'waterfall_memory', 'waterfall_failure'}:
+        m5_threshold = TOKEN_RISK_WATERFALL_RECLAIM_M5_PCT
+        bs_threshold = TOKEN_RISK_WATERFALL_RECLAIM_BS_RATIO
+        rvol_threshold = TOKEN_RISK_WATERFALL_RECLAIM_MIN_RVOL
 
     detail = {
         'reclaim_confirmed': False,
         'route': route,
+        'risk_profile': profile,
         'lifecycle_state': state,
         'entry_bias': entry_bias,
         'price_change_m5': price_change_m5,
@@ -1133,11 +1294,13 @@ def evaluate_token_reclaim(dex_snapshot=None, lifecycle=None, route=None):
         'tx_m5': tx_m5,
         'liquidity_usd': liquidity_usd,
         'liquidity_unknown': liquidity_unknown,
+        'relative_volume': relative_volume,
         'thresholds': {
-            'price_change_m5': TOKEN_RISK_RECLAIM_M5_PCT,
-            'buy_sell_ratio': TOKEN_RISK_RECLAIM_BS_RATIO,
+            'price_change_m5': m5_threshold,
+            'buy_sell_ratio': bs_threshold,
             'tx_m5': TOKEN_RISK_RECLAIM_MIN_TX_M5,
             'liquidity_usd': TOKEN_RISK_RECLAIM_MIN_LIQ_USD,
+            'relative_volume': rvol_threshold,
         },
     }
 
@@ -1145,11 +1308,14 @@ def evaluate_token_reclaim(dex_snapshot=None, lifecycle=None, route=None):
     if entry_bias == 'REJECT' or state in blocked_states:
         detail['reason'] = 'reclaim_lifecycle_blocked'
         return detail
-    if price_change_m5 is None or price_change_m5 < TOKEN_RISK_RECLAIM_M5_PCT:
+    if price_change_m5 is None or price_change_m5 < m5_threshold:
         detail['reason'] = 'reclaim_m5_too_low'
         return detail
-    if buy_sell_ratio is None or buy_sell_ratio < TOKEN_RISK_RECLAIM_BS_RATIO:
+    if buy_sell_ratio is None or buy_sell_ratio < bs_threshold:
         detail['reason'] = 'reclaim_buy_sell_too_low'
+        return detail
+    if rvol_threshold is not None and (relative_volume is None or relative_volume < rvol_threshold):
+        detail['reason'] = 'reclaim_relative_volume_too_low'
         return detail
     if tx_m5 is None or tx_m5 < TOKEN_RISK_RECLAIM_MIN_TX_M5:
         detail['reason'] = 'reclaim_tx_too_low'
@@ -1175,6 +1341,82 @@ TOKEN_RISK_DANGER_REASON_PATTERNS = (
 )
 
 
+def classify_token_risk_exit(row):
+    pnl = _safe_float(row['pnl_pct'], 0.0)
+    peak = _safe_float(row['peak_pnl'], 0.0) if 'peak_pnl' in row.keys() else 0.0
+    reason = (row['exit_reason'] or '').lower()
+    category = None
+    risk_profile = None
+    counts_as_failure = True
+
+    if 'gap_crash' in reason:
+        if pnl > 0:
+            category = 'PROFITABLE_VOLATILITY_EXIT'
+            risk_profile = 'waterfall_memory'
+            counts_as_failure = False
+        else:
+            category = 'WATERFALL_FAILURE'
+            risk_profile = 'waterfall_failure'
+    elif 'no_follow' in reason and pnl < 0:
+        category = 'NO_FOLLOW_FAILURE'
+        risk_profile = 'no_follow_failure'
+    elif ('doa' in reason or 'fast_fail' in reason) and pnl < 0:
+        category = 'DOA_FAILURE'
+        risk_profile = 'doa_failure'
+    elif ('hard_sl' in reason or 'hard_floor' in reason or 'stop_loss' in reason or 'lotto_sl' in reason):
+        if pnl <= TOKEN_RISK_LOSS_THRESHOLD or pnl < 0:
+            category = 'LOSS_FAILURE'
+            risk_profile = 'loss_failure'
+    elif pnl <= TOKEN_RISK_LOSS_THRESHOLD:
+        category = 'LOSS_FAILURE'
+        risk_profile = 'loss_failure'
+
+    if category is None:
+        return None
+    return {
+        'row': row,
+        'category': category,
+        'risk_profile': risk_profile,
+        'counts_as_failure': counts_as_failure,
+        'pnl': pnl,
+        'peak': peak,
+    }
+
+
+def strongest_token_risk_profile(events):
+    profiles = {event.get('risk_profile') for event in events}
+    if 'waterfall_failure' in profiles:
+        return 'waterfall_failure'
+    if 'waterfall_memory' in profiles:
+        return 'waterfall_memory'
+    if 'no_follow_failure' in profiles:
+        return 'no_follow_failure'
+    if 'doa_failure' in profiles:
+        return 'doa_failure'
+    if 'spread_chase_failure' in profiles:
+        return 'spread_chase_failure'
+    return 'loss_failure'
+
+
+def reclaim_satisfies_token_risk_profile(reclaim, risk_profile):
+    if not TOKEN_RISK_RECLAIM_REQUIRED:
+        return True, 'reclaim_not_required'
+    reclaim = reclaim or {}
+    if not reclaim.get('reclaim_confirmed'):
+        return False, reclaim.get('reason') or 'reclaim_not_confirmed'
+    if risk_profile not in {'no_follow_failure', 'waterfall_memory', 'waterfall_failure'}:
+        return True, 'reclaim_confirmed'
+    profile_check = evaluate_token_reclaim(
+        dex_snapshot=reclaim,
+        lifecycle={'lifecycle_state': reclaim.get('lifecycle_state'), 'entry_bias': reclaim.get('entry_bias')},
+        route=reclaim.get('route'),
+        risk_profile=risk_profile,
+    )
+    if not profile_check.get('reclaim_confirmed'):
+        return False, profile_check.get('reason') or 'risk_profile_reclaim_not_confirmed'
+    return True, 'reclaim_confirmed'
+
+
 def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
     """Return a global same-CA entry block after recent severe failed exits."""
     if not TOKEN_RISK_QUARANTINE_ENABLED or not token_ca:
@@ -1183,7 +1425,7 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
     cutoff = now_ts - TOKEN_RISK_FAILURE_WINDOW_SEC
     rows = db.execute(
         """
-        SELECT id, symbol, exit_ts, pnl_pct, exit_reason, replay_source, signal_route
+        SELECT id, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route
         FROM paper_trades
         WHERE token_ca = ?
           AND exit_ts IS NOT NULL
@@ -1192,25 +1434,27 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
         """,
         (token_ca, cutoff),
     ).fetchall()
-    severe = []
+    risk_events = []
     for row in rows:
-        pnl = _safe_float(row['pnl_pct'], 0.0)
-        reason = (row['exit_reason'] or '').lower()
-        danger_reason = any(pattern in reason for pattern in TOKEN_RISK_DANGER_REASON_PATTERNS)
-        if pnl <= TOKEN_RISK_LOSS_THRESHOLD or danger_reason:
-            severe.append(row)
+        event = classify_token_risk_exit(row)
+        if event:
+            risk_events.append(event)
 
-    if not severe:
+    if not risk_events:
         return {
             'blocked': False,
             'recent_exit_count': len(rows),
             'severe_failure_count': 0,
+            'risk_memory_count': 0,
             'loss_threshold': TOKEN_RISK_LOSS_THRESHOLD,
         }
 
-    latest = severe[0]
+    latest_event = risk_events[0]
+    latest = latest_event['row']
     latest_exit_ts = _safe_float(latest['exit_ts'], 0.0)
-    failure_count = len(severe)
+    failure_count = sum(1 for event in risk_events if event.get('counts_as_failure'))
+    risk_memory_count = len(risk_events) - failure_count
+    risk_profile = strongest_token_risk_profile(risk_events)
     cooldown_sec = (
         TOKEN_RISK_REPEAT_COOLDOWN_SEC
         if failure_count >= TOKEN_RISK_REPEAT_FAILURE_COUNT
@@ -1218,8 +1462,9 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
     )
     until_ts = latest_exit_ts + cooldown_sec
     if now_ts >= until_ts:
-        if TOKEN_RISK_RECLAIM_REQUIRED and not (reclaim or {}).get('reclaim_confirmed'):
-            worst_pnl = min((_safe_float(row['pnl_pct'], 0.0) for row in severe), default=None)
+        reclaim_ok, reclaim_reason = reclaim_satisfies_token_risk_profile(reclaim, risk_profile)
+        if not reclaim_ok:
+            worst_pnl = min((event.get('pnl', 0.0) for event in risk_events), default=None)
             return {
                 'blocked': True,
                 'reason': 'token_quarantine_reclaim_required',
@@ -1227,6 +1472,9 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
                 'remaining_sec': 0.0,
                 'recent_exit_count': len(rows),
                 'severe_failure_count': failure_count,
+                'risk_memory_count': risk_memory_count,
+                'risk_profile': risk_profile,
+                'last_risk_category': latest_event.get('category'),
                 'cooldown_expired': True,
                 'last_failure_trade_id': latest['id'],
                 'last_failure_exit_ts': latest_exit_ts,
@@ -1237,11 +1485,14 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
                 'loss_threshold': TOKEN_RISK_LOSS_THRESHOLD,
                 'reclaim_required': True,
                 'reclaim': reclaim or {'reclaim_confirmed': False, 'reason': 'reclaim_not_checked'},
+                'reclaim_profile_reason': reclaim_reason,
             }
         return {
             'blocked': False,
             'recent_exit_count': len(rows),
             'severe_failure_count': failure_count,
+            'risk_memory_count': risk_memory_count,
+            'risk_profile': risk_profile,
             'cooldown_expired': True,
             'reclaim_unlocked': bool((reclaim or {}).get('reclaim_confirmed')),
             'last_failure_exit_ts': latest_exit_ts,
@@ -1249,12 +1500,15 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
             'reclaim': reclaim,
         }
 
-    worst_pnl = min((_safe_float(row['pnl_pct'], 0.0) for row in severe), default=None)
-    reason = (
-        'token_quarantine_repeat_failure'
-        if failure_count >= TOKEN_RISK_REPEAT_FAILURE_COUNT
-        else 'token_quarantine_recent_failure'
-    )
+    worst_pnl = min((event.get('pnl', 0.0) for event in risk_events), default=None)
+    if risk_profile in {'waterfall_memory', 'waterfall_failure'}:
+        reason = 'token_quarantine_waterfall_memory'
+    else:
+        reason = (
+            'token_quarantine_repeat_failure'
+            if failure_count >= TOKEN_RISK_REPEAT_FAILURE_COUNT
+            else 'token_quarantine_recent_failure'
+        )
     return {
         'blocked': True,
         'reason': reason,
@@ -1262,6 +1516,9 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
         'remaining_sec': max(0.0, until_ts - now_ts),
         'recent_exit_count': len(rows),
         'severe_failure_count': failure_count,
+        'risk_memory_count': risk_memory_count,
+        'risk_profile': risk_profile,
+        'last_risk_category': latest_event.get('category'),
         'last_failure_trade_id': latest['id'],
         'last_failure_exit_ts': latest_exit_ts,
         'last_failure_pnl': _safe_float(latest['pnl_pct'], None),
@@ -2021,11 +2278,13 @@ def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MA
         return None, None, None
     price = snap.get('price')
     ts_ms = snap.get('timestamp_ms') or 0
-    age_ms = now_ms - ts_ms if ts_ms else None
+    age_ms, age_status = normalize_price_age_ms(now_ms, ts_ms)
     if not price or price <= 0:
         return None, None, None
     # Belt-and-suspenders: some sources (shared quote cache) don't honour
     # min_timestamp_ms inside get_live_price_snapshot — re-check here.
+    if age_status == 'future_quote':
+        return None, 'future_quote', age_ms
     if age_ms is not None and age_ms > max_age_ms:
         return None, None, age_ms
     return float(price), snap.get('source'), age_ms
@@ -2449,6 +2708,17 @@ def _coerce_timestamp_ms(payload):
     return None
 
 
+def normalize_price_age_ms(now_ms, timestamp_ms, *, max_future_ms=LIVE_PRICE_MAX_FUTURE_MS):
+    if not timestamp_ms:
+        return None, 'missing_timestamp'
+    age_ms = int(now_ms) - int(timestamp_ms)
+    if age_ms < 0:
+        if abs(age_ms) <= max_future_ms:
+            return 0, 'clock_skew_clamped'
+        return age_ms, 'future_quote'
+    return age_ms, 'ok'
+
+
 def is_redis_payload_fresh(payload, max_age_ms=LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=None):
     """Validate Redis price payload freshness and monotonicity."""
     if not isinstance(payload, dict):
@@ -2462,8 +2732,8 @@ def is_redis_payload_fresh(payload, max_age_ms=LIVE_PRICE_MAX_AGE_MS, min_timest
     timestamp_ms = _coerce_timestamp_ms(payload)
     if not timestamp_ms:
         return False
-    age_ms = int(time.time() * 1000) - timestamp_ms
-    if age_ms < 0 or age_ms > max_age_ms:
+    age_ms, age_status = normalize_price_age_ms(int(time.time() * 1000), timestamp_ms)
+    if age_status == 'future_quote' or age_ms > max_age_ms:
         return False
     if min_timestamp_ms is not None and timestamp_ms < int(min_timestamp_ms):
         return False
@@ -3348,7 +3618,15 @@ def get_signal_freshness():
 
 def get_last_processed_id(db):
     """Get the highest signal_ts in paper_trades to avoid re-processing."""
-    row = db.execute("SELECT MAX(signal_ts) as max_ts FROM paper_trades").fetchone()
+    row = db.execute("""
+        SELECT MAX(
+            CASE
+                WHEN signal_ts > 1000000000000 THEN CAST(signal_ts / 1000 AS INTEGER)
+                ELSE signal_ts
+            END
+        ) as max_ts
+        FROM paper_trades
+    """).fetchone()
     return row['max_ts'] or 0
 
 
@@ -6216,17 +6494,21 @@ def run_monitor(db):
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
-                    # SPREAD GUARD:
-                    # Latest real paper fills show 2% is too tight for this venue, but
-                    # 15% lets the spread eat most of the stop buffer. Treat >2% as an
-                    # attribution warning and abort >5%.
-                    _SPREAD_WARN_PCT = MATRIX_SPREAD_WARN_PCT
-                    _SPREAD_GUARD_MAX_PCT = 5.0 if pending.get('is_lotto') else MATRIX_SPREAD_ABORT_PCT
+                    _entry_edge_budget = evaluate_entry_edge_budget(
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        trigger_price=trigger_price_val,
+                        quote_price=price,
+                        lifecycle=_entry_timing_lifecycle,
+                        pending=pending,
+                        token_risk=_token_risk,
+                    )
+                    _SPREAD_WARN_PCT = _entry_edge_budget.get('warn_spread_pct', MATRIX_SPREAD_WARN_PCT)
+                    _SPREAD_GUARD_MAX_PCT = _entry_edge_budget.get('max_spread_pct', MATRIX_SPREAD_ABORT_PCT)
                     if _spread > _SPREAD_WARN_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] ⚠️ {pending['symbol']} WARN: "
                             f"fill spread {_spread:+.1f}% > {_SPREAD_WARN_PCT}% warn "
-                            f"(abort at {_SPREAD_GUARD_MAX_PCT}%)."
+                            f"(budget={_entry_edge_budget.get('profile')} abort at {_SPREAD_GUARD_MAX_PCT}%)."
                         )
                         record_decision_event(
                             db,
@@ -6247,21 +6529,22 @@ def run_monitor(db):
                                 'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
                                 'quote_price': price,
                                 'trigger_price': trigger_price_val,
+                                'entry_edge_budget': _entry_edge_budget,
                             },
                         )
-                    if _spread > _SPREAD_GUARD_MAX_PCT:
+                    if not _entry_edge_budget.get('pass', True):
                         log.info(
-                            f"  [SPREAD_GUARD] 🚫 {pending['symbol']} ABORT: "
-                            f"fill spread {_spread:+.1f}% > {_SPREAD_GUARD_MAX_PCT}% max "
+                            f"  [ENTRY_EDGE] 🚫 {pending['symbol']} ABORT: "
+                            f"fill spread {_spread:+.1f}% > {_SPREAD_GUARD_MAX_PCT}% budget "
                             f"(fill={price:.12f} vs trigger={_trigger_str}). "
-                            f"SL buffer would be eaten by spread."
+                            f"reason={_entry_edge_budget.get('reason')}"
                         )
                         record_decision_event(
                             db,
                             component='execution_guard',
                             event_type='entry_abort',
                             decision='abort',
-                            reason='spread_guard',
+                            reason=_entry_edge_budget.get('reason') or 'entry_edge_budget',
                             token_ca=pending['token_ca'],
                             symbol=pending['symbol'],
                             lifecycle_id=lifecycle_id,
@@ -6274,10 +6557,11 @@ def run_monitor(db):
                                 'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
                                 'quote_price': price,
                                 'trigger_price': trigger_price_val,
+                                'entry_edge_budget': _entry_edge_budget,
                             },
                         )
-                        # Track SPREAD_GUARD aborts on watchlist entry so subsequent
-                        # FIRE→SmartEntry cycles know the price was at the top.
+                        # Track budget aborts on watchlist entry so subsequent FIRE→
+                        # SmartEntry cycles know the fill was past the usable edge.
                         if pending_w_entry:
                             _prev_aborts = pending_w_entry.get('_spread_abort_count', 0)
                             pending_w_entry['_spread_abort_count'] = _prev_aborts + 1
@@ -6290,7 +6574,7 @@ def run_monitor(db):
                                 except Exception:
                                     pass
                             log.info(
-                                f"  [SPREAD_GUARD] Abort #{pending_w_entry['_spread_abort_count']} for {pending['symbol']} "
+                                f"  [ENTRY_EDGE] Abort #{pending_w_entry['_spread_abort_count']} for {pending['symbol']} "
                                 f"(first_pc_m5={pending_w_entry.get('_first_fire_pc_m5', 'N/A')})")
                         pending_entries.pop(lifecycle_id, None)
                         continue
@@ -6314,6 +6598,10 @@ def run_monitor(db):
                         'tokenCA': pending['token_ca'],
                         'symbol': pending['symbol'],
                         'entryPrice': price,
+                        'entryTriggerPrice': trigger_price_val,
+                        'entryQuotePrice': price,
+                        'entrySpreadPct': _spread,
+                        'entryEdgeBudget': _entry_edge_budget,
                         'entrySol': actual_position_size_sol,
                         'tokenAmount': int(token_amount_raw),
                         'tokenDecimals': int(token_decimals or 0),
@@ -6327,6 +6615,8 @@ def run_monitor(db):
                         _monitor_state['signalRoute'] = _pending_signal_route
                     if _pending_lotto_state:
                         _monitor_state['lottoState'] = _pending_lotto_state
+                    _signal_ts_store = normalize_signal_ts_seconds(pending.get('signal_ts')) or pending.get('signal_ts')
+                    _trigger_price_store = trigger_price_val if trigger_price_val else price
                     db.execute("""
                         INSERT INTO paper_trades
                             (strategy_id, strategy_role, strategy_stage, stage_outcome,
@@ -6341,13 +6631,19 @@ def run_monitor(db):
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """, (
                         _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
-                        pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts,
-                        regime, _pending_replay_source, lifecycle_id, stage_seq(_pending_strategy_stage), entry_ts, price,
+                        pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts,
+                        regime, _pending_replay_source, lifecycle_id, stage_seq(_pending_strategy_stage), entry_ts, _trigger_price_store,
                         actual_position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
                             'auditVersion': 1,
                             'stage': _pending_strategy_stage,
                             'lifecycleId': lifecycle_id,
+                            'signalTs': _signal_ts_store,
+                            'rawSignalTs': pending.get('signal_ts'),
                             'entryPriceUsd': price,
+                            'entryTriggerPrice': trigger_price_val,
+                            'entryQuotePrice': price,
+                            'entrySpreadPct': _spread,
+                            'entryEdgeBudget': _entry_edge_budget,
                             'positionSizeSol': actual_position_size_sol,
                         })), json.dumps(_monitor_state),
                         pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
@@ -6378,6 +6674,7 @@ def run_monitor(db):
                             'trigger_price': trigger_price_val,
                             'spread_pct': _spread,
                             'position_size_sol': actual_position_size_sol,
+                            'entry_edge_budget': _entry_edge_budget,
                             'execution': execution,
                         }, _entry_lifecycle),
                     )
@@ -6392,7 +6689,7 @@ def run_monitor(db):
                         _custom_stage1_exit['trailFactor'] = 0.5
                         log.info(f"  [SUSTAINED_ATH] {pending['symbol']} tight trail lock (10% start, 0.5x factor)")
 
-                    pos = Position(trade_id, pending['token_ca'], pending['symbol'], pending['signal_ts'], price, entry_ts, pending['pool'],
+                    pos = Position(trade_id, pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts, pending['pool'],
                                    _pending_strategy_stage, lifecycle_id, _custom_stage1_exit, actual_position_size_sol, token_amount_raw, token_decimals or 0,
                                    monitor_state=_monitor_state)
                     pos.premium_signal_id = pending.get('premium_signal_id')
@@ -6403,7 +6700,7 @@ def run_monitor(db):
                     # Use setdefault to avoid KeyError if lifecycle not yet initialized
                     lc = lifecycles.setdefault(lifecycle_id,
                         build_lifecycle_state(lifecycle_id, pending['token_ca'],
-                            pending['symbol'], pending['signal_ts'],
+                            pending['symbol'], _signal_ts_store,
                             pending.get('premium_signal_id'),
                             pending.get('signal_type')))
                     lc['stage1_trade_id'] = trade_id

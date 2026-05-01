@@ -16,8 +16,21 @@ Entry thresholds:
 
 import time
 import logging
+import os
 
 log = logging.getLogger('matrix')
+
+MATRIX_ATH_REENTRY_BELOW_LAST_EXIT_ENABLED = os.environ.get(
+    'MATRIX_ATH_REENTRY_BELOW_LAST_EXIT_ENABLED', 'true'
+).lower() != 'false'
+MATRIX_ATH_REENTRY_MIN_LAST_EXIT_RATIO = float(os.environ.get('MATRIX_ATH_REENTRY_MIN_LAST_EXIT_RATIO', '0.75'))
+MATRIX_ATH_REENTRY_MIN_TREND = int(os.environ.get('MATRIX_ATH_REENTRY_MIN_TREND', '80'))
+MATRIX_ATH_REENTRY_MIN_VOLUME = int(os.environ.get('MATRIX_ATH_REENTRY_MIN_VOLUME', '60'))
+MATRIX_ATH_REENTRY_MIN_SIGNAL = int(os.environ.get('MATRIX_ATH_REENTRY_MIN_SIGNAL', '50'))
+MATRIX_ATH_FLAT_MOMENTUM_ENABLED = os.environ.get(
+    'MATRIX_ATH_FLAT_MOMENTUM_ENABLED', 'true'
+).lower() != 'false'
+MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT = float(os.environ.get('MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT', '0.05'))
 
 # Import existing analysis functions from paper_trade_monitor
 # These will be imported at runtime to avoid circular imports
@@ -313,6 +326,48 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=2):
     return 0, f'declining {pct_move:.2f}% [{snap_str}]', snapshots
 
 
+def ath_structural_reentry_allowed(signal_type, scores, current_price, last_exit_price):
+    if not MATRIX_ATH_REENTRY_BELOW_LAST_EXIT_ENABLED or signal_type != 'ATH':
+        return False, 'not_ath_reentry_policy'
+    try:
+        current_price = float(current_price or 0)
+        last_exit_price = float(last_exit_price or 0)
+    except (TypeError, ValueError):
+        return False, 'missing_reentry_price'
+    if current_price <= 0 or last_exit_price <= 0:
+        return False, 'missing_reentry_price'
+    if current_price < last_exit_price * MATRIX_ATH_REENTRY_MIN_LAST_EXIT_RATIO:
+        return False, 'reentry_too_far_below_last_exit'
+    if scores.get('trend', 0) < MATRIX_ATH_REENTRY_MIN_TREND:
+        return False, 'reentry_trend_too_low'
+    if scores.get('volume', 0) < MATRIX_ATH_REENTRY_MIN_VOLUME:
+        return False, 'reentry_volume_too_low'
+    if scores.get('signal', 0) < MATRIX_ATH_REENTRY_MIN_SIGNAL:
+        return False, 'reentry_signal_too_low'
+    return True, 'ath_structural_reentry_below_last_exit'
+
+
+def ath_flat_momentum_allowed(signal_type, scores, snapshots):
+    if not MATRIX_ATH_FLAT_MOMENTUM_ENABLED or signal_type != 'ATH':
+        return False, None
+    if len(snapshots or []) < 2:
+        return False, None
+    first = snapshots[0]
+    last = snapshots[-1]
+    if first <= 0:
+        return False, None
+    pct_move = ((last - first) / first) * 100
+    if abs(pct_move) > MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT:
+        return False, pct_move
+    if scores.get('trend', 0) < MATRIX_ATH_REENTRY_MIN_TREND:
+        return False, pct_move
+    if scores.get('volume', 0) < MATRIX_ATH_REENTRY_MIN_VOLUME:
+        return False, pct_move
+    if scores.get('signal', 0) < MATRIX_ATH_REENTRY_MIN_SIGNAL:
+        return False, pct_move
+    return True, pct_move
+
+
 
 def score_signal_evolution(entry):
     """
@@ -571,12 +626,26 @@ class MatrixEvaluator:
             last_exit_px = entry.get('last_exit_price')
             if entry.get('entry_count', 0) > 0 and last_exit_px is not None:
                 if current_price and current_price <= last_exit_px:
-                    return {
-                        'scores': scores, 'reasons': reasons,
-                        'ready_for_momentum': False,
-                        'action': 'wait',
-                        'action_reason': f"reentry: price {current_price:.10f} <= last_exit {last_exit_px:.10f}, waiting for recovery",
-                    }
+                    _reentry_allowed, _reentry_reason = ath_structural_reentry_allowed(
+                        signal_type,
+                        scores,
+                        current_price,
+                        last_exit_px,
+                    )
+                    if not _reentry_allowed:
+                        return {
+                            'scores': scores, 'reasons': reasons,
+                            'ready_for_momentum': False,
+                            'action': 'wait',
+                            'action_reason': f"reentry: price {current_price:.10f} <= last_exit {last_exit_px:.10f}, waiting for recovery",
+                            'reentry_policy_reason': _reentry_reason,
+                        }
+                    reasons['reentry_policy'] = _reentry_reason
+                    log.info(
+                        f"[Matrix] ${symbol} ATH structural reentry allowed below last_exit: "
+                        f"price={current_price:.10f} last_exit={last_exit_px:.10f} "
+                        f"T={scores['trend']} V={scores['volume']} S={scores['signal']}"
+                    )
 
             scores['momentum'], reasons['momentum'], snaps = score_realtime_momentum(
                 ca, pool
@@ -594,10 +663,21 @@ class MatrixEvaluator:
                 )
                 log.info(f"[Matrix] 🔫 ${symbol} {action_reason}")
             else:
-                action_reason = f"momentum check failed: {reasons['momentum']}"
-                log.info(f"[Matrix] ${symbol} momentum FAIL: {reasons['momentum']}")
-                momentum_final_price = None
-                momentum_pct = 0
+                _flat_allowed, _flat_pct = ath_flat_momentum_allowed(signal_type, scores, snaps)
+                if _flat_allowed:
+                    scores['momentum'] = thresholds['momentum_min']
+                    reasons['momentum'] = f"ath_flat_reclaim {(_flat_pct or 0):+.2f}%"
+                    action = 'fire'
+                    action_reason = (
+                        f"ATH FLAT RECLAIM PASS: T={scores['trend']} V={scores['volume']} "
+                        f"P={scores['price']} S={scores['signal']} M={scores['momentum']}"
+                    )
+                    log.info(f"[Matrix] 🔫 ${symbol} {action_reason}")
+                else:
+                    action_reason = f"momentum check failed: {reasons['momentum']}"
+                    log.info(f"[Matrix] ${symbol} momentum FAIL: {reasons['momentum']}")
+                    momentum_final_price = None
+                    momentum_pct = 0
 
         else:
             momentum_final_price = None
