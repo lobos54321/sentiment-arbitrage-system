@@ -6456,7 +6456,7 @@ def run_monitor(db):
                                 # (avg 80/dimension), give 5pp extra room.
                                 # Data: OG (sum=420, Score=105) got KLINE_SL=-11.3% → shaken out,
                                 # then rallied 3x. With -16.3% SL, would have survived.
-                                _matrix_sum = sum((pending.get('matrix_scores') or {}).values())
+                                _matrix_sum = sum(v for v in (pending.get('matrix_scores') or {}).values() if v is not None)
                                 if _matrix_sum >= 400:
                                     _structure_sl_widened = _structure_sl - 5.0  # widen by 5pp
                                     _structure_sl_widened = max(-20.0, _structure_sl_widened)  # never wider than -20%
