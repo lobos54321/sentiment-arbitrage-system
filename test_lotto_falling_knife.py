@@ -13,6 +13,8 @@ from matrix_evaluator import (  # noqa: E402
     ath_flat_momentum_allowed,
     ath_structural_reentry_allowed,
 )
+from entry_readiness_policy import evaluate_entry_readiness_policy, entry_mode_allowed  # noqa: E402
+from analyze_trade_failure_attribution import classify_system_stage  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     evaluate_entry_edge_budget,
     evaluate_token_reclaim,
@@ -296,6 +298,26 @@ def test_entry_edge_budget_allows_favorable_lotto_fill():
     assert budget["spread_pct"] < 0
 
 
+def test_entry_edge_budget_uses_readiness_policy_spread_cap():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.018,
+        lifecycle={"lifecycle_features": {"liquidity_unknown": False, "live_top1_pct": 10}},
+        pending={
+            "is_lotto": True,
+            "entry_readiness_policy": {
+                "lifecycle_profile": "LOTTO_NORMAL",
+                "max_spread_pct": 1.5,
+            },
+        },
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["max_spread_pct"] == 1.5
+    assert budget["readiness_max_spread_pct"] == 1.5
+
+
 def test_entry_edge_budget_blocks_ath_spread_over_budget():
     budget = evaluate_entry_edge_budget(
         route="ATH",
@@ -574,6 +596,109 @@ def test_ath_flat_momentum_allowed_only_with_strong_structure():
         [1.0, 1.0001],
     )
     assert weak_allowed is False
+
+
+def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "NEWBORN_LAUNCH",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 90,
+                "liquidity_unknown": True,
+                "dex_id": "pumpfun",
+                "price_change_m5": 45,
+                "buy_sell_ratio": 1.5,
+            },
+        },
+        pending={"is_lotto": True},
+    )
+    assert policy.decision == "ARM"
+    assert policy.lifecycle_profile == "LOTTO_NEWBORN_RISKY"
+    assert policy.min_odds_r == 3.0
+    assert policy.min_p_follow >= 0.68
+    assert entry_mode_allowed("momentum_direct_entry", policy) is True
+    assert entry_mode_allowed("smart_entry", policy) is False
+
+
+def test_entry_readiness_marks_stale_ath_as_wait_for_fresh_high():
+    policy = evaluate_entry_readiness_policy(
+        route="ATH",
+        lifecycle={
+            "lifecycle_state": "UNKNOWN",
+            "entry_bias": "WAIT",
+            "lifecycle_features": {
+                "age_sec": 13 * 60 * 60,
+                "ath_distance_pct": -0.25,
+                "price_change_m5": 8,
+                "buy_sell_ratio": 1.2,
+            },
+        },
+        pending={"signal_ts": 1000},
+        now_ts=1000 + 13 * 60 * 60,
+    )
+    assert policy.decision == "WAIT"
+    assert policy.lifecycle_profile == "ATH_STALE"
+    assert policy.reason == "entry_readiness_stale_ath_requires_fresh_high"
+    assert policy.min_odds_r == 3.0
+
+
+def test_entry_readiness_expires_distribution_lifecycle():
+    policy = evaluate_entry_readiness_policy(
+        route="ATH",
+        lifecycle={
+            "lifecycle_state": "DISTRIBUTION",
+            "entry_bias": "REJECT",
+            "lifecycle_features": {"age_sec": 600},
+        },
+        pending={},
+    )
+    assert policy.decision == "EXPIRE"
+    assert policy.reason == "entry_readiness_bad_lifecycle"
+
+
+def test_stage_diagnosis_separates_timing_and_execution_cost():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE rows (
+            id INTEGER,
+            symbol TEXT,
+            signal_ts REAL,
+            entry_ts REAL,
+            exit_ts REAL,
+            entry_price REAL,
+            trigger_price REAL,
+            pnl_pct REAL,
+            peak_pnl REAL,
+            exit_reason TEXT,
+            signal_type TEXT,
+            signal_route TEXT,
+            lifecycle_state TEXT,
+            monitor_state_json TEXT,
+            entry_execution_audit_json TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO rows
+        VALUES (
+            1, 'BAD', 1000, 1030, 1090, 1.03, 1.0, -0.12, 0.0,
+            'guardian_lotto_no_follow_60s', 'LOTTO', 'LOTTO', 'FIRST_PUMP',
+            '{"entrySpreadPct":3.0,"entryReadinessPolicy":{"decision":"ARM","lifecycle_profile":"LOTTO_NEWBORN_RISKY","max_spread_pct":1.5},"smartEntryReason":"legacy_score_pass"}',
+            '{}'
+        )
+        """
+    )
+    row = db.execute("SELECT * FROM rows").fetchone()
+    tags = classify_system_stage(row)
+    assert "execution_cost_over_readiness_budget" in tags
+    assert "selection_high_risk_low_follow" in tags
+    assert "timing_zero_peak_entry" in tags
+    assert "timing_not_confirmed_node" in tags
 
 
 def run_tests():

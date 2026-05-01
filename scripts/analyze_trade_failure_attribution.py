@@ -78,6 +78,15 @@ def parse_trigger_pnl(reason):
     return float(match.group(1)) / 100.0
 
 
+def safe_float(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def table_exists(db, name):
     return bool(db.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -103,6 +112,131 @@ def get_trades(db, since_ts):
         """,
         (since_ts,),
     ).fetchall()
+
+
+def _row_get(row, key, default=None):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _dict_get_any(data, keys, default=None):
+    if not isinstance(data, dict):
+        return default
+    for key in keys:
+        if key in data and data[key] is not None:
+            return data[key]
+    return default
+
+
+def extract_entry_diagnostics(row):
+    monitor_state = load_json(_row_get(row, "monitor_state_json"))
+    audit = load_json(_row_get(row, "entry_execution_audit_json"))
+    edge = (
+        _dict_get_any(monitor_state, ("entryEdgeBudget", "entry_edge_budget"))
+        or _dict_get_any(audit, ("entryEdgeBudget", "entry_edge_budget"))
+        or {}
+    )
+    readiness = (
+        _dict_get_any(monitor_state, ("entryReadinessPolicy", "entry_readiness_policy"))
+        or _dict_get_any(audit, ("entryReadinessPolicy", "entry_readiness_policy"))
+        or {}
+    )
+
+    signal_ts = safe_float(_row_get(row, "signal_ts"))
+    entry_ts = safe_float(_row_get(row, "entry_ts"))
+    if signal_ts and signal_ts > 2_000_000_000:
+        signal_ts = signal_ts / 1000.0
+
+    spread_pct = safe_float(_dict_get_any(edge, ("spread_pct", "entrySpreadPct")))
+    if spread_pct is None:
+        spread_pct = safe_float(_dict_get_any(monitor_state, ("entrySpreadPct", "entry_spread_pct")))
+    if spread_pct is None:
+        trigger = safe_float(_row_get(row, "trigger_price"))
+        entry = safe_float(_row_get(row, "entry_price"))
+        if trigger and trigger > 0 and entry and entry > 0:
+            spread_pct = (entry - trigger) / trigger * 100.0
+
+    return {
+        "monitor_state": monitor_state,
+        "audit": audit,
+        "edge": edge if isinstance(edge, dict) else {},
+        "readiness": readiness if isinstance(readiness, dict) else {},
+        "signal_age_sec": (entry_ts - signal_ts) if entry_ts and signal_ts else None,
+        "spread_pct": spread_pct,
+        "route": (_row_get(row, "signal_route") or _row_get(row, "signal_type") or "").upper(),
+        "entry_mode": (
+            _dict_get_any(monitor_state, ("smartEntryReason", "entryMode", "entry_mode", "passReason"))
+            or _dict_get_any(audit, ("smartEntryReason", "entryMode", "entry_mode", "passReason"))
+            or _dict_get_any(edge if isinstance(edge, dict) else {}, ("entry_mode", "reason"))
+            or ""
+        ),
+    }
+
+
+def classify_system_stage(row):
+    """Classify the likely failing subsystem for backtest/readiness diagnosis."""
+    tags = []
+    pnl = safe_float(_row_get(row, "pnl_pct"), 0.0)
+    peak = safe_float(_row_get(row, "peak_pnl"), 0.0)
+    reason = _row_get(row, "exit_reason") or ""
+    diag = extract_entry_diagnostics(row)
+    readiness = diag["readiness"]
+    edge = diag["edge"]
+    route = diag["route"]
+    entry_mode = str(diag["entry_mode"] or "").lower()
+    lifecycle_state = (_row_get(row, "lifecycle_state") or "").upper()
+    lifecycle_profile = str(readiness.get("lifecycle_profile") or "").upper()
+    readiness_decision = str(readiness.get("decision") or "").upper()
+    max_spread = safe_float(readiness.get("max_spread_pct"))
+    spread = diag["spread_pct"]
+
+    if _row_get(row, "exit_ts") is None:
+        return ["open_position"]
+
+    if safe_float(_row_get(row, "signal_ts"), 0.0) > 2_000_000_000:
+        tags.append("accounting_truth_signal_ts_ms")
+    if not _row_get(row, "trigger_price"):
+        tags.append("accounting_truth_missing_trigger")
+
+    if spread is not None:
+        if max_spread is not None and spread > max_spread:
+            tags.append("execution_cost_over_readiness_budget")
+        elif route == "LOTTO" and spread > 2.0:
+            tags.append("execution_cost_lotto_spread_gt_2")
+        elif spread > 3.0:
+            tags.append("execution_cost_spread_gt_3")
+
+    if diag["signal_age_sec"] is not None and diag["signal_age_sec"] > 7200:
+        tags.append("selection_stale_signal_age")
+    if lifecycle_state in {"DISTRIBUTION", "DEAD"}:
+        tags.append("selection_bad_lifecycle_state")
+    if "STALE" in lifecycle_profile and pnl < 0:
+        tags.append("selection_stale_lifecycle_profile")
+    if ("NEWBORN_RISKY" in lifecycle_profile or "REAL_PROBE" in lifecycle_profile) and peak < 0.05 and pnl < 0:
+        tags.append("selection_high_risk_low_follow")
+    if readiness_decision == "WAIT" and peak < 0.05 and pnl < 0:
+        tags.append("selection_entered_wait_policy")
+
+    if peak < 0.01 and pnl < 0:
+        tags.append("timing_zero_peak_entry")
+    elif peak < 0.05 and pnl < 0:
+        tags.append("timing_low_follow_entry")
+    if pnl < 0 and entry_mode and not any(mode in entry_mode for mode in ("momentum_direct", "pullback_bounce")):
+        tags.append("timing_not_confirmed_node")
+    if "no_follow" in reason or "doa" in reason:
+        tags.append("timing_no_follow_exit")
+
+    if peak >= 0.10 and pnl < peak * 0.45:
+        tags.append("exit_capture_poor_peak_capture")
+    if peak >= 0.20 and (peak - pnl) >= 0.15:
+        tags.append("exit_capture_large_giveback")
+
+    if edge.get("pass") is False:
+        tags.append("accounting_or_gate_entered_failed_edge_budget")
+
+    return tags or ["unclassified"]
 
 
 def classify_trade(row):
@@ -235,6 +369,79 @@ def print_failure_buckets(rows, limit):
             f"{int(row['id']):>5} {str(row['symbol'] or '?')[:12]:<12} {route:<8} "
             f"{pct(pnl):>8} {pct(peak):>8} {pp(peak - pnl):>9} {str(row['exit_reason'] or '')[:90]}"
         )
+
+
+def print_stage_diagnosis(rows, limit):
+    bucket_rows = defaultdict(list)
+    policy_coverage = Counter()
+    by_profile = defaultdict(list)
+    by_entry_mode = defaultdict(list)
+    spread_rows = []
+
+    for row in rows:
+        diag = extract_entry_diagnostics(row)
+        readiness = diag["readiness"]
+        profile = readiness.get("lifecycle_profile") or "NO_POLICY"
+        decision = readiness.get("decision") or "NO_POLICY"
+        entry_mode = str(diag["entry_mode"] or "UNKNOWN")
+        policy_coverage[(profile, decision)] += 1
+        by_profile[profile].append(row)
+        by_entry_mode[entry_mode].append(row)
+        if diag["spread_pct"] is not None:
+            spread_rows.append((diag["spread_pct"], row, readiness))
+        for tag in classify_system_stage(row):
+            bucket_rows[tag].append(row)
+
+    print("\nStage Diagnosis")
+    print("  Buckets explain whether the likely failure is selection/lifecycle, timing, execution, exit, or accounting.")
+    print(f"{'stage_bucket':<42} {'n':>4} {'avg_pnl':>9} {'sum_pnl':>9} {'avg_peak':>9} examples")
+    for tag, group in sorted(bucket_rows.items(), key=lambda item: len(item[1]), reverse=True):
+        closed = [r for r in group if r["exit_ts"] is not None]
+        pnls = [safe_float(r["pnl_pct"], 0.0) for r in closed]
+        peaks = [safe_float(r["peak_pnl"], 0.0) for r in closed]
+        examples = ", ".join((r["symbol"] or "?") for r in group[-5:])
+        print(
+            f"{tag:<42} {len(group):>4} "
+            f"{pct(sum(pnls) / len(pnls) if pnls else None):>9} "
+            f"{pct(sum(pnls) if pnls else None):>9} "
+            f"{pct(sum(peaks) / len(peaks) if peaks else None):>9} {examples}"
+        )
+
+    print("\nEntry Readiness Coverage")
+    print(f"{'profile':<24} {'decision':<9} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'avg_peak':>9}")
+    for (profile, decision), count in sorted(policy_coverage.items(), key=lambda item: item[1], reverse=True)[:limit]:
+        group = [
+            r for r in by_profile[profile]
+            if (extract_entry_diagnostics(r)["readiness"].get("decision") or "NO_POLICY") == decision
+        ]
+        gm = trade_metrics(group)
+        win_rate = (gm["wins"] / gm["closed"] * 100.0) if gm.get("closed") else 0
+        print(
+            f"{str(profile)[:24]:<24} {str(decision)[:9]:<9} {count:>4} {gm['closed']:>6} "
+            f"{win_rate:>4.0f}% {pct(gm.get('avg_pnl')):>9} {pct(gm.get('avg_peak')):>9}"
+        )
+
+    print("\nEntry Mode Quality")
+    print(f"{'entry_mode':<34} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'avg_peak':>9}")
+    for mode, group in sorted(by_entry_mode.items(), key=lambda item: len(item[1]), reverse=True)[:limit]:
+        gm = trade_metrics(group)
+        win_rate = (gm["wins"] / gm["closed"] * 100.0) if gm.get("closed") else 0
+        print(
+            f"{mode[:34]:<34} {gm['entries']:>4} {gm['closed']:>6} "
+            f"{win_rate:>4.0f}% {pct(gm.get('avg_pnl')):>9} {pct(gm.get('avg_peak')):>9}"
+        )
+
+    if spread_rows:
+        print("\nWorst Entry Spread Vs Readiness Budget")
+        print(f"{'id':>5} {'symbol':<12} {'spread':>8} {'budget':>8} {'pnl':>8} {'profile':<22}")
+        for spread, row, readiness in sorted(spread_rows, key=lambda item: item[0], reverse=True)[:limit]:
+            max_spread = safe_float(readiness.get("max_spread_pct"))
+            budget_text = "n/a" if max_spread is None else f"{max_spread:.2f}%"
+            print(
+                f"{int(row['id']):>5} {str(row['symbol'] or '?')[:12]:<12} "
+                f"{spread:>+7.2f}% {budget_text:>8} "
+                f"{pct(safe_float(row['pnl_pct'])):>8} {str(readiness.get('lifecycle_profile') or 'NO_POLICY')[:22]:<22}"
+            )
 
 
 def print_decision_events(db, since_ts, limit):
@@ -770,6 +977,7 @@ def main():
     print()
     print_trade_summary(rows)
     print_failure_buckets(rows, args.limit)
+    print_stage_diagnosis(rows, args.limit)
     print_decision_events(db, since_ts, args.limit)
     print_missed_attribution(db, since_ts, args.limit)
     print_selection_quality(rows, db, since_ts, args.limit)

@@ -11,6 +11,11 @@ import time
 import logging
 
 from watchlist_store import WatchlistStore
+from entry_readiness_policy import (
+    ENTRY_READINESS_MAX_WAIT_SEC,
+    ENTRY_READINESS_POLL_SEC,
+    entry_mode_allowed,
+)
 
 log = logging.getLogger('paper_trade_monitor')
 
@@ -455,9 +460,86 @@ def is_chasing_top(trend_data):
 
     return False, 'ok'
 
+
+def evaluate_entry_position(price_history, current_price):
+    """
+    Locate a tradable pullback-bounce node from recent real-time prices.
+    Returns (position, detail).
+    """
+    if not price_history or len(price_history) < 3:
+        return 'INSUFFICIENT_DATA', {
+            'reason': f'only {len(price_history) if price_history else 0} price points'
+        }
+
+    prices = [p for _, p in price_history if p and p > 0]
+    if len(prices) < 3:
+        return 'INSUFFICIENT_DATA', {'reason': 'not_enough_valid_prices'}
+
+    local_high = max(prices)
+    high_idx = prices.index(local_high)
+    prices_after_high = prices[high_idx:]
+    if len(prices_after_high) < 2:
+        return 'AT_TOP', {
+            'reason': 'at_or_near_peak',
+            'local_high': local_high,
+            'current': current_price,
+            'n_points': len(prices),
+        }
+
+    local_low = min(prices_after_high)
+    if local_high <= 0 or local_low <= 0:
+        return 'INSUFFICIENT_DATA', {'reason': 'zero_prices'}
+
+    pullback_depth = (local_high - local_low) / local_high * 100
+    bounce_from_low = (current_price - local_low) / local_low * 100
+    below_high = (local_high - current_price) / local_high * 100
+
+    detail = {
+        'local_high': local_high,
+        'local_low': local_low,
+        'current': current_price,
+        'pullback_depth_pct': round(pullback_depth, 2),
+        'bounce_from_low_pct': round(bounce_from_low, 2),
+        'below_high_pct': round(below_high, 2),
+        'n_points': len(prices),
+    }
+
+    if (
+        pullback_depth >= SMART_ENTRY_MIN_PULLBACK_PCT
+        and bounce_from_low >= SMART_ENTRY_MIN_BOUNCE_PCT
+        and below_high >= 2.0
+    ):
+        return 'GOOD_ENTRY', detail
+    if pullback_depth < 1.0:
+        return 'AT_TOP', detail
+    if bounce_from_low < 1.0:
+        return 'STILL_FALLING', detail
+    if below_high < 2.0:
+        return 'AT_TOP', detail
+    return 'STILL_FALLING', detail
+
+
+def _policy_allows(mode, entry_readiness_policy):
+    if not entry_readiness_policy:
+        return True
+    return entry_mode_allowed(mode, entry_readiness_policy)
+
+
+def _policy_min_p_follow(entry_readiness_policy, default=0.58):
+    if not entry_readiness_policy:
+        return default
+    try:
+        if hasattr(entry_readiness_policy, 'min_p_follow'):
+            return float(entry_readiness_policy.min_p_follow)
+        return float(entry_readiness_policy.get('min_p_follow', default))
+    except (TypeError, ValueError):
+        return default
+
+
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                          momentum_snapshots=None, momentum_pct=0, sustained_ath=False,
-                         first_fire_pc_m5=None, spread_abort_count=0):
+                         first_fire_pc_m5=None, spread_abort_count=0,
+                         entry_readiness_policy=None):
     """
     Smart Entry Engine (V6 — Unified Scoring System)
     Replaces serial rejection with a 6-dimension scoring system (Total 100+ points).
@@ -736,46 +818,110 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # 5. DECISION LOGIC
     detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
 
-    if base_score >= 90:
-        # Fast Lane Entry — reserved for TRUE 大金狗 (big golden dogs)
-        # V3.1 fix: Gate on BASE score only (excluding bonuses), threshold=90.
-        # Root cause: Untweeney (base=75+bonus=15=90) bypassed 1% direction
-        # check via bonus inflation, entered at top → -13% loss with 0.5 SOL.
-        # Base ≥90 means nearly all core dimensions at max (100 total possible).
-        # NOBIKO (base=100) still enters.  Untweeney (base=75) goes smart_entry.
-        # Direction check: 3% reversal threshold (tighter than old 15%).
-        _time.sleep(1.0)
-        price_confirm, _, _ = fetch_realtime_price(token_ca, pool_address)
-        trigger_price = price
-        if price_confirm and price_confirm > 0:
-            drop_pct = (price - price_confirm) / price * 100
-            if drop_pct > 3.0:
-                log.info(f"[SmartEntry] 🚫  REJECT: fast_lane_reversal - fell {drop_pct:.1f}% in 1s (live={price_confirm:.10f})")
-                return False, 'fast_lane_reversal', f'fell {drop_pct:.1f}% in 1s', None
-            trigger_price = price_confirm
-            
-        log.info(f"[SmartEntry] 🚀  FAST_LANE: {detail_str}")
-        return True, 'fast_lane_entry', detail_str, trigger_price
-
-    elif total_score >= 50:
-        # Smart Entry
-        # V8: Reduced from 3×1s (3s) to single 1s confirmation.
-        # Momentum check (2×2s=4s) already confirms price direction.
-        # This single check catches only extreme reversals (>5% crash in 1s).
-        trigger_price = price
-        _time.sleep(1.0)
-        _sp, _, _ = fetch_realtime_price(token_ca, pool_address)
-        if _sp and _sp > 0:
-            if _sp < price * 0.95:
-                log.info(f"[SmartEntry] 🚫  REJECT: momentum_reversing - "
-                         f"fell >{(price-_sp)/price*100:.1f}% in 1s")
-                return False, 'momentum_reversing', f'fell >5% in 1s', None
-            trigger_price = _sp
-
-        log.info(f"[SmartEntry] ✅  SMART_ENTRY: {detail_str}")
-        return True, 'smart_entry', detail_str, trigger_price
-
-    else:
-        # Reject
+    if total_score < 50:
         log.info(f"[SmartEntry] 🚫  REJECT: {detail_str}")
         return False, 'score_too_low', detail_str, None
+
+    # Score only arms the candidate. Entry requires a live timing node.
+    from matrix_evaluator import MatrixEvaluator
+
+    now0 = _time.time()
+    existing = MatrixEvaluator._price_history.get(token_ca, [])
+    price_history = [(t, p) for t, p in existing if now0 - t <= 180 and p and p > 0]
+    price_history.append((_time.time(), price))
+    max_wait = max(1.0, float(ENTRY_READINESS_MAX_WAIT_SEC))
+    poll_sec = max(0.25, float(ENTRY_READINESS_POLL_SEC))
+    min_p_follow = _policy_min_p_follow(entry_readiness_policy)
+    best_wait_detail = "waiting_for_entry_node"
+    consecutive_momentum_rounds = 0
+    best_trend_phase = trend_phase
+    fake_pump_count = 0
+
+    log.info(
+        f"[SmartEntry] ARM ${symbol}: {detail_str} "
+        f"policy={entry_readiness_policy if entry_readiness_policy else 'default'} "
+        f"waiting up to {max_wait:.0f}s for momentum_direct or pullback_bounce"
+    )
+
+    while _time.time() - now0 <= max_wait:
+        loop_start = _time.time()
+        live_price, _, _ = fetch_realtime_price(token_ca, pool_address)
+        if live_price and live_price > 0:
+            price_history.append((_time.time(), live_price))
+            MatrixEvaluator._price_history[token_ca] = [
+                (t, p) for t, p in price_history if _time.time() - t <= 3600
+            ]
+        else:
+            live_price = price_history[-1][1] if price_history else price
+
+        trend_now = fetch_dexscreener_trend_snapshot(token_ca) or cached_trend
+        phase_now, phase_reason = evaluate_trend_phase(trend_now)
+        if phase_now == 'BEARISH' and (_time.time() - now0) > 300:
+            return False, 'trend_bearish_timeout', phase_reason, None
+        if phase_now == 'FAKE_PUMP':
+            fake_pump_count += 1
+        if phase_now == 'BULLISH' and best_trend_phase != 'BULLISH':
+            best_trend_phase = 'BULLISH'
+
+        b_now = (trend_now or {}).get('buys_m5', 0) or 0
+        s_now = max((trend_now or {}).get('sells_m5', 1) or 1, 1)
+        bs_now = b_now / s_now
+
+        vel_30s = _calc_velocity(price_history, 30)
+        vel_60s = _calc_velocity(price_history, 60)
+        if vel_30s > 15.0 and vel_60s < 0:
+            consecutive_momentum_rounds = 0
+            best_wait_detail = f"dead_cat vel30={vel_30s:+.1f}%/min vel60={vel_60s:+.1f}%/min"
+        elif vel_30s > 15.0 and vel_60s > 5.0 and bs_now > 1.0:
+            consecutive_momentum_rounds += 1
+        else:
+            consecutive_momentum_rounds = 0
+
+        elapsed = _time.time() - now0
+        min_momentum_wait = 10 if (bs_now >= 5.0 and vel_30s > 30.0) else 30
+        if consecutive_momentum_rounds >= 2 and elapsed >= min_momentum_wait and live_price > 0:
+            p_follow = 0.74 if bs_now >= 1.2 else 0.66
+            if p_follow >= min_p_follow and _policy_allows('momentum_direct_entry', entry_readiness_policy):
+                node_detail = (
+                    f"node=momentum_direct p_follow={p_follow:.2f} "
+                    f"vel_30s={vel_30s:+.1f}%/min vel_60s={vel_60s:+.1f}%/min "
+                    f"buy_sell={bs_now:.2f} consecutive={consecutive_momentum_rounds} "
+                    f"waited={elapsed:.0f}s armed=({detail_str}) trend={phase_reason}"
+                )
+                log.info(f"[SmartEntry] 🚀 ${symbol} MOMENTUM_ENTRY at ${live_price:.10f}: {node_detail}")
+                return True, 'momentum_direct_entry', node_detail, live_price
+
+        position, pos_detail = evaluate_entry_position(price_history, live_price)
+        if position == 'GOOD_ENTRY' and phase_now == 'BULLISH':
+            pullback = pos_detail.get('pullback_depth_pct', 0)
+            bounce = pos_detail.get('bounce_from_low_pct', 0)
+            bounce_ratio = bounce / pullback if pullback > 0 else 0
+            trend_downgraded = (best_trend_phase == 'BULLISH' and phase_now != 'BULLISH')
+            if fake_pump_count >= SMART_ENTRY_FAKE_PUMP_THRESHOLD and bs_now < 2.0:
+                best_wait_detail = f"fake_pump_history={fake_pump_count} bs={bs_now:.2f}<2.0"
+            elif bounce_ratio < SMART_ENTRY_MIN_BOUNCE_RATIO:
+                best_wait_detail = f"bounce_ratio={bounce_ratio:.0%} too low"
+            elif trend_downgraded:
+                best_wait_detail = "trend_downgraded"
+            else:
+                p_follow = 0.68 if bs_now >= 1.2 else 0.60
+                if p_follow >= min_p_follow and _policy_allows('smart_entry_pullback_bounce', entry_readiness_policy):
+                    node_detail = (
+                        f"node=pullback_bounce p_follow={p_follow:.2f} "
+                        f"pullback={pullback:.1f}% bounce={bounce:.1f}% "
+                        f"bounce_ratio={bounce_ratio:.0%} below_high={pos_detail.get('below_high_pct', 0):.1f}% "
+                        f"buy_sell={bs_now:.2f} waited={elapsed:.0f}s armed=({detail_str}) trend={phase_reason}"
+                    )
+                    log.info(f"[SmartEntry] ✅ ${symbol} GOOD_ENTRY at ${live_price:.10f}: {node_detail}")
+                    return True, 'smart_entry_pullback_bounce', node_detail, live_price
+        else:
+            best_wait_detail = (
+                f"{phase_now}/{position} vel30={vel_30s:+.1f}%/min "
+                f"vel60={vel_60s:+.1f}%/min bs={bs_now:.2f} detail={pos_detail}"
+            )
+
+        sleep_for = poll_sec - (_time.time() - loop_start)
+        if sleep_for > 0:
+            _time.sleep(sleep_for)
+
+    return False, 'entry_node_timeout', f'{best_wait_detail}; armed=({detail_str})', None

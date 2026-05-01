@@ -62,6 +62,7 @@ from paper_decision_audit import (
     update_due_missed_attributions,
 )
 from lifecycle_classifier import classify_lifecycle
+from entry_readiness_policy import evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from lotto_engine import (
@@ -878,6 +879,15 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
     risk_penalty_pct = 0.0
     if token_risk and token_risk.get('risk_profile') == 'waterfall_memory':
         risk_penalty_pct = 0.5
+    readiness_policy = pending.get('entry_readiness_policy') or {}
+    readiness_max_spread_pct = None
+    if readiness_policy:
+        try:
+            readiness_max_spread_pct = float(readiness_policy.get('max_spread_pct'))
+        except (TypeError, ValueError):
+            readiness_max_spread_pct = None
+    if readiness_max_spread_pct is not None:
+        max_spread_pct = min(max_spread_pct, readiness_max_spread_pct)
     effective_max_spread_pct = max(0.0, max_spread_pct - risk_penalty_pct)
 
     detail = {
@@ -891,6 +901,7 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         'max_spread_pct': effective_max_spread_pct,
         'base_max_spread_pct': max_spread_pct,
         'risk_penalty_pct': risk_penalty_pct,
+        'readiness_max_spread_pct': readiness_max_spread_pct,
         'required_follow_peak_pct': ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT,
         'remaining_follow_budget_pct': (
             ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT - max(spread_pct or 0.0, 0.0)
@@ -6161,6 +6172,69 @@ def run_monitor(db):
                     _entry_count = pending_w_entry.get('entry_count', 0) if pending_w_entry else 0
                     # === SmartEntry Unified Scoring V2 (Async) ===
                     if not pending.get('timing_passed'):
+                        if not pending.get('entry_readiness_policy'):
+                            try:
+                                _policy_dex = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                            except Exception:
+                                _policy_dex = None
+                            _policy_lifecycle_entry = pending_w_entry or {
+                                'ca': pending['token_ca'],
+                                'symbol': pending['symbol'],
+                                'type': pending.get('signal_route') or pending.get('signal_type'),
+                                'signal_ts': pending['signal_ts'],
+                                'signal_price': pending.get('signal_price') or pending.get('entry_price'),
+                                'signal_mc': pending.get('market_cap') or 0,
+                                'added_at': pending.get('added_at') or pending.get('staged_at') or pending['signal_ts'],
+                            }
+                            _policy_lifecycle = lifecycle_payload_for(
+                                watchlist_entry=_policy_lifecycle_entry,
+                                dex_snapshot=_policy_dex,
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                signal_ts=pending['signal_ts'],
+                                signal_price=pending.get('signal_price') or pending.get('entry_price'),
+                                quote_available=None,
+                                now=now,
+                            )
+                            _policy = evaluate_entry_readiness_policy(
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                lifecycle=_policy_lifecycle,
+                                pending=pending,
+                                now_ts=now,
+                            )
+                            pending['entry_readiness_policy'] = _policy.to_dict()
+                            if _policy.decision == 'EXPIRE':
+                                record_decision_event(
+                                    db,
+                                    component='entry_readiness',
+                                    event_type='entry_block',
+                                    decision='expire',
+                                    reason=_policy.reason,
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    route=pending.get('signal_route') or pending.get('signal_type'),
+                                    data_source='lifecycle+dexscreener',
+                                    payload=_policy.to_dict(),
+                                )
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
+                            record_decision_event(
+                                db,
+                                component='entry_readiness',
+                                event_type='entry_arm',
+                                decision=_policy.decision.lower(),
+                                reason=_policy.reason,
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                data_source='lifecycle+dexscreener',
+                                payload=_policy.to_dict(),
+                            )
                         _se_sustained = False
                         if hasattr(watchlist, '_ath_history'):
                             _se_ca = pending.get('token_ca')
@@ -6184,6 +6258,7 @@ def run_monitor(db):
                                 sustained_ath=_se_sustained,
                                 first_fire_pc_m5=pending.get('first_fire_pc_m5'),
                                 spread_abort_count=pending.get('spread_abort_count', 0),
+                                entry_readiness_policy=pending.get('entry_readiness_policy'),
                             )
                             pending['_smart_entry_future'] = _se_future
                             continue
@@ -6220,6 +6295,7 @@ def run_monitor(db):
                                     'retry_count': retry_count,
                                     'max_retries': max_retries,
                                     'trigger_price': timing_trigger_price,
+                                    'entry_readiness_policy': pending.get('entry_readiness_policy'),
                                 },
                             )
                             if retry_count >= max_retries:
@@ -6254,7 +6330,11 @@ def run_monitor(db):
                             signal_ts=pending['signal_ts'],
                             signal_id=pending.get('premium_signal_id'),
                             route=pending.get('signal_route') or pending.get('signal_type'),
-                            payload={'detail': timing_detail, 'trigger_price': timing_trigger_price},
+                            payload={
+                                'detail': timing_detail,
+                                'trigger_price': timing_trigger_price,
+                                'entry_readiness_policy': pending.get('entry_readiness_policy'),
+                            },
                         )
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
 
@@ -6607,6 +6687,7 @@ def run_monitor(db):
                         'entryQuotePrice': price,
                         'entrySpreadPct': _spread,
                         'entryEdgeBudget': _entry_edge_budget,
+                        'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                         'entrySol': actual_position_size_sol,
                         'tokenAmount': int(token_amount_raw),
                         'tokenDecimals': int(token_decimals or 0),
@@ -6649,6 +6730,7 @@ def run_monitor(db):
                             'entryQuotePrice': price,
                             'entrySpreadPct': _spread,
                             'entryEdgeBudget': _entry_edge_budget,
+                            'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                             'positionSizeSol': actual_position_size_sol,
                         })), json.dumps(_monitor_state),
                         pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
@@ -6680,6 +6762,7 @@ def run_monitor(db):
                             'spread_pct': _spread,
                             'position_size_sol': actual_position_size_sol,
                             'entry_edge_budget': _entry_edge_budget,
+                            'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             'execution': execution,
                         }, _entry_lifecycle),
                     )
