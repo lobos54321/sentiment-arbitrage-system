@@ -33,6 +33,32 @@ LOTTO_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_SE
 LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.03"))
 LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.08"))
 QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
+# Small winner exit contract: expected trigger→fill slippage buffer (B)
+PROTECT_SLIP_BUFFER = float(os.environ.get("PROTECT_SLIP_BUFFER", "0.015"))
+
+
+def profit_protect_floor(peak_pnl: float):
+    """Small winner exit contract: segmented trail floor for peak 8–50%.
+
+    Returns the minimum current_pnl trigger, pre-widened by PROTECT_SLIP_BUFFER
+    to account for the observed ~1.5–2pp trigger→fill slippage gap.
+    Returns None when peak is outside the guarded range (< 8% or >= 50%).
+
+    Peak 8–10%:  floor = max(peak × 0.65, 4%) + slip
+    Peak 10–20%: floor = max(peak × 0.60, peak − 5pp, 6%) + slip
+    Peak 20–50%: floor = max(peak × 0.50, peak − 10pp) + slip
+    Peak >= 50%: None — existing wide-trail phases handle these
+    """
+    slip = PROTECT_SLIP_BUFFER
+    if peak_pnl >= 0.50:
+        return None
+    if peak_pnl >= 0.20:
+        return max(peak_pnl * 0.50, peak_pnl - 0.10) + slip
+    if peak_pnl >= 0.10:
+        return max(peak_pnl * 0.60, peak_pnl - 0.05, 0.06) + slip
+    if peak_pnl >= 0.08:
+        return max(peak_pnl * 0.65, 0.04) + slip
+    return None
 
 
 def _quote_pnl_from_sim(sim, entry_price):
@@ -604,20 +630,22 @@ class ExitGuardianThread(threading.Thread):
                             f"peak={pos.peak_pnl*100:+.1f}% >= 8% confirmed"
                         )
                     else:
-                        # Phase 0 trail active — floor = peak * 0.50
-                        _p0_floor = pos.peak_pnl * 0.50
+                        # Phase 0 trail active — segmented floor via profit_protect_floor()
+                        # Falls back to peak * 0.50 for edge cases outside the 8-50% range.
+                        _p0_protect = profit_protect_floor(pos.peak_pnl)
+                        _p0_floor = _p0_protect if _p0_protect is not None else pos.peak_pnl * 0.50
                         if pnl < _p0_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} PHASE0 TRAIL: "
                                 f"pnl={pnl*100:+.1f}% < floor={_p0_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, 50% factor) "
+                                f"(peak={pos.peak_pnl*100:.1f}%) "
                                 f"price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
                                     'trade_id': trade_id,
                                     'symbol': pos.symbol,
-                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 50%)',
+                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%})',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
                                     '_instant_sim': self._get_instant_quote(pos, ca),
@@ -676,6 +704,32 @@ class ExitGuardianThread(threading.Thread):
                                     pos, ca, sell_pct=LOTTO_PARTIAL_SELL_PCT
                                 ),
                             })
+                        continue
+
+                    # Small winner exit contract (C+A+B): protect peak 8–50% gap
+                    # Fires well above the 2% breakeven floor so small winners don't
+                    # fully retrace before we exit.
+                    _lotto_protect = profit_protect_floor(pos.peak_pnl)
+                    if _lotto_protect is not None and pnl < _lotto_protect:
+                        log.info(
+                            f"[ExitGuardian] 🛡️ {pos.symbol} LOTTO PROFIT PROTECT: "
+                            f"pnl={pnl*100:+.1f}% < floor={_lotto_protect*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}%) price={price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': (
+                                    f'guardian_lotto_profit_protect '
+                                    f'(pnl={pnl:.1%} < floor={_lotto_protect:.1%}, '
+                                    f'peak={pos.peak_pnl:.1%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
                         continue
 
                     if pos.peak_pnl >= LOTTO_BREAKEVEN_PEAK and pnl <= LOTTO_BREAKEVEN_EXIT_PNL + LOTTO_EPSILON:

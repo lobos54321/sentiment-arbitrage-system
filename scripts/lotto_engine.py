@@ -40,6 +40,32 @@ LOTTO_PARTIAL_LOCK_PEAK = float(os.environ.get("LOTTO_PARTIAL_LOCK_PEAK", "0.20"
 LOTTO_PARTIAL_LOCK_MIN_PNL = float(os.environ.get("LOTTO_PARTIAL_LOCK_MIN_PNL", "0.15"))
 LOTTO_PARTIAL_SELL_PCT = float(os.environ.get("LOTTO_PARTIAL_SELL_PCT", "0.25"))
 LOTTO_EPSILON = 1e-9
+# Small winner exit contract: expected trigger→fill slippage buffer (B)
+LOTTO_PROTECT_SLIP_BUFFER = float(os.environ.get("PROTECT_SLIP_BUFFER", "0.015"))
+
+
+def profit_protect_floor(peak_pnl: float):
+    """Small winner exit contract: segmented trail floor for peak 8–50%.
+
+    Returns the minimum current_pnl trigger, pre-widened by LOTTO_PROTECT_SLIP_BUFFER
+    to account for the observed ~1.5–2pp trigger→fill slippage gap.
+    Returns None when peak is outside the guarded range (< 8% or >= 50%).
+
+    Peak 8–10%:  floor = max(peak × 0.65, 4%) + slip
+    Peak 10–20%: floor = max(peak × 0.60, peak − 5pp, 6%) + slip
+    Peak 20–50%: floor = max(peak × 0.50, peak − 10pp) + slip
+    Peak >= 50%: None — existing wide-trail phases handle these
+    """
+    slip = LOTTO_PROTECT_SLIP_BUFFER
+    if peak_pnl >= 0.50:
+        return None
+    if peak_pnl >= 0.20:
+        return max(peak_pnl * 0.50, peak_pnl - 0.10) + slip
+    if peak_pnl >= 0.10:
+        return max(peak_pnl * 0.60, peak_pnl - 0.05, 0.06) + slip
+    if peak_pnl >= 0.08:
+        return max(peak_pnl * 0.65, 0.04) + slip
+    return None
 
 
 @dataclass(frozen=True)
@@ -252,6 +278,21 @@ def evaluate_lotto_exit(pos, w_entry, current_price, *, now=None):
             "current_pnl": current_pnl,
             "peak_pnl": peak_pnl,
             "trail_floor": None,
+        }
+
+    # Small winner exit contract (C+A+B): protect peak 8–50% from full retracement.
+    # Fires before the 2% breakeven floor so small winners aren't fully given back.
+    _protect_floor = profit_protect_floor(peak_pnl)
+    if _protect_floor is not None and current_pnl < _protect_floor:
+        return {
+            "action": "exit",
+            "reason": (
+                f"lotto_profit_protect "
+                f"(pnl={current_pnl:.1%} < floor={_protect_floor:.1%}, peak={peak_pnl:.1%})"
+            ),
+            "current_pnl": current_pnl,
+            "peak_pnl": peak_pnl,
+            "trail_floor": _protect_floor,
         }
 
     if peak_pnl >= LOTTO_BREAKEVEN_PEAK and current_pnl <= LOTTO_BREAKEVEN_EXIT_PNL + LOTTO_EPSILON:
