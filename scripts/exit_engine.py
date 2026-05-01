@@ -1064,14 +1064,31 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
         if 'trail_stop' in gx.get('reason', '') and gx_pos.entry_price and gx_pos.entry_price > 0:
             current_peak = max(gx_pos.peak_pnl, 0)
             trigger_pnl = gx.get('trigger_pnl', 0)
-            # If peak has moved significantly beyond the trigger, this exit is stale
-            if current_peak > 0.05 and trigger_pnl < current_peak * 0.5:
-                log.info(
-                    f"  [GUARDIAN_EXIT] ⏭️ SKIPPING stale trail_stop for {gx['symbol']}: "
-                    f"trigger_pnl={trigger_pnl*100:+.1f}% but current peak={current_peak*100:+.1f}% "
-                    f"— price has recovered, exit no longer valid"
-                )
-                continue
+            # Skip only when the current mark price shows actual recovery above the trigger.
+            # Comparing trigger_pnl to historical peak alone incorrectly suppresses real trail
+            # exits after a token gives back from peak (AGI: trigger=+6.1%, peak=+12.8%, price
+            # had not recovered → old logic skipped, exit captured +1.4% instead of +6.1%).
+            # Republicans case (trigger=+4.3%, peak=+72%, price recovered to 72%+) still skips.
+            current_pnl = None
+            try:
+                ring = getattr(gx_pos, 'price_ring', None)
+                if ring:
+                    last_price = list(ring)[-1][1]
+                    current_pnl = (last_price - gx_pos.entry_price) / gx_pos.entry_price
+            except Exception:
+                pass
+            if current_pnl is not None:
+                # Require price to have actually recovered: above the trigger level + 2pp margin
+                # AND above 50% of the historical peak. Both must hold.
+                if (current_pnl >= trigger_pnl + 0.02
+                        and current_peak > 0.05
+                        and current_pnl >= current_peak * 0.5):
+                    log.info(
+                        f"  [GUARDIAN_EXIT] ⏭️ SKIPPING stale trail_stop for {gx['symbol']}: "
+                        f"trigger_pnl={trigger_pnl*100:+.1f}% current_pnl={current_pnl*100:+.1f}% "
+                        f"peak={current_peak*100:+.1f}% — price has recovered"
+                    )
+                    continue
 
         gx_lifecycle_id = gx_pos.lifecycle_id
         gx_lifecycle = lifecycles.setdefault(
