@@ -296,6 +296,20 @@ def test_entry_edge_budget_allows_favorable_lotto_fill():
     assert budget["spread_pct"] < 0
 
 
+def test_entry_edge_budget_blocks_ath_spread_over_budget():
+    budget = evaluate_entry_edge_budget(
+        route="ATH",
+        trigger_price=1.713e-6,
+        quote_price=1.773307e-6,
+        lifecycle={},
+        pending={},
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["profile"] == "ath"
+    assert budget["max_spread_pct"] == 2.5
+
+
 def test_positive_gap_crash_is_waterfall_memory_not_loss_failure():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

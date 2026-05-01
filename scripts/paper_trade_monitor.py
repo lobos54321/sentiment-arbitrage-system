@@ -100,6 +100,8 @@ DEFAULT_STRATEGY_ROLE = 'selective_challenger'
 DEFAULT_STAGE1_EXIT = {'stopLossPct': 7.5, 'trailStartPct': 15, 'trailFactor': 0.6, 'timeoutMinutes': 120}
 MATRIX_SPREAD_WARN_PCT = float(os.environ.get('MATRIX_SPREAD_WARN_PCT', '2.0'))
 MATRIX_SPREAD_ABORT_PCT = float(os.environ.get('MATRIX_SPREAD_ABORT_PCT', '4.5'))
+ENTRY_EDGE_MATRIX_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_MATRIX_MAX_SPREAD_PCT', '2.5'))
+ENTRY_EDGE_ATH_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_ATH_MAX_SPREAD_PCT', '2.5'))
 ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT', '2.0'))
 ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT', '1.5'))
 ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '1.0'))
@@ -858,8 +860,11 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
 
     liquidity_unknown = bool(features.get('liquidity_unknown'))
     live_top1_pct = _feature_float('live_top1_pct')
-    max_spread_pct = MATRIX_SPREAD_ABORT_PCT
+    max_spread_pct = ENTRY_EDGE_MATRIX_MAX_SPREAD_PCT
     profile = 'matrix'
+    if route_name == 'ATH':
+        max_spread_pct = ENTRY_EDGE_ATH_MAX_SPREAD_PCT
+        profile = 'ath'
     if is_lotto:
         max_spread_pct = ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT
         profile = 'lotto'
