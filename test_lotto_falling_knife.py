@@ -4,17 +4,19 @@ import sqlite3
 sys.path.insert(0, "scripts")
 
 from paper_decision_audit import init_decision_audit  # noqa: E402
-from lotto_engine import build_lotto_pending, evaluate_lotto_entry  # noqa: E402
+from lotto_engine import build_lotto_pending, evaluate_lotto_entry, evaluate_lotto_exit  # noqa: E402
 from exit_engine import (  # noqa: E402
     _partial_delta_from_command,
     _raw_amount_for_absolute_partial,
 )
 from matrix_evaluator import (  # noqa: E402
+    ExitMatrixEvaluator,
     ath_flat_momentum_allowed,
     ath_structural_reentry_allowed,
 )
 from entry_readiness_policy import evaluate_entry_readiness_policy, entry_mode_allowed  # noqa: E402
 from analyze_trade_failure_attribution import classify_system_stage  # noqa: E402
+from profit_protect_policy import profit_protect_floor  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     evaluate_entry_edge_budget,
     evaluate_token_reclaim,
@@ -557,6 +559,41 @@ def test_lotto_allows_pumpfun_liquidity_unknown_live_top10_under_risky_limit():
         now=1100,
     )
     assert decision.allow is True
+
+
+def test_profit_protect_floor_includes_exit_slippage_buffer():
+    assert profit_protect_floor(0.079) is None
+    assert round(profit_protect_floor(0.08), 4) == 0.067
+    assert round(profit_protect_floor(0.141), 4) == 0.106
+    assert round(profit_protect_floor(0.25), 4) == 0.165
+    assert profit_protect_floor(0.50) is None
+
+
+def test_lotto_profit_protect_fires_before_breakeven_floor():
+    class Pos:
+        entry_price = 1.0
+        entry_ts = 1000
+        peak_pnl = 0.141
+
+    decision = evaluate_lotto_exit(Pos(), {"peak_pnl": 0.141}, 1.09, now=1030)
+    assert decision["action"] == "exit"
+    assert decision["reason"].startswith("lotto_profit_protect")
+    assert round(decision["trail_floor"], 4) == 0.106
+
+
+def test_matrix_phase0_uses_profit_protect_floor():
+    evaluator = ExitMatrixEvaluator()
+    entry = {
+        "type": "MATRIX",
+        "symbol": "TEST",
+        "entry_price": 1.0,
+        "peak_pnl": 0.141,
+        "entry_time": 1000,
+    }
+    decision = evaluator.evaluate_exit(entry, 1.09)
+    assert decision["action"] == "exit"
+    assert decision["reason"].startswith("phase0_trail")
+    assert round(decision["trail_floor"], 4) == 0.106
 
 
 def test_ath_structural_reentry_can_bypass_last_exit_price_gate():

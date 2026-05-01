@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import os
 import time
 
+from profit_protect_policy import profit_protect_floor
+
 
 LOTTO_STRATEGY_ID = os.environ.get("LOTTO_STRATEGY_ID", "lotto-v1")
 LOTTO_STRATEGY_STAGE = "lotto"
@@ -257,6 +259,16 @@ def evaluate_lotto_exit(pos, w_entry, current_price, *, now=None):
             "current_pnl": current_pnl,
             "peak_pnl": peak_pnl,
             "trail_floor": None,
+        }
+
+    protect_floor = profit_protect_floor(peak_pnl)
+    if protect_floor is not None and current_pnl < protect_floor:
+        return {
+            "action": "exit",
+            "reason": f"lotto_profit_protect (pnl={current_pnl:.1%} < floor={protect_floor:.1%}, peak={peak_pnl:.1%})",
+            "current_pnl": current_pnl,
+            "peak_pnl": peak_pnl,
+            "trail_floor": protect_floor,
         }
 
     if peak_pnl >= LOTTO_BREAKEVEN_PEAK and current_pnl <= LOTTO_BREAKEVEN_EXIT_PNL + LOTTO_EPSILON:

@@ -243,12 +243,12 @@ def classify_trade(row):
     pnl = float(row["pnl_pct"] or 0.0)
     peak = float(row["peak_pnl"] or 0.0)
     reason = row["exit_reason"] or ""
-    signal_type = row["signal_type"] or "-"
-    route = row["signal_route"] or signal_type
+    signal_type = _row_get(row, "signal_type") or "-"
+    route = _row_get(row, "signal_route") or signal_type
     giveback = peak - pnl
     trigger_pnl = parse_trigger_pnl(reason)
     trigger_to_actual_gap = (trigger_pnl - pnl) if trigger_pnl is not None else None
-    monitor_state = load_json(row["monitor_state_json"])
+    monitor_state = load_json(_row_get(row, "monitor_state_json"))
     sold_pct = float(monitor_state.get("soldPct") or 0.0)
 
     tags = []
@@ -325,7 +325,11 @@ def print_trade_summary(rows):
 
     by_route = defaultdict(list)
     for row in rows:
-        by_route[(row["signal_type"] or "-", row["signal_route"] or "-", row["strategy_stage"] or "-")].append(row)
+        by_route[(
+            _row_get(row, "signal_type") or "-",
+            _row_get(row, "signal_route") or "-",
+            _row_get(row, "strategy_stage") or "-",
+        )].append(row)
     print("\nBy Route")
     print(f"{'signal':<10} {'route':<8} {'stage':<8} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'avg_peak':>9}")
     for (signal, route, stage), group in sorted(by_route.items(), key=lambda item: len(item[1]), reverse=True):
@@ -364,7 +368,7 @@ def print_failure_buckets(rows, limit):
     for row in closed[:limit]:
         pnl = float(row["pnl_pct"] or 0.0)
         peak = float(row["peak_pnl"] or 0.0)
-        route = row["signal_route"] or row["signal_type"] or "-"
+        route = _row_get(row, "signal_route") or _row_get(row, "signal_type") or "-"
         print(
             f"{int(row['id']):>5} {str(row['symbol'] or '?')[:12]:<12} {route:<8} "
             f"{pct(pnl):>8} {pct(peak):>8} {pp(peak - pnl):>9} {str(row['exit_reason'] or '')[:90]}"
@@ -664,12 +668,28 @@ def print_path_sample_quality(db, since_ts, limit):
         """,
         (since_ts,),
     ).fetchone()
+    gap_rows = db.execute(
+        """
+        SELECT ABS(quote_pnl - mark_pnl) AS abs_gap
+        FROM paper_trade_path_samples
+        WHERE sample_ts >= ?
+          AND quote_pnl IS NOT NULL
+          AND mark_pnl IS NOT NULL
+        ORDER BY abs_gap ASC
+        """,
+        (since_ts,),
+    ).fetchall()
+    p90_abs_quote_gap = None
+    if gap_rows:
+        p90_idx = min(len(gap_rows) - 1, int((len(gap_rows) - 1) * 0.90))
+        p90_abs_quote_gap = gap_rows[p90_idx]["abs_gap"]
     print("\nPath Sample Quality")
     print(
         f"  samples={summary['samples'] or 0} trades={summary['trades'] or 0} "
         f"quote_samples={summary['quote_samples'] or 0} "
         f"avg_mark={pct(summary['avg_mark_pnl'])} avg_quote={pct(summary['avg_quote_pnl'])} "
-        f"avg_quote_gap={pp(summary['avg_quote_gap'])} max_abs_quote_gap={pp(summary['max_abs_quote_gap'])}"
+        f"avg_quote_gap={pp(summary['avg_quote_gap'])} p90_abs_quote_gap={pp(p90_abs_quote_gap)} "
+        f"max_abs_quote_gap={pp(summary['max_abs_quote_gap'])}"
     )
 
     rows = db.execute(
@@ -727,7 +747,7 @@ def print_lifecycle_quality(rows, db, since_ts, limit):
     if has_trade_state:
         groups = defaultdict(list)
         for row in rows:
-            groups[row["lifecycle_state"] or "UNKNOWN"].append(row)
+            groups[_row_get(row, "lifecycle_state") or "UNKNOWN"].append(row)
         print("  Traded by lifecycle_state")
         print(f"  {'state':<24} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'avg_peak':>9}")
         for state, group in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)[:limit]:
@@ -740,7 +760,7 @@ def print_lifecycle_quality(rows, db, since_ts, limit):
 
         bias_groups = defaultdict(list)
         for row in rows:
-            bias_groups[row["entry_bias"] or "UNKNOWN"].append(row)
+            bias_groups[_row_get(row, "entry_bias") or "UNKNOWN"].append(row)
         print("  Traded by shadow entry_bias")
         print(f"  {'bias':<10} {'n':>4} {'closed':>6} {'win':>5} {'avg_pnl':>9} {'sum_pnl':>9} {'avg_peak':>9}")
         for bias, group in sorted(bias_groups.items(), key=lambda item: len(item[1]), reverse=True):

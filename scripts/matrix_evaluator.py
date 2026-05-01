@@ -18,6 +18,8 @@ import time
 import logging
 import os
 
+from profit_protect_policy import profit_protect_floor
+
 log = logging.getLogger('matrix')
 
 MATRIX_ATH_REENTRY_BELOW_LAST_EXIT_ENABLED = os.environ.get(
@@ -1058,15 +1060,15 @@ class ExitMatrixEvaluator:
 
         # === V8: PHASE 0 MICRO-TRAIL (peak >= 8%) ===
         # V8 audit: raised from 2%→8%. Meme coins swing ±5% as noise.
-        # Aligned with Guardian Phase 0 (both use 8% threshold, 50% floor).
+        # Aligned with Guardian Phase 0 (both use shared small-winner floor).
         # LOTTO bypass: LOTTO phase-based trail in exit_guardian uses wider 35% floor.
         # Applying 50% phase0 here would over-ride that and cut LOTTO positions too early.
         if not _is_lotto_entry and peak_pnl >= 0.08:
-            _p0_floor = peak_pnl * 0.50
+            _p0_floor = profit_protect_floor(peak_pnl) or (peak_pnl * 0.50)
             if current_pnl < _p0_floor:
                 return {
                     'action': 'exit',
-                    'reason': f'phase0_trail (pnl={current_pnl:.1%} < floor={_p0_floor:.1%}, peak={peak_pnl:.1%}, 50%)',
+                    'reason': f'phase0_trail (pnl={current_pnl:.1%} < floor={_p0_floor:.1%}, peak={peak_pnl:.1%})',
                     'current_pnl': current_pnl,
                     'trail_floor': _p0_floor,
                 }

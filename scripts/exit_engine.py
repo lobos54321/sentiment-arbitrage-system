@@ -11,6 +11,8 @@ import logging
 import threading
 import os
 
+from profit_protect_policy import profit_protect_floor
+
 log = logging.getLogger('paper_trade_monitor')
 
 GUARDIAN_DOA_EXIT_SEC = 15
@@ -624,6 +626,29 @@ class ExitGuardianThread(threading.Thread):
                             })
                         continue
 
+                    _phase0_protect_floor = profit_protect_floor(pos.peak_pnl)
+                    if _phase0_protect_floor is not None and pnl < _phase0_protect_floor:
+                        log.info(
+                            f"[ExitGuardian] 🛡️ {pos.symbol} PHASE0 PROFIT PROTECT: "
+                            f"pnl={pnl*100:+.1f}% < floor={_phase0_protect_floor*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}%) price={price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': (
+                                    f'guardian_phase0_profit_protect '
+                                    f'(pnl={pnl:.1%} < floor={_phase0_protect_floor:.1%}, '
+                                    f'peak={pos.peak_pnl:.1%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
+                        continue
+
                     _breakeven_floor = (
                         PHASE0_STRONG_BREAKEVEN_EXIT_PNL
                         if pos.peak_pnl >= PHASE0_STRONG_BREAKEVEN_PEAK
@@ -660,20 +685,19 @@ class ExitGuardianThread(threading.Thread):
                             f"peak={pos.peak_pnl*100:+.1f}% >= 8% confirmed"
                         )
                     else:
-                        # Phase 0 trail active — floor = peak * 0.50
-                        _p0_floor = pos.peak_pnl * 0.50
+                        _p0_floor = profit_protect_floor(pos.peak_pnl) or (pos.peak_pnl * 0.50)
                         if pnl < _p0_floor:
                             log.info(
                                 f"[ExitGuardian] 📉 {pos.symbol} PHASE0 TRAIL: "
                                 f"pnl={pnl*100:+.1f}% < floor={_p0_floor*100:.1f}% "
-                                f"(peak={pos.peak_pnl*100:.1f}%, 50% factor) "
+                                f"(peak={pos.peak_pnl*100:.1f}%) "
                                 f"price={price:.10f} src={src}"
                             )
                             with self.exit_queue_lock:
                                 self.exit_queue.append({
                                     'trade_id': trade_id,
                                     'symbol': pos.symbol,
-                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%}, 50%)',
+                                    'reason': f'guardian_phase0_trail (pnl={pnl:.1%} < floor={_p0_floor:.1%}, peak={pos.peak_pnl:.1%})',
                                     'trigger_price': price,
                                     'trigger_pnl': pnl,
                                     '_instant_sim': self._get_instant_quote(pos, ca),
@@ -736,6 +760,29 @@ class ExitGuardianThread(threading.Thread):
                                     pos, ca, sell_pct=LOTTO_PARTIAL_SELL_PCT
                                 ),
                             })
+                        continue
+
+                    _lotto_protect_floor = profit_protect_floor(pos.peak_pnl)
+                    if _lotto_protect_floor is not None and pnl < _lotto_protect_floor:
+                        log.info(
+                            f"[ExitGuardian] 🛡️ {pos.symbol} LOTTO PROFIT PROTECT: "
+                            f"pnl={pnl*100:+.1f}% < floor={_lotto_protect_floor*100:.1f}% "
+                            f"(peak={pos.peak_pnl*100:.1f}%) price={price:.10f} src={src}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': (
+                                    f'guardian_lotto_profit_protect '
+                                    f'(pnl={pnl:.1%} < floor={_lotto_protect_floor:.1%}, '
+                                    f'peak={pos.peak_pnl:.1%})'
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
                         continue
 
                     if pos.peak_pnl >= LOTTO_BREAKEVEN_PEAK and pnl <= LOTTO_BREAKEVEN_EXIT_PNL + LOTTO_EPSILON:
