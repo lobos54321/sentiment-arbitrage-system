@@ -165,6 +165,12 @@ TOKEN_RISK_FAILURE_WINDOW_SEC = int(os.environ.get('TOKEN_RISK_FAILURE_WINDOW_SE
 TOKEN_RISK_BASE_COOLDOWN_SEC = int(os.environ.get('TOKEN_RISK_BASE_COOLDOWN_SEC', str(45 * 60)))
 TOKEN_RISK_REPEAT_FAILURE_COUNT = int(os.environ.get('TOKEN_RISK_REPEAT_FAILURE_COUNT', '2'))
 TOKEN_RISK_REPEAT_COOLDOWN_SEC = int(os.environ.get('TOKEN_RISK_REPEAT_COOLDOWN_SEC', str(2 * 60 * 60)))
+TOKEN_RISK_RECLAIM_REQUIRED = os.environ.get('TOKEN_RISK_RECLAIM_REQUIRED', 'true').lower() != 'false'
+TOKEN_RISK_RECLAIM_M5_PCT = float(os.environ.get('TOKEN_RISK_RECLAIM_M5_PCT', '15'))
+TOKEN_RISK_RECLAIM_BS_RATIO = float(os.environ.get('TOKEN_RISK_RECLAIM_BS_RATIO', '1.25'))
+TOKEN_RISK_RECLAIM_MIN_TX_M5 = int(os.environ.get('TOKEN_RISK_RECLAIM_MIN_TX_M5', '20'))
+TOKEN_RISK_RECLAIM_MIN_LIQ_USD = float(os.environ.get('TOKEN_RISK_RECLAIM_MIN_LIQ_USD', '5000'))
+LOTTO_REAL_PROBE_MIN_RECLAIM_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_RECLAIM_PNL', '0.15'))
 LOTTO_LIFECYCLE_BLOCK_STATES = {
     s.strip().upper()
     for s in os.environ.get(
@@ -799,37 +805,39 @@ def find_lotto_real_probe_candidates(db, *, now_ts, limit=3):
         WITH ranked AS (
             SELECT
                 m.*,
-                COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS best_pnl,
+                COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS best_pnl,
+                COALESCE(m.first_tradable_pnl, m.pnl_15m, m.pnl_5m, 0) AS reclaim_pnl,
                 ROW_NUMBER() OVER (
                     PARTITION BY m.token_ca
-                    ORDER BY COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC,
+                    ORDER BY COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC,
                              m.created_event_ts DESC
                 ) AS rn
             FROM paper_missed_signal_attribution m
             WHERE m.route = 'LOTTO'
               AND m.baseline_price IS NOT NULL
-              AND m.pnl_15m IS NOT NULL
-              AND COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) >= ?
-              AND m.pnl_15m >= ?
-              AND LOWER(COALESCE(m.reject_reason, '')) NOT LIKE '%stale%'
+              AND COALESCE(m.tradable_missed, 0) = 1
+              AND COALESCE(m.would_stop_before_peak, 0) = 0
+              AND m.tradability_status = 'tradable_reclaim'
+              AND COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) >= ?
+              AND COALESCE(m.first_tradable_pnl, m.pnl_15m, m.pnl_5m, 0) >= ?
               AND m.created_event_ts >= ?
               AND NOT EXISTS (
                   SELECT 1
                   FROM paper_decision_events e
                   WHERE e.component = 'lotto_probe_live'
                     AND e.token_ca = m.token_ca
-                    AND e.event_type IN ('pending_entry', 'reentry_armed', 'skip')
+                    AND e.event_type IN ('pending_entry', 'reentry_armed')
               )
         )
         SELECT *
         FROM ranked
         WHERE rn = 1
-        ORDER BY best_pnl DESC, pnl_15m DESC
+        ORDER BY best_pnl DESC, reclaim_pnl DESC
         LIMIT ?
         """,
         (
             LOTTO_REAL_PROBE_MIN_MAX_PNL,
-            LOTTO_REAL_PROBE_MIN_15M_PNL,
+            LOTTO_REAL_PROBE_MIN_RECLAIM_PNL,
             now_ts - 2 * 60 * 60,
             limit,
         ),
@@ -865,6 +873,103 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
             )
             continue
 
+        recent_wait = db.execute(
+            """
+            SELECT 1
+            FROM paper_decision_events
+            WHERE component = 'lotto_probe_live'
+              AND token_ca = ?
+              AND event_type = 'wait_reclaim'
+              AND event_ts >= ?
+            LIMIT 1
+            """,
+            (token_ca, now_ts - 60),
+        ).fetchone()
+        if recent_wait:
+            continue
+
+        features = {}
+        try:
+            features = json.loads(row['lifecycle_features_json'] or '{}')
+        except Exception:
+            features = {}
+
+        try:
+            reclaim_dex = fetch_dexscreener_trend_snapshot(token_ca)
+        except Exception:
+            reclaim_dex = None
+        probe_entry = {
+            'ca': token_ca,
+            'symbol': symbol,
+            'type': 'LOTTO',
+            'signal_ts': row['signal_ts'] or int(row['created_event_ts']),
+            'signal_price': row['baseline_price'],
+            'signal_mc': features.get('market_cap') or 0,
+            'signal_vol24h': features.get('vol_h1') or 0,
+            'added_at': row['created_event_ts'],
+        }
+        reclaim_lifecycle = lifecycle_payload_for(
+            watchlist_entry=probe_entry,
+            dex_snapshot=reclaim_dex,
+            route='LOTTO',
+            signal_ts=probe_entry['signal_ts'],
+            signal_price=row['baseline_price'],
+            now=now_ts,
+        )
+        current_reclaim = evaluate_token_reclaim(
+            dex_snapshot=reclaim_dex,
+            lifecycle=reclaim_lifecycle,
+            route='LOTTO',
+        )
+        if not current_reclaim.get('reclaim_confirmed'):
+            record_decision_event(
+                db,
+                component='lotto_probe_live',
+                event_type='wait_reclaim',
+                decision='wait',
+                reason=current_reclaim.get('reason') or 'current_reclaim_not_confirmed',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='LOTTO',
+                data_source='dexscreener+lifecycle',
+                payload=with_lifecycle_payload({
+                    'missed_attribution_id': row['id'],
+                    'best_pnl': row['best_pnl'],
+                    'reclaim_pnl': row['reclaim_pnl'],
+                    'tradability_status': row['tradability_status'],
+                    'current_reclaim': current_reclaim,
+                }, reclaim_lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+
+        token_risk = token_quarantine_state(db, token_ca, now_ts=now_ts, reclaim=current_reclaim)
+        if token_risk.get('blocked'):
+            record_decision_event(
+                db,
+                component='lotto_probe_live',
+                event_type='wait_reclaim',
+                decision='wait',
+                reason=token_risk.get('reason') or 'token_quarantine',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='LOTTO',
+                data_source='paper_trade_history+dexscreener',
+                payload={
+                    'missed_attribution_id': row['id'],
+                    'token_risk': token_risk,
+                    'current_reclaim': current_reclaim,
+                },
+                event_ts=now_ts,
+            )
+            continue
+
         pool = get_pool_address(token_ca)
         if not pool:
             record_decision_event(
@@ -884,11 +989,6 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
             )
             continue
 
-        features = {}
-        try:
-            features = json.loads(row['lifecycle_features_json'] or '{}')
-        except Exception:
-            features = {}
         w_entry = watchlist.register(
             ca=token_ca,
             symbol=symbol,
@@ -917,6 +1017,14 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
             'source_component': row['component'],
             'source_reject_reason': row['reject_reason'],
             'best_pnl': row['best_pnl'],
+            'reclaim_pnl': row['reclaim_pnl'],
+            'tradability_status': row['tradability_status'],
+            'tradability_reason': row['tradability_reason'],
+            'first_tradable_horizon': row['first_tradable_horizon'],
+            'first_tradable_pnl': row['first_tradable_pnl'],
+            'tradable_peak_horizon': row['tradable_peak_horizon'],
+            'tradable_peak_pnl': row['tradable_peak_pnl'],
+            'current_reclaim': current_reclaim,
             'pnl_5m': row['pnl_5m'],
             'pnl_15m': row['pnl_15m'],
             'pnl_60m': row['pnl_60m'],
@@ -984,6 +1092,77 @@ def should_block_lotto_falling_knife(lotto_detail, lotto_lifecycle):
     }
 
 
+def evaluate_token_reclaim(dex_snapshot=None, lifecycle=None, route=None):
+    """Require a failed CA to prove current strength before any route can re-enter."""
+    dex_snapshot = dex_snapshot or {}
+    lifecycle = lifecycle or {}
+    features = lifecycle.get('lifecycle_features') or {}
+
+    def _pick_number(name, default=None):
+        value = features.get(name)
+        if value is None:
+            value = dex_snapshot.get(name)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    state = str(lifecycle.get('lifecycle_state') or 'UNKNOWN').upper()
+    entry_bias = str(lifecycle.get('entry_bias') or 'OBSERVE').upper()
+    price_change_m5 = _pick_number('price_change_m5')
+    buys_m5 = _pick_number('buys_m5')
+    sells_m5 = _pick_number('sells_m5')
+    tx_m5 = _pick_number('tx_m5')
+    if tx_m5 is None and buys_m5 is not None and sells_m5 is not None:
+        tx_m5 = buys_m5 + sells_m5
+    buy_sell_ratio = _pick_number('buy_sell_ratio')
+    if buy_sell_ratio is None and buys_m5 is not None:
+        buy_sell_ratio = buys_m5 / max(sells_m5 or 0, 1)
+    liquidity_usd = _pick_number('liquidity_usd', 0.0)
+    liquidity_unknown = bool(features.get('liquidity_unknown') or dex_snapshot.get('liquidity_unknown'))
+
+    detail = {
+        'reclaim_confirmed': False,
+        'route': route,
+        'lifecycle_state': state,
+        'entry_bias': entry_bias,
+        'price_change_m5': price_change_m5,
+        'buy_sell_ratio': buy_sell_ratio,
+        'tx_m5': tx_m5,
+        'liquidity_usd': liquidity_usd,
+        'liquidity_unknown': liquidity_unknown,
+        'thresholds': {
+            'price_change_m5': TOKEN_RISK_RECLAIM_M5_PCT,
+            'buy_sell_ratio': TOKEN_RISK_RECLAIM_BS_RATIO,
+            'tx_m5': TOKEN_RISK_RECLAIM_MIN_TX_M5,
+            'liquidity_usd': TOKEN_RISK_RECLAIM_MIN_LIQ_USD,
+        },
+    }
+
+    blocked_states = set(LOTTO_LIFECYCLE_BLOCK_STATES) | {'DEAD', 'DISTRIBUTION', 'DEAD_CAT_BOUNCE', 'ATH_DEEP_RESET'}
+    if entry_bias == 'REJECT' or state in blocked_states:
+        detail['reason'] = 'reclaim_lifecycle_blocked'
+        return detail
+    if price_change_m5 is None or price_change_m5 < TOKEN_RISK_RECLAIM_M5_PCT:
+        detail['reason'] = 'reclaim_m5_too_low'
+        return detail
+    if buy_sell_ratio is None or buy_sell_ratio < TOKEN_RISK_RECLAIM_BS_RATIO:
+        detail['reason'] = 'reclaim_buy_sell_too_low'
+        return detail
+    if tx_m5 is None or tx_m5 < TOKEN_RISK_RECLAIM_MIN_TX_M5:
+        detail['reason'] = 'reclaim_tx_too_low'
+        return detail
+    if liquidity_usd and liquidity_usd < TOKEN_RISK_RECLAIM_MIN_LIQ_USD and not liquidity_unknown:
+        detail['reason'] = 'reclaim_liquidity_too_low'
+        return detail
+
+    detail['reclaim_confirmed'] = True
+    detail['reason'] = 'reclaim_confirmed'
+    return detail
+
+
 TOKEN_RISK_DANGER_REASON_PATTERNS = (
     'hard_sl',
     'hard_floor',
@@ -996,7 +1175,7 @@ TOKEN_RISK_DANGER_REASON_PATTERNS = (
 )
 
 
-def token_quarantine_state(db, token_ca, *, now_ts=None):
+def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
     """Return a global same-CA entry block after recent severe failed exits."""
     if not TOKEN_RISK_QUARANTINE_ENABLED or not token_ca:
         return {'blocked': False, 'reason': 'disabled'}
@@ -1039,13 +1218,35 @@ def token_quarantine_state(db, token_ca, *, now_ts=None):
     )
     until_ts = latest_exit_ts + cooldown_sec
     if now_ts >= until_ts:
+        if TOKEN_RISK_RECLAIM_REQUIRED and not (reclaim or {}).get('reclaim_confirmed'):
+            worst_pnl = min((_safe_float(row['pnl_pct'], 0.0) for row in severe), default=None)
+            return {
+                'blocked': True,
+                'reason': 'token_quarantine_reclaim_required',
+                'until_ts': until_ts,
+                'remaining_sec': 0.0,
+                'recent_exit_count': len(rows),
+                'severe_failure_count': failure_count,
+                'cooldown_expired': True,
+                'last_failure_trade_id': latest['id'],
+                'last_failure_exit_ts': latest_exit_ts,
+                'last_failure_age_sec': now_ts - latest_exit_ts,
+                'last_failure_pnl': _safe_float(latest['pnl_pct'], None),
+                'last_failure_reason': latest['exit_reason'],
+                'worst_failure_pnl': worst_pnl,
+                'loss_threshold': TOKEN_RISK_LOSS_THRESHOLD,
+                'reclaim_required': True,
+                'reclaim': reclaim or {'reclaim_confirmed': False, 'reason': 'reclaim_not_checked'},
+            }
         return {
             'blocked': False,
             'recent_exit_count': len(rows),
             'severe_failure_count': failure_count,
             'cooldown_expired': True,
+            'reclaim_unlocked': bool((reclaim or {}).get('reclaim_confirmed')),
             'last_failure_exit_ts': latest_exit_ts,
             'last_failure_age_sec': now_ts - latest_exit_ts,
+            'reclaim': reclaim,
         }
 
     worst_pnl = min((_safe_float(row['pnl_pct'], 0.0) for row in severe), default=None)
@@ -1069,6 +1270,8 @@ def token_quarantine_state(db, token_ca, *, now_ts=None):
         'loss_threshold': TOKEN_RISK_LOSS_THRESHOLD,
         'base_cooldown_sec': TOKEN_RISK_BASE_COOLDOWN_SEC,
         'repeat_cooldown_sec': TOKEN_RISK_REPEAT_COOLDOWN_SEC,
+        'reclaim_required_after_cooldown': TOKEN_RISK_RECLAIM_REQUIRED,
+        'reclaim': reclaim,
     }
 
 
@@ -5197,6 +5400,11 @@ def run_monitor(db):
                     _lifecycle_blocked, _lifecycle_block_reason, _lifecycle_block_detail = should_block_lotto_lifecycle_entry(
                         _lotto_lifecycle,
                     )
+                    _lotto_reclaim = evaluate_token_reclaim(
+                        dex_snapshot=_lotto_dex,
+                        lifecycle=_lotto_lifecycle,
+                        route='LOTTO',
+                    )
                     if _falling_knife_blocked and _lotto_decision.allow:
                         _lotto_decision = LottoDecision(
                             "expire",
@@ -5211,7 +5419,7 @@ def run_monitor(db):
                             {**_lotto_detail, **_lifecycle_block_detail},
                         )
                         _lotto_detail = _lotto_decision.detail
-                    _token_risk = token_quarantine_state(db, w_entry['ca'], now_ts=now)
+                    _token_risk = token_quarantine_state(db, w_entry['ca'], now_ts=now, reclaim=_lotto_reclaim)
                     if _token_risk.get('blocked') and _lotto_decision.allow:
                         _lotto_decision = LottoDecision(
                             "wait",
@@ -5775,7 +5983,40 @@ def run_monitor(db):
                     _pending_lotto_state = pending.get('lotto_state') or None
                     _pending_exit_strategy = pending.get('exit_strategy') or 'NOT_ATH'
 
-                    _token_risk = token_quarantine_state(db, pending['token_ca'], now_ts=now)
+                    try:
+                        _entry_timing_dex = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                    except Exception:
+                        _entry_timing_dex = None
+                    _entry_lifecycle_entry = pending_w_entry or {
+                        'ca': pending['token_ca'],
+                        'symbol': pending['symbol'],
+                        'type': _pending_signal_route or pending.get('signal_type'),
+                        'signal_ts': pending['signal_ts'],
+                        'signal_price': pending.get('signal_price') or pending.get('entry_price'),
+                        'signal_mc': pending.get('market_cap') or 0,
+                        'added_at': pending.get('added_at') or pending['signal_ts'],
+                    }
+                    _entry_timing_lifecycle = lifecycle_payload_for(
+                        watchlist_entry=_entry_lifecycle_entry,
+                        dex_snapshot=_entry_timing_dex,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        signal_ts=pending['signal_ts'],
+                        signal_price=pending.get('signal_price') or pending.get('entry_price'),
+                        quote_available=None,
+                        now=now,
+                    )
+                    _entry_reclaim = evaluate_token_reclaim(
+                        dex_snapshot=_entry_timing_dex,
+                        lifecycle=_entry_timing_lifecycle,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                    )
+
+                    _token_risk = token_quarantine_state(
+                        db,
+                        pending['token_ca'],
+                        now_ts=now,
+                        reclaim=_entry_reclaim,
+                    )
                     if _token_risk.get('blocked'):
                         record_decision_event(
                             db,
@@ -5790,7 +6031,7 @@ def run_monitor(db):
                             signal_id=pending.get('premium_signal_id'),
                             strategy_stage=_pending_strategy_stage,
                             route=_pending_signal_route or pending.get('signal_type'),
-                            data_source='paper_trade_history',
+                            data_source='paper_trade_history+dexscreener+lifecycle',
                             payload=_token_risk,
                         )
                         log.info(
@@ -5802,20 +6043,8 @@ def run_monitor(db):
                         continue
 
                     if pending.get('is_lotto'):
-                        try:
-                            _lotto_timing_dex = fetch_dexscreener_trend_snapshot(pending['token_ca'])
-                        except Exception:
-                            _lotto_timing_dex = None
-                        _lotto_timing_lifecycle = lifecycle_payload_for(
-                            watchlist_entry=pending_w_entry,
-                            dex_snapshot=_lotto_timing_dex,
-                            route=_pending_signal_route or pending.get('signal_type'),
-                            signal_ts=pending['signal_ts'],
-                            quote_available=None,
-                            now=now,
-                        )
                         _lotto_timing_blocked, _lotto_timing_reason, _lotto_timing_detail = should_block_lotto_lifecycle_entry(
-                            _lotto_timing_lifecycle,
+                            _entry_timing_lifecycle,
                         )
                         if _lotto_timing_blocked:
                             record_decision_event(
@@ -5832,7 +6061,7 @@ def run_monitor(db):
                                 strategy_stage=_pending_strategy_stage,
                                 route=_pending_signal_route or pending.get('signal_type'),
                                 data_source='lifecycle+dexscreener',
-                                payload=with_lifecycle_payload(_lotto_timing_detail, _lotto_timing_lifecycle),
+                                payload=with_lifecycle_payload(_lotto_timing_detail, _entry_timing_lifecycle),
                             )
                             log.info(
                                 f"  [LOTTO_TIMING] 🚫 {pending['symbol']} BLOCKED: "
