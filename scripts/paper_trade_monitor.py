@@ -66,6 +66,7 @@ from entry_decision_contract import build_entry_decision_contract
 from entry_readiness_policy import evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
+from gmgn_readonly import fetch_gmgn_token_enrichment
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
     LOTTO_STRATEGY_ID,
@@ -5804,6 +5805,7 @@ def run_monitor(db):
                         _lotto_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
                     except Exception:
                         _lotto_dex = None
+                    _gmgn_enrichment = fetch_gmgn_token_enrichment(w_entry['ca'])
 
                     _lotto_live = helius_token_concentration(w_entry['ca'])
                     with positions_lock:
@@ -5817,6 +5819,12 @@ def run_monitor(db):
                         now=time.time(),
                     )
                     _lotto_detail = _lotto_decision.detail
+                    if _gmgn_enrichment:
+                        _lotto_detail = {
+                            **_lotto_detail,
+                            'gmgn_readonly': _gmgn_enrichment,
+                            'gmgn_risk_flags': _gmgn_enrichment.get('risk_flags', []),
+                        }
                     _lotto_liq = _lotto_detail.get('liquidity_usd', 0) or 0
                     _lotto_top10 = _lotto_detail.get('top10_pct', w_entry.get('signal_top10', 0) or 0)
                     _lotto_age_sec = _lotto_detail.get('age_sec', time.time() - w_entry.get('added_at', time.time()))
