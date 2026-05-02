@@ -73,6 +73,7 @@ SMART_ENTRY_MIN_POINTS = 8            # Raised from 6 → 8 (data: n_points≤10
 SMART_ENTRY_MAX_BELOW_HIGH_PCT = 15.0 # Dead cat bounce filter: below_high > 15% → reject
                                       # Data: 24+ samples, below_high>15% = zero win rate
                                       # Originally commit b9bb618, reverted 8102bc8. Now restored with stronger evidence.
+SMART_ENTRY_RISKY_MAX_BELOW_HIGH_PCT = float(os.environ.get("SMART_ENTRY_RISKY_MAX_BELOW_HIGH_PCT", "10.0"))
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
 
 
@@ -536,6 +537,47 @@ def _policy_min_p_follow(entry_readiness_policy, default=0.58):
         return default
 
 
+def _policy_profile(entry_readiness_policy):
+    if not entry_readiness_policy:
+        return ""
+    try:
+        if hasattr(entry_readiness_policy, "lifecycle_profile"):
+            return str(entry_readiness_policy.lifecycle_profile or "")
+        return str(entry_readiness_policy.get("lifecycle_profile") or "")
+    except Exception:
+        return ""
+
+
+def _policy_route(entry_readiness_policy):
+    if not entry_readiness_policy:
+        return ""
+    try:
+        detail = entry_readiness_policy.detail if hasattr(entry_readiness_policy, "detail") else entry_readiness_policy.get("detail", {})
+        return str((detail or {}).get("route") or "")
+    except Exception:
+        return ""
+
+
+def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, momentum_pct=0.0):
+    """Return a hard reject reason for dead-cat bounce patterns.
+
+    This is intentionally route/lifecycle-aware: a normal continuation can
+    tolerate more distance from the local high than a newborn risky probe.
+    """
+    profile = _policy_profile(entry_readiness_policy)
+    route = _policy_route(entry_readiness_policy).upper()
+    risky_newborn = profile in {"LOTTO_NEWBORN_RISKY", "LOTTO_REAL_PROBE"}
+    below_high = float((pos_detail or {}).get("below_high_pct") or 0.0)
+    max_below_high = SMART_ENTRY_RISKY_MAX_BELOW_HIGH_PCT if risky_newborn else SMART_ENTRY_MAX_BELOW_HIGH_PCT
+    if below_high > max_below_high:
+        return f"dead_cat_below_high_{below_high:.1f}pct_gt_{max_below_high:.1f}pct"
+    if risky_newborn and abs(float(momentum_pct or 0.0)) < 0.5:
+        return "risky_newborn_pullback_m9s_zero"
+    if route == "LOTTO" and below_high > SMART_ENTRY_MAX_BELOW_HIGH_PCT:
+        return f"lotto_dead_cat_below_high_{below_high:.1f}pct"
+    return None
+
+
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                          momentum_snapshots=None, momentum_pct=0, sustained_ath=False,
                          first_fire_pc_m5=None, spread_abort_count=0,
@@ -897,6 +939,17 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             bounce = pos_detail.get('bounce_from_low_pct', 0)
             bounce_ratio = bounce / pullback if pullback > 0 else 0
             trend_downgraded = (best_trend_phase == 'BULLISH' and phase_now != 'BULLISH')
+            bounce_reject = smart_entry_bounce_reject_reason(
+                pos_detail,
+                entry_readiness_policy=entry_readiness_policy,
+                momentum_pct=momentum_pct,
+            )
+            if bounce_reject:
+                return False, bounce_reject, (
+                    f"pullback={pullback:.1f}% bounce={bounce:.1f}% "
+                    f"bounce_ratio={bounce_ratio:.0%} below_high={pos_detail.get('below_high_pct', 0):.1f}% "
+                    f"m9s={momentum_pct:+.1f}% profile={_policy_profile(entry_readiness_policy) or 'default'}"
+                ), None
             if fake_pump_count >= SMART_ENTRY_FAKE_PUMP_THRESHOLD and bs_now < 2.0:
                 best_wait_detail = f"fake_pump_history={fake_pump_count} bs={bs_now:.2f}<2.0"
             elif bounce_ratio < SMART_ENTRY_MIN_BOUNCE_RATIO:

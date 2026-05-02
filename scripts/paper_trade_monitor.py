@@ -6220,6 +6220,28 @@ def run_monitor(db):
                                 )
                                 pending_entries.pop(lifecycle_id, None)
                                 continue
+                            if _policy.decision == 'WAIT':
+                                record_decision_event(
+                                    db,
+                                    component='entry_readiness',
+                                    event_type='entry_block',
+                                    decision='wait',
+                                    reason=_policy.reason,
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    route=pending.get('signal_route') or pending.get('signal_type'),
+                                    data_source='lifecycle+dexscreener',
+                                    payload=_policy.to_dict(),
+                                )
+                                log.info(
+                                    f"  [ENTRY_READINESS] {pending['symbol']} WAIT: "
+                                    f"{_policy.reason} profile={_policy.lifecycle_profile}; back to watchlist"
+                                )
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
                             record_decision_event(
                                 db,
                                 component='entry_readiness',

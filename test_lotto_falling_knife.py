@@ -17,6 +17,8 @@ from matrix_evaluator import (  # noqa: E402
 from entry_readiness_policy import evaluate_entry_readiness_policy, entry_mode_allowed  # noqa: E402
 from analyze_trade_failure_attribution import classify_system_stage  # noqa: E402
 from profit_protect_policy import profit_protect_floor  # noqa: E402
+from entry_engine import evaluate_entry_position, smart_entry_bounce_reject_reason  # noqa: E402
+from entry_decision_contract import build_entry_decision_contract  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     evaluate_entry_edge_budget,
     evaluate_token_reclaim,
@@ -559,6 +561,118 @@ def test_lotto_allows_pumpfun_liquidity_unknown_live_top10_under_risky_limit():
         now=1100,
     )
     assert decision.allow is True
+
+
+def test_lotto_midcap_with_activity_is_observable_not_hard_expired():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 51520,
+            "signal_holders": 414,
+            "signal_vol24h": 208110,
+            "signal_top10": 24,
+        },
+        dex_snapshot={
+            "liquidity_usd": 16008,
+            "vol_m5": 22891,
+            "buys_m5": 122,
+            "sells_m5": 134,
+            "dex_id": "pumpswap",
+        },
+        live_concentration={"top1_pct": 17.8, "top10_pct": 42.3},
+        now=1008,
+    )
+    assert decision.allow is True
+    assert decision.detail["mc_tier"] == "newborn_midcap"
+
+
+def test_lotto_midcap_uses_smaller_position_size():
+    pending = build_lotto_pending(
+        {
+            "ca": "midcap_ca",
+            "symbol": "MID",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "pool_address": "pool",
+            "id": 7,
+        },
+        "life-1",
+        {"mc_tier": "newborn_midcap"},
+    )
+    assert pending["kelly_position_sol"] == 0.03
+    assert pending["lotto_state"]["positionSizeSol"] == 0.03
+
+
+def test_lotto_midcap_without_activity_waits_instead_of_fast_lane():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 60000,
+            "signal_holders": 100,
+            "signal_vol24h": 50000,
+            "signal_top10": 25,
+        },
+        dex_snapshot={
+            "liquidity_usd": 8000,
+            "vol_m5": 1000,
+            "buys_m5": 10,
+            "sells_m5": 8,
+            "dex_id": "pumpswap",
+        },
+        live_concentration={"top1_pct": 20, "top10_pct": 40},
+        now=1008,
+    )
+    assert decision.action == "wait"
+    assert decision.reason == "lotto_midcap_activity_unconfirmed"
+
+
+def test_smart_entry_rejects_dead_cat_below_high():
+    history = [
+        (0, 1.00),
+        (10, 0.761),
+        (20, 0.83),
+    ]
+    position, detail = evaluate_entry_position(history, 0.83)
+    assert position == "GOOD_ENTRY"
+    reason = smart_entry_bounce_reject_reason(
+        detail,
+        entry_readiness_policy={
+            "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+            "detail": {"route": "LOTTO"},
+        },
+        momentum_pct=1.0,
+    )
+    assert reason == "dead_cat_below_high_17.0pct_gt_10.0pct"
+
+
+def test_smart_entry_rejects_risky_newborn_pullback_with_zero_m9s():
+    reason = smart_entry_bounce_reject_reason(
+        {"below_high_pct": 6.0},
+        entry_readiness_policy={
+            "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+            "detail": {"route": "LOTTO"},
+        },
+        momentum_pct=0.0,
+    )
+    assert reason == "risky_newborn_pullback_m9s_zero"
+
+
+def test_entry_decision_contract_accounts_for_cost_after_odds():
+    contract = build_entry_decision_contract(
+        entry_readiness_policy={
+            "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+            "min_p_follow": 0.68,
+            "expected_upside_pct": 36.0,
+            "expected_loss_pct": 12.0,
+            "min_odds_r": 3.0,
+        },
+        entry_mode="smart_entry_pullback_bounce",
+        p_follow=0.68,
+        spread_cost_pct=3.0,
+        exit_cost_buffer_pct=1.5,
+    )
+    assert contract.decision == "reject"
+    assert contract.reason == "odds_after_cost_below_policy"
 
 
 def test_profit_protect_floor_includes_exit_slippage_buffer():

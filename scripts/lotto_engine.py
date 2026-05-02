@@ -17,9 +17,14 @@ LOTTO_STRATEGY_ID = os.environ.get("LOTTO_STRATEGY_ID", "lotto-v1")
 LOTTO_STRATEGY_STAGE = "lotto"
 LOTTO_SIGNAL_TYPE = "LOTTO"
 LOTTO_POSITION_SIZE_SOL = float(os.environ.get("LOTTO_POSITION_SIZE_SOL", "0.05"))
+LOTTO_MIDCAP_POSITION_SIZE_SOL = float(os.environ.get("LOTTO_MIDCAP_POSITION_SIZE_SOL", "0.03"))
 LOTTO_MAX_CONCURRENT = int(os.environ.get("LOTTO_MAX_CONCURRENT", "10"))
 LOTTO_ENTRY_STALE_SEC = float(os.environ.get("LOTTO_ENTRY_STALE_SEC", str(30 * 60)))
 LOTTO_MC_MAX_USD = float(os.environ.get("LOTTO_MC_MAX_USD", "30000"))
+LOTTO_MIDCAP_MAX_USD = float(os.environ.get("LOTTO_MIDCAP_MAX_USD", "150000"))
+LOTTO_MIDCAP_MIN_LIQUIDITY_USD = float(os.environ.get("LOTTO_MIDCAP_MIN_LIQUIDITY_USD", "15000"))
+LOTTO_MIDCAP_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_MIDCAP_MIN_VOL_M5_USD", "8000"))
+LOTTO_MIDCAP_MIN_M5_TXNS = int(os.environ.get("LOTTO_MIDCAP_MIN_M5_TXNS", "100"))
 LOTTO_MIN_HOLDERS = int(os.environ.get("LOTTO_MIN_HOLDERS", "30"))
 LOTTO_NORMAL_HOLDERS = int(os.environ.get("LOTTO_NORMAL_HOLDERS", "50"))
 LOTTO_TOP10_MAX_PCT = float(os.environ.get("LOTTO_TOP10_MAX_PCT", "70"))
@@ -105,7 +110,14 @@ def evaluate_lotto_entry(
 
     market_cap = float(w_entry.get("signal_mc") or 0)
     detail["market_cap"] = market_cap
-    if market_cap <= 0 or market_cap >= LOTTO_MC_MAX_USD:
+    if market_cap <= 0:
+        return LottoDecision("expire", f"lotto_mc_{market_cap:.0f}", detail)
+    if market_cap < LOTTO_MC_MAX_USD:
+        detail["mc_tier"] = "newborn_micro"
+    elif market_cap < LOTTO_MIDCAP_MAX_USD:
+        detail["mc_tier"] = "newborn_midcap"
+    else:
+        detail["mc_tier"] = "observe_or_matrix_only"
         return LottoDecision("expire", f"lotto_mc_{market_cap:.0f}", detail)
 
     holders = int(w_entry.get("signal_holders") or 0)
@@ -165,6 +177,18 @@ def evaluate_lotto_entry(
         else:
             return LottoDecision("expire", f"lotto_liq_low_{liquidity:.0f}", detail)
 
+    if detail.get("mc_tier") == "newborn_midcap":
+        midcap_ok = (
+            liquidity >= LOTTO_MIDCAP_MIN_LIQUIDITY_USD
+            and vol_m5 >= LOTTO_MIDCAP_MIN_VOL_M5_USD
+            and (buys_m5 + sells_m5) >= LOTTO_MIDCAP_MIN_M5_TXNS
+        )
+        detail["midcap_min_liquidity_usd"] = LOTTO_MIDCAP_MIN_LIQUIDITY_USD
+        detail["midcap_min_vol_m5_usd"] = LOTTO_MIDCAP_MIN_VOL_M5_USD
+        detail["midcap_min_m5_txns"] = LOTTO_MIDCAP_MIN_M5_TXNS
+        if not midcap_ok:
+            return LottoDecision("wait", "lotto_midcap_activity_unconfirmed", detail)
+
     if live_concentration:
         live_top1 = float(live_concentration.get("top1_pct") or 0)
         live_top10 = float(live_concentration.get("top10_pct") or 0)
@@ -185,6 +209,9 @@ def evaluate_lotto_entry(
 def build_lotto_pending(w_entry, lifecycle_id, detail=None):
     detail = detail or {}
     timing_passed = bool(detail.get("timing_passed", False))
+    position_size_sol = LOTTO_POSITION_SIZE_SOL
+    if detail.get("mc_tier") == "newborn_midcap":
+        position_size_sol = LOTTO_MIDCAP_POSITION_SIZE_SOL
     return {
         "token_ca": w_entry["ca"],
         "symbol": w_entry["symbol"],
@@ -195,7 +222,7 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         "staged_at": time.time(),
         "trigger_price": None,
         "watchlist_id": w_entry["id"],
-        "kelly_position_sol": LOTTO_POSITION_SIZE_SOL,
+        "kelly_position_sol": position_size_sol,
         "matrix_scores": {},
         "is_lotto": True,
         "signal_route": "LOTTO",
@@ -210,6 +237,7 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         "lotto_state": {
             "route": "LOTTO",
             "entryDecision": detail,
+            "positionSizeSol": position_size_sol,
             "lifecycleId": lifecycle_id,
             "athBoostCount": 0,
         },

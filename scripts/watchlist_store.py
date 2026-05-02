@@ -119,6 +119,7 @@ class WatchlistStore:
         try:
             self.db = sqlite3.connect(self.db_path, check_same_thread=False)
             self.db.row_factory = sqlite3.Row
+            self._configure_connection()
             self._init_schema()
         except sqlite3.DatabaseError as e:
             if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
@@ -127,10 +128,18 @@ class WatchlistStore:
                     os.remove(self.db_path)
                 self.db = sqlite3.connect(self.db_path, check_same_thread=False)
                 self.db.row_factory = sqlite3.Row
+                self._configure_connection()
                 self._init_schema()
             else:
                 raise
         log.info(f"[WatchlistStore] initialized: {self.db_path}")
+
+    def _configure_connection(self):
+        self.db.execute("PRAGMA busy_timeout=5000")
+        try:
+            self.db.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            log.warning(f"[WatchlistStore] WAL enable failed: {exc}")
 
     def _init_schema(self):
         self.db.execute(CREATE_TABLE_SQL)
@@ -504,24 +513,31 @@ class WatchlistStore:
 
     def _update(self, entry_id, entry_count_delta=0, **kwargs):
         """Generic update helper. Handles entry_count increment specially."""
-        if entry_count_delta:
-            kwargs_sql = ', '.join(f"{k} = ?" for k in kwargs)
-            if kwargs_sql:
-                kwargs_sql += ', '
-            kwargs_sql += 'entry_count = entry_count + ?'
-            values = list(kwargs.values()) + [entry_count_delta, entry_id]
-            self.db.execute(
-                f"UPDATE watchlist SET {kwargs_sql} WHERE id = ?",
-                values
-            )
-        elif kwargs:
-            set_clause = ', '.join(f"{k} = ?" for k in kwargs)
-            values = list(kwargs.values()) + [entry_id]
-            self.db.execute(
-                f"UPDATE watchlist SET {set_clause} WHERE id = ?",
-                values
-            )
-        self.db.commit()
+        for attempt in range(3):
+            try:
+                if entry_count_delta:
+                    kwargs_sql = ', '.join(f"{k} = ?" for k in kwargs)
+                    if kwargs_sql:
+                        kwargs_sql += ', '
+                    kwargs_sql += 'entry_count = entry_count + ?'
+                    values = list(kwargs.values()) + [entry_count_delta, entry_id]
+                    self.db.execute(
+                        f"UPDATE watchlist SET {kwargs_sql} WHERE id = ?",
+                        values
+                    )
+                elif kwargs:
+                    set_clause = ', '.join(f"{k} = ?" for k in kwargs)
+                    values = list(kwargs.values()) + [entry_id]
+                    self.db.execute(
+                        f"UPDATE watchlist SET {set_clause} WHERE id = ?",
+                        values
+                    )
+                self.db.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower() or attempt >= 2:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
 
     def close(self):
         if self.db:
