@@ -67,6 +67,7 @@ from entry_readiness_policy import evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment
+from gmgn_policy import evaluate_gmgn_lotto_policy
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
     LOTTO_STRATEGY_ID,
@@ -884,6 +885,22 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
     risk_penalty_pct = 0.0
     if token_risk and token_risk.get('risk_profile') == 'waterfall_memory':
         risk_penalty_pct = 0.5
+    gmgn_policy = {}
+    if is_lotto:
+        gmgn_policy = (
+            (pending.get('lotto_state') or {})
+            .get('entryDecision', {})
+            .get('gmgn_policy')
+        ) or pending.get('gmgn_policy') or {}
+    gmgn_spread_penalty_pct = 0.0
+    if gmgn_policy:
+        try:
+            gmgn_spread_penalty_pct = float(gmgn_policy.get('spread_penalty_pct') or 0.0)
+        except (TypeError, ValueError):
+            gmgn_spread_penalty_pct = 0.0
+        if gmgn_spread_penalty_pct <= 0 and int(gmgn_policy.get('toxic_score') or 0) >= 2:
+            gmgn_spread_penalty_pct = 0.5
+        risk_penalty_pct += max(0.0, gmgn_spread_penalty_pct)
     readiness_policy = pending.get('entry_readiness_policy') or {}
     readiness_max_spread_pct = None
     if readiness_policy:
@@ -906,6 +923,9 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         'max_spread_pct': effective_max_spread_pct,
         'base_max_spread_pct': max_spread_pct,
         'risk_penalty_pct': risk_penalty_pct,
+        'gmgn_spread_penalty_pct': gmgn_spread_penalty_pct,
+        'gmgn_policy_action': gmgn_policy.get('action'),
+        'gmgn_policy_reason': gmgn_policy.get('reason'),
         'readiness_max_spread_pct': readiness_max_spread_pct,
         'required_follow_peak_pct': ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT,
         'remaining_follow_budget_pct': (
@@ -5836,6 +5856,35 @@ def run_monitor(db):
                         signal_ts=w_entry['signal_ts'],
                         now=now,
                     )
+                    _gmgn_policy = evaluate_gmgn_lotto_policy(
+                        _gmgn_enrichment,
+                        _lotto_detail,
+                        lifecycle=_lotto_lifecycle,
+                        entry_mode=_lotto_detail.get('entry_mode'),
+                    )
+                    _lotto_detail = {
+                        **_lotto_detail,
+                        'gmgn_policy': _gmgn_policy,
+                        'gmgn_action': _gmgn_policy.get('action'),
+                        'gmgn_reason': _gmgn_policy.get('reason'),
+                    }
+                    if _lotto_decision.allow and _gmgn_policy.get('action') == 'reject':
+                        _lotto_decision = LottoDecision(
+                            "expire",
+                            _gmgn_policy.get('reason') or 'gmgn_policy_reject',
+                            _lotto_detail,
+                        )
+                    elif _lotto_decision.allow and _gmgn_policy.get('action') == 'downsize':
+                        _lotto_detail['gmgn_size_multiplier'] = _gmgn_policy.get('size_multiplier', 1.0)
+                    elif _lotto_decision.allow and _gmgn_policy.get('action') == 'boost':
+                        _lotto_detail['gmgn_edge_boost'] = True
+                        if not _lotto_detail.get('entry_mode'):
+                            _lotto_detail['entry_mode'] = 'gmgn_clean_lotto_fast_lane'
+                        _lotto_decision = LottoDecision(
+                            "allow",
+                            _gmgn_policy.get('reason') or _lotto_decision.reason,
+                            _lotto_detail,
+                        )
                     _falling_knife_blocked, _falling_knife_detail = should_block_lotto_falling_knife(
                         _lotto_detail,
                         _lotto_lifecycle,
@@ -6372,7 +6421,16 @@ def run_monitor(db):
                                 pending=pending,
                                 now_ts=now,
                             )
-                            pending['entry_readiness_policy'] = _policy.to_dict()
+                            _policy_dict = _policy.to_dict()
+                            _pending_gmgn_policy = (
+                                (pending.get('lotto_state') or {})
+                                .get('entryDecision', {})
+                                .get('gmgn_policy')
+                            )
+                            if _pending_gmgn_policy:
+                                _policy_dict['gmgn_policy'] = _pending_gmgn_policy
+                                _policy_dict.setdefault('detail', {})['gmgn_policy'] = _pending_gmgn_policy
+                            pending['entry_readiness_policy'] = _policy_dict
                             if _policy.decision == 'EXPIRE':
                                 record_decision_event(
                                     db,

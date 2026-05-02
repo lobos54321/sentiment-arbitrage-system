@@ -562,9 +562,37 @@ def _policy_route(entry_readiness_policy):
         return ""
 
 
+def _policy_gmgn_policy(entry_readiness_policy):
+    try:
+        if hasattr(entry_readiness_policy, "gmgn_policy"):
+            return entry_readiness_policy.gmgn_policy or {}
+        if not isinstance(entry_readiness_policy, dict):
+            return {}
+        if isinstance(entry_readiness_policy.get("gmgn_policy"), dict):
+            return entry_readiness_policy.get("gmgn_policy") or {}
+        detail = entry_readiness_policy.get("detail") or {}
+        if isinstance(detail, dict) and isinstance(detail.get("gmgn_policy"), dict):
+            return detail.get("gmgn_policy") or {}
+    except Exception:
+        return {}
+    return {}
+
+
 def _explosive_direct_scout_ok(entry_readiness_policy, cached_trend, bs_ratio):
     if not _policy_allows("explosive_newborn_direct_scout", entry_readiness_policy):
         return False, {}
+    gmgn_policy = _policy_gmgn_policy(entry_readiness_policy)
+    if gmgn_policy:
+        try:
+            from gmgn_policy import gmgn_policy_blocks_explosive_direct
+            if gmgn_policy_blocks_explosive_direct(gmgn_policy):
+                return False, {
+                    "gmgn_policy": gmgn_policy,
+                    "gmgn_blocked": True,
+                    "gmgn_reason": gmgn_policy.get("reason"),
+                }
+        except Exception:
+            pass
     cached_trend = cached_trend or {}
     try:
         buys_m5 = float(cached_trend.get("buys_m5", 0) or 0)

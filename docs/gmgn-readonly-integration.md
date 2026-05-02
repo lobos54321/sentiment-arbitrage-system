@@ -19,7 +19,18 @@ LOTTO gate and records:
 - `gmgn_readonly`
 - `gmgn_risk_flags`
 
-These fields are observational. They do not currently allow or reject entries.
+The raw enrichment fields remain observational. Paper LOTTO decisions are made
+through the explicit policy object below.
+
+`scripts/gmgn_policy.py` adds a paper-only decision layer on top of this
+enrichment. It can reject, downsize, or boost LOTTO paper entries, and records:
+
+- `gmgn_policy`
+- `gmgn_action`
+- `gmgn_reason`
+
+GMGN policy is scoped to paper LOTTO paths. It does not call GMGN swap/order
+APIs and does not affect non-LOTTO entry edge budgets.
 
 ## Normalized Fields
 
@@ -41,6 +52,15 @@ The adapter normalizes GMGN token info into stable fields including:
 
 ## Next Step
 
-After collecting samples, promote only high-confidence fields into gates or edge
-budget. Any change that blocks entries, raises size, or increases entry
-frequency should get explicit review first.
+Use the analysis script below to tune policy thresholds from paper outcomes.
+Any change that raises size or increases entry frequency should get explicit
+review first.
+
+## Analysis And Candidate Tools
+
+- `scripts/analyze_gmgn_lotto_edge.py` groups closed LOTTO paper outcomes by
+  GMGN buckets such as `bundler_rate`, `smart_degen_count`, `renowned_count`,
+  `rat_trader_amount_rate`, and `gmgn_policy.action`.
+- `scripts/gmgn_candidate_scout.py` collects GMGN trending, signal, and trenches
+  candidates into `data/gmgn_candidates.jsonl` for review. It does not register
+  candidates into the watchlist.

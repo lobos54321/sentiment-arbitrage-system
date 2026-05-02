@@ -53,6 +53,7 @@ LOTTO_EXPLOSIVE_DIRECT_SCOUT_TOP10_MAX_PCT = float(os.environ.get("LOTTO_EXPLOSI
 LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_PCT = float(os.environ.get("LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_PCT", "300"))
 LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_VOL_M5_USD", "20000"))
 LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_TXNS = int(os.environ.get("LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_TXNS", "400"))
+LOTTO_GMGN_MIN_POSITION_SIZE_SOL = float(os.environ.get("LOTTO_GMGN_MIN_POSITION_SIZE_SOL", "0.003"))
 
 LOTTO_TIME_EXIT_60S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_60S_PEAK", "0.05"))
 LOTTO_TIME_EXIT_120S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_120S_PEAK", "0.10"))
@@ -272,6 +273,22 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         position_size_sol = LOTTO_CONCENTRATED_SCOUT_SIZE_SOL
     if detail.get("entry_mode") == "explosive_newborn_direct_scout" or detail.get("explosive_direct_scout_ok"):
         position_size_sol = LOTTO_EXPLOSIVE_DIRECT_SCOUT_SIZE_SOL
+    original_position_size_sol = position_size_sol
+    gmgn_policy = detail.get("gmgn_policy") or {}
+    try:
+        gmgn_size_multiplier = float(
+            detail.get("gmgn_size_multiplier")
+            or gmgn_policy.get("size_multiplier")
+            or 1.0
+        )
+    except (TypeError, ValueError):
+        gmgn_size_multiplier = 1.0
+    if gmgn_size_multiplier < 1.0:
+        position_size_sol = max(
+            LOTTO_GMGN_MIN_POSITION_SIZE_SOL,
+            position_size_sol * max(0.0, gmgn_size_multiplier),
+        )
+    position_size_sol = min(position_size_sol, original_position_size_sol)
     return {
         "token_ca": w_entry["ca"],
         "symbol": w_entry["symbol"],
@@ -298,6 +315,8 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
             "route": "LOTTO",
             "entryDecision": detail,
             "positionSizeSol": position_size_sol,
+            "basePositionSizeSol": original_position_size_sol,
+            "gmgnSizeMultiplier": gmgn_size_multiplier,
             "lifecycleId": lifecycle_id,
             "athBoostCount": 0,
         },
