@@ -37,6 +37,15 @@ LOTTO_PUMPFUN_LIQ_UNKNOWN_MIN_M5_TXNS = int(os.environ.get("LOTTO_PUMPFUN_LIQ_UN
 LOTTO_LIVE_TOP1_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP1_MAX_PCT", "35"))
 LOTTO_LIVE_TOP10_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_MAX_PCT", "70"))
 LOTTO_LIVE_TOP10_RISKY_MAX_PCT = float(os.environ.get("LOTTO_LIVE_TOP10_RISKY_MAX_PCT", "50"))
+LOTTO_CONCENTRATED_SCOUT_ENABLED = os.environ.get("LOTTO_CONCENTRATED_SCOUT_ENABLED", "true").lower() != "false"
+LOTTO_CONCENTRATED_SCOUT_SIZE_SOL = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_SIZE_SOL", "0.015"))
+LOTTO_CONCENTRATED_SCOUT_MC_MIN_USD = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_MC_MIN_USD", "10000"))
+LOTTO_CONCENTRATED_SCOUT_MC_MAX_USD = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_MC_MAX_USD", "40000"))
+LOTTO_CONCENTRATED_SCOUT_TOP1_MAX_PCT = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_TOP1_MAX_PCT", "38"))
+LOTTO_CONCENTRATED_SCOUT_TOP10_MAX_PCT = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_TOP10_MAX_PCT", "65"))
+LOTTO_CONCENTRATED_SCOUT_MIN_M5_PCT = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_MIN_M5_PCT", "150"))
+LOTTO_CONCENTRATED_SCOUT_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_CONCENTRATED_SCOUT_MIN_VOL_M5_USD", "15000"))
+LOTTO_CONCENTRATED_SCOUT_MIN_M5_TXNS = int(os.environ.get("LOTTO_CONCENTRATED_SCOUT_MIN_M5_TXNS", "300"))
 
 LOTTO_TIME_EXIT_60S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_60S_PEAK", "0.05"))
 LOTTO_TIME_EXIT_120S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_120S_PEAK", "0.10"))
@@ -137,8 +146,10 @@ def evaluate_lotto_entry(
     vol_m5 = float(dex_snapshot.get("vol_m5") or 0)
     buys_m5 = int(dex_snapshot.get("buys_m5") or 0)
     sells_m5 = int(dex_snapshot.get("sells_m5") or 0)
+    price_change_m5 = float(dex_snapshot.get("price_change_m5") or 0)
     detail["vol_m5"] = vol_m5
     detail["tx_m5"] = buys_m5 + sells_m5
+    detail["price_change_m5"] = price_change_m5
     if (
         vol24h < LOTTO_MIN_VOL24H_USD
         and vol_m5 < LOTTO_MIN_VOL_M5_USD
@@ -198,10 +209,29 @@ def evaluate_lotto_entry(
         if detail["liquidity_unknown"] or detail["dex_id"] == "pumpfun":
             live_top10_max = min(live_top10_max, LOTTO_LIVE_TOP10_RISKY_MAX_PCT)
         detail["live_top10_max_pct"] = live_top10_max
-        if live_top1 > LOTTO_LIVE_TOP1_MAX_PCT:
+        concentrated_scout_ok = (
+            LOTTO_CONCENTRATED_SCOUT_ENABLED
+            and detail["mc_tier"] == "newborn_micro"
+            and (detail["liquidity_unknown"] or detail["dex_id"] == "pumpfun")
+            and LOTTO_CONCENTRATED_SCOUT_MC_MIN_USD <= market_cap <= LOTTO_CONCENTRATED_SCOUT_MC_MAX_USD
+            and live_top1 <= LOTTO_CONCENTRATED_SCOUT_TOP1_MAX_PCT
+            and live_top10 <= LOTTO_CONCENTRATED_SCOUT_TOP10_MAX_PCT
+            and price_change_m5 >= LOTTO_CONCENTRATED_SCOUT_MIN_M5_PCT
+            and vol_m5 >= LOTTO_CONCENTRATED_SCOUT_MIN_VOL_M5_USD
+            and (buys_m5 + sells_m5) >= LOTTO_CONCENTRATED_SCOUT_MIN_M5_TXNS
+        )
+        detail["concentrated_scout_enabled"] = LOTTO_CONCENTRATED_SCOUT_ENABLED
+        detail["concentrated_scout_ok"] = concentrated_scout_ok
+        detail["concentrated_scout_top1_max_pct"] = LOTTO_CONCENTRATED_SCOUT_TOP1_MAX_PCT
+        detail["concentrated_scout_top10_max_pct"] = LOTTO_CONCENTRATED_SCOUT_TOP10_MAX_PCT
+        if live_top1 > LOTTO_LIVE_TOP1_MAX_PCT and not concentrated_scout_ok:
             return LottoDecision("expire", f"lotto_live_top1_{live_top1:.0f}pct", detail)
-        if live_top10 > live_top10_max:
+        if live_top10 > live_top10_max and not concentrated_scout_ok:
             return LottoDecision("expire", f"lotto_live_top10_{live_top10:.0f}pct", detail)
+        if concentrated_scout_ok and (live_top1 > LOTTO_LIVE_TOP1_MAX_PCT or live_top10 > live_top10_max):
+            detail["entry_mode"] = "lotto_concentrated_scout"
+            detail["position_size_sol"] = LOTTO_CONCENTRATED_SCOUT_SIZE_SOL
+            return LottoDecision("allow", "lotto_concentrated_scout_ok", detail)
 
     return LottoDecision("allow", "lotto_fast_lane_ok", detail)
 
@@ -212,6 +242,8 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
     position_size_sol = LOTTO_POSITION_SIZE_SOL
     if detail.get("mc_tier") == "newborn_midcap":
         position_size_sol = LOTTO_MIDCAP_POSITION_SIZE_SOL
+    if detail.get("entry_mode") == "lotto_concentrated_scout" or detail.get("concentrated_scout_ok"):
+        position_size_sol = LOTTO_CONCENTRATED_SCOUT_SIZE_SOL
     return {
         "token_ca": w_entry["ca"],
         "symbol": w_entry["symbol"],
@@ -230,7 +262,7 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         "strategy_stage": LOTTO_STRATEGY_STAGE,
         "stage_outcome": "lotto_entered",
         "replay_source": "live_monitor_lotto",
-        "entry_mode": "lotto_fast_arm" if not timing_passed else "lotto_fast_lane",
+        "entry_mode": detail.get("entry_mode") or ("lotto_fast_arm" if not timing_passed else "lotto_fast_lane"),
         "exit_strategy": "LOTTO",
         "timing_passed": timing_passed,
         "w_entry": w_entry,

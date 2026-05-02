@@ -1100,6 +1100,35 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
     if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
         return 0
     rows = find_lotto_real_probe_candidates(db, now_ts=now_ts, limit=limit)
+    if not rows:
+        recent_scan = db.execute(
+            """
+            SELECT 1
+            FROM paper_decision_events
+            WHERE component = 'lotto_probe_live'
+              AND event_type = 'scan'
+              AND reason = 'no_candidates'
+              AND event_ts >= ?
+            LIMIT 1
+            """,
+            (now_ts - 300,),
+        ).fetchone()
+        if not recent_scan:
+            record_decision_event(
+                db,
+                component='lotto_probe_live',
+                event_type='scan',
+                decision='observe',
+                reason='no_candidates',
+                route='LOTTO',
+                payload={
+                    'max_age_sec': LOTTO_REAL_PROBE_MAX_AGE_SEC,
+                    'min_max_pnl': LOTTO_REAL_PROBE_MIN_MAX_PNL,
+                    'min_reclaim_pnl': LOTTO_REAL_PROBE_MIN_RECLAIM_PNL,
+                },
+                event_ts=now_ts,
+            )
+        return 0
     enqueued = 0
     for row in rows:
         token_ca = row['token_ca']
@@ -5888,14 +5917,17 @@ def run_monitor(db):
                                 component='lotto_entry_gate',
                                 event_type='pending_entry',
                                 decision='pending',
-                                reason='lotto_fast_lane_ok',
+                                reason=_lotto_decision.reason,
                                 token_ca=w_entry['ca'],
                                 symbol=w_entry['symbol'],
                                 lifecycle_id=_lotto_lc_id,
                                 signal_ts=w_entry['signal_ts'],
                                 signal_id=w_entry.get('premium_signal_id'),
                                 route='LOTTO',
-                                payload=with_lifecycle_payload({'position_size_sol': LOTTO_POSITION_SIZE_SOL, **_lotto_detail}, _lotto_lifecycle),
+                                payload=with_lifecycle_payload({
+                                    'position_size_sol': pending_entries[_lotto_lc_id].get('kelly_position_sol'),
+                                    **_lotto_detail,
+                                }, _lotto_lifecycle),
                             )
                             last_progress = time.time()
                     continue

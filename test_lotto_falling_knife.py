@@ -542,6 +542,72 @@ def test_lotto_blocks_pumpfun_liquidity_unknown_live_top10_over_risky_limit():
     assert decision.detail["live_top10_max_pct"] == 50.0
 
 
+def test_lotto_concentrated_scout_allows_explosive_newborn_with_small_size():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 13230,
+            "signal_holders": 80,
+            "signal_vol24h": 20000,
+            "signal_top10": 28,
+        },
+        dex_snapshot={
+            "liquidity_unknown": True,
+            "dex_id": "pumpfun",
+            "vol_m5": 23658,
+            "buys_m5": 215,
+            "sells_m5": 187,
+            "price_change_m5": 515,
+        },
+        live_concentration={"top1_pct": 34.2, "top10_pct": 59.7},
+        now=1004,
+    )
+    assert decision.allow is True
+    assert decision.reason == "lotto_concentrated_scout_ok"
+    assert decision.detail["entry_mode"] == "lotto_concentrated_scout"
+    assert decision.detail["position_size_sol"] == 0.015
+
+    pending = build_lotto_pending(
+        {
+            "ca": "DogToken",
+            "symbol": "Dog",
+            "signal_ts": 1000,
+            "premium_signal_id": 1,
+            "pool_address": "Pool",
+            "id": 7,
+        },
+        "DogToken:1000",
+        decision.detail,
+    )
+    assert pending["kelly_position_sol"] == 0.015
+    assert pending["entry_mode"] == "lotto_concentrated_scout"
+    assert pending["lotto_state"]["positionSizeSol"] == 0.015
+
+
+def test_lotto_concentrated_scout_still_blocks_top1_too_high():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 11820,
+            "signal_holders": 80,
+            "signal_vol24h": 20000,
+            "signal_top10": 28,
+        },
+        dex_snapshot={
+            "liquidity_unknown": True,
+            "dex_id": "pumpfun",
+            "vol_m5": 23658,
+            "buys_m5": 215,
+            "sells_m5": 187,
+            "price_change_m5": 515,
+        },
+        live_concentration={"top1_pct": 41.5, "top10_pct": 63.0},
+        now=1004,
+    )
+    assert decision.expire is True
+    assert decision.reason == "lotto_live_top1_42pct"
+
+
 def test_lotto_allows_pumpfun_liquidity_unknown_live_top10_under_risky_limit():
     decision = evaluate_lotto_entry(
         {
