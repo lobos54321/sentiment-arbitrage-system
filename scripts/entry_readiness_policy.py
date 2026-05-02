@@ -107,11 +107,13 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
         min_p_follow = 0.68
         max_spread_pct = 1.0
         expected_loss_pct = 12.0
+        allowed_modes = ("smart_entry_pullback_bounce",)
     elif profile == "LOTTO_REAL_PROBE":
         min_odds_r = 3.0
         min_p_follow = 0.70
         max_spread_pct = 1.0
         expected_loss_pct = 12.0
+        allowed_modes = ("smart_entry_pullback_bounce",)
     elif profile == "LOTTO_NORMAL":
         min_odds_r = 2.5
         min_p_follow = 0.62

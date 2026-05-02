@@ -62,6 +62,7 @@ from paper_decision_audit import (
     update_due_missed_attributions,
 )
 from lifecycle_classifier import classify_lifecycle
+from entry_decision_contract import build_entry_decision_contract
 from entry_readiness_policy import evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
@@ -107,6 +108,9 @@ ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_MAX_SPR
 ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT', '1.5'))
 ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '1.0'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
+ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(30 * 60)))
+ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '5.0'))
+ENTRY_SPREAD_ABORT_RECLAIM_BS = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_BS', '1.4'))
 MATRIX_DOA_EXIT_SEC = float(os.environ.get('MATRIX_DOA_EXIT_SEC', '30'))
 MATRIX_DOA_PEAK_MAX = float(os.environ.get('MATRIX_DOA_PEAK_MAX', '0.001'))
 MATRIX_DOA_PNL_MAX = float(os.environ.get('MATRIX_DOA_PNL_MAX', '-0.03'))
@@ -919,6 +923,114 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         detail['pass'] = False
         detail['reason'] = 'entry_edge_spread_too_high'
     return detail
+
+
+def _safe_json_loads(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
+
+
+def evaluate_spread_abort_memory(db, token_ca, *, lifecycle=None, current_spread_pct=None,
+                                 max_spread_pct=None, now_ts=None):
+    """Persistent CA-level memory for spread aborts."""
+    now_ts = float(now_ts or time.time())
+    cutoff_ts = now_ts - ENTRY_SPREAD_ABORT_MEMORY_SEC
+    empty = {
+        'blocked': False,
+        'abort_count': 0,
+        'reason': 'no_spread_abort_memory',
+    }
+    if not db or not token_ca:
+        return empty
+    try:
+        count_row = db.execute(
+            """
+            SELECT COUNT(*) AS abort_count, MAX(event_ts) AS last_abort_ts
+            FROM paper_decision_events
+            WHERE token_ca = ?
+              AND component = 'execution_guard'
+              AND event_type = 'entry_abort'
+              AND reason = 'entry_edge_spread_too_high'
+              AND event_ts >= ?
+            """,
+            (token_ca, cutoff_ts),
+        ).fetchone()
+    except Exception:
+        return empty
+    if not count_row:
+        return empty
+
+    abort_count_val = count_row['abort_count'] if hasattr(count_row, 'keys') else count_row[0]
+    abort_count = int(abort_count_val or 0)
+    if abort_count <= 0:
+        return empty
+    last_abort_val = count_row['last_abort_ts'] if hasattr(count_row, 'keys') else count_row[1]
+    last_abort_ts = float(last_abort_val or now_ts)
+
+    try:
+        last_row = db.execute(
+            """
+            SELECT payload_json
+            FROM paper_decision_events
+            WHERE token_ca = ?
+              AND component = 'execution_guard'
+              AND event_type = 'entry_abort'
+              AND reason = 'entry_edge_spread_too_high'
+              AND event_ts = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (token_ca, last_abort_ts),
+        ).fetchone()
+        last_payload = _safe_json_loads(last_row['payload_json'] if hasattr(last_row, 'keys') else last_row[0]) if last_row else {}
+    except Exception:
+        last_payload = {}
+
+    lifecycle = lifecycle or {}
+    features = lifecycle.get('lifecycle_features') or {}
+
+    def _f(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    pc_m5 = _f(features.get('price_change_m5'))
+    bs = _f(features.get('buy_sell_ratio'))
+    spread = _f(current_spread_pct, 999.0)
+    spread_cap = _f(max_spread_pct, 0.0)
+    fresh_pressure = pc_m5 >= ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT and bs >= ENTRY_SPREAD_ABORT_RECLAIM_BS
+    spread_repaired = (
+        current_spread_pct is None
+        or max_spread_pct is None
+        or spread_cap <= 0.0
+        or spread <= max(0.5, spread_cap * 0.5)
+    )
+    reclaimed = fresh_pressure and spread_repaired
+
+    return {
+        'blocked': not reclaimed,
+        'abort_count': abort_count,
+        'reason': 'spread_abort_memory_reclaimed' if reclaimed else 'spread_abort_memory_wait_reclaim',
+        'last_abort_ts': last_abort_ts,
+        'age_sec': max(0.0, now_ts - last_abort_ts),
+        'memory_ttl_sec': ENTRY_SPREAD_ABORT_MEMORY_SEC,
+        'last_abort_payload': last_payload,
+        'price_change_m5': pc_m5,
+        'buy_sell_ratio': bs,
+        'current_spread_pct': current_spread_pct,
+        'max_spread_pct': max_spread_pct,
+        'required_price_change_m5': ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT,
+        'required_buy_sell_ratio': ENTRY_SPREAD_ABORT_RECLAIM_BS,
+        'fresh_pressure': fresh_pressure,
+        'spread_repaired': spread_repaired,
+    }
 
 
 def _real_probe_decayed(row, *, now_ts):
@@ -6195,6 +6307,7 @@ def run_monitor(db):
                                 quote_available=None,
                                 now=now,
                             )
+                            pending['entry_readiness_lifecycle'] = _policy_lifecycle
                             _policy = evaluate_entry_readiness_policy(
                                 route=pending.get('signal_route') or pending.get('signal_type'),
                                 lifecycle=_policy_lifecycle,
@@ -6257,6 +6370,39 @@ def run_monitor(db):
                                 data_source='lifecycle+dexscreener',
                                 payload=_policy.to_dict(),
                             )
+                        _spread_memory = evaluate_spread_abort_memory(
+                            db,
+                            pending.get('token_ca'),
+                            lifecycle=pending.get('entry_readiness_lifecycle'),
+                            now_ts=now,
+                        )
+                        pending['spread_abort_memory'] = _spread_memory
+                        _memory_abort_count = int(_spread_memory.get('abort_count') or 0)
+                        if _memory_abort_count > int(pending.get('spread_abort_count') or 0):
+                            pending['spread_abort_count'] = _memory_abort_count
+                        if _spread_memory.get('blocked'):
+                            log.info(
+                                f"  [SPREAD_MEMORY] 🚫 {pending['symbol']} BLOCKED: "
+                                f"{_memory_abort_count} spread abort(s), age={_spread_memory.get('age_sec', 0):.0f}s; "
+                                f"waiting for reclaim"
+                            )
+                            record_decision_event(
+                                db,
+                                component='entry_readiness',
+                                event_type='entry_block',
+                                decision='wait',
+                                reason='spread_abort_memory_wait_reclaim',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                data_source='paper_decision_events',
+                                payload=_spread_memory,
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
                         _se_sustained = False
                         if hasattr(watchlist, '_ath_history'):
                             _se_ca = pending.get('token_ca')
@@ -6574,15 +6720,38 @@ def run_monitor(db):
                         f"spread={_spread:+.1f}%)"
                     )
 
-                    # POST-SPREAD-ABORT GUARD (redundant with SmartEntry, but catches race conditions)
-                    # Bug: Gas 2026-04-24 passed SmartEntry despite spread_abort_count=1
-                    # because the pending entry snapshot was stale. Read directly from live w_entry.
+                    _entry_edge_budget = evaluate_entry_edge_budget(
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        trigger_price=trigger_price_val,
+                        quote_price=price,
+                        lifecycle=_entry_timing_lifecycle,
+                        pending=pending,
+                        token_risk=_token_risk,
+                    )
+                    _SPREAD_WARN_PCT = _entry_edge_budget.get('warn_spread_pct', MATRIX_SPREAD_WARN_PCT)
+                    _SPREAD_GUARD_MAX_PCT = _entry_edge_budget.get('max_spread_pct', MATRIX_SPREAD_ABORT_PCT)
+                    # POST-SPREAD-ABORT GUARD (persistent CA memory + live watchlist memory)
+                    # A spread abort proves the current move has no usable entry edge. Require
+                    # fresh reclaim before allowing another FIRE cycle for the same CA.
                     _live_abort_count = pending_w_entry.get('_spread_abort_count', 0) if pending_w_entry else 0
-                    if _live_abort_count >= 1:
+                    _persistent_spread_memory = evaluate_spread_abort_memory(
+                        db,
+                        pending.get('token_ca'),
+                        lifecycle=_entry_timing_lifecycle,
+                        current_spread_pct=_spread,
+                        max_spread_pct=_SPREAD_GUARD_MAX_PCT,
+                        now_ts=now,
+                    )
+                    _total_abort_count = max(
+                        int(_live_abort_count or 0),
+                        int(_persistent_spread_memory.get('abort_count') or 0),
+                    )
+                    if _total_abort_count >= 1 and _persistent_spread_memory.get('blocked', True):
                         log.info(
                             f"  [POST_SPREAD_ABORT] 🚫 {pending['symbol']} BLOCKED: "
-                            f"{_live_abort_count} prior spread abort(s) on watchlist entry. "
-                            f"Refusing entry (data: 100% loss rate post-abort).")
+                            f"{_total_abort_count} spread abort(s), no fresh reclaim. "
+                            f"Refusing entry."
+                        )
                         record_decision_event(
                             db,
                             component='execution_guard',
@@ -6596,21 +6765,15 @@ def run_monitor(db):
                             signal_id=pending.get('premium_signal_id'),
                             strategy_stage=_pending_strategy_stage,
                             route=_pending_signal_route or pending.get('signal_type'),
-                            payload={'spread_abort_count': _live_abort_count},
+                            payload={
+                                'spread_abort_count': _total_abort_count,
+                                'live_spread_abort_count': _live_abort_count,
+                                'spread_abort_memory': _persistent_spread_memory,
+                                'entry_edge_budget': _entry_edge_budget,
+                            },
                         )
                         pending_entries.pop(lifecycle_id, None)
                         continue
-
-                    _entry_edge_budget = evaluate_entry_edge_budget(
-                        route=_pending_signal_route or pending.get('signal_type'),
-                        trigger_price=trigger_price_val,
-                        quote_price=price,
-                        lifecycle=_entry_timing_lifecycle,
-                        pending=pending,
-                        token_risk=_token_risk,
-                    )
-                    _SPREAD_WARN_PCT = _entry_edge_budget.get('warn_spread_pct', MATRIX_SPREAD_WARN_PCT)
-                    _SPREAD_GUARD_MAX_PCT = _entry_edge_budget.get('max_spread_pct', MATRIX_SPREAD_ABORT_PCT)
                     if _spread > _SPREAD_WARN_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] ⚠️ {pending['symbol']} WARN: "
@@ -6686,6 +6849,32 @@ def run_monitor(db):
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
+                    _entry_decision_contract = build_entry_decision_contract(
+                        entry_readiness_policy=pending.get('entry_readiness_policy'),
+                        entry_mode=pending.get('entry_mode') or timing_reason,
+                        data_confidence=1.0,
+                        p_follow=None,
+                        spread_cost_pct=max(_spread or 0.0, 0.0),
+                        exit_cost_buffer_pct=1.5,
+                        timing_confirmed=True,
+                    )
+                    record_decision_event(
+                        db,
+                        component='entry_decision_contract',
+                        event_type='entry_audit',
+                        decision=_entry_decision_contract.decision,
+                        reason=_entry_decision_contract.reason,
+                        token_ca=pending['token_ca'],
+                        symbol=pending['symbol'],
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=pending['signal_ts'],
+                        signal_id=pending.get('premium_signal_id'),
+                        strategy_stage=_pending_strategy_stage,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        data_source='entry_readiness+smart_entry+execution_guard',
+                        payload=_entry_decision_contract.to_dict(),
+                    )
+
                     try:
                         _entry_dex_snapshot = fetch_dexscreener_trend_snapshot(pending['token_ca'])
                     except Exception:
@@ -6710,6 +6899,7 @@ def run_monitor(db):
                         'entrySpreadPct': _spread,
                         'entryEdgeBudget': _entry_edge_budget,
                         'entryReadinessPolicy': pending.get('entry_readiness_policy'),
+                        'entryDecisionContract': _entry_decision_contract.to_dict(),
                         'entrySol': actual_position_size_sol,
                         'tokenAmount': int(token_amount_raw),
                         'tokenDecimals': int(token_decimals or 0),
@@ -6753,6 +6943,7 @@ def run_monitor(db):
                             'entrySpreadPct': _spread,
                             'entryEdgeBudget': _entry_edge_budget,
                             'entryReadinessPolicy': pending.get('entry_readiness_policy'),
+                            'entryDecisionContract': _entry_decision_contract.to_dict(),
                             'positionSizeSol': actual_position_size_sol,
                         })), json.dumps(_monitor_state),
                         pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
@@ -6785,6 +6976,7 @@ def run_monitor(db):
                             'position_size_sol': actual_position_size_sol,
                             'entry_edge_budget': _entry_edge_budget,
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
+                            'entry_decision_contract': _entry_decision_contract.to_dict(),
                             'execution': execution,
                         }, _entry_lifecycle),
                     )

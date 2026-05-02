@@ -3,7 +3,7 @@ import sqlite3
 
 sys.path.insert(0, "scripts")
 
-from paper_decision_audit import init_decision_audit  # noqa: E402
+from paper_decision_audit import init_decision_audit, record_decision_event  # noqa: E402
 from lotto_engine import build_lotto_pending, evaluate_lotto_entry, evaluate_lotto_exit  # noqa: E402
 from exit_engine import (  # noqa: E402
     _partial_delta_from_command,
@@ -21,6 +21,7 @@ from entry_engine import evaluate_entry_position, smart_entry_bounce_reject_reas
 from entry_decision_contract import build_entry_decision_contract  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     evaluate_entry_edge_budget,
+    evaluate_spread_abort_memory,
     evaluate_token_reclaim,
     find_lotto_real_probe_candidates,
     normalize_price_age_ms,
@@ -769,8 +770,80 @@ def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():
     assert policy.lifecycle_profile == "LOTTO_NEWBORN_RISKY"
     assert policy.min_odds_r == 3.0
     assert policy.min_p_follow >= 0.68
-    assert entry_mode_allowed("momentum_direct_entry", policy) is True
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
     assert entry_mode_allowed("smart_entry", policy) is False
+
+
+def test_entry_readiness_real_probe_disallows_momentum_direct():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 600,
+                "price_change_m5": 18,
+                "buy_sell_ratio": 1.7,
+            },
+        },
+        pending={
+            "is_lotto": True,
+            "entry_mode": "lotto_real_probe_reentry_arm",
+        },
+    )
+    assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
+def test_spread_abort_memory_blocks_until_reclaim():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    record_decision_event(
+        db,
+        component="execution_guard",
+        event_type="entry_abort",
+        decision="abort",
+        reason="entry_edge_spread_too_high",
+        token_ca="TokenA",
+        symbol="TKA",
+        payload={"spread_pct": 3.2, "max_spread_pct": 1.5},
+        event_ts=1000,
+    )
+    blocked = evaluate_spread_abort_memory(
+        db,
+        "TokenA",
+        lifecycle={
+            "lifecycle_features": {
+                "price_change_m5": 2.0,
+                "buy_sell_ratio": 1.1,
+            }
+        },
+        current_spread_pct=0.4,
+        max_spread_pct=1.0,
+        now_ts=1060,
+    )
+    assert blocked["blocked"] is True
+    assert blocked["abort_count"] == 1
+    assert blocked["reason"] == "spread_abort_memory_wait_reclaim"
+
+    reclaimed = evaluate_spread_abort_memory(
+        db,
+        "TokenA",
+        lifecycle={
+            "lifecycle_features": {
+                "price_change_m5": 8.0,
+                "buy_sell_ratio": 1.6,
+            }
+        },
+        current_spread_pct=0.4,
+        max_spread_pct=1.0,
+        now_ts=1060,
+    )
+    assert reclaimed["blocked"] is False
+    assert reclaimed["reason"] == "spread_abort_memory_reclaimed"
 
 
 def test_entry_readiness_marks_stale_ath_as_wait_for_fresh_high():
