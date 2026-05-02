@@ -9,10 +9,12 @@ unless a later strategy change explicitly wires it into a gate.
 
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import time
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _risk_cache = {}
 
 
@@ -29,7 +31,7 @@ GMGN_DEMO_API_KEY = "gmgn_solbscbaseethmonadtron"
 
 def gmgn_readonly_runtime_status():
     key = os.environ.get("GMGN_API_KEY", "").strip()
-    cli_path = shutil.which("gmgn-cli")
+    cli_path = _gmgn_cli_path()
     return {
         "enabled": GMGN_READONLY_ENABLED,
         "api_key_present": bool(key),
@@ -163,12 +165,19 @@ def _api_key_available(env):
     return GMGN_ALLOW_DEMO_KEY
 
 
+def _gmgn_cli_path():
+    local_cli = PROJECT_ROOT / "node_modules" / ".bin" / "gmgn-cli"
+    if local_cli.exists():
+        return str(local_cli)
+    return shutil.which("gmgn-cli")
+
+
 def _run_gmgn_cli(args, timeout=GMGN_READONLY_TIMEOUT_SEC, env=None):
     env = dict(env or os.environ)
     if not env.get("GMGN_API_KEY") and GMGN_ALLOW_DEMO_KEY:
         env["GMGN_API_KEY"] = GMGN_DEMO_API_KEY
     completed = subprocess.run(
-        ["gmgn-cli", *args, "--raw"],
+        [_gmgn_cli_path() or "gmgn-cli", *args, "--raw"],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -193,7 +202,7 @@ def fetch_gmgn_token_enrichment(token_ca, chain="sol", enabled=None, now=None):
         return {"available": False, "source": "gmgn", "reason": "disabled"}
     if not token_ca:
         return {"available": False, "source": "gmgn", "reason": "missing_token"}
-    if not shutil.which("gmgn-cli"):
+    if not _gmgn_cli_path():
         return {"available": False, "source": "gmgn", "reason": "gmgn_cli_missing"}
     if not _api_key_available(os.environ):
         return {"available": False, "source": "gmgn", "reason": "api_key_missing"}

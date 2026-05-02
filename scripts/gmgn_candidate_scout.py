@@ -13,10 +13,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = PROJECT_ROOT / "data" / "gmgn_candidates.jsonl"
 
 
+def gmgn_cli_path():
+    local_cli = PROJECT_ROOT / "node_modules" / ".bin" / "gmgn-cli"
+    if local_cli.exists():
+        return str(local_cli)
+    return "gmgn-cli"
+
+
 def run_gmgn(args, timeout=20):
     env = dict(os.environ)
     completed = subprocess.run(
-        ["gmgn-cli", *args, "--raw"],
+        [gmgn_cli_path(), *args, "--raw"],
         capture_output=True,
         text=True,
         timeout=timeout,

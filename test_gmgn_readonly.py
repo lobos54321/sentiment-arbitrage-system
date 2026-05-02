@@ -99,7 +99,7 @@ def test_gmgn_runtime_status_strips_env_values(monkeypatch):
     assert status["enabled"] is True
     assert status["api_key_present"] is True
     assert status["api_key_prefix"] == "gmgn_tes"
-    assert status["gmgn_cli"] == "/usr/local/bin/gmgn-cli"
+    assert status["gmgn_cli"].endswith("gmgn-cli")
 
 
 def test_fetch_gmgn_token_enrichment_normalizes_cli_result(monkeypatch):

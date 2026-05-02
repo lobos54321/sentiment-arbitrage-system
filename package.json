@@ -27,6 +27,7 @@
     "date-fns": "^3.0.6",
     "dotenv": "^16.3.1",
     "ethers": "^6.10.0",
+    "gmgn-cli": "^1.2.8",
     "input": "^1.0.1",
     "jito-ts": "^4.2.1",
     "node-fetch": "^3.3.2",
