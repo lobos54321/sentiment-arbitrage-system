@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import time
 
+from external_alpha_shadow import connect_external_alpha_db, record_external_alpha_candidates
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = PROJECT_ROOT / "data" / "gmgn_candidates.jsonl"
@@ -146,15 +148,32 @@ def main():
     parser.add_argument("--chain", default="sol")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument("--state-db", default=os.environ.get("EXTERNAL_ALPHA_DB") or os.environ.get("PAPER_DB"))
+    parser.add_argument("--loop", action="store_true", help="Run continuously and update external alpha shadow state")
+    parser.add_argument("--interval", type=float, default=60.0)
     args = parser.parse_args()
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    candidates = collect_candidates(chain=args.chain, limit=args.limit)
-    with out_path.open("a", encoding="utf-8") as fh:
-        for cand in candidates:
-            fh.write(json.dumps(cand, ensure_ascii=False, sort_keys=True) + "\n")
-    print(f"wrote {len(candidates)} GMGN candidates to {out_path}")
+    db = connect_external_alpha_db(args.state_db)
+    try:
+        while True:
+            captured_at = int(time.time())
+            candidates = collect_candidates(chain=args.chain, limit=args.limit)
+            with out_path.open("a", encoding="utf-8") as fh:
+                for cand in candidates:
+                    fh.write(json.dumps(cand, ensure_ascii=False, sort_keys=True) + "\n")
+            state = record_external_alpha_candidates(db, candidates, captured_at=captured_at)
+            print(
+                f"wrote {len(candidates)} GMGN candidates to {out_path}; "
+                f"state_recorded={state['recorded']} momentum_confirmed={state['momentum_confirmed']}",
+                flush=True,
+            )
+            if not args.loop:
+                break
+            time.sleep(max(5.0, args.interval))
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

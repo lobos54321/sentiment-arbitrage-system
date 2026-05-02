@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""External alpha shadow state.
+
+This module records external candidate feeds as evidence only. It does not
+submit trades and does not change entry policy. Paper trader can join these
+features to Telegram-driven signals for attribution and later analysis.
+"""
+
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_EXTERNAL_ALPHA_DB = PROJECT_ROOT / "data" / "paper_trades.db"
+
+EXTERNAL_ALPHA_SHADOW_ENABLED = os.environ.get("EXTERNAL_ALPHA_SHADOW_ENABLED", "true").strip().lower() != "false"
+GMGN_MOMENTUM_SHADOW_ENABLED = os.environ.get("GMGN_MOMENTUM_SHADOW_ENABLED", "true").strip().lower() != "false"
+EXTERNAL_ALPHA_LOOKBACK_SEC = int(os.environ.get("EXTERNAL_ALPHA_LOOKBACK_SEC", "600"))
+GMGN_MOMENTUM_MIN_ROUNDS = int(os.environ.get("GMGN_MOMENTUM_MIN_ROUNDS", "3"))
+GMGN_MOMENTUM_MIN_GAIN_PCT = float(os.environ.get("GMGN_MOMENTUM_MIN_GAIN_PCT", "5.0"))
+GMGN_MOMENTUM_BUY_DECAY_TOLERANCE = float(os.environ.get("GMGN_MOMENTUM_BUY_DECAY_TOLERANCE", "0.80"))
+
+
+CREATE_EXTERNAL_ALPHA_SNAPSHOTS_SQL = """
+CREATE TABLE IF NOT EXISTS external_alpha_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    category TEXT,
+    chain TEXT NOT NULL,
+    token_ca TEXT NOT NULL,
+    symbol TEXT,
+    name TEXT,
+    market_cap REAL,
+    liquidity REAL,
+    volume REAL,
+    swaps REAL,
+    buys REAL,
+    sells REAL,
+    price_change_5m REAL,
+    price_change_1h REAL,
+    raw_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+
+CREATE_EXTERNAL_ALPHA_STATE_SQL = """
+CREATE TABLE IF NOT EXISTS external_alpha_state (
+    chain TEXT NOT NULL,
+    token_ca TEXT NOT NULL,
+    first_seen_ts INTEGER NOT NULL,
+    last_seen_ts INTEGER NOT NULL,
+    seen_count INTEGER DEFAULT 0,
+    changed_count INTEGER DEFAULT 0,
+    source_last TEXT,
+    category_last TEXT,
+    symbol TEXT,
+    name TEXT,
+    last_market_cap REAL,
+    last_liquidity REAL,
+    last_volume REAL,
+    last_swaps REAL,
+    last_buys REAL,
+    last_sells REAL,
+    momentum_rounds INTEGER DEFAULT 1,
+    momentum_start_mc REAL,
+    momentum_gain_pct REAL DEFAULT 0,
+    momentum_confirmed INTEGER DEFAULT 0,
+    volume_confirmed INTEGER DEFAULT 0,
+    buy_pressure REAL DEFAULT 0,
+    last_snapshot_json TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chain, token_ca)
+)
+"""
+
+
+EXTERNAL_ALPHA_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_eas_token ON external_alpha_snapshots(token_ca)",
+    "CREATE INDEX IF NOT EXISTS idx_eas_seen ON external_alpha_state(token_ca, last_seen_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_eas_momentum ON external_alpha_state(momentum_confirmed, last_seen_ts)",
+]
+
+
+def _json_default(value):
+    try:
+        return str(value)
+    except Exception:
+        return "<unserializable>"
+
+
+def _f(value, default=0.0):
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _i(value, default=0):
+    try:
+        if value in (None, ""):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def init_external_alpha_shadow(db):
+    db.execute(CREATE_EXTERNAL_ALPHA_SNAPSHOTS_SQL)
+    db.execute(CREATE_EXTERNAL_ALPHA_STATE_SQL)
+    for sql in EXTERNAL_ALPHA_INDEXES:
+        db.execute(sql)
+    db.commit()
+
+
+def connect_external_alpha_db(db_path=None):
+    path = Path(db_path or os.environ.get("EXTERNAL_ALPHA_DB") or os.environ.get("PAPER_DB") or DEFAULT_EXTERNAL_ALPHA_DB)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    init_external_alpha_shadow(db)
+    return db
+
+
+def _row_to_dict(row):
+    if not row:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def _candidate_key(candidate):
+    chain = str(candidate.get("chain") or "sol").lower()
+    ca = candidate.get("ca") or candidate.get("token_ca") or candidate.get("address")
+    return chain, ca
+
+
+def _changed(candidate, state):
+    if not state:
+        return True
+    return any(
+        _f(candidate.get(field)) != _f(state.get(state_field))
+        for field, state_field in [
+            ("market_cap", "last_market_cap"),
+            ("volume", "last_volume"),
+            ("swaps", "last_swaps"),
+            ("buys", "last_buys"),
+            ("sells", "last_sells"),
+        ]
+    )
+
+
+def compute_next_external_alpha_state(candidate, state=None, captured_at=None):
+    """Return the next state row for one normalized external candidate."""
+    captured_at = int(captured_at or candidate.get("captured_at") or time.time())
+    state = dict(state or {})
+    mc = _f(candidate.get("market_cap"))
+    volume = _f(candidate.get("volume"))
+    swaps = _f(candidate.get("swaps"))
+    buys = _f(candidate.get("buys"))
+    sells = _f(candidate.get("sells"))
+    buy_pressure = buys / max(sells, 1.0) if buys > 0 else 0.0
+
+    first_seen = _i(state.get("first_seen_ts"), captured_at)
+    seen_count = _i(state.get("seen_count")) + 1
+    changed_count = _i(state.get("changed_count"))
+    rounds = max(1, _i(state.get("momentum_rounds"), 1))
+    start_mc = _f(state.get("momentum_start_mc"), mc)
+    volume_confirmed = bool(_i(state.get("volume_confirmed")))
+
+    changed = _changed(candidate, state)
+    if changed:
+        changed_count += 1
+        prev_mc = _f(state.get("last_market_cap"))
+        prev_buys = _f(state.get("last_buys"))
+        prev_swaps = _f(state.get("last_swaps"))
+        if prev_mc > 0 and mc > prev_mc:
+            rounds += 1
+            if start_mc <= 0:
+                start_mc = prev_mc
+        else:
+            rounds = 1
+            start_mc = mc
+        if prev_buys > 0 or prev_swaps > 0:
+            volume_confirmed = (
+                buys >= prev_buys * GMGN_MOMENTUM_BUY_DECAY_TOLERANCE
+                or swaps >= prev_swaps * GMGN_MOMENTUM_BUY_DECAY_TOLERANCE
+            )
+        elif buys > 0 or swaps > 0:
+            volume_confirmed = True
+
+    gain_pct = ((mc - start_mc) / start_mc * 100.0) if start_mc > 0 else 0.0
+    momentum_confirmed = (
+        GMGN_MOMENTUM_SHADOW_ENABLED
+        and rounds >= GMGN_MOMENTUM_MIN_ROUNDS
+        and gain_pct >= GMGN_MOMENTUM_MIN_GAIN_PCT
+        and volume_confirmed
+    )
+
+    return {
+        "chain": str(candidate.get("chain") or state.get("chain") or "sol").lower(),
+        "token_ca": candidate.get("ca") or candidate.get("token_ca") or candidate.get("address"),
+        "first_seen_ts": first_seen,
+        "last_seen_ts": captured_at,
+        "seen_count": seen_count,
+        "changed_count": changed_count,
+        "source_last": candidate.get("source") or state.get("source_last"),
+        "category_last": candidate.get("category") or state.get("category_last"),
+        "symbol": candidate.get("symbol") or state.get("symbol"),
+        "name": candidate.get("name") or state.get("name"),
+        "last_market_cap": mc,
+        "last_liquidity": _f(candidate.get("liquidity")),
+        "last_volume": volume,
+        "last_swaps": swaps,
+        "last_buys": buys,
+        "last_sells": sells,
+        "momentum_rounds": rounds,
+        "momentum_start_mc": start_mc,
+        "momentum_gain_pct": gain_pct,
+        "momentum_confirmed": int(bool(momentum_confirmed)),
+        "volume_confirmed": int(bool(volume_confirmed)),
+        "buy_pressure": buy_pressure,
+        "last_snapshot_json": json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=_json_default),
+    }
+
+
+def record_external_alpha_candidates(db, candidates, captured_at=None):
+    if not EXTERNAL_ALPHA_SHADOW_ENABLED:
+        return {"recorded": 0, "momentum_confirmed": 0}
+    captured_at = int(captured_at or time.time())
+    recorded = 0
+    confirmed = 0
+    for candidate in candidates:
+        chain, ca = _candidate_key(candidate)
+        if not ca:
+            continue
+        raw_json = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=_json_default)
+        db.execute(
+            """
+            INSERT INTO external_alpha_snapshots
+                (captured_at, source, category, chain, token_ca, symbol, name,
+                 market_cap, liquidity, volume, swaps, buys, sells,
+                 price_change_5m, price_change_1h, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                captured_at,
+                candidate.get("source") or "unknown",
+                candidate.get("category"),
+                chain,
+                ca,
+                candidate.get("symbol"),
+                candidate.get("name"),
+                _f(candidate.get("market_cap")),
+                _f(candidate.get("liquidity")),
+                _f(candidate.get("volume")),
+                _f(candidate.get("swaps")),
+                _f(candidate.get("buys")),
+                _f(candidate.get("sells")),
+                _f(candidate.get("price_change_5m")),
+                _f(candidate.get("price_change_1h")),
+                raw_json,
+            ),
+        )
+        row = db.execute(
+            "SELECT * FROM external_alpha_state WHERE chain = ? AND token_ca = ?",
+            (chain, ca),
+        ).fetchone()
+        next_state = compute_next_external_alpha_state(candidate, _row_to_dict(row), captured_at=captured_at)
+        db.execute(
+            """
+            INSERT INTO external_alpha_state
+                (chain, token_ca, first_seen_ts, last_seen_ts, seen_count, changed_count,
+                 source_last, category_last, symbol, name, last_market_cap, last_liquidity,
+                 last_volume, last_swaps, last_buys, last_sells, momentum_rounds,
+                 momentum_start_mc, momentum_gain_pct, momentum_confirmed,
+                 volume_confirmed, buy_pressure, last_snapshot_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chain, token_ca) DO UPDATE SET
+                first_seen_ts = excluded.first_seen_ts,
+                last_seen_ts = excluded.last_seen_ts,
+                seen_count = excluded.seen_count,
+                changed_count = excluded.changed_count,
+                source_last = excluded.source_last,
+                category_last = excluded.category_last,
+                symbol = excluded.symbol,
+                name = excluded.name,
+                last_market_cap = excluded.last_market_cap,
+                last_liquidity = excluded.last_liquidity,
+                last_volume = excluded.last_volume,
+                last_swaps = excluded.last_swaps,
+                last_buys = excluded.last_buys,
+                last_sells = excluded.last_sells,
+                momentum_rounds = excluded.momentum_rounds,
+                momentum_start_mc = excluded.momentum_start_mc,
+                momentum_gain_pct = excluded.momentum_gain_pct,
+                momentum_confirmed = excluded.momentum_confirmed,
+                volume_confirmed = excluded.volume_confirmed,
+                buy_pressure = excluded.buy_pressure,
+                last_snapshot_json = excluded.last_snapshot_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            tuple(next_state[k] for k in [
+                "chain", "token_ca", "first_seen_ts", "last_seen_ts", "seen_count", "changed_count",
+                "source_last", "category_last", "symbol", "name", "last_market_cap", "last_liquidity",
+                "last_volume", "last_swaps", "last_buys", "last_sells", "momentum_rounds",
+                "momentum_start_mc", "momentum_gain_pct", "momentum_confirmed",
+                "volume_confirmed", "buy_pressure", "last_snapshot_json",
+            ]),
+        )
+        recorded += 1
+        if next_state["momentum_confirmed"]:
+            confirmed += 1
+    db.commit()
+    return {"recorded": recorded, "momentum_confirmed": confirmed}
+
+
+def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None, lookback_sec=None):
+    if not EXTERNAL_ALPHA_SHADOW_ENABLED or not token_ca:
+        return {"available": False, "reason": "external_alpha_disabled_or_missing_token"}
+    now = int(now or time.time())
+    lookback_sec = EXTERNAL_ALPHA_LOOKBACK_SEC if lookback_sec is None else int(lookback_sec)
+    params = [token_ca]
+    chain_clause = ""
+    if chain:
+        chain_clause = "AND chain = ?"
+        params.append(str(chain).lower())
+    row = db.execute(
+        f"""
+        SELECT * FROM external_alpha_state
+        WHERE token_ca = ?
+          {chain_clause}
+        ORDER BY last_seen_ts DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    if not row:
+        return {"available": False, "reason": "external_alpha_not_seen"}
+    state = _row_to_dict(row)
+    age_sec = now - _i(state.get("last_seen_ts"))
+    if age_sec > lookback_sec:
+        return {
+            "available": False,
+            "reason": "external_alpha_stale",
+            "last_seen_age_sec": age_sec,
+        }
+    first_seen = _i(state.get("first_seen_ts"))
+    lead_reference = _i(signal_ts, now)
+    return {
+        "available": True,
+        "source": "external_alpha_shadow",
+        "gmgn_pre_seen": True,
+        "gmgn_momentum_confirmed": bool(_i(state.get("momentum_confirmed"))),
+        "gmgn_momentum_rounds": _i(state.get("momentum_rounds")),
+        "gmgn_momentum_gain_pct": _f(state.get("momentum_gain_pct")),
+        "gmgn_volume_confirmed": bool(_i(state.get("volume_confirmed"))),
+        "gmgn_buy_pressure": _f(state.get("buy_pressure")),
+        "gmgn_seen_count": _i(state.get("seen_count")),
+        "gmgn_changed_count": _i(state.get("changed_count")),
+        "gmgn_first_seen_ts": first_seen,
+        "gmgn_last_seen_ts": _i(state.get("last_seen_ts")),
+        "gmgn_lead_time_sec": lead_reference - first_seen if first_seen else None,
+        "last_seen_age_sec": age_sec,
+        "source_last": state.get("source_last"),
+        "category_last": state.get("category_last"),
+        "last_market_cap": _f(state.get("last_market_cap")),
+        "last_liquidity": _f(state.get("last_liquidity")),
+        "last_volume": _f(state.get("last_volume")),
+    }

@@ -68,6 +68,7 @@ from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
 from gmgn_policy import evaluate_gmgn_lotto_policy
+from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
     LOTTO_STRATEGY_ID,
@@ -1786,6 +1787,20 @@ def with_lifecycle_payload(payload, lifecycle):
     return data
 
 
+def with_external_alpha_payload(payload, external_alpha):
+    data = dict(payload or {})
+    if external_alpha:
+        data['external_alpha'] = external_alpha
+    return data
+
+
+def safe_external_alpha_lookup(db, token_ca, *, now=None, signal_ts=None, chain='sol'):
+    try:
+        return lookup_external_alpha(db, token_ca, chain=chain, now=now, signal_ts=signal_ts)
+    except Exception as exc:
+        return {"available": False, "reason": "external_alpha_lookup_error", "error": str(exc)}
+
+
 
 def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
     trigger_pct = _safe_float(trigger_pnl * 100.0, None)
@@ -1956,6 +1971,7 @@ def init_paper_db(db_path=None):
         except sqlite3.OperationalError:
             pass
         init_decision_audit(db_conn)
+        init_external_alpha_shadow(db_conn)
         db_conn.commit()
     
     try:
@@ -5254,6 +5270,13 @@ def run_monitor(db):
                         signal_ts=signal_ts,
                         now=now,
                     )
+                    external_alpha = safe_external_alpha_lookup(
+                        db,
+                        token_ca,
+                        now=now,
+                        signal_ts=signal_ts,
+                    )
+                    signal_audit_payload = with_external_alpha_payload(signal_payload(sig), external_alpha)
 
                     record_decision_event(
                         db,
@@ -5267,7 +5290,7 @@ def run_monitor(db):
                         signal_ts=signal_ts,
                         signal_id=premium_signal_id,
                         data_source='premium_signals',
-                        payload=with_lifecycle_payload(signal_payload(sig), signal_lifecycle),
+                        payload=with_lifecycle_payload(signal_audit_payload, signal_lifecycle),
                     )
 
                     if signal_type == 'NEW_TRENDING' and hard_gate_status in {
@@ -5289,7 +5312,7 @@ def run_monitor(db):
                             signal_id=premium_signal_id,
                             route='LOTTO',
                             data_source='premium_signals',
-                            payload=with_lifecycle_payload(signal_payload(sig), signal_lifecycle),
+                            payload=with_lifecycle_payload(signal_audit_payload, signal_lifecycle),
                         )
                         log.info(
                             f"  [UPSTREAM_ATTR] {symbol} tracked as missed LOTTO candidate: "
@@ -5349,7 +5372,7 @@ def run_monitor(db):
                                 signal_id=premium_signal_id,
                                 route='LOTTO',
                                 data_source='pool_lookup',
-                                payload=with_lifecycle_payload(signal_payload(sig), signal_lifecycle),
+                                payload=with_lifecycle_payload(signal_audit_payload, signal_lifecycle),
                             )
                             log.info(f"  [LOTTO_OBSERVE] {symbol} not added to LOTTO watchlist: pool_not_found")
                             continue
@@ -5403,7 +5426,7 @@ def run_monitor(db):
                             route='LOTTO',
                             data_source='premium_signals+realtime_price',
                             payload=with_lifecycle_payload({
-                                **signal_payload(sig),
+                                **signal_audit_payload,
                                 'watchlist_id': registered_entry.get('id') if registered_entry else None,
                                 'pool': pool,
                                 'signal_price': sig_price,
@@ -5458,7 +5481,7 @@ def run_monitor(db):
                         route=route_decision.route,
                         data_source='premium_signals',
                         payload=with_lifecycle_payload({
-                            **signal_payload(sig),
+                            **signal_audit_payload,
                             'signal_age_sec': route_decision.signal_age_sec,
                             'existing_watchlist_status': existing_w_entry.get('status') if existing_w_entry else None,
                             'existing_watchlist_type': existing_w_entry.get('type') if existing_w_entry else None,
@@ -5746,6 +5769,7 @@ def run_monitor(db):
                         route='LOTTO' if _is_lotto_signal else _wl_type,
                         data_source='realtime_price',
                         payload=with_lifecycle_payload({
+                            'external_alpha': external_alpha,
                             'watchlist_id': registered_entry.get('id') if registered_entry else None,
                             'watchlist_type': _wl_type,
                             'pool': pool,
@@ -5865,6 +5889,16 @@ def run_monitor(db):
                         signal_ts=w_entry['signal_ts'],
                         now=now,
                     )
+                    _external_alpha = safe_external_alpha_lookup(
+                        db,
+                        w_entry['ca'],
+                        now=now,
+                        signal_ts=w_entry['signal_ts'],
+                    )
+                    _lotto_detail = {
+                        **_lotto_detail,
+                        'external_alpha': _external_alpha,
+                    }
                     _gmgn_policy = evaluate_gmgn_lotto_policy(
                         _gmgn_enrichment,
                         _lotto_detail,
@@ -6029,6 +6063,12 @@ def run_monitor(db):
                         if _last_px > _first_px and (_last_ts - _first_ts) >= 1800:
                             _wl_sustained = True
                 w_entry['is_sustained_ath'] = _wl_sustained
+                _external_alpha = safe_external_alpha_lookup(
+                    db,
+                    w_entry['ca'],
+                    now=now,
+                    signal_ts=w_entry['signal_ts'],
+                )
                 
                 eval_res = matrix_evaluator.evaluate(w_entry)
                 watchlist.update_scores(w_entry['id'], eval_res['scores'])
@@ -6050,6 +6090,7 @@ def run_monitor(db):
                         'reasons': eval_res.get('reasons'),
                         'current_price': eval_res.get('current_price'),
                         'momentum_pct': eval_res.get('momentum_pct'),
+                        'external_alpha': _external_alpha,
                     },
                 )
                 
