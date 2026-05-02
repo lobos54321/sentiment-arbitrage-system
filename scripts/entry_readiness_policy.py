@@ -97,6 +97,8 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
 
     bad_states = {"DISTRIBUTION", "DEAD"}
     allowed_modes = ("momentum_direct_entry", "smart_entry_pullback_bounce")
+    requested_entry_mode = str(pending.get("entry_mode") or "")
+    explosive_direct_scout = requested_entry_mode == "explosive_newborn_direct_scout"
     min_odds_r = 2.0
     min_p_follow = 0.58
     max_spread_pct = 2.0
@@ -104,10 +106,14 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
 
     if profile == "LOTTO_NEWBORN_RISKY":
         min_odds_r = 3.0
-        min_p_follow = 0.68
+        min_p_follow = 0.74 if explosive_direct_scout else 0.68
         max_spread_pct = 1.0
         expected_loss_pct = 12.0
-        allowed_modes = ("smart_entry_pullback_bounce",)
+        allowed_modes = (
+            ("explosive_newborn_direct_scout", "smart_entry_pullback_bounce")
+            if explosive_direct_scout
+            else ("smart_entry_pullback_bounce",)
+        )
     elif profile == "LOTTO_REAL_PROBE":
         min_odds_r = 3.0
         min_p_follow = 0.70

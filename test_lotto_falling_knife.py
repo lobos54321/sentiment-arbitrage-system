@@ -17,7 +17,7 @@ from matrix_evaluator import (  # noqa: E402
 from entry_readiness_policy import evaluate_entry_readiness_policy, entry_mode_allowed  # noqa: E402
 from analyze_trade_failure_attribution import classify_system_stage  # noqa: E402
 from profit_protect_policy import profit_protect_floor  # noqa: E402
-from entry_engine import evaluate_entry_position, smart_entry_bounce_reject_reason  # noqa: E402
+from entry_engine import evaluate_entry_position, evaluate_smart_entry, smart_entry_bounce_reject_reason  # noqa: E402
 from entry_decision_contract import build_entry_decision_contract  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     evaluate_entry_edge_budget,
@@ -542,7 +542,7 @@ def test_lotto_blocks_pumpfun_liquidity_unknown_live_top10_over_risky_limit():
     assert decision.detail["live_top10_max_pct"] == 50.0
 
 
-def test_lotto_concentrated_scout_allows_explosive_newborn_with_small_size():
+def test_lotto_explosive_direct_scout_allows_dog_like_newborn_with_tiny_size():
     decision = evaluate_lotto_entry(
         {
             "added_at": 1000,
@@ -563,9 +563,9 @@ def test_lotto_concentrated_scout_allows_explosive_newborn_with_small_size():
         now=1004,
     )
     assert decision.allow is True
-    assert decision.reason == "lotto_concentrated_scout_ok"
-    assert decision.detail["entry_mode"] == "lotto_concentrated_scout"
-    assert decision.detail["position_size_sol"] == 0.015
+    assert decision.reason == "lotto_explosive_direct_scout_ok"
+    assert decision.detail["entry_mode"] == "explosive_newborn_direct_scout"
+    assert decision.detail["position_size_sol"] == 0.008
 
     pending = build_lotto_pending(
         {
@@ -579,9 +579,35 @@ def test_lotto_concentrated_scout_allows_explosive_newborn_with_small_size():
         "DogToken:1000",
         decision.detail,
     )
-    assert pending["kelly_position_sol"] == 0.015
-    assert pending["entry_mode"] == "lotto_concentrated_scout"
-    assert pending["lotto_state"]["positionSizeSol"] == 0.015
+    assert pending["kelly_position_sol"] == 0.008
+    assert pending["entry_mode"] == "explosive_newborn_direct_scout"
+    assert pending["lotto_state"]["positionSizeSol"] == 0.008
+
+
+def test_lotto_concentrated_scout_still_uses_small_size_when_not_explosive():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 13230,
+            "signal_holders": 80,
+            "signal_vol24h": 20000,
+            "signal_top10": 28,
+        },
+        dex_snapshot={
+            "liquidity_unknown": True,
+            "dex_id": "pumpfun",
+            "vol_m5": 18000,
+            "buys_m5": 170,
+            "sells_m5": 160,
+            "price_change_m5": 180,
+        },
+        live_concentration={"top1_pct": 34.2, "top10_pct": 59.7},
+        now=1004,
+    )
+    assert decision.allow is True
+    assert decision.reason == "lotto_concentrated_scout_ok"
+    assert decision.detail["entry_mode"] == "lotto_concentrated_scout"
+    assert decision.detail["position_size_sol"] == 0.015
 
 
 def test_lotto_concentrated_scout_still_blocks_top1_too_high():
@@ -864,6 +890,68 @@ def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():
     assert entry_mode_allowed("momentum_direct_entry", policy) is False
     assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
     assert entry_mode_allowed("smart_entry", policy) is False
+
+
+def test_entry_readiness_allows_only_tiny_explosive_direct_for_explicit_scout():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "NEWBORN_LAUNCH",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 4,
+                "liquidity_unknown": True,
+                "dex_id": "pumpfun",
+                "price_change_m5": 515,
+                "buy_sell_ratio": 1.15,
+            },
+        },
+        pending={"is_lotto": True, "entry_mode": "explosive_newborn_direct_scout"},
+    )
+    assert policy.lifecycle_profile == "LOTTO_NEWBORN_RISKY"
+    assert policy.min_p_follow >= 0.74
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("explosive_newborn_direct_scout", policy) is True
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
+def test_smart_entry_explosive_direct_scout_bypasses_chasing_top(monkeypatch):
+    import entry_engine as entry_engine_module
+    import paper_trade_monitor as monitor_module
+
+    policy = {
+        "allowed_entry_modes": ["explosive_newborn_direct_scout", "smart_entry_pullback_bounce"],
+        "min_p_follow": 0.74,
+        "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+        "detail": {"route": "LOTTO"},
+    }
+    trend = {
+        "buys_m5": 215,
+        "sells_m5": 187,
+        "price_change_m5": 515,
+        "vol_m5": 23658,
+        "vol_h1": 12000,
+        "fdv": 13230,
+        "market_cap": 13230,
+    }
+
+    monkeypatch.setattr(monitor_module, "fetch_realtime_price", lambda *args, **kwargs: (1.0, "test", 0))
+    monkeypatch.setattr(entry_engine_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: trend)
+    monkeypatch.setattr(entry_engine_module, "is_chasing_top", lambda *_args, **_kwargs: (True, "near_local_high"))
+    monkeypatch.setattr(entry_engine_module, "evaluate_trend_phase", lambda *_args, **_kwargs: ("BULLISH", "explosive"))
+    monkeypatch.setattr(entry_engine_module, "calculate_ema_deviation", lambda *_args, **_kwargs: (10.0, 0.9))
+    monkeypatch.setattr(entry_engine_module, "get_recent_synthetic_bars", lambda *_args, **_kwargs: [])
+
+    should_enter, reason, detail, trigger = evaluate_smart_entry(
+        "DogToken",
+        symbol="Dog",
+        pool_address="Pool",
+        entry_readiness_policy=policy,
+    )
+    assert should_enter is True
+    assert reason == "explosive_newborn_direct_scout"
+    assert "node=explosive_direct_scout" in detail
+    assert trigger == 1.0
 
 
 def test_entry_readiness_real_probe_disallows_momentum_direct():

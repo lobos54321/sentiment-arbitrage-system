@@ -5900,7 +5900,7 @@ def run_monitor(db):
                                 f" live_top1={_lotto_live['top1_pct']:.0f}% live_top10={_lotto_live['top10_pct']:.0f}%"
                                 if _lotto_live else ""
                             )
-                            if _lotto_decision.reason == 'lotto_concentrated_scout_ok':
+                            if _lotto_decision.reason in {'lotto_concentrated_scout_ok', 'lotto_explosive_direct_scout_ok'}:
                                 record_decision_event(
                                     db,
                                     component='lotto_entry_gate',

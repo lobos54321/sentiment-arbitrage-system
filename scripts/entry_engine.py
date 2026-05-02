@@ -75,6 +75,10 @@ SMART_ENTRY_MAX_BELOW_HIGH_PCT = 15.0 # Dead cat bounce filter: below_high > 15%
                                       # Originally commit b9bb618, reverted 8102bc8. Now restored with stronger evidence.
 SMART_ENTRY_RISKY_MAX_BELOW_HIGH_PCT = float(os.environ.get("SMART_ENTRY_RISKY_MAX_BELOW_HIGH_PCT", "10.0"))
 SMART_ENTRY_FAKE_PUMP_THRESHOLD = 10  # After N fake_pump rounds, require stricter entry (buy_sell>=2.0)
+SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_PCT", "300"))
+SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_VOL_M5_USD = float(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_VOL_M5_USD", "20000"))
+SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_TXNS = int(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_TXNS", "400"))
+SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_BS_RATIO", "1.05"))
 
 
 def _calc_velocity(price_history, window_sec):
@@ -558,6 +562,48 @@ def _policy_route(entry_readiness_policy):
         return ""
 
 
+def _explosive_direct_scout_ok(entry_readiness_policy, cached_trend, bs_ratio):
+    if not _policy_allows("explosive_newborn_direct_scout", entry_readiness_policy):
+        return False, {}
+    cached_trend = cached_trend or {}
+    try:
+        buys_m5 = float(cached_trend.get("buys_m5", 0) or 0)
+    except (TypeError, ValueError):
+        buys_m5 = 0.0
+    try:
+        sells_m5 = float(cached_trend.get("sells_m5", 0) or 0)
+    except (TypeError, ValueError):
+        sells_m5 = 0.0
+    tx_m5 = buys_m5 + sells_m5
+    try:
+        price_change_m5 = float(cached_trend.get("price_change_m5", 0) or 0)
+    except (TypeError, ValueError):
+        price_change_m5 = 0.0
+    try:
+        vol_m5 = float(cached_trend.get("vol_m5", 0) or 0)
+    except (TypeError, ValueError):
+        vol_m5 = 0.0
+    detail = {
+        "price_change_m5": price_change_m5,
+        "vol_m5": vol_m5,
+        "tx_m5": tx_m5,
+        "buy_sell_ratio": bs_ratio,
+        "thresholds": {
+            "price_change_m5": SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_PCT,
+            "vol_m5": SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_VOL_M5_USD,
+            "tx_m5": SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_TXNS,
+            "buy_sell_ratio": SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_BS_RATIO,
+        },
+    }
+    ok = (
+        price_change_m5 >= SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_PCT
+        and vol_m5 >= SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_VOL_M5_USD
+        and tx_m5 >= SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_TXNS
+        and bs_ratio >= SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_BS_RATIO
+    )
+    return ok, detail
+
+
 def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, momentum_pct=0.0):
     """Return a hard reject reason for dead-cat bounce patterns.
 
@@ -614,9 +660,20 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
     # 1. ABSOLUTE HARD GATES (Touch and die)
     _chasing, _chase_reason = is_chasing_top(cached_trend) if cached_trend else (False, '')
+    _explosive_direct_ok, _explosive_direct_detail = _explosive_direct_scout_ok(
+        entry_readiness_policy,
+        cached_trend,
+        bs_ratio,
+    )
     if _chasing:
-        log.info(f"[SmartEntry] 🚫  REJECT: chasing_top - {_chase_reason}")
-        return False, 'chasing_top', _chase_reason, None
+        if _explosive_direct_ok:
+            log.info(
+                f"[SmartEntry] ⚡ DIRECT_SCOUT: bypassing chasing_top for tiny explosive newborn scout "
+                f"detail={_explosive_direct_detail} chase={_chase_reason}"
+            )
+        else:
+            log.info(f"[SmartEntry] 🚫  REJECT: chasing_top - {_chase_reason}")
+            return False, 'chasing_top', _chase_reason, None
 
     # Hard gate: BS must be >= 1.05 (buyers must exceed sellers)
     # Data: AIB entered with bs=0.94 (sellers > buyers) → -21.5% loss.
@@ -863,6 +920,17 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     if total_score < 50:
         log.info(f"[SmartEntry] 🚫  REJECT: {detail_str}")
         return False, 'score_too_low', detail_str, None
+
+    if _explosive_direct_ok:
+        node_detail = (
+            f"node=explosive_direct_scout p_follow=0.74 "
+            f"pc_m5={_explosive_direct_detail.get('price_change_m5'):+.1f}% "
+            f"vol_m5=${_explosive_direct_detail.get('vol_m5'):.0f} "
+            f"tx_m5={_explosive_direct_detail.get('tx_m5')} "
+            f"buy_sell={bs_ratio:.2f} armed=({detail_str})"
+        )
+        log.info(f"[SmartEntry] ⚡ ${symbol} EXPLOSIVE_DIRECT_SCOUT at ${price:.10f}: {node_detail}")
+        return True, 'explosive_newborn_direct_scout', node_detail, price
 
     # Score only arms the candidate. Entry requires a live timing node.
     from matrix_evaluator import MatrixEvaluator
