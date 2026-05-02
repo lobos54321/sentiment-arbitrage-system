@@ -5900,6 +5900,24 @@ def run_monitor(db):
                                 f" live_top1={_lotto_live['top1_pct']:.0f}% live_top10={_lotto_live['top10_pct']:.0f}%"
                                 if _lotto_live else ""
                             )
+                            if _lotto_decision.reason == 'lotto_concentrated_scout_ok':
+                                record_decision_event(
+                                    db,
+                                    component='lotto_entry_gate',
+                                    event_type='scout_candidate',
+                                    decision='candidate',
+                                    reason=_lotto_decision.reason,
+                                    token_ca=w_entry['ca'],
+                                    symbol=w_entry['symbol'],
+                                    lifecycle_id=_lotto_lc_id,
+                                    signal_ts=w_entry['signal_ts'],
+                                    signal_id=w_entry.get('premium_signal_id'),
+                                    route='LOTTO',
+                                    payload=with_lifecycle_payload({
+                                        'position_size_sol': _lotto_detail.get('position_size_sol'),
+                                        **_lotto_detail,
+                                    }, _lotto_lifecycle),
+                                )
                             log.info(
                                 f"  [LOTTO] 🎰 FIRE {w_entry['symbol']}! "
                                 f"MC=${w_entry.get('signal_mc', 0) or 0:.0f} "

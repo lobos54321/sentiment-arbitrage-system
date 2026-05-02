@@ -608,6 +608,31 @@ def test_lotto_concentrated_scout_still_blocks_top1_too_high():
     assert decision.reason == "lotto_live_top1_42pct"
 
 
+def test_lotto_concentrated_scout_blocks_top10_above_tighter_default():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 13230,
+            "signal_holders": 80,
+            "signal_vol24h": 20000,
+            "signal_top10": 28,
+        },
+        dex_snapshot={
+            "liquidity_unknown": True,
+            "dex_id": "pumpfun",
+            "vol_m5": 29800,
+            "buys_m5": 350,
+            "sells_m5": 283,
+            "price_change_m5": 349,
+        },
+        live_concentration={"top1_pct": 34.2, "top10_pct": 62.5},
+        now=1004,
+    )
+    assert decision.expire is True
+    assert decision.reason == "lotto_live_top10_62pct"
+    assert decision.detail["concentrated_scout_top10_max_pct"] == 60.0
+
+
 def test_lotto_allows_pumpfun_liquidity_unknown_live_top10_under_risky_limit():
     decision = evaluate_lotto_entry(
         {
