@@ -66,7 +66,7 @@ from entry_decision_contract import build_entry_decision_contract
 from entry_readiness_policy import evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
-from gmgn_readonly import fetch_gmgn_token_enrichment
+from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
 from gmgn_policy import evaluate_gmgn_lotto_policy
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -4879,6 +4879,15 @@ def run_monitor(db):
     log.info(f"  paper execution size: {position_size_sol} SOL")
     log.info(f"  max open positions: {max_positions}")
     log.info(f"  LOTTO: size={LOTTO_POSITION_SIZE_SOL} SOL max_concurrent={LOTTO_MAX_CONCURRENT} strategy={LOTTO_STRATEGY_ID}")
+    gmgn_status = gmgn_readonly_runtime_status()
+    log.info(
+        "  GMGN readonly: "
+        f"enabled={gmgn_status['enabled']} "
+        f"api_key_present={gmgn_status['api_key_present']} "
+        f"api_key_prefix={gmgn_status['api_key_prefix']} "
+        f"gmgn_cli={'found' if gmgn_status['gmgn_cli'] else 'missing'} "
+        f"cache_sec={gmgn_status['cache_sec']} timeout_sec={gmgn_status['timeout_sec']}"
+    )
     log.info(
         f"  paper execution: mode={paper_execution['executionMode']} entry={paper_execution['entryPriceSource']} "
         f"exit={paper_execution['exitPriceSource']} retries={paper_execution['quoteRetries']} "

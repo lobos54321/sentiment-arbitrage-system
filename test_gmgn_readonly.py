@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 from gmgn_readonly import (  # noqa: E402
     clear_gmgn_readonly_cache,
     fetch_gmgn_token_enrichment,
+    gmgn_readonly_runtime_status,
     gmgn_risk_flags,
     normalize_gmgn_token_info,
 )
@@ -86,6 +87,19 @@ def test_fetch_gmgn_token_enrichment_disabled_does_not_call_cli(monkeypatch):
     result = fetch_gmgn_token_enrichment("TokenCA", enabled=False)
 
     assert result == {"available": False, "source": "gmgn", "reason": "disabled"}
+
+
+def test_gmgn_runtime_status_strips_env_values(monkeypatch):
+    monkeypatch.setenv("GMGN_API_KEY", "  gmgn_test_key  ")
+    monkeypatch.setattr("gmgn_readonly.GMGN_READONLY_ENABLED", True)
+    monkeypatch.setattr("gmgn_readonly.shutil.which", lambda name: "/usr/local/bin/gmgn-cli")
+
+    status = gmgn_readonly_runtime_status()
+
+    assert status["enabled"] is True
+    assert status["api_key_present"] is True
+    assert status["api_key_prefix"] == "gmgn_tes"
+    assert status["gmgn_cli"] == "/usr/local/bin/gmgn-cli"
 
 
 def test_fetch_gmgn_token_enrichment_normalizes_cli_result(monkeypatch):

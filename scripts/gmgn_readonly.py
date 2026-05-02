@@ -13,14 +13,32 @@ import shutil
 import subprocess
 import time
 
+_risk_cache = {}
 
-GMGN_READONLY_ENABLED = os.environ.get("GMGN_READONLY_ENABLED", "false").lower() == "true"
-GMGN_READONLY_CACHE_SEC = float(os.environ.get("GMGN_READONLY_CACHE_SEC", "60"))
-GMGN_READONLY_TIMEOUT_SEC = float(os.environ.get("GMGN_READONLY_TIMEOUT_SEC", "6"))
-GMGN_ALLOW_DEMO_KEY = os.environ.get("GMGN_ALLOW_DEMO_KEY", "false").lower() == "true"
+
+def _env_flag(name, default="false"):
+    return os.environ.get(name, default).strip().lower() == "true"
+
+
+GMGN_READONLY_ENABLED = _env_flag("GMGN_READONLY_ENABLED")
+GMGN_READONLY_CACHE_SEC = float(os.environ.get("GMGN_READONLY_CACHE_SEC", "60").strip())
+GMGN_READONLY_TIMEOUT_SEC = float(os.environ.get("GMGN_READONLY_TIMEOUT_SEC", "6").strip())
+GMGN_ALLOW_DEMO_KEY = _env_flag("GMGN_ALLOW_DEMO_KEY")
 GMGN_DEMO_API_KEY = "gmgn_solbscbaseethmonadtron"
 
-_risk_cache = {}
+
+def gmgn_readonly_runtime_status():
+    key = os.environ.get("GMGN_API_KEY", "").strip()
+    cli_path = shutil.which("gmgn-cli")
+    return {
+        "enabled": GMGN_READONLY_ENABLED,
+        "api_key_present": bool(key),
+        "api_key_prefix": key[:8] if key else "",
+        "allow_demo_key": GMGN_ALLOW_DEMO_KEY,
+        "cache_sec": GMGN_READONLY_CACHE_SEC,
+        "timeout_sec": GMGN_READONLY_TIMEOUT_SEC,
+        "gmgn_cli": cli_path or "",
+    }
 
 
 def clear_gmgn_readonly_cache():
