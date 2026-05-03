@@ -188,6 +188,31 @@ class WatchlistStore:
         if existing:
             # Update existing entry with new signal info
             updates = {'signal_count': existing['signal_count'] + 1}
+            existing_signal_ts = existing.get('signal_ts') or 0
+            incoming_signal_ts = signal_ts or 0
+            try:
+                is_newer_signal = int(incoming_signal_ts) >= int(existing_signal_ts)
+            except (TypeError, ValueError):
+                is_newer_signal = bool(incoming_signal_ts)
+            should_refresh_signal = is_newer_signal and existing.get('status') == 'watching'
+            if should_refresh_signal:
+                refreshed_signal_price = existing.get('signal_price')
+                if signal_type != 'ATH' or not refreshed_signal_price:
+                    refreshed_signal_price = signal_price or refreshed_signal_price
+                updates.update({
+                    'symbol': symbol or existing.get('symbol'),
+                    'pool_address': pool_address or existing.get('pool_address'),
+                    'signal_ts': signal_ts or existing.get('signal_ts'),
+                    'premium_signal_id': premium_signal_id or existing.get('premium_signal_id'),
+                    'signal_price': refreshed_signal_price,
+                    'signal_mc': signal_mc or existing.get('signal_mc'),
+                    'signal_holders': signal_holders or existing.get('signal_holders'),
+                    'signal_vol24h': signal_vol24h or existing.get('signal_vol24h'),
+                    'signal_tx24h': signal_tx24h or existing.get('signal_tx24h'),
+                    'signal_top10': signal_top10 or existing.get('signal_top10'),
+                    'added_at': now,
+                    'last_eval_at': 0,
+                })
             if signal_super > 0:
                 updates['latest_super'] = signal_super
             if signal_type == 'ATH':
@@ -201,15 +226,16 @@ class WatchlistStore:
                 # so score_price always compares current price to the NOT_ATH anchor
                 if signal_price and signal_price > 0:
                     updates['latest_ath_price'] = signal_price
-                if existing['type'] == 'NOT_ATH':
-                    updates['type'] = 'ATH'  # upgrade type
+                if existing.get('status') == 'watching':
+                    updates['type'] = 'ATH'
             elif signal_type == 'LOTTO' and existing['type'] == 'NOT_ATH':
                 updates['type'] = 'LOTTO'
             self._update(existing['id'], **updates)
             log.info(
                 f"[WL] Updated ${symbol} signal_count={updates.get('signal_count')} "
                 f"has_ath={updates.get('has_ath', existing['has_ath'])} "
-                f"type={updates.get('type', existing['type'])}"
+                f"type={updates.get('type', existing['type'])} "
+                f"fresh={should_refresh_signal}"
             )
             return self.get_by_id(existing['id'])
 
@@ -303,6 +329,24 @@ class WatchlistStore:
             "SELECT COUNT(*) as c FROM watchlist WHERE status IN ('holding', 'moon_bag')"
         ).fetchone()
         return row['c'] if row else 0
+
+    def expire_orphaned_position_states(self, active_trade_ids=None):
+        """Expire holding/moon_bag rows that no longer have an open paper trade."""
+        active_trade_ids = {int(x) for x in (active_trade_ids or set()) if x is not None}
+        rows = self.db.execute(
+            "SELECT id, trade_id FROM watchlist WHERE status IN ('holding', 'moon_bag')"
+        ).fetchall()
+        expired = 0
+        for row in rows:
+            trade_id = row['trade_id']
+            try:
+                trade_id_int = int(trade_id) if trade_id is not None else None
+            except (TypeError, ValueError):
+                trade_id_int = None
+            if trade_id_int not in active_trade_ids:
+                self.mark_expired(row['id'], 'reconcile_no_open_paper_trade')
+                expired += 1
+        return expired
 
     def get_all_active(self):
         """Get all non-expired entries."""

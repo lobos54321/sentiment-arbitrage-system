@@ -1801,6 +1801,16 @@ def safe_external_alpha_lookup(db, token_ca, *, now=None, signal_ts=None, chain=
         return {"available": False, "reason": "external_alpha_lookup_error", "error": str(exc)}
 
 
+def smart_entry_result_ready(pending_entries):
+    for pending in (pending_entries or {}).values():
+        if pending.get('timing_passed'):
+            return True
+        future = pending.get('_smart_entry_future')
+        if future is not None and future.done():
+            return True
+    return False
+
+
 
 def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
     trigger_pct = _safe_float(trigger_pnl * 100.0, None)
@@ -5046,6 +5056,15 @@ def run_monitor(db):
         log.info(f"  Restored {len(positions)} open positions")
     if sanitized_monitor_states:
         log.info(f"  Sanitized {sanitized_monitor_states} open monitor_state rows")
+    try:
+        reconciled_watchlist = watchlist.expire_orphaned_position_states(set(positions.keys()))
+        if reconciled_watchlist:
+            log.warning(
+                f"  [WATCHLIST_RECONCILE] expired {reconciled_watchlist} orphaned holding/moon_bag rows "
+                f"with no open paper trade"
+            )
+    except Exception as exc:
+        log.warning(f"  [WATCHLIST_RECONCILE] failed: {exc}")
 
     last_id_row = db.execute("""
         SELECT MAX(
@@ -5107,6 +5126,7 @@ def run_monitor(db):
       try:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
+        pending_priority = smart_entry_result_ready(pending_entries)
 
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
@@ -5144,7 +5164,7 @@ def run_monitor(db):
             )
             last_heartbeat = now
 
-        if now - last_missed_attribution_update >= 60:
+        if not pending_priority and now - last_missed_attribution_update >= 60:
             try:
                 _missed_updated = update_due_missed_attributions(
                     db,
@@ -5251,7 +5271,7 @@ def run_monitor(db):
             )
             last_progress = now
 
-        if now - last_signal_check >= SIGNAL_POLL_INTERVAL:
+        if not pending_priority and now - last_signal_check >= SIGNAL_POLL_INTERVAL:
             last_signal_check = now
             try:
                 new_signals = get_new_signals(last_signal_id)
@@ -5783,7 +5803,11 @@ def run_monitor(db):
                 log.error(f"Signal check error: {e}")
 
         # --- Evaluate Watchlist Entries ---
-        watching_entries = watchlist.get_watching()
+        if pending_priority:
+            watching_entries = []
+            log.info("  [PENDING_PRIORITY] SmartEntry result ready; skipping housekeeping/watchlist scan for immediate execution")
+        else:
+            watching_entries = watchlist.get_watching()
         if watching_entries:
             log.info(f"  [WATCHLIST_SCAN] Scanning {len(watching_entries)} watching tokens...")
         wl_eval_count = 0
@@ -5791,6 +5815,9 @@ def run_monitor(db):
         wl_skip_duplicate = 0
         for w_entry in watching_entries:
             try:
+                if smart_entry_result_ready(pending_entries):
+                    log.info("  [PENDING_PRIORITY] SmartEntry completed during scan; deferring remaining watchlist work")
+                    break
                 lifecycle_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                 
                 # Skip if already in pending or open positions
