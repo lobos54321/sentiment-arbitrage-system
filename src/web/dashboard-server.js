@@ -79,6 +79,20 @@ function firstValue(...values) {
   return null;
 }
 
+function usableSymbol(value) {
+  if (value === undefined || value === null) return null;
+  const symbol = String(value).trim();
+  if (!symbol || symbol.toUpperCase() === 'UNKNOWN') return null;
+  return symbol;
+}
+
+function normalizeUnixishMs(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return numeric > 1_000_000_000_000 ? Math.floor(numeric) : Math.floor(numeric * 1000);
+}
+
 function inferEntryMode(row) {
   const monitorState = parseJsonObject(row.monitor_state_json);
   const lottoState = parseJsonObject(row.lotto_state_json);
@@ -2566,9 +2580,28 @@ const server = http.createServer(async (req, res) => {
       `).all(sinceTs ? { since: sinceTs, eventLimit } : { eventLimit });
 
       const summaries = new Map();
+      const latestAthByToken = new Map();
       for (const event of events) {
         const key = lifecycleSummaryKey(event);
         const payload = parseJsonObject(event.payload_json);
+        const routeLabel = String(firstValue(event.route, payload.watchlist_type, event.reason) || '').toUpperCase();
+        const signalTsMs = normalizeUnixishMs(event.signal_ts);
+        if (event.token_ca && routeLabel === 'ATH' && signalTsMs) {
+          const previous = latestAthByToken.get(event.token_ca);
+          if (!previous || signalTsMs > previous.signal_ts_ms) {
+            latestAthByToken.set(event.token_ca, {
+              signal_id: event.signal_id,
+              signal_ts: event.signal_ts,
+              signal_ts_ms: signalTsMs,
+              lifecycle_id: event.lifecycle_id,
+              symbol: usableSymbol(event.symbol) || (previous || {}).symbol || event.symbol || null,
+              event_id: event.id,
+              event_ts: event.event_ts,
+            });
+          } else if (previous && !usableSymbol(previous.symbol) && usableSymbol(event.symbol)) {
+            previous.symbol = usableSymbol(event.symbol);
+          }
+        }
         const entryMode = firstValue(
           payload.entry_mode,
           payload.entryMode,
@@ -2722,10 +2755,30 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      for (const summary of summaries.values()) {
+        const latestAth = summary.token_ca ? latestAthByToken.get(summary.token_ca) : null;
+        if (!latestAth) continue;
+        summary.latest_ath_signal_id = latestAth.signal_id;
+        summary.latest_ath_signal_ts = latestAth.signal_ts;
+        summary.latest_ath_signal_ts_ms = latestAth.signal_ts_ms;
+        summary.latest_ath_lifecycle_id = latestAth.lifecycle_id;
+        summary.latest_ath_symbol = latestAth.symbol;
+
+        if (String(summary.route || '').toUpperCase() === 'ATH') {
+          const anchorTsMs = normalizeUnixishMs(summary.signal_ts);
+          summary.anchor_signal_ts_ms = anchorTsMs;
+          summary.anchor_is_latest_ath = Boolean(anchorTsMs && latestAth.signal_ts_ms && anchorTsMs >= latestAth.signal_ts_ms);
+          summary.anchor_lag_sec = anchorTsMs && latestAth.signal_ts_ms && latestAth.signal_ts_ms > anchorTsMs
+            ? Math.round((latestAth.signal_ts_ms - anchorTsMs) / 1000)
+            : 0;
+        }
+      }
+
       let list = Array.from(summaries.values());
       if (statusFilter !== 'all') {
         list = list.filter((item) => String(item.final_status || '').toLowerCase() === statusFilter);
       }
+      const anchorMismatchCount = list.filter((item) => item.anchor_is_latest_ath === false).length;
       const counts = {};
       const byFinalGate = {};
       for (const item of list) {
@@ -2769,6 +2822,7 @@ const server = http.createServer(async (req, res) => {
           event_limit: eventLimit,
         },
         status_counts: counts,
+        anchor_mismatch_count: anchorMismatchCount,
         by_final_gate: Object.values(byFinalGate).sort((a, b) => b.n - a.n).slice(0, 100),
         lifecycles: list.slice(0, limit),
       }, null, 2));

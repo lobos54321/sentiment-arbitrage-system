@@ -50,6 +50,88 @@ def test_register_refreshes_existing_watchlist_entry_for_fresh_ath(tmp_path):
         store.close()
 
 
+def test_register_fresh_ath_preserves_real_symbol_when_parser_returns_unknown(tmp_path):
+    store = WatchlistStore(str(tmp_path / "watchlist.db"))
+    try:
+        first = store.register(
+            ca="TokenCA",
+            symbol="MIKE",
+            signal_type="NOT_ATH",
+            pool_address="Pool1",
+            signal_ts=1000,
+            premium_signal_id=1,
+            signal_price=0.000001,
+            signal_mc=16000,
+        )
+        updated = store.register(
+            ca="TokenCA",
+            symbol="UNKNOWN",
+            signal_type="ATH",
+            pool_address="Pool2",
+            signal_ts=2000,
+            premium_signal_id=2,
+            signal_price=0.0000026,
+            signal_mc=42000,
+        )
+
+        assert updated["id"] == first["id"]
+        assert updated["symbol"] == "MIKE"
+        assert updated["type"] == "ATH"
+        assert updated["signal_ts"] == 2000
+        assert updated["premium_signal_id"] == 2
+        assert updated["signal_mc"] == 42000
+        assert updated["last_ath_ts"] == 2000
+        assert updated["last_ath_mc"] == 42000
+        assert updated["signal_price"] == 0.000001
+        assert updated["latest_ath_price"] == 0.0000026
+    finally:
+        store.close()
+
+
+def test_register_reactivates_expired_ath_with_fresh_signal_anchor(tmp_path):
+    store = WatchlistStore(str(tmp_path / "watchlist.db"))
+    try:
+        first = store.register(
+            ca="TokenCA",
+            symbol="LUCY",
+            signal_type="ATH",
+            pool_address="Pool1",
+            signal_ts=1000,
+            premium_signal_id=1,
+            signal_price=0.000001,
+            signal_mc=30000,
+        )
+        store.mark_expired(first["id"], "timeout")
+
+        reactivated = store.register(
+            ca="TokenCA",
+            symbol="UNKNOWN",
+            signal_type="ATH",
+            pool_address="Pool2",
+            signal_ts=3000,
+            premium_signal_id=3,
+            signal_price=0.000004,
+            signal_mc=80000,
+        )
+
+        assert reactivated["id"] == first["id"]
+        assert reactivated["status"] == "watching"
+        assert reactivated["symbol"] == "LUCY"
+        assert reactivated["type"] == "ATH"
+        assert reactivated["pool_address"] == "Pool2"
+        assert reactivated["signal_ts"] == 3000
+        assert reactivated["premium_signal_id"] == 3
+        assert reactivated["signal_price"] == 0.000004
+        assert reactivated["signal_mc"] == 80000
+        assert reactivated["last_ath_ts"] == 3000
+        assert reactivated["last_ath_mc"] == 80000
+        assert reactivated["latest_ath_price"] == 0.000004
+        assert reactivated["expire_reason"] is None
+        assert reactivated["fire_block_until"] == 0
+    finally:
+        store.close()
+
+
 def test_reconcile_expires_orphaned_watchlist_holding_rows(tmp_path):
     store = WatchlistStore(str(tmp_path / "watchlist.db"))
     try:

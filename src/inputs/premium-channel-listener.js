@@ -2,7 +2,7 @@
  * Premium Channel Listener (Egeye AI Gems 100X Vip)
  *
  * Uses Telegram User API (MTProto) to monitor a private paid signal channel.
- * Parses "🔥 New Trending" messages for token signals, ignores ATH alerts.
+ * Parses "🔥 New Trending" and "📈 ATH" messages for token signals.
  * No database dependency - emits signals via callback.
  */
 
@@ -433,11 +433,18 @@ export class PremiumChannelListener {
 
   /**
    * Parse 📈 ATH message
-   * Format: "📈New ATH $KIRBY is up **51%** 📈" or "📈New ATH $PMPR is up **15.43X** 📈"
+   * Format: "📈New ATH $KIRBY is up **51%** 📈",
+   * "📈New ATH $PMPR is up **15.43X** 📈", or "ATH $Mike 2.6X".
    */
   _parseATHSignal(text) {
-    // Extract symbol and gain: $SYMBOL is up **XX%** or **X.XXX**
-    const athMatch = text.match(/\$(\S+)\s+is\s+up\s+\*{0,2}([\d.]+)(%|X)\*{0,2}/i);
+    const normalized = text
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\r/g, '');
+
+    // Extract symbol and gain: $SYMBOL is up **XX%**, $SYMBOL is up **X.XXX**,
+    // or compact premium-channel form: ATH $SYMBOL X.XX.
+    const athMatch = normalized.match(/(?:New\s+)?ATH\s+\$([^\s`*]+)(?:\s+(?:is\s+)?up)?\s+\*{0,2}([\d.]+)\s*(%|X)\*{0,2}/i)
+      || normalized.match(/\$([^\s`*]+)\s+(?:is\s+)?up\s+\*{0,2}([\d.]+)\s*(%|X)\*{0,2}/i);
     const symbol = athMatch ? athMatch[1] : null;
     let gainPct = 0;
     if (athMatch) {
@@ -449,7 +456,7 @@ export class PremiumChannelListener {
     }
 
     // Extract MC range: $12.86K —> $23.62K
-    const mcMatch = text.match(/\$([\d,.]+)\s*([KMBkmb])?\s*[—\-]+>\s*\$([\d,.]+)\s*([KMBkmb])?/);
+    const mcMatch = normalized.match(/\$([\d,.]+)\s*([KMBkmb])?\s*[—\-]+>\s*\$([\d,.]+)\s*([KMBkmb])?/);
     const mcFrom = mcMatch ? this._parseNumber(mcMatch[1], mcMatch[2]) : 0;
     const mcTo = mcMatch ? this._parseNumber(mcMatch[3], mcMatch[4]) : 0;
 

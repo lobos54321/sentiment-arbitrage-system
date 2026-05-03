@@ -23,6 +23,16 @@ DATA_DIR = PROJECT_ROOT / 'data'
 WATCHLIST_DB = os.environ.get('WATCHLIST_DB', str(DATA_DIR / 'watchlist.db'))
 
 
+def _usable_symbol(symbol):
+    """Return a real symbol, ignoring parser placeholders like UNKNOWN."""
+    if symbol is None:
+        return None
+    value = str(symbol).strip()
+    if not value or value.upper() == 'UNKNOWN':
+        return None
+    return value
+
+
 # ─── Schema ────────────────────────────────────────────────────────────────
 
 CREATE_TABLE_SQL = """
@@ -33,7 +43,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     pool_address    TEXT,
     type            TEXT NOT NULL DEFAULT 'NOT_ATH',   -- NOT_ATH | ATH | ATH_FOLLOWUP
 
-    -- Signal snapshot (recorded at first registration)
+    -- Signal snapshot (current active evaluation anchor; ATH refreshes may update it)
     signal_ts       INTEGER,
     premium_signal_id INTEGER,
     signal_price    REAL,
@@ -192,6 +202,7 @@ class WatchlistStore:
         if existing:
             # Update existing entry with new signal info
             updates = {'signal_count': existing['signal_count'] + 1}
+            resolved_symbol = _usable_symbol(symbol) or existing.get('symbol') or symbol or ca[:8]
             existing_signal_ts = existing.get('signal_ts') or 0
             incoming_signal_ts = signal_ts or 0
             try:
@@ -204,7 +215,7 @@ class WatchlistStore:
                 if signal_type != 'ATH' or not refreshed_signal_price:
                     refreshed_signal_price = signal_price or refreshed_signal_price
                 updates.update({
-                    'symbol': symbol or existing.get('symbol'),
+                    'symbol': resolved_symbol,
                     'pool_address': pool_address or existing.get('pool_address'),
                     'signal_ts': signal_ts or existing.get('signal_ts'),
                     'premium_signal_id': premium_signal_id or existing.get('premium_signal_id'),
@@ -238,7 +249,7 @@ class WatchlistStore:
                 updates['type'] = 'LOTTO'
             self._update(existing['id'], **updates)
             log.info(
-                f"[WL] Updated ${symbol} signal_count={updates.get('signal_count')} "
+                f"[WL] Updated ${resolved_symbol} signal_count={updates.get('signal_count')} "
                 f"has_ath={updates.get('has_ath', existing['has_ath'])} "
                 f"type={updates.get('type', existing['type'])} "
                 f"fresh={should_refresh_signal}"
@@ -247,19 +258,37 @@ class WatchlistStore:
 
         # Check if previously expired — allow re-registration for ATH upgrades
         expired = self.db.execute(
-            "SELECT id FROM watchlist WHERE ca = ? AND status = 'expired' ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM watchlist WHERE ca = ? AND status = 'expired' ORDER BY id DESC LIMIT 1",
             (ca,)
         ).fetchone()
         if expired and signal_type == 'ATH':
             # Re-activate expired entry
+            expired = dict(expired)
+            resolved_symbol = _usable_symbol(symbol) or expired.get('symbol') or symbol or ca[:8]
             self._update(expired['id'],
                          status='watching', type='ATH', has_ath=1,
-                         signal_count=1, latest_super=signal_super,
+                         symbol=resolved_symbol,
+                         pool_address=pool_address or expired.get('pool_address'),
+                         signal_ts=signal_ts or expired.get('signal_ts'),
+                         premium_signal_id=premium_signal_id or expired.get('premium_signal_id'),
+                         signal_price=signal_price or expired.get('signal_price'),
+                         signal_mc=signal_mc or expired.get('signal_mc'),
+                         signal_super=signal_super or expired.get('signal_super') or 0,
+                         signal_holders=signal_holders or expired.get('signal_holders') or 0,
+                         signal_vol24h=signal_vol24h or expired.get('signal_vol24h') or 0,
+                         signal_tx24h=signal_tx24h or expired.get('signal_tx24h') or 0,
+                         signal_top10=signal_top10 or expired.get('signal_top10') or 0,
+                         signal_count=(expired.get('signal_count') or 0) + 1,
+                         latest_super=signal_super or expired.get('latest_super') or 0,
+                         ath_count=(expired.get('ath_count') or 0) + 1,
+                         last_ath_ts=signal_ts or expired.get('last_ath_ts') or 0,
+                         last_ath_mc=signal_mc or expired.get('last_ath_mc') or 0,
+                         latest_ath_price=signal_price or expired.get('latest_ath_price'),
                          added_at=now, last_eval_at=0, expire_reason=None,
                          entry_count=0, cooldown_until=0,
                          fire_block_until=0, fire_block_reason=None,
                          lowest_price=signal_price, highest_price=signal_price)
-            log.info(f"[WL] Re-activated expired ${symbol} as ATH")
+            log.info(f"[WL] Re-activated expired ${resolved_symbol} as ATH")
             return self.get_by_id(expired['id'])
 
         # New registration
