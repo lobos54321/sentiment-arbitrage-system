@@ -137,6 +137,14 @@ DEFAULT_PAPER_EXECUTION = {
     'tokenNotTradableTrapMinutes': 1,
 }
 
+SOL_MINT = 'So11111111111111111111111111111111111111112'
+PRICE_UNIT_SOL_PER_TOKEN = 'SOL_PER_TOKEN'
+PRICE_UNIT_UNKNOWN = 'UNKNOWN'
+PNL_UNIT_RATIO_DECIMAL = 'RATIO_DECIMAL'
+AMOUNT_UNIT_SOL = 'SOL'
+AMOUNT_UNIT_TOKEN = 'TOKEN'
+PRICE_UNIT_CONTRACT_VERSION = 'v1_quote_truth_sol_per_token'
+
 # Backward-compatible defaults for code paths that still use legacy constants.
 SL_PCT = -0.03
 TRAIL_START = 0.02
@@ -361,6 +369,53 @@ def get_paper_execution_config(strategy_config):
     return execution
 
 
+def _amount_unit_for_mint(mint, token_ca=None):
+    mint_s = str(mint or '')
+    if mint_s == SOL_MINT:
+        return AMOUNT_UNIT_SOL
+    if token_ca and mint_s == str(token_ca):
+        return AMOUNT_UNIT_TOKEN
+    if mint_s:
+        return AMOUNT_UNIT_TOKEN
+    return None
+
+
+def execution_unit_contract(execution=None):
+    payload = execution if isinstance(execution, dict) else {}
+    token_ca = payload.get('tokenCA')
+    input_unit = _amount_unit_for_mint(payload.get('inputMint'), token_ca)
+    output_unit = _amount_unit_for_mint(payload.get('outputMint'), token_ca)
+    effective_price_unit = PRICE_UNIT_UNKNOWN
+    if {input_unit, output_unit} == {AMOUNT_UNIT_SOL, AMOUNT_UNIT_TOKEN}:
+        # Jupiter buy: SOL / token. Jupiter sell: SOL out / token in.
+        effective_price_unit = PRICE_UNIT_SOL_PER_TOKEN
+    return {
+        'priceUnitContractVersion': PRICE_UNIT_CONTRACT_VERSION,
+        'effectivePriceUnit': effective_price_unit,
+        'inputAmountUnit': input_unit,
+        'quotedOutAmountUnit': output_unit,
+        'accountingUnit': AMOUNT_UNIT_SOL,
+        'pnlUnit': PNL_UNIT_RATIO_DECIMAL,
+    }
+
+
+def price_unit_contract_payload(**overrides):
+    payload = {
+        'priceUnitContractVersion': PRICE_UNIT_CONTRACT_VERSION,
+        'entryPriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+        'entryTriggerPriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+        'entryQuotePriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+        'exitPriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+        'trailUnit': PNL_UNIT_RATIO_DECIMAL,
+        'stopUnit': PNL_UNIT_RATIO_DECIMAL,
+        'pnlUnit': PNL_UNIT_RATIO_DECIMAL,
+        'accountingUnit': AMOUNT_UNIT_SOL,
+        'marketContextUnit': 'USD_CONTEXT_ONLY',
+    }
+    payload.update({key: value for key, value in overrides.items() if value is not None})
+    return payload
+
+
 def build_execution_audit(execution=None, extra=None):
     payload = execution if isinstance(execution, dict) else {}
     audit = {
@@ -394,6 +449,7 @@ def build_execution_audit(execution=None, extra=None):
         'rawEffectivePrice': _safe_float(payload.get('rawEffectivePrice'), None),
         'rawFeeEstimate': _safe_float(payload.get('rawFeeEstimate'), None),
     }
+    audit.update(execution_unit_contract(payload))
     if isinstance(extra, dict):
         for key, value in extra.items():
             audit[key] = value
@@ -3916,6 +3972,12 @@ def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entr
     sanitized['tokenCA'] = token_ca or sanitized.get('tokenCA') or None
     sanitized['symbol'] = symbol or sanitized.get('symbol') or 'UNKNOWN'
     sanitized['entryPrice'] = _safe_float(entry_price, 0.0)
+    sanitized['entryPriceUnit'] = PRICE_UNIT_SOL_PER_TOKEN
+    sanitized['entryQuotePriceUnit'] = PRICE_UNIT_SOL_PER_TOKEN
+    sanitized['entryTriggerPriceUnit'] = PRICE_UNIT_SOL_PER_TOKEN
+    sanitized['pnlUnit'] = PNL_UNIT_RATIO_DECIMAL
+    sanitized['accountingUnit'] = AMOUNT_UNIT_SOL
+    sanitized['priceUnitContractVersion'] = PRICE_UNIT_CONTRACT_VERSION
     sanitized['entrySol'] = _safe_float(position_size_sol, 0.0)
     sanitized['tokenAmount'] = _safe_int(token_amount_raw, 0)
     sanitized['tokenDecimals'] = _safe_int(token_decimals, 0)
@@ -4820,6 +4882,7 @@ def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decisi
         'lifecycleId': pos.lifecycle_id,
         'decisionType': decision_type,
         'failureReason': pos.last_exit_quote_failure,
+        **price_unit_contract_payload(exitPriceUnit='SYNTHETIC_CLOSE_NO_PRICE'),
         'triggerPnlPct': _safe_float(float(pnl_pct) * 100.0, None),
     }
     if isinstance(audit_extra, dict):
@@ -7214,6 +7277,12 @@ def run_monitor(db):
                         'entryMode': pending.get('entry_mode') or timing_reason,
                         'entryTriggerPrice': trigger_price_val,
                         'entryQuotePrice': price,
+                        'entryPriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+                        'entryTriggerPriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+                        'entryQuotePriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
+                        'pnlUnit': PNL_UNIT_RATIO_DECIMAL,
+                        'accountingUnit': AMOUNT_UNIT_SOL,
+                        'priceUnitContractVersion': PRICE_UNIT_CONTRACT_VERSION,
                         'entrySpreadPct': _spread,
                         'entryEdgeBudget': _entry_edge_budget,
                         'entryReadinessPolicy': pending.get('entry_readiness_policy'),
@@ -7244,7 +7313,7 @@ def run_monitor(db):
                              premium_signal_id, signal_type, signal_route, entry_mode, lotto_state_json,
                              lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
                              strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """, (
                         _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
                         pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts,
@@ -7255,9 +7324,10 @@ def run_monitor(db):
                             'lifecycleId': lifecycle_id,
                             'signalTs': _signal_ts_store,
                             'rawSignalTs': pending.get('signal_ts'),
-                            'entryPriceUsd': price,
-                            'entryTriggerPrice': trigger_price_val,
-                            'entryQuotePrice': price,
+                            'entryPriceSolPerToken': price,
+                            'entryTriggerPriceSolPerToken': trigger_price_val,
+                            'entryQuotePriceSolPerToken': price,
+                            **price_unit_contract_payload(),
                             'entrySpreadPct': _spread,
                             'entryEdgeBudget': _entry_edge_budget,
                             'entryReadinessPolicy': pending.get('entry_readiness_policy'),
@@ -7290,13 +7360,17 @@ def run_monitor(db):
                         data_source='jupiter_quote',
                         payload=with_lifecycle_payload({
                             'entry_price': price,
+                            'entry_price_unit': PRICE_UNIT_SOL_PER_TOKEN,
                             'trigger_price': trigger_price_val,
+                            'trigger_price_unit': PRICE_UNIT_SOL_PER_TOKEN,
                             'spread_pct': _spread,
                             'position_size_sol': actual_position_size_sol,
+                            'accounting_unit': AMOUNT_UNIT_SOL,
+                            'pnl_unit': PNL_UNIT_RATIO_DECIMAL,
                             'entry_edge_budget': _entry_edge_budget,
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             'entry_decision_contract': _entry_decision_contract.to_dict(),
-                            'execution': execution,
+                            'execution': build_execution_audit(execution),
                         }, _entry_lifecycle),
                     )
 
@@ -8076,6 +8150,7 @@ def run_monitor(db):
                                 'lifecycleId': pos.lifecycle_id,
                                 'decisionType': exit_eval.get('action'),
                                 'tpName': exit_eval.get('tpName'),
+                                **price_unit_contract_payload(),
                                 'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
                                 'quotePnlPct': _safe_float(partial_quote_pnl * 100.0 if partial_quote_pnl is not None else None, None),
                                 'quoteMarkGapPct': _safe_float(partial_quote_mark_gap * 100.0 if partial_quote_mark_gap is not None else None, None),
@@ -8116,6 +8191,7 @@ def run_monitor(db):
                                 'lifecycleId': pos.lifecycle_id,
                                 'decisionType': exit_eval.get('action'),
                                 'markSource': mark_source,
+                                **price_unit_contract_payload(),
                                 'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
                             })),
                             pos.exit_quote_failures,
@@ -8225,6 +8301,11 @@ def run_monitor(db):
                 pos.monitor_state = dict(pos.monitor_state or {})
                 pos.monitor_state['closed'] = True
                 pos.monitor_state['exitReason'] = reason
+                pos.monitor_state['exitPriceUnit'] = PRICE_UNIT_SOL_PER_TOKEN
+                pos.monitor_state['triggerPriceUnit'] = PRICE_UNIT_SOL_PER_TOKEN
+                pos.monitor_state['pnlUnit'] = PNL_UNIT_RATIO_DECIMAL
+                pos.monitor_state['accountingUnit'] = AMOUNT_UNIT_SOL
+                pos.monitor_state['priceUnitContractVersion'] = PRICE_UNIT_CONTRACT_VERSION
                 pos.monitor_state['finalExitSol'] = _safe_float(actual_out, None)
                 pos.monitor_state['totalRealizedSol'] = _safe_float(total_realized_sol, None)
                 pos.monitor_state['blendedRealizedPnl'] = _safe_float(realized_pnl, None)
@@ -8260,6 +8341,10 @@ def run_monitor(db):
                         'decisionType': exit_eval.get('action'),
                         'actionReason': exit_eval.get('actionReason'),
                         'markSource': mark_source,
+                        **price_unit_contract_payload(
+                            effectiveExitPriceUnit=PRICE_UNIT_SOL_PER_TOKEN,
+                            triggerPriceUnit=PRICE_UNIT_SOL_PER_TOKEN,
+                        ),
                         'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
                         'realizedPnlPct': _safe_float(realized_pnl * 100.0, None),
                         'totalRealizedSol': _safe_float(total_realized_sol, None),

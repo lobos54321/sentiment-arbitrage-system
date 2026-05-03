@@ -12,6 +12,13 @@ import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import { exec } from 'child_process';
+import {
+  applyFinalBlocker,
+  chooseFinalBlocker,
+  finalBlockerFromEvent,
+  finalBlockerFromMissed,
+  finalBlockerFromTrade,
+} from './lifecycle-summary-utils.js';
 
 dotenv.config();
 
@@ -146,6 +153,52 @@ function roundNumber(value, digits = 3) {
   if (!Number.isFinite(n)) return null;
   const factor = 10 ** digits;
   return Math.round(n * factor) / factor;
+}
+
+function priceUnitAuditForTrade(row) {
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  const exitAudit = parseJsonObject(row.exit_execution_audit_json);
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const warnings = [];
+
+  const entryUnit = firstValue(entryAudit.effectivePriceUnit, entryAudit.entryPriceUnit, monitorState.entryPriceUnit);
+  const triggerUnit = firstValue(monitorState.entryTriggerPriceUnit, entryAudit.entryTriggerPriceUnit);
+  const quoteUnit = firstValue(monitorState.entryQuotePriceUnit, entryAudit.entryQuotePriceUnit);
+  const exitUnit = firstValue(exitAudit.effectivePriceUnit, exitAudit.effectiveExitPriceUnit, monitorState.exitPriceUnit);
+  const pnlUnit = firstValue(entryAudit.pnlUnit, exitAudit.pnlUnit, monitorState.pnlUnit);
+  const accountingUnit = firstValue(entryAudit.accountingUnit, exitAudit.accountingUnit, monitorState.accountingUnit);
+
+  if (row.entry_price != null && entryUnit !== 'SOL_PER_TOKEN') warnings.push('entry_price_unit_missing_or_not_sol_per_token');
+  if (row.trigger_price != null && triggerUnit && triggerUnit !== 'SOL_PER_TOKEN') warnings.push('trigger_price_unit_not_sol_per_token');
+  if (row.trigger_price != null && !triggerUnit) warnings.push('trigger_price_unit_missing');
+  if (row.exit_price != null && Number(row.synthetic_close || 0) !== 1 && exitUnit && exitUnit !== 'SOL_PER_TOKEN') warnings.push('exit_price_unit_not_sol_per_token');
+  if (row.exit_price != null && Number(row.synthetic_close || 0) !== 1 && !exitUnit) warnings.push('exit_price_unit_missing');
+  if (row.pnl_pct != null && pnlUnit && pnlUnit !== 'RATIO_DECIMAL') warnings.push('pnl_unit_not_ratio_decimal');
+  if (row.pnl_pct != null && !pnlUnit) warnings.push('pnl_unit_missing');
+  if (accountingUnit && accountingUnit !== 'SOL') warnings.push('accounting_unit_not_sol');
+  if (entryAudit.entryPriceUsd != null) warnings.push('legacy_entryPriceUsd_key_present');
+
+  const entryEffective = Number(entryAudit.effectivePrice);
+  if (Number.isFinite(entryEffective) && Number.isFinite(Number(row.entry_price))) {
+    const gap = Math.abs(entryEffective - Number(row.entry_price));
+    const denom = Math.max(Math.abs(entryEffective), Math.abs(Number(row.entry_price)), 1e-18);
+    if (gap / denom > 0.000001) warnings.push('entry_price_differs_from_execution_effective_price');
+  }
+
+  return {
+    trade_id: row.id,
+    token_ca: row.token_ca,
+    symbol: row.symbol,
+    entry_unit: entryUnit || null,
+    trigger_unit: triggerUnit || null,
+    quote_unit: quoteUnit || null,
+    exit_unit: exitUnit || null,
+    pnl_unit: pnlUnit || null,
+    accounting_unit: accountingUnit || null,
+    accounting_source: firstValue(exitAudit.accountingSource, monitorState.accountingSource),
+    synthetic_close: Number(row.synthetic_close || 0) === 1,
+    warnings,
+  };
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2211,6 +2264,87 @@ const server = http.createServer(async (req, res) => {
       ],
     }, null, 2));
     return;
+  } else if (url.pathname === '/api/paper/price-unit-audit') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '250', 10) || 250, 1000));
+      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('paper_trades')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_trades table not found' }));
+        return;
+      }
+      const cols = getTableColumns(paperDb, 'paper_trades');
+      const where = sinceTs ? 'WHERE entry_ts >= @since' : '';
+      const rows = paperDb.prepare(`
+        SELECT id, token_ca, symbol, entry_ts, exit_ts, entry_price,
+               ${cols.has('trigger_price') ? 'trigger_price' : 'NULL AS trigger_price'},
+               exit_price, pnl_pct,
+               ${cols.has('synthetic_close') ? 'synthetic_close' : '0 AS synthetic_close'},
+               ${cols.has('entry_execution_audit_json') ? 'entry_execution_audit_json' : 'NULL AS entry_execution_audit_json'},
+               ${cols.has('exit_execution_audit_json') ? 'exit_execution_audit_json' : 'NULL AS exit_execution_audit_json'},
+               ${cols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json'}
+        FROM paper_trades
+        ${where}
+        ORDER BY id DESC
+        LIMIT @limit
+      `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+      const audits = rows.map(priceUnitAuditForTrade);
+      const counters = {
+        sampled_trades: audits.length,
+        clean_n: audits.filter((row) => row.warnings.length === 0).length,
+        warning_n: audits.filter((row) => row.warnings.length > 0).length,
+        entry_sol_per_token_n: audits.filter((row) => row.entry_unit === 'SOL_PER_TOKEN').length,
+        exit_sol_per_token_n: audits.filter((row) => row.exit_unit === 'SOL_PER_TOKEN').length,
+        pnl_ratio_decimal_n: audits.filter((row) => row.pnl_unit === 'RATIO_DECIMAL').length,
+        accounting_sol_n: audits.filter((row) => row.accounting_unit === 'SOL').length,
+        synthetic_close_n: audits.filter((row) => row.synthetic_close).length,
+      };
+      const warningCounts = {};
+      for (const audit of audits) {
+        for (const warning of audit.warnings) {
+          warningCounts[warning] = (warningCounts[warning] || 0) + 1;
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        audit_version: 'v1_price_unit_contract',
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          limit,
+        },
+        canonical_units: {
+          entry_price: 'SOL_PER_TOKEN',
+          trigger_price: 'SOL_PER_TOKEN',
+          exit_price: 'SOL_PER_TOKEN unless synthetic_close=1',
+          pnl_pct: 'RATIO_DECIMAL stored in DB, displayed as percent by APIs',
+          accounting: 'SOL',
+          market_context: 'USD fields are allowed only as context, not fill/PnL truth',
+        },
+        status: counters.warning_n > 0 ? 'warn' : 'ok',
+        counters,
+        warning_counts: warningCounts,
+        warnings: audits.filter((row) => row.warnings.length > 0).slice(0, 100),
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/paper/data-source-health') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
@@ -2628,6 +2762,7 @@ const server = http.createServer(async (req, res) => {
             final_reason: event.reason,
             final_data_source: event.data_source,
             final_event_id: event.id,
+            final_blocker: null,
             lifecycle_state: event.lifecycle_state,
             vitality_score: event.vitality_score,
             entry_bias: event.entry_bias,
@@ -2640,6 +2775,10 @@ const server = http.createServer(async (req, res) => {
           });
         }
         const summary = summaries.get(key);
+        summary.final_blocker = chooseFinalBlocker(
+          summary.final_blocker,
+          finalBlockerFromEvent(event, payload)
+        );
         summary.event_count += 1;
         summary.first_event_ts = Math.min(summary.first_event_ts, event.event_ts);
         summary.last_event_ts = Math.max(summary.last_event_ts, event.event_ts);
@@ -2681,6 +2820,7 @@ const server = http.createServer(async (req, res) => {
               final_component: 'paper_trades',
               final_event_type: trade.exit_ts || trade.exit_reason ? 'trade_closed' : 'trade_open',
               final_reason: trade.exit_reason || 'open_position',
+              final_blocker: finalBlockerFromTrade(trade),
               has_trade: true,
               trade_count: 0,
             });
@@ -2702,6 +2842,7 @@ const server = http.createServer(async (req, res) => {
           summary.final_component = 'paper_trades';
           summary.final_event_type = summary.final_status === 'closed' ? 'trade_closed' : 'trade_open';
           summary.final_reason = trade.exit_reason || 'open_position';
+          summary.final_blocker = finalBlockerFromTrade(trade);
         }
       }
 
@@ -2735,11 +2876,15 @@ const server = http.createServer(async (req, res) => {
               final_status: 'missed_only',
               final_component: missed.component,
               final_reason: missed.reject_reason,
+              final_blocker: finalBlockerFromMissed(missed),
               has_trade: false,
               trade_count: 0,
             });
           }
           const summary = summaries.get(key);
+          if (!summary.has_trade) {
+            summary.final_blocker = chooseFinalBlocker(summary.final_blocker, finalBlockerFromMissed(missed));
+          }
           const maxPnl = missed.max_pnl == null ? null : Number(missed.max_pnl);
           if (maxPnl != null && Number.isFinite(maxPnl)) {
             const prev = summary.max_missed_pnl_pct == null ? -Infinity : summary.max_missed_pnl_pct / 100;
@@ -2775,35 +2920,62 @@ const server = http.createServer(async (req, res) => {
       }
 
       let list = Array.from(summaries.values());
+      for (const item of list) {
+        applyFinalBlocker(item);
+      }
       if (statusFilter !== 'all') {
         list = list.filter((item) => String(item.final_status || '').toLowerCase() === statusFilter);
       }
       const anchorMismatchCount = list.filter((item) => item.anchor_is_latest_ath === false).length;
       const counts = {};
       const byFinalGate = {};
+      const byFinalBlocker = {};
       for (const item of list) {
         counts[item.final_status || 'unknown'] = (counts[item.final_status || 'unknown'] || 0) + 1;
-        const gateKey = `${item.final_component || '-'}:${item.final_reason || '-'}`;
+        const blocker = item.final_blocker || {};
+        const gateKey = `${blocker.component || item.final_component || '-'}:${blocker.reason || item.final_reason || '-'}`;
+        const blockerKey = item.final_blocker_key || `${blocker.stage || 'unknown'}:${gateKey}`;
         if (!byFinalGate[gateKey]) {
           byFinalGate[gateKey] = {
-            component: item.final_component || '-',
-            reason: item.final_reason || '-',
+            component: blocker.component || item.final_component || '-',
+            reason: blocker.reason || item.final_reason || '-',
+            n: 0,
+            max_missed_pnl_pct: null,
+            tradable_n: 0,
+          };
+        }
+        if (!byFinalBlocker[blockerKey]) {
+          byFinalBlocker[blockerKey] = {
+            key: blockerKey,
+            status: blocker.status || item.final_status || 'unknown',
+            stage: blocker.stage || 'unknown',
+            component: blocker.component || item.final_component || '-',
+            reason: blocker.reason || item.final_reason || '-',
             n: 0,
             max_missed_pnl_pct: null,
             tradable_n: 0,
           };
         }
         byFinalGate[gateKey].n += 1;
+        byFinalBlocker[blockerKey].n += 1;
         if (item.max_missed_pnl_pct != null) {
           byFinalGate[gateKey].max_missed_pnl_pct = Math.max(
             byFinalGate[gateKey].max_missed_pnl_pct == null ? -Infinity : byFinalGate[gateKey].max_missed_pnl_pct,
             item.max_missed_pnl_pct
           );
+          byFinalBlocker[blockerKey].max_missed_pnl_pct = Math.max(
+            byFinalBlocker[blockerKey].max_missed_pnl_pct == null ? -Infinity : byFinalBlocker[blockerKey].max_missed_pnl_pct,
+            item.max_missed_pnl_pct
+          );
         }
         if (Number(item.tradable_missed || 0) === 1) byFinalGate[gateKey].tradable_n += 1;
+        if (Number(item.tradable_missed || 0) === 1) byFinalBlocker[blockerKey].tradable_n += 1;
       }
       for (const gate of Object.values(byFinalGate)) {
         if (gate.max_missed_pnl_pct === -Infinity) gate.max_missed_pnl_pct = null;
+      }
+      for (const blocker of Object.values(byFinalBlocker)) {
+        if (blocker.max_missed_pnl_pct === -Infinity) blocker.max_missed_pnl_pct = null;
       }
       list.sort((a, b) => {
         const missedDelta = (b.max_missed_pnl_pct ?? -99999) - (a.max_missed_pnl_pct ?? -99999);
@@ -2823,6 +2995,7 @@ const server = http.createServer(async (req, res) => {
         },
         status_counts: counts,
         anchor_mismatch_count: anchorMismatchCount,
+        by_final_blocker: Object.values(byFinalBlocker).sort((a, b) => b.n - a.n).slice(0, 100),
         by_final_gate: Object.values(byFinalGate).sort((a, b) => b.n - a.n).slice(0, 100),
         lifecycles: list.slice(0, limit),
       }, null, 2));
