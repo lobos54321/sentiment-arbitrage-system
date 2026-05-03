@@ -915,6 +915,29 @@ def test_entry_readiness_allows_only_tiny_explosive_direct_for_explicit_scout():
     assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
 
 
+def test_entry_readiness_allows_gmgn_tiny_scout_only_when_explicit():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "NEWBORN_LAUNCH",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 25,
+                "liquidity_unknown": False,
+                "dex_id": "pumpswap",
+                "price_change_m5": 13.7,
+                "buy_sell_ratio": 1.24,
+            },
+        },
+        pending={"is_lotto": True, "entry_mode": "gmgn_concentration_tiny_scout"},
+    )
+    assert policy.lifecycle_profile == "LOTTO_NEWBORN_RISKY"
+    assert policy.min_p_follow >= 0.72
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("gmgn_concentration_tiny_scout", policy) is True
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
 def test_smart_entry_explosive_direct_scout_bypasses_chasing_top(monkeypatch):
     import entry_engine as entry_engine_module
     import paper_trade_monitor as monitor_module

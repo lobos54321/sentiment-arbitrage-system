@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS external_alpha_state (
 """
 
 
+CREATE_EXTERNAL_ALPHA_HEALTH_SQL = """
+CREATE TABLE IF NOT EXISTS external_alpha_health (
+    source TEXT PRIMARY KEY,
+    last_run_ts INTEGER,
+    last_success_ts INTEGER,
+    candidate_count INTEGER DEFAULT 0,
+    recorded_count INTEGER DEFAULT 0,
+    momentum_confirmed_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    last_error TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+
 EXTERNAL_ALPHA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_eas_token ON external_alpha_snapshots(token_ca)",
     "CREATE INDEX IF NOT EXISTS idx_eas_seen ON external_alpha_state(token_ca, last_seen_ts)",
@@ -114,6 +129,7 @@ def _i(value, default=0):
 def init_external_alpha_shadow(db):
     db.execute(CREATE_EXTERNAL_ALPHA_SNAPSHOTS_SQL)
     db.execute(CREATE_EXTERNAL_ALPHA_STATE_SQL)
+    db.execute(CREATE_EXTERNAL_ALPHA_HEALTH_SQL)
     for sql in EXTERNAL_ALPHA_INDEXES:
         db.execute(sql)
     db.commit()
@@ -318,6 +334,61 @@ def record_external_alpha_candidates(db, candidates, captured_at=None):
             confirmed += 1
     db.commit()
     return {"recorded": recorded, "momentum_confirmed": confirmed}
+
+
+def record_external_alpha_health(
+    db,
+    *,
+    source="gmgn_candidate_scout",
+    run_ts=None,
+    success=False,
+    candidate_count=0,
+    recorded_count=0,
+    momentum_confirmed_count=0,
+    error=None,
+):
+    run_ts = int(run_ts or time.time())
+    error_text = str(error)[:500] if error else None
+    db.execute(
+        """
+        INSERT INTO external_alpha_health
+            (source, last_run_ts, last_success_ts, candidate_count, recorded_count,
+             momentum_confirmed_count, error_count, last_error, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(source) DO UPDATE SET
+            last_run_ts = excluded.last_run_ts,
+            last_success_ts = CASE
+                WHEN excluded.last_success_ts IS NOT NULL THEN excluded.last_success_ts
+                ELSE external_alpha_health.last_success_ts
+            END,
+            candidate_count = excluded.candidate_count,
+            recorded_count = excluded.recorded_count,
+            momentum_confirmed_count = excluded.momentum_confirmed_count,
+            error_count = external_alpha_health.error_count + excluded.error_count,
+            last_error = excluded.last_error,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            source,
+            run_ts,
+            run_ts if success else None,
+            int(candidate_count or 0),
+            int(recorded_count or 0),
+            int(momentum_confirmed_count or 0),
+            0 if success else 1,
+            error_text,
+        ),
+    )
+    db.commit()
+    return {
+        "source": source,
+        "last_run_ts": run_ts,
+        "success": bool(success),
+        "candidate_count": int(candidate_count or 0),
+        "recorded_count": int(recorded_count or 0),
+        "momentum_confirmed_count": int(momentum_confirmed_count or 0),
+        "error": error_text,
+    }
 
 
 def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None, lookback_sec=None):

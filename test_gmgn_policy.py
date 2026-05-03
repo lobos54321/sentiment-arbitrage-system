@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 from gmgn_policy import (  # noqa: E402
     evaluate_gmgn_lotto_policy,
+    evaluate_gmgn_tiny_scout_rescue,
     gmgn_policy_blocks_explosive_direct,
 )
 from entry_engine import evaluate_smart_entry  # noqa: E402
@@ -91,6 +92,49 @@ def test_gmgn_policy_boosts_clean_smart_money():
     assert policy["edge_score"] >= 4
 
 
+def test_gmgn_tiny_scout_rescues_clean_concentration_near_miss():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "smart_degen_count": 4,
+            "renowned_count": 2,
+            "creator_close": True,
+            "top10_holder_rate": 0.18,
+            "bundler_rate": 0.12,
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_live_top1_36pct",
+        policy,
+        {"live_top1_pct": 36.4, "live_top10_pct": 62.5},
+    )
+
+    assert rescue["allow"] is True
+    assert rescue["entry_mode"] == "gmgn_concentration_tiny_scout"
+    assert rescue["position_size_sol"] == 0.003
+
+
+def test_gmgn_tiny_scout_does_not_rescue_toxic_policy():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "rat_trader_amount_rate": 0.42,
+            "bundler_rate": 0.10,
+            "entrapment_ratio": 0.01,
+            "top10_holder_rate": 0.18,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_live_top1_36pct",
+        policy,
+        {"live_top1_pct": 36.4, "live_top10_pct": 62.5},
+    )
+
+    assert rescue["allow"] is False
+
+
 def test_lotto_pending_applies_gmgn_downsize_without_exceeding_original_size():
     pending = build_lotto_pending(
         {
@@ -114,6 +158,29 @@ def test_lotto_pending_applies_gmgn_downsize_without_exceeding_original_size():
 
     assert pending["kelly_position_sol"] == 0.004
     assert pending["lotto_state"]["positionSizeSol"] == 0.004
+
+
+def test_lotto_pending_honors_gmgn_tiny_scout_position_size():
+    pending = build_lotto_pending(
+        {
+            "id": 7,
+            "ca": "TokenCA",
+            "symbol": "DOG",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "pool_address": "Pool",
+        },
+        "TokenCA:1000",
+        detail={
+            "entry_mode": "gmgn_concentration_tiny_scout",
+            "position_size_sol": 0.003,
+            "gmgn_policy": {"action": "boost", "size_multiplier": 1.0},
+        },
+    )
+
+    assert pending["entry_mode"] == "gmgn_concentration_tiny_scout"
+    assert pending["kelly_position_sol"] == 0.003
+    assert pending["lotto_state"]["positionSizeSol"] == 0.003
 
 
 def test_entry_edge_budget_applies_gmgn_toxic_spread_penalty():
@@ -221,3 +288,56 @@ def test_smart_entry_toxic_gmgn_policy_blocks_explosive_chasing_bypass(monkeypat
     assert reason == "chasing_top"
     assert detail == "near_local_high"
     assert trigger is None
+
+
+def test_smart_entry_gmgn_tiny_scout_bypasses_low_kline_volume(monkeypatch):
+    import entry_engine as entry_engine_module
+    import paper_trade_monitor as monitor_module
+
+    policy = {
+        "allowed_entry_modes": ["gmgn_concentration_tiny_scout", "smart_entry_pullback_bounce"],
+        "min_p_follow": 0.72,
+        "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+        "detail": {"route": "LOTTO"},
+        "gmgn_policy": {
+            "action": "boost",
+            "reason": "gmgn_clean_smart_money_boost",
+            "toxic_score": 0,
+            "edge_score": 6,
+            "features": {
+                "bundler_rate": 0.12,
+                "rat_trader_amount_rate": 0.01,
+                "entrapment_ratio": 0.01,
+                "creator_hold_rate": 0.0,
+                "dev_team_hold_rate": 0.0,
+            },
+        },
+    }
+    trend = {
+        "buys_m5": 124,
+        "sells_m5": 100,
+        "price_change_m5": 13.7,
+        "vol_m5": 1800,
+        "vol_h1": 72000,
+        "fdv": 12490,
+        "market_cap": 12490,
+    }
+
+    monkeypatch.setattr(monitor_module, "fetch_realtime_price", lambda *args, **kwargs: (1.0, "test", 0))
+    monkeypatch.setattr(entry_engine_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: trend)
+    monkeypatch.setattr(entry_engine_module, "is_chasing_top", lambda *_args, **_kwargs: (False, ""))
+    monkeypatch.setattr(entry_engine_module, "evaluate_trend_phase", lambda *_args, **_kwargs: ("WAIT", "mixed"))
+    monkeypatch.setattr(entry_engine_module, "calculate_ema_deviation", lambda *_args, **_kwargs: (10.0, 0.9))
+    monkeypatch.setattr(entry_engine_module, "get_recent_synthetic_bars", lambda *_args, **_kwargs: [])
+
+    should_enter, reason, detail, trigger = evaluate_smart_entry(
+        "DogToken",
+        symbol="Dog",
+        pool_address="Pool",
+        entry_readiness_policy=policy,
+    )
+
+    assert should_enter is True
+    assert reason == "gmgn_concentration_tiny_scout"
+    assert "node=gmgn_tiny_scout" in detail
+    assert trigger == 1.0

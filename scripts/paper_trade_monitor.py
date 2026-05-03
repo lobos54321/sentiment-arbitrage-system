@@ -67,7 +67,7 @@ from entry_readiness_policy import evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
-from gmgn_policy import evaluate_gmgn_lotto_policy
+from gmgn_policy import evaluate_gmgn_lotto_policy, evaluate_gmgn_tiny_scout_rescue
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -5869,6 +5869,16 @@ def run_monitor(db):
                         log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=post_exit_cooldown ({_cd_remain}s remaining)")
                     wl_skip_cooldown += 1
                     continue
+                _fire_block_until = float(w_entry.get('fire_block_until') or 0)
+                if _fire_block_until > time.time():
+                    _fb_remain = int(_fire_block_until - time.time())
+                    if _fb_remain > 15:
+                        log.info(
+                            f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=readiness_preflight_cooldown "
+                            f"({_fb_remain}s remaining; {w_entry.get('fire_block_reason') or 'unknown'})"
+                        )
+                    wl_skip_cooldown += 1
+                    continue
                 
                 # Skip if max positions reached
                 if len(positions) + len(pending_entries) >= max_positions:
@@ -5955,6 +5965,27 @@ def run_monitor(db):
                             _gmgn_policy.get('reason') or _lotto_decision.reason,
                             _lotto_detail,
                         )
+                    elif not _lotto_decision.allow:
+                        _gmgn_rescue = evaluate_gmgn_tiny_scout_rescue(
+                            _lotto_decision.reason,
+                            _gmgn_policy,
+                            _lotto_detail,
+                        )
+                        if _gmgn_rescue.get("allow"):
+                            _lotto_detail = {
+                                **_lotto_detail,
+                                **(_gmgn_rescue.get("detail") or {}),
+                                "entry_mode": _gmgn_rescue.get("entry_mode"),
+                                "position_size_sol": _gmgn_rescue.get("position_size_sol"),
+                                "paper_only_scout": True,
+                                "gmgn_tiny_scout": True,
+                                "gmgn_tiny_scout_reason": _gmgn_rescue.get("reason"),
+                            }
+                            _lotto_decision = LottoDecision(
+                                "allow",
+                                _gmgn_rescue.get("reason") or "gmgn_tiny_scout_ok",
+                                _lotto_detail,
+                            )
                     _falling_knife_blocked, _falling_knife_detail = should_block_lotto_falling_knife(
                         _lotto_detail,
                         _lotto_lifecycle,
@@ -6027,7 +6058,12 @@ def run_monitor(db):
                                 f" live_top1={_lotto_live['top1_pct']:.0f}% live_top10={_lotto_live['top10_pct']:.0f}%"
                                 if _lotto_live else ""
                             )
-                            if _lotto_decision.reason in {'lotto_concentrated_scout_ok', 'lotto_explosive_direct_scout_ok'}:
+                            if _lotto_decision.reason in {
+                                'lotto_concentrated_scout_ok',
+                                'lotto_explosive_direct_scout_ok',
+                                'gmgn_concentration_tiny_scout_ok',
+                                'gmgn_midcap_near_miss_scout_ok',
+                            }:
                                 record_decision_event(
                                     db,
                                     component='lotto_entry_gate',
@@ -6360,6 +6396,7 @@ def run_monitor(db):
                     # P8: Liquidity floor — reject tokens with tiny pools
                     # Data: ROCCO/hallelujah/drone had 20%+ exit slippage due to
                     # pool < $5000, contributing 55% of overnight total losses.
+                    _fire_dex = None
                     try:
                         _fire_dex = fetch_dexscreener_trend_snapshot(w_entry['ca'])
                         _fire_liq = (_fire_dex.get('liquidity_usd', 0) or 0) if _fire_dex else 0
@@ -6426,6 +6463,55 @@ def run_monitor(db):
                         log.info(
                             f"  [WATCHLIST] 🚫 {w_entry['symbol']} TOP10_BLOCK: "
                             f"signal Top10={_sig_top10:.1f}% > 45% (insider concentration), skipping"
+                        )
+                        continue
+
+                    _preflight_lifecycle = lifecycle_payload_for(
+                        watchlist_entry=w_entry,
+                        dex_snapshot=_fire_dex,
+                        route=w_entry.get('type'),
+                        signal_ts=w_entry.get('signal_ts'),
+                        signal_price=w_entry.get('signal_price'),
+                        now=now,
+                    )
+                    _preflight_policy = evaluate_entry_readiness_policy(
+                        route=w_entry.get('type'),
+                        lifecycle=_preflight_lifecycle,
+                        pending=pending_entries.get(lifecycle_id) or {
+                            'token_ca': w_entry['ca'],
+                            'symbol': w_entry['symbol'],
+                            'signal_ts': w_entry['signal_ts'],
+                            'signal_type': w_entry['type'],
+                            'signal_route': w_entry['type'],
+                        },
+                        now_ts=now,
+                    )
+                    if _preflight_policy.decision == 'WAIT':
+                        _pf_cooldown = 600 if _preflight_policy.reason == 'entry_readiness_stale_ath_requires_fresh_high' else 300
+                        try:
+                            watchlist.defer_fire(w_entry['id'], _preflight_policy.reason, cooldown_sec=_pf_cooldown)
+                        except Exception:
+                            pass
+                        record_decision_event(
+                            db,
+                            component='entry_readiness',
+                            event_type='watchlist_fire_deferred',
+                            decision='wait',
+                            reason=_preflight_policy.reason,
+                            token_ca=w_entry['ca'],
+                            symbol=w_entry['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=w_entry['signal_ts'],
+                            signal_id=w_entry.get('premium_signal_id'),
+                            route=w_entry.get('type'),
+                            data_source='watchlist_preflight+lifecycle+dexscreener',
+                            payload=_preflight_policy.to_dict(),
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        log.info(
+                            f"  [WATCHLIST] ⏳ {w_entry['symbol']} FIRE_DEFERRED: "
+                            f"{_preflight_policy.reason} profile={_preflight_policy.lifecycle_profile}; "
+                            f"cooldown={_pf_cooldown}s"
                         )
                         continue
 

@@ -273,6 +273,11 @@ def build_lotto_pending(w_entry, lifecycle_id, detail=None):
         position_size_sol = LOTTO_CONCENTRATED_SCOUT_SIZE_SOL
     if detail.get("entry_mode") == "explosive_newborn_direct_scout" or detail.get("explosive_direct_scout_ok"):
         position_size_sol = LOTTO_EXPLOSIVE_DIRECT_SCOUT_SIZE_SOL
+    if detail.get("position_size_sol") is not None:
+        try:
+            position_size_sol = float(detail.get("position_size_sol"))
+        except (TypeError, ValueError):
+            pass
     original_position_size_sol = position_size_sol
     gmgn_policy = detail.get("gmgn_policy") or {}
     try:

@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     last_ath_ts     REAL DEFAULT 0,
     last_ath_mc     REAL DEFAULT 0,
     trail_lockout_until REAL DEFAULT 0,
+    fire_block_until REAL DEFAULT 0,
+    fire_block_reason TEXT,
 
     -- Lifecycle
     status          TEXT NOT NULL DEFAULT 'watching',  -- watching | pending_momentum | holding | moon_bag | expired
@@ -162,6 +164,8 @@ class WatchlistStore:
             ("ALTER TABLE watchlist ADD COLUMN last_ath_ts REAL DEFAULT 0", None),
             ("ALTER TABLE watchlist ADD COLUMN last_ath_mc REAL DEFAULT 0", None),
             ("ALTER TABLE watchlist ADD COLUMN trail_lockout_until REAL DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN fire_block_until REAL DEFAULT 0", None),
+            ("ALTER TABLE watchlist ADD COLUMN fire_block_reason TEXT", None),
         ]
         for col_sql, _ in _migrate_columns:
             try:
@@ -212,6 +216,8 @@ class WatchlistStore:
                     'signal_top10': signal_top10 or existing.get('signal_top10'),
                     'added_at': now,
                     'last_eval_at': 0,
+                    'fire_block_until': 0,
+                    'fire_block_reason': None,
                 })
             if signal_super > 0:
                 updates['latest_super'] = signal_super
@@ -251,6 +257,7 @@ class WatchlistStore:
                          signal_count=1, latest_super=signal_super,
                          added_at=now, last_eval_at=0, expire_reason=None,
                          entry_count=0, cooldown_until=0,
+                         fire_block_until=0, fire_block_reason=None,
                          lowest_price=signal_price, highest_price=signal_price)
             log.info(f"[WL] Re-activated expired ${symbol} as ATH")
             return self.get_by_id(expired['id'])
@@ -530,6 +537,17 @@ class WatchlistStore:
         filtered = {k: v for k, v in kwargs.items() if k in allowed}
         if filtered:
             self._update(entry_id, **filtered)
+
+    def defer_fire(self, entry_id, reason, cooldown_sec=300):
+        """Temporarily prevent repeated watchlist FIRE attempts for a known block."""
+        cooldown_sec = max(0, float(cooldown_sec or 0))
+        until = time.time() + cooldown_sec if cooldown_sec else 0
+        self._update(
+            entry_id,
+            fire_block_until=until,
+            fire_block_reason=str(reason or ""),
+        )
+        return until
 
     # ─── Cleanup ───────────────────────────────────────────────────────
 

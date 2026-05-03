@@ -129,6 +129,20 @@ def test_reconcile_keeps_active_watchlist_holding_rows(tmp_path):
         store.close()
 
 
+def test_defer_fire_persists_readiness_block(tmp_path):
+    store = WatchlistStore(str(tmp_path / "watchlist.db"))
+    try:
+        entry = store.register(ca="TokenCA", symbol="DOG", signal_type="ATH", signal_ts=1000)
+        until = store.defer_fire(entry["id"], "entry_readiness_stale_ath_requires_fresh_high", cooldown_sec=120)
+        updated = store.get_by_id(entry["id"])
+
+        assert updated["fire_block_reason"] == "entry_readiness_stale_ath_requires_fresh_high"
+        assert updated["fire_block_until"] >= until - 1
+        assert updated["fire_block_until"] > 0
+    finally:
+        store.close()
+
+
 def test_smart_entry_result_ready_detects_done_future():
     pending = {"lc": {"_smart_entry_future": Future()}}
     assert smart_entry_result_ready(pending) is False

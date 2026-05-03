@@ -15,6 +15,11 @@ import os
 
 ENTRY_READINESS_MAX_WAIT_SEC = int(os.environ.get("ENTRY_READINESS_MAX_WAIT_SEC", "900"))
 ENTRY_READINESS_POLL_SEC = float(os.environ.get("ENTRY_READINESS_POLL_SEC", "10"))
+GMGN_TINY_SCOUT_MODES = (
+    "gmgn_concentration_tiny_scout",
+    "gmgn_low_kline_tiny_scout",
+    "gmgn_midcap_near_miss_scout",
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,7 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
     allowed_modes = ("momentum_direct_entry", "smart_entry_pullback_bounce")
     requested_entry_mode = str(pending.get("entry_mode") or "")
     explosive_direct_scout = requested_entry_mode == "explosive_newborn_direct_scout"
+    gmgn_tiny_scout = requested_entry_mode in GMGN_TINY_SCOUT_MODES
     min_odds_r = 2.0
     min_p_follow = 0.58
     max_spread_pct = 2.0
@@ -106,12 +112,14 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
 
     if profile == "LOTTO_NEWBORN_RISKY":
         min_odds_r = 3.0
-        min_p_follow = 0.74 if explosive_direct_scout else 0.68
+        min_p_follow = 0.74 if explosive_direct_scout else (0.72 if gmgn_tiny_scout else 0.68)
         max_spread_pct = 1.0
         expected_loss_pct = 12.0
         allowed_modes = (
             ("explosive_newborn_direct_scout", "smart_entry_pullback_bounce")
             if explosive_direct_scout
+            else (requested_entry_mode, "smart_entry_pullback_bounce")
+            if gmgn_tiny_scout
             else ("smart_entry_pullback_bounce",)
         )
     elif profile == "LOTTO_REAL_PROBE":
@@ -122,9 +130,11 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
         allowed_modes = ("smart_entry_pullback_bounce",)
     elif profile == "LOTTO_NORMAL":
         min_odds_r = 2.5
-        min_p_follow = 0.62
+        min_p_follow = 0.68 if gmgn_tiny_scout else 0.62
         max_spread_pct = 1.5
         expected_loss_pct = 10.0
+        if gmgn_tiny_scout:
+            allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")
     elif profile == "ATH_CONTINUATION":
         min_odds_r = 1.8
         min_p_follow = 0.56

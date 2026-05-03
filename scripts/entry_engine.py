@@ -79,6 +79,13 @@ SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_EXPL
 SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_VOL_M5_USD = float(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_VOL_M5_USD", "20000"))
 SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_TXNS = int(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_M5_TXNS", "400"))
 SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_EXPLOSIVE_DIRECT_MIN_BS_RATIO", "1.05"))
+SMART_ENTRY_GMGN_TINY_SCOUT_MIN_SCORE = int(os.environ.get("SMART_ENTRY_GMGN_TINY_SCOUT_MIN_SCORE", "40"))
+SMART_ENTRY_GMGN_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_GMGN_TINY_SCOUT_MIN_BS_RATIO", "1.05"))
+SMART_ENTRY_GMGN_TINY_SCOUT_MODES = (
+    "gmgn_concentration_tiny_scout",
+    "gmgn_low_kline_tiny_scout",
+    "gmgn_midcap_near_miss_scout",
+)
 
 
 def _calc_velocity(price_history, window_sec):
@@ -632,6 +639,45 @@ def _explosive_direct_scout_ok(entry_readiness_policy, cached_trend, bs_ratio):
     return ok, detail
 
 
+def _gmgn_tiny_scout_ok(entry_readiness_policy, bs_ratio, total_score=0):
+    mode = ""
+    if isinstance(entry_readiness_policy, dict):
+        allowed = entry_readiness_policy.get("allowed_entry_modes") or []
+        mode = next((m for m in allowed if m in SMART_ENTRY_GMGN_TINY_SCOUT_MODES), "")
+    elif entry_readiness_policy is not None:
+        allowed = getattr(entry_readiness_policy, "allowed_entry_modes", ()) or ()
+        mode = next((m for m in allowed if m in SMART_ENTRY_GMGN_TINY_SCOUT_MODES), "")
+    if not mode or not _policy_allows(mode, entry_readiness_policy):
+        return False, {}
+    gmgn_policy = _policy_gmgn_policy(entry_readiness_policy)
+    if not gmgn_policy:
+        return False, {"entry_mode": mode, "gmgn_reason": "gmgn_policy_missing"}
+    try:
+        from gmgn_policy import gmgn_policy_allows_tiny_scout
+        if not gmgn_policy_allows_tiny_scout(gmgn_policy):
+            return False, {
+                "entry_mode": mode,
+                "gmgn_policy": gmgn_policy,
+                "gmgn_reason": gmgn_policy.get("reason"),
+            }
+    except Exception:
+        return False, {"entry_mode": mode, "gmgn_reason": "gmgn_policy_check_error"}
+    ok = (
+        bs_ratio >= SMART_ENTRY_GMGN_TINY_SCOUT_MIN_BS_RATIO
+        and int(total_score or 0) >= SMART_ENTRY_GMGN_TINY_SCOUT_MIN_SCORE
+    )
+    return ok, {
+        "entry_mode": mode,
+        "buy_sell_ratio": bs_ratio,
+        "total_score": total_score,
+        "thresholds": {
+            "buy_sell_ratio": SMART_ENTRY_GMGN_TINY_SCOUT_MIN_BS_RATIO,
+            "total_score": SMART_ENTRY_GMGN_TINY_SCOUT_MIN_SCORE,
+        },
+        "gmgn_policy": gmgn_policy,
+    }
+
+
 def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, momentum_pct=0.0):
     """Return a hard reject reason for dead-cat bounce patterns.
 
@@ -922,6 +968,12 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     except Exception:
         pass  # If K-line unavailable, don't block the trade
 
+    _gmgn_tiny_ok, _gmgn_tiny_detail = _gmgn_tiny_scout_ok(
+        entry_readiness_policy,
+        bs_ratio,
+        total_score,
+    )
+
     # 4b. COMPOUND WEAKNESS GATE
     # If kline did NOT confirm bullish trend AND rvol is low → hard reject.
     # Backtested (22 trades): filters 4 DOA (-68.4%) at cost of 2 marginal
@@ -932,11 +984,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     _mc = cached_trend.get('fdv', 0) or cached_trend.get('market_cap', 0) if cached_trend else 0
     _vol_mc = (vol_m5 / _mc) if _mc > 0 else 0
     if not _kline_confirmed and rvol < 2.0 and _vol_mc < 0.30:
-        log.info(
-            f"[SmartEntry] 🚫  REJECT: no_kline_low_volume - "
-            f"kline not confirmed + rvol={rvol:.1f}x < 2.0x + vol/mc={_vol_mc:.1%} < 30% "
-            f"(compound weakness: no trend proof + no volume surge)")
-        return False, 'no_kline_low_volume', f'kline_unconfirmed + rvol={rvol:.1f}x + vol/mc={_vol_mc:.1%}', None
+        if _gmgn_tiny_ok:
+            log.info(
+                f"[SmartEntry] 🧪 GMGN_TINY_SCOUT: bypassing no_kline_low_volume "
+                f"for paper-only scout detail={_gmgn_tiny_detail} "
+                f"kline=unconfirmed rvol={rvol:.1f}x vol/mc={_vol_mc:.1%}"
+            )
+        else:
+            log.info(
+                f"[SmartEntry] 🚫  REJECT: no_kline_low_volume - "
+                f"kline not confirmed + rvol={rvol:.1f}x < 2.0x + vol/mc={_vol_mc:.1%} < 30% "
+                f"(compound weakness: no trend proof + no volume surge)")
+            return False, 'no_kline_low_volume', f'kline_unconfirmed + rvol={rvol:.1f}x + vol/mc={_vol_mc:.1%}', None
     elif not _kline_confirmed and rvol < 2.0 and _vol_mc >= 0.30:
         log.info(
             f"[SmartEntry] ✅  VOL_MC_BYPASS: kline not confirmed + rvol={rvol:.1f}x < 2.0x "
@@ -944,6 +1003,15 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
     # 5. DECISION LOGIC
     detail_str = f"Score={total_score} (base={base_score}) [{','.join(score_details)}] bs={bs_ratio:.2f} rvol={rvol:.1f}x m9s={momentum_pct:+.1f}% pc_m5={pc_m5:+.1f}%"
+
+    if _gmgn_tiny_ok:
+        node_detail = (
+            f"node=gmgn_tiny_scout mode={_gmgn_tiny_detail.get('entry_mode')} "
+            f"score={total_score} bs={bs_ratio:.2f} rvol={rvol:.1f}x "
+            f"pc_m5={pc_m5:+.1f}% armed=({detail_str})"
+        )
+        log.info(f"[SmartEntry] 🧪 ${symbol} GMGN_TINY_SCOUT at ${price:.10f}: {node_detail}")
+        return True, _gmgn_tiny_detail.get('entry_mode') or 'gmgn_low_kline_tiny_scout', node_detail, price
 
     if total_score < 50:
         log.info(f"[SmartEntry] 🚫  REJECT: {detail_str}")

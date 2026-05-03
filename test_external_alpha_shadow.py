@@ -12,7 +12,9 @@ from external_alpha_shadow import (  # noqa: E402
     init_external_alpha_shadow,
     lookup_external_alpha,
     record_external_alpha_candidates,
+    record_external_alpha_health,
 )
+from gmgn_candidate_scout import normalize_token  # noqa: E402
 
 
 def candidate(mc, *, volume=10000, swaps=100, buys=60, sells=40, captured_at=1000):
@@ -84,3 +86,50 @@ def test_lookup_external_alpha_handles_missing_and_stale():
     assert stale["available"] is False
     assert stale["reason"] == "external_alpha_stale"
     assert stale["last_seen_age_sec"] == 1000
+
+
+def test_external_alpha_health_records_success_and_errors():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_external_alpha_shadow(db)
+
+    ok = record_external_alpha_health(
+        db,
+        source="gmgn_candidate_scout",
+        run_ts=1000,
+        success=True,
+        candidate_count=12,
+        recorded_count=10,
+        momentum_confirmed_count=2,
+    )
+    assert ok["success"] is True
+
+    record_external_alpha_health(
+        db,
+        source="gmgn_candidate_scout",
+        run_ts=1060,
+        success=False,
+        error="gmgn-cli failed",
+    )
+    row = db.execute("SELECT * FROM external_alpha_health WHERE source = 'gmgn_candidate_scout'").fetchone()
+    assert row["last_run_ts"] == 1060
+    assert row["last_success_ts"] == 1000
+    assert row["candidate_count"] == 0
+    assert row["error_count"] == 1
+    assert row["last_error"] == "gmgn-cli failed"
+
+
+def test_gmgn_candidate_normalize_accepts_ca_and_camel_base_token():
+    normalized = normalize_token(
+        {
+            "ca": "TokenCA",
+            "baseToken": {"symbol": "DOG", "name": "Dog Token"},
+            "usd_market_cap": 12345,
+        },
+        source="gmgn_test",
+        captured_at=1000,
+    )
+    assert normalized["ca"] == "TokenCA"
+    assert normalized["symbol"] == "DOG"
+    assert normalized["name"] == "Dog Token"
+    assert normalized["market_cap"] == 12345

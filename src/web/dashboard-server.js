@@ -40,6 +40,28 @@ function checkAuth(req, url, res) {
   return true;
 }
 
+function parseUnixishTime(value) {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric > 1_000_000_000_000 ? Math.floor(numeric / 1000) : Math.floor(numeric);
+  }
+  const parsedMs = Date.parse(trimmed);
+  if (Number.isNaN(parsedMs)) return null;
+  return Math.floor(parsedMs / 1000);
+}
+
+function tierCaseSql(expr, prefix = '') {
+  return `
+          SUM(CASE WHEN ${expr} >= 1.0 THEN 1 ELSE 0 END) AS ${prefix}gold_n,
+          SUM(CASE WHEN ${expr} >= 0.5 AND ${expr} < 1.0 THEN 1 ELSE 0 END) AS ${prefix}silver_n,
+          SUM(CASE WHEN ${expr} >= 0.25 AND ${expr} < 0.5 THEN 1 ELSE 0 END) AS ${prefix}bronze_n,
+          SUM(CASE WHEN ${expr} < 0.25 THEN 1 ELSE 0 END) AS ${prefix}sub25_n`;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = join(__dirname, '../..');
@@ -2091,6 +2113,11 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '25', 10) || 25, 200));
+      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      const whereSql = sinceTs
+        ? 'WHERE COALESCE(signal_ts, created_event_ts, baseline_ts, 0) >= @since'
+        : '';
+      const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_missed_signal_attribution'"
@@ -2132,6 +2159,7 @@ const server = http.createServer(async (req, res) => {
           SUM(CASE WHEN tradability_status = 'would_stop_before_peak' THEN 1 ELSE 0 END) AS stop_before_peak_n,` : `
           NULL AS tradable_n,
           NULL AS stop_before_peak_n,`;
+      const maxPnlExpr = 'COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999)';
       const topDogs = paperDb.prepare(`
         SELECT
           symbol,
@@ -2149,15 +2177,17 @@ const server = http.createServer(async (req, res) => {
           status,
           updated_at
         FROM paper_missed_signal_attribution
-        ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999) DESC
-        LIMIT ?
-      `).all(limit);
+        ${whereSql}
+        ORDER BY ${maxPnlExpr} DESC
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
       const byGate = paperDb.prepare(`
         SELECT
           COALESCE(route, '-') AS route,
           component,
           reject_reason,
           COUNT(*) AS n,
+          ${tierCaseSql('COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)')},
           SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 0.5 THEN 1 ELSE 0 END) AS dog50_n,
           SUM(CASE WHEN COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0) >= 1.0 THEN 1 ELSE 0 END) AS dog100_n,
           ${tradabilityAgg}
@@ -2166,17 +2196,140 @@ const server = http.createServer(async (req, res) => {
           AVG(pnl_60m) AS avg_60m,
           AVG(pnl_24h) AS avg_24h
         FROM paper_missed_signal_attribution
+        ${whereSql}
         GROUP BY COALESCE(route, '-'), component, reject_reason
         ORDER BY dog100_n DESC, dog50_n DESC, n DESC
-        LIMIT ?
-      `).all(limit);
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
+      const eventTierSummary = paperDb.prepare(`
+        SELECT
+          COUNT(*) AS total_n,
+          ${tierCaseSql('COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)')},
+          ${hasTradability ? `
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
+          NULL AS tradable_n,
+          NULL AS clean_tradable_n,
+          NULL AS stop_before_peak_n`}
+        FROM paper_missed_signal_attribution
+        ${whereSql}
+      `).get(whereParams);
+      const uniqueTierSummary = paperDb.prepare(`
+        WITH per_token AS (
+          SELECT
+            token_ca,
+            COALESCE(MAX(symbol), '?') AS symbol,
+            MIN(COALESCE(signal_ts, created_event_ts, baseline_ts, 0)) AS first_event_ts,
+            MAX(COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)) AS max_pnl,
+            ${hasTradability ? `
+            MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
+            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak` : `
+            NULL AS tradable_missed,
+            NULL AS would_stop_before_peak`}
+          FROM paper_missed_signal_attribution
+          ${whereSql}
+          GROUP BY token_ca
+        )
+        SELECT
+          COUNT(*) AS total_n,
+          ${tierCaseSql('max_pnl')},
+          ${hasTradability ? `
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
+          NULL AS tradable_n,
+          NULL AS clean_tradable_n,
+          NULL AS stop_before_peak_n`}
+        FROM per_token
+      `).get(whereParams);
+      const topUniqueDogs = paperDb.prepare(`
+        WITH ranked AS (
+          SELECT
+            *,
+            COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999) AS max_pnl,
+            ROW_NUMBER() OVER (
+              PARTITION BY token_ca
+              ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999) DESC
+            ) AS rn
+          FROM paper_missed_signal_attribution
+          ${whereSql}
+        )
+        SELECT
+          symbol,
+          token_ca,
+          route,
+          component,
+          reject_reason,
+          pnl_5m,
+          pnl_15m,
+          pnl_60m,
+          pnl_24h,
+          max_pnl_recorded,
+          min_pnl_recorded,
+          ${tradabilitySelect}
+          status,
+          updated_at
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY max_pnl DESC
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
         limit,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
+        },
+        tier_summary: {
+          event_rows: eventTierSummary,
+          unique_tokens: uniqueTierSummary,
+        },
         top_dogs: topDogs,
+        top_unique_dogs: topUniqueDogs,
         by_gate: byGate,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/external-alpha-health') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      const stateCount = tableNames.has('external_alpha_state')
+        ? paperDb.prepare("SELECT COUNT(*) AS n FROM external_alpha_state").get().n
+        : null;
+      const snapshotCount = tableNames.has('external_alpha_snapshots')
+        ? paperDb.prepare("SELECT COUNT(*) AS n FROM external_alpha_snapshots").get().n
+        : null;
+      const health = tableNames.has('external_alpha_health')
+        ? paperDb.prepare("SELECT * FROM external_alpha_health ORDER BY updated_at DESC").all()
+        : [];
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        state_count: stateCount,
+        snapshot_count: snapshotCount,
+        health,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });

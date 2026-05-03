@@ -8,7 +8,11 @@ from pathlib import Path
 import subprocess
 import time
 
-from external_alpha_shadow import connect_external_alpha_db, record_external_alpha_candidates
+from external_alpha_shadow import (
+    connect_external_alpha_db,
+    record_external_alpha_candidates,
+    record_external_alpha_health,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -54,16 +58,27 @@ def as_list(payload, *paths):
 
 def normalize_token(raw, *, source, category=None, captured_at=None):
     raw = raw or {}
-    address = raw.get("address") or raw.get("base_address") or raw.get("token_address")
     base_token = raw.get("base_token") if isinstance(raw.get("base_token"), dict) else {}
+    camel_base_token = raw.get("baseToken") if isinstance(raw.get("baseToken"), dict) else {}
+    token = raw.get("token") if isinstance(raw.get("token"), dict) else {}
+    address = (
+        raw.get("ca")
+        or raw.get("token_ca")
+        or raw.get("address")
+        or raw.get("base_address")
+        or raw.get("token_address")
+        or base_token.get("address")
+        or camel_base_token.get("address")
+        or token.get("address")
+    )
     return {
         "captured_at": captured_at or int(time.time()),
         "source": source,
         "category": category,
         "chain": raw.get("chain") or "sol",
         "ca": address,
-        "symbol": raw.get("symbol") or base_token.get("symbol"),
-        "name": raw.get("name") or base_token.get("name"),
+        "symbol": raw.get("symbol") or base_token.get("symbol") or camel_base_token.get("symbol") or token.get("symbol"),
+        "name": raw.get("name") or base_token.get("name") or camel_base_token.get("name") or token.get("name"),
         "market_cap": raw.get("market_cap") or raw.get("usd_market_cap"),
         "liquidity": raw.get("liquidity"),
         "volume": raw.get("volume") or raw.get("volume_24h"),
@@ -87,8 +102,8 @@ def normalize_token(raw, *, source, category=None, captured_at=None):
         "creator_close": raw.get("creator_close"),
         "launchpad": raw.get("launchpad"),
         "launchpad_platform": raw.get("launchpad_platform"),
-        "creation_timestamp": raw.get("creation_timestamp") or base_token.get("token_create_time"),
-        "open_timestamp": raw.get("open_timestamp") or base_token.get("token_open_time"),
+        "creation_timestamp": raw.get("creation_timestamp") or base_token.get("token_create_time") or camel_base_token.get("token_create_time"),
+        "open_timestamp": raw.get("open_timestamp") or base_token.get("token_open_time") or camel_base_token.get("token_open_time"),
     }
 
 
@@ -159,16 +174,30 @@ def main():
     try:
         while True:
             captured_at = int(time.time())
-            candidates = collect_candidates(chain=args.chain, limit=args.limit)
-            with out_path.open("a", encoding="utf-8") as fh:
-                for cand in candidates:
-                    fh.write(json.dumps(cand, ensure_ascii=False, sort_keys=True) + "\n")
-            state = record_external_alpha_candidates(db, candidates, captured_at=captured_at)
-            print(
-                f"wrote {len(candidates)} GMGN candidates to {out_path}; "
-                f"state_recorded={state['recorded']} momentum_confirmed={state['momentum_confirmed']}",
-                flush=True,
-            )
+            try:
+                candidates = collect_candidates(chain=args.chain, limit=args.limit)
+                with out_path.open("a", encoding="utf-8") as fh:
+                    for cand in candidates:
+                        fh.write(json.dumps(cand, ensure_ascii=False, sort_keys=True) + "\n")
+                state = record_external_alpha_candidates(db, candidates, captured_at=captured_at)
+                record_external_alpha_health(
+                    db,
+                    run_ts=captured_at,
+                    success=True,
+                    candidate_count=len(candidates),
+                    recorded_count=state["recorded"],
+                    momentum_confirmed_count=state["momentum_confirmed"],
+                )
+                print(
+                    f"wrote {len(candidates)} GMGN candidates to {out_path}; "
+                    f"state_recorded={state['recorded']} momentum_confirmed={state['momentum_confirmed']}",
+                    flush=True,
+                )
+            except Exception as exc:
+                record_external_alpha_health(db, run_ts=captured_at, success=False, error=exc)
+                print(f"gmgn candidate scout error: {exc}", flush=True)
+                if not args.loop:
+                    raise
             if not args.loop:
                 break
             time.sleep(max(5.0, args.interval))
