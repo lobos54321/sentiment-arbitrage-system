@@ -1874,6 +1874,7 @@ def init_paper_db(db_path=None):
                 premium_signal_id INTEGER,
                 signal_type TEXT,
                 signal_route TEXT,
+                entry_mode TEXT,
                 lotto_state_json TEXT,
                 lifecycle_state TEXT,
                 vitality_score REAL,
@@ -1961,6 +1962,7 @@ def init_paper_db(db_path=None):
             "ALTER TABLE paper_trades ADD COLUMN accounting_outcome TEXT",
             "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
             "ALTER TABLE paper_trades ADD COLUMN signal_route TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN entry_mode TEXT",
             "ALTER TABLE paper_trades ADD COLUMN lotto_state_json TEXT",
             "ALTER TABLE paper_trades ADD COLUMN lifecycle_state TEXT",
             "ALTER TABLE paper_trades ADD COLUMN vitality_score REAL",
@@ -6486,6 +6488,32 @@ def run_monitor(db):
                         },
                         now_ts=now,
                     )
+                    if _preflight_policy.decision == 'EXPIRE':
+                        try:
+                            watchlist.mark_expired(w_entry['id'], _preflight_policy.reason)
+                        except Exception:
+                            pass
+                        record_decision_event(
+                            db,
+                            component='entry_readiness',
+                            event_type='watchlist_fire_expired',
+                            decision='expire',
+                            reason=_preflight_policy.reason,
+                            token_ca=w_entry['ca'],
+                            symbol=w_entry['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=w_entry['signal_ts'],
+                            signal_id=w_entry.get('premium_signal_id'),
+                            route=w_entry.get('type'),
+                            data_source='watchlist_preflight+lifecycle+dexscreener',
+                            payload=_preflight_policy.to_dict(),
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        log.info(
+                            f"  [WATCHLIST] ⛔ {w_entry['symbol']} FIRE_EXPIRED: "
+                            f"{_preflight_policy.reason} profile={_preflight_policy.lifecycle_profile}"
+                        )
+                        continue
                     if _preflight_policy.decision == 'WAIT':
                         _pf_cooldown = 600 if _preflight_policy.reason == 'entry_readiness_stale_ath_requires_fresh_high' else 300
                         try:
@@ -7173,6 +7201,7 @@ def run_monitor(db):
                         'tokenCA': pending['token_ca'],
                         'symbol': pending['symbol'],
                         'entryPrice': price,
+                        'entryMode': pending.get('entry_mode') or timing_reason,
                         'entryTriggerPrice': trigger_price_val,
                         'entryQuotePrice': price,
                         'entrySpreadPct': _spread,
@@ -7202,7 +7231,7 @@ def run_monitor(db):
                              lifecycle_id, stage_seq, trigger_ts, trigger_price,
                              position_size_sol, token_amount_raw, token_decimals,
                              entry_execution_json, entry_execution_audit_json, monitor_state_json,
-                             premium_signal_id, signal_type, signal_route, lotto_state_json,
+                             premium_signal_id, signal_type, signal_route, entry_mode, lotto_state_json,
                              lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
                              strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -7226,7 +7255,8 @@ def run_monitor(db):
                             'positionSizeSol': actual_position_size_sol,
                         })), json.dumps(_monitor_state),
                         pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
-                        _pending_signal_route, json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
+                        _pending_signal_route, pending.get('entry_mode') or timing_reason,
+                        json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
                         _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
                         _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
                         'entered', 'available', 'open'

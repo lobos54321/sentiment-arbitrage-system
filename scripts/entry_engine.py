@@ -796,8 +796,8 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
     liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
     if cached_trend and 0 < liq_usd < 5000:
-        log.info(f"[SmartEntry] 🚫  REJECT: low_liquidity -  < 000")
-        return False, 'low_liquidity', f'liquidity= < 000', None
+        log.info(f"[SmartEntry] 🚫  REJECT: low_liquidity - liquidity=${liq_usd:.0f} < $5000")
+        return False, 'low_liquidity', f'liquidity=${liq_usd:.0f} < $5000', None
 
     _dev_pct, _ema_val = calculate_ema_deviation(token_ca, price, pool_address=pool_address)
     if _dev_pct is not None and _dev_pct > 120.0:

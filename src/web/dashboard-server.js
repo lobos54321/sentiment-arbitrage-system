@@ -62,6 +62,78 @@ function tierCaseSql(expr, prefix = '') {
           SUM(CASE WHEN ${expr} < 0.25 THEN 1 ELSE 0 END) AS ${prefix}sub25_n`;
 }
 
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+  }
+  return null;
+}
+
+function inferEntryMode(row) {
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const lottoState = parseJsonObject(row.lotto_state_json);
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  const entryDecision = lottoState.entryDecision || {};
+  const monitorContract = monitorState.entryDecisionContract || {};
+  const auditContract = entryAudit.entryDecisionContract || {};
+  return String(firstValue(
+    row.entry_mode,
+    monitorState.entryMode,
+    monitorState.entry_mode,
+    monitorState.smartEntryReason,
+    monitorState.passReason,
+    monitorContract.entry_mode,
+    auditContract.entry_mode,
+    entryDecision.entry_mode,
+    lottoState.entry_mode,
+    row.signal_route ? `${String(row.signal_route).toLowerCase()}_unknown` : null,
+    row.strategy_stage,
+    'unknown'
+  ));
+}
+
+function entryModeBucket(entryMode, positionSizeSol) {
+  const mode = String(entryMode || '').toLowerCase();
+  const size = Number(positionSizeSol || 0);
+  if (mode.includes('gmgn') && mode.includes('tiny_scout')) return 'gmgn_tiny_scout';
+  if (mode.includes('tiny_scout')) return 'tiny_scout';
+  if (mode.includes('scout') && size > 0 && size <= 0.005) return 'tiny_scout';
+  if (mode.includes('scout')) return 'scout';
+  return 'primary';
+}
+
+function lifecycleSummaryKey(row) {
+  return row.lifecycle_id || `${row.token_ca || 'unknown'}:${row.signal_ts || ''}`;
+}
+
+function decisionStatus(row) {
+  const decision = String(row.decision || '').toLowerCase();
+  const eventType = String(row.event_type || '').toLowerCase();
+  if (row.component === 'execution_api' && decision === 'filled_paper') return 'entered';
+  if (eventType.includes('exit') || eventType.includes('close')) return 'closed';
+  if (['reject', 'skip', 'abort', 'remove', 'expire', 'block', 'fail'].includes(decision)) return 'blocked';
+  if (decision === 'wait') return 'waiting';
+  if (['pending', 'pass', 'arm', 'registered', 'candidate', 'received', 'warn'].includes(decision)) return 'active';
+  return decision || 'unknown';
+}
+
+function roundNumber(value, digits = 3) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const factor = 10 ** digits;
+  return Math.round(n * factor) / factor;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = join(__dirname, '../..');
@@ -2100,6 +2172,612 @@ const server = http.createServer(async (req, res) => {
     });
     const fileStream = fs.createReadStream(klineDbPath);
     fileStream.pipe(res);
+    return;
+  } else if (url.pathname === '/api/paper/data-source-policy') {
+    if (!checkAuth(req, url, res)) return;
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      policy_version: 'v1_explicit_fail_modes',
+      principles: [
+        'Execution price and PnL must use SOL/token quote truth, not GMGN/DexScreener USD marks.',
+        'Entry quote failure is fail-closed: do not enter without a fresh Jupiter-compatible quote.',
+        'GMGN unavailable is fail-soft: do not boost or rescue, but do not reject the base signal only because GMGN is down.',
+        'DexScreener trend unavailable is route-dependent: LOTTO defensive gates should wait/expire; optional watchlist guards may warn and fail-open.',
+        'Exit quote failure does not synthesize profit; it records quote failure and keeps monitoring unless a trapped/no-route fail-safe triggers.',
+      ],
+      boundaries: [
+        { boundary: 'entry_execution_quote', source: 'Jupiter/shared quote', unavailable: 'fail_closed', action: 'retry within quote window, then drop pending entry' },
+        { boundary: 'entry_timing_price', source: 'Redis/shared quote/DexScreener/GeckoTerminal', unavailable: 'fail_closed', action: 'SmartEntry rejects no_price' },
+        { boundary: 'gmgn_lotto_policy', source: 'GMGN readonly enrichment', unavailable: 'fail_soft', action: 'allow base route, disable GMGN boost/tiny rescue' },
+        { boundary: 'lotto_defense_snapshot', source: 'DexScreener + Helius', unavailable: 'defensive_wait_or_expire', action: 'do not treat missing liquidity/activity as a positive signal' },
+        { boundary: 'watchlist_optional_fire_guard', source: 'DexScreener', unavailable: 'warn_fail_open', action: 'do not block solely on missing optional MC/liquidity guard' },
+        { boundary: 'exit_trigger_price', source: 'fresh SOL/token price snapshot', unavailable: 'hold_and_log', action: 'do not close from stale or missing mark price' },
+        { boundary: 'exit_execution_quote', source: 'Jupiter/shared quote', unavailable: 'fail_safe_after_retries', action: 'record quote failure; trapped/no-route fail-safe can synthetic-close later' },
+      ],
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/data-source-health') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts')) || (nowSec - 6 * 60 * 60);
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      const health = {
+        status: 'ok',
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        window: {
+          since_ts: sinceTs,
+          since_iso: new Date(sinceTs * 1000).toISOString(),
+        },
+        fail_modes: {
+          fail_closed_entry: [],
+          fail_soft_enrichment: [],
+          hold_and_log_exit: [],
+          warn_fail_open_optional: [],
+        },
+        counters: {},
+        external_alpha_health: [],
+        open_exit_quote_risk: null,
+        missed_attribution_coverage: null,
+        notes: [],
+      };
+
+      if (tableNames.has('paper_decision_events')) {
+        const eventCounts = paperDb.prepare(`
+          SELECT
+            SUM(CASE WHEN component = 'execution_api' AND event_type = 'entry_quote' AND decision = 'fail' THEN 1 ELSE 0 END) AS entry_quote_fail_n,
+            SUM(CASE WHEN component = 'execution_api' AND event_type = 'exit_quote' AND decision = 'fail' THEN 1 ELSE 0 END) AS exit_quote_fail_n,
+            SUM(CASE WHEN component = 'smart_entry' AND decision = 'reject' AND reason = 'no_price' THEN 1 ELSE 0 END) AS smart_entry_no_price_n,
+            SUM(CASE WHEN component = 'entry_readiness' AND event_type = 'watchlist_fire_deferred' THEN 1 ELSE 0 END) AS readiness_defer_n,
+            SUM(CASE WHEN component = 'entry_readiness' AND event_type = 'watchlist_fire_expired' THEN 1 ELSE 0 END) AS readiness_expire_n,
+            SUM(CASE WHEN reason LIKE '%rate_limited%' OR reason LIKE '%429%' THEN 1 ELSE 0 END) AS rate_limited_n,
+            COUNT(*) AS total_events
+          FROM paper_decision_events
+          WHERE event_ts >= @since
+        `).get({ since: sinceTs });
+        health.counters = {
+          total_events: eventCounts.total_events || 0,
+          entry_quote_fail_n: eventCounts.entry_quote_fail_n || 0,
+          exit_quote_fail_n: eventCounts.exit_quote_fail_n || 0,
+          smart_entry_no_price_n: eventCounts.smart_entry_no_price_n || 0,
+          readiness_defer_n: eventCounts.readiness_defer_n || 0,
+          readiness_expire_n: eventCounts.readiness_expire_n || 0,
+          rate_limited_n: eventCounts.rate_limited_n || 0,
+        };
+        health.fail_modes.fail_closed_entry = paperDb.prepare(`
+          SELECT component, event_type, reason, data_source, COUNT(*) AS n, MAX(event_ts) AS last_event_ts
+          FROM paper_decision_events
+          WHERE event_ts >= @since
+            AND (
+              (component = 'execution_api' AND event_type = 'entry_quote' AND decision = 'fail')
+              OR (component = 'smart_entry' AND decision = 'reject' AND reason = 'no_price')
+            )
+          GROUP BY component, event_type, reason, data_source
+          ORDER BY n DESC, last_event_ts DESC
+          LIMIT 20
+        `).all({ since: sinceTs });
+        health.fail_modes.hold_and_log_exit = paperDb.prepare(`
+          SELECT reason, data_source, COUNT(*) AS n, MAX(event_ts) AS last_event_ts
+          FROM paper_decision_events
+          WHERE event_ts >= @since
+            AND component = 'execution_api'
+            AND event_type = 'exit_quote'
+            AND decision = 'fail'
+          GROUP BY reason, data_source
+          ORDER BY n DESC, last_event_ts DESC
+          LIMIT 20
+        `).all({ since: sinceTs });
+        health.fail_modes.warn_fail_open_optional = paperDb.prepare(`
+          SELECT component, event_type, reason, data_source, COUNT(*) AS n, MAX(event_ts) AS last_event_ts
+          FROM paper_decision_events
+          WHERE event_ts >= @since
+            AND decision IN ('warn', 'wait')
+            AND (
+              reason LIKE '%data%'
+              OR reason LIKE '%dex%'
+              OR reason LIKE '%liquidity%'
+              OR reason LIKE '%readiness%'
+            )
+          GROUP BY component, event_type, reason, data_source
+          ORDER BY n DESC, last_event_ts DESC
+          LIMIT 20
+        `).all({ since: sinceTs });
+      } else {
+        health.notes.push('paper_decision_events table missing; decision-level health unavailable');
+      }
+
+      if (tableNames.has('paper_trades')) {
+        const tradeCols = getTableColumns(paperDb, 'paper_trades');
+        if (tradeCols.has('exit_quote_failures') && tradeCols.has('last_exit_quote_failure')) {
+          health.open_exit_quote_risk = paperDb.prepare(`
+            SELECT
+              COUNT(*) AS open_with_failures_n,
+              MAX(exit_quote_failures) AS max_exit_quote_failures,
+              SUM(CASE WHEN last_exit_quote_failure = 'no_route' THEN 1 ELSE 0 END) AS no_route_open_n,
+              SUM(CASE WHEN last_exit_quote_failure = 'token_not_tradable' THEN 1 ELSE 0 END) AS token_not_tradable_open_n
+            FROM paper_trades
+            WHERE exit_reason IS NULL
+              AND COALESCE(exit_quote_failures, 0) > 0
+          `).get();
+        }
+      }
+
+      if (tableNames.has('external_alpha_health')) {
+        health.external_alpha_health = paperDb.prepare(`
+          SELECT
+            source,
+            last_run_ts,
+            last_success_ts,
+            @now - COALESCE(last_run_ts, 0) AS last_run_age_sec,
+            @now - COALESCE(last_success_ts, 0) AS last_success_age_sec,
+            candidate_count,
+            recorded_count,
+            momentum_confirmed_count,
+            error_count,
+            last_error,
+            updated_at
+          FROM external_alpha_health
+          ORDER BY updated_at DESC
+        `).all({ now: nowSec });
+        health.fail_modes.fail_soft_enrichment = health.external_alpha_health
+          .filter((row) => !row.last_success_ts || row.last_success_age_sec > 15 * 60 || row.last_error)
+          .map((row) => ({
+            source: row.source,
+            last_success_age_sec: row.last_success_age_sec,
+            candidate_count: row.candidate_count,
+            recorded_count: row.recorded_count,
+            error_count: row.error_count,
+            last_error: row.last_error,
+          }));
+      } else {
+        health.notes.push('external_alpha_health table missing; GMGN scout health unavailable');
+      }
+
+      if (tableNames.has('paper_missed_signal_attribution')) {
+        const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
+        const tradableMissedExpr = missedCols.has('tradable_missed')
+          ? "SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END)"
+          : "NULL";
+        health.missed_attribution_coverage = paperDb.prepare(`
+          SELECT
+            COUNT(*) AS total_n,
+            SUM(CASE WHEN baseline_price IS NOT NULL THEN 1 ELSE 0 END) AS baseline_n,
+            SUM(CASE WHEN status = 'baseline_missing' THEN 1 ELSE 0 END) AS baseline_missing_n,
+            SUM(CASE WHEN pnl_5m IS NOT NULL THEN 1 ELSE 0 END) AS pnl_5m_n,
+            ${tradableMissedExpr} AS tradable_missed_n
+          FROM paper_missed_signal_attribution
+          WHERE COALESCE(signal_ts, created_event_ts, baseline_ts, 0) >= @since
+        `).get({ since: sinceTs });
+      }
+
+      const warnReasons = [];
+      if ((health.counters.entry_quote_fail_n || 0) > 0) warnReasons.push('entry_quote_failures_present');
+      if ((health.counters.smart_entry_no_price_n || 0) > 5) warnReasons.push('smart_entry_no_price_spike');
+      if ((health.counters.exit_quote_fail_n || 0) > 0) warnReasons.push('exit_quote_failures_present');
+      if (health.fail_modes.fail_soft_enrichment.length > 0) warnReasons.push('external_alpha_degraded');
+      if (health.open_exit_quote_risk && (health.open_exit_quote_risk.open_with_failures_n || 0) > 0) warnReasons.push('open_positions_have_exit_quote_failures');
+      if (health.missed_attribution_coverage && health.missed_attribution_coverage.total_n > 0) {
+        const baselinePct = (health.missed_attribution_coverage.baseline_n || 0) / health.missed_attribution_coverage.total_n;
+        if (baselinePct < 0.8) warnReasons.push('missed_attribution_baseline_coverage_low');
+      }
+      if (warnReasons.length) {
+        health.status = warnReasons.some((reason) => reason.includes('entry_quote') || reason.includes('open_positions')) ? 'warn' : 'degraded';
+        health.warn_reasons = warnReasons;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(health, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/entry-mode-performance') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '1000', 10) || 1000, 10000));
+      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
+      if (!hasTable) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_trades table not found' }));
+        return;
+      }
+      const cols = getTableColumns(paperDb, 'paper_trades');
+      const selectCols = [
+        'id', 'symbol', 'token_ca', 'entry_ts', 'exit_ts', 'exit_reason', 'pnl_pct', 'peak_pnl',
+        'position_size_sol', 'signal_route', 'signal_type', 'strategy_stage',
+        cols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode',
+        cols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json',
+        cols.has('lotto_state_json') ? 'lotto_state_json' : 'NULL AS lotto_state_json',
+        cols.has('entry_execution_audit_json') ? 'entry_execution_audit_json' : 'NULL AS entry_execution_audit_json',
+      ];
+      const whereSql = sinceTs ? 'WHERE entry_ts >= @since' : '';
+      const rows = paperDb.prepare(`
+        SELECT ${selectCols.join(', ')}
+        FROM paper_trades
+        ${whereSql}
+        ORDER BY entry_ts DESC, id DESC
+        LIMIT @limit
+      `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+
+      const groups = new Map();
+      const recent = [];
+      for (const row of rows) {
+        const entryMode = inferEntryMode(row);
+        const bucket = entryModeBucket(entryMode, row.position_size_sol);
+        const key = `${bucket}:${entryMode}`;
+        const closed = row.exit_ts != null || row.exit_reason != null;
+        const pnl = row.pnl_pct == null ? null : Number(row.pnl_pct);
+        const peak = row.peak_pnl == null ? null : Number(row.peak_pnl);
+        if (!groups.has(key)) {
+          groups.set(key, {
+            bucket,
+            entry_mode: entryMode,
+            total: 0,
+            open: 0,
+            closed: 0,
+            wins: 0,
+            losses: 0,
+            total_pnl: 0,
+            total_peak: 0,
+            pnl_n: 0,
+            peak_n: 0,
+            total_position_size_sol: 0,
+            position_n: 0,
+            est_pnl_sol: 0,
+          });
+        }
+        const g = groups.get(key);
+        g.total += 1;
+        if (closed) g.closed += 1;
+        else g.open += 1;
+        if (pnl != null && Number.isFinite(pnl)) {
+          g.pnl_n += 1;
+          g.total_pnl += pnl;
+          if (closed && pnl > 0) g.wins += 1;
+          if (closed && pnl <= 0) g.losses += 1;
+          if (row.position_size_sol) g.est_pnl_sol += pnl * Number(row.position_size_sol || 0);
+        }
+        if (peak != null && Number.isFinite(peak)) {
+          g.peak_n += 1;
+          g.total_peak += peak;
+        }
+        if (row.position_size_sol != null) {
+          g.position_n += 1;
+          g.total_position_size_sol += Number(row.position_size_sol || 0);
+        }
+        if (recent.length < 50) {
+          recent.push({
+            id: row.id,
+            symbol: row.symbol,
+            token_ca: row.token_ca,
+            entry_ts: row.entry_ts,
+            exit_ts: row.exit_ts,
+            exit_reason: row.exit_reason,
+            signal_route: row.signal_route,
+            strategy_stage: row.strategy_stage,
+            entry_mode: entryMode,
+            bucket,
+            position_size_sol: row.position_size_sol,
+            pnl_pct: pnl == null ? null : roundNumber(pnl * 100, 2),
+            peak_pnl_pct: peak == null ? null : roundNumber(peak * 100, 2),
+          });
+        }
+      }
+      const byMode = Array.from(groups.values()).map((g) => ({
+        bucket: g.bucket,
+        entry_mode: g.entry_mode,
+        total: g.total,
+        open: g.open,
+        closed: g.closed,
+        wins: g.wins,
+        losses: g.losses,
+        win_rate_pct: g.closed ? roundNumber((g.wins / g.closed) * 100, 1) : null,
+        avg_pnl_pct: g.pnl_n ? roundNumber((g.total_pnl / g.pnl_n) * 100, 2) : null,
+        avg_peak_pnl_pct: g.peak_n ? roundNumber((g.total_peak / g.peak_n) * 100, 2) : null,
+        avg_position_size_sol: g.position_n ? roundNumber(g.total_position_size_sol / g.position_n, 4) : null,
+        est_pnl_sol: roundNumber(g.est_pnl_sol, 5),
+      })).sort((a, b) => {
+        if (a.bucket !== b.bucket) return a.bucket.localeCompare(b.bucket);
+        return b.total - a.total;
+      });
+      const bucketSummary = {};
+      for (const g of byMode) {
+        if (!bucketSummary[g.bucket]) bucketSummary[g.bucket] = { total: 0, closed: 0, open: 0, est_pnl_sol: 0 };
+        bucketSummary[g.bucket].total += g.total;
+        bucketSummary[g.bucket].closed += g.closed;
+        bucketSummary[g.bucket].open += g.open;
+        bucketSummary[g.bucket].est_pnl_sol += g.est_pnl_sol || 0;
+      }
+      for (const summary of Object.values(bucketSummary)) {
+        summary.est_pnl_sol = roundNumber(summary.est_pnl_sol, 5);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          limit,
+        },
+        bucket_summary: bucketSummary,
+        by_entry_mode: byMode,
+        recent,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/lifecycle-summary') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 500));
+      const eventLimit = Math.max(limit, Math.min(parseInt(url.searchParams.get('event_limit') || '5000', 10) || 5000, 50000));
+      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      const statusFilter = (url.searchParams.get('status') || 'all').toLowerCase();
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('paper_decision_events')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_decision_events table not found' }));
+        return;
+      }
+      const eventWhere = sinceTs ? 'WHERE event_ts >= @since' : '';
+      const events = paperDb.prepare(`
+        SELECT id, event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
+               signal_ts, strategy_stage, route, component, event_type, decision,
+               reason, data_source, lifecycle_state, vitality_score, entry_bias, payload_json
+        FROM paper_decision_events
+        ${eventWhere}
+        ORDER BY event_ts DESC, id DESC
+        LIMIT @eventLimit
+      `).all(sinceTs ? { since: sinceTs, eventLimit } : { eventLimit });
+
+      const summaries = new Map();
+      for (const event of events) {
+        const key = lifecycleSummaryKey(event);
+        const payload = parseJsonObject(event.payload_json);
+        const entryMode = firstValue(
+          payload.entry_mode,
+          payload.entryMode,
+          (payload.entryDecisionContract || {}).entry_mode,
+          (payload.entry_readiness_policy || {}).entry_mode
+        );
+        if (!summaries.has(key)) {
+          summaries.set(key, {
+            key,
+            lifecycle_id: event.lifecycle_id,
+            token_ca: event.token_ca,
+            symbol: event.symbol,
+            signal_id: event.signal_id,
+            signal_ts: event.signal_ts,
+            route: event.route,
+            strategy_stage: event.strategy_stage,
+            first_event_ts: event.event_ts,
+            last_event_ts: event.event_ts,
+            event_count: 0,
+            final_status: decisionStatus(event),
+            final_decision: event.decision,
+            final_component: event.component,
+            final_event_type: event.event_type,
+            final_reason: event.reason,
+            final_data_source: event.data_source,
+            final_event_id: event.id,
+            lifecycle_state: event.lifecycle_state,
+            vitality_score: event.vitality_score,
+            entry_bias: event.entry_bias,
+            entry_mode: entryMode,
+            has_trade: false,
+            trade_count: 0,
+            max_missed_pnl_pct: null,
+            tradable_missed: null,
+            tradability_status: null,
+          });
+        }
+        const summary = summaries.get(key);
+        summary.event_count += 1;
+        summary.first_event_ts = Math.min(summary.first_event_ts, event.event_ts);
+        summary.last_event_ts = Math.max(summary.last_event_ts, event.event_ts);
+        if (!summary.entry_mode && entryMode) summary.entry_mode = entryMode;
+      }
+
+      if (tableNames.has('paper_trades')) {
+        const tradeCols = getTableColumns(paperDb, 'paper_trades');
+        const tradeWhere = sinceTs ? 'WHERE entry_ts >= @since' : '';
+        const tradeRows = paperDb.prepare(`
+          SELECT id, lifecycle_id, token_ca, symbol, signal_ts, signal_route, signal_type,
+                 strategy_stage, entry_ts, exit_ts, exit_reason, pnl_pct, peak_pnl,
+                 position_size_sol,
+                 ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'},
+                 ${tradeCols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json'},
+                 ${tradeCols.has('lotto_state_json') ? 'lotto_state_json' : 'NULL AS lotto_state_json'},
+                 ${tradeCols.has('entry_execution_audit_json') ? 'entry_execution_audit_json' : 'NULL AS entry_execution_audit_json'}
+          FROM paper_trades
+          ${tradeWhere}
+          ORDER BY entry_ts DESC, id DESC
+          LIMIT @eventLimit
+        `).all(sinceTs ? { since: sinceTs, eventLimit } : { eventLimit });
+        for (const trade of tradeRows) {
+          const key = lifecycleSummaryKey(trade);
+          if (!summaries.has(key)) {
+            summaries.set(key, {
+              key,
+              lifecycle_id: trade.lifecycle_id,
+              token_ca: trade.token_ca,
+              symbol: trade.symbol,
+              signal_ts: trade.signal_ts,
+              route: trade.signal_route || trade.signal_type,
+              strategy_stage: trade.strategy_stage,
+              first_event_ts: trade.entry_ts,
+              last_event_ts: trade.exit_ts || trade.entry_ts,
+              event_count: 0,
+              final_status: trade.exit_ts || trade.exit_reason ? 'closed' : 'entered',
+              final_decision: trade.exit_ts || trade.exit_reason ? 'closed' : 'filled_paper',
+              final_component: 'paper_trades',
+              final_event_type: trade.exit_ts || trade.exit_reason ? 'trade_closed' : 'trade_open',
+              final_reason: trade.exit_reason || 'open_position',
+              has_trade: true,
+              trade_count: 0,
+            });
+          }
+          const summary = summaries.get(key);
+          summary.has_trade = true;
+          summary.trade_count = (summary.trade_count || 0) + 1;
+          summary.trade_id = trade.id;
+          summary.entry_ts = trade.entry_ts;
+          summary.exit_ts = trade.exit_ts;
+          summary.exit_reason = trade.exit_reason;
+          summary.pnl_pct = trade.pnl_pct == null ? null : roundNumber(Number(trade.pnl_pct) * 100, 2);
+          summary.peak_pnl_pct = trade.peak_pnl == null ? null : roundNumber(Number(trade.peak_pnl) * 100, 2);
+          summary.position_size_sol = trade.position_size_sol;
+          summary.entry_mode = summary.entry_mode || inferEntryMode(trade);
+          summary.entry_mode_bucket = entryModeBucket(summary.entry_mode, trade.position_size_sol);
+          summary.final_status = trade.exit_ts || trade.exit_reason ? 'closed' : 'entered';
+          summary.final_decision = summary.final_status;
+          summary.final_component = 'paper_trades';
+          summary.final_event_type = summary.final_status === 'closed' ? 'trade_closed' : 'trade_open';
+          summary.final_reason = trade.exit_reason || 'open_position';
+        }
+      }
+
+      if (tableNames.has('paper_missed_signal_attribution')) {
+        const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
+        const missedWhere = sinceTs ? 'WHERE COALESCE(signal_ts, created_event_ts, baseline_ts, 0) >= @since' : '';
+        const missedRows = paperDb.prepare(`
+          SELECT lifecycle_id, token_ca, symbol, signal_ts, route, component,
+                 reject_reason, COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, NULL) AS max_pnl,
+                 ${missedCols.has('tradable_missed') ? 'tradable_missed' : 'NULL AS tradable_missed'},
+                 ${missedCols.has('tradability_status') ? 'tradability_status' : 'NULL AS tradability_status'},
+                 ${missedCols.has('would_stop_before_peak') ? 'would_stop_before_peak' : 'NULL AS would_stop_before_peak'}
+          FROM paper_missed_signal_attribution
+          ${missedWhere}
+          ORDER BY COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999) DESC
+          LIMIT @eventLimit
+        `).all(sinceTs ? { since: sinceTs, eventLimit } : { eventLimit });
+        for (const missed of missedRows) {
+          const key = lifecycleSummaryKey(missed);
+          if (!summaries.has(key)) {
+            summaries.set(key, {
+              key,
+              lifecycle_id: missed.lifecycle_id,
+              token_ca: missed.token_ca,
+              symbol: missed.symbol,
+              signal_ts: missed.signal_ts,
+              route: missed.route,
+              first_event_ts: null,
+              last_event_ts: null,
+              event_count: 0,
+              final_status: 'missed_only',
+              final_component: missed.component,
+              final_reason: missed.reject_reason,
+              has_trade: false,
+              trade_count: 0,
+            });
+          }
+          const summary = summaries.get(key);
+          const maxPnl = missed.max_pnl == null ? null : Number(missed.max_pnl);
+          if (maxPnl != null && Number.isFinite(maxPnl)) {
+            const prev = summary.max_missed_pnl_pct == null ? -Infinity : summary.max_missed_pnl_pct / 100;
+            if (maxPnl > prev) {
+              summary.max_missed_pnl_pct = roundNumber(maxPnl * 100, 2);
+              summary.missed_component = missed.component;
+              summary.missed_reason = missed.reject_reason;
+              summary.tradable_missed = missed.tradable_missed;
+              summary.tradability_status = missed.tradability_status;
+              summary.would_stop_before_peak = missed.would_stop_before_peak;
+            }
+          }
+        }
+      }
+
+      let list = Array.from(summaries.values());
+      if (statusFilter !== 'all') {
+        list = list.filter((item) => String(item.final_status || '').toLowerCase() === statusFilter);
+      }
+      const counts = {};
+      const byFinalGate = {};
+      for (const item of list) {
+        counts[item.final_status || 'unknown'] = (counts[item.final_status || 'unknown'] || 0) + 1;
+        const gateKey = `${item.final_component || '-'}:${item.final_reason || '-'}`;
+        if (!byFinalGate[gateKey]) {
+          byFinalGate[gateKey] = {
+            component: item.final_component || '-',
+            reason: item.final_reason || '-',
+            n: 0,
+            max_missed_pnl_pct: null,
+            tradable_n: 0,
+          };
+        }
+        byFinalGate[gateKey].n += 1;
+        if (item.max_missed_pnl_pct != null) {
+          byFinalGate[gateKey].max_missed_pnl_pct = Math.max(
+            byFinalGate[gateKey].max_missed_pnl_pct == null ? -Infinity : byFinalGate[gateKey].max_missed_pnl_pct,
+            item.max_missed_pnl_pct
+          );
+        }
+        if (Number(item.tradable_missed || 0) === 1) byFinalGate[gateKey].tradable_n += 1;
+      }
+      for (const gate of Object.values(byFinalGate)) {
+        if (gate.max_missed_pnl_pct === -Infinity) gate.max_missed_pnl_pct = null;
+      }
+      list.sort((a, b) => {
+        const missedDelta = (b.max_missed_pnl_pct ?? -99999) - (a.max_missed_pnl_pct ?? -99999);
+        if (missedDelta !== 0) return missedDelta;
+        return (b.last_event_ts || b.entry_ts || 0) - (a.last_event_ts || a.entry_ts || 0);
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          status: statusFilter,
+          limit,
+          event_limit: eventLimit,
+        },
+        status_counts: counts,
+        by_final_gate: Object.values(byFinalGate).sort((a, b) => b.n - a.n).slice(0, 100),
+        lifecycles: list.slice(0, limit),
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
     return;
   } else if (url.pathname === '/api/paper/missed-attribution') {
     // Paper missed-dog attribution summary — 需要 token 认证
