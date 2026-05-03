@@ -3,6 +3,7 @@ import { KlineRepository } from './kline-repository.js';
 import { PoolResolver } from './pool-resolver.js';
 import { MarketDataBackfillService } from './market-data-backfill-service.js';
 import { MARKET_DATA_REASON, SharedMarketRuntime, isMarketDataFlagEnabled, normalizeMarketDataReason } from './shared-market-runtime.js';
+import { normalizeUnixTimestampSec } from '../utils/time-normalization.js';
 
 function normalizePoolId(poolAddress) {
   if (!poolAddress) return null;
@@ -18,6 +19,10 @@ function normalizeBars(list = []) {
     close: Number(close),
     volume: Number(volume || 0)
   }));
+}
+
+export function normalizeMarketDataTimestampSec(value, fallbackSec = Math.floor(Date.now() / 1000)) {
+  return normalizeUnixTimestampSec(value, fallbackSec);
 }
 
 export class SharedPoolOhlcvClient {
@@ -125,9 +130,10 @@ export class SharedPoolOhlcvClient {
     };
   }
 
-  async fetchOhlcvWindow({ tokenCa, signalTsSec = Math.floor(Date.now() / 1000), poolAddress = null, bars = this.config.evaluator.maxHistoricalBars, startTs = null, endTs = null } = {}, options = {}) {
-    const windowStart = startTs ?? signalTsSec;
-    const windowEnd = endTs ?? (signalTsSec + bars * 60);
+  async fetchOhlcvWindow({ tokenCa, signalTsSec: rawSignalTsSec = Math.floor(Date.now() / 1000), poolAddress = null, bars = this.config.evaluator.maxHistoricalBars, startTs = null, endTs = null } = {}, options = {}) {
+    const signalTsSec = normalizeMarketDataTimestampSec(rawSignalTsSec);
+    const windowStart = startTs == null ? signalTsSec : normalizeMarketDataTimestampSec(startTs, signalTsSec);
+    const windowEnd = endTs == null ? signalTsSec + bars * 60 : normalizeMarketDataTimestampSec(endTs, signalTsSec + bars * 60);
     const minBars = options.minBars ?? 1;
 
     const cached = this.getCachedBars(tokenCa, windowStart, windowEnd, minBars);
@@ -173,7 +179,9 @@ export class SharedPoolOhlcvClient {
       return { ...cachedProviderResult, cacheHit: true };
     }
 
-    const windows = options.windows || [windowEnd, signalTsSec + 600, signalTsSec + 3600];
+    const windows = (options.windows || [windowEnd, signalTsSec + 600, signalTsSec + 3600])
+      .map((value) => normalizeMarketDataTimestampSec(value, windowEnd))
+      .filter((value) => Number.isFinite(value) && value > 0);
     const limit = options.limit || Math.max(20, Math.min(200, bars));
 
     const providerResult = await this.runtime.runSingleFlight(`ohlcv:${cacheKey}`, async () => {
@@ -249,14 +257,14 @@ export class SharedPoolOhlcvClient {
   }
 
   async fetchRecentOhlcvByPool(tokenCa, poolAddress, options = {}) {
-    const signalTsSec = Number(options.signalTsSec || Math.floor(Date.now() / 1000));
+    const signalTsSec = normalizeMarketDataTimestampSec(options.signalTsSec);
     const bars = Number(options.bars || this.config.evaluator.maxHistoricalBars);
     const beforeTimestamps = Array.isArray(options.beforeTimestamps) && options.beforeTimestamps.length
       ? options.beforeTimestamps
       : (Array.isArray(options.windows) && options.windows.length ? options.windows : [signalTsSec + bars * 60]);
 
     const normalizedWindows = beforeTimestamps
-      .map((value) => (value == null ? signalTsSec + bars * 60 : Number(value)))
+      .map((value) => normalizeMarketDataTimestampSec(value, signalTsSec + bars * 60))
       .filter((value) => Number.isFinite(value) && value > 0);
 
     return this.fetchOhlcvWindow({

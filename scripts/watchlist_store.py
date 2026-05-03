@@ -510,6 +510,10 @@ class WatchlistStore:
                      last_scores_json=json.dumps(scores_dict),
                      last_eval_at=eval_time or time.time())
 
+    def touch_eval(self, entry_id, eval_time=None):
+        """Record that the watchlist entry was evaluated or intentionally skipped."""
+        self._update(entry_id, last_eval_at=eval_time or time.time())
+
     def update_price_bounds(self, entry_id, current_price):
         """Update lowest/highest price bounds during observation."""
         entry = self.get_by_id(entry_id)
@@ -541,11 +545,13 @@ class WatchlistStore:
     def defer_fire(self, entry_id, reason, cooldown_sec=300):
         """Temporarily prevent repeated watchlist FIRE attempts for a known block."""
         cooldown_sec = max(0, float(cooldown_sec or 0))
-        until = time.time() + cooldown_sec if cooldown_sec else 0
+        now = time.time()
+        until = now + cooldown_sec if cooldown_sec else 0
         self._update(
             entry_id,
             fire_block_until=until,
             fire_block_reason=str(reason or ""),
+            last_eval_at=now,
         )
         return until
 

@@ -139,6 +139,19 @@ def test_defer_fire_persists_readiness_block(tmp_path):
         assert updated["fire_block_reason"] == "entry_readiness_stale_ath_requires_fresh_high"
         assert updated["fire_block_until"] >= until - 1
         assert updated["fire_block_until"] > 0
+        assert updated["last_eval_at"] > 0
+    finally:
+        store.close()
+
+
+def test_touch_eval_updates_last_eval_at(tmp_path):
+    store = WatchlistStore(str(tmp_path / "watchlist.db"))
+    try:
+        entry = store.register(ca="TokenCA", symbol="DOG", signal_type="ATH", signal_ts=1000)
+        store.touch_eval(entry["id"], eval_time=1234.5)
+        updated = store.get_by_id(entry["id"])
+
+        assert updated["last_eval_at"] == 1234.5
     finally:
         store.close()
 

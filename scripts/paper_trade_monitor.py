@@ -5865,20 +5865,30 @@ def run_monitor(db):
                 # P5: Self cooldown — respect cooldown_until on THIS entry
                 # Catches the deadly "win → instant re-buy same CA → loss" pattern
                 _cd_until = w_entry.get('cooldown_until', 0) or 0
-                if _cd_until > time.time():
-                    _cd_remain = int(_cd_until - time.time())
+                _now_for_cooldown = time.time()
+                if _cd_until > _now_for_cooldown:
+                    _cd_remain = int(_cd_until - _now_for_cooldown)
                     if _cd_remain > 15:  # only log if > 15s remaining to reduce spam
                         log.info(f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=post_exit_cooldown ({_cd_remain}s remaining)")
+                    try:
+                        watchlist.touch_eval(w_entry['id'], _now_for_cooldown)
+                    except Exception:
+                        pass
                     wl_skip_cooldown += 1
                     continue
                 _fire_block_until = float(w_entry.get('fire_block_until') or 0)
-                if _fire_block_until > time.time():
-                    _fb_remain = int(_fire_block_until - time.time())
+                _now_for_fire_block = time.time()
+                if _fire_block_until > _now_for_fire_block:
+                    _fb_remain = int(_fire_block_until - _now_for_fire_block)
                     if _fb_remain > 15:
                         log.info(
                             f"  [WATCHLIST] ⏳ {w_entry['symbol']} WAIT reason=readiness_preflight_cooldown "
                             f"({_fb_remain}s remaining; {w_entry.get('fire_block_reason') or 'unknown'})"
                         )
+                    try:
+                        watchlist.touch_eval(w_entry['id'], _now_for_fire_block)
+                    except Exception:
+                        pass
                     wl_skip_cooldown += 1
                     continue
                 

@@ -27,7 +27,12 @@ import { ShadowPnlTracker } from '../tracking/shadow-pnl-tracker.js';
 import { RiskManager } from '../risk/risk-manager.js';
 import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
 import { SharedMarketDataClient } from '../market-data/shared-market-data-client.js';
+import { normalizeUnixTimestampSec } from '../utils/time-normalization.js';
 import axios from 'axios';
+
+export function normalizeSignalTimestampSec(value, fallbackSec = Math.floor(Date.now() / 1000)) {
+  return normalizeUnixTimestampSec(value, fallbackSec);
+}
 
 export class PremiumSignalEngine {
   constructor(config, db) {
@@ -1276,7 +1281,9 @@ export class PremiumSignalEngine {
       return { action: 'SKIP', reason: 'already_in_position' };
     }
 
-    const signalTsSec = Number(signal.signal_ts || signal.timestamp || Math.floor(Date.now() / 1000));
+    const signalTsSec = normalizeSignalTimestampSec(
+      signal.signal_ts ?? signal.source_message_ts ?? signal.timestamp ?? signal.receive_ts
+    );
 
     try {
       const backfill = await this._backfillPrebuyKlines(ca, signalTsSec, 5);
