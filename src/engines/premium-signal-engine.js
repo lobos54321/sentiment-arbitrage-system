@@ -812,11 +812,18 @@ export class PremiumSignalEngine {
       }
     }
 
-    const ohlcvResult = await this.sharedMarketData.fetchRecentOhlcvByPool(tokenCA, poolAddress, {
+    const providerBars = Math.max(20, targetBars * 4);
+    const ohlcvResult = await this.sharedMarketData.fetchOhlcvWindow({
+      tokenCa: tokenCA,
+      poolAddress,
       signalTsSec,
-      bars: Math.max(20, targetBars * 4),
-      beforeTimestamps: [signalTsSec + 600, signalTsSec + 3600],
-      allowDexFallback: false,
+      bars: providerBars,
+      startTs: lookbackStart,
+      endTs: signalTsSec - 60,
+    }, {
+      minBars: targetBars,
+      windows: [signalTsSec, signalTsSec + 600, signalTsSec + 3600],
+      limit: providerBars,
     });
 
     if (ohlcvResult.rateLimited) {
@@ -1299,6 +1306,15 @@ export class PremiumSignalEngine {
       const decisionContinuedToBuy = gateDecision !== 'BLOCK' && !unknownDataBlocked;
       const normalizeUnknownReason = (reason, check, backfillResult, waitState) => {
         if (gateDecision !== 'UNKNOWN_DATA') return reason || 'unknown';
+        const diagnosticText = [
+          reason,
+          check?.error,
+          backfillResult?.reason,
+          waitState?.error,
+        ].filter(Boolean).join(' ');
+        if (/invalid api key|unauthori[sz]ed|forbidden|http 401|status 401/i.test(diagnosticText)) {
+          return 'provider_auth_failed';
+        }
         if (reason === 'RATE_LIMITED') return backfillResult?.reason === 'RATE_LIMITED' ? 'backfill_rate_limited' : 'provider_rate_limited';
         if (reason === 'stale_local_bars' || reason === 'stale_primed_bars') return reason;
         if (reason === 'no_history') return 'insufficient_bars';
