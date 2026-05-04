@@ -42,6 +42,12 @@ GMGN_TINY_SCOUT_MIN_EDGE_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MIN_EDGE_SC
 GMGN_TINY_SCOUT_MAX_TOXIC_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MAX_TOXIC_SCORE", "1"))
 GMGN_TINY_SCOUT_TOP1_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP1_MAX_PCT", "58"))
 GMGN_TINY_SCOUT_TOP10_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP10_MAX_PCT", "78"))
+GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5", "20000"))
+GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5", "250"))
+GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5", "-45"))
+GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5", "12000"))
+GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5", "120"))
+GMGN_RECLAIM_TINY_SCOUT_MIN_M5 = float(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_M5", "-8"))
 
 
 def _f(value, default=0.0):
@@ -243,6 +249,7 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
     liquidity_usd = _f(lotto_detail.get("liquidity_usd"))
     vol_m5 = _f(lotto_detail.get("vol_m5"))
     tx_m5 = _f(lotto_detail.get("tx_m5"))
+    price_change_m5 = _f(lotto_detail.get("price_change_m5"))
 
     concentration_reason = reject_reason.startswith("lotto_live_top1_") or reject_reason.startswith("lotto_live_top10_")
     if concentration_reason:
@@ -276,4 +283,63 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
                     "tx_m5": tx_m5,
                 },
             }
+
+    unknown_or_falling_knife_reason = reject_reason in {
+        "lotto_newborn_falling_knife_low_liq",
+        "lotto_liq_unknown_pumpfun_wait",
+    } or reject_reason.startswith("lotto_liq_unknown_pumpfun_wait")
+    if unknown_or_falling_knife_reason:
+        if (
+            live_top1 <= GMGN_TINY_SCOUT_TOP1_MAX_PCT
+            and live_top10 <= GMGN_TINY_SCOUT_TOP10_MAX_PCT
+            and vol_m5 >= GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5
+            and tx_m5 >= GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5
+            and price_change_m5 >= GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5
+        ):
+            return {
+                "allow": True,
+                "entry_mode": "gmgn_unknown_data_tiny_scout",
+                "reason": "gmgn_unknown_data_tiny_scout_ok",
+                "position_size_sol": GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL,
+                "detail": {
+                    "rescued_reject_reason": reject_reason,
+                    "live_top1_pct": live_top1,
+                    "live_top10_pct": live_top10,
+                    "vol_m5": vol_m5,
+                    "tx_m5": tx_m5,
+                    "price_change_m5": price_change_m5,
+                    "min_vol_m5": GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5,
+                    "min_tx_m5": GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5,
+                    "max_negative_m5": GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5,
+                },
+            }
+        return {"allow": False, "reason": "gmgn_unknown_data_activity_not_enough"}
+
+    reclaim_reason = reject_reason in {"lotto_timing_negative_m5", "post_spread_abort"}
+    if reclaim_reason:
+        if (
+            live_top1 <= GMGN_TINY_SCOUT_TOP1_MAX_PCT
+            and live_top10 <= GMGN_TINY_SCOUT_TOP10_MAX_PCT
+            and vol_m5 >= GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5
+            and tx_m5 >= GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5
+            and price_change_m5 >= GMGN_RECLAIM_TINY_SCOUT_MIN_M5
+        ):
+            return {
+                "allow": True,
+                "entry_mode": "gmgn_reclaim_tiny_scout",
+                "reason": "gmgn_reclaim_tiny_scout_ok",
+                "position_size_sol": GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL,
+                "detail": {
+                    "rescued_reject_reason": reject_reason,
+                    "live_top1_pct": live_top1,
+                    "live_top10_pct": live_top10,
+                    "vol_m5": vol_m5,
+                    "tx_m5": tx_m5,
+                    "price_change_m5": price_change_m5,
+                    "min_vol_m5": GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5,
+                    "min_tx_m5": GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5,
+                    "min_price_change_m5": GMGN_RECLAIM_TINY_SCOUT_MIN_M5,
+                },
+            }
+        return {"allow": False, "reason": "gmgn_reclaim_activity_not_enough"}
     return {"allow": False, "reason": "gmgn_tiny_scout_reason_not_rescueable"}

@@ -135,6 +135,61 @@ def test_gmgn_tiny_scout_does_not_rescue_toxic_policy():
     assert rescue["allow"] is False
 
 
+def test_gmgn_tiny_scout_rescues_unknown_data_with_clean_high_activity():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "smart_degen_count": 4,
+            "renowned_count": 2,
+            "creator_close": True,
+            "top10_holder_rate": 0.18,
+            "bundler_rate": 0.12,
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_newborn_falling_knife_low_liq",
+        policy,
+        {
+            "live_top1_pct": 34,
+            "live_top10_pct": 61,
+            "vol_m5": 24000,
+            "tx_m5": 310,
+            "price_change_m5": -18,
+        },
+    )
+
+    assert rescue["allow"] is True
+    assert rescue["entry_mode"] == "gmgn_unknown_data_tiny_scout"
+    assert rescue["position_size_sol"] == 0.003
+
+
+def test_gmgn_tiny_scout_does_not_rescue_unknown_data_when_toxic():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "rat_trader_amount_rate": 0.42,
+            "bundler_rate": 0.10,
+            "entrapment_ratio": 0.01,
+            "top10_holder_rate": 0.18,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_newborn_falling_knife_low_liq",
+        policy,
+        {
+            "live_top1_pct": 34,
+            "live_top10_pct": 61,
+            "vol_m5": 24000,
+            "tx_m5": 310,
+            "price_change_m5": -18,
+        },
+    )
+
+    assert rescue["allow"] is False
+
+
 def test_lotto_pending_applies_gmgn_downsize_without_exceeding_original_size():
     pending = build_lotto_pending(
         {
@@ -205,6 +260,32 @@ def test_entry_edge_budget_applies_gmgn_toxic_spread_penalty():
 
     assert budget["gmgn_spread_penalty_pct"] == 0.5
     assert budget["max_spread_pct"] == 1.5
+    assert budget["pass"] is True
+
+
+def test_entry_edge_budget_allows_wider_spread_for_paper_tiny_scout():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.029,
+        lifecycle={
+            "lifecycle_features": {
+                "liquidity_unknown": True,
+            }
+        },
+        pending={
+            "is_lotto": True,
+            "entry_mode": "gmgn_concentration_tiny_scout",
+            "kelly_position_sol": 0.003,
+            "entry_readiness_policy": {
+                "max_spread_pct": 1.0,
+            },
+        },
+    )
+
+    assert budget["is_tiny_scout"] is True
+    assert budget["tiny_scout_spread_cap_pct"] == 3.0
+    assert budget["max_spread_pct"] == 3.0
     assert budget["pass"] is True
 
 
@@ -340,4 +421,44 @@ def test_smart_entry_gmgn_tiny_scout_bypasses_low_kline_volume(monkeypatch):
     assert should_enter is True
     assert reason == "gmgn_concentration_tiny_scout"
     assert "node=gmgn_tiny_scout" in detail
+    assert trigger == 1.0
+
+
+def test_smart_entry_reclaim_tiny_scout_bypasses_prior_spread_abort(monkeypatch):
+    import entry_engine as entry_engine_module
+    import paper_trade_monitor as monitor_module
+
+    policy = {
+        "allowed_entry_modes": ["smart_entry_reclaim_tiny_scout", "smart_entry_pullback_bounce"],
+        "min_p_follow": 0.72,
+        "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+        "detail": {"route": "LOTTO"},
+    }
+    trend = {
+        "buys_m5": 120,
+        "sells_m5": 60,
+        "price_change_m5": 15,
+        "vol_m5": 10000,
+        "vol_h1": 80000,
+        "liquidity_usd": 7000,
+        "fdv": 24000,
+        "market_cap": 24000,
+    }
+
+    monkeypatch.setattr(monitor_module, "fetch_realtime_price", lambda *args, **kwargs: (1.0, "test", 0))
+    monkeypatch.setattr(entry_engine_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: trend)
+    monkeypatch.setattr(entry_engine_module, "is_chasing_top", lambda *_args, **_kwargs: (False, ""))
+    monkeypatch.setattr(entry_engine_module, "calculate_ema_deviation", lambda *_args, **_kwargs: (10.0, 0.9))
+
+    should_enter, reason, detail, trigger = evaluate_smart_entry(
+        "DogToken",
+        symbol="Dog",
+        pool_address="Pool",
+        spread_abort_count=1,
+        entry_readiness_policy=policy,
+    )
+
+    assert should_enter is True
+    assert reason == "smart_entry_reclaim_tiny_scout"
+    assert "node=smart_entry_reclaim_tiny_scout" in detail
     assert trigger == 1.0

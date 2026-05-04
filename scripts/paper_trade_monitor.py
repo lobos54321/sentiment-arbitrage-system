@@ -63,7 +63,7 @@ from paper_decision_audit import (
 )
 from lifecycle_classifier import classify_lifecycle
 from entry_decision_contract import build_entry_decision_contract
-from entry_readiness_policy import evaluate_entry_readiness_policy
+from entry_readiness_policy import PAPER_TINY_SCOUT_MODES, evaluate_entry_readiness_policy
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
@@ -110,6 +110,7 @@ ENTRY_EDGE_ATH_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_ATH_MAX_SPREAD_
 ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT', '2.0'))
 ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT', '1.5'))
 ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '1.0'))
+ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT', '3.0'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
 ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(30 * 60)))
 ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '5.0'))
@@ -121,6 +122,8 @@ MATRIX_ATH_FULL_MC_MAX = float(os.environ.get('MATRIX_ATH_FULL_MC_MAX', '80000')
 MATRIX_ATH_HALF_MC_MAX = float(os.environ.get('MATRIX_ATH_HALF_MC_MAX', '200000'))
 MATRIX_ATH_FULL_SIZE_SOL = float(os.environ.get('MATRIX_ATH_FULL_SIZE_SOL', '0.08'))
 MATRIX_ATH_HALF_SIZE_SOL = float(os.environ.get('MATRIX_ATH_HALF_SIZE_SOL', '0.04'))
+PAPER_TINY_SCOUT_ENTRY_MODES = set(PAPER_TINY_SCOUT_MODES)
+PAPER_TINY_SCOUT_SIZE_SOL = float(os.environ.get('PAPER_TINY_SCOUT_SIZE_SOL', '0.003'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -913,6 +916,25 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         or pending.get('replay_source') == 'live_monitor_lotto_probe'
         or pending.get('entry_mode') == 'lotto_real_probe_reentry_arm'
     )
+    entry_decision = lotto_state.get('entryDecision') or {}
+    entry_mode = str(
+        pending.get('entry_mode')
+        or entry_decision.get('entry_mode')
+        or ''
+    )
+    try:
+        pending_size_sol = float(
+            pending.get('kelly_position_sol')
+            or lotto_state.get('positionSizeSol')
+            or entry_decision.get('position_size_sol')
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        pending_size_sol = 0.0
+    is_tiny_scout = (
+        entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES
+        or (bool(entry_decision.get('paper_only_scout') or pending.get('paper_only_scout')) and pending_size_sol <= 0.005)
+    )
     spread_pct = calculate_entry_spread_pct(trigger_price, quote_price)
 
     def _feature_float(name, default=None):
@@ -967,6 +989,10 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
             readiness_max_spread_pct = None
     if readiness_max_spread_pct is not None:
         max_spread_pct = min(max_spread_pct, readiness_max_spread_pct)
+    tiny_scout_spread_cap_pct = None
+    if is_tiny_scout:
+        tiny_scout_spread_cap_pct = ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT
+        max_spread_pct = max(max_spread_pct, tiny_scout_spread_cap_pct)
     effective_max_spread_pct = max(0.0, max_spread_pct - risk_penalty_pct)
 
     detail = {
@@ -984,6 +1010,10 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         'gmgn_policy_action': gmgn_policy.get('action'),
         'gmgn_policy_reason': gmgn_policy.get('reason'),
         'readiness_max_spread_pct': readiness_max_spread_pct,
+        'tiny_scout_spread_cap_pct': tiny_scout_spread_cap_pct,
+        'entry_mode': entry_mode or None,
+        'is_tiny_scout': is_tiny_scout,
+        'pending_size_sol': pending_size_sol,
         'required_follow_peak_pct': ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT,
         'remaining_follow_budget_pct': (
             ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT - max(spread_pct or 0.0, 0.0)
@@ -6074,11 +6104,32 @@ def run_monitor(db):
                         route='LOTTO',
                     )
                     if _falling_knife_blocked and _lotto_decision.allow:
-                        _lotto_decision = LottoDecision(
-                            "expire",
+                        _falling_detail = {**_lotto_detail, **_falling_knife_detail}
+                        _gmgn_rescue = evaluate_gmgn_tiny_scout_rescue(
                             "lotto_newborn_falling_knife_low_liq",
-                            {**_lotto_detail, **_falling_knife_detail},
+                            _gmgn_policy,
+                            _falling_detail,
                         )
+                        if _gmgn_rescue.get("allow"):
+                            _lotto_decision = LottoDecision(
+                                "allow",
+                                _gmgn_rescue.get("reason") or "gmgn_unknown_data_tiny_scout_ok",
+                                {
+                                    **_falling_detail,
+                                    **(_gmgn_rescue.get("detail") or {}),
+                                    "entry_mode": _gmgn_rescue.get("entry_mode"),
+                                    "position_size_sol": _gmgn_rescue.get("position_size_sol"),
+                                    "paper_only_scout": True,
+                                    "gmgn_tiny_scout": True,
+                                    "gmgn_tiny_scout_reason": _gmgn_rescue.get("reason"),
+                                },
+                            )
+                        else:
+                            _lotto_decision = LottoDecision(
+                                "expire",
+                                "lotto_newborn_falling_knife_low_liq",
+                                _falling_detail,
+                            )
                         _lotto_detail = _lotto_decision.detail
                     elif _lifecycle_blocked and _lotto_decision.allow:
                         _lotto_decision = LottoDecision(
@@ -6087,6 +6138,26 @@ def run_monitor(db):
                             {**_lotto_detail, **_lifecycle_block_detail},
                         )
                         _lotto_detail = _lotto_decision.detail
+                    _reclaim_watch = w_entry.get('_smart_entry_reclaim_watch') or {}
+                    if (
+                        _reclaim_watch
+                        and _lotto_reclaim.get('reclaim_confirmed')
+                        and _lotto_decision.allow
+                        and _gmgn_policy.get('action') != 'reject'
+                    ):
+                        _lotto_detail = {
+                            **_lotto_detail,
+                            'entry_mode': 'smart_entry_reclaim_tiny_scout',
+                            'position_size_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+                            'paper_only_scout': True,
+                            'reclaim_watch': _reclaim_watch,
+                            'reclaim': _lotto_reclaim,
+                        }
+                        _lotto_decision = LottoDecision(
+                            "allow",
+                            "smart_entry_reclaim_watch_ok",
+                            _lotto_detail,
+                        )
                     _token_risk = token_quarantine_state(db, w_entry['ca'], now_ts=now, reclaim=_lotto_reclaim)
                     if _token_risk.get('blocked') and _lotto_decision.allow:
                         _lotto_decision = LottoDecision(
@@ -6138,6 +6209,9 @@ def run_monitor(db):
                                 'lotto_explosive_direct_scout_ok',
                                 'gmgn_concentration_tiny_scout_ok',
                                 'gmgn_midcap_near_miss_scout_ok',
+                                'gmgn_unknown_data_tiny_scout_ok',
+                                'gmgn_reclaim_tiny_scout_ok',
+                                'smart_entry_reclaim_watch_ok',
                             }:
                                 record_decision_event(
                                     db,
@@ -6349,6 +6423,11 @@ def run_monitor(db):
                             )
                             continue
 
+                    _is_ath_flat_tiny_fire = (
+                        w_entry.get('type') == 'ATH'
+                        and str(eval_res.get('action_reason') or '').startswith('ATH FLAT STRUCTURE TINY PASS')
+                    )
+
                     # Fetch signal description for sub-index parsing (Task 6)
                     # NOTE: premium_signals lives in SENTIMENT_DB (sentiment_arb.db),
                     # not in the paper_trades db connection.
@@ -6399,6 +6478,12 @@ def run_monitor(db):
                         'first_fire_pc_m5': w_entry.get('_first_fire_pc_m5'),
                         'spread_abort_count': w_entry.get('_spread_abort_count', 0),
                     }
+                    if _is_ath_flat_tiny_fire:
+                        pending_entries[lifecycle_id]['scout_mode'] = 'ath_flat_structure_tiny_scout'
+                        pending_entries[lifecycle_id]['entry_mode'] = 'ath_flat_structure_tiny_scout'
+                        pending_entries[lifecycle_id]['kelly_position_sol'] = PAPER_TINY_SCOUT_SIZE_SOL
+                        pending_entries[lifecycle_id]['paper_only_scout'] = True
+                        pending_entries[lifecycle_id]['ath_flat_structure_tiny_scout'] = True
 
                     # Note: Kelly always returns >= 0.03 SOL (never vetoes).
                     # Matrix+Momentum decide whether to trade; Kelly only sizes.
@@ -6409,7 +6494,12 @@ def run_monitor(db):
                     
                     _fire_mc_for_size = float(w_entry.get('signal_mc') or 0)
                     _is_matrix_ath_fire = (w_entry.get('type') == 'ATH')
-                    if _is_matrix_ath_fire:
+                    if _is_matrix_ath_fire and _is_ath_flat_tiny_fire:
+                        log.info(
+                            f"  [Kelly] {w_entry['symbol']} ATH flat-structure tiny scout: "
+                            f"size={PAPER_TINY_SCOUT_SIZE_SOL:.3f} SOL"
+                        )
+                    elif _is_matrix_ath_fire:
                         if _fire_mc_for_size >= MATRIX_ATH_HALF_MC_MAX:
                             log.info(
                                 f"  [Kelly] {w_entry['symbol']} ATH observe-only: "
@@ -6826,6 +6916,15 @@ def run_monitor(db):
                             max_retries = 3
                             if pending.get('is_lotto'):
                                 _LOTTO_TIMING_RETRY_MEMORY[lifecycle_id] = retry_count + 1
+                            _reclaimable_timing_reject = (
+                                timing_reason in {
+                                    'negative_trend',
+                                    'post_spread_abort',
+                                    'kline_trend_reversed',
+                                }
+                                or str(timing_reason or '').startswith('dead_cat')
+                                or str(timing_reason or '').startswith('lotto_dead_cat')
+                            )
                             record_decision_event(
                                 db,
                                 component='smart_entry',
@@ -6846,6 +6945,14 @@ def run_monitor(db):
                                     'entry_readiness_policy': pending.get('entry_readiness_policy'),
                                 },
                             )
+                            if pending_w_entry and _reclaimable_timing_reject:
+                                pending_w_entry['_smart_entry_reclaim_watch'] = {
+                                    'armed_at': now,
+                                    'reject_reason': timing_reason,
+                                    'reject_detail': timing_detail,
+                                    'retry_count': retry_count,
+                                    'max_retries': max_retries,
+                                }
                             if retry_count >= max_retries:
                                 log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
                                 _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
@@ -6865,7 +6972,12 @@ def run_monitor(db):
                         _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
                         if timing_trigger_price:
                             pending['trigger_price'] = timing_trigger_price
-                        pending['entry_mode'] = timing_reason
+                        _scout_mode = pending.get('scout_mode') or pending.get('entry_mode')
+                        if _scout_mode in PAPER_TINY_SCOUT_ENTRY_MODES:
+                            pending['timing_entry_mode'] = timing_reason
+                            pending['entry_mode'] = _scout_mode
+                        else:
+                            pending['entry_mode'] = timing_reason
                         record_decision_event(
                             db,
                             component='smart_entry',
@@ -6985,6 +7097,12 @@ def run_monitor(db):
                     if pending.get('is_lotto'):
                         actual_position_size_sol = float(pending.get('kelly_position_sol') or LOTTO_POSITION_SIZE_SOL)
                         log.info(f"  [LOTTO] {pending['symbol']} fixed size: {actual_position_size_sol} SOL")
+                    elif pending.get('entry_mode') in PAPER_TINY_SCOUT_ENTRY_MODES:
+                        actual_position_size_sol = float(pending.get('kelly_position_sol') or PAPER_TINY_SCOUT_SIZE_SOL)
+                        log.info(
+                            f"  [ENTRY_SIZE] {pending['symbol']} paper tiny scout "
+                            f"mode={pending.get('entry_mode')} size={actual_position_size_sol:.3f} SOL"
+                        )
                     else:
                         # Recalculate Kelly with entry mode + matrix scores
                         pending['kelly_position_sol'] = calculate_kelly_position(

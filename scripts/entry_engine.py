@@ -85,7 +85,15 @@ SMART_ENTRY_GMGN_TINY_SCOUT_MODES = (
     "gmgn_concentration_tiny_scout",
     "gmgn_low_kline_tiny_scout",
     "gmgn_midcap_near_miss_scout",
+    "gmgn_unknown_data_tiny_scout",
+    "gmgn_reclaim_tiny_scout",
 )
+SMART_ENTRY_RECLAIM_TINY_SCOUT_MODE = "smart_entry_reclaim_tiny_scout"
+SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT", "12"))
+SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO", "1.25"))
+SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5", "8000"))
+SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5", "80"))
+SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD", "5000"))
 
 
 def _calc_velocity(price_history, window_sec):
@@ -537,6 +545,13 @@ def _policy_allows(mode, entry_readiness_policy):
     return entry_mode_allowed(mode, entry_readiness_policy)
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _policy_min_p_follow(entry_readiness_policy, default=0.58):
     if not entry_readiness_policy:
         return default
@@ -678,6 +693,43 @@ def _gmgn_tiny_scout_ok(entry_readiness_policy, bs_ratio, total_score=0):
     }
 
 
+def _smart_entry_reclaim_tiny_scout_ok(entry_readiness_policy, cached_trend):
+    if not entry_readiness_policy:
+        return False, {}
+    if not _policy_allows(SMART_ENTRY_RECLAIM_TINY_SCOUT_MODE, entry_readiness_policy):
+        return False, {}
+    trend = cached_trend or {}
+    buys = _safe_float(trend.get("buys_m5"), 0.0)
+    sells = max(_safe_float(trend.get("sells_m5"), 1.0), 1.0)
+    bs_ratio = buys / sells
+    pc_m5 = _safe_float(trend.get("price_change_m5"), 0.0)
+    vol_m5 = _safe_float(trend.get("vol_m5"), 0.0)
+    liquidity_usd = _safe_float(trend.get("liquidity_usd"), 0.0)
+    tx_m5 = buys + sells
+    ok = (
+        pc_m5 >= SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT
+        and bs_ratio >= SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO
+        and vol_m5 >= SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5
+        and tx_m5 >= SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5
+        and (liquidity_usd <= 0 or liquidity_usd >= SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD)
+    )
+    return ok, {
+        "entry_mode": SMART_ENTRY_RECLAIM_TINY_SCOUT_MODE,
+        "price_change_m5": pc_m5,
+        "buy_sell_ratio": bs_ratio,
+        "vol_m5": vol_m5,
+        "tx_m5": tx_m5,
+        "liquidity_usd": liquidity_usd,
+        "thresholds": {
+            "price_change_m5": SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT,
+            "buy_sell_ratio": SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO,
+            "vol_m5": SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5,
+            "tx_m5": SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5,
+            "liquidity_usd": SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD,
+        },
+    }
+
+
 def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, momentum_pct=0.0):
     """Return a hard reject reason for dead-cat bounce patterns.
 
@@ -769,6 +821,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 f'pc_m5 {first_fire_pc_m5:+.1f}%→{pc_m5:+.1f}% '
                 f'({((first_fire_pc_m5-pc_m5)/first_fire_pc_m5*100):.0f}% decay)'), None
 
+    _reclaim_tiny_ok, _reclaim_tiny_detail = _smart_entry_reclaim_tiny_scout_ok(
+        entry_readiness_policy,
+        cached_trend,
+    )
+
     # SPREAD_GUARD abort guard: ANY prior abort means price was at the top.
     # Data (9.5h, 5 tokens): 2/2 entries after spread abort = loss
     #   casinu:  1 abort → entered 2min later → -15.4%
@@ -776,12 +833,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # Tokens where SPREAD_GUARD blocked ALL attempts ($ORG 3x, TRIFECTA 7x)
     # showed pc_m5 decay 70-85%, confirming the pump was over.
     if spread_abort_count >= 1:
-        log.info(
-            f"[SmartEntry] 🚫  REJECT: post_spread_abort - "
-            f"{spread_abort_count} spread abort(s), price likely past peak "
-            f"(data: 2/2 post-abort entries lost -15% to -16%)")
-        return False, 'post_spread_abort', (
-            f'{spread_abort_count} spread abort(s), past peak'), None
+        if _reclaim_tiny_ok:
+            log.info(
+                f"[SmartEntry] 🧪 RECLAIM_TINY_SCOUT: bypassing post_spread_abort "
+                f"after {spread_abort_count} abort(s) detail={_reclaim_tiny_detail}"
+            )
+        else:
+            log.info(
+                f"[SmartEntry] 🚫  REJECT: post_spread_abort - "
+                f"{spread_abort_count} spread abort(s), price likely past peak "
+                f"(data: 2/2 post-abort entries lost -15% to -16%)")
+            return False, 'post_spread_abort', (
+                f'{spread_abort_count} spread abort(s), past peak'), None
 
     # TREND GUARD: reject if 5-minute price change is negative.
     # Data (8hr audit, 2026-04-24): 4 trades with pc_m5<0 → 1W/3L = 25% win rate.
@@ -803,6 +866,18 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     if _dev_pct is not None and _dev_pct > 120.0:
         log.info(f"[SmartEntry] 🚫  REJECT: ema_extreme (>{_dev_pct:.0f}%)")
         return False, 'ema_extreme', f'deviation={_dev_pct:.0f}% > 120%', None
+
+    if _reclaim_tiny_ok:
+        node_detail = (
+            f"node=smart_entry_reclaim_tiny_scout "
+            f"pc_m5={_reclaim_tiny_detail.get('price_change_m5'):+.1f}% "
+            f"bs={_reclaim_tiny_detail.get('buy_sell_ratio'):.2f} "
+            f"vol_m5=${_reclaim_tiny_detail.get('vol_m5'):.0f} "
+            f"tx_m5={_reclaim_tiny_detail.get('tx_m5'):.0f} "
+            f"armed=({_reclaim_tiny_detail})"
+        )
+        log.info(f"[SmartEntry] 🧪 ${symbol} RECLAIM_TINY_SCOUT at ${price:.10f}: {node_detail}")
+        return True, SMART_ENTRY_RECLAIM_TINY_SCOUT_MODE, node_detail, price
 
     # 2. SCORING SYSTEM
     total_score = 0

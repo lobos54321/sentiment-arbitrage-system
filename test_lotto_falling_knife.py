@@ -12,6 +12,7 @@ from exit_engine import (  # noqa: E402
 from matrix_evaluator import (  # noqa: E402
     ExitMatrixEvaluator,
     ath_flat_momentum_allowed,
+    ath_flat_structure_tiny_scout_allowed,
     ath_structural_reentry_allowed,
 )
 from entry_readiness_policy import evaluate_entry_readiness_policy, entry_mode_allowed  # noqa: E402
@@ -865,6 +866,23 @@ def test_ath_flat_momentum_allowed_only_with_strong_structure():
         [1.0, 1.0001],
     )
     assert weak_allowed is False
+
+
+def test_ath_flat_structure_tiny_scout_rescues_flat_high_price_structure():
+    allowed, pct_move = ath_flat_structure_tiny_scout_allowed(
+        "ATH",
+        {"trend": 60, "volume": 70, "price": 80, "signal": 100},
+        [1.0, 1.0001],
+    )
+    assert allowed is True
+    assert abs(pct_move) <= 0.05
+
+    flat_allowed, _ = ath_flat_momentum_allowed(
+        "ATH",
+        {"trend": 60, "volume": 70, "price": 80, "signal": 100},
+        [1.0, 1.0001],
+    )
+    assert flat_allowed is True
 
 
 def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():

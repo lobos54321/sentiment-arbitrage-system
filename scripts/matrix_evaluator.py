@@ -33,6 +33,10 @@ MATRIX_ATH_FLAT_MOMENTUM_ENABLED = os.environ.get(
     'MATRIX_ATH_FLAT_MOMENTUM_ENABLED', 'true'
 ).lower() != 'false'
 MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT = float(os.environ.get('MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT', '0.05'))
+MATRIX_ATH_FLAT_TINY_MIN_TREND = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_TREND', '60'))
+MATRIX_ATH_FLAT_TINY_MIN_VOLUME = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_VOLUME', '70'))
+MATRIX_ATH_FLAT_TINY_MIN_PRICE = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_PRICE', '80'))
+MATRIX_ATH_FLAT_TINY_MIN_SIGNAL = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_SIGNAL', '80'))
 
 # Import existing analysis functions from paper_trade_monitor
 # These will be imported at runtime to avoid circular imports
@@ -362,10 +366,35 @@ def ath_flat_momentum_allowed(signal_type, scores, snapshots):
     if abs(pct_move) > MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT:
         return False, pct_move
     if scores.get('trend', 0) < MATRIX_ATH_REENTRY_MIN_TREND:
-        return False, pct_move
+        return ath_flat_structure_tiny_scout_allowed(signal_type, scores, snapshots)
     if scores.get('volume', 0) < MATRIX_ATH_REENTRY_MIN_VOLUME:
         return False, pct_move
     if scores.get('signal', 0) < MATRIX_ATH_REENTRY_MIN_SIGNAL:
+        return False, pct_move
+    return True, pct_move
+
+
+def ath_flat_structure_tiny_scout_allowed(signal_type, scores, snapshots):
+    if not MATRIX_ATH_FLAT_MOMENTUM_ENABLED or signal_type != 'ATH':
+        return False, None
+    if len(snapshots or []) < 2:
+        return False, None
+    first = snapshots[0]
+    last = snapshots[-1]
+    if first <= 0:
+        return False, None
+    pct_move = ((last - first) / first) * 100
+    if abs(pct_move) > MATRIX_ATH_FLAT_MOMENTUM_MAX_ABS_PCT:
+        return False, pct_move
+    if scores.get('trend', 0) >= MATRIX_ATH_REENTRY_MIN_TREND:
+        return False, pct_move
+    if scores.get('trend', 0) < MATRIX_ATH_FLAT_TINY_MIN_TREND:
+        return False, pct_move
+    if scores.get('volume', 0) < MATRIX_ATH_FLAT_TINY_MIN_VOLUME:
+        return False, pct_move
+    if scores.get('price', 0) < MATRIX_ATH_FLAT_TINY_MIN_PRICE:
+        return False, pct_move
+    if scores.get('signal', 0) < MATRIX_ATH_FLAT_TINY_MIN_SIGNAL:
         return False, pct_move
     return True, pct_move
 
@@ -666,14 +695,24 @@ class MatrixEvaluator:
                 log.info(f"[Matrix] 🔫 ${symbol} {action_reason}")
             else:
                 _flat_allowed, _flat_pct = ath_flat_momentum_allowed(signal_type, scores, snaps)
-                if _flat_allowed:
+                _flat_tiny_allowed, _flat_tiny_pct = ath_flat_structure_tiny_scout_allowed(signal_type, scores, snaps)
+                if _flat_allowed or _flat_tiny_allowed:
                     scores['momentum'] = thresholds['momentum_min']
-                    reasons['momentum'] = f"ath_flat_reclaim {(_flat_pct or 0):+.2f}%"
+                    if _flat_tiny_allowed:
+                        reasons['momentum'] = f"ath_flat_structure_tiny_scout {(_flat_tiny_pct or 0):+.2f}%"
+                    else:
+                        reasons['momentum'] = f"ath_flat_reclaim {(_flat_pct or 0):+.2f}%"
                     action = 'fire'
-                    action_reason = (
-                        f"ATH FLAT RECLAIM PASS: T={scores['trend']} V={scores['volume']} "
-                        f"P={scores['price']} S={scores['signal']} M={scores['momentum']}"
-                    )
+                    if _flat_tiny_allowed:
+                        action_reason = (
+                            f"ATH FLAT STRUCTURE TINY PASS: T={scores['trend']} V={scores['volume']} "
+                            f"P={scores['price']} S={scores['signal']} M={scores['momentum']}"
+                        )
+                    else:
+                        action_reason = (
+                            f"ATH FLAT RECLAIM PASS: T={scores['trend']} V={scores['volume']} "
+                            f"P={scores['price']} S={scores['signal']} M={scores['momentum']}"
+                        )
                     log.info(f"[Matrix] 🔫 ${symbol} {action_reason}")
                 else:
                     action_reason = f"momentum check failed: {reasons['momentum']}"
