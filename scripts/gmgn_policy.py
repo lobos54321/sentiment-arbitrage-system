@@ -45,6 +45,10 @@ GMGN_TINY_SCOUT_TOP10_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP10_MAX_
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5", "20000"))
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5", "250"))
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5", "-45"))
+GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD", "5000"))
+GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5 = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5", "4000"))
+GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5 = int(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5", "80"))
+GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5 = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5", "-35"))
 GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5", "12000"))
 GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5", "120"))
 GMGN_RECLAIM_TINY_SCOUT_MIN_M5 = float(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_M5", "-8"))
@@ -270,7 +274,12 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
         return {"allow": False, "reason": "gmgn_tiny_scout_concentration_too_high"}
 
     if reject_reason == "lotto_midcap_activity_unconfirmed":
-        if liquidity_usd >= 10_000 and vol_m5 >= 6_000 and tx_m5 >= 80:
+        if (
+            liquidity_usd >= GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD
+            and vol_m5 >= GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5
+            and tx_m5 >= GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5
+            and price_change_m5 >= GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5
+        ):
             return {
                 "allow": True,
                 "entry_mode": "gmgn_midcap_near_miss_scout",
@@ -281,6 +290,11 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
                     "liquidity_usd": liquidity_usd,
                     "vol_m5": vol_m5,
                     "tx_m5": tx_m5,
+                    "price_change_m5": price_change_m5,
+                    "min_liquidity_usd": GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD,
+                    "min_vol_m5": GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5,
+                    "min_tx_m5": GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5,
+                    "max_negative_m5": GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5,
                 },
             }
 

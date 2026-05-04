@@ -885,6 +885,16 @@ def test_ath_flat_structure_tiny_scout_rescues_flat_high_price_structure():
     assert flat_allowed is True
 
 
+def test_ath_flat_structure_tiny_scout_rescues_flat_seventy_price_structure():
+    allowed, pct_move = ath_flat_structure_tiny_scout_allowed(
+        "ATH",
+        {"trend": 60, "volume": 70, "price": 70, "signal": 100},
+        [1.0, 1.0],
+    )
+    assert allowed is True
+    assert pct_move == 0
+
+
 def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():
     policy = evaluate_entry_readiness_policy(
         route="LOTTO",

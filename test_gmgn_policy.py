@@ -169,6 +169,63 @@ def test_gmgn_tiny_scout_rescues_unknown_data_with_clean_high_activity():
     assert rescue["position_size_sol"] == 0.003
 
 
+def test_gmgn_tiny_scout_rescues_clean_midcap_activity_near_miss():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "smart_degen_count": 7,
+            "renowned_count": 4,
+            "creator_close": True,
+            "top10_holder_rate": 0.19,
+            "bundler_rate": 0.03,
+            "rat_trader_amount_rate": 0.0,
+            "entrapment_ratio": 0.01,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_midcap_activity_unconfirmed",
+        policy,
+        {
+            "liquidity_usd": 6400,
+            "vol_m5": 5400,
+            "tx_m5": 180,
+            "price_change_m5": -25,
+        },
+    )
+
+    assert rescue["allow"] is True
+    assert rescue["entry_mode"] == "gmgn_midcap_near_miss_scout"
+    assert rescue["position_size_sol"] == 0.005
+
+
+def test_gmgn_tiny_scout_rejects_midcap_activity_crashing_too_hard():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "smart_degen_count": 7,
+            "renowned_count": 4,
+            "creator_close": True,
+            "top10_holder_rate": 0.19,
+            "bundler_rate": 0.03,
+            "rat_trader_amount_rate": 0.0,
+            "entrapment_ratio": 0.01,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_midcap_activity_unconfirmed",
+        policy,
+        {
+            "liquidity_usd": 6400,
+            "vol_m5": 5400,
+            "tx_m5": 180,
+            "price_change_m5": -44,
+        },
+    )
+
+    assert rescue["allow"] is False
+    assert rescue["reason"] == "gmgn_tiny_scout_reason_not_rescueable"
+
+
 def test_gmgn_tiny_scout_does_not_rescue_unknown_data_when_toxic():
     policy = evaluate_gmgn_lotto_policy(
         {
