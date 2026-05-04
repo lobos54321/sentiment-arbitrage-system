@@ -28,6 +28,7 @@ import { RiskManager } from '../risk/risk-manager.js';
 import { MarketDataBackfillService } from '../market-data/market-data-backfill-service.js';
 import { SharedMarketDataClient } from '../market-data/shared-market-data-client.js';
 import { normalizeUnixTimestampSec } from '../utils/time-normalization.js';
+import { scoreNarrativeFeatures } from '../scoring/signal-narrative-features.js';
 import axios from 'axios';
 
 export function normalizeSignalTimestampSec(value, fallbackSec = Math.floor(Date.now() / 1000)) {
@@ -238,6 +239,11 @@ export class PremiumSignalEngine {
         parse_missing_fields TEXT,
         hard_gate_status TEXT,
         gate_result TEXT,
+        signal_links_json TEXT,
+        narrative_features_json TEXT,
+        narrative_score REAL,
+        narrative_confidence REAL,
+        narrative_tags TEXT,
         ai_action TEXT,
         ai_confidence INTEGER,
         ai_narrative_tier TEXT,
@@ -351,7 +357,7 @@ export class PremiumSignalEngine {
     addCol('kline_1m', 'source', 'TEXT');
     this._klineInsertStmt = this.db.prepare(`
       INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, score, pullback, vol_ratio, wick_ratio, ema21, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'geckoterminal')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const addSqlColumn = (sql) => {
       try { this.db.exec(sql); } catch {}
@@ -366,6 +372,11 @@ export class PremiumSignalEngine {
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN parse_status TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN parse_missing_fields TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN gate_result TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN signal_links_json TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN narrative_features_json TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN narrative_score REAL`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN narrative_confidence REAL`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN narrative_tags TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_trade_id INTEGER`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_lifecycle_id TEXT`);
     addSqlColumn(`ALTER TABLE trades ADD COLUMN premium_signal_id INTEGER`);
@@ -852,7 +863,7 @@ export class PremiumSignalEngine {
       }));
 
     if (bars.length) {
-      this._saveKlineBars(tokenCA, poolAddress, bars, {});
+      this._saveKlineBars(tokenCA, poolAddress, bars, { source: ohlcvResult.provider || 'shared_market_data' });
     }
 
     const totalBefore = heliusBarsBefore + bars.length;
@@ -970,11 +981,18 @@ export class PremiumSignalEngine {
       const inheritedGateResult = linkage.gateResult && typeof linkage.gateResult === 'object'
         ? linkage.gateResult
         : (signal._prebuyGateResult && typeof signal._prebuyGateResult === 'object' ? signal._prebuyGateResult : null);
+      const narrativeFeatures = scoreNarrativeFeatures({
+        symbol: signal.symbol || '',
+        description: signal.description || '',
+        rawMessage: signal.raw_message || signal.description || '',
+      });
       const gatePayload = {
         status: gateStatus,
         executed: executed ? 1 : 0,
         aiAction: aiResult?.action || null,
         aiConfidence: aiResult?.confidence || null,
+        narrativeScore: narrativeFeatures.score,
+        narrativeTags: narrativeFeatures.tags,
         ...(inheritedGateResult || {}),
       };
       if (inheritedGateResult && typeof inheritedGateResult === 'object') {
@@ -987,10 +1005,11 @@ export class PremiumSignalEngine {
           token_ca, symbol, market_cap, holders, volume_24h, top10_pct,
           age, description, raw_message, timestamp, source_message_ts, receive_ts,
           signal_type, is_ath, signal_source, source_event_id, parse_status, parse_missing_fields,
-          hard_gate_status, gate_result,
+          hard_gate_status, gate_result, signal_links_json, narrative_features_json,
+          narrative_score, narrative_confidence, narrative_tags,
           ai_action, ai_confidence, ai_narrative_tier, executed,
           downstream_trade_id, downstream_lifecycle_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         signal.token_ca,
         signal.symbol || null,
@@ -1012,6 +1031,11 @@ export class PremiumSignalEngine {
         parseMissingFields.length ? JSON.stringify(parseMissingFields) : null,
         gateStatus,
         JSON.stringify(gatePayload),
+        JSON.stringify(narrativeFeatures.links || []),
+        JSON.stringify(narrativeFeatures),
+        narrativeFeatures.score,
+        narrativeFeatures.confidence,
+        narrativeFeatures.tags?.length ? narrativeFeatures.tags.join(',') : null,
         aiResult?.action || null,
         aiResult?.confidence || null,
         aiResult?.narrative_tier || null,
@@ -1600,7 +1624,7 @@ export class PremiumSignalEngine {
 
       if (isATH) {
         const passed = current.close > current.open;
-        this._saveKlineBars(tokenCA, poolAddress, bars, {});
+        this._saveKlineBars(tokenCA, poolAddress, bars, { source: metadata.provider || 'shared_market_data' });
         return { passed, gateStatus: passed ? 'PASS' : 'BLOCK', close: current.close, open: current.open, fbr, volume: current.volume,
                  reason: passed ? 'pass' : 'not_green_bar', barCountSeen: bars.length, ...metadata };
       }
@@ -1645,7 +1669,8 @@ export class PremiumSignalEngine {
 
       this._saveKlineBars(tokenCA, poolAddress, bars, {
         score, isRed, lowVolume, isActive,
-        momFromLag1, avgVol3
+        momFromLag1, avgVol3,
+        source: metadata.provider || 'shared_market_data'
       });
 
       return { passed, gateStatus: passed ? 'PASS' : 'BLOCK', close: current.close, open: current.open, fbr,
@@ -1848,7 +1873,8 @@ export class PremiumSignalEngine {
           scores.pullback ?? null,
           scores.volRatio ?? null,
           scores.wickRatio ?? null,
-          scores.ema21 ?? null
+          scores.ema21 ?? null,
+          scores.source || 'geckoterminal'
         );
       }
     } catch (e) {

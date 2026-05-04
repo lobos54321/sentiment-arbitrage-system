@@ -40,8 +40,12 @@ GMGN_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_TINY_SCOUT_SIZE_SOL", "0.0
 GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL", "0.003"))
 GMGN_TINY_SCOUT_MIN_EDGE_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MIN_EDGE_SCORE", "4"))
 GMGN_TINY_SCOUT_MAX_TOXIC_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MAX_TOXIC_SCORE", "1"))
-GMGN_TINY_SCOUT_TOP1_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP1_MAX_PCT", "58"))
-GMGN_TINY_SCOUT_TOP10_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP10_MAX_PCT", "78"))
+GMGN_TINY_SCOUT_TOP1_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP1_MAX_PCT", "50"))
+GMGN_TINY_SCOUT_TOP10_MAX_PCT = float(os.environ.get("GMGN_TINY_SCOUT_TOP10_MAX_PCT", "70"))
+GMGN_CONCENTRATION_TINY_SCOUT_MIN_LIQUIDITY_USD = float(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_MIN_LIQUIDITY_USD", "3000"))
+GMGN_CONCENTRATION_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_MIN_VOL_M5", "12000"))
+GMGN_CONCENTRATION_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_MIN_TX_M5", "120"))
+GMGN_CONCENTRATION_TINY_SCOUT_MAX_NEG_M5 = float(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_MAX_NEG_M5", "-20"))
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5", "20000"))
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5", "250"))
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5", "-45"))
@@ -119,6 +123,12 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
         "renowned_count": _i(gmgn.get("renowned_count")),
         "sniper_count": _i(gmgn.get("sniper_count")),
         "creator_close": bool(gmgn.get("creator_close")),
+        "has_social": bool(gmgn.get("twitter_username") or gmgn.get("website") or gmgn.get("telegram")),
+        "cto_flag": _i(gmgn.get("cto_flag")),
+        "dexscr_update_link": _i(gmgn.get("dexscr_update_link")),
+        "dexscr_ad": _i(gmgn.get("dexscr_ad")),
+        "dexscr_trending_bar": _i(gmgn.get("dexscr_trending_bar")),
+        "launchpad_progress": _f(gmgn.get("launchpad_progress")),
     }
 
     flags = []
@@ -157,6 +167,14 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
     if features["creator_close"]:
         edge_score += 1
         flags.append("gmgn_creator_close")
+    if features["has_social"]:
+        flags.append("gmgn_social_present")
+    if features["cto_flag"]:
+        flags.append("gmgn_cto_flag")
+    if features["dexscr_update_link"]:
+        flags.append("gmgn_dexscr_link_updated")
+    if features["dexscr_ad"] or features["dexscr_trending_bar"]:
+        flags.append("gmgn_paid_attention_present")
     if 0 < features["top10_holder_rate"] <= GMGN_CLEAN_TOP10_RATE:
         edge_score += 1
         flags.append("gmgn_clean_top10")
@@ -257,7 +275,14 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
 
     concentration_reason = reject_reason.startswith("lotto_live_top1_") or reject_reason.startswith("lotto_live_top10_")
     if concentration_reason:
-        if live_top1 <= GMGN_TINY_SCOUT_TOP1_MAX_PCT and live_top10 <= GMGN_TINY_SCOUT_TOP10_MAX_PCT:
+        if (
+            live_top1 <= GMGN_TINY_SCOUT_TOP1_MAX_PCT
+            and live_top10 <= GMGN_TINY_SCOUT_TOP10_MAX_PCT
+            and liquidity_usd >= GMGN_CONCENTRATION_TINY_SCOUT_MIN_LIQUIDITY_USD
+            and vol_m5 >= GMGN_CONCENTRATION_TINY_SCOUT_MIN_VOL_M5
+            and tx_m5 >= GMGN_CONCENTRATION_TINY_SCOUT_MIN_TX_M5
+            and price_change_m5 >= GMGN_CONCENTRATION_TINY_SCOUT_MAX_NEG_M5
+        ):
             return {
                 "allow": True,
                 "entry_mode": "gmgn_concentration_tiny_scout",
@@ -267,11 +292,19 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
                     "rescued_reject_reason": reject_reason,
                     "live_top1_pct": live_top1,
                     "live_top10_pct": live_top10,
+                    "liquidity_usd": liquidity_usd,
+                    "vol_m5": vol_m5,
+                    "tx_m5": tx_m5,
+                    "price_change_m5": price_change_m5,
                     "gmgn_tiny_scout_max_top1_pct": GMGN_TINY_SCOUT_TOP1_MAX_PCT,
                     "gmgn_tiny_scout_max_top10_pct": GMGN_TINY_SCOUT_TOP10_MAX_PCT,
+                    "min_liquidity_usd": GMGN_CONCENTRATION_TINY_SCOUT_MIN_LIQUIDITY_USD,
+                    "min_vol_m5": GMGN_CONCENTRATION_TINY_SCOUT_MIN_VOL_M5,
+                    "min_tx_m5": GMGN_CONCENTRATION_TINY_SCOUT_MIN_TX_M5,
+                    "max_negative_m5": GMGN_CONCENTRATION_TINY_SCOUT_MAX_NEG_M5,
                 },
             }
-        return {"allow": False, "reason": "gmgn_tiny_scout_concentration_too_high"}
+        return {"allow": False, "reason": "gmgn_concentration_activity_not_enough"}
 
     if reject_reason == "lotto_midcap_activity_unconfirmed":
         if (

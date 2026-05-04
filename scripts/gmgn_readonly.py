@@ -81,6 +81,7 @@ def normalize_gmgn_token_info(raw):
     stat = raw.get("stat") if isinstance(raw.get("stat"), dict) else {}
     wallet_tags = raw.get("wallet_tags_stat") if isinstance(raw.get("wallet_tags_stat"), dict) else {}
     pool = raw.get("pool") if isinstance(raw.get("pool"), dict) else {}
+    link = raw.get("link") if isinstance(raw.get("link"), dict) else {}
 
     top10 = _to_float(
         stat.get("top_10_holder_rate", dev.get("top_10_holder_rate", raw.get("top_10_holder_rate")))
@@ -112,6 +113,8 @@ def normalize_gmgn_token_info(raw):
         "creation_timestamp": _to_int(raw.get("creation_timestamp")),
         "open_timestamp": _to_int(raw.get("open_timestamp")),
         "launchpad": raw.get("launchpad"),
+        "launchpad_status": _to_int(raw.get("launchpad_status")),
+        "launchpad_progress": _to_float(raw.get("launchpad_progress")),
         "launchpad_platform": raw.get("launchpad_platform"),
         "exchange": pool.get("exchange") or raw.get("exchange"),
         "top10_holder_rate": top10,
@@ -135,7 +138,18 @@ def normalize_gmgn_token_info(raw):
         "bot_degen_count": _to_int(stat.get("bot_degen_count", raw.get("bot_degen_count"))),
         "cto_flag": _to_int(dev.get("cto_flag", raw.get("cto_flag"))),
         "dexscr_update_link": _to_int(dev.get("dexscr_update_link", raw.get("dexscr_update_link"))),
-        "gmgn_url": _nested_get(raw, "link", "gmgn", default=""),
+        "dexscr_ad": _to_int(dev.get("dexscr_ad", raw.get("dexscr_ad"))),
+        "dexscr_boost_fee": _to_float(dev.get("dexscr_boost_fee", raw.get("dexscr_boost_fee"))),
+        "dexscr_trending_bar": _to_int(dev.get("dexscr_trending_bar", raw.get("dexscr_trending_bar"))),
+        "twitter_del_post_token_count": _to_int(dev.get("twitter_del_post_token_count")),
+        "twitter_create_token_count": _to_int(dev.get("twitter_create_token_count")),
+        "twitter_username": link.get("twitter_username") or raw.get("twitter_username"),
+        "website": link.get("website") or raw.get("website"),
+        "telegram": link.get("telegram") or raw.get("telegram"),
+        "discord": link.get("discord") or raw.get("discord"),
+        "link_description": link.get("description") or raw.get("description"),
+        "link_verify_status": _to_int(link.get("verify_status")),
+        "gmgn_url": link.get("gmgn") or raw.get("gmgn_url") or "",
     }
 
 

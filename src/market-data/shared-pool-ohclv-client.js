@@ -4,6 +4,12 @@ import { PoolResolver } from './pool-resolver.js';
 import { MarketDataBackfillService } from './market-data-backfill-service.js';
 import { MARKET_DATA_REASON, SharedMarketRuntime, isMarketDataFlagEnabled, normalizeMarketDataReason } from './shared-market-runtime.js';
 import { normalizeUnixTimestampSec } from '../utils/time-normalization.js';
+import { execFile } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 function normalizePoolId(poolAddress) {
   if (!poolAddress) return null;
@@ -19,6 +25,34 @@ function normalizeBars(list = []) {
     close: Number(close),
     volume: Number(volume || 0)
   }));
+}
+
+function normalizeGmgnKlineBars(list = [], startTs = 0, endTs = Number.MAX_SAFE_INTEGER) {
+  return list.map((item) => {
+    const timestamp = Math.floor(Number(item?.time || 0) / 1000);
+    return {
+      timestamp,
+      open: Number(item?.open),
+      high: Number(item?.high),
+      low: Number(item?.low),
+      close: Number(item?.close),
+      volume: Number(item?.volume || 0)
+    };
+  }).filter((bar) => (
+    Number.isFinite(bar.timestamp)
+    && Number.isFinite(bar.open)
+    && Number.isFinite(bar.high)
+    && Number.isFinite(bar.low)
+    && Number.isFinite(bar.close)
+    && bar.timestamp >= startTs
+    && bar.timestamp <= endTs
+  ));
+}
+
+function resolveGmgnCliPath() {
+  const localPath = path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'gmgn-cli.cmd' : 'gmgn-cli');
+  if (fs.existsSync(localPath)) return localPath;
+  return 'gmgn-cli';
 }
 
 export function normalizeMarketDataTimestampSec(value, fallbackSec = Math.floor(Date.now() / 1000)) {
@@ -37,6 +71,9 @@ export class SharedPoolOhlcvClient {
     });
     this.sharedPoolResolutionEnabled = options.sharedPoolResolutionEnabled ?? isMarketDataFlagEnabled('MARKET_DATA_SHARED_POOL_RESOLUTION', true);
     this.sharedOhlcvEnabled = options.sharedOhlcvEnabled ?? isMarketDataFlagEnabled('MARKET_DATA_SHARED_OHLCV', true);
+    this.gmgnKlineFallbackEnabled = options.gmgnKlineFallbackEnabled ?? isMarketDataFlagEnabled('MARKET_DATA_GMGN_KLINE_FALLBACK', true);
+    this.gmgnKlineFetcher = options.gmgnKlineFetcher || null;
+    this.gmgnCliPath = options.gmgnCliPath || resolveGmgnCliPath();
   }
 
   getRepository() {
@@ -130,6 +167,97 @@ export class SharedPoolOhlcvClient {
     };
   }
 
+  async fetchGmgnKlineWindow({ tokenCa, startTs, endTs, minBars = 1, bars = 20, cacheKey = '', ttlMs = 60_000 } = {}) {
+    if (!this.gmgnKlineFallbackEnabled) {
+      return { ok: false, provider: 'gmgn', bars: [], error: 'gmgn_kline_fallback_disabled', rateLimited: false };
+    }
+    if (!tokenCa) {
+      return { ok: false, provider: 'gmgn', bars: [], error: 'missing_token', rateLimited: false };
+    }
+    if (!this.gmgnKlineFetcher && !process.env.GMGN_API_KEY) {
+      return { ok: false, provider: 'gmgn', bars: [], error: 'gmgn_api_key_missing', rateLimited: false };
+    }
+
+    const requestKey = `gmgn-kline:${cacheKey || `${tokenCa}:${startTs}:${endTs}:${bars}`}`;
+    const cached = await this.runtime.getCache(requestKey);
+    if (cached) return { ...cached, cacheHit: true };
+
+    const execute = async () => {
+      try {
+        let raw;
+        if (this.gmgnKlineFetcher) {
+          raw = await this.gmgnKlineFetcher({ tokenCa, startTs, endTs, bars });
+        } else {
+          const { stdout } = await execFileAsync(this.gmgnCliPath, [
+            'market',
+            'kline',
+            '--chain',
+            'sol',
+            '--address',
+            tokenCa,
+            '--resolution',
+            '1m',
+            '--from',
+            String(startTs),
+            '--to',
+            String(endTs),
+            '--raw',
+          ], {
+            env: process.env,
+            timeout: 20_000,
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          raw = JSON.parse(String(stdout || '{}'));
+        }
+
+        const list = Array.isArray(raw?.list) ? raw.list : (Array.isArray(raw) ? raw : []);
+        const normalizedBars = normalizeGmgnKlineBars(list, startTs, endTs)
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(-bars);
+        const result = {
+          ok: normalizedBars.length >= minBars,
+          provider: 'gmgn',
+          poolAddress: null,
+          bars: normalizedBars,
+          error: normalizedBars.length >= minBars ? null : 'gmgn_no_ohlcv',
+          reason: normalizedBars.length >= minBars ? null : MARKET_DATA_REASON.UNKNOWN_DATA,
+          rateLimited: false,
+          fetchedAt: Date.now(),
+          cacheHit: false,
+          source: 'gmgn-market-kline',
+          priceUnit: 'USD_PER_TOKEN',
+          volumeUnit: 'USD',
+        };
+        await this.runtime.setCache(requestKey, result, ttlMs);
+        return result;
+      } catch (error) {
+        const message = String(error?.message || error || 'gmgn_kline_failed');
+        const rateLimited = /429|rate.?limit|RATE_LIMIT/i.test(message);
+        if (rateLimited) {
+          await this.runtime.setSharedCooldown('gmgn-kline', 60_000);
+        }
+        return {
+          ok: false,
+          provider: 'gmgn',
+          bars: [],
+          error: rateLimited ? 'gmgn_rate_limited' : message.slice(0, 180),
+          reason: normalizeMarketDataReason({ error: message, rateLimited }) || MARKET_DATA_REASON.UPSTREAM_UNAVAILABLE,
+          rateLimited,
+          fetchedAt: Date.now(),
+          cacheHit: false,
+          source: 'gmgn-market-kline',
+          priceUnit: 'USD_PER_TOKEN',
+          volumeUnit: 'USD',
+        };
+      }
+    };
+
+    return this.runtime.runSingleFlight(`fetch:${requestKey}`, execute, {
+      distributed: true,
+      cacheKey: requestKey,
+    });
+  }
+
   async fetchOhlcvWindow({ tokenCa, signalTsSec: rawSignalTsSec = Math.floor(Date.now() / 1000), poolAddress = null, bars = this.config.evaluator.maxHistoricalBars, startTs = null, endTs = null } = {}, options = {}) {
     const signalTsSec = normalizeMarketDataTimestampSec(rawSignalTsSec);
     const windowStart = startTs == null ? signalTsSec : normalizeMarketDataTimestampSec(startTs, signalTsSec);
@@ -159,16 +287,43 @@ export class SharedPoolOhlcvClient {
 
     const resolvedPool = poolAddress || backfillResult.poolAddress || (await this.resolvePool(tokenCa)).poolAddress;
     if (!resolvedPool) {
+      const gmgnNoPoolFallback = await this.fetchGmgnKlineWindow({
+        tokenCa,
+        startTs: windowStart,
+        endTs: windowEnd,
+        minBars,
+        bars,
+        cacheKey: `no-pool:${tokenCa}:${windowStart}:${windowEnd}:${bars}`,
+        ttlMs: options.cacheTtlMs ?? 60 * 1000,
+      });
+      if ((gmgnNoPoolFallback.bars?.length || 0) >= minBars) {
+        return {
+          provider: 'gmgn',
+          poolAddress: null,
+          bars: gmgnNoPoolFallback.bars,
+          error: null,
+          reason: null,
+          rateLimited: Boolean(gmgnNoPoolFallback.rateLimited),
+          fetchedAt: Date.now(),
+          cacheHit: Boolean(gmgnNoPoolFallback.cacheHit),
+          source: 'shared-pool-client',
+          priceUnit: 'USD_PER_TOKEN',
+          volumeUnit: 'USD',
+          fallbackProvider: 'gmgn',
+        };
+      }
       return {
         provider: backfillResult.provider || null,
         poolAddress: null,
         bars: backfillResult.bars || [],
         error: backfillResult.error || 'no_pool',
         reason: backfillResult.reason || normalizeMarketDataReason({ error: backfillResult.error || 'no_pool', rateLimited: false }) || MARKET_DATA_REASON.NO_POOL,
-        rateLimited: false,
+        rateLimited: Boolean(gmgnNoPoolFallback.rateLimited),
         fetchedAt: Date.now(),
         cacheHit: false,
-        source: 'shared-pool-client'
+        source: 'shared-pool-client',
+        fallbackProvider: 'gmgn',
+        fallbackError: gmgnNoPoolFallback.error || null
       };
     }
 
@@ -224,19 +379,50 @@ export class SharedPoolOhlcvClient {
       }
 
       const rateLimited = lastError === 'cooldown_active' || /429/.test(String(lastError || ''));
+      let gmgnFallback = null;
+      let finalBars = [...byTs.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-bars);
+      let finalProvider = byTs.size ? 'geckoterminal' : (backfillResult.provider || null);
+      let finalError = byTs.size ? null : (lastError || backfillResult.error || 'no_ohlcv');
+      let finalReason = byTs.size ? null : (backfillResult.reason || normalizeMarketDataReason({
+        error: lastError || backfillResult.error || 'no_ohlcv',
+        rateLimited
+      }) || MARKET_DATA_REASON.UNKNOWN_DATA);
+
+      if (finalBars.length < minBars) {
+        gmgnFallback = await this.fetchGmgnKlineWindow({
+          tokenCa,
+          startTs: windowStart,
+          endTs: windowEnd,
+          minBars,
+          bars,
+          cacheKey,
+          ttlMs,
+        });
+        if ((gmgnFallback.bars?.length || 0) >= minBars) {
+          finalBars = gmgnFallback.bars;
+          finalProvider = 'gmgn';
+          finalError = null;
+          finalReason = null;
+        } else if (!finalError && gmgnFallback.error) {
+          finalError = gmgnFallback.error;
+          finalReason = gmgnFallback.reason || MARKET_DATA_REASON.UNKNOWN_DATA;
+        }
+      }
+
       const normalized = {
-        provider: byTs.size ? 'geckoterminal' : (backfillResult.provider || null),
+        provider: finalProvider,
         poolAddress: resolvedPool,
-        bars: [...byTs.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-bars),
-        error: byTs.size ? null : (lastError || backfillResult.error || 'no_ohlcv'),
-        reason: byTs.size ? null : (backfillResult.reason || normalizeMarketDataReason({
-          error: lastError || backfillResult.error || 'no_ohlcv',
-          rateLimited
-        }) || MARKET_DATA_REASON.UNKNOWN_DATA),
-        rateLimited,
+        bars: finalBars,
+        error: finalError,
+        reason: finalReason,
+        rateLimited: rateLimited || Boolean(gmgnFallback?.rateLimited),
         fetchedAt: Date.now(),
         cacheHit: false,
-        source: 'shared-pool-client'
+        source: 'shared-pool-client',
+        priceUnit: finalProvider === 'gmgn' ? 'USD_PER_TOKEN' : undefined,
+        volumeUnit: finalProvider === 'gmgn' ? 'USD' : undefined,
+        fallbackProvider: gmgnFallback ? 'gmgn' : null,
+        fallbackError: gmgnFallback && !(gmgnFallback.bars?.length >= minBars) ? gmgnFallback.error : null
       };
 
       if (normalized.bars.length) {

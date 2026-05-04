@@ -112,7 +112,14 @@ def test_gmgn_tiny_scout_rescues_clean_concentration_near_miss():
     rescue = evaluate_gmgn_tiny_scout_rescue(
         "lotto_live_top1_36pct",
         policy,
-        {"live_top1_pct": 36.4, "live_top10_pct": 62.5},
+        {
+            "live_top1_pct": 36.4,
+            "live_top10_pct": 62.5,
+            "liquidity_usd": 6500,
+            "vol_m5": 18000,
+            "tx_m5": 180,
+            "price_change_m5": -8,
+        },
     )
 
     assert rescue["allow"] is True

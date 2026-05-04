@@ -24,6 +24,7 @@ def test_normalize_gmgn_token_info_extracts_risk_fields():
             "liquidity": "24000.5",
             "holder_count": 321,
             "creation_timestamp": 1770000000,
+            "launchpad_progress": "0.72",
             "launchpad_platform": "Pump.fun",
             "pool": {"exchange": "pump_amm", "initial_liquidity": "12000"},
             "dev": {
@@ -31,6 +32,9 @@ def test_normalize_gmgn_token_info_extracts_risk_fields():
                 "top_10_holder_rate": "0.27",
                 "cto_flag": 1,
                 "dexscr_update_link": 1,
+                "dexscr_ad": 1,
+                "dexscr_boost_fee": "12.5",
+                "twitter_create_token_count": 2,
             },
             "stat": {
                 "top_rat_trader_percentage": "0.12",
@@ -47,7 +51,14 @@ def test_normalize_gmgn_token_info_extracts_risk_fields():
                 "sniper_wallets": 17,
                 "bundler_wallets": 99,
             },
-            "link": {"gmgn": "https://gmgn.ai/sol/token/TokenCA"},
+            "link": {
+                "gmgn": "https://gmgn.ai/sol/token/TokenCA",
+                "twitter_username": "dogcoin",
+                "website": "https://dog.example",
+                "telegram": "https://t.me/dog",
+                "description": "dog narrative",
+                "verify_status": 1,
+            },
         }
     )
 
@@ -62,6 +73,13 @@ def test_normalize_gmgn_token_info_extracts_risk_fields():
     assert normalized["smart_degen_count"] == 4
     assert normalized["renowned_count"] == 2
     assert normalized["creator_close"] is True
+    assert normalized["launchpad_progress"] == 0.72
+    assert normalized["dexscr_ad"] == 1
+    assert normalized["dexscr_boost_fee"] == 12.5
+    assert normalized["twitter_username"] == "dogcoin"
+    assert normalized["website"] == "https://dog.example"
+    assert normalized["telegram"] == "https://t.me/dog"
+    assert normalized["link_description"] == "dog narrative"
     assert normalized["gmgn_url"].endswith("/TokenCA")
 
 
