@@ -48,13 +48,24 @@ function hasAny(text, patterns) {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+const METRIC_LINE_RE = /^\s*(?:✡\s*)?(?:Super|AI|Trade|Security|Address|Sentiment|Media)\s+Index\b.*$/gim;
+const ORGANIC_BUYERS_LINE_RE = /^\s*Organic\s+Buyers\b.*$/gim;
+
+function stripSignalMetricLines(text = '') {
+  return String(text || '')
+    .replace(METRIC_LINE_RE, '')
+    .replace(ORGANIC_BUYERS_LINE_RE, '');
+}
+
 export function scoreNarrativeFeatures(input = {}) {
   const description = input.description || '';
   const rawMessage = input.rawMessage || input.raw_message || '';
   const symbol = input.symbol || '';
   const name = input.name || '';
+  const narrativeText = [symbol, name, description, stripSignalMetricLines(rawMessage)].filter(Boolean).join('\n');
   const text = [symbol, name, description, rawMessage].filter(Boolean).join('\n');
   const lower = text.toLowerCase();
+  const narrativeLower = narrativeText.toLowerCase();
   const links = extractSignalLinks(text);
   const counts = links.reduce((acc, link) => {
     acc[link.type] = (acc[link.type] || 0) + 1;
@@ -78,19 +89,27 @@ export function scoreNarrativeFeatures(input = {}) {
   if (counts.discord > 0) add(2, 'discord_link', 'signal_has_discord');
   if (links.length === 0) add(-3, 'no_links', 'signal_has_no_links');
 
-  if (hasAny(lower, [/\bai\b/, /\bagent\b/, /artificial intelligence/, /\bdefai\b/, /autonomous/])) {
+  if (hasAny(narrativeLower, [
+    /\bai\s+agent(s)?\b/,
+    /\bagentic\b/,
+    /\bautonomous\s+agent(s)?\b/,
+    /\bartificial intelligence\b/,
+    /\bdefai\b/,
+    /\bxai\b/,
+    /\bgrok\b/,
+  ])) {
     add(5, 'ai_agent', 'ai_or_agent_theme');
   }
-  if (hasAny(lower, [/\bgithub\b/, /\bopen\s*source\b/, /\bdeveloper\b/, /\bdevtool\b/, /\bterminal\b/, /\bcli\b/])) {
+  if (hasAny(narrativeLower, [/\bgithub\b/, /\bopen\s*source\b/, /\bdeveloper\b/, /\bdevtool\b/, /\bterminal\b/, /\bcli\b/])) {
     add(4, 'dev_tool', 'developer_tool_theme');
   }
-  if (hasAny(lower, [/\btrump\b/, /\bmusk\b/, /\belon\b/, /\bbinance\b/, /\bcz\b/, /\bvitalik\b/])) {
+  if (hasAny(narrativeLower, [/\btrump\b/, /\bmusk\b/, /\belon\b/, /\bbinance\b/, /\bcz\b/, /\bvitalik\b/])) {
     add(3, 'attention_narrative', 'attention_or_personality_theme');
   }
-  if (hasAny(lower, [/\bcto\b/, /community takeover/, /community\s+takeover/])) {
+  if (hasAny(narrativeLower, [/\bcto\b/, /community takeover/, /community\s+takeover/])) {
     add(3, 'cto', 'community_takeover_theme');
   }
-  if (hasAny(lower, [/\bpump\.fun\b/, /\bletsbonk\b/, /\bmoonshot\b/, /\bbonding curve\b/])) {
+  if (hasAny(narrativeLower, [/\bpump\.fun\b/, /\bletsbonk\b/, /\bmoonshot\b/, /\bbonding curve\b/])) {
     add(2, 'launchpad', 'launchpad_theme');
   }
 

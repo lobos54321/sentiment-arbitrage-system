@@ -55,6 +55,11 @@ function resolveGmgnCliPath() {
   return 'gmgn-cli';
 }
 
+function envNumber(name, defaultValue) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : defaultValue;
+}
+
 export function normalizeMarketDataTimestampSec(value, fallbackSec = Math.floor(Date.now() / 1000)) {
   return normalizeUnixTimestampSec(value, fallbackSec);
 }
@@ -188,6 +193,27 @@ export class SharedPoolOhlcvClient {
         if (this.gmgnKlineFetcher) {
           raw = await this.gmgnKlineFetcher({ tokenCa, startTs, endTs, bars });
         } else {
+          const cooldownRemainingMs = await this.runtime.getSharedCooldown('gmgn-kline');
+          if (cooldownRemainingMs > 0) {
+            return {
+              ok: false,
+              provider: 'gmgn',
+              bars: [],
+              error: 'gmgn_cooldown_active',
+              reason: MARKET_DATA_REASON.COOLDOWN_ACTIVE,
+              rateLimited: true,
+              fetchedAt: Date.now(),
+              cooldownRemainingMs,
+              cacheHit: false,
+              source: 'gmgn-market-kline',
+              priceUnit: 'USD_PER_TOKEN',
+              volumeUnit: 'USD',
+            };
+          }
+          await this.runtime.throttle('gmgn-kline', {
+            requestsPerSecond: envNumber('MARKET_DATA_GMGN_KLINE_RPS', 0.25),
+            burstCapacity: envNumber('MARKET_DATA_GMGN_KLINE_BURST', 1),
+          });
           const { stdout } = await execFileAsync(this.gmgnCliPath, [
             'market',
             'kline',

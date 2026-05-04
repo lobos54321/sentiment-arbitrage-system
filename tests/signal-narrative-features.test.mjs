@@ -25,3 +25,28 @@ test('signal narrative score treats links as soft features', () => {
   assert.ok(result.tags.includes('ai_agent'));
   assert.ok(result.tags.includes('dev_tool'));
 });
+
+test('signal narrative parser does not treat AI Index metric as ai agent narrative', () => {
+  const result = scoreNarrativeFeatures({
+    symbol: 'HOPE',
+    name: 'A New Hope',
+    rawMessage: `
+🔥 **A New Hope** **New Trending** | #SOLANA
+
+🔗 🐦 https://twitter.com/WhiteHouse/status/2051412229250056458 • DexScreener
+
+✡ **Super Index**： 70
+
+AI        Index：35
+Trade     Index：10
+Security  Index：10
+Address   Index：0
+Sentiment Index：10
+Media     Index：5
+Organic Buyers：12
+`,
+  });
+
+  assert.ok(result.tags.includes('x_link'));
+  assert.ok(!result.tags.includes('ai_agent'));
+});
