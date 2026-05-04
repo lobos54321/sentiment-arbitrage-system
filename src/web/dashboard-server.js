@@ -19,6 +19,7 @@ import {
   finalBlockerFromMissed,
   finalBlockerFromTrade,
 } from './lifecycle-summary-utils.js';
+import { summarizePremiumSignalGateHealth } from './data-source-health-utils.js';
 
 dotenv.config();
 
@@ -2354,6 +2355,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let signalDb;
     try {
       const nowSec = Math.floor(Date.now() / 1000);
       const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts')) || (nowSec - 6 * 60 * 60);
@@ -2375,6 +2377,8 @@ const server = http.createServer(async (req, res) => {
         },
         counters: {},
         external_alpha_health: [],
+        premium_signal_gate_health: null,
+        signal_db_path: resolvedDbPath,
         open_exit_quote_risk: null,
         missed_attribution_coverage: null,
         notes: [],
@@ -2491,6 +2495,42 @@ const server = http.createServer(async (req, res) => {
         health.notes.push('external_alpha_health table missing; GMGN scout health unavailable');
       }
 
+      if (fs.existsSync(resolvedDbPath)) {
+        try {
+          signalDb = new Database(resolvedDbPath, { readonly: true });
+          const signalTables = new Set(signalDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+          if (signalTables.has('premium_signals')) {
+            const signalCols = getTableColumns(signalDb, 'premium_signals');
+            const timestampExpr = signalCols.has('timestamp')
+              ? "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE CAST(timestamp AS INTEGER) END"
+              : "0";
+            const gateRows = signalDb.prepare(`
+              SELECT
+                id,
+                symbol,
+                token_ca,
+                ${signalCols.has('timestamp') ? 'timestamp' : 'NULL AS timestamp'},
+                ${signalCols.has('hard_gate_status') ? 'hard_gate_status' : 'NULL AS hard_gate_status'},
+                ${signalCols.has('gate_result') ? 'gate_result' : 'NULL AS gate_result'}
+              FROM premium_signals
+              WHERE ${timestampExpr} >= @since
+              ORDER BY ${timestampExpr} DESC, id DESC
+              LIMIT 500
+            `).all({ since: sinceTs });
+            health.premium_signal_gate_health = summarizePremiumSignalGateHealth(gateRows);
+            if (health.premium_signal_gate_health.status !== 'ok') {
+              health.notes.push('premium_signals gate_result shows upstream provider issues');
+            }
+          } else {
+            health.notes.push('premium_signals table missing; upstream signal gate health unavailable');
+          }
+        } catch (e) {
+          health.notes.push(`premium_signals gate health unavailable: ${e.message}`);
+        }
+      } else {
+        health.notes.push('sentiment database missing; upstream signal gate health unavailable');
+      }
+
       if (tableNames.has('paper_missed_signal_attribution')) {
         const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
         const tradableMissedExpr = missedCols.has('tradable_missed')
@@ -2512,6 +2552,9 @@ const server = http.createServer(async (req, res) => {
       if ((health.counters.entry_quote_fail_n || 0) > 0) warnReasons.push('entry_quote_failures_present');
       if ((health.counters.smart_entry_no_price_n || 0) > 5) warnReasons.push('smart_entry_no_price_spike');
       if ((health.counters.exit_quote_fail_n || 0) > 0) warnReasons.push('exit_quote_failures_present');
+      if (health.premium_signal_gate_health && (health.premium_signal_gate_health.counters.rate_limited_n || 0) > 0) warnReasons.push('premium_signal_provider_rate_limited');
+      if (health.premium_signal_gate_health && (health.premium_signal_gate_health.counters.invalid_api_key_n || 0) > 0) warnReasons.push('premium_signal_provider_auth_failed');
+      if (health.premium_signal_gate_health && (health.premium_signal_gate_health.counters.unknown_data_blocked_n || 0) > 0) warnReasons.push('premium_signal_unknown_data_blocks_present');
       if (health.fail_modes.fail_soft_enrichment.length > 0) warnReasons.push('external_alpha_degraded');
       if (health.open_exit_quote_risk && (health.open_exit_quote_risk.open_with_failures_n || 0) > 0) warnReasons.push('open_positions_have_exit_quote_failures');
       if (health.missed_attribution_coverage && health.missed_attribution_coverage.total_n > 0) {
@@ -2530,6 +2573,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     } finally {
       try { if (paperDb) paperDb.close(); } catch {}
+      try { if (signalDb) signalDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {

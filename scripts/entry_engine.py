@@ -89,11 +89,17 @@ SMART_ENTRY_GMGN_TINY_SCOUT_MODES = (
     "gmgn_reclaim_tiny_scout",
 )
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MODE = "smart_entry_reclaim_tiny_scout"
+SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE = "newborn_momentum_tiny_scout"
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT", "12"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO", "1.25"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5", "8000"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5", "80"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD", "5000"))
+SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SCORE = int(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SCORE", "60"))
+SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT", "5"))
+SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO", "1.20"))
+SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5", "8000"))
+SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5", "50"))
 
 
 def _calc_velocity(price_history, window_sec):
@@ -730,6 +736,58 @@ def _smart_entry_reclaim_tiny_scout_ok(entry_readiness_policy, cached_trend):
     }
 
 
+def _newborn_momentum_tiny_scout_ok(entry_readiness_policy, cached_trend, total_score=0):
+    if not entry_readiness_policy:
+        return False, {}
+    if not _policy_allows(SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE, entry_readiness_policy):
+        return False, {}
+    gmgn_policy = _policy_gmgn_policy(entry_readiness_policy)
+    if gmgn_policy:
+        try:
+            from gmgn_policy import gmgn_policy_allows_tiny_scout
+            if not gmgn_policy_allows_tiny_scout(gmgn_policy):
+                return False, {
+                    "entry_mode": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE,
+                    "gmgn_policy": gmgn_policy,
+                    "gmgn_reason": gmgn_policy.get("reason"),
+                }
+        except Exception:
+            return False, {
+                "entry_mode": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE,
+                "gmgn_reason": "gmgn_policy_check_error",
+            }
+    trend = cached_trend or {}
+    buys = _safe_float(trend.get("buys_m5"), 0.0)
+    sells = max(_safe_float(trend.get("sells_m5"), 1.0), 1.0)
+    bs_ratio = buys / sells
+    pc_m5 = _safe_float(trend.get("price_change_m5"), 0.0)
+    vol_m5 = _safe_float(trend.get("vol_m5"), 0.0)
+    tx_m5 = buys + sells
+    ok = (
+        int(total_score or 0) >= SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SCORE
+        and pc_m5 >= SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT
+        and bs_ratio >= SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO
+        and vol_m5 >= SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5
+        and tx_m5 >= SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5
+    )
+    return ok, {
+        "entry_mode": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE,
+        "total_score": total_score,
+        "price_change_m5": pc_m5,
+        "buy_sell_ratio": bs_ratio,
+        "vol_m5": vol_m5,
+        "tx_m5": tx_m5,
+        "thresholds": {
+            "total_score": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SCORE,
+            "price_change_m5": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT,
+            "buy_sell_ratio": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO,
+            "vol_m5": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5,
+            "tx_m5": SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5,
+        },
+        "gmgn_policy": gmgn_policy,
+    }
+
+
 def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, momentum_pct=0.0):
     """Return a hard reject reason for dead-cat bounce patterns.
 
@@ -1048,6 +1106,11 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         bs_ratio,
         total_score,
     )
+    _newborn_momentum_tiny_ok, _newborn_momentum_tiny_detail = _newborn_momentum_tiny_scout_ok(
+        entry_readiness_policy,
+        cached_trend,
+        total_score,
+    )
 
     # 4b. COMPOUND WEAKNESS GATE
     # If kline did NOT confirm bullish trend AND rvol is low → hard reject.
@@ -1087,6 +1150,17 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
         )
         log.info(f"[SmartEntry] 🧪 ${symbol} GMGN_TINY_SCOUT at ${price:.10f}: {node_detail}")
         return True, _gmgn_tiny_detail.get('entry_mode') or 'gmgn_low_kline_tiny_scout', node_detail, price
+
+    if _newborn_momentum_tiny_ok:
+        node_detail = (
+            f"node=newborn_momentum_tiny_scout "
+            f"score={total_score} bs={bs_ratio:.2f} rvol={rvol:.1f}x "
+            f"pc_m5={pc_m5:+.1f}% vol_m5=${vol_m5:.0f} "
+            f"tx_m5={_newborn_momentum_tiny_detail.get('tx_m5'):.0f} "
+            f"armed=({detail_str})"
+        )
+        log.info(f"[SmartEntry] 🧪 ${symbol} NEWBORN_MOMENTUM_TINY_SCOUT at ${price:.10f}: {node_detail}")
+        return True, SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE, node_detail, price
 
     if total_score < 50:
         log.info(f"[SmartEntry] 🚫  REJECT: {detail_str}")

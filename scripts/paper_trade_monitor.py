@@ -2613,13 +2613,14 @@ def get_recent_signatures(token_ca, limit=100):
 
 
 
-def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS, token_decimals=None):
+def fetch_realtime_price_snapshot(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS, token_decimals=None):
     """
     Fetch a real-time SOL-denominated price for the timing/exit engines.
 
     Uses get_live_price_snapshot (Redis → shared Jupiter quote → DexScreener
     → direct) but enforces a strict freshness check: any snapshot older than
-    max_age_ms is rejected. Returns (price, source, age_ms) or (None, None, None).
+    max_age_ms is rejected. Returns a dict with price/source/age/timestamp,
+    or None when no usable snapshot exists.
 
     Pass `token_decimals` when known (e.g. exit-monitor positions) so the
     Jupiter shared-quote source can convert SOL lamports → USD per token
@@ -2630,19 +2631,53 @@ def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MA
     min_ts_ms = now_ms - max_age_ms
     snap = get_live_price_snapshot(token_ca, pool_address, min_timestamp_ms=min_ts_ms, token_decimals=token_decimals)
     if not snap:
-        return None, None, None
+        return None
     price = snap.get('price')
     ts_ms = snap.get('timestamp_ms') or 0
     age_ms, age_status = normalize_price_age_ms(now_ms, ts_ms)
     if not price or price <= 0:
-        return None, None, None
+        return None
     # Belt-and-suspenders: some sources (shared quote cache) don't honour
     # min_timestamp_ms inside get_live_price_snapshot — re-check here.
     if age_status == 'future_quote':
-        return None, 'future_quote', age_ms
+        return {
+            'price': None,
+            'source': 'future_quote',
+            'age_ms': age_ms,
+            'timestamp_ms': ts_ms,
+            'age_status': age_status,
+        }
     if age_ms is not None and age_ms > max_age_ms:
-        return None, None, age_ms
-    return float(price), snap.get('source'), age_ms
+        return {
+            'price': None,
+            'source': snap.get('source'),
+            'age_ms': age_ms,
+            'timestamp_ms': ts_ms,
+            'age_status': age_status,
+        }
+    return {
+        'price': float(price),
+        'source': snap.get('source'),
+        'age_ms': age_ms,
+        'timestamp_ms': ts_ms,
+        'age_status': age_status,
+        'payload': snap.get('payload'),
+    }
+
+
+def fetch_realtime_price(token_ca, pool_address, max_age_ms=ENTRY_TIMING_SNAP_MAX_AGE_MS, token_decimals=None):
+    """
+    Compatibility wrapper returning (price, source, age_ms).
+    """
+    snap = fetch_realtime_price_snapshot(
+        token_ca,
+        pool_address,
+        max_age_ms=max_age_ms,
+        token_decimals=token_decimals,
+    )
+    if not snap:
+        return None, None, None
+    return snap.get('price'), snap.get('source'), snap.get('age_ms')
 
 
 def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_open=False):
@@ -3390,14 +3425,15 @@ def parse_super_index(description):
     Supports formats:
       ✡ Super Index： 119🔮
       ✡ **Super Index**： 119🔮
+      ✡ **Super Index**： 119
       ✡ Super Index： ✡ x 82
     Returns int or None.
     """
     if not description:
         return None
     normalized = str(description).replace('**', '').replace('\r', '')
-    # Try format: " 119🔮"
-    m = re.search(r'Super\s+Index[：:]\s*(\d+)\s*🔮', normalized)
+    # Current signal format no longer always includes the trailing crystal ball.
+    m = re.search(r'Super\s+Index[：:]\s*(\d+)(?:\s*🔮)?', normalized)
     if m:
         return int(m.group(1))
     # Try format: "✡ x 82"
@@ -6308,6 +6344,7 @@ def run_monitor(db):
                                 'gmgn_unknown_data_tiny_scout_ok',
                                 'gmgn_reclaim_tiny_scout_ok',
                                 'smart_entry_reclaim_watch_ok',
+                                'lotto_newborn_momentum_tiny_scout_ok',
                             }:
                                 record_decision_event(
                                     db,

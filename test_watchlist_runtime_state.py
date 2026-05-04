@@ -7,7 +7,8 @@ from concurrent.futures import Future
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
-from paper_trade_monitor import smart_entry_result_ready  # noqa: E402
+from matrix_evaluator import MatrixEvaluator, _epoch_seconds, score_realtime_momentum  # noqa: E402
+from paper_trade_monitor import parse_super_index, smart_entry_result_ready  # noqa: E402
 from watchlist_store import WatchlistStore  # noqa: E402
 
 
@@ -245,3 +246,48 @@ def test_smart_entry_result_ready_detects_done_future():
     pending["lc"]["_smart_entry_future"].set_result((True, "momentum_direct_entry", "", 1.0))
     assert smart_entry_result_ready(pending) is True
     assert smart_entry_result_ready({"lc": {"timing_passed": True}}) is True
+
+
+def test_parse_super_index_accepts_current_plain_numeric_format():
+    assert parse_super_index("✡ **Super Index**： 98\n\nAI Index：15") == 98
+    assert parse_super_index("✡ Super Index： 119🔮") == 119
+    assert parse_super_index("✡ Super Index： ✡ x 82") == 82
+
+
+def test_matrix_watchlist_timeout_normalizes_millisecond_last_ath_ts(monkeypatch):
+    now = 1_777_900_000.0
+    old_ath_ms = int((now - 3 * 60 * 60) * 1000)
+    monkeypatch.setattr("matrix_evaluator.time.time", lambda: now)
+
+    removal = MatrixEvaluator()._check_removal(
+        {
+            "added_at": now - 3 * 60 * 60,
+            "last_ath_ts": old_ath_ms,
+            "signal_price": 1.0,
+            "lowest_price": 1.0,
+        },
+        {"max_obs_minutes": 120},
+    )
+
+    assert _epoch_seconds(old_ath_ms) == old_ath_ms / 1000
+    assert removal == "timeout (180min >= 120min)"
+
+
+def test_realtime_momentum_marks_same_snapshot_timestamp_as_wait_not_decline(monkeypatch):
+    import matrix_evaluator as matrix_module
+
+    snapshots = [
+        {"price": 0.0000004544, "source": "shared-quote-cache", "age_ms": 1000, "timestamp_ms": 1777891570000},
+        {"price": 0.0000004544, "source": "shared-quote-cache", "age_ms": 3000, "timestamp_ms": 1777891570000},
+    ]
+
+    monkeypatch.setattr(matrix_module, "_lazy_import", lambda: None)
+    monkeypatch.setattr(matrix_module, "_price_snapshot_fn", lambda *_args, **_kwargs: snapshots.pop(0))
+    monkeypatch.setattr(matrix_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    score, reason, prices = score_realtime_momentum("TokenCA", "Pool", interval_sec=0)
+
+    assert score == 0
+    assert reason.startswith("flat_no_fresh_tick")
+    assert "declining" not in reason
+    assert prices == [0.0000004544, 0.0000004544]

@@ -585,6 +585,48 @@ def test_lotto_explosive_direct_scout_allows_dog_like_newborn_with_tiny_size():
     assert pending["lotto_state"]["positionSizeSol"] == 0.008
 
 
+def test_lotto_newborn_momentum_tiny_scout_arms_high_super_high_volume_token():
+    decision = evaluate_lotto_entry(
+        {
+            "added_at": 1000,
+            "signal_mc": 37920,
+            "signal_super": 98,
+            "signal_holders": 80,
+            "signal_vol24h": 40000,
+            "signal_top10": 26,
+        },
+        dex_snapshot={
+            "liquidity_usd": 15070,
+            "vol_m5": 12000,
+            "buys_m5": 138,
+            "sells_m5": 100,
+            "price_change_m5": 8.8,
+        },
+        live_concentration={"top1_pct": 19, "top10_pct": 43},
+        now=1004,
+    )
+
+    assert decision.allow is True
+    assert decision.reason == "lotto_newborn_momentum_tiny_scout_ok"
+    assert decision.detail["entry_mode"] == "newborn_momentum_tiny_scout"
+    assert decision.detail["position_size_sol"] == 0.005
+
+    pending = build_lotto_pending(
+        {
+            "ca": "ILHAMRToken",
+            "symbol": "ILHAMR",
+            "signal_ts": 1000,
+            "premium_signal_id": 1,
+            "pool_address": "Pool",
+            "id": 7,
+        },
+        "ILHAMRToken:1000",
+        decision.detail,
+    )
+    assert pending["kelly_position_sol"] == 0.005
+    assert pending["entry_mode"] == "newborn_momentum_tiny_scout"
+
+
 def test_lotto_concentrated_scout_still_uses_small_size_when_not_explosive():
     decision = evaluate_lotto_entry(
         {
@@ -966,6 +1008,28 @@ def test_entry_readiness_allows_gmgn_tiny_scout_only_when_explicit():
     assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
 
 
+def test_entry_readiness_allows_newborn_momentum_tiny_scout_when_explicit():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "NEWBORN_LAUNCH",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 25,
+                "liquidity_unknown": False,
+                "dex_id": "pumpswap",
+                "price_change_m5": 8.8,
+                "buy_sell_ratio": 1.38,
+            },
+        },
+        pending={"is_lotto": True, "entry_mode": "newborn_momentum_tiny_scout"},
+    )
+    assert policy.lifecycle_profile == "LOTTO_NEWBORN_RISKY"
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("newborn_momentum_tiny_scout", policy) is True
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
 def test_smart_entry_explosive_direct_scout_bypasses_chasing_top(monkeypatch):
     import entry_engine as entry_engine_module
     import paper_trade_monitor as monitor_module
@@ -1002,6 +1066,60 @@ def test_smart_entry_explosive_direct_scout_bypasses_chasing_top(monkeypatch):
     assert should_enter is True
     assert reason == "explosive_newborn_direct_scout"
     assert "node=explosive_direct_scout" in detail
+    assert trigger == 1.0
+
+
+def test_smart_entry_newborn_momentum_tiny_scout_enters_without_waiting_for_pullback(monkeypatch):
+    import entry_engine as entry_engine_module
+    import paper_trade_monitor as monitor_module
+
+    policy = {
+        "allowed_entry_modes": ["newborn_momentum_tiny_scout", "smart_entry_pullback_bounce"],
+        "min_p_follow": 0.72,
+        "lifecycle_profile": "LOTTO_NEWBORN_RISKY",
+        "detail": {"route": "LOTTO"},
+        "gmgn_policy": {
+            "action": "boost",
+            "reason": "gmgn_clean_smart_money_boost",
+            "toxic_score": 0,
+            "edge_score": 6,
+            "features": {
+                "bundler_rate": 0.01,
+                "rat_trader_amount_rate": 0.01,
+                "entrapment_ratio": 0.01,
+                "creator_hold_rate": 0.0,
+                "dev_team_hold_rate": 0.0,
+            },
+        },
+    }
+    trend = {
+        "buys_m5": 138,
+        "sells_m5": 100,
+        "price_change_m5": 8.8,
+        "vol_m5": 12000,
+        "vol_h1": 24000,
+        "liquidity_usd": 15070,
+        "fdv": 37920,
+        "market_cap": 37920,
+    }
+
+    monkeypatch.setattr(monitor_module, "fetch_realtime_price", lambda *args, **kwargs: (1.0, "test", 0))
+    monkeypatch.setattr(entry_engine_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: trend)
+    monkeypatch.setattr(entry_engine_module, "is_chasing_top", lambda *_args, **_kwargs: (False, ""))
+    monkeypatch.setattr(entry_engine_module, "evaluate_trend_phase", lambda *_args, **_kwargs: ("BULLISH", "strong"))
+    monkeypatch.setattr(entry_engine_module, "calculate_ema_deviation", lambda *_args, **_kwargs: (10.0, 0.9))
+    monkeypatch.setattr(entry_engine_module, "get_recent_synthetic_bars", lambda *_args, **_kwargs: [])
+
+    should_enter, reason, detail, trigger = evaluate_smart_entry(
+        "ILHAMRToken",
+        symbol="ILHAMR",
+        pool_address="Pool",
+        entry_readiness_policy=policy,
+    )
+
+    assert should_enter is True
+    assert reason == "newborn_momentum_tiny_scout"
+    assert "node=newborn_momentum_tiny_scout" in detail
     assert trigger == 1.0
 
 

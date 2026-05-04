@@ -54,6 +54,27 @@ LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_PCT = float(os.environ.get("LOTTO_EXPLOSIVE_
 LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_VOL_M5_USD = float(os.environ.get("LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_VOL_M5_USD", "20000"))
 LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_TXNS = int(os.environ.get("LOTTO_EXPLOSIVE_DIRECT_SCOUT_MIN_M5_TXNS", "400"))
 LOTTO_GMGN_MIN_POSITION_SIZE_SOL = float(os.environ.get("LOTTO_GMGN_MIN_POSITION_SIZE_SOL", "0.003"))
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_ENABLED = os.environ.get(
+    "LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_ENABLED", "true"
+).lower() != "false"
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_SIZE_SOL = float(
+    os.environ.get("LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_SIZE_SOL", "0.005")
+)
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SUPER = int(
+    os.environ.get("LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SUPER", "85")
+)
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT = float(
+    os.environ.get("LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT", "5")
+)
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5_USD = float(
+    os.environ.get("LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5_USD", "8000")
+)
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_TXNS = int(
+    os.environ.get("LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_TXNS", "50")
+)
+LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO = float(
+    os.environ.get("LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO", "1.20")
+)
 
 LOTTO_TIME_EXIT_60S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_60S_PEAK", "0.05"))
 LOTTO_TIME_EXIT_120S_PEAK = float(os.environ.get("LOTTO_TIME_EXIT_120S_PEAK", "0.10"))
@@ -154,10 +175,14 @@ def evaluate_lotto_entry(
     vol_m5 = float(dex_snapshot.get("vol_m5") or 0)
     buys_m5 = int(dex_snapshot.get("buys_m5") or 0)
     sells_m5 = int(dex_snapshot.get("sells_m5") or 0)
+    buy_sell_ratio = buys_m5 / max(sells_m5, 1)
     price_change_m5 = float(dex_snapshot.get("price_change_m5") or 0)
+    signal_super = int(w_entry.get("signal_super") or w_entry.get("latest_super") or 0)
     detail["vol_m5"] = vol_m5
     detail["tx_m5"] = buys_m5 + sells_m5
+    detail["buy_sell_ratio"] = buy_sell_ratio
     detail["price_change_m5"] = price_change_m5
+    detail["signal_super"] = signal_super
     if (
         vol24h < LOTTO_MIN_VOL24H_USD
         and vol_m5 < LOTTO_MIN_VOL_M5_USD
@@ -259,6 +284,30 @@ def evaluate_lotto_entry(
             detail["entry_mode"] = "lotto_concentrated_scout"
             detail["position_size_sol"] = LOTTO_CONCENTRATED_SCOUT_SIZE_SOL
             return LottoDecision("allow", "lotto_concentrated_scout_ok", detail)
+
+    newborn_momentum_tiny_scout_ok = (
+        LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_ENABLED
+        and detail["mc_tier"] in {"newborn_micro", "newborn_midcap"}
+        and signal_super >= LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SUPER
+        and price_change_m5 >= LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT
+        and vol_m5 >= LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5_USD
+        and (buys_m5 + sells_m5) >= LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_TXNS
+        and buy_sell_ratio >= LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO
+    )
+    detail["newborn_momentum_tiny_scout_enabled"] = LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_ENABLED
+    detail["newborn_momentum_tiny_scout_ok"] = newborn_momentum_tiny_scout_ok
+    detail["newborn_momentum_tiny_scout_thresholds"] = {
+        "signal_super": LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_SUPER,
+        "price_change_m5": LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT,
+        "vol_m5": LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5_USD,
+        "tx_m5": LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_TXNS,
+        "buy_sell_ratio": LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO,
+    }
+    if newborn_momentum_tiny_scout_ok:
+        detail["entry_mode"] = "newborn_momentum_tiny_scout"
+        detail["position_size_sol"] = LOTTO_NEWBORN_MOMENTUM_TINY_SCOUT_SIZE_SOL
+        detail["paper_only_scout"] = True
+        return LottoDecision("allow", "lotto_newborn_momentum_tiny_scout_ok", detail)
 
     return LottoDecision("allow", "lotto_fast_lane_ok", detail)
 

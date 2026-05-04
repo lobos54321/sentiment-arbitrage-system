@@ -43,13 +43,27 @@ MATRIX_ATH_FLAT_TINY_MIN_SIGNAL = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_S
 _trend_fn = None
 _bars_fn = None
 _price_fn = None
+_price_snapshot_fn = None
 _dex_volume_fn = None
 _dex_trend_fn = None      # P1: DexScreener trend snapshot for volume scoring
 
 
+def _epoch_seconds(value, fallback=None):
+    """Normalize signal/watchlist timestamps to epoch seconds."""
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if ts <= 0:
+        return fallback
+    if ts > 1_000_000_000_000:
+        ts = ts / 1000.0
+    return ts
+
+
 def _lazy_import():
     """Lazy import to avoid circular dependency with paper_trade_monitor."""
-    global _trend_fn, _bars_fn, _price_fn, _dex_volume_fn, _dex_trend_fn
+    global _trend_fn, _bars_fn, _price_fn, _price_snapshot_fn, _dex_volume_fn, _dex_trend_fn
     if _trend_fn is None:
         from paper_trade_monitor import (
             check_multi_bar_trend,
@@ -59,6 +73,11 @@ def _lazy_import():
         _trend_fn = check_multi_bar_trend
         _bars_fn = get_notath_bars
         _price_fn = fetch_realtime_price
+        try:
+            from paper_trade_monitor import fetch_realtime_price_snapshot
+            _price_snapshot_fn = fetch_realtime_price_snapshot
+        except ImportError:
+            _price_snapshot_fn = None
         # DexScreener volume — may not exist yet, gracefully handle
         try:
             from paper_trade_monitor import fetch_dexscreener_volume
@@ -302,12 +321,22 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=2):
     _lazy_import()
 
     snapshots = []
+    snapshot_meta = []
     for i in range(2):
         if i > 0:
             time.sleep(interval_sec)
-        price, src, age_ms = _price_fn(token_ca, pool_address)
+        if callable(_price_snapshot_fn):
+            snap = _price_snapshot_fn(token_ca, pool_address) or {}
+            price = snap.get('price')
+            src = snap.get('source')
+            age_ms = snap.get('age_ms')
+            ts_ms = snap.get('timestamp_ms')
+        else:
+            price, src, age_ms = _price_fn(token_ca, pool_address)
+            ts_ms = None
         if price and price > 0:
             snapshots.append(price)
+            snapshot_meta.append({'source': src, 'age_ms': age_ms, 'timestamp_ms': ts_ms})
 
     if len(snapshots) < 2:
         return 0, 'insufficient_snapshots', snapshots
@@ -320,10 +349,19 @@ def score_realtime_momentum(token_ca, pool_address, interval_sec=2):
 
     pct_move = ((s_last - s_first) / s_first) * 100
     snap_str = ' '.join(f'{s:.10f}' for s in snapshots)
+    first_meta = snapshot_meta[0] if snapshot_meta else {}
+    last_meta = snapshot_meta[-1] if snapshot_meta else {}
+    first_ts = first_meta.get('timestamp_ms')
+    last_ts = last_meta.get('timestamp_ms')
+    same_tick = bool(first_ts and last_ts and int(first_ts) == int(last_ts))
 
     # Strong ascending: last > first by threshold
     if pct_move >= MIN_MOMENTUM_MOVE_PCT:
         return 100, f'ascending +{pct_move:.1f}% [{snap_str}]', snapshots
+
+    if same_tick:
+        src = last_meta.get('source') or first_meta.get('source') or 'unknown'
+        return 0, f'flat_no_fresh_tick source={src} ts={int(last_ts)} move={pct_move:+.2f}% [{snap_str}]', snapshots
 
     # Below threshold but positive
     if pct_move > 0:
@@ -714,6 +752,11 @@ class MatrixEvaluator:
                             f"P={scores['price']} S={scores['signal']} M={scores['momentum']}"
                         )
                     log.info(f"[Matrix] 🔫 ${symbol} {action_reason}")
+                elif str(reasons.get('momentum') or '').startswith('flat_no_fresh_tick'):
+                    action_reason = f"momentum check waiting: {reasons['momentum']}"
+                    log.info(f"[Matrix] ${symbol} momentum WAIT: {reasons['momentum']}")
+                    momentum_final_price = None
+                    momentum_pct = 0
                 else:
                     action_reason = f"momentum check failed: {reasons['momentum']}"
                     log.info(f"[Matrix] ${symbol} momentum FAIL: {reasons['momentum']}")
@@ -819,12 +862,13 @@ class MatrixEvaluator:
     def _check_removal(self, entry, thresholds):
         """Check if entry should be removed from watchlist."""
         now = time.time()
-        age_minutes = (now - entry.get('added_at', now)) / 60
+        added_at = _epoch_seconds(entry.get('added_at'), now)
+        age_minutes = (now - min(added_at, now)) / 60
 
         # Timeout: calculate idle time since the LAST valid activity (ATH registration)
         # If it keeps hitting ATH, the timer resets, preventing premature removal of multi-hour runners
-        _base_ts = entry.get('last_ath_ts') or entry.get('added_at', now)
-        idle_minutes = (now - _base_ts) / 60
+        _base_ts = _epoch_seconds(entry.get('last_ath_ts'), None) or added_at
+        idle_minutes = (now - min(_base_ts, now)) / 60
         
         _max_obs = thresholds['max_obs_minutes']
         if idle_minutes >= _max_obs:
