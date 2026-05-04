@@ -533,8 +533,15 @@ export class PremiumChannelListener {
     for (const [key, label] of indexNames) {
       const escaped = label.replace(/\s+/g, '\\s+');
 
-      // ATH delta format: Label：(signal)116🔮 --> (current)124🔮
-      const reDelta = new RegExp(escaped + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+).*?[\\(（]current[\\)）]\\s*x?(\\d+)', 'i');
+      // ATH delta format:
+      //   Label：(signal)116🔮 --> (current)124🔮
+      //   Label：(signal)87 --> 244 🔺180%
+      const reDelta = new RegExp(
+        escaped
+        + '[：:]\\s*[\\(（]signal[\\)）]\\s*x?(\\d+)\\s*(?:🔮)?\\s*'
+        + '(?:-->|->|→|—>)\\s*(?:[\\(（]current[\\)）]\\s*)?x?(\\d+)',
+        'i'
+      );
       const mDelta = normalized.match(reDelta);
       if (mDelta) {
         const signalVal = parseInt(mDelta[1]);

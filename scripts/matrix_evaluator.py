@@ -37,6 +37,13 @@ MATRIX_ATH_FLAT_TINY_MIN_TREND = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_TR
 MATRIX_ATH_FLAT_TINY_MIN_VOLUME = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_VOLUME', '70'))
 MATRIX_ATH_FLAT_TINY_MIN_PRICE = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_PRICE', '70'))
 MATRIX_ATH_FLAT_TINY_MIN_SIGNAL = int(os.environ.get('MATRIX_ATH_FLAT_TINY_MIN_SIGNAL', '80'))
+MATRIX_ATH_FLAT_TINY_LOW_PRICE_ENABLED = os.environ.get(
+    'MATRIX_ATH_FLAT_TINY_LOW_PRICE_ENABLED', 'true'
+).lower() != 'false'
+MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_TREND = int(os.environ.get('MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_TREND', '60'))
+MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_VOLUME = int(os.environ.get('MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_VOLUME', '100'))
+MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_PRICE = int(os.environ.get('MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_PRICE', '30'))
+MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_SIGNAL = int(os.environ.get('MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_SIGNAL', '100'))
 
 # Import existing analysis functions from paper_trade_monitor
 # These will be imported at runtime to avoid circular imports
@@ -426,15 +433,27 @@ def ath_flat_structure_tiny_scout_allowed(signal_type, scores, snapshots):
         return False, pct_move
     if scores.get('trend', 0) >= MATRIX_ATH_REENTRY_MIN_TREND:
         return False, pct_move
-    if scores.get('trend', 0) < MATRIX_ATH_FLAT_TINY_MIN_TREND:
+    trend = scores.get('trend', 0)
+    volume = scores.get('volume', 0)
+    price = scores.get('price', 0)
+    signal = scores.get('signal', 0)
+    if trend < MATRIX_ATH_FLAT_TINY_MIN_TREND:
         return False, pct_move
-    if scores.get('volume', 0) < MATRIX_ATH_FLAT_TINY_MIN_VOLUME:
+    if volume < MATRIX_ATH_FLAT_TINY_MIN_VOLUME:
         return False, pct_move
-    if scores.get('price', 0) < MATRIX_ATH_FLAT_TINY_MIN_PRICE:
+    if signal < MATRIX_ATH_FLAT_TINY_MIN_SIGNAL:
         return False, pct_move
-    if scores.get('signal', 0) < MATRIX_ATH_FLAT_TINY_MIN_SIGNAL:
-        return False, pct_move
-    return True, pct_move
+    if price >= MATRIX_ATH_FLAT_TINY_MIN_PRICE:
+        return True, pct_move
+    if (
+        MATRIX_ATH_FLAT_TINY_LOW_PRICE_ENABLED
+        and trend >= MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_TREND
+        and volume >= MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_VOLUME
+        and price >= MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_PRICE
+        and signal >= MATRIX_ATH_FLAT_TINY_LOW_PRICE_MIN_SIGNAL
+    ):
+        return True, pct_move
+    return False, pct_move
 
 
 

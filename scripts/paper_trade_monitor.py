@@ -3421,17 +3421,27 @@ def get_current_price(token_ca, pool_address=None):
 
 def parse_super_index(description):
     """
-    Parse Super Index from NOT_ATH description.
+    Parse Super Index from signal description.
     Supports formats:
       ✡ Super Index： 119🔮
       ✡ **Super Index**： 119🔮
       ✡ **Super Index**： 119
       ✡ Super Index： ✡ x 82
+      ✡ Super Index：(signal)87 --> 244 🔺180%
+      ✡ Super Index：(signal)87 --> (current)244 🔺180%
     Returns int or None.
     """
     if not description:
         return None
     normalized = str(description).replace('**', '').replace('\r', '')
+    # ATH format: take current/latest Super value, not the original signal value.
+    m = re.search(
+        r'Super\s+Index[：:]\s*\(signal\)\s*x?\d+\s*(?:🔮)?\s*(?:-->|->|→|—>)\s*(?:\(current\)\s*)?x?(\d+)',
+        normalized,
+        re.IGNORECASE,
+    )
+    if m:
+        return int(m.group(1))
     # Current signal format no longer always includes the trailing crystal ball.
     m = re.search(r'Super\s+Index[：:]\s*(\d+)(?:\s*🔮)?', normalized)
     if m:

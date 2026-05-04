@@ -252,6 +252,8 @@ def test_parse_super_index_accepts_current_plain_numeric_format():
     assert parse_super_index("✡ **Super Index**： 98\n\nAI Index：15") == 98
     assert parse_super_index("✡ Super Index： 119🔮") == 119
     assert parse_super_index("✡ Super Index： ✡ x 82") == 82
+    assert parse_super_index("✡ Super Index：(signal)87 --> 244 🔺180%") == 244
+    assert parse_super_index("✡ Super Index：(signal)87 --> (current)244 🔺180%") == 244
 
 
 def test_matrix_watchlist_timeout_normalizes_millisecond_last_ath_ts(monkeypatch):

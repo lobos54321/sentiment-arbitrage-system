@@ -154,19 +154,25 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
             allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")
     elif profile == "ATH_CONTINUATION":
         min_odds_r = 1.8
-        min_p_follow = 0.56
-        max_spread_pct = 2.0
+        min_p_follow = 0.62 if paper_tiny_scout else 0.56
+        max_spread_pct = 1.0 if paper_tiny_scout else 2.0
         expected_loss_pct = 9.0
+        if paper_tiny_scout:
+            allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")
     elif profile == "ATH_DEEP_RECLAIM":
         min_odds_r = 3.0
-        min_p_follow = 0.68
+        min_p_follow = 0.70 if paper_tiny_scout else 0.68
         max_spread_pct = 1.5
         expected_loss_pct = 12.0
+        if paper_tiny_scout:
+            allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")
     elif profile == "ATH_STALE":
         min_odds_r = 3.0
-        min_p_follow = 0.70
+        min_p_follow = 0.72 if paper_tiny_scout else 0.70
         max_spread_pct = 1.0
         expected_loss_pct = 12.0
+        if paper_tiny_scout:
+            allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")
     else:
         min_odds_r = 2.0
         min_p_follow = 0.58

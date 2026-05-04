@@ -937,6 +937,38 @@ def test_ath_flat_structure_tiny_scout_rescues_flat_seventy_price_structure():
     assert pct_move == 0
 
 
+def test_ath_flat_structure_tiny_scout_rescues_low_price_when_volume_signal_are_maxed():
+    allowed, pct_move = ath_flat_structure_tiny_scout_allowed(
+        "ATH",
+        {"trend": 60, "volume": 100, "price": 30, "signal": 100},
+        [1.0, 1.0],
+    )
+    assert allowed is True
+    assert pct_move == 0
+
+    weak_allowed, _ = ath_flat_structure_tiny_scout_allowed(
+        "ATH",
+        {"trend": 60, "volume": 70, "price": 30, "signal": 100},
+        [1.0, 1.0],
+    )
+    assert weak_allowed is False
+
+
+def test_ath_readiness_allows_flat_structure_tiny_scout_mode():
+    policy = evaluate_entry_readiness_policy(
+        route="ATH",
+        lifecycle={
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {"age_sec": 240},
+        },
+        pending={"entry_mode": "ath_flat_structure_tiny_scout"},
+    )
+
+    assert entry_mode_allowed("ath_flat_structure_tiny_scout", policy) is True
+    assert policy.max_spread_pct == 1.0
+
+
 def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():
     policy = evaluate_entry_readiness_policy(
         route="LOTTO",
@@ -1120,6 +1152,47 @@ def test_smart_entry_newborn_momentum_tiny_scout_enters_without_waiting_for_pull
     assert should_enter is True
     assert reason == "newborn_momentum_tiny_scout"
     assert "node=newborn_momentum_tiny_scout" in detail
+    assert trigger == 1.0
+
+
+def test_smart_entry_ath_flat_tiny_scout_bypasses_chasing_top_for_paper_probe(monkeypatch):
+    import entry_engine as entry_engine_module
+    import paper_trade_monitor as monitor_module
+
+    policy = {
+        "allowed_entry_modes": ["ath_flat_structure_tiny_scout", "smart_entry_pullback_bounce"],
+        "min_p_follow": 0.62,
+        "lifecycle_profile": "ATH_CONTINUATION",
+        "detail": {"route": "ATH"},
+    }
+    trend = {
+        "buys_m5": 137,
+        "sells_m5": 100,
+        "price_change_m5": 65.9,
+        "vol_m5": 12000,
+        "vol_h1": 24000,
+        "liquidity_usd": 15070,
+        "fdv": 54000,
+        "market_cap": 54000,
+    }
+
+    monkeypatch.setattr(monitor_module, "fetch_realtime_price", lambda *args, **kwargs: (1.0, "test", 0))
+    monkeypatch.setattr(entry_engine_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: trend)
+    monkeypatch.setattr(entry_engine_module, "is_chasing_top", lambda *_args, **_kwargs: (True, "extreme_chase"))
+    monkeypatch.setattr(entry_engine_module, "evaluate_trend_phase", lambda *_args, **_kwargs: ("BULLISH", "strong"))
+    monkeypatch.setattr(entry_engine_module, "calculate_ema_deviation", lambda *_args, **_kwargs: (10.0, 0.9))
+    monkeypatch.setattr(entry_engine_module, "get_recent_synthetic_bars", lambda *_args, **_kwargs: [])
+
+    should_enter, reason, detail, trigger = evaluate_smart_entry(
+        "OOOToken",
+        symbol="OOO",
+        pool_address="Pool",
+        entry_readiness_policy=policy,
+    )
+
+    assert should_enter is True
+    assert reason == "ath_flat_structure_tiny_scout"
+    assert "node=ath_flat_structure_tiny_scout" in detail
     assert trigger == 1.0
 
 
