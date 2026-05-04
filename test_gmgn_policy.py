@@ -13,7 +13,7 @@ from gmgn_policy import (  # noqa: E402
 )
 from entry_engine import evaluate_smart_entry  # noqa: E402
 from lotto_engine import build_lotto_pending  # noqa: E402
-from paper_trade_monitor import evaluate_entry_edge_budget  # noqa: E402
+from paper_trade_monitor import evaluate_entry_edge_budget, pending_is_paper_tiny_scout  # noqa: E402
 
 
 def test_gmgn_policy_noops_when_unavailable():
@@ -287,6 +287,28 @@ def test_entry_edge_budget_allows_wider_spread_for_paper_tiny_scout():
     assert budget["tiny_scout_spread_cap_pct"] == 3.0
     assert budget["max_spread_pct"] == 3.0
     assert budget["pass"] is True
+
+
+def test_pending_is_paper_tiny_scout_detects_nested_paper_scout():
+    pending = {
+        "lotto_state": {
+            "entryDecision": {
+                "paper_only_scout": True,
+                "position_size_sol": 0.003,
+            },
+        },
+    }
+
+    assert pending_is_paper_tiny_scout(pending) is True
+
+
+def test_pending_is_paper_tiny_scout_rejects_large_paper_scout():
+    pending = {
+        "paper_only_scout": True,
+        "kelly_position_sol": 0.08,
+    }
+
+    assert pending_is_paper_tiny_scout(pending) is False
 
 
 def test_entry_edge_budget_ignores_gmgn_policy_for_non_lotto():

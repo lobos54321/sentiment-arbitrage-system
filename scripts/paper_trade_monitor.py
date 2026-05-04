@@ -902,6 +902,34 @@ def calculate_entry_spread_pct(trigger_price, quote_price):
     return (quote - trigger) / trigger * 100.0
 
 
+def pending_is_paper_tiny_scout(pending):
+    pending = pending or {}
+    lotto_state = pending.get('lotto_state') or {}
+    entry_decision = lotto_state.get('entryDecision') or {}
+    entry_mode = str(
+        pending.get('entry_mode')
+        or pending.get('scout_mode')
+        or entry_decision.get('entry_mode')
+        or ''
+    )
+    try:
+        pending_size_sol = float(
+            pending.get('kelly_position_sol')
+            or lotto_state.get('positionSizeSol')
+            or entry_decision.get('position_size_sol')
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        pending_size_sol = 0.0
+    return (
+        entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES
+        or (
+            bool(entry_decision.get('paper_only_scout') or pending.get('paper_only_scout'))
+            and pending_size_sol <= 0.005
+        )
+    )
+
+
 def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=None,
                                lifecycle=None, pending=None, token_risk=None):
     """Last-mile entry contract: the fill cannot consume the trade's edge budget."""
@@ -931,10 +959,7 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         )
     except (TypeError, ValueError):
         pending_size_sol = 0.0
-    is_tiny_scout = (
-        entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES
-        or (bool(entry_decision.get('paper_only_scout') or pending.get('paper_only_scout')) and pending_size_sol <= 0.005)
-    )
+    is_tiny_scout = pending_is_paper_tiny_scout(pending)
     spread_pct = calculate_entry_spread_pct(trigger_price, quote_price)
 
     def _feature_float(name, default=None):
@@ -6848,31 +6873,56 @@ def run_monitor(db):
                         )
                         pending['spread_abort_memory'] = _spread_memory
                         _memory_abort_count = int(_spread_memory.get('abort_count') or 0)
-                        if _memory_abort_count > int(pending.get('spread_abort_count') or 0):
+                        _pending_tiny_scout = pending_is_paper_tiny_scout(pending)
+                        if (
+                            _memory_abort_count > int(pending.get('spread_abort_count') or 0)
+                            and not _pending_tiny_scout
+                        ):
                             pending['spread_abort_count'] = _memory_abort_count
                         if _spread_memory.get('blocked'):
-                            log.info(
-                                f"  [SPREAD_MEMORY] 🚫 {pending['symbol']} BLOCKED: "
-                                f"{_memory_abort_count} spread abort(s), age={_spread_memory.get('age_sec', 0):.0f}s; "
-                                f"waiting for reclaim"
-                            )
-                            record_decision_event(
-                                db,
-                                component='entry_readiness',
-                                event_type='entry_block',
-                                decision='wait',
-                                reason='spread_abort_memory_wait_reclaim',
-                                token_ca=pending['token_ca'],
-                                symbol=pending['symbol'],
-                                lifecycle_id=lifecycle_id,
-                                signal_ts=pending['signal_ts'],
-                                signal_id=pending.get('premium_signal_id'),
-                                route=pending.get('signal_route') or pending.get('signal_type'),
-                                data_source='paper_decision_events',
-                                payload=_spread_memory,
-                            )
-                            pending_entries.pop(lifecycle_id, None)
-                            continue
+                            if _pending_tiny_scout:
+                                log.info(
+                                    f"  [SPREAD_MEMORY] ⚠️ {pending['symbol']} tiny scout defers "
+                                    f"{_memory_abort_count} prior spread abort(s) to live quote guard"
+                                )
+                                record_decision_event(
+                                    db,
+                                    component='entry_readiness',
+                                    event_type='entry_block',
+                                    decision='warn',
+                                    reason='spread_abort_memory_tiny_scout_deferred',
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    route=pending.get('signal_route') or pending.get('signal_type'),
+                                    data_source='paper_decision_events',
+                                    payload=_spread_memory,
+                                )
+                            else:
+                                log.info(
+                                    f"  [SPREAD_MEMORY] 🚫 {pending['symbol']} BLOCKED: "
+                                    f"{_memory_abort_count} spread abort(s), age={_spread_memory.get('age_sec', 0):.0f}s; "
+                                    f"waiting for reclaim"
+                                )
+                                record_decision_event(
+                                    db,
+                                    component='entry_readiness',
+                                    event_type='entry_block',
+                                    decision='wait',
+                                    reason='spread_abort_memory_wait_reclaim',
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    route=pending.get('signal_route') or pending.get('signal_type'),
+                                    data_source='paper_decision_events',
+                                    payload=_spread_memory,
+                                )
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
                         _se_sustained = False
                         if hasattr(watchlist, '_ath_history'):
                             _se_ca = pending.get('token_ca')
@@ -6895,7 +6945,10 @@ def run_monitor(db):
                                 momentum_pct=pending.get('momentum_pct', 0),
                                 sustained_ath=_se_sustained,
                                 first_fire_pc_m5=pending.get('first_fire_pc_m5'),
-                                spread_abort_count=pending.get('spread_abort_count', 0),
+                                spread_abort_count=(
+                                    0 if pending_is_paper_tiny_scout(pending)
+                                    else pending.get('spread_abort_count', 0)
+                                ),
                                 entry_readiness_policy=pending.get('entry_readiness_policy'),
                             )
                             pending['_smart_entry_future'] = _se_future
@@ -7244,7 +7297,17 @@ def run_monitor(db):
                         int(_live_abort_count or 0),
                         int(_persistent_spread_memory.get('abort_count') or 0),
                     )
-                    if _total_abort_count >= 1 and _persistent_spread_memory.get('blocked', True):
+                    _tiny_scout_memory_bypass = (
+                        pending_is_paper_tiny_scout(pending)
+                        and bool(_entry_edge_budget.get('pass', True))
+                        and _spread is not None
+                        and _spread <= _SPREAD_GUARD_MAX_PCT
+                    )
+                    if (
+                        _total_abort_count >= 1
+                        and _persistent_spread_memory.get('blocked', True)
+                        and not _tiny_scout_memory_bypass
+                    ):
                         log.info(
                             f"  [POST_SPREAD_ABORT] 🚫 {pending['symbol']} BLOCKED: "
                             f"{_total_abort_count} spread abort(s), no fresh reclaim. "
@@ -7272,6 +7335,31 @@ def run_monitor(db):
                         )
                         pending_entries.pop(lifecycle_id, None)
                         continue
+                    if _tiny_scout_memory_bypass:
+                        log.info(
+                            f"  [POST_SPREAD_ABORT] ⚠️ {pending['symbol']} tiny scout bypass: "
+                            f"live spread {_spread:+.1f}% within {_SPREAD_GUARD_MAX_PCT}% cap"
+                        )
+                        record_decision_event(
+                            db,
+                            component='execution_guard',
+                            event_type='entry_arm',
+                            decision='warn',
+                            reason='spread_abort_memory_tiny_scout_quote_repaired',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            payload={
+                                'spread_abort_count': _total_abort_count,
+                                'live_spread_abort_count': _live_abort_count,
+                                'spread_abort_memory': _persistent_spread_memory,
+                                'entry_edge_budget': _entry_edge_budget,
+                            },
+                        )
                     if _spread > _SPREAD_WARN_PCT:
                         log.info(
                             f"  [SPREAD_GUARD] ⚠️ {pending['symbol']} WARN: "
