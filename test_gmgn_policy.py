@@ -13,7 +13,11 @@ from gmgn_policy import (  # noqa: E402
 )
 from entry_engine import evaluate_smart_entry  # noqa: E402
 from lotto_engine import build_lotto_pending  # noqa: E402
-from paper_trade_monitor import evaluate_entry_edge_budget, pending_is_paper_tiny_scout  # noqa: E402
+from paper_trade_monitor import (  # noqa: E402
+    evaluate_entry_edge_budget,
+    pending_is_paper_tiny_scout,
+    supersede_stale_pending_for_signal,
+)
 
 
 def test_gmgn_policy_noops_when_unavailable():
@@ -309,6 +313,58 @@ def test_pending_is_paper_tiny_scout_rejects_large_paper_scout():
     }
 
     assert pending_is_paper_tiny_scout(pending) is False
+
+
+def test_newer_ath_signal_supersedes_stale_pending_anchor():
+    pending_entries = {
+        "TokenCA:1000": {
+            "token_ca": "TokenCA",
+            "symbol": "DOG",
+            "signal_ts": 1000,
+            "premium_signal_id": 1,
+            "signal_type": "ATH",
+        },
+        "OtherCA:1000": {
+            "token_ca": "OtherCA",
+            "symbol": "CAT",
+            "signal_ts": 1000,
+            "premium_signal_id": 2,
+            "signal_type": "ATH",
+        },
+    }
+
+    superseded = supersede_stale_pending_for_signal(
+        pending_entries,
+        "TokenCA",
+        2000,
+        "ATH",
+    )
+
+    assert [item[0] for item in superseded] == ["TokenCA:1000"]
+    assert "TokenCA:1000" not in pending_entries
+    assert "OtherCA:1000" in pending_entries
+
+
+def test_non_ath_signal_does_not_supersede_pending_anchor():
+    pending_entries = {
+        "TokenCA:1000": {
+            "token_ca": "TokenCA",
+            "symbol": "DOG",
+            "signal_ts": 1000,
+            "premium_signal_id": 1,
+            "signal_type": "ATH",
+        },
+    }
+
+    superseded = supersede_stale_pending_for_signal(
+        pending_entries,
+        "TokenCA",
+        2000,
+        "NEW_TRENDING",
+    )
+
+    assert superseded == []
+    assert "TokenCA:1000" in pending_entries
 
 
 def test_entry_edge_budget_ignores_gmgn_policy_for_non_lotto():

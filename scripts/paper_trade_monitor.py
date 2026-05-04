@@ -930,6 +930,44 @@ def pending_is_paper_tiny_scout(pending):
     )
 
 
+def _signal_ts_order_value(value):
+    try:
+        ts = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if ts > 1_000_000_000_000:
+        ts = ts / 1000.0
+    return ts
+
+
+def supersede_stale_pending_for_signal(pending_entries, token_ca, signal_ts, signal_type):
+    if not pending_entries or not token_ca:
+        return []
+    incoming_type = str(signal_type or '').upper()
+    if incoming_type != 'ATH':
+        return []
+    incoming_ts = _signal_ts_order_value(signal_ts)
+    if incoming_ts <= 0:
+        return []
+
+    superseded = []
+    for lifecycle_id, pending in list(pending_entries.items()):
+        if pending.get('token_ca') != token_ca:
+            continue
+        pending_ts = _signal_ts_order_value(pending.get('signal_ts'))
+        if pending_ts <= 0 or pending_ts >= incoming_ts:
+            continue
+        future = pending.get('_smart_entry_future')
+        if future is not None:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        superseded.append((lifecycle_id, pending))
+        pending_entries.pop(lifecycle_id, None)
+    return superseded
+
+
 def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=None,
                                lifecycle=None, pending=None, token_risk=None):
     """Last-mile entry contract: the fill cannot consume the trade's edge budget."""
@@ -5404,6 +5442,39 @@ def run_monitor(db):
                     hard_gate_status = (sig.get('hard_gate_status') or '').upper()
                     lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
                     symbol = sig['symbol'] or token_ca[:8]
+                    superseded_pending = supersede_stale_pending_for_signal(
+                        pending_entries,
+                        token_ca,
+                        signal_ts,
+                        signal_type,
+                    )
+                    for old_lifecycle_id, old_pending in superseded_pending:
+                        record_decision_event(
+                            db,
+                            component='ath_anchor_refresh',
+                            event_type='entry_abort',
+                            decision='supersede',
+                            reason='newer_ath_signal_refresh',
+                            token_ca=token_ca,
+                            symbol=symbol,
+                            lifecycle_id=old_lifecycle_id,
+                            signal_ts=old_pending.get('signal_ts'),
+                            signal_id=old_pending.get('premium_signal_id'),
+                            route=old_pending.get('signal_route') or old_pending.get('signal_type'),
+                            data_source='premium_signals',
+                            payload={
+                                'old_lifecycle_id': old_lifecycle_id,
+                                'old_signal_ts': old_pending.get('signal_ts'),
+                                'old_premium_signal_id': old_pending.get('premium_signal_id'),
+                                'new_lifecycle_id': lifecycle_id,
+                                'new_signal_ts': signal_ts,
+                                'new_premium_signal_id': premium_signal_id,
+                            },
+                        )
+                        log.info(
+                            f"  [ATH_REFRESH] {symbol} superseded stale pending "
+                            f"{old_lifecycle_id} with newer ATH lifecycle={lifecycle_id}"
+                        )
                     signal_lifecycle = lifecycle_payload_for(
                         signal=sig,
                         route=signal_type,
