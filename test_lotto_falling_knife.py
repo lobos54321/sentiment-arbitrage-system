@@ -21,6 +21,7 @@ from profit_protect_policy import profit_protect_floor  # noqa: E402
 from entry_engine import evaluate_entry_position, evaluate_smart_entry, smart_entry_bounce_reject_reason  # noqa: E402
 from entry_decision_contract import build_entry_decision_contract  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
+    arm_ath_uncertainty_tiny_scout,
     evaluate_entry_edge_budget,
     evaluate_spread_abort_memory,
     evaluate_token_reclaim,
@@ -509,6 +510,50 @@ def test_entry_edge_budget_keeps_upstream_miss_tiny_scout_spread_strict():
     assert budget["reason"] == "entry_edge_spread_too_high"
     assert budget["max_spread_pct"] == 1.0
     assert budget["tiny_scout_spread_cap_pct"] == 1.0
+
+
+def test_entry_edge_budget_keeps_upstream_realtime_tiny_scout_spread_strict():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.02,
+        lifecycle={"lifecycle_features": {"liquidity_unknown": False, "live_top1_pct": 10}},
+        pending={
+            "is_lotto": True,
+            "paper_only_scout": True,
+            "entry_mode": "lotto_upstream_realtime_tiny_scout",
+            "replay_source": "live_monitor_lotto_upstream_realtime",
+            "entry_readiness_policy": {
+                "lifecycle_profile": "LOTTO_REAL_PROBE",
+                "max_spread_pct": 1.0,
+            },
+        },
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["max_spread_pct"] == 1.0
+    assert budget["tiny_scout_spread_cap_pct"] == 1.0
+
+
+def test_entry_edge_budget_keeps_ath_uncertainty_tiny_scout_spread_capped():
+    budget = evaluate_entry_edge_budget(
+        route="ATH",
+        trigger_price=1.0,
+        quote_price=1.025,
+        lifecycle={},
+        pending={
+            "paper_only_scout": True,
+            "entry_mode": "ath_uncertainty_tiny_scout",
+            "replay_source": "live_monitor_ath_uncertainty",
+            "entry_readiness_policy": {
+                "lifecycle_profile": "ATH_CONTINUATION",
+                "max_spread_pct": 2.0,
+            },
+        },
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["max_spread_pct"] == 2.0
 
 
 def test_entry_edge_budget_blocks_ath_spread_over_budget():
@@ -1427,6 +1472,79 @@ def test_entry_readiness_upstream_miss_tiny_scout_uses_real_probe_profile():
     assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
     assert entry_mode_allowed("momentum_direct_entry", policy) is False
     assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
+def test_entry_readiness_upstream_realtime_tiny_scout_uses_real_probe_profile():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 120,
+                "price_change_m5": 18,
+                "buy_sell_ratio": 1.5,
+            },
+        },
+        pending={
+            "is_lotto": True,
+            "paper_only_scout": True,
+            "entry_mode": "lotto_upstream_realtime_tiny_scout",
+            "replay_source": "live_monitor_lotto_upstream_realtime",
+        },
+    )
+    assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
+def test_ath_uncertainty_scout_arms_tiny_pending(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 55000,
+        "liquidity_usd": 12000,
+        "price_change_m5": 8,
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolA")
+
+    pending_entries = {}
+    armed = arm_ath_uncertainty_tiny_scout(
+        db,
+        pending_entries,
+        {},
+        w_entry={
+            "id": 1,
+            "ca": "AthToken",
+            "symbol": "ATHX",
+            "type": "ATH",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "signal_mc": 55000,
+            "signal_top10": 20,
+            "signal_price": 1.0,
+        },
+        lifecycle_id="AthToken:1000",
+        eval_res={
+            "action": "wait",
+            "action_reason": "matrices not yet aligned",
+            "current_price": 1.01,
+            "scores": {"trend": 0, "volume": 70},
+            "reasons": {},
+        },
+        now_ts=1200,
+    )
+
+    assert armed is True
+    assert pending_entries["AthToken:1000"]["entry_mode"] == "ath_uncertainty_tiny_scout"
+    assert pending_entries["AthToken:1000"]["kelly_position_sol"] == 0.003
+    row = db.execute(
+        "SELECT component, event_type, reason FROM paper_decision_events WHERE component = 'ath_uncertainty_scout'"
+    ).fetchone()
+    assert row["event_type"] == "pending_entry"
 
 
 def test_spread_abort_memory_blocks_until_reclaim():

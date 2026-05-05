@@ -2616,12 +2616,15 @@ const server = http.createServer(async (req, res) => {
       const groups = new Map();
       const recent = [];
       for (const row of rows) {
+        const entryAudit = parseJsonObject(row.entry_execution_audit_json);
         const entryMode = inferEntryMode(row);
         const bucket = entryModeBucket(entryMode, row.position_size_sol);
         const key = `${bucket}:${entryMode}`;
         const closed = row.exit_ts != null || row.exit_reason != null;
         const pnl = row.pnl_pct == null ? null : Number(row.pnl_pct);
         const peak = row.peak_pnl == null ? null : Number(row.peak_pnl);
+        const entryQuoteSuccess = entryAudit.success === true || entryAudit.routeAvailable === true;
+        const entryQuoteFailure = Boolean(entryAudit.failureReason) || entryAudit.success === false || entryAudit.routeAvailable === false;
         if (!groups.has(key)) {
           groups.set(key, {
             bucket,
@@ -2638,6 +2641,8 @@ const server = http.createServer(async (req, res) => {
             total_position_size_sol: 0,
             position_n: 0,
             est_pnl_sol: 0,
+            entry_quote_success_n: 0,
+            entry_quote_failure_n: 0,
           });
         }
         const g = groups.get(key);
@@ -2659,6 +2664,8 @@ const server = http.createServer(async (req, res) => {
           g.position_n += 1;
           g.total_position_size_sol += Number(row.position_size_sol || 0);
         }
+        if (entryQuoteSuccess) g.entry_quote_success_n += 1;
+        if (entryQuoteFailure) g.entry_quote_failure_n += 1;
         if (recent.length < 50) {
           recent.push({
             id: row.id,
@@ -2674,6 +2681,8 @@ const server = http.createServer(async (req, res) => {
             position_size_sol: row.position_size_sol,
             pnl_pct: pnl == null ? null : roundNumber(pnl * 100, 2),
             peak_pnl_pct: peak == null ? null : roundNumber(peak * 100, 2),
+            entry_quote_success: entryQuoteSuccess,
+            entry_quote_failure_reason: entryAudit.failureReason || null,
           });
         }
       }
@@ -2690,6 +2699,12 @@ const server = http.createServer(async (req, res) => {
         avg_peak_pnl_pct: g.peak_n ? roundNumber((g.total_peak / g.peak_n) * 100, 2) : null,
         avg_position_size_sol: g.position_n ? roundNumber(g.total_position_size_sol / g.position_n, 4) : null,
         est_pnl_sol: roundNumber(g.est_pnl_sol, 5),
+        avg_ev_sol_per_trade: g.total ? roundNumber(g.est_pnl_sol / g.total, 6) : null,
+        entry_quote_success_n: g.entry_quote_success_n,
+        entry_quote_failure_n: g.entry_quote_failure_n,
+        entry_quote_success_rate_pct: (g.entry_quote_success_n + g.entry_quote_failure_n)
+          ? roundNumber((g.entry_quote_success_n / (g.entry_quote_success_n + g.entry_quote_failure_n)) * 100, 1)
+          : null,
       })).sort((a, b) => {
         if (a.bucket !== b.bucket) return a.bucket.localeCompare(b.bucket);
         return b.total - a.total;
@@ -3068,10 +3083,10 @@ const server = http.createServer(async (req, res) => {
         : '';
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
-      const hasTable = paperDb.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_missed_signal_attribution'"
-      ).get();
-      if (!hasTable) {
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      if (!tableNames.has('paper_missed_signal_attribution')) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
         return;
@@ -3080,6 +3095,25 @@ const server = http.createServer(async (req, res) => {
         paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
       );
       const hasTradability = missedCols.has('tradable_missed');
+      const hasDecisionEvents = tableNames.has('paper_decision_events');
+      const spreadAbortExistsSql = hasDecisionEvents ? `
+            EXISTS (
+              SELECT 1
+              FROM paper_decision_events e
+              WHERE e.token_ca = paper_missed_signal_attribution.token_ca
+                AND e.component = 'execution_guard'
+                AND e.reason IN ('entry_edge_spread_too_high', 'spread_guard')
+                AND e.event_ts >= COALESCE(paper_missed_signal_attribution.signal_ts, paper_missed_signal_attribution.created_event_ts, paper_missed_signal_attribution.baseline_ts, 0) - 60
+                AND e.event_ts <= COALESCE(paper_missed_signal_attribution.signal_ts, paper_missed_signal_attribution.created_event_ts, paper_missed_signal_attribution.baseline_ts, 0) + 3600
+            )` : '0';
+      const quoteExecutableBaseExpression = hasTradability ? `
+          CASE
+            WHEN tradable_missed = 1
+             AND COALESCE(would_stop_before_peak, 0) != 1
+             AND NOT (${spreadAbortExistsSql})
+            THEN 1 ELSE 0
+          END` : 'NULL';
+      const quoteExecutableSelect = 'quote_executable_proxy,';
       const tradabilitySelect = hasTradability ? `
           tradable_missed,
           tradability_status,
@@ -3091,7 +3125,8 @@ const server = http.createServer(async (req, res) => {
           would_stop_before_peak,
           stop_floor_pnl,
           first_tradable_horizon,
-          first_tradable_pnl,` : `
+          first_tradable_pnl,
+          ${quoteExecutableSelect}` : `
           NULL AS tradable_missed,
           NULL AS tradability_status,
           NULL AS tradability_reason,
@@ -3102,11 +3137,16 @@ const server = http.createServer(async (req, res) => {
           NULL AS would_stop_before_peak,
           NULL AS stop_floor_pnl,
           NULL AS first_tradable_horizon,
-          NULL AS first_tradable_pnl,`;
+          NULL AS first_tradable_pnl,
+          NULL AS quote_executable_proxy,`;
       const tradabilityAgg = hasTradability ? `
           SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
           SUM(CASE WHEN tradability_status = 'would_stop_before_peak' THEN 1 ELSE 0 END) AS stop_before_peak_n,` : `
           NULL AS tradable_n,
+          NULL AS clean_tradable_n,
+          NULL AS quote_executable_proxy_n,
           NULL AS stop_before_peak_n,`;
       const maxPnlExpr = 'COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999)';
       const topDogs = paperDb.prepare(`
@@ -3125,8 +3165,13 @@ const server = http.createServer(async (req, res) => {
           ${tradabilitySelect}
           status,
           updated_at
-        FROM paper_missed_signal_attribution
-        ${whereSql}
+        FROM (
+          SELECT
+            *,
+            ${quoteExecutableBaseExpression} AS quote_executable_proxy
+          FROM paper_missed_signal_attribution
+          ${whereSql}
+        ) paper_missed_signal_attribution
         ORDER BY ${maxPnlExpr} DESC
         LIMIT @limit
       `).all({ ...whereParams, limit });
@@ -3157,9 +3202,11 @@ const server = http.createServer(async (req, res) => {
           ${hasTradability ? `
           SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
           SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
           SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
           NULL AS tradable_n,
           NULL AS clean_tradable_n,
+          NULL AS quote_executable_proxy_n,
           NULL AS stop_before_peak_n`}
         FROM paper_missed_signal_attribution
         ${whereSql}
@@ -3173,9 +3220,11 @@ const server = http.createServer(async (req, res) => {
             MAX(COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)) AS max_pnl,
             ${hasTradability ? `
             MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
-            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak` : `
+            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak,
+            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy` : `
             NULL AS tradable_missed,
-            NULL AS would_stop_before_peak`}
+            NULL AS would_stop_before_peak,
+            NULL AS quote_executable_proxy`}
           FROM paper_missed_signal_attribution
           ${whereSql}
           GROUP BY token_ca
@@ -3186,9 +3235,11 @@ const server = http.createServer(async (req, res) => {
           ${hasTradability ? `
           SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
           SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN quote_executable_proxy = 1 THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
           SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
           NULL AS tradable_n,
           NULL AS clean_tradable_n,
+          NULL AS quote_executable_proxy_n,
           NULL AS stop_before_peak_n`}
         FROM per_token
       `).get(whereParams);
@@ -3196,6 +3247,7 @@ const server = http.createServer(async (req, res) => {
         WITH ranked AS (
           SELECT
             *,
+            ${quoteExecutableBaseExpression} AS quote_executable_proxy,
             COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999) AS max_pnl,
             ROW_NUMBER() OVER (
               PARTITION BY token_ca

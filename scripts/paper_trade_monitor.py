@@ -192,11 +192,28 @@ LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_RECLAIM_PNL = float(os.environ.get('LOTTO_UPS
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_MC = float(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_MC', '200000'))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_LIQ_USD', '5000'))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE = 'lotto_upstream_miss_tiny_scout'
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC', '200000'))
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MIN_LIQ_USD', '5000'))
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_TOP1_PCT = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_TOP1_PCT', '50'))
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_TOP10_PCT = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_TOP10_PCT', '70'))
+LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE = 'lotto_upstream_realtime_tiny_scout'
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_REASONS = {
     'not_ath_v17',
     'not_ath_prebuy_kline_unknown_data_blocked',
     'lotto_observe_low_mc_vol',
 }
+ATH_UNCERTAINTY_TINY_SCOUT_ENABLED = os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
+ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
+ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC', '200000'))
+ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD', '5000'))
+ATH_UNCERTAINTY_TINY_SCOUT_MODE = 'ath_uncertainty_tiny_scout'
+ATH_UNCERTAINTY_REASONS = (
+    'matrices not yet aligned',
+    'momentum check failed:',
+    'momentum check waiting: flat_no_fresh_tick',
+)
 ATH_REAL_PROBE_ENABLED = os.environ.get('ATH_REAL_PROBE_ENABLED', 'true').lower() != 'false'
 ATH_REAL_PROBE_MIN_MAX_PNL = float(os.environ.get('ATH_REAL_PROBE_MIN_MAX_PNL', '0.50'))
 ATH_REAL_PROBE_MIN_RECLAIM_PNL = float(os.environ.get('ATH_REAL_PROBE_MIN_RECLAIM_PNL', '0.25'))
@@ -1001,8 +1018,12 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         bool(lotto_state.get('probe'))
         or pending.get('replay_source') == 'live_monitor_lotto_probe'
         or pending.get('replay_source') == 'live_monitor_lotto_upstream_probe'
+        or pending.get('replay_source') == 'live_monitor_lotto_upstream_realtime'
+        or pending.get('replay_source') == 'live_monitor_ath_uncertainty'
         or pending.get('entry_mode') == 'lotto_real_probe_reentry_arm'
         or pending.get('entry_mode') == LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
+        or pending.get('entry_mode') == LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
+        or pending.get('entry_mode') == ATH_UNCERTAINTY_TINY_SCOUT_MODE
     )
     entry_decision = lotto_state.get('entryDecision') or {}
     entry_mode = str(
@@ -1077,8 +1098,11 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
     tiny_scout_spread_cap_pct = None
     if is_tiny_scout:
         tiny_scout_spread_cap_pct = ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT
-        if entry_mode == LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE:
+        if entry_mode in {LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE, LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE}:
             max_spread_pct = min(max_spread_pct, ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT)
+            tiny_scout_spread_cap_pct = max_spread_pct
+        elif entry_mode == ATH_UNCERTAINTY_TINY_SCOUT_MODE:
+            max_spread_pct = min(max_spread_pct, 2.0)
             tiny_scout_spread_cap_pct = max_spread_pct
         else:
             max_spread_pct = max(max_spread_pct, tiny_scout_spread_cap_pct)
@@ -1951,6 +1975,311 @@ def _first_number(*values):
         if number > 0:
             return number
     return 0.0
+
+
+def _reason_matches_any(reason, prefixes):
+    reason = str(reason or '')
+    return any(reason == prefix or reason.startswith(prefix) for prefix in prefixes)
+
+
+def arm_lotto_upstream_realtime_tiny_scout(
+    db,
+    watchlist,
+    pending_entries,
+    positions,
+    *,
+    sig,
+    registered_entry,
+    pool,
+    lifecycle_id,
+    signal_lifecycle,
+    signal_audit_payload,
+    hard_gate_status,
+    now_ts,
+):
+    """Arm a tiny paper scout immediately when upstream uncertainty blocks LOTTO."""
+    if not LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED:
+        return False
+    reason = str(hard_gate_status or '').lower()
+    if reason not in LOTTO_UPSTREAM_MISS_TINY_SCOUT_REASONS:
+        return False
+    token_ca = sig['token_ca']
+    symbol = sig.get('symbol') or token_ca[:8]
+    signal_ts = sig.get('timestamp')
+    premium_signal_id = sig.get('id')
+    if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+        return False
+    if not registered_entry or not pool:
+        return False
+
+    try:
+        realtime_dex = fetch_dexscreener_trend_snapshot(token_ca)
+    except Exception:
+        realtime_dex = None
+    try:
+        gmgn_enrichment = fetch_gmgn_token_enrichment(token_ca)
+    except Exception:
+        gmgn_enrichment = None
+    try:
+        live_concentration = helius_token_concentration(token_ca)
+    except Exception:
+        live_concentration = None
+
+    current_mc = _first_number(
+        (realtime_dex or {}).get('market_cap'),
+        (realtime_dex or {}).get('fdv'),
+        sig.get('market_cap'),
+        registered_entry.get('signal_mc'),
+    )
+    liquidity_usd = _first_number(
+        (realtime_dex or {}).get('liquidity_usd'),
+        sig.get('liquidity_usd'),
+    )
+    top10_pct = _first_number(
+        (live_concentration or {}).get('top10_pct'),
+        registered_entry.get('signal_top10'),
+    )
+    top1_pct = _first_number((live_concentration or {}).get('top1_pct'))
+    detail = {
+        **(signal_audit_payload or {}),
+        'paper_only_scout': True,
+        'probe': True,
+        'probe_source': 'upstream_realtime',
+        'source_component': 'upstream_gate',
+        'source_reject_reason': reason,
+        'entry_mode': LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+        'position_size_sol': LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL,
+        'current_mc': current_mc,
+        'liquidity_usd': liquidity_usd,
+        'top1_pct': top1_pct,
+        'top10_pct': top10_pct,
+        'gmgn_readonly': gmgn_enrichment,
+    }
+    scout_lifecycle = lifecycle_payload_for(
+        signal=sig,
+        watchlist_entry=registered_entry,
+        dex_snapshot=realtime_dex,
+        live_concentration=live_concentration,
+        route='LOTTO',
+        signal_ts=signal_ts,
+        signal_price=registered_entry.get('signal_price'),
+        now=now_ts,
+    )
+
+    reject_reason = None
+    if current_mc <= 0 or current_mc >= LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC:
+        reject_reason = 'upstream_realtime_mc_gate'
+    elif liquidity_usd < LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MIN_LIQ_USD:
+        reject_reason = 'upstream_realtime_liquidity_too_low'
+    elif top1_pct and top1_pct > LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_TOP1_PCT:
+        reject_reason = 'upstream_realtime_top1_too_high'
+    elif top10_pct and top10_pct > LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_TOP10_PCT:
+        reject_reason = 'upstream_realtime_top10_too_high'
+
+    gmgn_policy = evaluate_gmgn_lotto_policy(
+        gmgn_enrichment,
+        detail,
+        lifecycle=scout_lifecycle,
+        entry_mode=LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+    )
+    detail['gmgn_policy'] = gmgn_policy
+    detail['gmgn_action'] = gmgn_policy.get('action')
+    detail['gmgn_reason'] = gmgn_policy.get('reason')
+    if gmgn_policy.get('action') == 'reject':
+        reject_reason = gmgn_policy.get('reason') or 'gmgn_policy_reject'
+
+    if reject_reason:
+        record_decision_event(
+            db,
+            component='lotto_upstream_realtime_scout',
+            event_type='scout_reject',
+            decision='reject',
+            reason=reject_reason,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=premium_signal_id,
+            route='LOTTO',
+            data_source='premium_signals+dexscreener+gmgn+helius',
+            payload=with_lifecycle_payload(detail, scout_lifecycle or signal_lifecycle),
+            event_ts=now_ts,
+        )
+        return False
+
+    pending_entries[lifecycle_id] = build_lotto_pending(registered_entry, lifecycle_id, detail=detail)
+    pending_entries[lifecycle_id]['kelly_position_sol'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL
+    pending_entries[lifecycle_id]['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
+    pending_entries[lifecycle_id]['entry_mode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
+    pending_entries[lifecycle_id]['scout_mode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
+    pending_entries[lifecycle_id]['paper_only_scout'] = True
+    pending_entries[lifecycle_id]['replay_source'] = 'live_monitor_lotto_upstream_realtime'
+    pending_entries[lifecycle_id]['stage_outcome'] = 'lotto_upstream_realtime_tiny_scout_armed'
+    pending_entries[lifecycle_id]['lotto_state']['probe'] = True
+    pending_entries[lifecycle_id]['lotto_state']['probeSource'] = 'upstream_realtime'
+    pending_entries[lifecycle_id]['lotto_state']['probeEntryMode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
+    pending_entries[lifecycle_id]['lotto_state']['paper_only_scout'] = True
+    record_decision_event(
+        db,
+        component='lotto_upstream_realtime_scout',
+        event_type='pending_entry',
+        decision='pending',
+        reason=LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts,
+        signal_id=premium_signal_id,
+        route='LOTTO',
+        data_source='premium_signals+dexscreener+gmgn+helius',
+        payload=with_lifecycle_payload(detail, scout_lifecycle or signal_lifecycle),
+        event_ts=now_ts,
+    )
+    return True
+
+
+def _ath_uncertainty_reason(reason):
+    return _reason_matches_any(reason, ATH_UNCERTAINTY_REASONS)
+
+
+def arm_ath_uncertainty_tiny_scout(
+    db,
+    pending_entries,
+    positions,
+    *,
+    w_entry,
+    lifecycle_id,
+    eval_res,
+    now_ts,
+):
+    """Arm an ATH tiny scout for uncertainty gates without changing main ATH gate."""
+    if not ATH_UNCERTAINTY_TINY_SCOUT_ENABLED:
+        return False
+    if w_entry.get('type') != 'ATH':
+        return False
+    reason = str(eval_res.get('action_reason') or '')
+    if not _ath_uncertainty_reason(reason):
+        return False
+    token_ca = w_entry['ca']
+    symbol = w_entry['symbol']
+    if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+        return False
+    pool = w_entry.get('pool_address') or get_pool_address(token_ca)
+    if not pool:
+        record_decision_event(
+            db,
+            component='ath_uncertainty_scout',
+            event_type='scout_reject',
+            decision='reject',
+            reason='pool_not_found',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=w_entry.get('signal_ts'),
+            signal_id=w_entry.get('premium_signal_id'),
+            route='ATH',
+            payload={'source_reject_reason': reason},
+            event_ts=now_ts,
+        )
+        return False
+    try:
+        dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca)
+    except Exception:
+        dex_snapshot = None
+    current_mc = _first_number(
+        (dex_snapshot or {}).get('market_cap'),
+        (dex_snapshot or {}).get('fdv'),
+        w_entry.get('signal_mc'),
+    )
+    liquidity_usd = _first_number((dex_snapshot or {}).get('liquidity_usd'))
+    top10_pct = _first_number(w_entry.get('signal_top10'))
+    scout_lifecycle = lifecycle_payload_for(
+        watchlist_entry=w_entry,
+        dex_snapshot=dex_snapshot,
+        route='ATH',
+        signal_ts=w_entry.get('signal_ts'),
+        signal_price=w_entry.get('signal_price'),
+        now=now_ts,
+    )
+    detail = {
+        'paper_only_scout': True,
+        'probe': True,
+        'probe_source': 'ath_uncertainty',
+        'source_component': 'matrix_evaluator',
+        'source_reject_reason': reason,
+        'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'position_size_sol': ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
+        'scores': eval_res.get('scores'),
+        'reasons': eval_res.get('reasons'),
+        'current_mc': current_mc,
+        'liquidity_usd': liquidity_usd,
+        'top10_pct': top10_pct,
+    }
+    reject_reason = None
+    if current_mc <= 0 or current_mc >= ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC:
+        reject_reason = 'ath_uncertainty_mc_gate'
+    elif liquidity_usd < ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD:
+        reject_reason = 'ath_uncertainty_liquidity_too_low'
+    elif top10_pct and top10_pct > 45:
+        reject_reason = 'ath_uncertainty_top10_too_high'
+    if reject_reason:
+        record_decision_event(
+            db,
+            component='ath_uncertainty_scout',
+            event_type='scout_reject',
+            decision='reject',
+            reason=reject_reason,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=w_entry.get('signal_ts'),
+            signal_id=w_entry.get('premium_signal_id'),
+            route='ATH',
+            data_source='matrix_inputs+dexscreener',
+            payload=with_lifecycle_payload(detail, scout_lifecycle),
+            event_ts=now_ts,
+        )
+        return False
+
+    pending_entries[lifecycle_id] = {
+        'token_ca': token_ca,
+        'symbol': symbol,
+        'signal_ts': w_entry['signal_ts'],
+        'premium_signal_id': w_entry.get('premium_signal_id'),
+        'signal_type': 'ATH',
+        'signal_route': 'ATH',
+        'pool': pool,
+        'staged_at': time.time(),
+        'trigger_price': eval_res.get('current_price') or w_entry.get('signal_price'),
+        'watchlist_id': w_entry.get('id'),
+        'kelly_position_sol': ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
+        'matrix_scores': eval_res.get('scores') or {},
+        'smart_entry_retries': w_entry.get('_smart_entry_retries', 0),
+        'w_entry': w_entry,
+        'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'scout_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'paper_only_scout': True,
+        'replay_source': 'live_monitor_ath_uncertainty',
+        'ath_uncertainty_tiny_scout': True,
+        'source_reject_reason': reason,
+    }
+    record_decision_event(
+        db,
+        component='ath_uncertainty_scout',
+        event_type='pending_entry',
+        decision='pending',
+        reason=ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=w_entry.get('signal_ts'),
+        signal_id=w_entry.get('premium_signal_id'),
+        route='ATH',
+        data_source='matrix_inputs+dexscreener',
+        payload=with_lifecycle_payload(detail, scout_lifecycle),
+        event_ts=now_ts,
+    )
+    return True
 
 
 def find_ath_real_probe_candidates(db, *, now_ts, limit=3):
@@ -6562,6 +6891,25 @@ def run_monitor(db):
                                 'top10_pct': top10_pct,
                             }, observe_lifecycle),
                         )
+                        _upstream_realtime_armed = arm_lotto_upstream_realtime_tiny_scout(
+                            db,
+                            watchlist,
+                            pending_entries,
+                            dict(positions),
+                            sig=sig,
+                            registered_entry=watchlist.get_by_id(registered_entry['id']) if registered_entry else None,
+                            pool=pool,
+                            lifecycle_id=lifecycle_id,
+                            signal_lifecycle=observe_lifecycle,
+                            signal_audit_payload=signal_audit_payload,
+                            hard_gate_status=hard_gate_status,
+                            now_ts=now,
+                        )
+                        if _upstream_realtime_armed:
+                            log.info(
+                                f"  [LOTTO_UPSTREAM_REALTIME_SCOUT] {symbol} pending "
+                                f"status={hard_gate_status} size={LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL:.3f}SOL"
+                            )
                         log.info(
                             f"  [LOTTO_OBSERVE] {symbol} added to LOTTO watchlist for second-pass filtering: "
                             f"status={hard_gate_status} MC=${sig.get('market_cap') or 0:,.0f} "
@@ -7340,6 +7688,22 @@ def run_monitor(db):
                     watchlist._momentum_fail_counts[_wl_id] = 0  # reset on success
                 elif eval_res.get('action_reason', '').startswith('momentum check failed'):
                     watchlist._momentum_fail_counts[_wl_id] = watchlist._momentum_fail_counts.get(_wl_id, 0) + 1
+
+                if arm_ath_uncertainty_tiny_scout(
+                    db,
+                    pending_entries,
+                    dict(positions),
+                    w_entry=w_entry,
+                    lifecycle_id=lifecycle_id,
+                    eval_res=eval_res,
+                    now_ts=now,
+                ):
+                    log.info(
+                        f"  [ATH_UNCERTAINTY_SCOUT] {w_entry['symbol']} pending "
+                        f"reason={eval_res.get('action_reason')} size={ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL:.3f}SOL"
+                    )
+                    last_progress = time.time()
+                    continue
 
                 if eval_res['action'] == 'remove':
                     watchlist.mark_expired(w_entry['id'], eval_res['action_reason'])
