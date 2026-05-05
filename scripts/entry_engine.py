@@ -16,6 +16,7 @@ from entry_readiness_policy import (
     ENTRY_READINESS_POLL_SEC,
     entry_mode_allowed,
 )
+from scout_quality import SCOUT_QUALITY_SIZE_CAP_SOL, evaluate_scout_quality
 
 log = logging.getLogger('paper_trade_monitor')
 
@@ -110,7 +111,7 @@ SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_EN
 # Conditions: moderate dip (-3% to -15%) + buyers still dominating.
 # This is the designed pullback-bounce scenario — the old hard reject contradicted strategy intent.
 SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE = "pullback_tiny_scout"
-SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO", "1.15"))
+SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO", "1.20"))
 SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5 = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5", "-15.0"))
 SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD", "5000.0"))
 # DEX cache staleness threshold: if cache is older than this when pc_m5 < 0, force a refresh
@@ -844,25 +845,31 @@ def _pullback_tiny_scout_ok(cached_trend, bs_ratio):
     """Check if a moderate pullback qualifies for a tiny probe entry.
 
     Called only when pc_m5 < 0 and the old hard-reject would fire.
-    Requires buyers to still be dominant (bs >= 1.2) and the dip to be
-    a pullback (-15% to 0%), not a crash (< -15%).
-    No policy-level gate needed: this is invoked specifically to replace
-    the negative_trend hard-reject with a data-producing tiny probe.
+    Requires buyers to still be dominant and the dip to be a pullback
+    (-15% to 0%), not a crash (< -15%). The shared scout-quality gate
+    adds the current volume/transaction floor so weak pullbacks stay out.
     """
     trend = cached_trend or {}
     pc_m5 = _safe_float(trend.get("price_change_m5"), 0.0)
     liq = _safe_float(trend.get("liquidity_usd"), 0.0)
-    ok = (
+    local_ok = (
         pc_m5 < 0
         and pc_m5 >= SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5
         and bs_ratio >= SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO
         and (liq <= 0 or liq >= SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD)
     )
-    return ok, {
+    quality = evaluate_scout_quality(
+        mode=SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE,
+        trend=trend,
+        position_size_sol=SCOUT_QUALITY_SIZE_CAP_SOL,
+        liquidity_usd=liq,
+    )
+    return local_ok and quality.get("pass"), {
         "entry_mode": SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE,
         "price_change_m5": pc_m5,
         "buy_sell_ratio": bs_ratio,
         "liquidity_usd": liq,
+        "scout_quality": quality,
     }
 
 

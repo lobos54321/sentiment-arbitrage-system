@@ -20,7 +20,10 @@ from analyze_trade_failure_attribution import classify_system_stage  # noqa: E40
 from profit_protect_policy import profit_protect_floor  # noqa: E402
 from entry_engine import evaluate_entry_position, evaluate_smart_entry, smart_entry_bounce_reject_reason  # noqa: E402
 from entry_decision_contract import build_entry_decision_contract  # noqa: E402
+from gmgn_policy import evaluate_gmgn_tiny_scout_rescue  # noqa: E402
+from scout_quality import evaluate_scout_quality  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
+    apply_paper_tiny_scout_size_cap,
     arm_ath_uncertainty_tiny_scout,
     evaluate_entry_edge_budget,
     evaluate_spread_abort_memory,
@@ -29,6 +32,7 @@ from paper_trade_monitor import (  # noqa: E402
     find_lotto_real_probe_candidates,
     find_lotto_upstream_miss_tiny_scout_candidates,
     normalize_price_age_ms,
+    record_explosive_continuation_shadow_candidates,
     should_block_lotto_falling_knife,
     should_block_lotto_lifecycle_entry,
     token_quarantine_state,
@@ -306,6 +310,120 @@ def test_lotto_upstream_miss_probe_skips_already_armed_token():
     candidates = find_lotto_upstream_miss_tiny_scout_candidates(db, now_ts=1200, limit=5)
 
     assert candidates == []
+
+
+def test_paper_tiny_scout_size_cap_precedes_lotto_fixed_size():
+    pending = {
+        "is_lotto": True,
+        "entry_mode": "pullback_tiny_scout",
+        "paper_only_scout": True,
+        "kelly_position_sol": 0.05,
+        "lotto_state": {
+            "positionSizeSol": 0.05,
+            "entryDecision": {
+                "entry_mode": "pullback_tiny_scout",
+                "position_size_sol": 0.05,
+                "paper_only_scout": True,
+            },
+        },
+    }
+
+    detail = apply_paper_tiny_scout_size_cap(pending)
+
+    assert detail["capped"] is True
+    assert pending["kelly_position_sol"] == 0.003
+    assert pending["lotto_state"]["positionSizeSol"] == 0.003
+    assert pending["lotto_state"]["entryDecision"]["position_size_sol"] == 0.003
+
+
+def test_shared_scout_quality_blocks_weak_midcap_near_miss():
+    quality = evaluate_scout_quality(
+        mode="gmgn_midcap_near_miss_scout",
+        route="LOTTO",
+        trend={
+            "liquidity_usd": 7000,
+            "price_change_m5": -20,
+            "vol_m5": 6000,
+            "buys_m5": 50,
+            "sells_m5": 40,
+        },
+        position_size_sol=0.003,
+    )
+
+    assert quality["pass"] is False
+    assert quality["reason"] == "scout_quality_volume_low"
+
+
+def test_gmgn_midcap_rescue_uses_shared_quality_gate():
+    clean_policy = {
+        "action": "allow",
+        "toxic_score": 0,
+        "edge_score": 5,
+        "features": {
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+            "bundler_rate": 0.01,
+            "creator_hold_rate": 0.0,
+            "dev_team_hold_rate": 0.0,
+        },
+    }
+
+    weak = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_midcap_activity_unconfirmed",
+        clean_policy,
+        {
+            "liquidity_usd": 7000,
+            "vol_m5": 6000,
+            "tx_m5": 120,
+            "buy_sell_ratio": 1.3,
+            "price_change_m5": -5,
+        },
+    )
+    strong = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_midcap_activity_unconfirmed",
+        clean_policy,
+        {
+            "liquidity_usd": 9000,
+            "vol_m5": 18000,
+            "tx_m5": 240,
+            "buy_sell_ratio": 1.35,
+            "price_change_m5": -5,
+        },
+    )
+
+    assert weak["allow"] is False
+    assert weak["reason"] == "scout_quality_volume_low"
+    assert strong["allow"] is True
+    assert strong["position_size_sol"] == 0.003
+
+
+def test_explosive_continuation_shadow_records_chasing_top_without_entry():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, signal_ts, route, component,
+             decision, reject_reason, baseline_price, baseline_ts,
+             pnl_5m, pnl_15m, max_pnl_recorded, status)
+        VALUES (1000, 'ChaseToken', 'CHASE', 900, 'LOTTO', 'smart_entry',
+                'block', 'chasing_top', 1.0, 900,
+                0.05, 0.30, 0.50, 'pending')
+        """
+    )
+    db.commit()
+
+    recorded = record_explosive_continuation_shadow_candidates(db, now_ts=1200, limit=5)
+
+    assert recorded == 1
+    row = db.execute(
+        "SELECT component, event_type, decision, reason FROM paper_decision_events WHERE token_ca = 'ChaseToken'"
+    ).fetchone()
+    assert row["component"] == "explosive_continuation_shadow"
+    assert row["event_type"] == "shadow_candidate"
+    assert row["decision"] == "SHADOW_ONLY"
+    assert row["reason"] == "chasing_top"
 
 
 def test_lotto_lifecycle_blocks_deep_reset_reject():
@@ -1508,6 +1626,9 @@ def test_ath_uncertainty_scout_arms_tiny_pending(monkeypatch):
         "market_cap": 55000,
         "liquidity_usd": 12000,
         "price_change_m5": 8,
+        "vol_m5": 12000,
+        "buys_m5": 72,
+        "sells_m5": 48,
     })
     monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolA")
 
@@ -1545,6 +1666,105 @@ def test_ath_uncertainty_scout_arms_tiny_pending(monkeypatch):
         "SELECT component, event_type, reason FROM paper_decision_events WHERE component = 'ath_uncertainty_scout'"
     ).fetchone()
     assert row["event_type"] == "pending_entry"
+
+
+def test_ath_uncertainty_scout_rejects_low_quality_under_mc_cap(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 55000,
+        "liquidity_usd": 12000,
+        "price_change_m5": -4,
+        "vol_m5": 3000,
+        "buys_m5": 40,
+        "sells_m5": 38,
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolA")
+
+    pending_entries = {}
+    armed = arm_ath_uncertainty_tiny_scout(
+        db,
+        pending_entries,
+        {},
+        w_entry={
+            "id": 1,
+            "ca": "WeakAthToken",
+            "symbol": "WATH",
+            "type": "ATH",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "signal_mc": 55000,
+            "signal_top10": 20,
+            "signal_price": 1.0,
+        },
+        lifecycle_id="WeakAthToken:1000",
+        eval_res={
+            "action": "wait",
+            "action_reason": "matrices not yet aligned",
+            "current_price": 1.01,
+            "scores": {"trend": 0, "volume": 40},
+            "reasons": {},
+        },
+        now_ts=1200,
+    )
+
+    assert armed is False
+    assert pending_entries == {}
+    row = db.execute(
+        "SELECT reason FROM paper_decision_events WHERE component = 'ath_uncertainty_scout'"
+    ).fetchone()
+    assert row["reason"] == "scout_quality_buy_pressure_weak"
+
+
+def test_ath_uncertainty_scout_allows_experimental_midcap_probe(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 350000,
+        "liquidity_usd": 32000,
+        "price_change_m5": 18,
+        "vol_m5": 26000,
+        "buys_m5": 180,
+        "sells_m5": 110,
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolA")
+
+    pending_entries = {}
+    armed = arm_ath_uncertainty_tiny_scout(
+        db,
+        pending_entries,
+        {},
+        w_entry={
+            "id": 1,
+            "ca": "MidAthToken",
+            "symbol": "MATH",
+            "type": "ATH",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "signal_mc": 350000,
+            "signal_top10": 30,
+            "signal_price": 1.0,
+        },
+        lifecycle_id="MidAthToken:1000",
+        eval_res={
+            "action": "wait",
+            "action_reason": "matrices not yet aligned",
+            "current_price": 1.01,
+            "scores": {"trend": 0, "volume": 80},
+            "reasons": {},
+        },
+        now_ts=1200,
+    )
+
+    assert armed is True
+    assert pending_entries["MidAthToken:1000"]["entry_mode"] == "ath_uncertainty_tiny_scout"
+    assert pending_entries["MidAthToken:1000"]["kelly_position_sol"] == 0.003
 
 
 def test_spread_abort_memory_blocks_until_reclaim():

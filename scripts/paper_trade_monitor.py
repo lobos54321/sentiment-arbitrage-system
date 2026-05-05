@@ -68,6 +68,7 @@ from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
 from gmgn_policy import evaluate_gmgn_lotto_policy, evaluate_gmgn_tiny_scout_rescue
+from scout_quality import SCOUT_QUALITY_SIZE_CAP_SOL, evaluate_scout_quality
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -178,6 +179,8 @@ LOTTO_PHASE_POLICY_LIVE_EXIT = os.environ.get('LOTTO_PHASE_POLICY_LIVE_EXIT', 't
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
+EXPLOSIVE_CONTINUATION_SHADOW_ENABLED = os.environ.get('EXPLOSIVE_CONTINUATION_SHADOW_ENABLED', 'true').lower() != 'false'
+EXPLOSIVE_CONTINUATION_SHADOW_LOOKBACK_SEC = int(os.environ.get('EXPLOSIVE_CONTINUATION_SHADOW_LOOKBACK_SEC', str(2 * 60 * 60)))
 LOTTO_REAL_PROBE_ENABLED = os.environ.get('LOTTO_REAL_PROBE_ENABLED', 'true').lower() != 'false'
 LOTTO_REAL_PROBE_MIN_MAX_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_MAX_PNL', '0.25'))
 LOTTO_REAL_PROBE_MIN_15M_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_15M_PNL', '0.15'))
@@ -206,7 +209,7 @@ LOTTO_UPSTREAM_MISS_TINY_SCOUT_REASONS = {
 }
 ATH_UNCERTAINTY_TINY_SCOUT_ENABLED = os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
-ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC', '200000'))
+ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC', '400000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD', '5000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MODE = 'ath_uncertainty_tiny_scout'
 ATH_UNCERTAINTY_REASONS = (
@@ -916,6 +919,75 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
     return recorded
 
 
+def record_explosive_continuation_shadow_candidates(db, *, now_ts, limit=40):
+    """Shadow-track chasing_top misses without creating a live entry path."""
+    if not EXPLOSIVE_CONTINUATION_SHADOW_ENABLED:
+        return 0
+    rows = db.execute(
+        """
+        SELECT
+            m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
+            m.route, m.component, m.reject_reason, m.baseline_price, m.pnl_5m,
+            m.pnl_15m, m.pnl_60m, m.max_pnl_recorded, m.lifecycle_state,
+            m.vitality_score, m.entry_bias, m.created_event_ts
+        FROM paper_missed_signal_attribution m
+        WHERE m.route = 'LOTTO'
+          AND m.component = 'smart_entry'
+          AND m.reject_reason = 'chasing_top'
+          AND m.created_event_ts >= ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM paper_decision_events e
+              WHERE e.component = 'explosive_continuation_shadow'
+                AND e.token_ca = m.token_ca
+                AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
+          )
+        ORDER BY COALESCE(m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC,
+                 m.created_event_ts DESC
+        LIMIT ?
+        """,
+        (now_ts - EXPLOSIVE_CONTINUATION_SHADOW_LOOKBACK_SEC, limit),
+    ).fetchall()
+    recorded = 0
+    for row in rows:
+        payload = {
+            'missed_attribution_id': row['id'],
+            'probe_trigger': 'chasing_top_explosive_continuation_shadow',
+            'source_component': row['component'],
+            'source_reject_reason': row['reject_reason'],
+            'baseline_price': row['baseline_price'],
+            'pnl_5m': row['pnl_5m'],
+            'pnl_15m': row['pnl_15m'],
+            'pnl_60m': row['pnl_60m'],
+            'max_pnl_recorded': row['max_pnl_recorded'],
+            'probe_mode': 'shadow_only',
+            'live_entry_enabled': False,
+            'lifecycle': {
+                'lifecycle_state': row['lifecycle_state'],
+                'vitality_score': row['vitality_score'],
+                'entry_bias': row['entry_bias'],
+            },
+        }
+        record_decision_event(
+            db,
+            component='explosive_continuation_shadow',
+            event_type='shadow_candidate',
+            decision='SHADOW_ONLY',
+            reason='chasing_top',
+            token_ca=row['token_ca'],
+            symbol=row['symbol'],
+            lifecycle_id=row['lifecycle_id'],
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='LOTTO',
+            data_source='missed_attribution',
+            payload=payload,
+            event_ts=now_ts,
+        )
+        recorded += 1
+    return recorded
+
+
 def normalize_signal_ts_seconds(value):
     if value is None:
         return None
@@ -965,6 +1037,45 @@ def pending_is_paper_tiny_scout(pending):
             and pending_size_sol <= 0.005
         )
     )
+
+
+def apply_paper_tiny_scout_size_cap(pending):
+    pending = pending or {}
+    if not pending_is_paper_tiny_scout(pending):
+        return {
+            'is_tiny_scout': False,
+            'requested_size_sol': None,
+            'actual_size_sol': None,
+            'capped': False,
+            'cap_sol': min(PAPER_TINY_SCOUT_SIZE_SOL, SCOUT_QUALITY_SIZE_CAP_SOL),
+        }
+    lotto_state = pending.get('lotto_state') or {}
+    entry_decision = lotto_state.get('entryDecision') or {}
+    requested_size = _safe_float(
+        pending.get('kelly_position_sol')
+        or lotto_state.get('positionSizeSol')
+        or entry_decision.get('position_size_sol')
+        or PAPER_TINY_SCOUT_SIZE_SOL,
+        PAPER_TINY_SCOUT_SIZE_SOL,
+    )
+    cap_sol = min(PAPER_TINY_SCOUT_SIZE_SOL, SCOUT_QUALITY_SIZE_CAP_SOL)
+    actual_size = min(requested_size, cap_sol)
+    pending['kelly_position_sol'] = actual_size
+    pending['paper_only_scout'] = True
+    if isinstance(lotto_state, dict):
+        lotto_state['positionSizeSol'] = actual_size
+        lotto_state['paper_only_scout'] = True
+        if isinstance(entry_decision, dict):
+            entry_decision['position_size_sol'] = actual_size
+            entry_decision['paper_only_scout'] = True
+    return {
+        'is_tiny_scout': True,
+        'entry_mode': pending.get('entry_mode') or pending.get('scout_mode') or entry_decision.get('entry_mode'),
+        'requested_size_sol': requested_size,
+        'actual_size_sol': actual_size,
+        'capped': actual_size < requested_size,
+        'cap_sol': cap_sol,
+    }
 
 
 def _signal_ts_order_value(value):
@@ -1589,6 +1700,39 @@ def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_ent
             )
             continue
 
+        scout_quality = evaluate_scout_quality(
+            mode=LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
+            route='LOTTO',
+            trend=reclaim_dex,
+            lifecycle=reclaim_lifecycle,
+            token_risk=token_risk,
+            position_size_sol=LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL,
+            current_mc=current_mc,
+            liquidity_usd=liquidity_usd,
+        )
+        if not scout_quality.get('pass'):
+            record_decision_event(
+                db,
+                component='lotto_upstream_probe_live',
+                event_type='skip',
+                decision='skip',
+                reason=scout_quality.get('reason') or 'scout_quality_reject',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='LOTTO',
+                data_source='dexscreener+lifecycle+paper_risk',
+                payload=with_lifecycle_payload({
+                    'missed_attribution_id': row['id'],
+                    'source_reject_reason': row['reject_reason'],
+                    'scout_quality': scout_quality,
+                }, reclaim_lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+
         pool = get_pool_address(token_ca)
         if not pool:
             record_decision_event(
@@ -1647,6 +1791,7 @@ def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_ent
             'current_reclaim': current_reclaim,
             'current_mc': current_mc,
             'liquidity_usd': liquidity_usd,
+            'scout_quality': scout_quality,
             'position_size_sol': LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL,
             'entry_mode': LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
         }
@@ -2088,6 +2233,23 @@ def arm_lotto_upstream_realtime_tiny_scout(
     if gmgn_policy.get('action') == 'reject':
         reject_reason = gmgn_policy.get('reason') or 'gmgn_policy_reject'
 
+    scout_quality = evaluate_scout_quality(
+        mode=LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+        route='LOTTO',
+        trend=realtime_dex,
+        lifecycle=scout_lifecycle,
+        gmgn=gmgn_policy,
+        live_concentration=live_concentration,
+        position_size_sol=LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL,
+        current_mc=current_mc,
+        liquidity_usd=liquidity_usd,
+        top1_pct=top1_pct,
+        top10_pct=top10_pct,
+    )
+    detail['scout_quality'] = scout_quality
+    if not reject_reason and not scout_quality.get('pass'):
+        reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
+
     if reject_reason:
         record_decision_event(
             db,
@@ -2201,6 +2363,15 @@ def arm_ath_uncertainty_tiny_scout(
         signal_price=w_entry.get('signal_price'),
         now=now_ts,
     )
+    scout_reclaim = evaluate_token_reclaim(
+        dex_snapshot=dex_snapshot,
+        lifecycle=scout_lifecycle,
+        route='ATH',
+    )
+    try:
+        token_risk = token_quarantine_state(db, token_ca, now_ts=now_ts, reclaim=scout_reclaim)
+    except Exception as exc:
+        token_risk = {'blocked': False, 'reason': 'token_risk_unavailable', 'error': str(exc)}
     detail = {
         'paper_only_scout': True,
         'probe': True,
@@ -2214,6 +2385,8 @@ def arm_ath_uncertainty_tiny_scout(
         'current_mc': current_mc,
         'liquidity_usd': liquidity_usd,
         'top10_pct': top10_pct,
+        'current_reclaim': scout_reclaim,
+        'token_risk': token_risk,
     }
     reject_reason = None
     if current_mc <= 0 or current_mc >= ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC:
@@ -2222,6 +2395,20 @@ def arm_ath_uncertainty_tiny_scout(
         reject_reason = 'ath_uncertainty_liquidity_too_low'
     elif top10_pct and top10_pct > 45:
         reject_reason = 'ath_uncertainty_top10_too_high'
+    scout_quality = evaluate_scout_quality(
+        mode=ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        route='ATH',
+        trend=dex_snapshot,
+        lifecycle=scout_lifecycle,
+        token_risk=token_risk,
+        position_size_sol=ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
+        current_mc=current_mc,
+        liquidity_usd=liquidity_usd,
+        top10_pct=top10_pct,
+    )
+    detail['scout_quality'] = scout_quality
+    if not reject_reason and not scout_quality.get('pass'):
+        reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
     if reject_reason:
         record_decision_event(
             db,
@@ -6595,6 +6782,15 @@ def run_monitor(db):
                 except Exception as _probe_shadow_err:
                     log.debug(f"  [LOTTO_PROBE_SHADOW] scan failed: {_probe_shadow_err}")
                 try:
+                    _explosive_shadow_n = record_explosive_continuation_shadow_candidates(db, now_ts=now, limit=30)
+                    if _explosive_shadow_n:
+                        log.info(
+                            f"  [EXPLOSIVE_CONTINUATION_SHADOW] candidates={_explosive_shadow_n} "
+                            f"mode=shadow_only live_entry=false"
+                        )
+                except Exception as _explosive_shadow_err:
+                    log.debug(f"  [EXPLOSIVE_CONTINUATION_SHADOW] scan failed: {_explosive_shadow_err}")
+                try:
                     with positions_lock:
                         _upstream_probe_live_n = enqueue_lotto_upstream_miss_tiny_scout_candidates(
                             db,
@@ -8506,6 +8702,74 @@ def run_monitor(db):
                             pending_entries.pop(lifecycle_id, None)
                             continue
 
+                    if pending_is_paper_tiny_scout(pending):
+                        _scout_size_detail = apply_paper_tiny_scout_size_cap(pending)
+                        if _scout_size_detail.get('capped'):
+                            record_decision_event(
+                                db,
+                                component='scout_sizing',
+                                event_type='entry_size',
+                                decision='cap',
+                                reason='paper_tiny_scout_size_cap',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='pending_entry',
+                                payload=_scout_size_detail,
+                            )
+                            log.info(
+                                f"  [SCOUT_SIZE] {pending['symbol']} "
+                                f"{_scout_size_detail.get('entry_mode')} capped "
+                                f"{_scout_size_detail.get('requested_size_sol'):.3f} -> "
+                                f"{_scout_size_detail.get('actual_size_sol'):.3f} SOL"
+                            )
+                        _scout_gmgn_policy = (
+                            ((pending.get('lotto_state') or {}).get('entryDecision') or {}).get('gmgn_policy')
+                            or pending.get('gmgn_policy')
+                            or (pending.get('entry_readiness_policy') or {}).get('gmgn_policy')
+                        )
+                        _scout_quality = evaluate_scout_quality(
+                            mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            trend=_entry_timing_dex,
+                            lifecycle=_entry_timing_lifecycle,
+                            gmgn=_scout_gmgn_policy,
+                            token_risk=_token_risk,
+                            spread_memory=pending.get('spread_abort_memory'),
+                            position_size_sol=pending.get('kelly_position_sol'),
+                        )
+                        pending['scout_quality'] = _scout_quality
+                        if not _scout_quality.get('pass'):
+                            record_decision_event(
+                                db,
+                                component='scout_quality',
+                                event_type='entry_block',
+                                decision='block',
+                                reason=_scout_quality.get('reason') or 'scout_quality_reject',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='dexscreener+lifecycle+paper_risk',
+                                payload=with_lifecycle_payload({
+                                    'scout_quality': _scout_quality,
+                                    'scout_size': _scout_size_detail,
+                                }, _entry_timing_lifecycle),
+                            )
+                            log.info(
+                                f"  [SCOUT_QUALITY] 🚫 {pending['symbol']} BLOCKED: "
+                                f"{_scout_quality.get('reason')} mode={pending.get('entry_mode')}"
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+
                     if pending.get('is_lotto'):
                         _lotto_timing_blocked, _lotto_timing_reason, _lotto_timing_detail = should_block_lotto_lifecycle_entry(
                             _entry_timing_lifecycle,
@@ -8534,16 +8798,20 @@ def run_monitor(db):
                             pending_entries.pop(lifecycle_id, None)
                             continue
 
-                    # LOTTO: fixed paper size, skip Kelly and liquidity cap
-                    if pending.get('is_lotto'):
-                        actual_position_size_sol = float(pending.get('kelly_position_sol') or LOTTO_POSITION_SIZE_SOL)
-                        log.info(f"  [LOTTO] {pending['symbol']} fixed size: {actual_position_size_sol} SOL")
-                    elif pending.get('entry_mode') in PAPER_TINY_SCOUT_ENTRY_MODES:
+                    # Paper tiny scouts must stay at the probe budget even when they come
+                    # from a LOTTO pending entry with a larger fixed-size default.
+                    if pending_is_paper_tiny_scout(pending):
+                        _scout_size_detail = apply_paper_tiny_scout_size_cap(pending)
                         actual_position_size_sol = float(pending.get('kelly_position_sol') or PAPER_TINY_SCOUT_SIZE_SOL)
                         log.info(
                             f"  [ENTRY_SIZE] {pending['symbol']} paper tiny scout "
-                            f"mode={pending.get('entry_mode')} size={actual_position_size_sol:.3f} SOL"
+                            f"mode={pending.get('entry_mode')} size={actual_position_size_sol:.3f} SOL "
+                            f"cap={_scout_size_detail.get('cap_sol'):.3f}"
                         )
+                    # LOTTO: fixed paper size, skip Kelly and liquidity cap
+                    elif pending.get('is_lotto'):
+                        actual_position_size_sol = float(pending.get('kelly_position_sol') or LOTTO_POSITION_SIZE_SOL)
+                        log.info(f"  [LOTTO] {pending['symbol']} fixed size: {actual_position_size_sol} SOL")
                     else:
                         # Recalculate Kelly with entry mode + matrix scores
                         pending['kelly_position_sol'] = calculate_kelly_position(

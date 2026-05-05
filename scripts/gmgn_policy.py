@@ -8,6 +8,8 @@ kept separate from gmgn_readonly so the data adapter remains non-opinionated.
 
 import os
 
+from scout_quality import evaluate_scout_quality
+
 
 GMGN_PAPER_POLICY_ENABLED = os.environ.get("GMGN_PAPER_POLICY_ENABLED", "true").lower() != "false"
 GMGN_PAPER_REJECT_ENABLED = os.environ.get("GMGN_PAPER_REJECT_ENABLED", "true").lower() != "false"
@@ -36,7 +38,7 @@ GMGN_CLEAN_RAT_RATE = float(os.environ.get("GMGN_CLEAN_RAT_RATE", "0.05"))
 GMGN_TOXIC_SPREAD_PENALTY_PCT = float(os.environ.get("GMGN_TOXIC_SPREAD_PENALTY_PCT", "0.50"))
 GMGN_DOWNSIZE_SPREAD_PENALTY_PCT = float(os.environ.get("GMGN_DOWNSIZE_SPREAD_PENALTY_PCT", "0.25"))
 GMGN_TINY_SCOUT_ENABLED = os.environ.get("GMGN_TINY_SCOUT_ENABLED", "true").lower() != "false"
-GMGN_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_TINY_SCOUT_SIZE_SOL", "0.005"))
+GMGN_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_TINY_SCOUT_SIZE_SOL", "0.003"))
 GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL", "0.003"))
 GMGN_TINY_SCOUT_MIN_EDGE_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MIN_EDGE_SCORE", "4"))
 GMGN_TINY_SCOUT_MAX_TOXIC_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MAX_TOXIC_SCORE", "1"))
@@ -50,9 +52,9 @@ GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_UNKNOWN_DAT
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MIN_TX_M5", "250"))
 GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5 = float(os.environ.get("GMGN_UNKNOWN_DATA_TINY_SCOUT_MAX_NEG_M5", "-45"))
 GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD", "5000"))
-GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5 = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5", "4000"))
-GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5 = int(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5", "80"))
-GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5 = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5", "-35"))
+GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5 = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5", "15000"))
+GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5 = int(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5", "200"))
+GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5 = float(os.environ.get("GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5", "-15"))
 GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_VOL_M5", "12000"))
 GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_TX_M5", "120"))
 GMGN_RECLAIM_TINY_SCOUT_MIN_M5 = float(os.environ.get("GMGN_RECLAIM_TINY_SCOUT_MIN_M5", "-8"))
@@ -307,12 +309,17 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
         return {"allow": False, "reason": "gmgn_concentration_activity_not_enough"}
 
     if reject_reason == "lotto_midcap_activity_unconfirmed":
-        if (
-            liquidity_usd >= GMGN_MIDCAP_NEAR_MISS_MIN_LIQUIDITY_USD
-            and vol_m5 >= GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5
-            and tx_m5 >= GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5
-            and price_change_m5 >= GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5
-        ):
+        scout_quality = evaluate_scout_quality(
+            mode="gmgn_midcap_near_miss_scout",
+            route="LOTTO",
+            trend=lotto_detail,
+            gmgn=policy,
+            position_size_sol=GMGN_TINY_SCOUT_SIZE_SOL,
+            liquidity_usd=liquidity_usd,
+            top1_pct=live_top1,
+            top10_pct=live_top10,
+        )
+        if scout_quality.get("pass"):
             return {
                 "allow": True,
                 "entry_mode": "gmgn_midcap_near_miss_scout",
@@ -328,8 +335,14 @@ def evaluate_gmgn_tiny_scout_rescue(reject_reason, policy, lotto_detail=None):
                     "min_vol_m5": GMGN_MIDCAP_NEAR_MISS_MIN_VOL_M5,
                     "min_tx_m5": GMGN_MIDCAP_NEAR_MISS_MIN_TX_M5,
                     "max_negative_m5": GMGN_MIDCAP_NEAR_MISS_MAX_NEG_M5,
+                    "scout_quality": scout_quality,
                 },
             }
+        return {
+            "allow": False,
+            "reason": scout_quality.get("reason") or "gmgn_midcap_near_miss_quality_reject",
+            "detail": {"scout_quality": scout_quality},
+        }
 
     unknown_or_falling_knife_reason = reject_reason in {
         "lotto_newborn_falling_knife_low_liq",
