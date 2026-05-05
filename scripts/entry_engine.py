@@ -106,6 +106,16 @@ SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_M5_PCT = float(os.environ.get("SMART
 SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_BS_RATIO", "1.20"))
 SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_VOL_M5", "8000"))
 SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5", "50"))
+# Pullback tiny scout: fires when negative_trend would hard-reject a genuine pullback.
+# Conditions: moderate dip (-3% to -15%) + buyers still dominating.
+# This is the designed pullback-bounce scenario — the old hard reject contradicted strategy intent.
+SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE = "pullback_tiny_scout"
+SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO", "1.2"))
+SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5 = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5", "-15.0"))
+SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD", "5000.0"))
+# DEX cache staleness threshold: if cache is older than this when pc_m5 < 0, force a refresh
+# before applying the negative_trend decision (TARZAN case: stale -30.5% data)
+SMART_ENTRY_DEX_STALE_REFRESH_SEC = float(os.environ.get("SMART_ENTRY_DEX_STALE_REFRESH_SEC", "8.0"))
 
 
 def _calc_velocity(price_history, window_sec):
@@ -830,6 +840,32 @@ def _ath_flat_tiny_scout_ok(entry_readiness_policy, cached_trend, total_score=0)
     }
 
 
+def _pullback_tiny_scout_ok(cached_trend, bs_ratio):
+    """Check if a moderate pullback qualifies for a tiny probe entry.
+
+    Called only when pc_m5 < 0 and the old hard-reject would fire.
+    Requires buyers to still be dominant (bs >= 1.2) and the dip to be
+    a pullback (-15% to 0%), not a crash (< -15%).
+    No policy-level gate needed: this is invoked specifically to replace
+    the negative_trend hard-reject with a data-producing tiny probe.
+    """
+    trend = cached_trend or {}
+    pc_m5 = _safe_float(trend.get("price_change_m5"), 0.0)
+    liq = _safe_float(trend.get("liquidity_usd"), 0.0)
+    ok = (
+        pc_m5 < 0
+        and pc_m5 >= SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5
+        and bs_ratio >= SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO
+        and (liq <= 0 or liq >= SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD)
+    )
+    return ok, {
+        "entry_mode": SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE,
+        "price_change_m5": pc_m5,
+        "buy_sell_ratio": bs_ratio,
+        "liquidity_usd": liq,
+    }
+
+
 def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, momentum_pct=0.0):
     """Return a hard reject reason for dead-cat bounce patterns.
 
@@ -959,16 +995,62 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             return False, 'post_spread_abort', (
                 f'{spread_abort_count} spread abort(s), past peak'), None
 
-    # TREND GUARD: reject if 5-minute price change is negative.
-    # Data (8hr audit, 2026-04-24): 4 trades with pc_m5<0 → 1W/3L = 25% win rate.
-    # If the trend is declining, we're buying into a falling knife.
-    # Matrix T≥60 should already filter this, but SmartEntry runs later and
-    # DexScreener data may have shifted. This is the second safety net.
+    # TREND GUARD: tiered handling of negative pc_m5.
+    # V9 (2026-05-05): Old code was a hard reject on ANY pc_m5 < 0 (n=4, 25% WR).
+    # Problem: hard reject contradicts pullback_bounce strategy — the designed
+    # entry scenario requires pc_m5 < 0 (price pulling back after initial pump).
+    # Additional problem: DexScreener cache can be up to 15s old; a stale -30%
+    # read (e.g. TARZAN) may not reflect the actual current price direction.
+    # Fix: (1) refresh stale cache before deciding, (2) tiered by depth + buyer support.
     if pc_m5 is not None and pc_m5 < 0:
-        log.info(
-            f"[SmartEntry] 🚫  REJECT: negative_trend - "
-            f"pc_m5={pc_m5:+.1f}% (5min price declining, refusing to buy into downtrend)")
-        return False, 'negative_trend', f'pc_m5={pc_m5:+.1f}% < 0', None
+        # Step 1: If cache is stale, force a fresh DexScreener read and recalculate.
+        _cached_entry = _dex_trend_cache.get(token_ca)
+        _cache_age = (_time.time() - _cached_entry['fetched_at']) if _cached_entry else 999
+        if _cache_age > SMART_ENTRY_DEX_STALE_REFRESH_SEC:
+            log.info(
+                f"[SmartEntry] ⚠️  DEX_STALE: pc_m5={pc_m5:+.1f}% but cache is {_cache_age:.0f}s old "
+                f"— forcing refresh before negative_trend decision")
+            _fresh_trend = fetch_dexscreener_trend_snapshot.__wrapped__(token_ca) if hasattr(
+                fetch_dexscreener_trend_snapshot, '__wrapped__') else None
+            # Bypass cache: temporarily clear and re-fetch
+            _dex_trend_cache.pop(token_ca, None)
+            _fresh_trend = fetch_dexscreener_trend_snapshot(token_ca)
+            if _fresh_trend:
+                cached_trend = _fresh_trend
+                _b = _fresh_trend.get('buys_m5', 0)
+                _s = max(_fresh_trend.get('sells_m5', 1), 1)
+                bs_ratio = _b / _s
+                pc_m5 = _fresh_trend.get('price_change_m5', 0)
+                vol_m5 = _fresh_trend.get('vol_m5', 0)
+                vol_h1 = _fresh_trend.get('vol_h1', 0)
+                log.info(f"[SmartEntry] 🔄  DEX_REFRESHED: pc_m5={pc_m5:+.1f}% bs={bs_ratio:.2f} (was stale)")
+                if pc_m5 >= 0:
+                    # Trend recovered — skip the negative_trend gate entirely
+                    log.info(f"[SmartEntry] ✅  DEX_REFRESHED: pc_m5 recovered to {pc_m5:+.1f}%, continuing")
+
+        # Step 2: Apply tiered decision on (now possibly refreshed) data.
+        if pc_m5 < 0:
+            # Deep crash OR sellers dominating → genuine downtrend, reject
+            if pc_m5 < -15.0 or bs_ratio < 1.1:
+                log.info(
+                    f"[SmartEntry] 🚫  REJECT: negative_trend_crash - "
+                    f"pc_m5={pc_m5:+.1f}% bs={bs_ratio:.2f} (crash or seller-dominated)")
+                return False, 'negative_trend', f'pc_m5={pc_m5:+.1f}% bs={bs_ratio:.2f}', None
+            # Moderate pullback (-15% to 0%) + buyers present → try pullback tiny scout
+            _pullback_tiny_ok, _pullback_tiny_detail = _pullback_tiny_scout_ok(cached_trend, bs_ratio)
+            if _pullback_tiny_ok:
+                _pt_node = (
+                    f"node=pullback_tiny_scout "
+                    f"pc_m5={pc_m5:+.1f}% bs={bs_ratio:.2f} "
+                    f"liq=${_pullback_tiny_detail.get('liquidity_usd', 0):.0f}"
+                )
+                log.info(f"[SmartEntry] 🧪 ${symbol} PULLBACK_TINY_SCOUT at ${price:.10f}: {_pt_node}")
+                return True, SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE, _pt_node, price
+            # Pullback present but scout conditions not met (liq too low, bs marginal)
+            log.info(
+                f"[SmartEntry] 🚫  REJECT: negative_trend - "
+                f"pc_m5={pc_m5:+.1f}% bs={bs_ratio:.2f} (pullback but scout conditions not met)")
+            return False, 'negative_trend', f'pc_m5={pc_m5:+.1f}% bs={bs_ratio:.2f}', None
 
     liq_usd = cached_trend.get('liquidity_usd', 0) if cached_trend else 0
     if cached_trend and 0 < liq_usd < 5000:
@@ -1038,11 +1120,14 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     score_details.append(f"m9s:{m9s_score}")
 
     # Dim 5: Trend Phase (Max 15)
+    # Note: BEARISH (pc_m5 < -3%) is unreachable here — the negative_trend gate
+    # above either hard-rejects or routes to pullback_tiny_scout before scoring.
+    # Setting BEARISH = 0 to reflect its true expected value in this path.
     trend_phase, _ = evaluate_trend_phase(cached_trend)
     trend_score = 0
     if trend_phase == 'BULLISH': trend_score = 15
     elif trend_phase == 'WAIT': trend_score = 8
-    elif trend_phase == 'BEARISH': trend_score = 2
+    elif trend_phase == 'BEARISH': trend_score = 0  # dead path; negative_trend gate fires first
     total_score += trend_score
     score_details.append(f"tr:{trend_score}")
 

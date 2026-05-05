@@ -8319,9 +8319,6 @@ def run_monitor(db):
 
                         if not should_enter:
                             retry_count = pending.get('smart_entry_retries', 0)
-                            max_retries = 3
-                            if pending.get('is_lotto'):
-                                _LOTTO_TIMING_RETRY_MEMORY[lifecycle_id] = retry_count + 1
                             _reclaimable_timing_reject = (
                                 timing_reason in {
                                     'negative_trend',
@@ -8331,6 +8328,12 @@ def run_monitor(db):
                                 or str(timing_reason or '').startswith('dead_cat')
                                 or str(timing_reason or '').startswith('lotto_dead_cat')
                             )
+                            # Give negative_trend rejects extra retries: pullback may resolve
+                            # within 30-60s as DexScreener data refreshes or price recovers.
+                            # Standard 3 retries would drop the token too quickly.
+                            max_retries = 5 if timing_reason == 'negative_trend' else 3
+                            if pending.get('is_lotto'):
+                                _LOTTO_TIMING_RETRY_MEMORY[lifecycle_id] = retry_count + 1
                             record_decision_event(
                                 db,
                                 component='smart_entry',

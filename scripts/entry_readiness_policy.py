@@ -36,12 +36,16 @@ LOTTO_UPSTREAM_TINY_SCOUT_MODES = (
     "lotto_upstream_miss_tiny_scout",
     "lotto_upstream_realtime_tiny_scout",
 )
+PULLBACK_TINY_SCOUT_MODES = (
+    "pullback_tiny_scout",
+)
 PAPER_TINY_SCOUT_MODES = (
     GMGN_TINY_SCOUT_MODES
     + RECLAIM_TINY_SCOUT_MODES
     + ATH_TINY_SCOUT_MODES
     + NEWBORN_TINY_SCOUT_MODES
     + LOTTO_UPSTREAM_TINY_SCOUT_MODES
+    + PULLBACK_TINY_SCOUT_MODES
 )
 
 

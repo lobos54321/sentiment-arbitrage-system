@@ -3301,6 +3301,115 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/stats/missed-gates') {
+    // Most expensive gates: which SmartEntry reject reasons caused the most missed gold/silver dogs.
+    // Query paper_decision_events (timing rejects) joined against paper_missed_signal_attribution.
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const hoursBack = Math.max(1, Math.min(parseInt(url.searchParams.get('hours') || '24', 10) || 24, 168));
+      const sinceTs = Math.floor(Date.now() / 1000) - hoursBack * 3600;
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name)
+      );
+      const hasEvents = tableNames.has('paper_decision_events');
+      const hasMissed = tableNames.has('paper_missed_signal_attribution');
+      const missedCols = hasMissed
+        ? new Set(paperDb.prepare('PRAGMA table_info(paper_missed_signal_attribution)').all().map((r) => r.name))
+        : new Set();
+      const hasTradability = missedCols.has('tradable_missed') && missedCols.has('tradable_peak_pnl');
+
+      // Gate stats from decision_events
+      let gateRows = [];
+      if (hasEvents) {
+        gateRows = paperDb.prepare(`
+          SELECT
+            reason,
+            COUNT(*) AS total_rejects,
+            COUNT(DISTINCT token_ca) AS unique_tokens
+          FROM paper_decision_events
+          WHERE component = 'smart_entry'
+            AND event_type = 'timing_decision'
+            AND decision = 'reject'
+            AND event_ts >= @since
+          GROUP BY reason
+          ORDER BY total_rejects DESC
+        `).all({ since: sinceTs });
+      }
+
+      // Missed attribution by reject_reason
+      let missedRows = [];
+      if (hasMissed && hasTradability) {
+        missedRows = paperDb.prepare(`
+          SELECT
+            reject_reason,
+            COUNT(*) AS missed_n,
+            SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) = 0 THEN 1 ELSE 0 END) AS clean_missed,
+            SUM(CASE WHEN COALESCE(tradable_peak_pnl, 0) >= 0.5 THEN 1 ELSE 0 END) AS gold_missed,
+            SUM(CASE WHEN COALESCE(tradable_peak_pnl, 0) >= 0.25 AND COALESCE(tradable_peak_pnl, 0) < 0.5 THEN 1 ELSE 0 END) AS silver_missed,
+            ROUND(MAX(COALESCE(tradable_peak_pnl, 0)) * 100, 1) AS max_missed_pct
+          FROM paper_missed_signal_attribution
+          WHERE COALESCE(signal_ts, created_event_ts, 0) >= @since
+            AND reject_reason IS NOT NULL
+          GROUP BY reject_reason
+          ORDER BY gold_missed DESC, silver_missed DESC, clean_missed DESC
+        `).all({ since: sinceTs });
+      }
+
+      // Merge: attach missed-attribution counts to gate stats
+      const missedByReason = {};
+      for (const r of missedRows) missedByReason[r.reject_reason] = r;
+      const merged = gateRows.map((g) => {
+        const m = missedByReason[g.reason] || {};
+        return {
+          reason: g.reason,
+          total_rejects: g.total_rejects,
+          unique_tokens: g.unique_tokens,
+          missed_n: m.missed_n || 0,
+          clean_missed: m.clean_missed || 0,
+          gold_missed: m.gold_missed || 0,
+          silver_missed: m.silver_missed || 0,
+          max_missed_pct: m.max_missed_pct || null,
+        };
+      });
+      // Add any missed-attribution reasons not in decision_events
+      for (const r of missedRows) {
+        if (!gateRows.find((g) => g.reason === r.reject_reason)) {
+          merged.push({
+            reason: r.reject_reason,
+            total_rejects: 0,
+            unique_tokens: 0,
+            missed_n: r.missed_n,
+            clean_missed: r.clean_missed,
+            gold_missed: r.gold_missed,
+            silver_missed: r.silver_missed,
+            max_missed_pct: r.max_missed_pct,
+          });
+        }
+      }
+      merged.sort((a, b) => (b.gold_missed + b.silver_missed) - (a.gold_missed + a.silver_missed) || b.total_rejects - a.total_rejects);
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        window_hours: hoursBack,
+        since_ts: sinceTs,
+        gates: merged,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/paper/external-alpha-health') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
