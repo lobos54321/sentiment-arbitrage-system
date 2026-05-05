@@ -31,11 +31,15 @@ ATH_TINY_SCOUT_MODES = (
 NEWBORN_TINY_SCOUT_MODES = (
     "newborn_momentum_tiny_scout",
 )
+LOTTO_UPSTREAM_TINY_SCOUT_MODES = (
+    "lotto_upstream_miss_tiny_scout",
+)
 PAPER_TINY_SCOUT_MODES = (
     GMGN_TINY_SCOUT_MODES
     + RECLAIM_TINY_SCOUT_MODES
     + ATH_TINY_SCOUT_MODES
     + NEWBORN_TINY_SCOUT_MODES
+    + LOTTO_UPSTREAM_TINY_SCOUT_MODES
 )
 
 
@@ -78,7 +82,9 @@ def _profile_from_lifecycle(route=None, lifecycle=None, pending=None, now_ts=Non
     is_probe = (
         bool((pending.get("lotto_state") or {}).get("probe"))
         or pending.get("replay_source") == "live_monitor_lotto_probe"
+        or pending.get("replay_source") == "live_monitor_lotto_upstream_probe"
         or pending.get("entry_mode") == "lotto_real_probe_reentry_arm"
+        or pending.get("entry_mode") == "lotto_upstream_miss_tiny_scout"
     )
     liquidity_unknown = bool(features.get("liquidity_unknown"))
     dex_id = str(features.get("dex_id") or "").lower()

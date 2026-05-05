@@ -26,6 +26,7 @@ from paper_trade_monitor import (  # noqa: E402
     evaluate_token_reclaim,
     find_ath_real_probe_candidates,
     find_lotto_real_probe_candidates,
+    find_lotto_upstream_miss_tiny_scout_candidates,
     normalize_price_age_ms,
     should_block_lotto_falling_knife,
     should_block_lotto_lifecycle_entry,
@@ -223,6 +224,89 @@ def test_ath_real_probe_skips_already_armed_token():
     assert candidates == []
 
 
+def test_lotto_upstream_miss_probe_targets_only_clean_upstream_blockers():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    rows = [
+        ("NATH", "NotAthToken", "upstream_gate", "not_ath_v17", 1.30, 0.35, 1, "tradable_reclaim", 0),
+        ("UNK", "UnknownKlineToken", "upstream_gate", "not_ath_prebuy_kline_unknown_data_blocked", 0.80, 0.25, 1, "tradable_reclaim", 0),
+        ("ENTRY", "EntryGateToken", "lotto_entry_gate", "lotto_stale_1825s", 2.00, 0.50, 1, "tradable_reclaim", 0),
+        ("STOP", "StopToken", "upstream_gate", "not_ath_v17", 3.00, 0.50, 1, "would_stop_before_peak", 1),
+        ("LOW", "LowPnlToken", "upstream_gate", "not_ath_v17", 0.20, 0.19, 1, "tradable_reclaim", 0),
+    ]
+    for symbol, token, component, reason, peak_pnl, reclaim_pnl, tradable, status, would_stop in rows:
+        db.execute(
+            """
+            INSERT INTO paper_missed_signal_attribution
+                (created_event_ts, token_ca, symbol, signal_ts, route, component,
+                 decision, reject_reason, baseline_price, baseline_ts,
+                 pnl_5m, pnl_15m, max_pnl_recorded, status,
+                 tradable_missed, tradability_status, would_stop_before_peak,
+                 first_tradable_pnl, tradable_peak_pnl)
+            VALUES (1000, ?, ?, 900, 'LOTTO', ?,
+                    'wait', ?, 1.0, 900,
+                    ?, ?, ?, 'pending',
+                    ?, ?, ?, ?, ?)
+            """,
+            (
+                token,
+                symbol,
+                component,
+                reason,
+                reclaim_pnl,
+                peak_pnl,
+                peak_pnl,
+                tradable,
+                status,
+                would_stop,
+                reclaim_pnl,
+                peak_pnl,
+            ),
+        )
+    db.commit()
+
+    candidates = find_lotto_upstream_miss_tiny_scout_candidates(db, now_ts=1200, limit=10)
+
+    assert [row["symbol"] for row in candidates] == ["NATH", "UNK"]
+
+
+def test_lotto_upstream_miss_probe_skips_already_armed_token():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, signal_ts, route, component,
+             decision, reject_reason, baseline_price, baseline_ts,
+             pnl_5m, pnl_15m, max_pnl_recorded, status,
+             tradable_missed, tradability_status, would_stop_before_peak,
+             first_tradable_pnl, tradable_peak_pnl)
+        VALUES (1000, 'ArmedUpstreamToken', 'ARMUP', 900, 'LOTTO', 'upstream_gate',
+                'wait', 'not_ath_v17', 1.0, 900,
+                0.35, 0.80, 0.80, 'pending',
+                1, 'tradable_reclaim', 0, 0.35, 0.80)
+        """
+    )
+    record_decision_event(
+        db,
+        component="lotto_upstream_probe_live",
+        event_type="pending_entry",
+        decision="pending",
+        reason="lotto_upstream_miss_tiny_scout",
+        token_ca="ArmedUpstreamToken",
+        symbol="ARMUP",
+        route="LOTTO",
+        event_ts=1100,
+    )
+    db.commit()
+
+    candidates = find_lotto_upstream_miss_tiny_scout_candidates(db, now_ts=1200, limit=5)
+
+    assert candidates == []
+
+
 def test_lotto_lifecycle_blocks_deep_reset_reject():
     blocked, reason, detail = should_block_lotto_lifecycle_entry({
         "lifecycle_state": "ATH_DEEP_RESET",
@@ -403,6 +487,28 @@ def test_entry_edge_budget_uses_readiness_policy_spread_cap():
     assert budget["reason"] == "entry_edge_spread_too_high"
     assert budget["max_spread_pct"] == 1.5
     assert budget["readiness_max_spread_pct"] == 1.5
+
+
+def test_entry_edge_budget_keeps_upstream_miss_tiny_scout_spread_strict():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.02,
+        lifecycle={"lifecycle_features": {"liquidity_unknown": False, "live_top1_pct": 10}},
+        pending={
+            "is_lotto": True,
+            "paper_only_scout": True,
+            "entry_mode": "lotto_upstream_miss_tiny_scout",
+            "entry_readiness_policy": {
+                "lifecycle_profile": "LOTTO_REAL_PROBE",
+                "max_spread_pct": 1.0,
+            },
+        },
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["max_spread_pct"] == 1.0
+    assert budget["tiny_scout_spread_cap_pct"] == 1.0
 
 
 def test_entry_edge_budget_blocks_ath_spread_over_budget():
@@ -1292,6 +1398,30 @@ def test_entry_readiness_real_probe_disallows_momentum_direct():
         pending={
             "is_lotto": True,
             "entry_mode": "lotto_real_probe_reentry_arm",
+        },
+    )
+    assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
+    assert entry_mode_allowed("momentum_direct_entry", policy) is False
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
+def test_entry_readiness_upstream_miss_tiny_scout_uses_real_probe_profile():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 480,
+                "price_change_m5": 22,
+                "buy_sell_ratio": 1.8,
+            },
+        },
+        pending={
+            "is_lotto": True,
+            "paper_only_scout": True,
+            "entry_mode": "lotto_upstream_miss_tiny_scout",
+            "replay_source": "live_monitor_lotto_upstream_probe",
         },
     )
     assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
