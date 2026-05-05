@@ -110,7 +110,7 @@ SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_EN
 # Conditions: moderate dip (-3% to -15%) + buyers still dominating.
 # This is the designed pullback-bounce scenario — the old hard reject contradicted strategy intent.
 SMART_ENTRY_PULLBACK_TINY_SCOUT_MODE = "pullback_tiny_scout"
-SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO", "1.2"))
+SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_BS_RATIO", "1.15"))
 SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5 = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_PC_M5", "-15.0"))
 SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_PULLBACK_TINY_SCOUT_MIN_LIQ_USD", "5000.0"))
 # DEX cache staleness threshold: if cache is older than this when pc_m5 < 0, force a refresh
