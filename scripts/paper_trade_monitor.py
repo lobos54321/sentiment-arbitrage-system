@@ -8450,29 +8450,61 @@ def run_monitor(db):
                         reclaim=_entry_reclaim,
                     )
                     if _token_risk.get('blocked'):
-                        record_decision_event(
-                            db,
-                            component='token_risk',
-                            event_type='entry_block',
-                            decision='block',
-                            reason=_token_risk.get('reason') or 'token_quarantine',
-                            token_ca=pending['token_ca'],
-                            symbol=pending['symbol'],
-                            lifecycle_id=lifecycle_id,
-                            signal_ts=pending['signal_ts'],
-                            signal_id=pending.get('premium_signal_id'),
-                            strategy_stage=_pending_strategy_stage,
-                            route=_pending_signal_route or pending.get('signal_type'),
-                            data_source='paper_trade_history+dexscreener+lifecycle',
-                            payload=_token_risk,
-                        )
-                        log.info(
-                            f"  [TOKEN_RISK] 🚫 {pending['symbol']} BLOCKED: "
-                            f"{_token_risk.get('reason')} remaining={_token_risk.get('remaining_sec', 0):.0f}s "
-                            f"failures={_token_risk.get('severe_failure_count')}"
-                        )
-                        pending_entries.pop(lifecycle_id, None)
-                        continue
+                        _is_tiny_scout_pending = pending_is_paper_tiny_scout(pending)
+                        # Tiny scouts (0.003 SOL probes) bypass quarantine when the cooldown
+                        # period has expired and only reclaim is missing. Rationale: spread_abort
+                        # memory already has this exemption pattern (line ~8229). A 0.003 SOL
+                        # probe is specifically designed to gather data on uncertain tokens —
+                        # blocking it defeats its purpose. Hard cooldown (remaining_sec > 0) still
+                        # applies to tiny scouts (don't probe while still hot).
+                        _quarantine_cooldown_expired = _token_risk.get('cooldown_expired', False)
+                        if _is_tiny_scout_pending and _quarantine_cooldown_expired:
+                            log.info(
+                                f"  [TOKEN_RISK] ⚠️ {pending['symbol']} quarantine deferred for tiny scout "
+                                f"({_token_risk.get('reason')}, cooldown expired, "
+                                f"failures={_token_risk.get('severe_failure_count')})"
+                            )
+                            record_decision_event(
+                                db,
+                                component='token_risk',
+                                event_type='entry_block',
+                                decision='warn',
+                                reason='token_quarantine_tiny_scout_deferred',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='paper_trade_history+dexscreener+lifecycle',
+                                payload=_token_risk,
+                            )
+                            # Allow tiny scout to proceed — do not pop or continue
+                        else:
+                            record_decision_event(
+                                db,
+                                component='token_risk',
+                                event_type='entry_block',
+                                decision='block',
+                                reason=_token_risk.get('reason') or 'token_quarantine',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='paper_trade_history+dexscreener+lifecycle',
+                                payload=_token_risk,
+                            )
+                            log.info(
+                                f"  [TOKEN_RISK] 🚫 {pending['symbol']} BLOCKED: "
+                                f"{_token_risk.get('reason')} remaining={_token_risk.get('remaining_sec', 0):.0f}s "
+                                f"failures={_token_risk.get('severe_failure_count')}"
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
 
                     if pending.get('is_lotto'):
                         _lotto_timing_blocked, _lotto_timing_reason, _lotto_timing_detail = should_block_lotto_lifecycle_entry(
