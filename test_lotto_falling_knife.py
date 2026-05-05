@@ -24,6 +24,7 @@ from paper_trade_monitor import (  # noqa: E402
     evaluate_entry_edge_budget,
     evaluate_spread_abort_memory,
     evaluate_token_reclaim,
+    find_ath_real_probe_candidates,
     find_lotto_real_probe_candidates,
     normalize_price_age_ms,
     should_block_lotto_falling_knife,
@@ -139,6 +140,86 @@ def test_real_probe_rejects_stale_missed_opportunity():
     )
     db.commit()
     candidates = find_lotto_real_probe_candidates(db, now_ts=5000, limit=5)
+    assert candidates == []
+
+
+def test_ath_real_probe_uses_only_uncertainty_gate_counterfactuals():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    rows = [
+        ("ALIGN", "AlignToken", "matrix_evaluator", "matrices not yet aligned", 1.20, 0.40),
+        ("SMART", "SmartToken", "smart_entry", "no_kline_low_volume", 0.80, 0.30),
+        ("CRASH", "CrashToken", "matrix_evaluator", "price_collapse", 5.00, 1.00),
+    ]
+    for symbol, token, component, reason, peak_pnl, reclaim_pnl in rows:
+        db.execute(
+            """
+            INSERT INTO paper_missed_signal_attribution
+                (created_event_ts, token_ca, symbol, signal_ts, route, component,
+                 decision, reject_reason, baseline_price, baseline_ts,
+                 pnl_5m, pnl_15m, max_pnl_recorded, status,
+                 tradable_missed, tradability_status, would_stop_before_peak,
+                 first_tradable_pnl, tradable_peak_pnl)
+            VALUES (?, ?, ?, ?, 'ATH', ?,
+                    'wait', ?, 1.0, ?,
+                    ?, ?, ?, 'pending',
+                    1, 'tradable_reclaim', 0, ?, ?)
+            """,
+            (
+                1000,
+                token,
+                symbol,
+                900,
+                component,
+                reason,
+                900,
+                reclaim_pnl,
+                peak_pnl,
+                peak_pnl,
+                reclaim_pnl,
+                peak_pnl,
+            ),
+        )
+    db.commit()
+
+    candidates = find_ath_real_probe_candidates(db, now_ts=1200, limit=5)
+
+    assert [row["symbol"] for row in candidates] == ["ALIGN", "SMART"]
+
+
+def test_ath_real_probe_skips_already_armed_token():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, signal_ts, route, component,
+             decision, reject_reason, baseline_price, baseline_ts,
+             pnl_5m, pnl_15m, max_pnl_recorded, status,
+             tradable_missed, tradability_status, would_stop_before_peak,
+             first_tradable_pnl, tradable_peak_pnl)
+        VALUES (1000, 'ArmedToken', 'ARMED', 900, 'ATH', 'matrix_evaluator',
+                'wait', 'momentum check failed: noise +0.17% < 0.8%', 1.0, 900,
+                0.40, 0.90, 0.90, 'pending',
+                1, 'tradable_reclaim', 0, 0.40, 0.90)
+        """
+    )
+    record_decision_event(
+        db,
+        component="ath_probe_live",
+        event_type="pending_entry",
+        decision="pending",
+        reason="ath_flat_structure_tiny_scout",
+        token_ca="ArmedToken",
+        symbol="ARMED",
+        route="ATH",
+        event_ts=1100,
+    )
+
+    candidates = find_ath_real_probe_candidates(db, now_ts=1200, limit=5)
+
     assert candidates == []
 
 

@@ -184,6 +184,13 @@ LOTTO_REAL_PROBE_MIN_15M_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_15M_PN
 LOTTO_REAL_PROBE_SIZE_SOL = float(os.environ.get('LOTTO_REAL_PROBE_SIZE_SOL', '0.03'))
 LOTTO_REAL_PROBE_MAX_AGE_SEC = int(os.environ.get('LOTTO_REAL_PROBE_MAX_AGE_SEC', str(30 * 60)))
 LOTTO_REAL_PROBE_DECAY_FACTOR = float(os.environ.get('LOTTO_REAL_PROBE_DECAY_FACTOR', '0.5'))
+ATH_REAL_PROBE_ENABLED = os.environ.get('ATH_REAL_PROBE_ENABLED', 'true').lower() != 'false'
+ATH_REAL_PROBE_MIN_MAX_PNL = float(os.environ.get('ATH_REAL_PROBE_MIN_MAX_PNL', '0.50'))
+ATH_REAL_PROBE_MIN_RECLAIM_PNL = float(os.environ.get('ATH_REAL_PROBE_MIN_RECLAIM_PNL', '0.25'))
+ATH_REAL_PROBE_SIZE_SOL = float(os.environ.get('ATH_REAL_PROBE_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
+ATH_REAL_PROBE_MAX_AGE_SEC = int(os.environ.get('ATH_REAL_PROBE_MAX_AGE_SEC', str(45 * 60)))
+ATH_REAL_PROBE_MAX_MC = float(os.environ.get('ATH_REAL_PROBE_MAX_MC', str(MATRIX_ATH_HALF_MC_MAX)))
+ATH_REAL_PROBE_MIN_LIQ_USD = float(os.environ.get('ATH_REAL_PROBE_MIN_LIQ_USD', '5000'))
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
@@ -1517,6 +1524,429 @@ def enqueue_lotto_real_probe_candidates(db, watchlist, pending_entries, position
             signal_id=row['signal_id'],
             route='LOTTO',
             payload=detail,
+            event_ts=now_ts,
+        )
+        enqueued += 1
+    return enqueued
+
+
+def _json_dict(value):
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _first_number(*values):
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return 0.0
+
+
+def find_ath_real_probe_candidates(db, *, now_ts, limit=3):
+    """Find ATH gate misses that earned a tiny, current-reclaim re-test."""
+    if not ATH_REAL_PROBE_ENABLED:
+        return []
+    rows = db.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                m.*,
+                COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS best_pnl,
+                COALESCE(m.first_tradable_pnl, m.pnl_15m, m.pnl_5m, 0) AS reclaim_pnl,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.token_ca
+                    ORDER BY COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC,
+                             m.created_event_ts DESC
+                ) AS rn
+            FROM paper_missed_signal_attribution m
+            WHERE m.route = 'ATH'
+              AND m.baseline_price IS NOT NULL
+              AND COALESCE(m.tradable_missed, 0) = 1
+              AND COALESCE(m.would_stop_before_peak, 0) = 0
+              AND m.tradability_status = 'tradable_reclaim'
+              AND COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) >= ?
+              AND COALESCE(m.first_tradable_pnl, m.pnl_15m, m.pnl_5m, 0) >= ?
+              AND m.created_event_ts >= ?
+              AND m.component IN ('matrix_evaluator', 'smart_entry')
+              AND (
+                  m.reject_reason = 'matrices not yet aligned'
+                  OR m.reject_reason LIKE 'momentum check failed:%'
+                  OR m.reject_reason = 'no_kline_low_volume'
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM paper_decision_events e
+                  WHERE e.component = 'ath_probe_live'
+                    AND e.token_ca = m.token_ca
+                    AND e.event_type IN ('pending_entry', 'reentry_armed')
+              )
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY best_pnl DESC, reclaim_pnl DESC
+        LIMIT ?
+        """,
+        (
+            ATH_REAL_PROBE_MIN_MAX_PNL,
+            ATH_REAL_PROBE_MIN_RECLAIM_PNL,
+            now_ts - ATH_REAL_PROBE_MAX_AGE_SEC,
+            limit,
+        ),
+    ).fetchall()
+    return rows
+
+
+def enqueue_ath_real_probe_candidates(db, watchlist, pending_entries, positions, *, now_ts, limit=1, max_positions=None):
+    if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+        return 0
+    rows = find_ath_real_probe_candidates(db, now_ts=now_ts, limit=limit)
+    if not rows:
+        recent_scan = db.execute(
+            """
+            SELECT 1
+            FROM paper_decision_events
+            WHERE component = 'ath_probe_live'
+              AND event_type = 'scan'
+              AND reason = 'no_candidates'
+              AND event_ts >= ?
+            LIMIT 1
+            """,
+            (now_ts - 300,),
+        ).fetchone()
+        if not recent_scan:
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='scan',
+                decision='observe',
+                reason='no_candidates',
+                route='ATH',
+                payload={
+                    'max_age_sec': ATH_REAL_PROBE_MAX_AGE_SEC,
+                    'min_max_pnl': ATH_REAL_PROBE_MIN_MAX_PNL,
+                    'min_reclaim_pnl': ATH_REAL_PROBE_MIN_RECLAIM_PNL,
+                    'max_mc': ATH_REAL_PROBE_MAX_MC,
+                    'min_liquidity_usd': ATH_REAL_PROBE_MIN_LIQ_USD,
+                },
+                event_ts=now_ts,
+            )
+        return 0
+
+    enqueued = 0
+    for row in rows:
+        token_ca = row['token_ca']
+        symbol = row['symbol'] or token_ca[:8]
+        lifecycle_id = build_lifecycle_id(token_ca, row['signal_ts'] or int(row['created_event_ts']))
+        if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+            break
+        if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='skip',
+                decision='skip',
+                reason='already_pending_or_holding',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='ATH',
+                payload={'missed_attribution_id': row['id']},
+                event_ts=now_ts,
+            )
+            continue
+
+        recent_wait = db.execute(
+            """
+            SELECT 1
+            FROM paper_decision_events
+            WHERE component = 'ath_probe_live'
+              AND token_ca = ?
+              AND event_type = 'wait_reclaim'
+              AND event_ts >= ?
+            LIMIT 1
+            """,
+            (token_ca, now_ts - 60),
+        ).fetchone()
+        if recent_wait:
+            continue
+
+        features = _json_dict(row['lifecycle_features_json'])
+        payload = _json_dict(row['payload_json'])
+        try:
+            reclaim_dex = fetch_dexscreener_trend_snapshot(token_ca)
+        except Exception:
+            reclaim_dex = None
+
+        current_mc = _first_number(
+            (reclaim_dex or {}).get('market_cap'),
+            (reclaim_dex or {}).get('fdv'),
+            features.get('market_cap'),
+            payload.get('market_cap'),
+            payload.get('signal_mc'),
+        )
+        liquidity_usd = _first_number(
+            (reclaim_dex or {}).get('liquidity_usd'),
+            features.get('liquidity_usd'),
+            payload.get('liquidity_usd'),
+        )
+        if current_mc <= 0 or current_mc >= ATH_REAL_PROBE_MAX_MC:
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='skip',
+                decision='skip',
+                reason='ath_probe_mc_gate',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='ATH',
+                data_source='dexscreener+missed_attribution',
+                payload={
+                    'missed_attribution_id': row['id'],
+                    'current_mc': current_mc,
+                    'max_mc': ATH_REAL_PROBE_MAX_MC,
+                    'source_component': row['component'],
+                    'source_reject_reason': row['reject_reason'],
+                },
+                event_ts=now_ts,
+            )
+            continue
+        if liquidity_usd < ATH_REAL_PROBE_MIN_LIQ_USD:
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='wait_reclaim',
+                decision='wait',
+                reason='ath_probe_liquidity_too_low',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='ATH',
+                data_source='dexscreener+missed_attribution',
+                payload={
+                    'missed_attribution_id': row['id'],
+                    'liquidity_usd': liquidity_usd,
+                    'min_liquidity_usd': ATH_REAL_PROBE_MIN_LIQ_USD,
+                },
+                event_ts=now_ts,
+            )
+            continue
+
+        probe_entry = {
+            'ca': token_ca,
+            'symbol': symbol,
+            'type': 'ATH',
+            'signal_ts': row['signal_ts'] or int(row['created_event_ts']),
+            'signal_price': row['baseline_price'],
+            'signal_mc': current_mc,
+            'signal_vol24h': features.get('vol_h1') or features.get('volume_24h') or 0,
+            'signal_tx24h': features.get('tx_m5') or 0,
+            'signal_top10': features.get('top10_pct') or 0,
+            'added_at': row['created_event_ts'],
+        }
+        reclaim_lifecycle = lifecycle_payload_for(
+            watchlist_entry=probe_entry,
+            dex_snapshot=reclaim_dex,
+            route='ATH',
+            signal_ts=probe_entry['signal_ts'],
+            signal_price=row['baseline_price'],
+            now=now_ts,
+        )
+        current_reclaim = evaluate_token_reclaim(
+            dex_snapshot=reclaim_dex,
+            lifecycle=reclaim_lifecycle,
+            route='ATH',
+        )
+        if not current_reclaim.get('reclaim_confirmed'):
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='wait_reclaim',
+                decision='wait',
+                reason=current_reclaim.get('reason') or 'current_reclaim_not_confirmed',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='ATH',
+                data_source='dexscreener+lifecycle',
+                payload=with_lifecycle_payload({
+                    'missed_attribution_id': row['id'],
+                    'best_pnl': row['best_pnl'],
+                    'reclaim_pnl': row['reclaim_pnl'],
+                    'tradability_status': row['tradability_status'],
+                    'source_component': row['component'],
+                    'source_reject_reason': row['reject_reason'],
+                    'current_reclaim': current_reclaim,
+                    'current_mc': current_mc,
+                    'liquidity_usd': liquidity_usd,
+                }, reclaim_lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+
+        token_risk = token_quarantine_state(db, token_ca, now_ts=now_ts, reclaim=current_reclaim)
+        if token_risk.get('blocked'):
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='wait_reclaim',
+                decision='wait',
+                reason=token_risk.get('reason') or 'token_quarantine',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='ATH',
+                data_source='paper_trade_history+dexscreener',
+                payload={
+                    'missed_attribution_id': row['id'],
+                    'token_risk': token_risk,
+                    'current_reclaim': current_reclaim,
+                },
+                event_ts=now_ts,
+            )
+            continue
+
+        pool = get_pool_address(token_ca)
+        if not pool:
+            record_decision_event(
+                db,
+                component='ath_probe_live',
+                event_type='skip',
+                decision='skip',
+                reason='pool_not_found',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='ATH',
+                payload={'missed_attribution_id': row['id']},
+                event_ts=now_ts,
+            )
+            continue
+
+        w_entry = watchlist.register(
+            ca=token_ca,
+            symbol=symbol,
+            signal_type='ATH',
+            pool_address=pool,
+            signal_ts=row['signal_ts'] or int(row['created_event_ts']),
+            premium_signal_id=row['signal_id'],
+            signal_price=row['baseline_price'],
+            signal_mc=current_mc,
+            signal_super=0,
+            signal_holders=0,
+            signal_vol24h=probe_entry['signal_vol24h'],
+            signal_tx24h=probe_entry['signal_tx24h'],
+            signal_top10=probe_entry['signal_top10'],
+        )
+        if not w_entry:
+            continue
+        watchlist.update_position_state(w_entry['id'], signal_route='ATH')
+        w_entry = watchlist.get_by_id(w_entry['id']) or w_entry
+        detail = {
+            'probe': True,
+            'probe_source': 'missed_attribution',
+            'timing_passed': False,
+            'timing_gate': 'ath_probe_reentry',
+            'missed_attribution_id': row['id'],
+            'source_component': row['component'],
+            'source_reject_reason': row['reject_reason'],
+            'best_pnl': row['best_pnl'],
+            'reclaim_pnl': row['reclaim_pnl'],
+            'tradability_status': row['tradability_status'],
+            'tradability_reason': row['tradability_reason'],
+            'first_tradable_horizon': row['first_tradable_horizon'],
+            'first_tradable_pnl': row['first_tradable_pnl'],
+            'tradable_peak_horizon': row['tradable_peak_horizon'],
+            'tradable_peak_pnl': row['tradable_peak_pnl'],
+            'current_reclaim': current_reclaim,
+            'current_mc': current_mc,
+            'liquidity_usd': liquidity_usd,
+            'position_size_sol': ATH_REAL_PROBE_SIZE_SOL,
+            'entry_mode': 'ath_flat_structure_tiny_scout',
+            'paper_only_scout': True,
+        }
+        pending_entries[lifecycle_id] = {
+            'token_ca': token_ca,
+            'symbol': symbol,
+            'signal_ts': row['signal_ts'] or int(row['created_event_ts']),
+            'premium_signal_id': row['signal_id'],
+            'signal_type': 'ATH',
+            'signal_route': 'ATH',
+            'signal_price': row['baseline_price'],
+            'market_cap': current_mc,
+            'pool': pool,
+            'staged_at': time.time(),
+            'trigger_price': None,
+            'watchlist_id': w_entry['id'],
+            'kelly_position_sol': ATH_REAL_PROBE_SIZE_SOL,
+            'matrix_scores': {},
+            'smart_entry_retries': 0,
+            'w_entry': w_entry,
+            'momentum_snapshots': [],
+            'momentum_pct': 0,
+            'first_fire_pc_m5': current_reclaim.get('price_change_m5'),
+            'spread_abort_count': 0,
+            'entry_mode': 'ath_flat_structure_tiny_scout',
+            'scout_mode': 'ath_flat_structure_tiny_scout',
+            'paper_only_scout': True,
+            'ath_real_probe': detail,
+            'replay_source': 'live_monitor_ath_probe',
+            'stage_outcome': 'ath_probe_reentry_armed',
+        }
+        record_decision_event(
+            db,
+            component='ath_probe_live',
+            event_type='reentry_armed',
+            decision='pending',
+            reason='missed_ath_reclaim_tiny_scout_armed',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='ATH',
+            data_source='missed_attribution+dexscreener+lifecycle',
+            payload=with_lifecycle_payload(detail, reclaim_lifecycle),
+            event_ts=now_ts,
+        )
+        record_decision_event(
+            db,
+            component='ath_probe_live',
+            event_type='pending_entry',
+            decision='pending',
+            reason='ath_flat_structure_tiny_scout',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='ATH',
+            data_source='missed_attribution+dexscreener+lifecycle',
+            payload=with_lifecycle_payload(detail, reclaim_lifecycle),
             event_ts=now_ts,
         )
         enqueued += 1
@@ -5455,6 +5885,26 @@ def run_monitor(db):
                         )
                 except Exception as _probe_live_err:
                     log.debug(f"  [LOTTO_PROBE_LIVE] scan failed: {_probe_live_err}")
+                try:
+                    with positions_lock:
+                        _ath_probe_live_n = enqueue_ath_real_probe_candidates(
+                            db,
+                            watchlist,
+                            pending_entries,
+                            dict(positions),
+                            now_ts=now,
+                            limit=1,
+                            max_positions=max_positions,
+                        )
+                    if _ath_probe_live_n:
+                        log.info(
+                            f"  [ATH_PROBE_LIVE] pending={_ath_probe_live_n} "
+                            f"minMax={ATH_REAL_PROBE_MIN_MAX_PNL:.0%} "
+                            f"minReclaim={ATH_REAL_PROBE_MIN_RECLAIM_PNL:.0%} "
+                            f"size={ATH_REAL_PROBE_SIZE_SOL:.3f}SOL"
+                        )
+                except Exception as _ath_probe_live_err:
+                    log.debug(f"  [ATH_PROBE_LIVE] scan failed: {_ath_probe_live_err}")
             except Exception as _missed_err:
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
