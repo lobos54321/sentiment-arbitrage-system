@@ -33,6 +33,7 @@ from paper_trade_monitor import (  # noqa: E402
     find_lotto_real_probe_candidates,
     find_lotto_upstream_miss_tiny_scout_candidates,
     normalize_price_age_ms,
+    process_discovery_tracking_candidates,
     record_scout_funnel_summary,
     record_explosive_continuation_shadow_candidates,
     record_scout_quality_decision,
@@ -40,6 +41,7 @@ from paper_trade_monitor import (  # noqa: E402
     should_block_lotto_falling_knife,
     should_block_lotto_lifecycle_entry,
     token_quarantine_state,
+    track_discovery_candidate,
 )
 
 
@@ -657,6 +659,26 @@ def test_entry_edge_budget_keeps_upstream_realtime_tiny_scout_spread_strict():
     assert budget["tiny_scout_spread_cap_pct"] == 1.0
 
 
+def test_entry_edge_budget_keeps_lotto_discovery_probe_spread_strict():
+    budget = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.02,
+        lifecycle={"lifecycle_features": {"liquidity_unknown": False, "live_top1_pct": 55}},
+        pending={
+            "is_lotto": True,
+            "paper_only_scout": True,
+            "entry_mode": "lotto_high_risk_discovery_probe",
+            "replay_source": "live_monitor_discovery_probe",
+        },
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["profile"] == "lotto_probe"
+    assert budget["max_spread_pct"] == 1.0
+    assert budget["tiny_scout_spread_cap_pct"] == 1.0
+
+
 def test_entry_edge_budget_keeps_ath_uncertainty_tiny_scout_spread_capped():
     budget = evaluate_entry_edge_budget(
         route="ATH",
@@ -671,6 +693,23 @@ def test_entry_edge_budget_keeps_ath_uncertainty_tiny_scout_spread_capped():
                 "lifecycle_profile": "ATH_CONTINUATION",
                 "max_spread_pct": 2.0,
             },
+        },
+    )
+    assert budget["pass"] is False
+    assert budget["reason"] == "entry_edge_spread_too_high"
+    assert budget["max_spread_pct"] == 2.0
+
+
+def test_entry_edge_budget_keeps_ath_discovery_probe_spread_capped():
+    budget = evaluate_entry_edge_budget(
+        route="ATH",
+        trigger_price=1.0,
+        quote_price=1.025,
+        lifecycle={},
+        pending={
+            "paper_only_scout": True,
+            "entry_mode": "matrix_reclaim_tiny_probe",
+            "replay_source": "live_monitor_discovery_probe",
         },
     )
     assert budget["pass"] is False
@@ -1620,6 +1659,29 @@ def test_entry_readiness_upstream_realtime_tiny_scout_uses_real_probe_profile():
     assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
 
 
+def test_entry_readiness_discovery_lotto_probe_uses_real_probe_profile():
+    policy = evaluate_entry_readiness_policy(
+        route="LOTTO",
+        lifecycle={
+            "lifecycle_state": "FIRST_PUMP",
+            "entry_bias": "PROBE",
+            "lifecycle_features": {
+                "age_sec": 180,
+                "price_change_m5": 12,
+                "buy_sell_ratio": 1.3,
+            },
+        },
+        pending={
+            "is_lotto": True,
+            "paper_only_scout": True,
+            "entry_mode": "lotto_high_risk_discovery_probe",
+        },
+    )
+    assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
+    assert entry_mode_allowed("lotto_high_risk_discovery_probe", policy) is False
+    assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
 def test_ath_uncertainty_scout_arms_tiny_pending(monkeypatch):
     import paper_trade_monitor as monitor_module
 
@@ -1721,6 +1783,162 @@ def test_ath_uncertainty_scout_rejects_low_quality_under_mc_cap(monkeypatch):
         "SELECT reason FROM paper_decision_events WHERE component = 'ath_uncertainty_scout'"
     ).fetchone()
     assert row["reason"] == "scout_quality_buy_pressure_weak"
+
+
+def test_ath_uncertainty_soft_quality_reject_enters_discovery_tracking(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 55000,
+        "liquidity_usd": 12000,
+        "price_change_m5": -4,
+        "vol_m5": 3000,
+        "buys_m5": 40,
+        "sells_m5": 38,
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolA")
+
+    discovery_candidates = {}
+    armed = arm_ath_uncertainty_tiny_scout(
+        db,
+        {},
+        {},
+        w_entry={
+            "id": 1,
+            "ca": "WeakAthToken",
+            "symbol": "WATH",
+            "type": "ATH",
+            "pool_address": "PoolA",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "signal_mc": 55000,
+            "signal_top10": 20,
+            "signal_price": 1.0,
+        },
+        lifecycle_id="WeakAthToken:1000",
+        eval_res={
+            "action": "wait",
+            "action_reason": "matrices not yet aligned",
+            "current_price": 1.01,
+            "scores": {"trend": 0, "volume": 40},
+            "reasons": {},
+        },
+        now_ts=1200,
+        discovery_candidates=discovery_candidates,
+    )
+
+    assert armed is False
+    assert len(discovery_candidates) == 1
+    candidate = next(iter(discovery_candidates.values()))
+    assert candidate["mode"] == "matrix_reclaim_tiny_probe"
+    row = db.execute(
+        "SELECT component, event_type, reason FROM paper_decision_events WHERE component = 'discovery_tracking'"
+    ).fetchone()
+    assert row["event_type"] == "candidate_tracked"
+    assert row["reason"] == "matrices not yet aligned"
+
+
+def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    class FakeWatchlist:
+        def __init__(self):
+            self.entry = {
+                "id": 7,
+                "ca": "BossToken",
+                "symbol": "BOSS",
+                "type": "LOTTO",
+                "pool_address": "PoolB",
+                "signal_ts": 1000,
+                "premium_signal_id": 99,
+                "signal_price": 1.0,
+                "signal_mc": 42000,
+                "signal_top10": 72,
+                "added_at": 1000,
+            }
+
+        def get_by_id(self, entry_id):
+            return dict(self.entry) if entry_id == self.entry["id"] else None
+
+        def get_by_ca(self, ca):
+            return dict(self.entry) if ca == self.entry["ca"] else None
+
+        def register(self, **kwargs):
+            self.entry.update({
+                "ca": kwargs["ca"],
+                "symbol": kwargs["symbol"],
+                "type": kwargs["signal_type"],
+                "pool_address": kwargs["pool_address"],
+                "signal_ts": kwargs["signal_ts"],
+                "premium_signal_id": kwargs.get("premium_signal_id"),
+                "signal_mc": kwargs.get("signal_mc"),
+                "signal_top10": kwargs.get("signal_top10"),
+            })
+            return dict(self.entry)
+
+        def update_position_state(self, entry_id, **kwargs):
+            self.entry.update(kwargs)
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 42000,
+        "liquidity_usd": 12000,
+        "price_change_m5": -3,
+        "vol_m5": 6500,
+        "buys_m5": 70,
+        "sells_m5": 35,
+        "pair_address": "PoolB",
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolB")
+    monkeypatch.setattr(monitor_module, "helius_token_concentration", lambda *_args, **_kwargs: {
+        "top1_pct": 55,
+        "top10_pct": 72,
+    })
+    monkeypatch.setattr(monitor_module, "fetch_gmgn_token_enrichment", lambda *_args, **_kwargs: None)
+
+    watchlist = FakeWatchlist()
+    discovery_candidates = {}
+    track_discovery_candidate(
+        db,
+        discovery_candidates,
+        mode="lotto_high_risk_discovery_probe",
+        route="LOTTO",
+        token_ca="BossToken",
+        symbol="BOSS",
+        lifecycle_id="BossToken:1000",
+        signal_ts=1000,
+        signal_id=99,
+        pool="PoolB",
+        watchlist_id=7,
+        watchlist_entry=watchlist.entry,
+        source_component="lotto_entry_gate",
+        source_reject_reason="lotto_live_top1_55pct",
+        now_ts=1200,
+    )
+
+    pending_entries = {}
+    armed = process_discovery_tracking_candidates(
+        db,
+        watchlist,
+        discovery_candidates,
+        pending_entries,
+        {},
+        now_ts=1211,
+        max_positions=10,
+    )
+
+    assert armed == 1
+    assert discovery_candidates == {}
+    pending = pending_entries["BossToken:1000"]
+    assert pending["entry_mode"] == "lotto_high_risk_discovery_probe"
+    assert pending["timing_passed"] is True
+    assert pending["kelly_position_sol"] == 0.003
+    assert pending["paper_only_scout"] is True
 
 
 def test_ath_uncertainty_scout_allows_experimental_midcap_probe(monkeypatch):

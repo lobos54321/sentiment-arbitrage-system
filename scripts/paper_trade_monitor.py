@@ -229,6 +229,22 @@ SCOUT_FUNNEL_LOOKBACK_SEC = int(os.environ.get('SCOUT_FUNNEL_LOOKBACK_SEC', str(
 SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC = int(os.environ.get('SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC', '300'))
 SCOUT_UPSTREAM_CHAIN_LOOKBACK_SEC = int(os.environ.get('SCOUT_UPSTREAM_CHAIN_LOOKBACK_SEC', str(24 * 60 * 60)))
 SCOUT_UPSTREAM_CHAIN_LIMIT = int(os.environ.get('SCOUT_UPSTREAM_CHAIN_LIMIT', '300'))
+DISCOVERY_TRACKING_ENABLED = os.environ.get('DISCOVERY_TRACKING_ENABLED', 'true').lower() != 'false'
+DISCOVERY_TRACKING_POLL_SEC = max(1, int(os.environ.get('DISCOVERY_TRACKING_POLL_SEC', '10')))
+DISCOVERY_TRACKING_TTL_SEC = max(30, int(os.environ.get('DISCOVERY_TRACKING_TTL_SEC', '600')))
+DISCOVERY_TRACKING_MAX_CANDIDATES = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_CANDIDATES', '120')))
+DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE', '2')))
+DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE', '12')))
+DISCOVERY_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_MIN_LIQUIDITY_USD', '5000'))
+DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD', '5000'))
+DISCOVERY_UNKNOWN_ACTIVITY_MAX_MC = float(os.environ.get('DISCOVERY_UNKNOWN_ACTIVITY_MAX_MC', '250000'))
+DISCOVERY_LOTTO_HIGH_RISK_MAX_MC = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_MAX_MC', '150000'))
+DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT', '70'))
+DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP10_PCT = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP10_PCT', '90'))
+ATH_SOFT_RECLAIM_TINY_SCOUT_MODE = 'ath_soft_reclaim_tiny_scout'
+UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE = 'unknown_data_activity_tiny_scout'
+MATRIX_RECLAIM_TINY_PROBE_MODE = 'matrix_reclaim_tiny_probe'
+LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE = 'lotto_high_risk_discovery_probe'
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
@@ -1136,10 +1152,17 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         or pending.get('replay_source') == 'live_monitor_lotto_upstream_probe'
         or pending.get('replay_source') == 'live_monitor_lotto_upstream_realtime'
         or pending.get('replay_source') == 'live_monitor_ath_uncertainty'
+        or pending.get('replay_source') == 'live_monitor_discovery_probe'
         or pending.get('entry_mode') == 'lotto_real_probe_reentry_arm'
         or pending.get('entry_mode') == LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
         or pending.get('entry_mode') == LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
         or pending.get('entry_mode') == ATH_UNCERTAINTY_TINY_SCOUT_MODE
+        or pending.get('entry_mode') in {
+            ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
+            UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE,
+            MATRIX_RECLAIM_TINY_PROBE_MODE,
+            LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE,
+        }
     )
     entry_decision = lotto_state.get('entryDecision') or {}
     entry_mode = str(
@@ -1214,10 +1237,19 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
     tiny_scout_spread_cap_pct = None
     if is_tiny_scout:
         tiny_scout_spread_cap_pct = ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT
-        if entry_mode in {LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE, LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE}:
+        if entry_mode in {
+            LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
+            LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+            UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE,
+            LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE,
+        }:
             max_spread_pct = min(max_spread_pct, ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT)
             tiny_scout_spread_cap_pct = max_spread_pct
-        elif entry_mode == ATH_UNCERTAINTY_TINY_SCOUT_MODE:
+        elif entry_mode in {
+            ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
+            MATRIX_RECLAIM_TINY_PROBE_MODE,
+        }:
             max_spread_pct = min(max_spread_pct, 2.0)
             tiny_scout_spread_cap_pct = max_spread_pct
         else:
@@ -2166,6 +2198,7 @@ def arm_lotto_upstream_realtime_tiny_scout(
     signal_audit_payload,
     hard_gate_status,
     now_ts,
+    discovery_candidates=None,
 ):
     """Arm a tiny paper scout immediately when upstream uncertainty blocks LOTTO."""
     if not LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED:
@@ -2296,6 +2329,36 @@ def arm_lotto_upstream_realtime_tiny_scout(
         reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
 
     if reject_reason:
+        discovery_mode = _discovery_mode_for_lotto_reason(reason) or _discovery_mode_for_lotto_reason(reject_reason)
+        if discovery_mode and gmgn_policy.get('action') != 'reject':
+            track_discovery_candidate(
+                db,
+                discovery_candidates,
+                mode=discovery_mode,
+                route='LOTTO',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=signal_ts,
+                signal_id=premium_signal_id,
+                pool=pool,
+                watchlist_id=registered_entry.get('id') if registered_entry else None,
+                watchlist_entry=registered_entry,
+                source_component='upstream_gate',
+                source_reject_reason=reason,
+                source_detail={
+                    'upstream_realtime_reject_reason': reject_reason,
+                    'hard_gate_status': hard_gate_status,
+                    'scout_quality': scout_quality,
+                    'gmgn_policy': gmgn_policy,
+                    'current_mc': current_mc,
+                    'liquidity_usd': liquidity_usd,
+                    'top1_pct': top1_pct,
+                    'top10_pct': top10_pct,
+                },
+                lifecycle=scout_lifecycle or signal_lifecycle,
+                now_ts=now_ts,
+            )
         record_decision_event(
             db,
             component='lotto_upstream_realtime_scout',
@@ -2358,6 +2421,7 @@ def arm_ath_uncertainty_tiny_scout(
     lifecycle_id,
     eval_res,
     now_ts,
+    discovery_candidates=None,
 ):
     """Arm an ATH tiny scout for uncertainty gates without changing main ATH gate."""
     if not ATH_UNCERTAINTY_TINY_SCOUT_ENABLED:
@@ -2475,6 +2539,35 @@ def arm_ath_uncertainty_tiny_scout(
     if not reject_reason and not scout_quality.get('pass'):
         reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
     if reject_reason:
+        if _discovery_is_soft_quality_reason(reject_reason):
+            discovery_mode = _discovery_mode_for_ath_reason(reason)
+            track_discovery_candidate(
+                db,
+                discovery_candidates,
+                mode=discovery_mode,
+                route='ATH',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=w_entry.get('signal_ts'),
+                signal_id=w_entry.get('premium_signal_id'),
+                pool=pool,
+                watchlist_id=w_entry.get('id'),
+                watchlist_entry=w_entry,
+                source_component='matrix_evaluator',
+                source_reject_reason=reason,
+                source_detail={
+                    'ath_uncertainty_reject_reason': reject_reason,
+                    'scout_quality': scout_quality,
+                    'scores': eval_res.get('scores'),
+                    'reasons': eval_res.get('reasons'),
+                    'current_mc': current_mc,
+                    'liquidity_usd': liquidity_usd,
+                    'top10_pct': top10_pct,
+                },
+                lifecycle=scout_lifecycle,
+                now_ts=now_ts,
+            )
         record_decision_event(
             db,
             component='ath_uncertainty_scout',
@@ -3462,6 +3555,653 @@ def record_scout_quality_decision(
     return True
 
 
+DISCOVERY_SOFT_QUALITY_REASONS = {
+    'scout_quality_buy_pressure_weak',
+    'scout_quality_volume_low',
+    'scout_quality_tx_low',
+    'scout_quality_negative_trend',
+}
+DISCOVERY_MATRIX_RECLAIM_REASONS = {
+    'matrices not yet aligned',
+    'no_kline_low_volume',
+}
+DISCOVERY_UNKNOWN_DATA_REASONS = {
+    'not_ath_prebuy_kline_unknown_data_blocked',
+}
+DISCOVERY_LOTTO_HIGH_RISK_REASON_PREFIXES = (
+    'lotto_observe_low_mc_vol',
+    'lotto_volume_unconfirmed',
+    'lotto_midcap_activity_unconfirmed',
+    'lotto_live_top1_',
+    'lotto_live_top10_',
+    'lotto_top10_',
+    'upstream_realtime_top1_too_high',
+    'upstream_realtime_top10_too_high',
+)
+
+
+def discovery_candidate_key(token_ca, signal_ts, mode):
+    return f"{token_ca or ''}:{signal_ts or ''}:{mode or ''}"
+
+
+def _discovery_is_soft_quality_reason(reason):
+    return str(reason or '') in DISCOVERY_SOFT_QUALITY_REASONS
+
+
+def _discovery_mode_for_ath_reason(reason):
+    reason = str(reason or '')
+    if reason in DISCOVERY_MATRIX_RECLAIM_REASONS:
+        return MATRIX_RECLAIM_TINY_PROBE_MODE
+    if reason.startswith('momentum check failed') or reason.startswith('momentum check waiting'):
+        return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
+    return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
+
+
+def _discovery_mode_for_lotto_reason(reason):
+    reason = str(reason or '').lower()
+    if reason in DISCOVERY_UNKNOWN_DATA_REASONS:
+        return UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE
+    if reason == 'not_ath_v17':
+        return UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE
+    if reason.startswith(DISCOVERY_LOTTO_HIGH_RISK_REASON_PREFIXES):
+        return LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE
+    return None
+
+
+def track_discovery_candidate(
+    db,
+    discovery_candidates,
+    *,
+    mode,
+    route,
+    token_ca,
+    symbol,
+    lifecycle_id,
+    signal_ts,
+    signal_id=None,
+    pool=None,
+    watchlist_id=None,
+    watchlist_entry=None,
+    source_component=None,
+    source_reject_reason=None,
+    source_detail=None,
+    lifecycle=None,
+    now_ts=None,
+):
+    """Put a soft-blocked candidate into the 10-second discovery tracking pool."""
+    if not DISCOVERY_TRACKING_ENABLED or discovery_candidates is None or not token_ca or not mode:
+        return False
+    if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return False
+    now_ts = float(now_ts or time.time())
+    signal_ts = normalize_signal_ts_seconds(signal_ts) or signal_ts or int(now_ts)
+    key = discovery_candidate_key(token_ca, signal_ts, mode)
+    existing = discovery_candidates.get(key)
+    if existing:
+        existing['last_seen_ts'] = now_ts
+        existing['source_reject_reason'] = source_reject_reason or existing.get('source_reject_reason')
+        existing['source_component'] = source_component or existing.get('source_component')
+        existing['source_detail'] = source_detail or existing.get('source_detail') or {}
+        if watchlist_entry:
+            existing['watchlist_entry'] = dict(watchlist_entry)
+            existing['watchlist_id'] = watchlist_entry.get('id') or watchlist_id or existing.get('watchlist_id')
+        if lifecycle:
+            existing['last_lifecycle'] = lifecycle
+        return False
+
+    if len(discovery_candidates) >= DISCOVERY_TRACKING_MAX_CANDIDATES:
+        oldest_key = min(
+            discovery_candidates,
+            key=lambda k: discovery_candidates[k].get('first_seen_ts', now_ts),
+        )
+        dropped = discovery_candidates.pop(oldest_key, None)
+        if dropped:
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_expire',
+                decision='expire',
+                reason='discovery_tracking_capacity_prune',
+                token_ca=dropped.get('token_ca'),
+                symbol=dropped.get('symbol'),
+                lifecycle_id=dropped.get('lifecycle_id'),
+                signal_ts=dropped.get('signal_ts'),
+                signal_id=dropped.get('signal_id'),
+                route=dropped.get('route'),
+                payload={
+                    'entry_mode': dropped.get('mode'),
+                    'age_sec': max(0.0, now_ts - float(dropped.get('first_seen_ts') or now_ts)),
+                },
+                event_ts=now_ts,
+            )
+
+    candidate = {
+        'key': key,
+        'mode': mode,
+        'route': route,
+        'token_ca': token_ca,
+        'symbol': symbol or token_ca[:8],
+        'lifecycle_id': lifecycle_id or build_lifecycle_id(token_ca, signal_ts),
+        'signal_ts': signal_ts,
+        'signal_id': signal_id,
+        'pool': pool,
+        'watchlist_id': watchlist_id or (watchlist_entry or {}).get('id'),
+        'watchlist_entry': dict(watchlist_entry or {}) if watchlist_entry else None,
+        'source_component': source_component,
+        'source_reject_reason': source_reject_reason,
+        'source_detail': source_detail or {},
+        'first_seen_ts': now_ts,
+        'last_seen_ts': now_ts,
+        'last_check_ts': 0.0,
+        'expires_at': now_ts + DISCOVERY_TRACKING_TTL_SEC,
+        'attempts': 0,
+        'last_lifecycle': lifecycle,
+    }
+    discovery_candidates[key] = candidate
+    record_decision_event(
+        db,
+        component='discovery_tracking',
+        event_type='candidate_tracked',
+        decision='track',
+        reason=source_reject_reason or mode,
+        token_ca=token_ca,
+        symbol=candidate['symbol'],
+        lifecycle_id=candidate['lifecycle_id'],
+        signal_ts=signal_ts,
+        signal_id=signal_id,
+        route=route,
+        data_source='soft_block',
+        payload=with_lifecycle_payload({
+            'entry_mode': mode,
+            'poll_sec': DISCOVERY_TRACKING_POLL_SEC,
+            'ttl_sec': DISCOVERY_TRACKING_TTL_SEC,
+            'source_component': source_component,
+            'source_reject_reason': source_reject_reason,
+            'source_detail': source_detail or {},
+        }, lifecycle),
+        event_ts=now_ts,
+    )
+    return True
+
+
+def _discovery_synthetic_watchlist_entry(candidate, dex_snapshot=None):
+    dex_snapshot = dex_snapshot or {}
+    return {
+        'ca': candidate['token_ca'],
+        'symbol': candidate.get('symbol') or candidate['token_ca'][:8],
+        'type': candidate.get('route') or 'LOTTO',
+        'pool_address': candidate.get('pool') or dex_snapshot.get('pair_address'),
+        'signal_ts': candidate.get('signal_ts'),
+        'premium_signal_id': candidate.get('signal_id'),
+        'signal_price': candidate.get('signal_price'),
+        'signal_mc': _first_number(
+            candidate.get('signal_mc'),
+            dex_snapshot.get('market_cap'),
+            dex_snapshot.get('fdv'),
+        ),
+        'signal_super': 0,
+        'signal_holders': 0,
+        'signal_vol24h': dex_snapshot.get('vol_h1') or 0,
+        'signal_tx24h': (dex_snapshot.get('buys_m5') or 0) + (dex_snapshot.get('sells_m5') or 0),
+        'signal_top10': candidate.get('top10_pct') or 0,
+        'added_at': candidate.get('first_seen_ts') or candidate.get('signal_ts') or time.time(),
+    }
+
+
+def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top10_pct=None, gmgn_policy=None):
+    gmgn_policy = gmgn_policy or {}
+    if gmgn_policy.get('action') == 'reject':
+        return gmgn_policy.get('reason') or 'gmgn_policy_reject'
+    if liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD:
+        return 'discovery_liquidity_too_low'
+    if mode in {ATH_SOFT_RECLAIM_TINY_SCOUT_MODE, MATRIX_RECLAIM_TINY_PROBE_MODE}:
+        if current_mc <= 0 or current_mc >= ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC:
+            return 'discovery_ath_mc_gate'
+        if top10_pct and top10_pct > 45:
+            return 'discovery_ath_top10_too_high'
+    elif mode == UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE:
+        if current_mc <= 0 or current_mc >= DISCOVERY_UNKNOWN_ACTIVITY_MAX_MC:
+            return 'discovery_unknown_activity_mc_gate'
+    elif mode == LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE:
+        if current_mc <= 0 or current_mc >= DISCOVERY_LOTTO_HIGH_RISK_MAX_MC:
+            return 'discovery_lotto_high_risk_mc_gate'
+        if liquidity_usd < DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD:
+            return 'discovery_lotto_high_risk_liquidity_too_low'
+        if top1_pct and top1_pct > DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT:
+            return 'discovery_lotto_high_risk_top1_extreme'
+        if top10_pct and top10_pct > DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP10_PCT:
+            return 'discovery_lotto_high_risk_top10_extreme'
+    return None
+
+
+def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
+    route = str(candidate.get('route') or w_entry.get('type') or '').upper()
+    size_sol = PAPER_TINY_SCOUT_SIZE_SOL
+    if route == 'LOTTO':
+        lotto_detail = {
+            **detail,
+            'entry_mode': mode,
+            'position_size_sol': size_sol,
+            'paper_only_scout': True,
+            'probe': True,
+            'probe_source': 'discovery_tracking',
+            'timing_passed': True,
+        }
+        pending = build_lotto_pending(w_entry, lifecycle_id, detail=lotto_detail)
+        pending['kelly_position_sol'] = size_sol
+        pending['entry_mode'] = mode
+        pending['scout_mode'] = mode
+        pending['paper_only_scout'] = True
+        pending['replay_source'] = 'live_monitor_discovery_probe'
+        pending['stage_outcome'] = 'discovery_probe_entered'
+        pending['source_component'] = candidate.get('source_component')
+        pending['source_reject_reason'] = candidate.get('source_reject_reason')
+        pending['lotto_state']['probe'] = True
+        pending['lotto_state']['probeSource'] = 'discovery_tracking'
+        pending['lotto_state']['probeEntryMode'] = mode
+        pending['lotto_state']['paper_only_scout'] = True
+        pending['lotto_state']['discoveryCandidate'] = {
+            'mode': mode,
+            'source_component': candidate.get('source_component'),
+            'source_reject_reason': candidate.get('source_reject_reason'),
+            'first_seen_ts': candidate.get('first_seen_ts'),
+            'attempts': candidate.get('attempts'),
+        }
+        return pending
+
+    return {
+        'token_ca': w_entry['ca'],
+        'symbol': w_entry['symbol'],
+        'signal_ts': w_entry.get('signal_ts') or candidate.get('signal_ts'),
+        'premium_signal_id': w_entry.get('premium_signal_id') or candidate.get('signal_id'),
+        'signal_type': route or 'ATH',
+        'signal_route': route or 'ATH',
+        'signal_price': w_entry.get('signal_price'),
+        'market_cap': detail.get('current_mc') or w_entry.get('signal_mc') or 0,
+        'pool': w_entry.get('pool_address') or candidate.get('pool'),
+        'staged_at': time.time(),
+        'trigger_price': None,
+        'watchlist_id': w_entry.get('id'),
+        'kelly_position_sol': size_sol,
+        'matrix_scores': {},
+        'smart_entry_retries': 0,
+        'w_entry': w_entry,
+        'entry_mode': mode,
+        'scout_mode': mode,
+        'paper_only_scout': True,
+        'timing_passed': True,
+        'replay_source': 'live_monitor_discovery_probe',
+        'stage_outcome': 'discovery_probe_entered',
+        'source_component': candidate.get('source_component'),
+        'source_reject_reason': candidate.get('source_reject_reason'),
+        'discovery_candidate': {
+            'mode': mode,
+            'source_component': candidate.get('source_component'),
+            'source_reject_reason': candidate.get('source_reject_reason'),
+            'first_seen_ts': candidate.get('first_seen_ts'),
+            'attempts': candidate.get('attempts'),
+            'detail': detail,
+        },
+        'momentum_snapshots': [],
+        'momentum_pct': 0,
+        'first_fire_pc_m5': (detail.get('current_reclaim') or {}).get('price_change_m5'),
+        'spread_abort_count': 0,
+    }
+
+
+def process_discovery_tracking_candidates(
+    db,
+    watchlist,
+    discovery_candidates,
+    pending_entries,
+    positions,
+    *,
+    now_ts,
+    max_positions=None,
+):
+    """Evaluate active discovery candidates every 10 seconds and arm tiny probes on reclaim."""
+    if not DISCOVERY_TRACKING_ENABLED or not discovery_candidates:
+        return 0
+    now_ts = float(now_ts or time.time())
+    armed = 0
+    evaluated = 0
+
+    for key, candidate in list(discovery_candidates.items()):
+        if armed >= DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE:
+            break
+        if evaluated >= DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE:
+            break
+        if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+            break
+        token_ca = candidate.get('token_ca')
+        mode = candidate.get('mode')
+        route = str(candidate.get('route') or '').upper()
+        lifecycle_id = candidate.get('lifecycle_id') or build_lifecycle_id(token_ca, candidate.get('signal_ts'))
+        if not token_ca or not mode:
+            discovery_candidates.pop(key, None)
+            continue
+        if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+            discovery_candidates.pop(key, None)
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_expire',
+                decision='expire',
+                reason='already_pending_or_holding',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                payload={'entry_mode': mode},
+                event_ts=now_ts,
+            )
+            continue
+        if now_ts >= float(candidate.get('expires_at') or now_ts):
+            discovery_candidates.pop(key, None)
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_expire',
+                decision='expire',
+                reason='tracking_ttl_expired',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                payload={
+                    'entry_mode': mode,
+                    'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                    'attempts': candidate.get('attempts'),
+                    'last_wait_reason': candidate.get('last_wait_reason'),
+                },
+                event_ts=now_ts,
+            )
+            continue
+        if now_ts - float(candidate.get('last_check_ts') or 0.0) < DISCOVERY_TRACKING_POLL_SEC:
+            continue
+
+        candidate['last_check_ts'] = now_ts
+        candidate['attempts'] = int(candidate.get('attempts') or 0) + 1
+        evaluated += 1
+
+        try:
+            dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca)
+        except Exception:
+            dex_snapshot = None
+        dex_snapshot = dex_snapshot or {}
+        w_entry = None
+        if candidate.get('watchlist_id'):
+            try:
+                w_entry = watchlist.get_by_id(candidate['watchlist_id'])
+            except Exception:
+                w_entry = None
+        if not w_entry:
+            w_entry = candidate.get('watchlist_entry') or watchlist.get_by_ca(token_ca)
+        synthetic_entry = _discovery_synthetic_watchlist_entry(candidate, dex_snapshot)
+        entry_for_lifecycle = w_entry or synthetic_entry
+        pool = (
+            candidate.get('pool')
+            or (w_entry or {}).get('pool_address')
+            or dex_snapshot.get('pair_address')
+            or get_pool_address(token_ca)
+        )
+        if not pool:
+            candidate['last_wait_reason'] = 'pool_not_found'
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='wait',
+                reason='pool_not_found',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                payload={'entry_mode': mode, 'attempts': candidate['attempts']},
+                event_ts=now_ts,
+            )
+            continue
+
+        live_concentration = None
+        gmgn_enrichment = None
+        gmgn_policy = None
+        if route == 'LOTTO' or mode in {UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE, LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE}:
+            try:
+                live_concentration = helius_token_concentration(token_ca)
+            except Exception:
+                live_concentration = None
+            try:
+                gmgn_enrichment = fetch_gmgn_token_enrichment(token_ca)
+            except Exception:
+                gmgn_enrichment = None
+
+        lifecycle = lifecycle_payload_for(
+            watchlist_entry=entry_for_lifecycle,
+            dex_snapshot=dex_snapshot,
+            live_concentration=live_concentration,
+            route=route,
+            signal_ts=candidate.get('signal_ts'),
+            signal_price=(w_entry or {}).get('signal_price') or candidate.get('signal_price'),
+            quote_available=None,
+            now=now_ts,
+        )
+        current_reclaim = evaluate_token_reclaim(
+            dex_snapshot=dex_snapshot,
+            lifecycle=lifecycle,
+            route=route,
+        )
+        features = lifecycle.get('lifecycle_features') or {}
+        current_mc = _first_number(
+            dex_snapshot.get('market_cap'),
+            dex_snapshot.get('fdv'),
+            features.get('market_cap'),
+            (w_entry or {}).get('signal_mc'),
+            candidate.get('signal_mc'),
+        )
+        liquidity_usd = _first_number(
+            dex_snapshot.get('liquidity_usd'),
+            features.get('liquidity_usd'),
+        )
+        top1_pct = _first_number(
+            (live_concentration or {}).get('top1_pct'),
+            features.get('top1_pct'),
+        )
+        top10_pct = _first_number(
+            (live_concentration or {}).get('top10_pct'),
+            (w_entry or {}).get('signal_top10'),
+            features.get('top10_pct'),
+        )
+        detail = {
+            'paper_only_scout': True,
+            'probe': True,
+            'probe_source': 'discovery_tracking',
+            'entry_mode': mode,
+            'position_size_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+            'source_component': candidate.get('source_component'),
+            'source_reject_reason': candidate.get('source_reject_reason'),
+            'source_detail': candidate.get('source_detail') or {},
+            'first_seen_ts': candidate.get('first_seen_ts'),
+            'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+            'attempts': candidate.get('attempts'),
+            'current_mc': current_mc,
+            'liquidity_usd': liquidity_usd,
+            'top1_pct': top1_pct,
+            'top10_pct': top10_pct,
+            'current_reclaim': current_reclaim,
+            'gmgn_readonly': gmgn_enrichment,
+        }
+        if gmgn_enrichment is not None:
+            gmgn_policy = evaluate_gmgn_lotto_policy(
+                gmgn_enrichment,
+                detail,
+                lifecycle=lifecycle,
+                entry_mode=mode,
+            )
+            detail['gmgn_policy'] = gmgn_policy
+            detail['gmgn_action'] = gmgn_policy.get('action')
+            detail['gmgn_reason'] = gmgn_policy.get('reason')
+
+        try:
+            token_risk = token_quarantine_state(db, token_ca, now_ts=now_ts, reclaim=current_reclaim)
+        except Exception as exc:
+            token_risk = {'blocked': False, 'reason': 'token_risk_unavailable', 'error': str(exc)}
+        detail['token_risk'] = token_risk
+        hard_reason = _discovery_hard_block(
+            mode,
+            current_mc=current_mc,
+            liquidity_usd=liquidity_usd,
+            top1_pct=top1_pct,
+            top10_pct=top10_pct,
+            gmgn_policy=gmgn_policy,
+        )
+        if hard_reason:
+            candidate['last_wait_reason'] = hard_reason
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='wait',
+                reason=hard_reason,
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='dexscreener+gmgn+helius+lifecycle',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+        if token_risk.get('blocked') and not token_risk.get('cooldown_expired'):
+            candidate['last_wait_reason'] = token_risk.get('reason') or 'token_quarantine'
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='wait',
+                reason=token_risk.get('reason') or 'token_quarantine',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='paper_trade_history+dexscreener+lifecycle',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+
+        scout_quality = evaluate_scout_quality(
+            mode=mode,
+            route=route,
+            trend=dex_snapshot,
+            lifecycle=lifecycle,
+            gmgn=gmgn_policy,
+            token_risk=token_risk,
+            live_concentration=live_concentration,
+            position_size_sol=PAPER_TINY_SCOUT_SIZE_SOL,
+            current_mc=current_mc,
+            liquidity_usd=liquidity_usd,
+            top1_pct=top1_pct,
+            top10_pct=top10_pct,
+        )
+        detail['scout_quality'] = scout_quality
+        record_scout_quality_decision(
+            db,
+            scout_quality=scout_quality,
+            token_ca=token_ca,
+            symbol=candidate.get('symbol'),
+            lifecycle_id=lifecycle_id,
+            signal_ts=candidate.get('signal_ts'),
+            signal_id=candidate.get('signal_id'),
+            route=route,
+            lifecycle=lifecycle,
+            scout_size={
+                'entry_mode': mode,
+                'actual_size_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+                'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+            },
+            source_component=candidate.get('source_component') or 'discovery_tracking',
+            source_reject_reason=candidate.get('source_reject_reason'),
+            data_source='discovery_tracking+dexscreener+lifecycle+paper_risk',
+            event_ts=now_ts,
+        )
+        if not scout_quality.get('pass'):
+            wait_reason = scout_quality.get('reason') or 'scout_quality_reject'
+            candidate['last_wait_reason'] = wait_reason
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='wait',
+                reason=wait_reason,
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='discovery_tracking+dexscreener+lifecycle+paper_risk',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+
+        if not w_entry:
+            w_entry = watchlist.register(
+                ca=token_ca,
+                symbol=candidate.get('symbol') or token_ca[:8],
+                signal_type=route or synthetic_entry['type'],
+                pool_address=pool,
+                signal_ts=candidate.get('signal_ts') or int(now_ts),
+                premium_signal_id=candidate.get('signal_id'),
+                signal_price=candidate.get('signal_price'),
+                signal_mc=current_mc,
+                signal_super=0,
+                signal_holders=0,
+                signal_vol24h=dex_snapshot.get('vol_h1') or 0,
+                signal_tx24h=(dex_snapshot.get('buys_m5') or 0) + (dex_snapshot.get('sells_m5') or 0),
+                signal_top10=top10_pct or 0,
+            )
+        if not w_entry:
+            continue
+        try:
+            watchlist.update_position_state(w_entry['id'], signal_route=route)
+        except Exception:
+            pass
+        w_entry = watchlist.get_by_id(w_entry['id']) or w_entry
+        w_entry['pool_address'] = w_entry.get('pool_address') or pool
+        pending = _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail)
+        pending_entries[lifecycle_id] = pending
+        discovery_candidates.pop(key, None)
+        record_decision_event(
+            db,
+            component='discovery_tracking',
+            event_type='pending_entry',
+            decision='pending',
+            reason=mode,
+            token_ca=token_ca,
+            symbol=w_entry.get('symbol') or candidate.get('symbol'),
+            lifecycle_id=lifecycle_id,
+            signal_ts=candidate.get('signal_ts'),
+            signal_id=candidate.get('signal_id'),
+            route=route,
+            data_source='discovery_tracking+dexscreener+gmgn+helius+lifecycle',
+            payload=with_lifecycle_payload(detail, lifecycle),
+            event_ts=now_ts,
+        )
+        armed += 1
+    return armed
+
+
 def record_scout_funnel_summary(db, *, now_ts, lookback_sec=None):
     """Summarize tiny-scout candidate -> quality -> pending -> SmartEntry -> fill conversion."""
     if not SCOUT_TELEMETRY_ENABLED:
@@ -3478,13 +4218,14 @@ def record_scout_funnel_summary(db, *, now_ts, lookback_sec=None):
               event_type IN (
                   'scout_candidate', 'pending_entry', 'reentry_armed',
                   'quality_gate', 'entry_quote', 'entry_abort',
-                  'entry_spread_warning', 'timing_decision', 'scout_reject'
+                  'entry_spread_warning', 'timing_decision', 'scout_reject',
+                  'candidate_tracked', 'candidate_recheck', 'candidate_expire'
               )
               OR component IN (
                   'scout_quality', 'lotto_entry_gate', 'lotto_upstream_probe_live',
                   'lotto_upstream_realtime_scout', 'ath_uncertainty_scout',
                   'smart_entry', 'execution_api', 'execution_guard',
-                  'lotto_timing_gate', 'token_risk'
+                  'lotto_timing_gate', 'token_risk', 'discovery_tracking'
               )
           )
         ORDER BY event_ts ASC
@@ -3538,9 +4279,9 @@ def record_scout_funnel_summary(db, *, now_ts, lookback_sec=None):
         decision = str(row['decision'] or '').lower()
         reason = row['reason'] or 'unknown'
 
-        if event_type in {'scout_candidate', 'quality_gate', 'pending_entry', 'reentry_armed'}:
+        if event_type in {'scout_candidate', 'quality_gate', 'pending_entry', 'reentry_armed', 'candidate_tracked', 'candidate_recheck'}:
             stats['candidate'].add(key)
-        if event_type == 'scout_candidate':
+        if event_type in {'scout_candidate', 'candidate_tracked'}:
             stats['explicit_candidate'].add(key)
         if component == 'scout_quality' and event_type == 'quality_gate':
             stats['quality_evaluated'].add(key)
@@ -7013,12 +7754,14 @@ def run_monitor(db):
     positions_lock = threading.Lock()  # P6: shared lock for Guardian thread
     guardian_exit_queue = []  # P6: Guardian pushes exit signals here
     pending_entries = {}
+    discovery_candidates = {}
     # SmartEntry async: each coin evaluates in its own thread, no blocking
     smart_entry_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='SmartEntry')
     lifecycles = restore_lifecycles(db)
     sanitized_monitor_states = 0
     last_missed_attribution_update = 0.0
     last_scout_telemetry = 0.0
+    last_discovery_tracking = 0.0
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
@@ -7234,9 +7977,33 @@ def run_monitor(db):
                 pass
             log.info(
                 f'[heartbeat] signals={freshness.get("total", 0)} source={freshness.get("source", "unknown")} '
-                f'age_min={freshness.get("age_minutes")} watching={wl_watching} holding={wl_holding} active_positions={len(positions)} pending={len(pending_entries)}{_mem_info}'
+                f'age_min={freshness.get("age_minutes")} watching={wl_watching} holding={wl_holding} '
+                f'active_positions={len(positions)} pending={len(pending_entries)} discovery={len(discovery_candidates)}{_mem_info}'
             )
             last_heartbeat = now
+
+        if now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC:
+            try:
+                with positions_lock:
+                    _discovery_armed = process_discovery_tracking_candidates(
+                        db,
+                        watchlist,
+                        discovery_candidates,
+                        pending_entries,
+                        dict(positions),
+                        now_ts=now,
+                        max_positions=max_positions,
+                    )
+                if _discovery_armed:
+                    log.info(
+                        f"  [DISCOVERY_TRACKING] armed={_discovery_armed} "
+                        f"active={len(discovery_candidates)} poll={DISCOVERY_TRACKING_POLL_SEC}s "
+                        f"size={PAPER_TINY_SCOUT_SIZE_SOL:.3f}SOL"
+                    )
+                    last_progress = time.time()
+            except Exception as _discovery_err:
+                log.debug(f"  [DISCOVERY_TRACKING] scan failed: {_discovery_err}")
+            last_discovery_tracking = now
 
         if not pending_priority and now - last_missed_attribution_update >= 60:
             try:
@@ -7632,6 +8399,7 @@ def run_monitor(db):
                             signal_audit_payload=signal_audit_payload,
                             hard_gate_status=hard_gate_status,
                             now_ts=now,
+                            discovery_candidates=discovery_candidates,
                         )
                         if _upstream_realtime_armed:
                             log.info(
@@ -8320,6 +9088,31 @@ def run_monitor(db):
                         except Exception:
                             pass
                         if _lotto_decision.expire:
+                            _discovery_mode = _discovery_mode_for_lotto_reason(_lotto_decision.reason)
+                            if _discovery_mode and _gmgn_policy.get('action') != 'reject':
+                                track_discovery_candidate(
+                                    db,
+                                    discovery_candidates,
+                                    mode=_discovery_mode,
+                                    route='LOTTO',
+                                    token_ca=w_entry['ca'],
+                                    symbol=w_entry['symbol'],
+                                    lifecycle_id=_lotto_lc_id,
+                                    signal_ts=w_entry['signal_ts'],
+                                    signal_id=w_entry.get('premium_signal_id'),
+                                    pool=w_entry.get('pool_address'),
+                                    watchlist_id=w_entry.get('id'),
+                                    watchlist_entry=w_entry,
+                                    source_component='lotto_entry_gate',
+                                    source_reject_reason=_lotto_decision.reason,
+                                    source_detail={
+                                        **_lotto_detail,
+                                        'gmgn_policy': _gmgn_policy,
+                                        'current_reclaim': _lotto_reclaim,
+                                    },
+                                    lifecycle=_lotto_lifecycle,
+                                    now_ts=now,
+                                )
                             watchlist.mark_expired(w_entry['id'], _lotto_decision.reason)
                             log.info(
                                 f"  [LOTTO] ⛔ {w_entry['symbol']} SKIP: {_lotto_decision.reason} "
@@ -8467,6 +9260,7 @@ def run_monitor(db):
                     lifecycle_id=lifecycle_id,
                     eval_res=eval_res,
                     now_ts=now,
+                    discovery_candidates=discovery_candidates,
                 ):
                     log.info(
                         f"  [ATH_UNCERTAINTY_SCOUT] {w_entry['symbol']} pending "
@@ -9331,6 +10125,41 @@ def run_monitor(db):
                             data_source='dexscreener+lifecycle+paper_risk',
                         )
                         if not _scout_quality.get('pass'):
+                            if _discovery_is_soft_quality_reason(_scout_quality.get('reason')):
+                                _pending_route_for_tracking = _pending_signal_route or pending.get('signal_type')
+                                _pending_source_reason = pending.get('source_reject_reason') or pending.get('entry_mode')
+                                if str(_pending_route_for_tracking or '').upper() == 'LOTTO' or pending.get('is_lotto'):
+                                    _pending_discovery_mode = (
+                                        _discovery_mode_for_lotto_reason(_pending_source_reason)
+                                        or pending.get('entry_mode')
+                                        or pending.get('scout_mode')
+                                    )
+                                else:
+                                    _pending_discovery_mode = _discovery_mode_for_ath_reason(_pending_source_reason)
+                                track_discovery_candidate(
+                                    db,
+                                    discovery_candidates,
+                                    mode=_pending_discovery_mode,
+                                    route=_pending_route_for_tracking,
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    pool=pending.get('pool'),
+                                    watchlist_id=pending.get('watchlist_id'),
+                                    watchlist_entry=pending_w_entry,
+                                    source_component=pending.get('source_component') or 'pending_entry',
+                                    source_reject_reason=_pending_source_reason,
+                                    source_detail={
+                                        'pending_entry_quality_reject_reason': _scout_quality.get('reason'),
+                                        'entry_mode': pending.get('entry_mode'),
+                                        'scout_quality': _scout_quality,
+                                        'scout_size': _scout_size_detail,
+                                    },
+                                    lifecycle=_entry_timing_lifecycle,
+                                    now_ts=now,
+                                )
                             record_decision_event(
                                 db,
                                 component='scout_quality',
@@ -9362,6 +10191,35 @@ def run_monitor(db):
                             _entry_timing_lifecycle,
                         )
                         if _lotto_timing_blocked:
+                            if pending_is_paper_tiny_scout(pending) and _lotto_timing_reason == 'lotto_timing_negative_m5':
+                                _lotto_discovery_mode = (
+                                    _discovery_mode_for_lotto_reason(pending.get('source_reject_reason'))
+                                    or pending.get('entry_mode')
+                                    or pending.get('scout_mode')
+                                )
+                                track_discovery_candidate(
+                                    db,
+                                    discovery_candidates,
+                                    mode=_lotto_discovery_mode,
+                                    route=_pending_signal_route or pending.get('signal_type') or 'LOTTO',
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    pool=pending.get('pool'),
+                                    watchlist_id=pending.get('watchlist_id'),
+                                    watchlist_entry=pending_w_entry,
+                                    source_component=pending.get('source_component') or 'lotto_timing_gate',
+                                    source_reject_reason=pending.get('source_reject_reason') or _lotto_timing_reason,
+                                    source_detail={
+                                        'lotto_timing_reason': _lotto_timing_reason,
+                                        'lotto_timing_detail': _lotto_timing_detail,
+                                        'entry_mode': pending.get('entry_mode'),
+                                    },
+                                    lifecycle=_entry_timing_lifecycle,
+                                    now_ts=now,
+                                )
                             record_decision_event(
                                 db,
                                 component='lotto_timing_gate',

@@ -39,6 +39,12 @@ LOTTO_UPSTREAM_TINY_SCOUT_MODES = (
 PULLBACK_TINY_SCOUT_MODES = (
     "pullback_tiny_scout",
 )
+DISCOVERY_TINY_SCOUT_MODES = (
+    "ath_soft_reclaim_tiny_scout",
+    "unknown_data_activity_tiny_scout",
+    "matrix_reclaim_tiny_probe",
+    "lotto_high_risk_discovery_probe",
+)
 PAPER_TINY_SCOUT_MODES = (
     GMGN_TINY_SCOUT_MODES
     + RECLAIM_TINY_SCOUT_MODES
@@ -46,6 +52,7 @@ PAPER_TINY_SCOUT_MODES = (
     + NEWBORN_TINY_SCOUT_MODES
     + LOTTO_UPSTREAM_TINY_SCOUT_MODES
     + PULLBACK_TINY_SCOUT_MODES
+    + DISCOVERY_TINY_SCOUT_MODES
 )
 
 
@@ -93,6 +100,7 @@ def _profile_from_lifecycle(route=None, lifecycle=None, pending=None, now_ts=Non
         or pending.get("entry_mode") == "lotto_real_probe_reentry_arm"
         or pending.get("entry_mode") == "lotto_upstream_miss_tiny_scout"
         or pending.get("entry_mode") == "lotto_upstream_realtime_tiny_scout"
+        or pending.get("entry_mode") in DISCOVERY_TINY_SCOUT_MODES
     )
     liquidity_unknown = bool(features.get("liquidity_unknown"))
     dex_id = str(features.get("dex_id") or "").lower()
