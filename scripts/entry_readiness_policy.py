@@ -164,7 +164,7 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
     elif profile == "LOTTO_REAL_PROBE":
         min_odds_r = 3.0
         min_p_follow = 0.70
-        max_spread_pct = 1.0
+        max_spread_pct = 2.0 if paper_tiny_scout else 1.0
         expected_loss_pct = 12.0
         allowed_modes = ("smart_entry_pullback_bounce",)
     elif profile == "LOTTO_NORMAL":
@@ -177,7 +177,7 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
     elif profile == "ATH_CONTINUATION":
         min_odds_r = 1.8
         min_p_follow = 0.62 if paper_tiny_scout else 0.56
-        max_spread_pct = 1.0 if paper_tiny_scout else 2.0
+        max_spread_pct = 2.0 if paper_tiny_scout else 2.0
         expected_loss_pct = 9.0
         if paper_tiny_scout:
             allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")

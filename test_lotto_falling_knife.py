@@ -25,6 +25,7 @@ from gmgn_policy import evaluate_gmgn_tiny_scout_rescue  # noqa: E402
 from scout_quality import evaluate_scout_quality  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     apply_paper_tiny_scout_size_cap,
+    apply_matrix_doa_fast_exit,
     apply_probe_profit_capture,
     arm_ath_uncertainty_tiny_scout,
     evaluate_entry_edge_budget,
@@ -385,6 +386,48 @@ def test_observation_probe_late_locks_when_ten_percent_peak_gives_back_to_three(
     assert exit_matrix["action"] == "lock_profit"
     assert exit_matrix["sell_pct"] == 0.75
     assert exit_matrix["reason"].startswith("probe_profit_late_lock")
+
+
+def test_observation_probe_skips_matrix_doa_fast_exit():
+    class Pos:
+        position_size_sol = 0.003
+        entry_ts = 1000
+        peak_pnl = 0.0
+        monitor_state = {
+            "entryMode": "matrix_reclaim_tiny_probe",
+            "signalRoute": "ATH",
+            "entrySol": 0.003,
+        }
+
+    exit_matrix = apply_matrix_doa_fast_exit(
+        Pos(),
+        {"action": "hold", "reason": "ath_phase1_free_run", "current_pnl": -0.12, "peak_pnl": 0.0},
+        now_ts=1045,
+    )
+
+    assert exit_matrix["action"] == "hold"
+    assert exit_matrix["reason"] == "ath_phase1_free_run"
+
+
+def test_main_position_still_gets_matrix_doa_fast_exit():
+    class Pos:
+        position_size_sol = 0.05
+        entry_ts = 1000
+        peak_pnl = 0.0
+        monitor_state = {
+            "entryMode": "momentum_direct_entry",
+            "signalRoute": "ATH",
+            "entrySol": 0.05,
+        }
+
+    exit_matrix = apply_matrix_doa_fast_exit(
+        Pos(),
+        {"action": "hold", "reason": "ath_phase1_free_run", "current_pnl": -0.12, "peak_pnl": 0.0},
+        now_ts=1045,
+    )
+
+    assert exit_matrix["action"] == "exit"
+    assert exit_matrix["reason"].startswith("matrix_doa_fast_exit")
 
 
 def test_probe_profit_capture_does_not_touch_main_size_position():
@@ -777,8 +820,8 @@ def test_entry_edge_budget_keeps_lotto_discovery_probe_spread_strict():
     assert budget["pass"] is False
     assert budget["reason"] == "entry_edge_spread_too_high"
     assert budget["profile"] == "lotto_probe"
-    assert budget["max_spread_pct"] == 1.0
-    assert budget["tiny_scout_spread_cap_pct"] == 1.0
+    assert budget["max_spread_pct"] == 2.0
+    assert budget["tiny_scout_spread_cap_pct"] == 2.0
 
 
 def test_entry_edge_budget_keeps_ath_uncertainty_tiny_scout_spread_capped():
@@ -1461,7 +1504,7 @@ def test_ath_readiness_allows_flat_structure_tiny_scout_mode():
     )
 
     assert entry_mode_allowed("ath_flat_structure_tiny_scout", policy) is True
-    assert policy.max_spread_pct == 1.0
+    assert policy.max_spread_pct == 2.0
 
 
 def test_entry_readiness_sets_higher_odds_for_lotto_risky_newborn():
@@ -1991,15 +2034,15 @@ def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
         "market_cap": 42000,
         "liquidity_usd": 12000,
         "price_change_m5": -3,
-        "vol_m5": 6500,
-        "buys_m5": 70,
-        "sells_m5": 35,
+        "vol_m5": 16000,
+        "buys_m5": 160,
+        "sells_m5": 80,
         "pair_address": "PoolB",
     })
     monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolB")
     monkeypatch.setattr(monitor_module, "helius_token_concentration", lambda *_args, **_kwargs: {
-        "top1_pct": 55,
-        "top10_pct": 72,
+        "top1_pct": 45,
+        "top10_pct": 70,
     })
     monkeypatch.setattr(monitor_module, "fetch_gmgn_token_enrichment", lambda *_args, **_kwargs: None)
 
@@ -2019,7 +2062,7 @@ def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
         watchlist_id=7,
         watchlist_entry=watchlist.entry,
         source_component="lotto_entry_gate",
-        source_reject_reason="lotto_live_top1_55pct",
+        source_reject_reason="lotto_live_top1_45pct",
         now_ts=1200,
     )
 

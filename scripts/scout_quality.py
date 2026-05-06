@@ -328,15 +328,18 @@ def evaluate_scout_quality(
         int(token_risk.get("severe_failure_count") or 0) > 0
         or int(token_risk.get("risk_memory_count") or 0) > 0
     ):
-        return _result(
-            False,
-            "scout_quality_recent_token_failure",
-            mode=mode_name,
-            profile=profile,
-            observed=observed,
-            thresholds=thresholds,
-            extras=extras,
-        )
+        reclaim_unlocked = bool(token_risk.get("reclaim_unlocked"))
+        cooldown_expired = bool(token_risk.get("cooldown_expired"))
+        if not (reclaim_unlocked and cooldown_expired and not token_risk.get("blocked")):
+            return _result(
+                False,
+                "scout_quality_recent_token_failure",
+                mode=mode_name,
+                profile=profile,
+                observed=observed,
+                thresholds=thresholds,
+                extras=extras,
+            )
     if token_risk.get("blocked") and not token_risk.get("cooldown_expired"):
         return _result(
             False,

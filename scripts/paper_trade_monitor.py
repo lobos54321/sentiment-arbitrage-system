@@ -244,6 +244,13 @@ DISCOVERY_UNKNOWN_ACTIVITY_MAX_MC = float(os.environ.get('DISCOVERY_UNKNOWN_ACTI
 DISCOVERY_LOTTO_HIGH_RISK_MAX_MC = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_MAX_MC', '150000'))
 DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT', '70'))
 DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP10_PCT = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP10_PCT', '90'))
+DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_TX_M5 = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_TX_M5', '200'))
+DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_VOL_M5 = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_VOL_M5', '15000'))
+DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_BS = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_BS', '1.2'))
+DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP1_PCT = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP1_PCT', '50'))
+DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP10_PCT = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP10_PCT', '75'))
+OBSERVATION_PROBE_COOLDOWN_SEC = int(os.environ.get('OBSERVATION_PROBE_COOLDOWN_SEC', '90'))
+OBSERVATION_PROBE_TOXIC_COOLDOWN_SEC = int(os.environ.get('OBSERVATION_PROBE_TOXIC_COOLDOWN_SEC', '600'))
 ATH_SOFT_RECLAIM_TINY_SCOUT_MODE = 'ath_soft_reclaim_tiny_scout'
 UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE = 'unknown_data_activity_tiny_scout'
 MATRIX_RECLAIM_TINY_PROBE_MODE = 'matrix_reclaim_tiny_probe'
@@ -1150,6 +1157,39 @@ def position_is_observation_probe(pos):
     if size_sol <= 0 or size_sol > PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL:
         return False
     return entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES or 'scout' in entry_mode or 'probe' in entry_mode
+
+
+def apply_matrix_doa_fast_exit(pos, exit_matrix, *, now_ts=None):
+    if position_is_observation_probe(pos):
+        return exit_matrix
+    if not isinstance(exit_matrix, dict):
+        return exit_matrix
+    now_ts = float(now_ts or time.time())
+    _held_sec = max(0.0, now_ts - float(getattr(pos, 'entry_ts', now_ts) or now_ts))
+    _current_pnl = exit_matrix.get('current_pnl')
+    _peak_now = max(
+        float(getattr(pos, 'peak_pnl', 0) or 0),
+        float(exit_matrix.get('peak_pnl') or 0),
+        float(_current_pnl or 0),
+    )
+    if (
+        _held_sec >= MATRIX_DOA_EXIT_SEC
+        and _peak_now <= MATRIX_DOA_PEAK_MAX
+        and _current_pnl is not None
+        and _current_pnl <= MATRIX_DOA_PNL_MAX
+    ):
+        return {
+            'action': 'exit',
+            'reason': (
+                f"matrix_doa_fast_exit "
+                f"(held={_held_sec:.0f}s peak={_peak_now:.1%} "
+                f"pnl={_current_pnl:.1%})"
+            ),
+            'current_pnl': _current_pnl,
+            'peak_pnl': _peak_now,
+            'trail_floor': None,
+        }
+    return exit_matrix
 
 
 def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
@@ -3799,9 +3839,12 @@ DISCOVERY_LOTTO_HIGH_RISK_REASON_PREFIXES = (
     'lotto_observe_low_mc_vol',
     'lotto_volume_unconfirmed',
     'lotto_midcap_activity_unconfirmed',
+    'lotto_liq_low_',
+    'lotto_newborn_falling_knife_low_liq',
     'lotto_live_top1_',
     'lotto_live_top10_',
     'lotto_top10_',
+    'upstream_realtime_liquidity_too_low',
     'upstream_realtime_top1_too_high',
     'upstream_realtime_top10_too_high',
 )
@@ -4071,6 +4114,58 @@ def _discovery_low_liquidity_activity_bypass(mode, *, liquidity_usd, activity=No
             'vol_m5': vol_m5,
             'tx_m5': tx_m5,
             'price_change_m5': pc_m5,
+        },
+        'thresholds': thresholds,
+    }
+
+
+def _discovery_lotto_high_risk_live_gate(*, activity=None, liquidity_usd=None, top1_pct=None, top10_pct=None, gmgn_policy=None, low_liquidity_bypass=None):
+    activity = activity or {}
+    gmgn_policy = gmgn_policy or {}
+    bs = _first_float_any(activity.get('buy_sell_ratio'), default=0.0) or 0.0
+    vol_m5 = _first_float_any(activity.get('vol_m5'), default=0.0) or 0.0
+    tx_m5 = _first_float_any(activity.get('tx_m5'), default=0.0) or 0.0
+    liq = _first_number(liquidity_usd)
+    top1 = _first_float_any(top1_pct, default=None)
+    top10 = _first_float_any(top10_pct, default=None)
+    quote_probe_ok = liq >= DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD or bool((low_liquidity_bypass or {}).get('pass'))
+    thresholds = {
+        'min_tx_m5': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_TX_M5,
+        'min_vol_m5': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_VOL_M5,
+        'min_buy_sell_ratio': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_BS,
+        'min_liquidity_usd_or_low_liq_bypass': DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD,
+        'max_top1_pct': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP1_PCT,
+        'max_top10_pct': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP10_PCT,
+    }
+    failures = []
+    if gmgn_policy.get('action') == 'reject':
+        failures.append(gmgn_policy.get('reason') or 'gmgn_policy_reject')
+    if not quote_probe_ok:
+        failures.append('liquidity_or_quote_probe_not_ready')
+    if tx_m5 < DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_TX_M5:
+        failures.append('tx_m5_low')
+    if vol_m5 < DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_VOL_M5:
+        failures.append('vol_m5_low')
+    if bs < DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_BS:
+        failures.append('buy_sell_ratio_low')
+    if top1 is not None and top1 > DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP1_PCT:
+        failures.append('top1_high')
+    if top10 is not None and top10 > DISCOVERY_LOTTO_HIGH_RISK_LIVE_MAX_TOP10_PCT:
+        failures.append('top10_high')
+    return {
+        'pass': not failures,
+        'reason': 'lotto_high_risk_live_activity_pass' if not failures else 'lotto_high_risk_shadow_activity_not_enough',
+        'failures': failures,
+        'observed': {
+            'liquidity_usd': liq,
+            'buy_sell_ratio': bs,
+            'vol_m5': vol_m5,
+            'tx_m5': tx_m5,
+            'top1_pct': top1,
+            'top10_pct': top10,
+            'low_liquidity_bypass': low_liquidity_bypass,
+            'gmgn_action': gmgn_policy.get('action'),
+            'gmgn_reason': gmgn_policy.get('reason'),
         },
         'thresholds': thresholds,
     }
@@ -4392,6 +4487,18 @@ def process_discovery_tracking_candidates(
             detail['gmgn_action'] = gmgn_policy.get('action')
             detail['gmgn_reason'] = gmgn_policy.get('reason')
 
+        high_risk_live_gate = None
+        if mode == LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE:
+            high_risk_live_gate = _discovery_lotto_high_risk_live_gate(
+                activity=activity,
+                liquidity_usd=liquidity_usd,
+                top1_pct=top1_pct,
+                top10_pct=top10_pct,
+                gmgn_policy=gmgn_policy,
+                low_liquidity_bypass=low_liquidity_bypass,
+            )
+            detail['lotto_high_risk_live_gate'] = high_risk_live_gate
+
         try:
             token_risk = token_quarantine_state(db, token_ca, now_ts=now_ts, reclaim=current_reclaim)
         except Exception as exc:
@@ -4421,6 +4528,42 @@ def process_discovery_tracking_candidates(
                 signal_id=candidate.get('signal_id'),
                 route=route,
                 data_source='dexscreener+gmgn+helius+lifecycle',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+        if (low_liquidity_bypass or {}).get('pass') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD:
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='warn',
+                reason='low_liq_quote_executable_probe_candidate',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='dexscreener+lifecycle',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+        if high_risk_live_gate and not high_risk_live_gate.get('pass'):
+            candidate['last_wait_reason'] = high_risk_live_gate.get('reason')
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='shadow',
+                reason=high_risk_live_gate.get('reason') or 'lotto_high_risk_shadow',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='discovery_tracking+dexscreener+gmgn+helius+lifecycle',
                 payload=with_lifecycle_payload(detail, lifecycle),
                 event_ts=now_ts,
             )
@@ -10881,6 +11024,55 @@ def run_monitor(db):
                             log.info(
                                 f"  [ENTRY_EDGE] Abort #{pending_w_entry['_spread_abort_count']} for {pending['symbol']} "
                                 f"(first_pc_m5={pending_w_entry.get('_first_fire_pc_m5', 'N/A')})")
+                        if pending_is_paper_tiny_scout(pending):
+                            try:
+                                track_discovery_candidate(
+                                    db,
+                                    discovery_candidates,
+                                    mode=pending.get('entry_mode') or pending.get('scout_mode') or ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
+                                    route=_pending_signal_route or pending.get('signal_type'),
+                                    token_ca=pending.get('token_ca'),
+                                    symbol=pending.get('symbol'),
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending.get('signal_ts'),
+                                    signal_id=pending.get('premium_signal_id'),
+                                    pool=pending.get('pool') or pending.get('pool_address') or (pending_w_entry or {}).get('pool_address'),
+                                    watchlist_id=(pending_w_entry or {}).get('id'),
+                                    watchlist_entry=pending_w_entry,
+                                    source_component='execution_guard',
+                                    source_reject_reason='entry_edge_spread_too_high',
+                                    source_detail={
+                                        'spread_pct': _spread,
+                                        'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
+                                        'quote_price': price,
+                                        'trigger_price': trigger_price_val,
+                                        'entry_edge_budget': _entry_edge_budget,
+                                        'tracker': 'spread_normalization_tracker',
+                                    },
+                                    lifecycle=_entry_timing_lifecycle,
+                                    now_ts=now,
+                                )
+                                record_decision_event(
+                                    db,
+                                    component='execution_guard',
+                                    event_type='entry_defer',
+                                    decision='track',
+                                    reason='spread_normalization_tracker',
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    strategy_stage=_pending_strategy_stage,
+                                    route=_pending_signal_route or pending.get('signal_type'),
+                                    payload={
+                                        'spread_pct': _spread,
+                                        'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
+                                        'entry_edge_budget': _entry_edge_budget,
+                                    },
+                                )
+                            except Exception as _spread_track_err:
+                                log.debug(f"  [ENTRY_EDGE] spread normalization track failed for {pending['symbol']}: {_spread_track_err}")
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
@@ -11244,30 +11436,10 @@ def run_monitor(db):
                             exit_matrix = exit_matrix_evaluator.evaluate_exit(w_entry, pre_price)
 
                         if w_entry and not is_lotto_position(pos, w_entry) and w_entry.get('status') != 'moon_bag':
-                            _held_sec = max(0.0, time.time() - float(pos.entry_ts or time.time()))
-                            _current_pnl = exit_matrix.get('current_pnl')
-                            _peak_now = max(
-                                float(pos.peak_pnl or 0),
-                                float(w_entry.get('peak_pnl') or 0),
-                                float(_current_pnl or 0),
-                            )
-                            if (
-                                _held_sec >= MATRIX_DOA_EXIT_SEC
-                                and _peak_now <= MATRIX_DOA_PEAK_MAX
-                                and _current_pnl is not None
-                                and _current_pnl <= MATRIX_DOA_PNL_MAX
-                            ):
-                                exit_matrix = {
-                                    'action': 'exit',
-                                    'reason': (
-                                        f"matrix_doa_fast_exit "
-                                        f"(held={_held_sec:.0f}s peak={_peak_now:.1%} "
-                                        f"pnl={_current_pnl:.1%})"
-                                    ),
-                                    'current_pnl': _current_pnl,
-                                    'peak_pnl': _peak_now,
-                                    'trail_floor': None,
-                                }
+                            _pre_doa_peak = exit_matrix.get('peak_pnl')
+                            if _pre_doa_peak is None and w_entry.get('peak_pnl') is not None:
+                                exit_matrix = {**exit_matrix, 'peak_pnl': w_entry.get('peak_pnl')}
+                            exit_matrix = apply_matrix_doa_fast_exit(pos, exit_matrix)
 
                         _pre_capture_action = exit_matrix.get('action')
                         _pre_capture_reason = exit_matrix.get('reason')
@@ -12109,14 +12281,26 @@ def run_monitor(db):
                 # Update Watchlist Status
                 w_entry_close = watchlist.get_by_ca(pos.token_ca)
                 if w_entry_close:
-                    # Loss exits: 30-minute cooldown — avoid dying-token re-entry
-                    #   Data: ASTROID re-entered 6 min after -9.1% exit → -20.4% again
-                    # Win exits: 5-minute cooldown — avoid immediate double-dip
-                    #   Data: ASTERWOJAK re-entered 2.5 min after +5.9% exit → -7.7%
-                    if realized_pnl is not None and realized_pnl < 0:
-                        _exit_cooldown = 1800  # 30 min
+                    if position_is_observation_probe(pos):
+                        _toxic_probe_exit = _token_risk_probe_loss_should_poison(reason)
+                        _exit_cooldown = (
+                            OBSERVATION_PROBE_TOXIC_COOLDOWN_SEC
+                            if _toxic_probe_exit and realized_pnl is not None and realized_pnl < 0
+                            else OBSERVATION_PROBE_COOLDOWN_SEC
+                        )
+                        log.info(
+                            f"[WL] Observation probe cooldown: {pos.symbol} "
+                            f"cooldown={_exit_cooldown}s toxic={1 if _toxic_probe_exit else 0}"
+                        )
                     else:
-                        _exit_cooldown = 300   # 5 min
+                        # Loss exits: 30-minute cooldown — avoid dying-token re-entry
+                        #   Data: ASTROID re-entered 6 min after -9.1% exit → -20.4% again
+                        # Win exits: 5-minute cooldown — avoid immediate double-dip
+                        #   Data: ASTERWOJAK re-entered 2.5 min after +5.9% exit → -7.7%
+                        if realized_pnl is not None and realized_pnl < 0:
+                            _exit_cooldown = 1800  # 30 min
+                        else:
+                            _exit_cooldown = 300   # 5 min
                     watchlist.mark_watching(w_entry_close['id'], realized_pnl, cooldown_sec=_exit_cooldown)
                 last_progress = time.time()
                 trigger_price_text = f"{exit_price:.10f}" if exit_price is not None else 'na'

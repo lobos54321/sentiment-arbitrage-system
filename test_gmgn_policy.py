@@ -329,7 +329,7 @@ def test_entry_edge_budget_applies_gmgn_toxic_spread_penalty():
     )
 
     assert budget["gmgn_spread_penalty_pct"] == 0.5
-    assert budget["max_spread_pct"] == 1.5
+    assert budget["max_spread_pct"] == 3.0
     assert budget["pass"] is True
 
 
@@ -354,8 +354,8 @@ def test_entry_edge_budget_allows_wider_spread_for_paper_tiny_scout():
     )
 
     assert budget["is_tiny_scout"] is True
-    assert budget["tiny_scout_spread_cap_pct"] == 3.0
-    assert budget["max_spread_pct"] == 3.0
+    assert budget["tiny_scout_spread_cap_pct"] == 5.0
+    assert budget["max_spread_pct"] == 5.0
     assert budget["pass"] is True
 
 
