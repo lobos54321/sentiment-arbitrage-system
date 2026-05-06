@@ -25,6 +25,7 @@ from gmgn_policy import evaluate_gmgn_tiny_scout_rescue  # noqa: E402
 from scout_quality import evaluate_scout_quality  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     apply_paper_tiny_scout_size_cap,
+    apply_probe_profit_capture,
     arm_ath_uncertainty_tiny_scout,
     evaluate_entry_edge_budget,
     evaluate_spread_abort_memory,
@@ -340,6 +341,67 @@ def test_paper_tiny_scout_size_cap_precedes_lotto_fixed_size():
     assert pending["kelly_position_sol"] == 0.003
     assert pending["lotto_state"]["positionSizeSol"] == 0.003
     assert pending["lotto_state"]["entryDecision"]["position_size_sol"] == 0.003
+
+
+def test_probe_profit_capture_locks_small_scout_at_ten_percent():
+    class Pos:
+        position_size_sol = 0.004
+        peak_pnl = 0.02
+        signal_type = "LOTTO"
+        monitor_state = {
+            "entryMode": "explosive_newborn_direct_scout",
+            "signalRoute": "LOTTO",
+            "entrySol": 0.004,
+        }
+
+    exit_matrix = apply_probe_profit_capture(
+        Pos(),
+        {},
+        {"action": "hold", "reason": "lotto_verify", "current_pnl": 0.105, "peak_pnl": 0.105},
+    )
+
+    assert exit_matrix["action"] == "lock_profit"
+    assert exit_matrix["sell_pct"] == 0.75
+    assert exit_matrix["reason"].startswith("probe_profit_lock")
+
+
+def test_probe_profit_capture_exits_when_ten_percent_peak_gives_back_to_three():
+    class Pos:
+        position_size_sol = 0.003
+        peak_pnl = 0.109
+        signal_type = "ATH"
+        monitor_state = {
+            "entryMode": "ath_uncertainty_tiny_scout",
+            "signalRoute": "ATH",
+            "entrySol": 0.003,
+        }
+
+    exit_matrix = apply_probe_profit_capture(
+        Pos(),
+        {"peak_pnl": 0.109},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.025},
+    )
+
+    assert exit_matrix["action"] == "exit"
+    assert exit_matrix["trail_floor"] == 0.03
+    assert exit_matrix["reason"].startswith("probe_profit_capture_10_floor")
+
+
+def test_probe_profit_capture_does_not_touch_main_size_position():
+    class Pos:
+        position_size_sol = 0.05
+        peak_pnl = 0.11
+        signal_type = "LOTTO"
+        monitor_state = {
+            "entryMode": "lotto_fast_lane",
+            "signalRoute": "LOTTO",
+            "entrySol": 0.05,
+        }
+
+    original = {"action": "hold", "reason": "lotto_verify", "current_pnl": 0.02, "peak_pnl": 0.11}
+    exit_matrix = apply_probe_profit_capture(Pos(), {}, original)
+
+    assert exit_matrix == original
 
 
 def test_shared_scout_quality_blocks_weak_midcap_near_miss():

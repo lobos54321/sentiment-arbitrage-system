@@ -245,6 +245,14 @@ ATH_SOFT_RECLAIM_TINY_SCOUT_MODE = 'ath_soft_reclaim_tiny_scout'
 UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE = 'unknown_data_activity_tiny_scout'
 MATRIX_RECLAIM_TINY_PROBE_MODE = 'matrix_reclaim_tiny_probe'
 LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE = 'lotto_high_risk_discovery_probe'
+PROBE_PROFIT_CAPTURE_ENABLED = os.environ.get('PROBE_PROFIT_CAPTURE_ENABLED', 'true').lower() != 'false'
+PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL = float(os.environ.get('PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL', '0.02'))
+PROBE_PROFIT_CAPTURE_LOCK_PNL = float(os.environ.get('PROBE_PROFIT_CAPTURE_LOCK_PNL', '0.10'))
+PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT = float(os.environ.get('PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT', '0.75'))
+PROBE_PROFIT_CAPTURE_START_PEAK = float(os.environ.get('PROBE_PROFIT_CAPTURE_START_PEAK', '0.08'))
+PROBE_PROFIT_CAPTURE_START_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_START_FLOOR', '0.00'))
+PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR', '0.03'))
+PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR', '0.08'))
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
@@ -1097,6 +1105,121 @@ def apply_paper_tiny_scout_size_cap(pending):
         'capped': actual_size < requested_size,
         'cap_sol': cap_sol,
     }
+
+
+def position_is_probe_profit_capture_candidate(pos):
+    if not PROBE_PROFIT_CAPTURE_ENABLED or pos is None:
+        return False
+    state = getattr(pos, 'monitor_state', None) or {}
+    entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    signal_route = str(state.get('signalRoute') or getattr(pos, 'signal_type', '') or '')
+    try:
+        size_sol = float(
+            state.get('entrySol')
+            or getattr(pos, 'position_size_sol', 0)
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        size_sol = 0.0
+    if entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return True
+    if entry_mode and ('scout' in entry_mode or 'probe' in entry_mode):
+        return size_sol <= PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL
+    if signal_route == 'LOTTO' and size_sol > 0 and size_sol <= PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL:
+        return True
+    return False
+
+
+def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
+    """Add fast profit capture for small probe/scout paper positions."""
+    if not position_is_probe_profit_capture_candidate(pos):
+        return exit_matrix
+    if not isinstance(exit_matrix, dict):
+        return exit_matrix
+    current_pnl = _safe_float(exit_matrix.get('current_pnl'), None)
+    if current_pnl is None:
+        return exit_matrix
+    state = getattr(pos, 'monitor_state', None) or {}
+    peak_pnl = max(
+        _safe_float(exit_matrix.get('peak_pnl'), 0.0),
+        _safe_float(getattr(pos, 'peak_pnl', 0.0), 0.0),
+        _safe_float((w_entry or {}).get('peak_pnl'), 0.0),
+        current_pnl,
+    )
+    entry_mode = str(state.get('entryMode') or '')
+    sold_pct = max(0.0, min(1.0, _safe_float(state.get('soldPct'), 0.0)))
+    already_locked = bool((w_entry or {}).get('has_locked_profit')) or sold_pct > 0
+
+    def _override(action, reason, *, trail_floor=None, sell_pct=None):
+        updated = dict(exit_matrix)
+        updated.update({
+            'action': action,
+            'reason': reason,
+            'current_pnl': current_pnl,
+            'peak_pnl': peak_pnl,
+            'trail_floor': trail_floor,
+            'probe_profit_capture': {
+                'enabled': True,
+                'entry_mode': entry_mode,
+                'peak_pnl': peak_pnl,
+                'current_pnl': current_pnl,
+                'sold_pct': sold_pct,
+                'already_locked': already_locked,
+                'thresholds': {
+                    'lock_pnl': PROBE_PROFIT_CAPTURE_LOCK_PNL,
+                    'lock_sell_pct': PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT,
+                    'start_peak': PROBE_PROFIT_CAPTURE_START_PEAK,
+                    'start_floor': PROBE_PROFIT_CAPTURE_START_FLOOR,
+                    'peak10_floor': PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR,
+                    'peak15_floor': PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR,
+                },
+            },
+        })
+        if sell_pct is not None:
+            updated['sell_pct'] = sell_pct
+        return updated
+
+    if not already_locked and current_pnl >= PROBE_PROFIT_CAPTURE_LOCK_PNL:
+        return _override(
+            'lock_profit',
+            (
+                f"probe_profit_lock "
+                f"(pnl={current_pnl:.1%} >= {PROBE_PROFIT_CAPTURE_LOCK_PNL:.1%}, "
+                f"sell={PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT:.0%})"
+            ),
+            sell_pct=PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT,
+        )
+    if peak_pnl >= 0.15 and current_pnl <= PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR:
+        return _override(
+            'exit',
+            (
+                f"probe_profit_capture_15_floor "
+                f"(pnl={current_pnl:.1%} <= floor={PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR:.1%}, "
+                f"peak={peak_pnl:.1%})"
+            ),
+            trail_floor=PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR,
+        )
+    if peak_pnl >= 0.10 and current_pnl <= PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR:
+        return _override(
+            'exit',
+            (
+                f"probe_profit_capture_10_floor "
+                f"(pnl={current_pnl:.1%} <= floor={PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR:.1%}, "
+                f"peak={peak_pnl:.1%})"
+            ),
+            trail_floor=PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR,
+        )
+    if peak_pnl >= PROBE_PROFIT_CAPTURE_START_PEAK and current_pnl <= PROBE_PROFIT_CAPTURE_START_FLOOR:
+        return _override(
+            'exit',
+            (
+                f"probe_profit_capture_breakeven "
+                f"(pnl={current_pnl:.1%} <= floor={PROBE_PROFIT_CAPTURE_START_FLOOR:.1%}, "
+                f"peak={peak_pnl:.1%})"
+            ),
+            trail_floor=PROBE_PROFIT_CAPTURE_START_FLOOR,
+        )
+    return exit_matrix
 
 
 def _signal_ts_order_value(value):
@@ -10908,6 +11031,31 @@ def run_monitor(db):
                                     'peak_pnl': _peak_now,
                                     'trail_floor': None,
                                 }
+
+                        _pre_capture_action = exit_matrix.get('action')
+                        _pre_capture_reason = exit_matrix.get('reason')
+                        exit_matrix = apply_probe_profit_capture(pos, w_entry, exit_matrix, now_ts=time.time())
+                        if exit_matrix.get('probe_profit_capture') and (
+                            exit_matrix.get('action') != _pre_capture_action
+                            or exit_matrix.get('reason') != _pre_capture_reason
+                        ):
+                            record_decision_event(
+                                db,
+                                component='probe_profit_capture',
+                                event_type='exit_override',
+                                decision=exit_matrix.get('action', 'unknown'),
+                                reason=exit_matrix.get('reason'),
+                                token_ca=pos.token_ca,
+                                symbol=pos.symbol,
+                                lifecycle_id=pos.lifecycle_id,
+                                trade_id=pos.trade_id,
+                                signal_ts=pos.signal_ts,
+                                signal_id=getattr(pos, 'premium_signal_id', None),
+                                strategy_stage=pos.strategy_stage,
+                                route=(w_entry or {}).get('signal_route') or (pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                                data_source=pre_src,
+                                payload=exit_matrix.get('probe_profit_capture'),
+                            )
                         
                         # Log every exit evaluation
                         held_min = int((time.time() - pos.entry_ts) / 60)
