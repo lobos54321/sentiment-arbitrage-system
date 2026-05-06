@@ -990,20 +990,22 @@ class ExitGuardianThread(threading.Thread):
                             self._exit_pending.add(trade_id)
                             continue
 
-                    # === ATH Phase 1b: peak >= 5% — velocity+volume crash brake ===
-                    # Previously "free run" — no protection at all. TripleUnch lost +11.9% → -6.9%.
-                    # Now: use velocity and volume signals to detect crashes early.
-                    if pos.peak_pnl >= 0.05:  # only if we've seen at least +5% peak
+                    # === ATH Phase 1b: peak >= 8% — velocity+volume crash brake ===
+                    # V9: raised from 5%→8%. Meme coins swing ±5% as noise.
+                    # AI lost at peak=5.2%, Memestock lost at peak=5.7% — both normal volatility.
+                    # 8% means the token has shown real momentum before we protect.
+                    if pos.peak_pnl >= 0.08:  # only if we've seen at least +8% peak
                         _ath_crash_exit = False
                         _ath_crash_reason = ''
 
                         # Crash brake 1: velocity-driven — rapid decline
-                        if raw_vel_30s < -5.0 and pnl < pos.peak_pnl * 0.3:
-                            # Crashing >5%/min AND lost >70% of peak → dump it
+                        # V9: tightened vel threshold -5→-6, peak ratio 0.3→0.2
+                        if raw_vel_30s < -6.0 and pnl < pos.peak_pnl * 0.2:
+                            # Crashing >6%/min AND lost >80% of peak → dump it
                             _ath_crash_exit = True
-                            _ath_crash_reason = f'vel_crash (vel={raw_vel_30s:.1f}%/min, pnl={pnl:.1%} < 30% of peak={pos.peak_pnl:.1%})'
-                        elif use_vel < -3.0 and pnl <= 0:
-                            # Steady decline >3%/min AND back to breakeven → cut
+                            _ath_crash_reason = f'vel_crash (vel={raw_vel_30s:.1f}%/min, pnl={pnl:.1%} < 20% of peak={pos.peak_pnl:.1%})'
+                        elif use_vel < -4.0 and pnl <= 0:
+                            # Steady decline >4%/min AND back to breakeven → cut
                             _ath_crash_exit = True
                             _ath_crash_reason = f'vel_fade (vel={use_vel:.1f}%/min, pnl={pnl:.1%} <= 0, peak was {pos.peak_pnl:.1%})'
                         # Crash brake 2: volume death — tick_vol near zero while declining

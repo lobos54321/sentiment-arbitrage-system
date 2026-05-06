@@ -521,14 +521,14 @@ class MatrixEvaluator:
         'price_min': 60,
         'signal_min': 45,  # V3.4: split-tier filter — non-ATH stricter (45), ATH looser (40)
         'momentum_min': 60,
-        'min_passing': 4,   # V3: Requires 4 out of 5. T and S are mandatory, needs P or V to reach 3 pre-momentum.
+        'min_passing': 3,   # V9: relaxed from 4→3 (match ATH). Allows T+S+any(P,V) to pass.
         'max_obs_minutes': 120,
     }
 
     # Thresholds for ATH entries (reverted to 84% win rate period)
     ATH_THRESHOLDS = {
         'trend_min': 60,    # V3.2: raised from 50, ATH also needs mild uptrend
-        'volume_min': 60,   # V≥60 counts as passing
+        'volume_min': 40,   # V9: relaxed from 60→40. V=40 (weak) is non-zero, shouldn't hard-block ATH
         'price_min': 0,     # Skipped for ATH (ATH = price at highs)
         'signal_min': 40,  # V3.4: split-tier — ATH gets 40 (looser than non-ATH 45)
         'momentum_min': 60, # required
@@ -580,12 +580,12 @@ class MatrixEvaluator:
             }
 
         # --- Check max re-entry ---
-        if entry.get('entry_count', 0) >= 3:
+        if entry.get('entry_count', 0) >= 4:
             return {
                 'scores': {}, 'reasons': {},
                 'ready_for_momentum': False,
                 'action': 'remove',
-                'action_reason': 'max_entries_reached (3)',
+                'action_reason': 'max_entries_reached (4)',
             }
 
         # --- Matrix ① Trend --- (uses real 1m K-lines from GeckoTerminal)

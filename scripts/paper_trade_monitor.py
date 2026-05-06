@@ -108,14 +108,14 @@ MATRIX_SPREAD_WARN_PCT = float(os.environ.get('MATRIX_SPREAD_WARN_PCT', '2.0'))
 MATRIX_SPREAD_ABORT_PCT = float(os.environ.get('MATRIX_SPREAD_ABORT_PCT', '4.5'))
 ENTRY_EDGE_MATRIX_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_MATRIX_MAX_SPREAD_PCT', '2.5'))
 ENTRY_EDGE_ATH_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_ATH_MAX_SPREAD_PCT', '2.5'))
-ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT', '2.0'))
-ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT', '1.5'))
-ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '1.0'))
-ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT', '3.0'))
+ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_MAX_SPREAD_PCT', '3.5'))
+ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT', '2.5'))
+ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '2.0'))
+ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT', '5.0'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
-ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(30 * 60)))
-ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '5.0'))
-ENTRY_SPREAD_ABORT_RECLAIM_BS = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_BS', '1.4'))
+ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(3 * 60)))
+ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '2.0'))
+ENTRY_SPREAD_ABORT_RECLAIM_BS = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_BS', '1.15'))
 MATRIX_DOA_EXIT_SEC = float(os.environ.get('MATRIX_DOA_EXIT_SEC', '30'))
 MATRIX_DOA_PEAK_MAX = float(os.environ.get('MATRIX_DOA_PEAK_MAX', '0.001'))
 MATRIX_DOA_PNL_MAX = float(os.environ.get('MATRIX_DOA_PNL_MAX', '-0.03'))
@@ -9641,41 +9641,43 @@ def run_monitor(db):
                     if _any_ca_cooldown:
                         continue
 
-                    # REENTRY CAP V7: Conditional re-entry (max 2 entries per token).
+                    # REENTRY CAP V8: Conditional re-entry (max 3 entries per token).
                     # V3 data (9/9 re-entries lost) was under old entry logic with no SmartEntry.
-                    # V7: allow 1 re-entry IF last exit was not a crash AND momentum is strong.
+                    # V7→V8: raised from 2→3. SmartEntry now provides entry quality filtering
+                    # that didn't exist when V3 data was collected. Memestock passed 5+ Matrix
+                    # checks but was blocked by cap=2.
                     # Conditions:
-                    #   1. entry_count < 2 (max 2 entries total)
-                    #   2. last_exit_pnl > -5% (small shakeout OK, crash exit blocked)
-                    #   3. momentum score >= 80 (not borderline)
+                    #   1. entry_count < 3 (max 3 entries total)
+                    #   2. last_exit_pnl > -8% (small shakeout OK, crash exit blocked)
+                    #   3. momentum score >= 70 (reasonable, not borderline)
                     #   4. 5min cooldown (already enforced by per-CA cooldown above)
                     _entry_count = w_entry.get('entry_count', 0) or 0
-                    if _entry_count >= 2:
+                    if _entry_count >= 3:
                         log.info(
                             f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_CAP: "
-                            f"re-entry #{_entry_count+1} blocked (max 2 entries per token)."
+                            f"re-entry #{_entry_count+1} blocked (max 3 entries per token)."
                         )
                         continue
                     if _entry_count >= 1:
                         _last_exit_pnl = w_entry.get('last_exit_pnl')
                         _m_score = (eval_res.get('scores') or {}).get('momentum', 0) or 0
-                        if _last_exit_pnl is not None and _last_exit_pnl < -0.05:
+                        if _last_exit_pnl is not None and _last_exit_pnl < -0.08:
                             log.info(
                                 f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
-                                f"re-entry #{_entry_count+1}, last_exit_pnl={_last_exit_pnl:.1%} < -5% "
+                                f"re-entry #{_entry_count+1}, last_exit_pnl={_last_exit_pnl:.1%} < -8% "
                                 f"(crash exit, too risky to re-enter)"
                             )
                             continue
-                        if _m_score < 80:
+                        if _m_score < 70:
                             log.info(
                                 f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
-                                f"re-entry #{_entry_count+1}, M={_m_score} < 80 "
+                                f"re-entry #{_entry_count+1}, M={_m_score} < 70 "
                                 f"(momentum not strong enough for re-entry)"
                             )
                             continue
                         log.info(
                             f"  [WATCHLIST] ✅ {w_entry['symbol']} REENTRY ALLOWED: "
-                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%} > -5%, M={_m_score} >= 80"
+                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%} > -8%, M={_m_score} >= 70"
                         )
 
                     # PRICE-GATE: For re-entries, current price must be above last entry price.
