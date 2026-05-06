@@ -1,5 +1,6 @@
 import sys
 import sqlite3
+import json
 
 sys.path.insert(0, "scripts")
 
@@ -32,7 +33,10 @@ from paper_trade_monitor import (  # noqa: E402
     find_lotto_real_probe_candidates,
     find_lotto_upstream_miss_tiny_scout_candidates,
     normalize_price_age_ms,
+    record_scout_funnel_summary,
     record_explosive_continuation_shadow_candidates,
+    record_scout_quality_decision,
+    record_upstream_miss_chain_summary,
     should_block_lotto_falling_knife,
     should_block_lotto_lifecycle_entry,
     token_quarantine_state,
@@ -1893,6 +1897,166 @@ def test_stage_diagnosis_separates_timing_and_execution_cost():
     assert "selection_high_risk_low_follow" in tags
     assert "timing_zero_peak_entry" in tags
     assert "timing_not_confirmed_node" in tags
+
+
+def test_records_scout_quality_pass_and_block_events():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+
+    record_scout_quality_decision(
+        db,
+        scout_quality={
+            "pass": True,
+            "reason": "scout_quality_pass",
+            "mode": "pullback_tiny_scout",
+        },
+        token_ca="TokenPass",
+        symbol="PASS",
+        lifecycle_id="TokenPass:1000",
+        signal_ts=1000,
+        route="LOTTO",
+        event_ts=1100,
+    )
+    record_scout_quality_decision(
+        db,
+        scout_quality={
+            "pass": False,
+            "reason": "scout_quality_volume_low",
+            "mode": "pullback_tiny_scout",
+        },
+        token_ca="TokenBlock",
+        symbol="BLOCK",
+        lifecycle_id="TokenBlock:1000",
+        signal_ts=1000,
+        route="LOTTO",
+        event_ts=1101,
+    )
+
+    rows = db.execute(
+        """
+        SELECT decision, reason, event_type, payload_json
+        FROM paper_decision_events
+        WHERE component = 'scout_quality'
+        ORDER BY event_ts
+        """
+    ).fetchall()
+    assert [row["decision"] for row in rows] == ["pass", "block"]
+    assert rows[0]["event_type"] == "quality_gate"
+    assert rows[1]["reason"] == "scout_quality_volume_low"
+    assert json.loads(rows[0]["payload_json"])["entry_mode"] == "pullback_tiny_scout"
+
+
+def test_scout_funnel_summary_counts_candidate_to_fill_layers():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    payload = {"entry_mode": "gmgn_midcap_near_miss_scout"}
+    common = {
+        "token_ca": "TokenA",
+        "symbol": "AAA",
+        "lifecycle_id": "TokenA:1000",
+        "signal_ts": 1000,
+        "route": "LOTTO",
+    }
+
+    record_decision_event(
+        db,
+        component="lotto_entry_gate",
+        event_type="scout_candidate",
+        decision="candidate",
+        reason="gmgn_midcap_near_miss_scout_ok",
+        payload=payload,
+        event_ts=1100,
+        **common,
+    )
+    record_decision_event(
+        db,
+        component="lotto_entry_gate",
+        event_type="pending_entry",
+        decision="pending",
+        reason="gmgn_midcap_near_miss_scout_ok",
+        payload=payload,
+        event_ts=1101,
+        **common,
+    )
+    record_scout_quality_decision(
+        db,
+        scout_quality={
+            "pass": True,
+            "reason": "scout_quality_pass",
+            "mode": "gmgn_midcap_near_miss_scout",
+        },
+        event_ts=1102,
+        **common,
+    )
+    record_decision_event(
+        db,
+        component="smart_entry",
+        event_type="timing_decision",
+        decision="pass",
+        reason="legacy_score_pass",
+        payload={"detail": {}},
+        event_ts=1103,
+        **common,
+    )
+    record_decision_event(
+        db,
+        component="execution_api",
+        event_type="entry_quote",
+        decision="filled_paper",
+        reason="entry_quote_success",
+        payload={"position_size_sol": 0.003},
+        event_ts=1104,
+        **common,
+    )
+
+    summary = record_scout_funnel_summary(db, now_ts=1200, lookback_sec=1000)
+    mode_summary = summary["by_mode"][0]
+    assert mode_summary["entry_mode"] == "gmgn_midcap_near_miss_scout"
+    assert mode_summary["candidate_n"] == 1
+    assert mode_summary["quality_pass_n"] == 1
+    assert mode_summary["pending_n"] == 1
+    assert mode_summary["smart_entry_pass_n"] == 1
+    assert mode_summary["quote_success_n"] == 1
+    assert mode_summary["fill_per_candidate_pct"] == 100.0
+
+
+def test_upstream_miss_chain_summary_links_not_ath_to_downstream_block():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, lifecycle_id, signal_ts, route,
+             component, decision, reject_reason, baseline_price, baseline_ts,
+             tradable_missed, tradability_status)
+        VALUES (?, ?, ?, ?, ?, 'LOTTO', 'upstream_gate', 'reject',
+                'not_ath_v17', 1.0, ?, 1, 'tradable_reclaim')
+        """,
+        (1000, "TokenNA", "NATH", "TokenNA:900", 900, 900),
+    )
+    db.commit()
+    record_decision_event(
+        db,
+        component="scout_quality",
+        event_type="quality_gate",
+        decision="block",
+        reason="scout_quality_volume_low",
+        token_ca="TokenNA",
+        symbol="NATH",
+        lifecycle_id="TokenNA:900",
+        signal_ts=900,
+        route="LOTTO",
+        payload={"entry_mode": "lotto_upstream_miss_tiny_scout"},
+        event_ts=1030,
+    )
+
+    summary = record_upstream_miss_chain_summary(db, now_ts=1200, lookback_sec=1000)
+    assert summary["source_count"] == 1
+    assert summary["source_reasons"]["not_ath_v17"]["scout_quality:scout_quality_volume_low"] == 1
+    assert summary["samples"][0]["terminal"] == "scout_quality:scout_quality_volume_low"
 
 
 def run_tests():

@@ -194,15 +194,16 @@ def test_gmgn_tiny_scout_rescues_clean_midcap_activity_near_miss():
         policy,
         {
             "liquidity_usd": 6400,
-            "vol_m5": 5400,
-            "tx_m5": 180,
-            "price_change_m5": -25,
+            "buy_sell_ratio": 1.4,
+            "vol_m5": 16000,
+            "tx_m5": 220,
+            "price_change_m5": -10,
         },
     )
 
     assert rescue["allow"] is True
     assert rescue["entry_mode"] == "gmgn_midcap_near_miss_scout"
-    assert rescue["position_size_sol"] == 0.005
+    assert rescue["position_size_sol"] == 0.003
 
 
 def test_gmgn_tiny_scout_rejects_midcap_activity_crashing_too_hard():
@@ -223,14 +224,15 @@ def test_gmgn_tiny_scout_rejects_midcap_activity_crashing_too_hard():
         policy,
         {
             "liquidity_usd": 6400,
-            "vol_m5": 5400,
-            "tx_m5": 180,
+            "buy_sell_ratio": 1.4,
+            "vol_m5": 16000,
+            "tx_m5": 220,
             "price_change_m5": -44,
         },
     )
 
     assert rescue["allow"] is False
-    assert rescue["reason"] == "gmgn_tiny_scout_reason_not_rescueable"
+    assert rescue["reason"] == "scout_quality_negative_trend"
 
 
 def test_gmgn_tiny_scout_does_not_rescue_unknown_data_when_toxic():

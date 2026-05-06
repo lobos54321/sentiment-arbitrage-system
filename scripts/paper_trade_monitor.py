@@ -38,7 +38,7 @@ import urllib.parse
 import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
 from watchlist_store import WatchlistStore
@@ -224,6 +224,11 @@ ATH_REAL_PROBE_SIZE_SOL = float(os.environ.get('ATH_REAL_PROBE_SIZE_SOL', str(PA
 ATH_REAL_PROBE_MAX_AGE_SEC = int(os.environ.get('ATH_REAL_PROBE_MAX_AGE_SEC', str(45 * 60)))
 ATH_REAL_PROBE_MAX_MC = float(os.environ.get('ATH_REAL_PROBE_MAX_MC', str(MATRIX_ATH_HALF_MC_MAX)))
 ATH_REAL_PROBE_MIN_LIQ_USD = float(os.environ.get('ATH_REAL_PROBE_MIN_LIQ_USD', '5000'))
+SCOUT_TELEMETRY_ENABLED = os.environ.get('SCOUT_TELEMETRY_ENABLED', 'true').lower() != 'false'
+SCOUT_FUNNEL_LOOKBACK_SEC = int(os.environ.get('SCOUT_FUNNEL_LOOKBACK_SEC', str(24 * 60 * 60)))
+SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC = int(os.environ.get('SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC', '300'))
+SCOUT_UPSTREAM_CHAIN_LOOKBACK_SEC = int(os.environ.get('SCOUT_UPSTREAM_CHAIN_LOOKBACK_SEC', str(24 * 60 * 60)))
+SCOUT_UPSTREAM_CHAIN_LIMIT = int(os.environ.get('SCOUT_UPSTREAM_CHAIN_LIMIT', '300'))
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
@@ -1710,6 +1715,26 @@ def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_ent
             current_mc=current_mc,
             liquidity_usd=liquidity_usd,
         )
+        record_scout_quality_decision(
+            db,
+            scout_quality=scout_quality,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='LOTTO',
+            lifecycle=reclaim_lifecycle,
+            scout_size={
+                'entry_mode': LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
+                'actual_size_sol': LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL,
+                'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+            },
+            source_component=row['component'],
+            source_reject_reason=row['reject_reason'],
+            data_source='missed_attribution+dexscreener+lifecycle+paper_risk',
+            event_ts=now_ts,
+        )
         if not scout_quality.get('pass'):
             record_decision_event(
                 db,
@@ -2247,6 +2272,26 @@ def arm_lotto_upstream_realtime_tiny_scout(
         top10_pct=top10_pct,
     )
     detail['scout_quality'] = scout_quality
+    record_scout_quality_decision(
+        db,
+        scout_quality=scout_quality,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts,
+        signal_id=premium_signal_id,
+        route='LOTTO',
+        lifecycle=scout_lifecycle,
+        scout_size={
+            'entry_mode': LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+            'actual_size_sol': LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL,
+            'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+        },
+        source_component='upstream_gate',
+        source_reject_reason=reason,
+        data_source='premium_signals+dexscreener+gmgn+helius',
+        event_ts=now_ts,
+    )
     if not reject_reason and not scout_quality.get('pass'):
         reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
 
@@ -2407,6 +2452,26 @@ def arm_ath_uncertainty_tiny_scout(
         top10_pct=top10_pct,
     )
     detail['scout_quality'] = scout_quality
+    record_scout_quality_decision(
+        db,
+        scout_quality=scout_quality,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=w_entry.get('signal_ts'),
+        signal_id=w_entry.get('premium_signal_id'),
+        route='ATH',
+        lifecycle=scout_lifecycle,
+        scout_size={
+            'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            'actual_size_sol': ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
+            'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+        },
+        source_component='matrix_evaluator',
+        source_reject_reason=reason,
+        data_source='matrix_inputs+dexscreener',
+        event_ts=now_ts,
+    )
     if not reject_reason and not scout_quality.get('pass'):
         reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
     if reject_reason:
@@ -3280,6 +3345,464 @@ def with_lifecycle_payload(payload, lifecycle):
         data['vitality_score'] = lifecycle.get('vitality_score')
         data['entry_bias'] = lifecycle.get('entry_bias')
     return data
+
+
+def _scout_event_key(row):
+    lifecycle_id = row['lifecycle_id'] if 'lifecycle_id' in row.keys() else None
+    token_ca = row['token_ca'] if 'token_ca' in row.keys() else None
+    signal_ts = row['signal_ts'] if 'signal_ts' in row.keys() else None
+    if lifecycle_id:
+        return str(lifecycle_id)
+    return f"{token_ca or ''}:{signal_ts or ''}"
+
+
+def _extract_scout_mode(payload=None, reason=None):
+    payload = payload if isinstance(payload, dict) else {}
+    candidates = [
+        payload.get('entry_mode'),
+        payload.get('scout_mode'),
+        payload.get('probeEntryMode'),
+        reason,
+    ]
+    scout_quality = payload.get('scout_quality')
+    if isinstance(scout_quality, dict):
+        candidates.extend([scout_quality.get('mode'), scout_quality.get('entry_mode')])
+    scout_size = payload.get('scout_size')
+    if isinstance(scout_size, dict):
+        candidates.extend([scout_size.get('entry_mode'), scout_size.get('mode')])
+    entry_decision = payload.get('entryDecision') or payload.get('entry_decision')
+    if isinstance(entry_decision, dict):
+        candidates.extend([entry_decision.get('entry_mode'), entry_decision.get('mode')])
+    lotto_state = payload.get('lottoState') or payload.get('lotto_state')
+    if isinstance(lotto_state, dict):
+        candidates.extend([
+            lotto_state.get('probeEntryMode'),
+            lotto_state.get('entry_mode'),
+            lotto_state.get('scout_mode'),
+        ])
+        nested_decision = lotto_state.get('entryDecision')
+        if isinstance(nested_decision, dict):
+            candidates.extend([nested_decision.get('entry_mode'), nested_decision.get('mode')])
+    for candidate in candidates:
+        mode = str(candidate or '').strip()
+        if mode in PAPER_TINY_SCOUT_ENTRY_MODES:
+            return mode
+        if mode.endswith('_ok'):
+            base = mode[:-3]
+            if base in PAPER_TINY_SCOUT_ENTRY_MODES:
+                return base
+    return None
+
+
+def _pct(numerator, denominator):
+    if not denominator:
+        return None
+    return round((float(numerator) / float(denominator)) * 100.0, 2)
+
+
+def record_scout_quality_decision(
+    db,
+    *,
+    scout_quality,
+    pending=None,
+    token_ca=None,
+    symbol=None,
+    lifecycle_id=None,
+    signal_ts=None,
+    signal_id=None,
+    strategy_stage=None,
+    route=None,
+    lifecycle=None,
+    scout_size=None,
+    source_component=None,
+    source_reject_reason=None,
+    data_source='dexscreener+lifecycle+paper_risk',
+    event_ts=None,
+):
+    """Record every tiny-scout quality gate pass/block without changing behavior."""
+    if not SCOUT_TELEMETRY_ENABLED or not isinstance(scout_quality, dict):
+        return False
+    pending = pending or {}
+    mode = (
+        scout_quality.get('mode')
+        or pending.get('entry_mode')
+        or pending.get('scout_mode')
+        or _extract_scout_mode({'scout_quality': scout_quality})
+    )
+    if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return False
+    passed = bool(scout_quality.get('pass'))
+    decision = 'pass' if passed else 'block'
+    reason = scout_quality.get('reason') or ('scout_quality_pass' if passed else 'scout_quality_reject')
+    payload = {
+        'entry_mode': mode,
+        'quality_passed': passed,
+        'scout_quality': scout_quality,
+        'scout_size': scout_size or {},
+        'source_component': source_component,
+        'source_reject_reason': source_reject_reason,
+    }
+    record_decision_event(
+        db,
+        component='scout_quality',
+        event_type='quality_gate',
+        decision=decision,
+        reason=reason,
+        token_ca=token_ca or pending.get('token_ca'),
+        symbol=symbol or pending.get('symbol'),
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts if signal_ts is not None else pending.get('signal_ts'),
+        signal_id=signal_id if signal_id is not None else pending.get('premium_signal_id'),
+        strategy_stage=strategy_stage,
+        route=route or pending.get('signal_route') or pending.get('signal_type'),
+        data_source=data_source,
+        payload=with_lifecycle_payload(payload, lifecycle),
+        event_ts=event_ts,
+    )
+    return True
+
+
+def record_scout_funnel_summary(db, *, now_ts, lookback_sec=None):
+    """Summarize tiny-scout candidate -> quality -> pending -> SmartEntry -> fill conversion."""
+    if not SCOUT_TELEMETRY_ENABLED:
+        return None
+    lookback_sec = int(lookback_sec or SCOUT_FUNNEL_LOOKBACK_SEC)
+    since_ts = float(now_ts) - lookback_sec
+    rows = db.execute(
+        """
+        SELECT event_ts, token_ca, symbol, lifecycle_id, signal_ts, route,
+               component, event_type, decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE event_ts >= ?
+          AND (
+              event_type IN (
+                  'scout_candidate', 'pending_entry', 'reentry_armed',
+                  'quality_gate', 'entry_quote', 'entry_abort',
+                  'entry_spread_warning', 'timing_decision', 'scout_reject'
+              )
+              OR component IN (
+                  'scout_quality', 'lotto_entry_gate', 'lotto_upstream_probe_live',
+                  'lotto_upstream_realtime_scout', 'ath_uncertainty_scout',
+                  'smart_entry', 'execution_api', 'execution_guard',
+                  'lotto_timing_gate', 'token_risk'
+              )
+          )
+        ORDER BY event_ts ASC
+        LIMIT 25000
+        """,
+        (since_ts,),
+    ).fetchall()
+
+    key_to_mode = {}
+    for row in rows:
+        payload = _json_dict(row['payload_json'])
+        key = _scout_event_key(row)
+        mode = _extract_scout_mode(payload, row['reason'])
+        if mode:
+            key_to_mode[key] = mode
+
+    def new_stats():
+        return {
+            'candidate': set(),
+            'explicit_candidate': set(),
+            'quality_evaluated': set(),
+            'quality_pass': set(),
+            'quality_block': set(),
+            'pending': set(),
+            'smart_entry_pass': set(),
+            'smart_entry_reject': set(),
+            'quote_success': set(),
+            'quote_fail': set(),
+            'execution_abort': set(),
+            'scout_reject': set(),
+            'tokens': set(),
+            'quality_block_reasons': Counter(),
+            'smart_entry_reject_reasons': Counter(),
+            'quote_fail_reasons': Counter(),
+            'execution_abort_reasons': Counter(),
+            'scout_reject_reasons': Counter(),
+        }
+
+    by_mode = defaultdict(new_stats)
+    for row in rows:
+        payload = _json_dict(row['payload_json'])
+        key = _scout_event_key(row)
+        mode = _extract_scout_mode(payload, row['reason']) or key_to_mode.get(key)
+        if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+            continue
+        stats = by_mode[mode]
+        if row['token_ca']:
+            stats['tokens'].add(row['token_ca'])
+        component = row['component']
+        event_type = row['event_type']
+        decision = str(row['decision'] or '').lower()
+        reason = row['reason'] or 'unknown'
+
+        if event_type in {'scout_candidate', 'quality_gate', 'pending_entry', 'reentry_armed'}:
+            stats['candidate'].add(key)
+        if event_type == 'scout_candidate':
+            stats['explicit_candidate'].add(key)
+        if component == 'scout_quality' and event_type == 'quality_gate':
+            stats['quality_evaluated'].add(key)
+            if decision == 'pass':
+                stats['quality_pass'].add(key)
+            elif decision == 'block':
+                stats['quality_block'].add(key)
+                stats['quality_block_reasons'][reason] += 1
+        elif event_type == 'pending_entry' and decision == 'pending':
+            stats['pending'].add(key)
+        elif event_type == 'reentry_armed' and decision == 'pending':
+            stats['pending'].add(key)
+        elif component == 'smart_entry' and event_type == 'timing_decision':
+            if decision == 'pass':
+                stats['smart_entry_pass'].add(key)
+            elif decision == 'reject':
+                stats['smart_entry_reject'].add(key)
+                stats['smart_entry_reject_reasons'][reason] += 1
+        elif component == 'execution_api' and event_type == 'entry_quote':
+            if decision == 'filled_paper':
+                stats['quote_success'].add(key)
+            elif decision == 'fail':
+                stats['quote_fail'].add(key)
+                stats['quote_fail_reasons'][reason] += 1
+        elif component == 'execution_guard' and event_type == 'entry_abort':
+            stats['execution_abort'].add(key)
+            stats['execution_abort_reasons'][reason] += 1
+        elif event_type == 'scout_reject':
+            stats['scout_reject'].add(key)
+            stats['scout_reject_reasons'][reason] += 1
+
+    try:
+        trade_rows = db.execute(
+            """
+            SELECT lifecycle_id, token_ca, symbol, signal_ts, entry_mode
+            FROM paper_trades
+            WHERE entry_ts >= ?
+              AND entry_mode IS NOT NULL
+            """,
+            (since_ts,),
+        ).fetchall()
+    except Exception:
+        trade_rows = []
+    for row in trade_rows:
+        mode = str(row['entry_mode'] or '')
+        if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+            continue
+        key = row['lifecycle_id'] or f"{row['token_ca'] or ''}:{row['signal_ts'] or ''}"
+        stats = by_mode[mode]
+        stats['candidate'].add(key)
+        stats['quote_success'].add(key)
+        if row['token_ca']:
+            stats['tokens'].add(row['token_ca'])
+
+    mode_summaries = []
+    totals = new_stats()
+    for mode, stats in sorted(by_mode.items()):
+        candidate_n = len(stats['candidate'])
+        quality_eval_n = len(stats['quality_evaluated'])
+        quality_pass_n = len(stats['quality_pass'])
+        pending_n = len(stats['pending'])
+        smart_entry_pass_n = len(stats['smart_entry_pass'])
+        fill_n = len(stats['quote_success'])
+        mode_summaries.append({
+            'entry_mode': mode,
+            'candidate_n': candidate_n,
+            'explicit_candidate_n': len(stats['explicit_candidate']),
+            'quality_evaluated_n': quality_eval_n,
+            'quality_pass_n': quality_pass_n,
+            'quality_block_n': len(stats['quality_block']),
+            'pending_n': pending_n,
+            'smart_entry_pass_n': smart_entry_pass_n,
+            'smart_entry_reject_n': len(stats['smart_entry_reject']),
+            'quote_success_n': fill_n,
+            'quote_fail_n': len(stats['quote_fail']),
+            'execution_abort_n': len(stats['execution_abort']),
+            'scout_reject_n': len(stats['scout_reject']),
+            'unique_token_n': len(stats['tokens']),
+            'quality_pass_rate_pct': _pct(quality_pass_n, quality_eval_n),
+            'pending_per_candidate_pct': _pct(pending_n, candidate_n),
+            'smart_entry_pass_per_pending_pct': _pct(smart_entry_pass_n, pending_n),
+            'fill_per_smart_entry_pass_pct': _pct(fill_n, smart_entry_pass_n),
+            'fill_per_candidate_pct': _pct(fill_n, candidate_n),
+            'quality_block_reasons': dict(stats['quality_block_reasons'].most_common(8)),
+            'smart_entry_reject_reasons': dict(stats['smart_entry_reject_reasons'].most_common(8)),
+            'quote_fail_reasons': dict(stats['quote_fail_reasons'].most_common(8)),
+            'execution_abort_reasons': dict(stats['execution_abort_reasons'].most_common(8)),
+            'scout_reject_reasons': dict(stats['scout_reject_reasons'].most_common(8)),
+        })
+        for key, value in stats.items():
+            if isinstance(value, set):
+                totals[key].update(value)
+            elif isinstance(value, Counter):
+                totals[key].update(value)
+
+    payload = {
+        'lookback_sec': lookback_sec,
+        'since_ts': since_ts,
+        'mode_count': len(mode_summaries),
+        'by_mode': mode_summaries,
+        'totals': {
+            'candidate_n': len(totals['candidate']),
+            'quality_evaluated_n': len(totals['quality_evaluated']),
+            'quality_pass_n': len(totals['quality_pass']),
+            'quality_block_n': len(totals['quality_block']),
+            'pending_n': len(totals['pending']),
+            'smart_entry_pass_n': len(totals['smart_entry_pass']),
+            'smart_entry_reject_n': len(totals['smart_entry_reject']),
+            'quote_success_n': len(totals['quote_success']),
+            'quote_fail_n': len(totals['quote_fail']),
+            'execution_abort_n': len(totals['execution_abort']),
+            'scout_reject_n': len(totals['scout_reject']),
+            'unique_token_n': len(totals['tokens']),
+            'quality_pass_rate_pct': _pct(len(totals['quality_pass']), len(totals['quality_evaluated'])),
+            'fill_per_candidate_pct': _pct(len(totals['quote_success']), len(totals['candidate'])),
+            'quality_block_reasons': dict(totals['quality_block_reasons'].most_common(10)),
+            'smart_entry_reject_reasons': dict(totals['smart_entry_reject_reasons'].most_common(10)),
+            'quote_fail_reasons': dict(totals['quote_fail_reasons'].most_common(10)),
+            'execution_abort_reasons': dict(totals['execution_abort_reasons'].most_common(10)),
+            'scout_reject_reasons': dict(totals['scout_reject_reasons'].most_common(10)),
+        },
+    }
+    record_decision_event(
+        db,
+        component='scout_telemetry',
+        event_type='conversion_summary',
+        decision='observe',
+        reason='scout_funnel_summary',
+        route='SCOUT',
+        data_source='paper_decision_events+paper_trades',
+        payload=payload,
+        event_ts=now_ts,
+    )
+    if mode_summaries:
+        compact = []
+        for item in mode_summaries[:4]:
+            compact.append(
+                f"{item['entry_mode']}:cand={item['candidate_n']} "
+                f"q={item['quality_pass_n']}/{item['quality_evaluated_n']} "
+                f"fill={item['quote_success_n']}"
+            )
+        log.info(f"  [SCOUT_FUNNEL] lookback={lookback_sec}s " + " | ".join(compact))
+    return payload
+
+
+def _classify_upstream_miss_terminal(events):
+    if not events:
+        return 'no_probe_event'
+    for row in reversed(events):
+        if row['component'] == 'execution_api' and row['event_type'] == 'entry_quote' and row['decision'] == 'filled_paper':
+            return 'filled_paper'
+    for row in reversed(events):
+        decision = str(row['decision'] or '').lower()
+        if decision in {'block', 'reject', 'skip', 'abort', 'expire', 'fail', 'wait'}:
+            return f"{row['component']}:{row['reason'] or decision}"
+    if any(row['event_type'] == 'pending_entry' for row in events):
+        return 'pending_no_terminal'
+    if any(row['event_type'] == 'reentry_armed' for row in events):
+        return 'armed_no_pending'
+    if any(row['component'] == 'scout_quality' and row['decision'] == 'pass' for row in events):
+        return 'quality_pass_no_pending'
+    return 'downstream_observed_no_terminal'
+
+
+def record_upstream_miss_chain_summary(db, *, now_ts, lookback_sec=None, limit=None):
+    """Trace not_ath/upstream misses into the later probe/downstream terminal layer."""
+    if not SCOUT_TELEMETRY_ENABLED:
+        return None
+    lookback_sec = int(lookback_sec or SCOUT_UPSTREAM_CHAIN_LOOKBACK_SEC)
+    limit = int(limit or SCOUT_UPSTREAM_CHAIN_LIMIT)
+    since_ts = float(now_ts) - lookback_sec
+    source_rows = db.execute(
+        """
+        SELECT id, decision_event_id, created_event_ts, token_ca, symbol, lifecycle_id,
+               signal_id, signal_ts, reject_reason, max_pnl_recorded, pnl_5m,
+               pnl_15m, pnl_60m, tradability_status, tradable_missed
+        FROM paper_missed_signal_attribution
+        WHERE route = 'LOTTO'
+          AND component = 'upstream_gate'
+          AND reject_reason IN (
+              'not_ath_v17',
+              'not_ath_prebuy_kline_unknown_data_blocked',
+              'lotto_observe_low_mc_vol'
+          )
+          AND created_event_ts >= ?
+        ORDER BY created_event_ts DESC
+        LIMIT ?
+        """,
+        (since_ts, limit),
+    ).fetchall()
+    by_source_reason = defaultdict(Counter)
+    samples = []
+    for source in source_rows:
+        events = db.execute(
+            """
+            SELECT id, event_ts, component, event_type, decision, reason, payload_json
+            FROM paper_decision_events
+            WHERE token_ca = ?
+              AND event_ts >= ?
+              AND event_ts <= ?
+              AND (? IS NULL OR id != ?)
+              AND (
+                  COALESCE(lifecycle_id, '') = COALESCE(?, '')
+                  OR COALESCE(signal_ts, 0) = COALESCE(?, 0)
+              )
+              AND component != 'upstream_gate'
+            ORDER BY event_ts ASC
+            """,
+            (
+                source['token_ca'],
+                float(source['created_event_ts'] or since_ts),
+                float(now_ts),
+                source['decision_event_id'],
+                source['decision_event_id'],
+                source['lifecycle_id'],
+                source['signal_ts'],
+            ),
+        ).fetchall()
+        terminal = _classify_upstream_miss_terminal(events)
+        source_reason = source['reject_reason'] or 'unknown'
+        by_source_reason[source_reason][terminal] += 1
+        if len(samples) < 20 and (source_reason == 'not_ath_v17' or terminal != 'no_probe_event'):
+            samples.append({
+                'missed_attribution_id': source['id'],
+                'token_ca': source['token_ca'],
+                'symbol': source['symbol'],
+                'signal_ts': source['signal_ts'],
+                'source_reject_reason': source_reason,
+                'terminal': terminal,
+                'max_pnl_recorded': source['max_pnl_recorded'],
+                'tradability_status': source['tradability_status'],
+                'event_chain': [
+                    f"{row['component']}:{row['event_type']}:{row['decision']}:{row['reason'] or ''}"
+                    for row in events[-8:]
+                ],
+            })
+    payload = {
+        'lookback_sec': lookback_sec,
+        'since_ts': since_ts,
+        'source_count': len(source_rows),
+        'source_reasons': {
+            reason: dict(counter.most_common())
+            for reason, counter in sorted(by_source_reason.items())
+        },
+        'samples': samples,
+    }
+    record_decision_event(
+        db,
+        component='scout_telemetry',
+        event_type='upstream_miss_chain_summary',
+        decision='observe',
+        reason='not_ath_upstream_chain',
+        route='LOTTO',
+        data_source='paper_missed_signal_attribution+paper_decision_events',
+        payload=payload,
+        event_ts=now_ts,
+    )
+    if source_rows:
+        not_ath = by_source_reason.get('not_ath_v17', Counter())
+        top = ", ".join(f"{reason}={count}" for reason, count in not_ath.most_common(4)) or "none"
+        log.info(f"  [UPSTREAM_MISS_CHAIN] not_ath_v17 {top}")
+    return payload
 
 
 def with_external_alpha_payload(payload, external_alpha):
@@ -6495,6 +7018,7 @@ def run_monitor(db):
     lifecycles = restore_lifecycles(db)
     sanitized_monitor_states = 0
     last_missed_attribution_update = 0.0
+    last_scout_telemetry = 0.0
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
@@ -6854,6 +7378,14 @@ def run_monitor(db):
             except Exception as _missed_err:
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
+
+        if not pending_priority and now - last_scout_telemetry >= SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC:
+            try:
+                record_scout_funnel_summary(db, now_ts=now)
+                record_upstream_miss_chain_summary(db, now_ts=now)
+            except Exception as _scout_telemetry_err:
+                log.debug(f"  [SCOUT_TELEMETRY] summary failed: {_scout_telemetry_err}")
+            last_scout_telemetry = now
 
         if now - last_progress >= HEARTBEAT_INTERVAL_SEC * 2:
             freshness = get_signal_freshness()
@@ -7633,6 +8165,27 @@ def run_monitor(db):
                             _gmgn_policy,
                             _lotto_detail,
                         )
+                        _rescue_quality = (_gmgn_rescue.get("detail") or {}).get("scout_quality")
+                        record_scout_quality_decision(
+                            db,
+                            scout_quality=_rescue_quality,
+                            token_ca=w_entry['ca'],
+                            symbol=w_entry['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=w_entry['signal_ts'],
+                            signal_id=w_entry.get('premium_signal_id'),
+                            route='LOTTO',
+                            lifecycle=_lotto_lifecycle,
+                            scout_size={
+                                'entry_mode': _gmgn_rescue.get("entry_mode") or _extract_scout_mode({'scout_quality': _rescue_quality}),
+                                'actual_size_sol': _gmgn_rescue.get("position_size_sol") or PAPER_TINY_SCOUT_SIZE_SOL,
+                                'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+                            },
+                            source_component='gmgn_tiny_scout_rescue',
+                            source_reject_reason=_lotto_decision.reason,
+                            data_source='dexscreener+gmgn+lifecycle',
+                            event_ts=now,
+                        )
                         if _gmgn_rescue.get("allow"):
                             _lotto_detail = {
                                 **_lotto_detail,
@@ -7666,6 +8219,27 @@ def run_monitor(db):
                             "lotto_newborn_falling_knife_low_liq",
                             _gmgn_policy,
                             _falling_detail,
+                        )
+                        _rescue_quality = (_gmgn_rescue.get("detail") or {}).get("scout_quality")
+                        record_scout_quality_decision(
+                            db,
+                            scout_quality=_rescue_quality,
+                            token_ca=w_entry['ca'],
+                            symbol=w_entry['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=w_entry['signal_ts'],
+                            signal_id=w_entry.get('premium_signal_id'),
+                            route='LOTTO',
+                            lifecycle=_lotto_lifecycle,
+                            scout_size={
+                                'entry_mode': _gmgn_rescue.get("entry_mode") or _extract_scout_mode({'scout_quality': _rescue_quality}),
+                                'actual_size_sol': _gmgn_rescue.get("position_size_sol") or PAPER_TINY_SCOUT_SIZE_SOL,
+                                'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+                            },
+                            source_component='gmgn_tiny_scout_rescue',
+                            source_reject_reason='lotto_newborn_falling_knife_low_liq',
+                            data_source='dexscreener+gmgn+lifecycle',
+                            event_ts=now,
                         )
                         if _gmgn_rescue.get("allow"):
                             _lotto_decision = LottoDecision(
@@ -8743,6 +9317,19 @@ def run_monitor(db):
                             position_size_sol=pending.get('kelly_position_sol'),
                         )
                         pending['scout_quality'] = _scout_quality
+                        record_scout_quality_decision(
+                            db,
+                            scout_quality=_scout_quality,
+                            pending=pending,
+                            lifecycle_id=lifecycle_id,
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            lifecycle=_entry_timing_lifecycle,
+                            scout_size=_scout_size_detail,
+                            source_component=pending.get('source_component') or 'pending_entry',
+                            source_reject_reason=pending.get('source_reject_reason'),
+                            data_source='dexscreener+lifecycle+paper_risk',
+                        )
                         if not _scout_quality.get('pass'):
                             record_decision_event(
                                 db,
