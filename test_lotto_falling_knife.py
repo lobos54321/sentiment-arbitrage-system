@@ -365,7 +365,7 @@ def test_probe_profit_capture_locks_small_scout_at_ten_percent():
     assert exit_matrix["reason"].startswith("probe_profit_lock")
 
 
-def test_probe_profit_capture_exits_when_ten_percent_peak_gives_back_to_three():
+def test_observation_probe_late_locks_when_ten_percent_peak_gives_back_to_three():
     class Pos:
         position_size_sol = 0.003
         peak_pnl = 0.109
@@ -382,9 +382,9 @@ def test_probe_profit_capture_exits_when_ten_percent_peak_gives_back_to_three():
         {"action": "hold", "reason": "hold", "current_pnl": 0.025},
     )
 
-    assert exit_matrix["action"] == "exit"
-    assert exit_matrix["trail_floor"] == 0.03
-    assert exit_matrix["reason"].startswith("probe_profit_capture_10_floor")
+    assert exit_matrix["action"] == "lock_profit"
+    assert exit_matrix["sell_pct"] == 0.75
+    assert exit_matrix["reason"].startswith("probe_profit_late_lock")
 
 
 def test_probe_profit_capture_does_not_touch_main_size_position():
@@ -594,6 +594,46 @@ def test_token_quarantine_requires_reclaim_after_cooldown():
     )
     assert unlocked["blocked"] is False
     assert unlocked["reclaim_unlocked"] is True
+
+
+def test_token_quarantine_ignores_observation_probe_loss():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            exit_ts REAL,
+            pnl_pct REAL,
+            peak_pnl REAL,
+            exit_reason TEXT,
+            replay_source TEXT,
+            signal_route TEXT,
+            position_size_sol REAL,
+            entry_mode TEXT,
+            monitor_state_json TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_trades
+            (token_ca, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source,
+             signal_route, position_size_sol, entry_mode, monitor_state_json)
+        VALUES ('TokenA', 'TOKA', 1000, -0.18, 0.05, 'hard_sl',
+                'live_monitor_discovery_probe', 'ATH', 0.003,
+                'matrix_reclaim_tiny_probe', '{"entryMode":"matrix_reclaim_tiny_probe","entrySol":0.003}')
+        """
+    )
+    db.commit()
+
+    state = token_quarantine_state(db, "TokenA", now_ts=1100)
+
+    assert state["blocked"] is False
+    assert state["severe_failure_count"] == 0
+    assert state["risk_memory_count"] == 0
 
 
 def test_evaluate_token_reclaim_requires_current_strength():

@@ -35,6 +35,10 @@ LOTTO_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_SE
 LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.03"))
 LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.08"))
 QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
+OBSERVATION_PROBE_MAX_SIZE_SOL = float(os.environ.get("OBSERVATION_PROBE_MAX_SIZE_SOL", "0.02"))
+OBSERVATION_PROBE_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_HARD_SL", "-0.30"))
+OBSERVATION_PROBE_LOTTO_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_LOTTO_HARD_SL", "-0.35"))
+QUOTE_MARK_REPRICE_DIVERGENCE = float(os.environ.get("EXIT_QUOTE_REPRICE_DIVERGENCE_PCT", "0.20"))
 PARTIAL_IDEMPOTENCY_EPSILON = 1e-9
 
 
@@ -47,6 +51,20 @@ def _pct(value, default=0.0):
 
 def _clamp_pct(value, default=0.0):
     return min(1.0, max(0.0, _pct(value, default)))
+
+
+def _is_observation_probe_position(pos):
+    if pos is None:
+        return False
+    state = getattr(pos, "monitor_state", None) or {}
+    entry_mode = str(state.get("entryMode") or getattr(pos, "entry_mode", "") or "")
+    try:
+        size_sol = float(state.get("entrySol") or getattr(pos, "position_size_sol", 0) or 0)
+    except (TypeError, ValueError):
+        size_sol = 0.0
+    if size_sol <= 0 or size_sol > OBSERVATION_PROBE_MAX_SIZE_SOL:
+        return False
+    return "scout" in entry_mode or "probe" in entry_mode
 
 
 def _partial_target_from_command(command, *, prev_sold_pct, sell_pct):
@@ -312,12 +330,20 @@ class ExitGuardianThread(threading.Thread):
                         base_sl = w_entry.get('dynamic_sl', -0.10)
                     hard_sl = compute_dynamic_sl(pos, _dex_trend, base_sl=base_sl)
 
+                _is_observation_probe = _is_observation_probe_position(pos)
+                if _is_observation_probe:
+                    hard_sl = min(
+                        hard_sl,
+                        OBSERVATION_PROBE_LOTTO_HARD_SL if _is_lotto_entry else OBSERVATION_PROBE_HARD_SL,
+                    )
+
                 # Early DOA cut for MATRIX/ATH: if the trade never goes green and
                 # is already meaningfully red, do not wait for a full -20% hard SL.
                 # This targets the overnight MPGA/BEAR pattern: peak≈0, then rug.
                 held_sec = max(0.0, time.time() - float(getattr(pos, 'entry_ts', time.time()) or time.time()))
                 if (
                     not _is_lotto_entry
+                    and not _is_observation_probe
                     and held_sec >= GUARDIAN_DOA_EXIT_SEC
                     and max(float(getattr(pos, 'peak_pnl', 0) or 0), pnl) <= GUARDIAN_DOA_PEAK_MAX
                     and pnl <= GUARDIAN_DOA_PNL_MAX
@@ -345,6 +371,7 @@ class ExitGuardianThread(threading.Thread):
                 # path for peak=0 rugs.
                 if (
                     _is_lotto_entry
+                    and not _is_observation_probe
                     and held_sec >= LOTTO_GUARDIAN_FAST_FAIL_SEC
                     and max(float(getattr(pos, 'peak_pnl', 0) or 0), pnl) <= LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX
                     and pnl <= LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX
@@ -580,7 +607,7 @@ class ExitGuardianThread(threading.Thread):
                 # 8% means the token has shown REAL momentum before we start protecting.
                 # Floor = peak * 0.50 (aligned with ExitMatrix's Phase 0).
                 # SKIP for LOTTO — wider phase-based trail (peak * 0.35) handles this.
-                if not _is_lotto_entry and pos.peak_pnl >= PHASE0_BREAKEVEN_PEAK:
+                if not _is_lotto_entry and not _is_observation_probe and pos.peak_pnl >= PHASE0_BREAKEVEN_PEAK:
                     _phase0_lock_state = pos.monitor_state or {}
                     _phase0_partial_locked = (
                         getattr(pos, '_phase0_partial_locked', False)
@@ -1337,10 +1364,20 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
             gx_quote_pnl - gx_trigger_pnl
             if gx_quote_pnl is not None and gx_trigger_pnl is not None else None
         )
+        gx_realized_pnl = gx_trigger_pnl
+        gx_quote_sanity = 'quote_checked' if gx_quote_pnl is not None else 'quote_unavailable'
+        if gx_quote_mark_gap is not None and abs(gx_quote_mark_gap) >= QUOTE_MARK_REPRICE_DIVERGENCE:
+            gx_realized_pnl = gx_quote_pnl
+            gx_quote_sanity = 'exit_repriced_quote_mark_divergence'
+            log.warning(
+                f"  [GUARDIAN_EXIT] quote repriced {gx['symbol']}: "
+                f"trigger={gx_trigger_pnl:+.1%} quote={gx_quote_pnl:+.1%} "
+                f"gap={gx_quote_mark_gap:+.1%}"
+            )
         to_close.append({
             'trade_id': gx_trade_id,
             'reason': gx['reason'],
-            'pnl': gx_trigger_pnl,
+            'pnl': gx_realized_pnl,
             'trigger_pnl': gx_trigger_pnl,
             'exit_price': gx.get('trigger_price', gx_pos.entry_price),
             'exit_ts': int(time.time()),
@@ -1350,7 +1387,7 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 'execution': gx_sim if (gx_sim and gx_sim.get('success')) else {'success': True, 'synthetic': True},
                 'quotePnl': gx_quote_pnl,
                 'quoteMarkGap': gx_quote_mark_gap,
-                'quoteSanityStatus': 'quote_checked' if gx_quote_pnl is not None else 'quote_unavailable',
+                'quoteSanityStatus': gx_quote_sanity,
             },
         })
         # IMPORTANT: Do NOT pop positions[gx_trade_id] here!

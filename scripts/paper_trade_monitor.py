@@ -210,6 +210,8 @@ LOTTO_UPSTREAM_MISS_TINY_SCOUT_REASONS = {
 ATH_UNCERTAINTY_TINY_SCOUT_ENABLED = os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
 ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC', '400000'))
+ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC', '1250000'))
+ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC', '3000000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD', '5000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MODE = 'ath_uncertainty_tiny_scout'
 ATH_UNCERTAINTY_REASONS = (
@@ -231,11 +233,12 @@ SCOUT_UPSTREAM_CHAIN_LOOKBACK_SEC = int(os.environ.get('SCOUT_UPSTREAM_CHAIN_LOO
 SCOUT_UPSTREAM_CHAIN_LIMIT = int(os.environ.get('SCOUT_UPSTREAM_CHAIN_LIMIT', '300'))
 DISCOVERY_TRACKING_ENABLED = os.environ.get('DISCOVERY_TRACKING_ENABLED', 'true').lower() != 'false'
 DISCOVERY_TRACKING_POLL_SEC = max(1, int(os.environ.get('DISCOVERY_TRACKING_POLL_SEC', '10')))
-DISCOVERY_TRACKING_TTL_SEC = max(30, int(os.environ.get('DISCOVERY_TRACKING_TTL_SEC', '600')))
+DISCOVERY_TRACKING_TTL_SEC = max(30, int(os.environ.get('DISCOVERY_TRACKING_TTL_SEC', '3600')))
 DISCOVERY_TRACKING_MAX_CANDIDATES = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_CANDIDATES', '120')))
 DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE', '2')))
 DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE', '12')))
 DISCOVERY_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_MIN_LIQUIDITY_USD', '5000'))
+DISCOVERY_LOW_LIQ_BYPASS_ENABLED = os.environ.get('DISCOVERY_LOW_LIQ_BYPASS_ENABLED', 'true').lower() != 'false'
 DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD', '5000'))
 DISCOVERY_UNKNOWN_ACTIVITY_MAX_MC = float(os.environ.get('DISCOVERY_UNKNOWN_ACTIVITY_MAX_MC', '250000'))
 DISCOVERY_LOTTO_HIGH_RISK_MAX_MC = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_MAX_MC', '150000'))
@@ -253,6 +256,7 @@ PROBE_PROFIT_CAPTURE_START_PEAK = float(os.environ.get('PROBE_PROFIT_CAPTURE_STA
 PROBE_PROFIT_CAPTURE_START_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_START_FLOOR', '0.00'))
 PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR', '0.03'))
 PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR', '0.08'))
+EXIT_QUOTE_REPRICE_DIVERGENCE_PCT = float(os.environ.get('EXIT_QUOTE_REPRICE_DIVERGENCE_PCT', '0.20'))
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
@@ -1130,6 +1134,24 @@ def position_is_probe_profit_capture_candidate(pos):
     return False
 
 
+def position_is_observation_probe(pos):
+    if pos is None:
+        return False
+    state = getattr(pos, 'monitor_state', None) or {}
+    entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    try:
+        size_sol = float(
+            state.get('entrySol')
+            or getattr(pos, 'position_size_sol', 0)
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        size_sol = 0.0
+    if size_sol <= 0 or size_sol > PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL:
+        return False
+    return entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES or 'scout' in entry_mode or 'probe' in entry_mode
+
+
 def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
     """Add fast profit capture for small probe/scout paper positions."""
     if not position_is_probe_profit_capture_candidate(pos):
@@ -1189,6 +1211,18 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
             ),
             sell_pct=PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT,
         )
+    if position_is_observation_probe(pos):
+        if not already_locked and peak_pnl >= 0.10 and current_pnl > 0:
+            return _override(
+                'lock_profit',
+                (
+                    f"probe_profit_late_lock "
+                    f"(pnl={current_pnl:.1%}, peak={peak_pnl:.1%}, "
+                    f"sell={PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT:.0%})"
+                ),
+                sell_pct=PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT,
+            )
+        return exit_matrix
     if peak_pnl >= 0.15 and current_pnl <= PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR:
         return _override(
             'exit',
@@ -2621,8 +2655,17 @@ def arm_ath_uncertainty_tiny_scout(
         'token_risk': token_risk,
     }
     reject_reason = None
-    if current_mc <= 0 or current_mc >= ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC:
+    ath_mc_tier = _ath_uncertainty_mc_tier(current_mc)
+    detail['ath_mc_tier'] = ath_mc_tier
+    detail['ath_mc_thresholds'] = {
+        'base_max_mc': ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC,
+        'runner_max_mc': ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC,
+        'shadow_max_mc': ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC,
+    }
+    if ath_mc_tier in {'invalid', 'blocked'}:
         reject_reason = 'ath_uncertainty_mc_gate'
+    elif ath_mc_tier == 'shadow':
+        reject_reason = 'ath_uncertainty_mc_shadow_only'
     elif liquidity_usd < ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD:
         reject_reason = 'ath_uncertainty_liquidity_too_low'
     elif top10_pct and top10_pct > 45:
@@ -3296,6 +3339,46 @@ TOKEN_RISK_DANGER_REASON_PATTERNS = (
 )
 
 
+def _row_value(row, key, default=None):
+    try:
+        if key in row.keys():
+            return row[key]
+    except Exception:
+        pass
+    return default
+
+
+def _token_risk_row_is_observation_probe(row):
+    entry_mode = str(_row_value(row, 'entry_mode') or '')
+    monitor_state = parse_monitor_state(_row_value(row, 'monitor_state_json')) or {}
+    if not entry_mode:
+        entry_mode = str(monitor_state.get('entryMode') or '')
+    size_sol = _safe_float(
+        _row_value(row, 'position_size_sol', None),
+        _safe_float(monitor_state.get('entrySol'), 0.0),
+    )
+    replay_source = str(_row_value(row, 'replay_source') or '')
+    if size_sol <= 0 or size_sol > PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL:
+        return False
+    return (
+        entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES
+        or 'scout' in entry_mode
+        or 'probe' in entry_mode
+        or 'probe' in replay_source
+    )
+
+
+def _token_risk_probe_loss_should_poison(reason):
+    reason = str(reason or '').lower()
+    return any(marker in reason for marker in (
+        'rug',
+        'honeypot',
+        'blacklist',
+        'freeze',
+        'mint_authority',
+    ))
+
+
 def classify_token_risk_exit(row):
     pnl = _safe_float(row['pnl_pct'], 0.0)
     peak = _safe_float(row['peak_pnl'], 0.0) if 'peak_pnl' in row.keys() else 0.0
@@ -3303,6 +3386,9 @@ def classify_token_risk_exit(row):
     category = None
     risk_profile = None
     counts_as_failure = True
+
+    if pnl < 0 and _token_risk_row_is_observation_probe(row) and not _token_risk_probe_loss_should_poison(reason):
+        return None
 
     if 'gap_crash' in reason:
         if pnl > 0:
@@ -3378,17 +3464,33 @@ def token_quarantine_state(db, token_ca, *, now_ts=None, reclaim=None):
         return {'blocked': False, 'reason': 'disabled'}
     now_ts = float(now_ts or time.time())
     cutoff = now_ts - TOKEN_RISK_FAILURE_WINDOW_SEC
-    rows = db.execute(
-        """
-        SELECT id, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route
-        FROM paper_trades
-        WHERE token_ca = ?
-          AND exit_ts IS NOT NULL
-          AND exit_ts >= ?
-        ORDER BY exit_ts DESC
-        """,
-        (token_ca, cutoff),
-    ).fetchall()
+    try:
+        rows = db.execute(
+            """
+            SELECT id, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route,
+                   position_size_sol, entry_mode, monitor_state_json
+            FROM paper_trades
+            WHERE token_ca = ?
+              AND exit_ts IS NOT NULL
+              AND exit_ts >= ?
+            ORDER BY exit_ts DESC
+            """,
+            (token_ca, cutoff),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if 'no such column' not in str(exc):
+            raise
+        rows = db.execute(
+            """
+            SELECT id, symbol, exit_ts, pnl_pct, peak_pnl, exit_reason, replay_source, signal_route
+            FROM paper_trades
+            WHERE token_ca = ?
+              AND exit_ts IS NOT NULL
+              AND exit_ts >= ?
+            ORDER BY exit_ts DESC
+            """,
+            (token_ca, cutoff),
+        ).fetchall()
     risk_events = []
     for row in rows:
         event = classify_token_risk_exit(row)
@@ -3679,6 +3781,8 @@ def record_scout_quality_decision(
 
 
 DISCOVERY_SOFT_QUALITY_REASONS = {
+    'ath_uncertainty_liquidity_too_low',
+    'scout_quality_liquidity_low',
     'scout_quality_buy_pressure_weak',
     'scout_quality_volume_low',
     'scout_quality_tx_low',
@@ -3716,7 +3820,7 @@ def _discovery_mode_for_ath_reason(reason):
     if reason in DISCOVERY_MATRIX_RECLAIM_REASONS:
         return MATRIX_RECLAIM_TINY_PROBE_MODE
     if reason.startswith('momentum check failed') or reason.startswith('momentum check waiting'):
-        return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
+        return MATRIX_RECLAIM_TINY_PROBE_MODE
     return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
 
 
@@ -3871,15 +3975,119 @@ def _discovery_synthetic_watchlist_entry(candidate, dex_snapshot=None):
     }
 
 
-def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top10_pct=None, gmgn_policy=None):
+def _ath_uncertainty_mc_tier(current_mc):
+    current_mc = _first_number(current_mc)
+    if current_mc <= 0:
+        return 'invalid'
+    if current_mc <= ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC:
+        return 'base'
+    if current_mc <= ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC:
+        return 'runner'
+    if current_mc <= ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC:
+        return 'shadow'
+    return 'blocked'
+
+
+def _first_float_any(*values, default=None):
+    for value in values:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _discovery_activity_metrics(dex_snapshot=None, lifecycle=None):
+    dex_snapshot = dex_snapshot or {}
+    features = (lifecycle or {}).get('lifecycle_features') or {}
+    buys_m5 = _first_float_any(dex_snapshot.get('buys_m5'), features.get('buys_m5'), default=None)
+    sells_m5 = _first_float_any(dex_snapshot.get('sells_m5'), features.get('sells_m5'), default=None)
+    tx_m5 = _first_float_any(dex_snapshot.get('tx_m5'), features.get('tx_m5'), default=None)
+    if tx_m5 is None and buys_m5 is not None and sells_m5 is not None:
+        tx_m5 = buys_m5 + sells_m5
+    buy_sell_ratio = _first_float_any(
+        dex_snapshot.get('buy_sell_ratio'),
+        features.get('buy_sell_ratio'),
+        default=None,
+    )
+    if buy_sell_ratio is None and buys_m5 is not None:
+        buy_sell_ratio = buys_m5 / max(sells_m5 or 0.0, 1.0)
+    return {
+        'buy_sell_ratio': buy_sell_ratio,
+        'vol_m5': _first_float_any(dex_snapshot.get('vol_m5'), features.get('vol_m5'), default=None),
+        'tx_m5': tx_m5,
+        'price_change_m5': _first_float_any(
+            dex_snapshot.get('price_change_m5'),
+            features.get('price_change_m5'),
+            default=None,
+        ),
+        'buys_m5': buys_m5,
+        'sells_m5': sells_m5,
+    }
+
+
+def _discovery_low_liquidity_activity_bypass(mode, *, liquidity_usd, activity=None):
+    if not DISCOVERY_LOW_LIQ_BYPASS_ENABLED:
+        return None
+    if _first_number(liquidity_usd) >= DISCOVERY_MIN_LIQUIDITY_USD:
+        return None
+    activity = activity or {}
+    bs = _first_float_any(activity.get('buy_sell_ratio'), default=0.0) or 0.0
+    vol_m5 = _first_float_any(activity.get('vol_m5'), default=0.0) or 0.0
+    tx_m5 = _first_float_any(activity.get('tx_m5'), default=0.0) or 0.0
+    pc_m5 = _first_float_any(activity.get('price_change_m5'), default=0.0) or 0.0
+    thresholds = {
+        'min_bs': 1.10,
+        'min_vol_m5': 12000.0,
+        'min_tx_m5': 120.0,
+        'max_negative_m5': -10.0,
+    }
+    if mode in {ATH_SOFT_RECLAIM_TINY_SCOUT_MODE, MATRIX_RECLAIM_TINY_PROBE_MODE}:
+        thresholds = {
+            'min_bs': 1.05,
+            'min_vol_m5': 5000.0,
+            'min_tx_m5': 50.0,
+            'max_negative_m5': -5.0,
+        }
+    elif mode == LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE:
+        thresholds = {
+            'min_bs': 1.05,
+            'min_vol_m5': 5000.0,
+            'min_tx_m5': 60.0,
+            'max_negative_m5': -12.0,
+        }
+    passed = (
+        bs >= thresholds['min_bs']
+        and vol_m5 >= thresholds['min_vol_m5']
+        and tx_m5 >= thresholds['min_tx_m5']
+        and pc_m5 >= thresholds['max_negative_m5']
+    )
+    return {
+        'pass': passed,
+        'reason': 'low_liquidity_activity_bypass' if passed else 'low_liquidity_activity_not_enough',
+        'observed': {
+            'liquidity_usd': liquidity_usd,
+            'buy_sell_ratio': bs,
+            'vol_m5': vol_m5,
+            'tx_m5': tx_m5,
+            'price_change_m5': pc_m5,
+        },
+        'thresholds': thresholds,
+    }
+
+
+def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top10_pct=None, gmgn_policy=None, low_liquidity_bypass=None):
     gmgn_policy = gmgn_policy or {}
     if gmgn_policy.get('action') == 'reject':
         return gmgn_policy.get('reason') or 'gmgn_policy_reject'
-    if liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD:
+    if liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD and not (low_liquidity_bypass or {}).get('pass'):
         return 'discovery_liquidity_too_low'
     if mode in {ATH_SOFT_RECLAIM_TINY_SCOUT_MODE, MATRIX_RECLAIM_TINY_PROBE_MODE}:
-        if current_mc <= 0 or current_mc >= ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC:
+        mc_tier = _ath_uncertainty_mc_tier(current_mc)
+        if mc_tier in {'invalid', 'blocked'}:
             return 'discovery_ath_mc_gate'
+        if mc_tier == 'shadow':
+            return 'discovery_ath_mc_shadow_only'
         if top10_pct and top10_pct > 45:
             return 'discovery_ath_top10_too_high'
     elif mode == UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE:
@@ -3888,7 +4096,7 @@ def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top
     elif mode == LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE:
         if current_mc <= 0 or current_mc >= DISCOVERY_LOTTO_HIGH_RISK_MAX_MC:
             return 'discovery_lotto_high_risk_mc_gate'
-        if liquidity_usd < DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD:
+        if liquidity_usd < DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD and not (low_liquidity_bypass or {}).get('pass'):
             return 'discovery_lotto_high_risk_liquidity_too_low'
         if top1_pct and top1_pct > DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT:
             return 'discovery_lotto_high_risk_top1_extreme'
@@ -4140,6 +4348,17 @@ def process_discovery_tracking_candidates(
             (w_entry or {}).get('signal_top10'),
             features.get('top10_pct'),
         )
+        activity = _discovery_activity_metrics(dex_snapshot, lifecycle)
+        low_liquidity_bypass = _discovery_low_liquidity_activity_bypass(
+            mode,
+            liquidity_usd=liquidity_usd,
+            activity=activity,
+        )
+        effective_liquidity_usd = (
+            DISCOVERY_MIN_LIQUIDITY_USD
+            if (low_liquidity_bypass or {}).get('pass') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD
+            else liquidity_usd
+        )
         detail = {
             'paper_only_scout': True,
             'probe': True,
@@ -4154,6 +4373,9 @@ def process_discovery_tracking_candidates(
             'attempts': candidate.get('attempts'),
             'current_mc': current_mc,
             'liquidity_usd': liquidity_usd,
+            'effective_liquidity_usd': effective_liquidity_usd,
+            'low_liquidity_bypass': low_liquidity_bypass,
+            'activity': activity,
             'top1_pct': top1_pct,
             'top10_pct': top10_pct,
             'current_reclaim': current_reclaim,
@@ -4182,6 +4404,7 @@ def process_discovery_tracking_candidates(
             top1_pct=top1_pct,
             top10_pct=top10_pct,
             gmgn_policy=gmgn_policy,
+            low_liquidity_bypass=low_liquidity_bypass,
         )
         if hard_reason:
             candidate['last_wait_reason'] = hard_reason
@@ -4232,7 +4455,7 @@ def process_discovery_tracking_candidates(
             live_concentration=live_concentration,
             position_size_sol=PAPER_TINY_SCOUT_SIZE_SOL,
             current_mc=current_mc,
-            liquidity_usd=liquidity_usd,
+            liquidity_usd=effective_liquidity_usd,
             top1_pct=top1_pct,
             top10_pct=top10_pct,
         )
@@ -10809,7 +11032,17 @@ def run_monitor(db):
 
                     # Tighter trailing stop for SUSTAINED_ATH to lock in profits
                     _custom_stage1_exit = dict(stage1_exit)
-                    if pending_w_entry and pending_w_entry.get('is_sustained_ath'):
+                    if pending_is_paper_tiny_scout(pending):
+                        _probe_sl_pct = 35.0 if _pending_signal_route == 'LOTTO' or pending.get('is_lotto') else 30.0
+                        _custom_stage1_exit['stopLossPct'] = max(float(_custom_stage1_exit.get('stopLossPct') or 0.0), _probe_sl_pct)
+                        _custom_stage1_exit['trailStartPct'] = max(float(_custom_stage1_exit.get('trailStartPct') or 0.0), 100.0)
+                        _custom_stage1_exit['timeoutMinutes'] = max(int(_custom_stage1_exit.get('timeoutMinutes') or 0), 240)
+                        log.info(
+                            f"  [OBS_PROBE] {pending['symbol']} observation exit room: "
+                            f"SL={_custom_stage1_exit['stopLossPct']:.0f}% "
+                            f"trail_start={_custom_stage1_exit['trailStartPct']:.0f}%"
+                        )
+                    if pending_w_entry and pending_w_entry.get('is_sustained_ath') and not pending_is_paper_tiny_scout(pending):
                         _custom_stage1_exit['trailStartPct'] = 10.0
                         _custom_stage1_exit['trailFactor'] = 0.5
                         log.info(f"  [SUSTAINED_ATH] {pending['symbol']} tight trail lock (10% start, 0.5x factor)")
@@ -10841,6 +11074,8 @@ def run_monitor(db):
                             _base_sl = -0.18
                         else:
                             _base_sl = get_adaptive_stop_loss()  # returns -0.15
+                        if pending_is_paper_tiny_scout(pending):
+                            _base_sl = -0.35 if pending.get('is_lotto') else -0.30
                         _final_sl = _base_sl
                         
                         if _spread > 0:
@@ -11391,6 +11626,7 @@ def run_monitor(db):
                         and phase_policy_payload
                         and action not in ('partial_sell', 'exit')
                         and not should_exit
+                        and not position_is_observation_probe(pos)
                     ):
                         _policy_route = (
                             (w_entry or {}).get('signal_route')
@@ -11736,6 +11972,17 @@ def run_monitor(db):
                     realized_pnl = (float(actual_out) - float(pos.position_size_sol)) / float(pos.position_size_sol)
                     accounting_source = 'final_exit_only'
 
+                if exit_quote_pnl is not None and exit_quote_mark_gap is not None:
+                    if abs(exit_quote_mark_gap) >= EXIT_QUOTE_REPRICE_DIVERGENCE_PCT:
+                        log.warning(
+                            f"  [PNL_SANITY] {pos.symbol} trigger/quote gap={exit_quote_mark_gap*100:+.0f}pp "
+                            f"trigger={trigger_pnl*100:+.1f}% quote={exit_quote_pnl*100:+.1f}%. "
+                            f"Using executable quote PnL."
+                        )
+                        realized_pnl = exit_quote_pnl
+                        accounting_source = f'quote_pnl_reprice(was={accounting_source})'
+                        exit_eval['quoteSanityStatus'] = 'exit_repriced_quote_mark_divergence'
+
                 # ─── PnL Sanity Guard ────────────────────────────────────
                 # quotedOutAmount from Jupiter can be wildly wrong for
                 # low-liquidity tokens (e.g. returning token amount instead
@@ -11744,7 +11991,14 @@ def run_monitor(db):
                 # which is derived from real market prices.
                 if trigger_pnl is not None and realized_pnl is not None:
                     divergence = abs(realized_pnl - trigger_pnl)
-                    if divergence > 0.50:  # >50 percentage points
+                    if (
+                        divergence > 0.50
+                        and not (
+                            exit_quote_pnl is not None
+                            and exit_quote_mark_gap is not None
+                            and abs(exit_quote_mark_gap) >= EXIT_QUOTE_REPRICE_DIVERGENCE_PCT
+                        )
+                    ):  # >50 percentage points
                         log.warning(
                             f"  [PNL_SANITY] {pos.symbol} accounting PnL={realized_pnl*100:+.1f}% "
                             f"diverges from trigger PnL={trigger_pnl*100:+.1f}% "
