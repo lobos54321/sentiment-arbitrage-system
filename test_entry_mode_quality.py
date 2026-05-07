@@ -75,3 +75,14 @@ def test_pullback_tiny_scout_can_shadow_after_two_dead_probes():
 
     assert decision["decision"] == "shadow"
     assert decision["reason"] == "entry_mode_quality_degraded"
+
+
+def test_matrix_micro_momentum_probe_shadows_after_four_bad_givebacks():
+    db = _db()
+    for idx in range(4):
+        _insert(db, "matrix_micro_momentum_tiny_probe", 0.08, -0.06, idx)
+
+    decision = evaluate_entry_mode_quality(db, "matrix_micro_momentum_tiny_probe", now_ts=4000)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_degraded"

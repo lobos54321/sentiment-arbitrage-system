@@ -111,6 +111,14 @@ _PROFILE_OVERRIDES = {
         "max_negative_m5": 0.0,
         "block_recent_failures": True,
     },
+    "matrix_micro_momentum_tiny_probe": {
+        "min_buy_sell_ratio": 1.15,
+        "min_vol_m5": 8000.0,
+        "min_tx_m5": 80,
+        "max_negative_m5": -3.0,
+        "max_top10_pct": 45.0,
+        "block_recent_failures": True,
+    },
     "unknown_data_activity_tiny_scout": {
         "min_buy_sell_ratio": 1.10,
         "min_vol_m5": 12000.0,

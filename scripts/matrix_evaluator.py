@@ -18,7 +18,7 @@ import time
 import logging
 import os
 
-from profit_protect_policy import ath_moon_bag_floor, profit_protect_floor
+from profit_protect_policy import ath_moon_bag_floor, probe_runner_floor, profit_protect_floor
 
 log = logging.getLogger('matrix')
 
@@ -1352,7 +1352,7 @@ class ExitMatrixEvaluator:
         # === ATH Phase 3 Moon Bag: shared dynamic floor (house money, let it moonshot) ===
         _is_ath_entry = entry.get('type') == 'ATH' or entry.get('signal_type') == 'ATH'
         if _is_ath_entry:
-            moon_floor = ath_moon_bag_floor(moon_peak)
+            moon_floor = probe_runner_floor(moon_peak) if moon_peak < 0.50 else ath_moon_bag_floor(moon_peak)
             if moon_floor is not None and moon_floor > 0 and current_pnl < moon_floor:
                 return {
                     'action': 'exit',

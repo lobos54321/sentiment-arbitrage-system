@@ -11,6 +11,13 @@ ATH_MOON_FLOOR_FULL_MOON_PEAK = float(os.environ.get("ATH_MOON_FLOOR_FULL_MOON_P
 ATH_MOON_FLOOR_TIGHT_MARGIN = float(os.environ.get("ATH_MOON_FLOOR_TIGHT_MARGIN", "0.25"))
 ATH_MOON_FLOOR_WIDE_MARGIN = float(os.environ.get("ATH_MOON_FLOOR_WIDE_MARGIN", "0.40"))
 ATH_MOON_FLOOR_MIN_FACTOR = float(os.environ.get("ATH_MOON_FLOOR_MIN_FACTOR", "0.55"))
+PROBE_RUNNER_FLOOR_START_PEAK = float(os.environ.get("PROBE_RUNNER_FLOOR_START_PEAK", "0.10"))
+PROBE_RUNNER_FLOOR_MID_PEAK = float(os.environ.get("PROBE_RUNNER_FLOOR_MID_PEAK", "0.20"))
+PROBE_RUNNER_FLOOR_HIGH_PEAK = float(os.environ.get("PROBE_RUNNER_FLOOR_HIGH_PEAK", "0.45"))
+PROBE_RUNNER_FLOOR_LOW_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_LOW_MIN", "0.04"))
+PROBE_RUNNER_FLOOR_MID_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_MID_MIN", "0.07"))
+PROBE_RUNNER_FLOOR_HIGH_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_HIGH_MIN", "0.12"))
+PROBE_RUNNER_FLOOR_FACTOR = float(os.environ.get("PROBE_RUNNER_FLOOR_FACTOR", "0.35"))
 
 
 def profit_protect_floor(peak_pnl, *, slip_buffer=None):
@@ -66,3 +73,20 @@ def ath_moon_bag_floor(peak_pnl):
     blend_width = max(ATH_MOON_FLOOR_FULL_MOON_PEAK - ATH_MOON_FLOOR_BLEND_PEAK, 1e-9)
     blend = min(1.0, max(0.0, (peak - ATH_MOON_FLOOR_BLEND_PEAK) / blend_width))
     return tight_floor * (1.0 - blend) + wide_floor * blend
+
+
+def probe_runner_floor(peak_pnl):
+    """Return a post-lock runner floor for 10-50% probe peaks."""
+    try:
+        peak = float(peak_pnl or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if peak >= ATH_MOON_FLOOR_LOW_PEAK:
+        return ath_moon_bag_floor(peak)
+    if peak < PROBE_RUNNER_FLOOR_START_PEAK:
+        return None
+    if peak >= PROBE_RUNNER_FLOOR_HIGH_PEAK:
+        return max(PROBE_RUNNER_FLOOR_HIGH_MIN, peak * PROBE_RUNNER_FLOOR_FACTOR)
+    if peak >= PROBE_RUNNER_FLOOR_MID_PEAK:
+        return max(PROBE_RUNNER_FLOOR_MID_MIN, peak * PROBE_RUNNER_FLOOR_FACTOR)
+    return max(PROBE_RUNNER_FLOOR_LOW_MIN, peak * PROBE_RUNNER_FLOOR_FACTOR)

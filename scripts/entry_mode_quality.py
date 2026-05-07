@@ -32,6 +32,11 @@ _MODE_OVERRIDES = {
         "capture_bad_final": float(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_RECLAIM_BAD_FINAL", "-0.05")),
         "capture_giveback": float(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_RECLAIM_GIVEBACK", "0.12")),
     },
+    "matrix_micro_momentum_tiny_probe": {
+        "min_samples": int(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_MICRO_MIN_SAMPLES", "4")),
+        "capture_bad_final": float(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_MICRO_BAD_FINAL", "-0.05")),
+        "capture_giveback": float(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_MICRO_GIVEBACK", "0.10")),
+    },
     "pullback_tiny_scout": {
         "min_samples": int(os.environ.get("ENTRY_MODE_QUALITY_PULLBACK_MIN_SAMPLES", "2")),
         "capture_bad_final": float(os.environ.get("ENTRY_MODE_QUALITY_PULLBACK_BAD_FINAL", "-0.05")),

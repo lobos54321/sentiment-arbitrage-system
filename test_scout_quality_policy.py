@@ -73,3 +73,41 @@ def test_matrix_reclaim_requires_cleaner_activity_than_soft_reclaim():
 
     assert weak_matrix["pass"] is False
     assert weak_matrix["reason"] == "scout_quality_buy_pressure_weak"
+
+
+def test_matrix_micro_momentum_probe_has_its_own_clean_activity_profile():
+    quality = evaluate_scout_quality(
+        mode="matrix_micro_momentum_tiny_probe",
+        route="ATH",
+        trend={
+            "liquidity_usd": 10000,
+            "price_change_m5": -2.5,
+            "vol_m5": 9000,
+            "tx_m5": 90,
+            "buy_sell_ratio": 1.16,
+            "top10_holder_pct": 40,
+        },
+        position_size_sol=0.003,
+    )
+
+    assert quality["pass"] is True
+    assert quality["reason"] == "scout_quality_pass"
+
+
+def test_matrix_micro_momentum_probe_blocks_deeper_negative_trend():
+    quality = evaluate_scout_quality(
+        mode="matrix_micro_momentum_tiny_probe",
+        route="ATH",
+        trend={
+            "liquidity_usd": 10000,
+            "price_change_m5": -3.5,
+            "vol_m5": 9000,
+            "tx_m5": 90,
+            "buy_sell_ratio": 1.16,
+            "top10_holder_pct": 40,
+        },
+        position_size_sol=0.003,
+    )
+
+    assert quality["pass"] is False
+    assert quality["reason"] == "scout_quality_negative_trend"

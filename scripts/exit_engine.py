@@ -11,7 +11,7 @@ import logging
 import threading
 import os
 
-from profit_protect_policy import ath_moon_bag_floor, profit_protect_floor
+from profit_protect_policy import ath_moon_bag_floor, probe_runner_floor, profit_protect_floor
 
 log = logging.getLogger('paper_trade_monitor')
 
@@ -249,6 +249,25 @@ class ExitGuardianThread(threading.Thread):
         except Exception as _e:
             log.warning(f"[ExitGuardian] {pos.symbol} instant quote failed: {_e}")
             return None
+
+    @staticmethod
+    def _is_probe_runner(pos):
+        state = getattr(pos, 'monitor_state', None) or {}
+        entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+        try:
+            entry_sol = float(state.get('entrySol') or getattr(pos, 'position_size_sol', 0) or 0.0)
+        except (TypeError, ValueError):
+            entry_sol = 0.0
+        try:
+            sold_pct = float(state.get('soldPct') or 0.0)
+        except (TypeError, ValueError):
+            sold_pct = 0.0
+        return (
+            sold_pct > 0
+            and entry_sol > 0
+            and entry_sol <= OBSERVATION_PROBE_MAX_SIZE_SOL
+            and ('scout' in entry_mode or 'probe' in entry_mode)
+        )
 
     def get_pending_exits(self):
         """Retrieve and clear pending exit signals (called by main loop)."""
@@ -868,7 +887,11 @@ class ExitGuardianThread(threading.Thread):
                 elif _is_ath_entry and is_moon:
                     # === ATH Phase 3 Moon Bag: shared dynamic floor ===
                     moon_peak = pos.peak_pnl
-                    moon_floor = ath_moon_bag_floor(moon_peak)
+                    moon_floor = (
+                        probe_runner_floor(moon_peak)
+                        if self._is_probe_runner(pos)
+                        else ath_moon_bag_floor(moon_peak)
+                    )
                     if moon_floor is not None and moon_floor > 0 and pnl < moon_floor:
                         log.info(
                             f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE3 MOON TRAIL: "
@@ -1140,18 +1163,20 @@ class ExitGuardianThread(threading.Thread):
                         self.store.update_position_state(w_entry['id'], moon_peak_pnl=pnl)
 
                     trail_factor = w_entry.get('moon_trail_factor', 0.2) or 0.2
-                    moon_floor = moon_peak * trail_factor
+                    runner_floor = probe_runner_floor(moon_peak) if self._is_probe_runner(pos) else None
+                    moon_floor = runner_floor if runner_floor is not None else moon_peak * trail_factor
                     if moon_peak > 0 and pnl < moon_floor:
+                        floor_reason = 'probe_runner_floor' if runner_floor is not None else 'moon_trail'
                         log.info(
                             f"[ExitGuardian] 🔔 {pos.symbol} MOON TRAIL: "
                             f"pnl={pnl*100:+.1f}% < floor={moon_floor*100:.1f}% "
-                            f"(peak={moon_peak*100:.1f}% factor={trail_factor})"
+                            f"(peak={moon_peak*100:.1f}% factor={trail_factor} rule={floor_reason})"
                         )
                         with self.exit_queue_lock:
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
-                                'reason': f'guardian_moon_trail (pnl={pnl:.1%} < floor={moon_floor:.1%})',
+                                'reason': f'guardian_{floor_reason} (pnl={pnl:.1%} < floor={moon_floor:.1%})',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             '_instant_sim': self._get_instant_quote(pos, ca),

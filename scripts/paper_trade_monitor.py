@@ -54,6 +54,7 @@ from entry_engine import (
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
 from exit_engine import ExitGuardianThread, process_guardian_exits
+from profit_protect_policy import probe_runner_floor
 from paper_decision_audit import (
     init_decision_audit,
     missed_attribution_coverage,
@@ -126,6 +127,13 @@ MATRIX_ATH_FULL_SIZE_SOL = float(os.environ.get('MATRIX_ATH_FULL_SIZE_SOL', '0.0
 MATRIX_ATH_HALF_SIZE_SOL = float(os.environ.get('MATRIX_ATH_HALF_SIZE_SOL', '0.04'))
 PAPER_TINY_SCOUT_ENTRY_MODES = set(PAPER_TINY_SCOUT_MODES)
 PAPER_TINY_SCOUT_SIZE_SOL = float(os.environ.get('PAPER_TINY_SCOUT_SIZE_SOL', '0.003'))
+PRIMARY_PROVING_CAP_ENABLED = os.environ.get('PRIMARY_PROVING_CAP_ENABLED', 'true').lower() != 'false'
+PRIMARY_PROVING_CAP_SIZE_SOL = float(os.environ.get('PRIMARY_PROVING_CAP_SIZE_SOL', '0.02'))
+PRIMARY_PROVING_CAP_MODES = {
+    item.strip()
+    for item in os.environ.get('PRIMARY_PROVING_CAP_MODES', 'momentum_direct_entry').split(',')
+    if item.strip()
+}
 LOTTO_PULLBACK_SIZE_PROTECT_ENABLED = os.environ.get('LOTTO_PULLBACK_SIZE_PROTECT_ENABLED', 'true').lower() != 'false'
 LOTTO_PULLBACK_STRONG_MIN_TX_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_TX_M5', '150'))
 LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_VOL_M5', '15000'))
@@ -264,6 +272,7 @@ OBSERVATION_PROBE_TOXIC_COOLDOWN_SEC = int(os.environ.get('OBSERVATION_PROBE_TOX
 ATH_SOFT_RECLAIM_TINY_SCOUT_MODE = 'ath_soft_reclaim_tiny_scout'
 UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE = 'unknown_data_activity_tiny_scout'
 MATRIX_RECLAIM_TINY_PROBE_MODE = 'matrix_reclaim_tiny_probe'
+MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE = 'matrix_micro_momentum_tiny_probe'
 LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE = 'lotto_high_risk_discovery_probe'
 PROBE_PROFIT_CAPTURE_ENABLED = os.environ.get('PROBE_PROFIT_CAPTURE_ENABLED', 'true').lower() != 'false'
 PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL = float(os.environ.get('PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL', '0.02'))
@@ -273,6 +282,11 @@ PROBE_PROFIT_CAPTURE_START_PEAK = float(os.environ.get('PROBE_PROFIT_CAPTURE_STA
 PROBE_PROFIT_CAPTURE_START_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_START_FLOOR', '0.00'))
 PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR', '0.03'))
 PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR = float(os.environ.get('PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR', '0.08'))
+DISCOVERY_LOW_LIQ_QUOTE_PROBE_ENABLED = os.environ.get('DISCOVERY_LOW_LIQ_QUOTE_PROBE_ENABLED', 'true').lower() != 'false'
+DISCOVERY_LOW_LIQ_EXTREME_MIN_BS = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MIN_BS', '1.20'))
+DISCOVERY_LOW_LIQ_EXTREME_MIN_VOL_M5 = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MIN_VOL_M5', '20000'))
+DISCOVERY_LOW_LIQ_EXTREME_MIN_TX_M5 = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MIN_TX_M5', '200'))
+DISCOVERY_LOW_LIQ_EXTREME_MAX_NEG_M5 = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MAX_NEG_M5', '0'))
 EXIT_QUOTE_REPRICE_DIVERGENCE_PCT = float(os.environ.get('EXIT_QUOTE_REPRICE_DIVERGENCE_PCT', '0.20'))
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
@@ -1244,6 +1258,7 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
                     'start_floor': PROBE_PROFIT_CAPTURE_START_FLOOR,
                     'peak10_floor': PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR,
                     'peak15_floor': PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR,
+                    'runner_floor': probe_runner_floor(peak_pnl),
                 },
             },
         })
@@ -1260,6 +1275,17 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
                 f"sell={PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT:.0%})"
             ),
             sell_pct=PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT,
+        )
+    runner_floor = probe_runner_floor(peak_pnl) if already_locked else None
+    if runner_floor is not None and current_pnl <= runner_floor:
+        return _override(
+            'exit',
+            (
+                f"probe_runner_floor "
+                f"(pnl={current_pnl:.1%} <= floor={runner_floor:.1%}, "
+                f"peak={peak_pnl:.1%})"
+            ),
+            trail_floor=runner_floor,
         )
     if position_is_observation_probe(pos):
         if not already_locked and peak_pnl >= 0.10 and current_pnl > 0:
@@ -1368,6 +1394,7 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
             ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
             UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE,
             MATRIX_RECLAIM_TINY_PROBE_MODE,
+            MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
             LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE,
         }
     )
@@ -1456,6 +1483,7 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
             ATH_UNCERTAINTY_TINY_SCOUT_MODE,
             ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
             MATRIX_RECLAIM_TINY_PROBE_MODE,
+            MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
         }:
             max_spread_pct = min(max_spread_pct, 2.0)
             tiny_scout_spread_cap_pct = max_spread_pct
@@ -2391,6 +2419,79 @@ def _reason_matches_any(reason, prefixes):
     return any(reason == prefix or reason.startswith(prefix) for prefix in prefixes)
 
 
+def _matrix_micro_momentum_reason(reason):
+    reason = str(reason or '')
+    lower = reason.lower()
+    if lower.startswith('momentum check waiting: flat_no_fresh_tick'):
+        return True
+    if not lower.startswith('momentum check failed:'):
+        return False
+    if 'noise' in lower and '< 0.8%' in lower:
+        return True
+    match = re.search(r'declining\s+([+-]?\d+(?:\.\d+)?)%', lower)
+    if match:
+        try:
+            return abs(float(match.group(1))) <= 0.25
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _entry_mode_for_ath_uncertainty_reason(reason):
+    if _matrix_micro_momentum_reason(reason):
+        return MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE
+    return ATH_UNCERTAINTY_TINY_SCOUT_MODE
+
+
+def _apply_actual_tiny_trigger_mode(pending, timing_reason):
+    """Preserve parent scout mode while attributing live EV to the real trigger."""
+    pending = pending or {}
+    timing_reason = str(timing_reason or '')
+    parent_mode = pending.get('parent_scout_mode') or pending.get('scout_mode') or pending.get('entry_mode')
+    if parent_mode in PAPER_TINY_SCOUT_ENTRY_MODES:
+        pending['parent_scout_mode'] = parent_mode
+        pending['entry_trigger_mode'] = timing_reason
+        if timing_reason in PAPER_TINY_SCOUT_ENTRY_MODES:
+            pending['entry_mode'] = timing_reason
+            pending['scout_mode'] = parent_mode
+        else:
+            pending['entry_mode'] = parent_mode
+            pending['scout_mode'] = parent_mode
+    else:
+        pending['entry_mode'] = timing_reason
+        pending['entry_trigger_mode'] = timing_reason
+    return pending.get('entry_mode')
+
+
+def _apply_primary_proving_cap(pending, size_sol):
+    pending = pending or {}
+    try:
+        current_size = float(size_sol or 0.0)
+    except (TypeError, ValueError):
+        current_size = 0.0
+    entry_mode = str(pending.get('entry_mode') or '')
+    if (
+        not PRIMARY_PROVING_CAP_ENABLED
+        or pending_is_paper_tiny_scout(pending)
+        or entry_mode not in PRIMARY_PROVING_CAP_MODES
+        or current_size <= 0
+    ):
+        return current_size, None
+    capped_size = min(current_size, PRIMARY_PROVING_CAP_SIZE_SOL)
+    detail = {
+        'entry_mode': entry_mode,
+        'old_size_sol': current_size,
+        'new_size_sol': capped_size,
+        'cap_sol': PRIMARY_PROVING_CAP_SIZE_SOL,
+        'capped': capped_size < current_size,
+        'reason': 'primary_proving_cap',
+    }
+    if capped_size < current_size:
+        pending['kelly_position_sol'] = capped_size
+        pending['primary_proving_cap'] = detail
+    return capped_size, detail
+
+
 def arm_lotto_upstream_realtime_tiny_scout(
     db,
     watchlist,
@@ -2688,13 +2789,16 @@ def arm_ath_uncertainty_tiny_scout(
         token_risk = token_quarantine_state(db, token_ca, now_ts=now_ts, reclaim=scout_reclaim)
     except Exception as exc:
         token_risk = {'blocked': False, 'reason': 'token_risk_unavailable', 'error': str(exc)}
+    entry_mode = _entry_mode_for_ath_uncertainty_reason(reason)
     detail = {
         'paper_only_scout': True,
         'probe': True,
         'probe_source': 'ath_uncertainty',
         'source_component': 'matrix_evaluator',
         'source_reject_reason': reason,
-        'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'entry_mode': entry_mode,
+        'parent_scout_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'entry_trigger_mode': entry_mode,
         'position_size_sol': ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
         'scores': eval_res.get('scores'),
         'reasons': eval_res.get('reasons'),
@@ -2721,7 +2825,7 @@ def arm_ath_uncertainty_tiny_scout(
     elif top10_pct and top10_pct > 45:
         reject_reason = 'ath_uncertainty_top10_too_high'
     scout_quality = evaluate_scout_quality(
-        mode=ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        mode=entry_mode,
         route='ATH',
         trend=dex_snapshot,
         lifecycle=scout_lifecycle,
@@ -2743,7 +2847,8 @@ def arm_ath_uncertainty_tiny_scout(
         route='ATH',
         lifecycle=scout_lifecycle,
         scout_size={
-            'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            'entry_mode': entry_mode,
+            'parent_scout_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
             'actual_size_sol': ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
             'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
         },
@@ -2817,8 +2922,10 @@ def arm_ath_uncertainty_tiny_scout(
         'matrix_scores': eval_res.get('scores') or {},
         'smart_entry_retries': w_entry.get('_smart_entry_retries', 0),
         'w_entry': w_entry,
-        'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
-        'scout_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'entry_mode': entry_mode,
+        'scout_mode': entry_mode,
+        'parent_scout_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'entry_trigger_mode': entry_mode,
         'paper_only_scout': True,
         'replay_source': 'live_monitor_ath_uncertainty',
         'ath_uncertainty_tiny_scout': True,
@@ -2829,7 +2936,7 @@ def arm_ath_uncertainty_tiny_scout(
         component='ath_uncertainty_scout',
         event_type='pending_entry',
         decision='pending',
-        reason=ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        reason=entry_mode,
         token_ca=token_ca,
         symbol=symbol,
         lifecycle_id=lifecycle_id,
@@ -3804,6 +3911,9 @@ def record_scout_quality_decision(
     reason = scout_quality.get('reason') or ('scout_quality_pass' if passed else 'scout_quality_reject')
     payload = {
         'entry_mode': mode,
+        'actual_entry_mode': pending.get('entry_mode') or mode,
+        'parent_scout_mode': pending.get('parent_scout_mode') or pending.get('scout_mode'),
+        'entry_trigger_mode': pending.get('entry_trigger_mode') or pending.get('timing_entry_mode'),
         'quality_passed': passed,
         'scout_quality': scout_quality,
         'scout_size': scout_size or {},
@@ -3873,10 +3983,12 @@ def _discovery_is_soft_quality_reason(reason):
 
 def _discovery_mode_for_ath_reason(reason):
     reason = str(reason or '')
+    if _matrix_micro_momentum_reason(reason):
+        return MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE
     if reason in DISCOVERY_MATRIX_RECLAIM_REASONS:
         return MATRIX_RECLAIM_TINY_PROBE_MODE
     if reason.startswith('momentum check failed') or reason.startswith('momentum check waiting'):
-        return MATRIX_RECLAIM_TINY_PROBE_MODE
+        return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
     return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
 
 
@@ -4118,9 +4230,24 @@ def _discovery_low_liquidity_activity_bypass(mode, *, liquidity_usd, activity=No
         and tx_m5 >= thresholds['min_tx_m5']
         and pc_m5 >= thresholds['max_negative_m5']
     )
+    extreme_thresholds = {
+        'min_bs': DISCOVERY_LOW_LIQ_EXTREME_MIN_BS,
+        'min_vol_m5': DISCOVERY_LOW_LIQ_EXTREME_MIN_VOL_M5,
+        'min_tx_m5': DISCOVERY_LOW_LIQ_EXTREME_MIN_TX_M5,
+        'max_negative_m5': DISCOVERY_LOW_LIQ_EXTREME_MAX_NEG_M5,
+    }
+    extreme_activity = (
+        bs >= extreme_thresholds['min_bs']
+        and vol_m5 >= extreme_thresholds['min_vol_m5']
+        and tx_m5 >= extreme_thresholds['min_tx_m5']
+        and pc_m5 >= extreme_thresholds['max_negative_m5']
+    )
     return {
         'pass': passed,
         'reason': 'low_liquidity_activity_bypass' if passed else 'low_liquidity_activity_not_enough',
+        'extreme_activity': extreme_activity,
+        'live_eligible': bool(passed and extreme_activity),
+        'quote_executable': None,
         'observed': {
             'liquidity_usd': liquidity_usd,
             'buy_sell_ratio': bs,
@@ -4129,6 +4256,120 @@ def _discovery_low_liquidity_activity_bypass(mode, *, liquidity_usd, activity=No
             'price_change_m5': pc_m5,
         },
         'thresholds': thresholds,
+        'extreme_thresholds': extreme_thresholds,
+    }
+
+
+def _discovery_quote_probe(token_ca, *, lifecycle_id=None, mode=None, stage_name='discovery_quote_probe'):
+    if not DISCOVERY_LOW_LIQ_QUOTE_PROBE_ENABLED:
+        return {'attempted': False, 'success': False, 'reason': 'quote_probe_disabled'}
+    try:
+        execution = simulate_entry_execution(
+            token_ca,
+            PAPER_TINY_SCOUT_SIZE_SOL,
+            stage_name,
+            strategy_id=stage_name,
+            lifecycle_id=lifecycle_id,
+        )
+    except Exception as exc:
+        return {
+            'attempted': True,
+            'success': False,
+            'reason': 'quote_probe_exception',
+            'error': str(exc),
+            'entry_mode': mode,
+        }
+    execution = execution or {}
+    return {
+        'attempted': True,
+        'success': bool(execution.get('success')),
+        'reason': 'quote_executable' if execution.get('success') else execution.get('failureReason') or 'quote_not_executable',
+        'effective_price': execution.get('effectivePrice'),
+        'quoted_out_amount_raw': execution.get('quotedOutAmountRaw'),
+        'route_available': execution.get('routeAvailable'),
+        'entry_mode': mode,
+    }
+
+
+def _discovery_low_liq_quote_probe(token_ca, *, lifecycle_id=None, mode=None):
+    return _discovery_quote_probe(
+        token_ca,
+        lifecycle_id=lifecycle_id,
+        mode=mode,
+        stage_name='discovery_low_liq_quote_probe',
+    )
+
+
+def _discovery_unknown_data_live_gate(token_ca, *, lifecycle_id=None, mode=None, activity=None):
+    activity = activity or {}
+    bs = _first_float_any(activity.get('buy_sell_ratio'), default=0.0) or 0.0
+    vol_m5 = _first_float_any(activity.get('vol_m5'), default=0.0) or 0.0
+    tx_m5 = _first_float_any(activity.get('tx_m5'), default=0.0) or 0.0
+    pc_m5 = _first_float_any(activity.get('price_change_m5'), default=0.0) or 0.0
+    thresholds = {
+        'min_bs': 1.10,
+        'min_vol_m5': 12000.0,
+        'min_tx_m5': 100.0,
+        'max_negative_m5': -8.0,
+    }
+    extreme_thresholds = {
+        'min_bs': DISCOVERY_LOW_LIQ_EXTREME_MIN_BS,
+        'min_vol_m5': DISCOVERY_LOW_LIQ_EXTREME_MIN_VOL_M5,
+        'min_tx_m5': DISCOVERY_LOW_LIQ_EXTREME_MIN_TX_M5,
+        'max_negative_m5': DISCOVERY_LOW_LIQ_EXTREME_MAX_NEG_M5,
+    }
+    base_activity = (
+        bs >= thresholds['min_bs']
+        and vol_m5 >= thresholds['min_vol_m5']
+        and tx_m5 >= thresholds['min_tx_m5']
+        and pc_m5 >= thresholds['max_negative_m5']
+    )
+    extreme_activity = (
+        bs >= extreme_thresholds['min_bs']
+        and vol_m5 >= extreme_thresholds['min_vol_m5']
+        and tx_m5 >= extreme_thresholds['min_tx_m5']
+        and pc_m5 >= extreme_thresholds['max_negative_m5']
+    )
+    observed = {
+        'buy_sell_ratio': bs,
+        'vol_m5': vol_m5,
+        'tx_m5': tx_m5,
+        'price_change_m5': pc_m5,
+    }
+    if not base_activity:
+        return {
+            'pass': False,
+            'live_eligible': False,
+            'reason': 'unknown_data_activity_not_enough',
+            'observed': observed,
+            'thresholds': thresholds,
+            'extreme_thresholds': extreme_thresholds,
+            'quote_probe': None,
+        }
+    if extreme_activity:
+        return {
+            'pass': True,
+            'live_eligible': True,
+            'reason': 'unknown_data_extreme_activity',
+            'observed': observed,
+            'thresholds': thresholds,
+            'extreme_thresholds': extreme_thresholds,
+            'quote_probe': None,
+        }
+    quote_probe = _discovery_quote_probe(
+        token_ca,
+        lifecycle_id=lifecycle_id,
+        mode=mode,
+        stage_name='discovery_unknown_data_quote_probe',
+    )
+    return {
+        'pass': bool(quote_probe.get('success')),
+        'live_eligible': bool(quote_probe.get('success')),
+        'reason': 'unknown_data_quote_executable' if quote_probe.get('success') else 'unknown_data_shadow_quote_or_activity_not_enough',
+        'observed': observed,
+        'thresholds': thresholds,
+        'extreme_thresholds': extreme_thresholds,
+        'quote_probe': quote_probe,
     }
 
 
@@ -4141,7 +4382,7 @@ def _discovery_lotto_high_risk_live_gate(*, activity=None, liquidity_usd=None, t
     liq = _first_number(liquidity_usd)
     top1 = _first_float_any(top1_pct, default=None)
     top10 = _first_float_any(top10_pct, default=None)
-    quote_probe_ok = liq >= DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD or bool((low_liquidity_bypass or {}).get('pass'))
+    quote_probe_ok = liq >= DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD or bool((low_liquidity_bypass or {}).get('live_eligible'))
     thresholds = {
         'min_tx_m5': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_TX_M5,
         'min_vol_m5': DISCOVERY_LOTTO_HIGH_RISK_LIVE_MIN_VOL_M5,
@@ -4186,11 +4427,16 @@ def _discovery_lotto_high_risk_live_gate(*, activity=None, liquidity_usd=None, t
 
 def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top10_pct=None, gmgn_policy=None, low_liquidity_bypass=None):
     gmgn_policy = gmgn_policy or {}
+    low_liq_live_eligible = bool((low_liquidity_bypass or {}).get('live_eligible'))
     if gmgn_policy.get('action') == 'reject':
         return gmgn_policy.get('reason') or 'gmgn_policy_reject'
-    if liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD and not (low_liquidity_bypass or {}).get('pass'):
+    if liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD and not low_liq_live_eligible:
         return 'discovery_liquidity_too_low'
-    if mode in {ATH_SOFT_RECLAIM_TINY_SCOUT_MODE, MATRIX_RECLAIM_TINY_PROBE_MODE}:
+    if mode in {
+        ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
+        MATRIX_RECLAIM_TINY_PROBE_MODE,
+        MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
+    }:
         mc_tier = _ath_uncertainty_mc_tier(current_mc)
         if mc_tier in {'invalid', 'blocked'}:
             return 'discovery_ath_mc_gate'
@@ -4204,7 +4450,7 @@ def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top
     elif mode == LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE:
         if current_mc <= 0 or current_mc >= DISCOVERY_LOTTO_HIGH_RISK_MAX_MC:
             return 'discovery_lotto_high_risk_mc_gate'
-        if liquidity_usd < DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD and not (low_liquidity_bypass or {}).get('pass'):
+        if liquidity_usd < DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD and not low_liq_live_eligible:
             return 'discovery_lotto_high_risk_liquidity_too_low'
         if top1_pct and top1_pct > DISCOVERY_LOTTO_HIGH_RISK_EXTREME_TOP1_PCT:
             return 'discovery_lotto_high_risk_top1_extreme'
@@ -4612,9 +4858,23 @@ def process_discovery_tracking_candidates(
             liquidity_usd=liquidity_usd,
             activity=activity,
         )
+        if (
+            low_liquidity_bypass
+            and low_liquidity_bypass.get('pass')
+            and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD
+            and not low_liquidity_bypass.get('live_eligible')
+        ):
+            quote_probe = _discovery_low_liq_quote_probe(
+                token_ca,
+                lifecycle_id=lifecycle_id,
+                mode=mode,
+            )
+            low_liquidity_bypass['quote_probe'] = quote_probe
+            low_liquidity_bypass['quote_executable'] = bool(quote_probe.get('success'))
+            low_liquidity_bypass['live_eligible'] = bool(quote_probe.get('success'))
         effective_liquidity_usd = (
             DISCOVERY_MIN_LIQUIDITY_USD
-            if (low_liquidity_bypass or {}).get('pass') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD
+            if (low_liquidity_bypass or {}).get('live_eligible') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD
             else liquidity_usd
         )
         detail = {
@@ -4695,7 +4955,35 @@ def process_discovery_tracking_candidates(
                 event_ts=now_ts,
             )
             continue
-        if (low_liquidity_bypass or {}).get('pass') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD:
+        unknown_data_live_gate = None
+        if mode == UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE:
+            unknown_data_live_gate = _discovery_unknown_data_live_gate(
+                token_ca,
+                lifecycle_id=lifecycle_id,
+                mode=mode,
+                activity=activity,
+            )
+            detail['unknown_data_live_gate'] = unknown_data_live_gate
+            if not unknown_data_live_gate.get('pass'):
+                candidate['last_wait_reason'] = unknown_data_live_gate.get('reason')
+                record_decision_event(
+                    db,
+                    component='discovery_tracking',
+                    event_type='candidate_recheck',
+                    decision='shadow',
+                    reason=unknown_data_live_gate.get('reason') or 'unknown_data_shadow',
+                    token_ca=token_ca,
+                    symbol=candidate.get('symbol'),
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=candidate.get('signal_ts'),
+                    signal_id=candidate.get('signal_id'),
+                    route=route,
+                    data_source='discovery_tracking+dexscreener+quote_probe',
+                    payload=with_lifecycle_payload(detail, lifecycle),
+                    event_ts=now_ts,
+                )
+                continue
+        if (low_liquidity_bypass or {}).get('live_eligible') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD:
             record_decision_event(
                 db,
                 component='discovery_tracking',
@@ -10635,9 +10923,10 @@ def run_monitor(db):
                         _scout_mode = pending.get('scout_mode') or pending.get('entry_mode')
                         if _scout_mode in PAPER_TINY_SCOUT_ENTRY_MODES:
                             pending['timing_entry_mode'] = timing_reason
-                            pending['entry_mode'] = _scout_mode
+                            _apply_actual_tiny_trigger_mode(pending, timing_reason)
                         else:
                             pending['entry_mode'] = timing_reason
+                            pending['entry_trigger_mode'] = timing_reason
                         record_decision_event(
                             db,
                             component='smart_entry',
@@ -10653,6 +10942,9 @@ def run_monitor(db):
                             payload={
                                 'detail': timing_detail,
                                 'trigger_price': timing_trigger_price,
+                                'actual_entry_mode': pending.get('entry_mode'),
+                                'parent_scout_mode': pending.get('parent_scout_mode'),
+                                'entry_trigger_mode': pending.get('entry_trigger_mode'),
                                 'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             },
                         )
@@ -11070,6 +11362,33 @@ def run_monitor(db):
                         )
                         if _liq_cap is not None and actual_position_size_sol < _kelly_raw:
                             log.info(f"  [ENTRY_SIZE] {pending['symbol']} kelly={_kelly_raw:.3f} → liq_cap={actual_position_size_sol:.3f} SOL (pool liquidity limit)")
+                    actual_position_size_sol, _primary_cap_detail = _apply_primary_proving_cap(
+                        pending,
+                        actual_position_size_sol,
+                    )
+                    if _primary_cap_detail and _primary_cap_detail.get('capped'):
+                        record_decision_event(
+                            db,
+                            component='entry_sizing',
+                            event_type='entry_size',
+                            decision='cap',
+                            reason='primary_proving_cap',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='entry_mode_quality+paper_research',
+                            payload=_primary_cap_detail,
+                        )
+                        log.info(
+                            f"  [ENTRY_SIZE] {pending['symbol']} primary proving cap "
+                            f"{_primary_cap_detail.get('old_size_sol'):.3f} -> "
+                            f"{_primary_cap_detail.get('new_size_sol'):.3f} SOL "
+                            f"mode={pending.get('entry_mode')}"
+                        )
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,
@@ -11373,6 +11692,33 @@ def run_monitor(db):
                                 )
                             except Exception as _spread_track_err:
                                 log.debug(f"  [ENTRY_EDGE] spread normalization track failed for {pending['symbol']}: {_spread_track_err}")
+                        record_decision_event(
+                            db,
+                            component='spread_reject_shadow_fill',
+                            event_type='phantom_entry',
+                            decision='shadow',
+                            reason='entry_edge_spread_too_high',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='jupiter_quote+entry_edge',
+                            payload=with_lifecycle_payload({
+                                'entry_mode': pending.get('entry_mode'),
+                                'parent_scout_mode': pending.get('parent_scout_mode') or pending.get('scout_mode'),
+                                'entry_trigger_mode': pending.get('entry_trigger_mode') or pending.get('timing_entry_mode'),
+                                'phantom_entry_price': price,
+                                'trigger_price': trigger_price_val,
+                                'spread_pct': _spread,
+                                'max_spread_pct': _SPREAD_GUARD_MAX_PCT,
+                                'entry_edge_budget': _entry_edge_budget,
+                                'quote_executable': bool(execution.get('success')),
+                                'paper_pnl_impact': 'excluded_from_live_paper_pnl',
+                            }, _entry_timing_lifecycle),
+                        )
                         pending_entries.pop(lifecycle_id, None)
                         continue
 

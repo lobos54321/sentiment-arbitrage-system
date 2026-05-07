@@ -43,6 +43,7 @@ DISCOVERY_TINY_SCOUT_MODES = (
     "ath_soft_reclaim_tiny_scout",
     "unknown_data_activity_tiny_scout",
     "matrix_reclaim_tiny_probe",
+    "matrix_micro_momentum_tiny_probe",
     "lotto_high_risk_discovery_probe",
 )
 PAPER_TINY_SCOUT_MODES = (
