@@ -134,6 +134,9 @@ PRIMARY_PROVING_CAP_MODES = {
     for item in os.environ.get('PRIMARY_PROVING_CAP_MODES', 'momentum_direct_entry').split(',')
     if item.strip()
 }
+SMART_PULLBACK_BOUNCE_PROVING_CAP_ENABLED = os.environ.get('SMART_PULLBACK_BOUNCE_PROVING_CAP_ENABLED', 'true').lower() != 'false'
+SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL = float(os.environ.get('SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL', '0.005'))
+SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL = float(os.environ.get('SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
 LOTTO_PULLBACK_SIZE_PROTECT_ENABLED = os.environ.get('LOTTO_PULLBACK_SIZE_PROTECT_ENABLED', 'true').lower() != 'false'
 LOTTO_PULLBACK_STRONG_MIN_TX_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_TX_M5', '150'))
 LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_VOL_M5', '15000'))
@@ -232,6 +235,14 @@ ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY
 ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC', '3000000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD', '5000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MODE = 'ath_uncertainty_tiny_scout'
+ATH_NO_KLINE_TINY_PROBE_MODE = 'ath_no_kline_tiny_probe'
+ATH_HIGH_MC_TINY_PROBE_MODE = 'ath_high_mc_tiny_probe'
+ATH_HIGH_MC_TINY_PROBE_ENABLED = os.environ.get('ATH_HIGH_MC_TINY_PROBE_ENABLED', 'true').lower() != 'false'
+ATH_HIGH_MC_TINY_PROBE_MAX_MC = float(os.environ.get('ATH_HIGH_MC_TINY_PROBE_MAX_MC', str(ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC)))
+ENTRY_MODE_QUALITY_HIGH_QUALITY_TINY_OVERRIDE_ENABLED = os.environ.get('ENTRY_MODE_QUALITY_HIGH_QUALITY_TINY_OVERRIDE_ENABLED', 'true').lower() != 'false'
+ENTRY_MODE_QUALITY_OVERRIDE_MIN_T = int(os.environ.get('ENTRY_MODE_QUALITY_OVERRIDE_MIN_T', '80'))
+ENTRY_MODE_QUALITY_OVERRIDE_MIN_P = int(os.environ.get('ENTRY_MODE_QUALITY_OVERRIDE_MIN_P', '80'))
+ENTRY_MODE_QUALITY_OVERRIDE_MIN_S = int(os.environ.get('ENTRY_MODE_QUALITY_OVERRIDE_MIN_S', '100'))
 ATH_UNCERTAINTY_REASONS = (
     'matrices not yet aligned',
     'momentum check failed:',
@@ -2471,6 +2482,35 @@ def _apply_primary_proving_cap(pending, size_sol):
         current_size = 0.0
     entry_mode = str(pending.get('entry_mode') or '')
     if (
+        SMART_PULLBACK_BOUNCE_PROVING_CAP_ENABLED
+        and not pending_is_paper_tiny_scout(pending)
+        and entry_mode == 'smart_entry_pullback_bounce'
+        and current_size > 0
+    ):
+        entry_mode_quality = pending.get('entry_mode_quality') or {}
+        force_detail = pending.get('entry_mode_quality_force_live') or {}
+        degraded_or_forced = (
+            entry_mode_quality.get('reason') == 'entry_mode_quality_degraded'
+            or entry_mode_quality.get('reason') == 'entry_mode_shadow_cooldown'
+            or bool(force_detail)
+        )
+        cap_sol = SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL if degraded_or_forced else SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL
+        capped_size = min(current_size, cap_sol)
+        detail = {
+            'entry_mode': entry_mode,
+            'old_size_sol': current_size,
+            'new_size_sol': capped_size,
+            'cap_sol': cap_sol,
+            'capped': capped_size < current_size,
+            'reason': 'smart_pullback_bounce_proving_cap',
+            'entry_mode_quality': entry_mode_quality,
+            'force_live_detail': force_detail,
+        }
+        if capped_size < current_size:
+            pending['kelly_position_sol'] = capped_size
+            pending['primary_proving_cap'] = detail
+        return capped_size, detail
+    if (
         not PRIMARY_PROVING_CAP_ENABLED
         or pending_is_paper_tiny_scout(pending)
         or entry_mode not in PRIMARY_PROVING_CAP_MODES
@@ -4538,6 +4578,85 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
             event_ts=event_ts,
         )
     return True, decision
+
+
+def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=None, entry_mode=None, route=None):
+    """Allow one 0.003 SOL probe through path cooldown when ATH structure is exceptional."""
+    if not ENTRY_MODE_QUALITY_HIGH_QUALITY_TINY_OVERRIDE_ENABLED:
+        return {'pass': False, 'reason': 'entry_mode_quality_override_disabled'}
+    pending = pending or {}
+    entry_mode = str(entry_mode or pending.get('entry_mode') or pending.get('scout_mode') or '')
+    if not pending_is_paper_tiny_scout(pending):
+        return {'pass': False, 'reason': 'not_tiny_scout'}
+    route_label = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    if route_label != 'ATH':
+        return {'pass': False, 'reason': 'not_ath_route', 'route': route_label}
+
+    scores = pending.get('matrix_scores') or {}
+    try:
+        trend = int(float(scores.get('trend', 0) or 0))
+        price = int(float(scores.get('price', 0) or 0))
+        signal = int(float(scores.get('signal', 0) or 0))
+        volume = int(float(scores.get('volume', 0) or 0))
+        momentum = int(float(scores.get('momentum', 0) or 0))
+    except (TypeError, ValueError):
+        trend = price = signal = volume = momentum = 0
+
+    tiny_modes_allowed = {
+        ATH_NO_KLINE_TINY_PROBE_MODE,
+        ATH_HIGH_MC_TINY_PROBE_MODE,
+        'ath_flat_structure_tiny_scout',
+        ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
+        MATRIX_RECLAIM_TINY_PROBE_MODE,
+        MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
+        'pullback_tiny_scout',
+    }
+    matrix_strong = (
+        trend >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_T
+        and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
+        and signal >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
+    )
+    flat_structure_strong = (
+        entry_mode in {ATH_HIGH_MC_TINY_PROBE_MODE, 'ath_flat_structure_tiny_scout'}
+        and trend >= 60
+        and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
+        and signal >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
+    )
+    no_kline_strong = (
+        entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE
+        and trend >= 60
+        and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
+        and signal >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
+    )
+    if entry_mode not in tiny_modes_allowed:
+        return {'pass': False, 'reason': 'mode_not_overrideable', 'entry_mode': entry_mode}
+    if not (matrix_strong or flat_structure_strong or no_kline_strong):
+        return {
+            'pass': False,
+            'reason': 'matrix_not_strong_enough',
+            'entry_mode': entry_mode,
+            'scores': scores,
+            'thresholds': {
+                'trend': ENTRY_MODE_QUALITY_OVERRIDE_MIN_T,
+                'price': ENTRY_MODE_QUALITY_OVERRIDE_MIN_P,
+                'signal': ENTRY_MODE_QUALITY_OVERRIDE_MIN_S,
+            },
+        }
+
+    return {
+        'pass': True,
+        'reason': 'entry_mode_quality_high_quality_tiny_override',
+        'entry_mode': entry_mode,
+        'route': route_label,
+        'scores': {
+            'trend': trend,
+            'volume': volume,
+            'price': price,
+            'signal': signal,
+            'momentum': momentum,
+        },
+    }
 
 
 def _lotto_pullback_has_strong_activity(lifecycle):
@@ -10295,16 +10414,16 @@ def run_monitor(db):
                                 f"(crash exit, too risky to re-enter)"
                             )
                             continue
-                        if _m_score < 70:
+                        if _m_score < 60:
                             log.info(
                                 f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
-                                f"re-entry #{_entry_count+1}, M={_m_score} < 70 "
+                                f"re-entry #{_entry_count+1}, M={_m_score} < 60 "
                                 f"(momentum not strong enough for re-entry)"
                             )
                             continue
                         log.info(
                             f"  [WATCHLIST] ✅ {w_entry['symbol']} REENTRY ALLOWED: "
-                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%} > -8%, M={_m_score} >= 70"
+                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%} > -8%, M={_m_score} >= 60"
                         )
 
                     # PRICE-GATE: For re-entries, current price must be above last entry price.
@@ -10418,26 +10537,58 @@ def run_monitor(db):
                         )
                     elif _is_matrix_ath_fire:
                         if _fire_mc_for_size >= MATRIX_ATH_HALF_MC_MAX:
-                            log.info(
-                                f"  [Kelly] {w_entry['symbol']} ATH observe-only: "
-                                f"signal_mc=${_fire_mc_for_size:,.0f} >= ${MATRIX_ATH_HALF_MC_MAX:,.0f}"
-                            )
-                            record_decision_event(
-                                db,
-                                component='matrix_ath_sizing',
-                                event_type='signal_reject',
-                                decision='reject',
-                                reason='ath_high_mc_observe_only',
-                                token_ca=w_entry['ca'],
-                                symbol=w_entry['symbol'],
-                                lifecycle_id=lifecycle_id,
-                                signal_ts=w_entry['signal_ts'],
-                                signal_id=w_entry.get('premium_signal_id'),
-                                route='ATH',
-                                payload={'signal_mc': _fire_mc_for_size, 'mc_cap': MATRIX_ATH_HALF_MC_MAX},
-                            )
-                            pending_entries.pop(lifecycle_id, None)
-                            continue
+                            if ATH_HIGH_MC_TINY_PROBE_ENABLED and _fire_mc_for_size <= ATH_HIGH_MC_TINY_PROBE_MAX_MC:
+                                pending_entries[lifecycle_id]['scout_mode'] = ATH_HIGH_MC_TINY_PROBE_MODE
+                                pending_entries[lifecycle_id]['entry_mode'] = ATH_HIGH_MC_TINY_PROBE_MODE
+                                pending_entries[lifecycle_id]['kelly_position_sol'] = PAPER_TINY_SCOUT_SIZE_SOL
+                                pending_entries[lifecycle_id]['paper_only_scout'] = True
+                                pending_entries[lifecycle_id]['ath_high_mc_tiny_probe'] = True
+                                log.info(
+                                    f"  [Kelly] {w_entry['symbol']} ATH high-MC tiny probe: "
+                                    f"signal_mc=${_fire_mc_for_size:,.0f} >= ${MATRIX_ATH_HALF_MC_MAX:,.0f}, "
+                                    f"size={PAPER_TINY_SCOUT_SIZE_SOL:.3f} SOL"
+                                )
+                                record_decision_event(
+                                    db,
+                                    component='matrix_ath_sizing',
+                                    event_type='entry_size',
+                                    decision='allow',
+                                    reason='ath_high_mc_tiny_probe_allowed',
+                                    token_ca=w_entry['ca'],
+                                    symbol=w_entry['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=w_entry['signal_ts'],
+                                    signal_id=w_entry.get('premium_signal_id'),
+                                    route='ATH',
+                                    payload={
+                                        'signal_mc': _fire_mc_for_size,
+                                        'mc_cap': MATRIX_ATH_HALF_MC_MAX,
+                                        'max_probe_mc': ATH_HIGH_MC_TINY_PROBE_MAX_MC,
+                                        'entry_mode': ATH_HIGH_MC_TINY_PROBE_MODE,
+                                        'position_size_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+                                    },
+                                )
+                            else:
+                                log.info(
+                                    f"  [Kelly] {w_entry['symbol']} ATH observe-only: "
+                                    f"signal_mc=${_fire_mc_for_size:,.0f} >= ${MATRIX_ATH_HALF_MC_MAX:,.0f}"
+                                )
+                                record_decision_event(
+                                    db,
+                                    component='matrix_ath_sizing',
+                                    event_type='signal_reject',
+                                    decision='reject',
+                                    reason='ath_high_mc_observe_only',
+                                    token_ca=w_entry['ca'],
+                                    symbol=w_entry['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=w_entry['signal_ts'],
+                                    signal_id=w_entry.get('premium_signal_id'),
+                                    route='ATH',
+                                    payload={'signal_mc': _fire_mc_for_size, 'mc_cap': MATRIX_ATH_HALF_MC_MAX},
+                                )
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
                         _ath_cap = MATRIX_ATH_HALF_SIZE_SOL if _fire_mc_for_size >= MATRIX_ATH_FULL_MC_MAX else MATRIX_ATH_FULL_SIZE_SOL
                         _old_kelly = _kelly_sol
                         _kelly_sol = _ath_cap
@@ -10502,12 +10653,38 @@ def run_monitor(db):
                         # Fail-open: if signal had no MC data (signal_mc=0), always allow.
                         MC_CAP = 200_000  # $200K — real K-line review shows >$200K ATH/NT loses convexity
                         if _fire_mc > MC_CAP:
-                            log.info(
-                                f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: signal_mc=${_fire_mc:,.0f} > ${MC_CAP:,.0f} "
-                                f"(chasing top — upside capped, spread will eat profits)"
-                            )
-                            pending_entries.pop(lifecycle_id, None)
-                            continue
+                            _pending_for_mc = pending_entries.get(lifecycle_id) or {}
+                            if pending_is_paper_tiny_scout(_pending_for_mc):
+                                log.info(
+                                    f"  [WATCHLIST] 🧪 {w_entry['symbol']} ATH high-MC tiny probe allowed: "
+                                    f"signal_mc=${_fire_mc:,.0f} > ${MC_CAP:,.0f}, "
+                                    f"mode={_pending_for_mc.get('entry_mode')}"
+                                )
+                                record_decision_event(
+                                    db,
+                                    component='matrix_ath_sizing',
+                                    event_type='entry_gate',
+                                    decision='allow',
+                                    reason='ath_high_mc_tiny_probe_mc_cap_bypass',
+                                    token_ca=w_entry['ca'],
+                                    symbol=w_entry['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=w_entry['signal_ts'],
+                                    signal_id=w_entry.get('premium_signal_id'),
+                                    route='ATH',
+                                    payload={
+                                        'signal_mc': _fire_mc,
+                                        'mc_cap': MC_CAP,
+                                        'entry_mode': _pending_for_mc.get('entry_mode'),
+                                    },
+                                )
+                            else:
+                                log.info(
+                                    f"  [WATCHLIST] ⛔ {w_entry['symbol']} SKIP: signal_mc=${_fire_mc:,.0f} > ${MC_CAP:,.0f} "
+                                    f"(chasing top — upside capped, spread will eat profits)"
+                                )
+                                pending_entries.pop(lifecycle_id, None)
+                                continue
                         elif _fire_mc > 0:
                             log.info(f"  [FIRE] {w_entry['symbol']} MC_OK: signal_mc=${_fire_mc:,.0f} < ${MC_CAP:,.0f}")
 
@@ -11164,6 +11341,19 @@ def run_monitor(db):
                             )
                             pending_entries.pop(lifecycle_id, None)
                             continue
+                        _entry_mode_force_live = _entry_mode_quality_high_quality_tiny_override(
+                            pending,
+                            lifecycle=_entry_timing_lifecycle,
+                            entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                            route=_pending_signal_route or pending.get('signal_type'),
+                        )
+                        if _entry_mode_force_live.get('pass'):
+                            pending['entry_mode_quality_force_live'] = _entry_mode_force_live
+                            log.info(
+                                f"  [ENTRY_MODE_QUALITY] force-live {pending['symbol']}: "
+                                f"mode={pending.get('entry_mode')} reason={_entry_mode_force_live.get('reason')} "
+                                f"scores={_entry_mode_force_live.get('scores')}"
+                            )
                         _entry_mode_live_allowed, _entry_mode_quality = _entry_mode_quality_allows_live(
                             db,
                             entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
@@ -11175,7 +11365,10 @@ def run_monitor(db):
                             route=_pending_signal_route or pending.get('signal_type'),
                             event_ts=now,
                             data_source='pending_entry+paper_trades',
+                            force_live=bool(_entry_mode_force_live.get('pass')),
                         )
+                        if _entry_mode_force_live.get('pass'):
+                            _entry_mode_quality['force_live_detail'] = _entry_mode_force_live
                         pending['entry_mode_quality'] = _entry_mode_quality
                         if not _entry_mode_live_allowed:
                             _shadow_mode = (
@@ -11372,7 +11565,7 @@ def run_monitor(db):
                             component='entry_sizing',
                             event_type='entry_size',
                             decision='cap',
-                            reason='primary_proving_cap',
+                            reason=_primary_cap_detail.get('reason') or 'primary_proving_cap',
                             token_ca=pending['token_ca'],
                             symbol=pending['symbol'],
                             lifecycle_id=lifecycle_id,
@@ -11384,7 +11577,7 @@ def run_monitor(db):
                             payload=_primary_cap_detail,
                         )
                         log.info(
-                            f"  [ENTRY_SIZE] {pending['symbol']} primary proving cap "
+                            f"  [ENTRY_SIZE] {pending['symbol']} proving cap "
                             f"{_primary_cap_detail.get('old_size_sol'):.3f} -> "
                             f"{_primary_cap_detail.get('new_size_sol'):.3f} SOL "
                             f"mode={pending.get('entry_mode')}"

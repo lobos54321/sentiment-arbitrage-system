@@ -42,6 +42,17 @@ def test_entry_mode_quality_insufficient_samples_allows_live():
     assert decision["reason"] == "entry_mode_quality_insufficient_samples"
 
 
+def test_entry_mode_quality_force_live_bypasses_degraded_shadow():
+    db = _db()
+    for idx in range(8):
+        _insert(db, "pullback_tiny_scout", 0.0, -0.12, idx)
+
+    decision = evaluate_entry_mode_quality(db, "pullback_tiny_scout", now_ts=1000, force_live=True)
+
+    assert decision["decision"] == "allow_live"
+    assert decision["reason"] == "entry_mode_quality_force_live"
+
+
 def test_entry_mode_quality_degraded_path_shadows_future_entries():
     db = _db()
     for idx in range(8):

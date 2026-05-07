@@ -92,11 +92,15 @@ SMART_ENTRY_GMGN_TINY_SCOUT_MODES = (
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MODE = "smart_entry_reclaim_tiny_scout"
 SMART_ENTRY_NEWBORN_MOMENTUM_TINY_SCOUT_MODE = "newborn_momentum_tiny_scout"
 SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MODE = "ath_flat_structure_tiny_scout"
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MODE = "ath_no_kline_tiny_probe"
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_M5_PCT", "12"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_BS_RATIO", "1.25"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5", "8000"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5", "80"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD", "5000"))
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE = int(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE", "55"))
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL = float(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL", "0.30"))
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS = float(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS", "1.15"))
 SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_SCORE = int(os.environ.get("SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_SCORE", "45"))
 SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_M5_PCT = float(os.environ.get("SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_M5_PCT", "5"))
 SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_BS_RATIO = float(os.environ.get("SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_BS_RATIO", "1.05"))
@@ -1271,8 +1275,33 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # BensHouse (rvol=5.3x) which had genuine volume behind the move.
     # V7: Vol/MC escape hatch — if Vol/MC > 30%, token IS heavily traded
     # regardless of rvol. KITTENGER had rvol 0.2x but Vol/MC=60-80% (massive).
+    # V9: ATH no-kline fallback — keep the compound weakness gate intact for
+    # primary entries, but let high-quality ATH scout policies buy a 0.003 SOL
+    # data ticket with clean attribution instead of sitting empty.
     _mc = cached_trend.get('fdv', 0) or cached_trend.get('market_cap', 0) if cached_trend else 0
     _vol_mc = (vol_m5 / _mc) if _mc > 0 else 0
+    _ath_no_kline_fallback_ok = False
+    _policy_profile = ''
+    _policy_route = ''
+    if entry_readiness_policy:
+        _policy_profile = str(
+            entry_readiness_policy.get('lifecycle_profile', '')
+            if isinstance(entry_readiness_policy, dict)
+            else getattr(entry_readiness_policy, 'lifecycle_profile', '')
+        )
+        _policy_detail = (
+            entry_readiness_policy.get('detail', {})
+            if isinstance(entry_readiness_policy, dict)
+            else getattr(entry_readiness_policy, 'detail', {})
+        ) or {}
+        _policy_route = str(_policy_detail.get('route') or '')
+        _ath_policy = _policy_route.upper() == 'ATH' or _policy_profile.startswith('ATH_')
+        _ath_no_kline_fallback_ok = (
+            _ath_policy
+            and total_score >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE
+            and rvol >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL
+            and bs_ratio >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS
+        )
     if not _kline_confirmed and rvol < 2.0 and _vol_mc < 0.30:
         if _gmgn_tiny_ok:
             log.info(
@@ -1280,6 +1309,17 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 f"for paper-only scout detail={_gmgn_tiny_detail} "
                 f"kline=unconfirmed rvol={rvol:.1f}x vol/mc={_vol_mc:.1%}"
             )
+        elif _ath_no_kline_fallback_ok:
+            node_detail = (
+                f"node=ath_no_kline_tiny_probe score={total_score} "
+                f"bs={bs_ratio:.2f} rvol={rvol:.1f}x vol/mc={_vol_mc:.1%} "
+                f"profile={_policy_profile or '?'} route={_policy_route or '?'} "
+                f"armed=({','.join(score_details)})"
+            )
+            log.info(
+                f"[SmartEntry] 🧪 ${symbol} ATH_NO_KLINE_TINY_PROBE at ${price:.10f}: "
+                f"{node_detail}")
+            return True, SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MODE, node_detail, price
         else:
             log.info(
                 f"[SmartEntry] 🚫  REJECT: no_kline_low_volume - "

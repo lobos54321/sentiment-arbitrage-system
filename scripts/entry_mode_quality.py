@@ -146,7 +146,11 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
         "shadow_until": shadow_until if shadow_until > now_ts else None,
         "stats": stats,
     }
-    if not ENTRY_MODE_QUALITY_ENABLED or force_live or not entry_mode:
+    if force_live:
+        base["reason"] = "entry_mode_quality_force_live"
+        return base
+
+    if not ENTRY_MODE_QUALITY_ENABLED or not entry_mode:
         return base
 
     if shadow_until > now_ts:

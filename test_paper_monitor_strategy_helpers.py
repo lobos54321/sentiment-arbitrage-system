@@ -6,14 +6,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 import paper_trade_monitor as monitor  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
+    ATH_HIGH_MC_TINY_PROBE_MODE,
+    ATH_NO_KLINE_TINY_PROBE_MODE,
     ATH_UNCERTAINTY_TINY_SCOUT_MODE,
     MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
     PAPER_TINY_SCOUT_SIZE_SOL,
     PRIMARY_PROVING_CAP_SIZE_SOL,
+    SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL,
+    SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL,
     _apply_actual_tiny_trigger_mode,
     _apply_primary_proving_cap,
     _discovery_hard_block,
     _entry_mode_for_ath_uncertainty_reason,
+    _entry_mode_quality_high_quality_tiny_override,
     _matrix_micro_momentum_reason,
 )
 
@@ -81,6 +86,70 @@ def test_primary_proving_cap_limits_momentum_direct_without_touching_tiny_scout(
 
     assert size == PAPER_TINY_SCOUT_SIZE_SOL
     assert detail is None
+
+
+def test_smart_entry_pullback_bounce_uses_smaller_proving_cap():
+    pending = {"entry_mode": "smart_entry_pullback_bounce", "kelly_position_sol": 0.1}
+
+    size, detail = _apply_primary_proving_cap(pending, 0.1)
+
+    assert size == SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL
+    assert detail["reason"] == "smart_pullback_bounce_proving_cap"
+    assert pending["kelly_position_sol"] == SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL
+
+
+def test_smart_entry_pullback_bounce_degraded_force_live_caps_to_tiny():
+    pending = {
+        "entry_mode": "smart_entry_pullback_bounce",
+        "kelly_position_sol": 0.1,
+        "entry_mode_quality_force_live": {"reason": "entry_mode_quality_high_quality_tiny_override"},
+    }
+
+    size, detail = _apply_primary_proving_cap(pending, 0.1)
+
+    assert size == SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL
+    assert detail["cap_sol"] == SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL
+
+
+def test_new_ath_probe_modes_are_tiny_scouts_and_get_capped():
+    for mode in (ATH_NO_KLINE_TINY_PROBE_MODE, ATH_HIGH_MC_TINY_PROBE_MODE):
+        pending = {"entry_mode": mode, "kelly_position_sol": 0.1}
+
+        assert monitor.pending_is_paper_tiny_scout(pending)
+        detail = monitor.apply_paper_tiny_scout_size_cap(pending)
+
+        assert pending["kelly_position_sol"] == PAPER_TINY_SCOUT_SIZE_SOL
+        assert detail["capped"] is True
+
+
+def test_entry_mode_quality_high_quality_tiny_override_allows_strong_ath():
+    pending = {
+        "entry_mode": ATH_NO_KLINE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "signal_type": "ATH",
+        "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 60},
+    }
+
+    decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "entry_mode_quality_high_quality_tiny_override"
+
+
+def test_entry_mode_quality_high_quality_tiny_override_keeps_weak_scores_shadowed():
+    pending = {
+        "entry_mode": "pullback_tiny_scout",
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "signal_type": "ATH",
+        "matrix_scores": {"trend": 50, "volume": 70, "price": 80, "signal": 100, "momentum": 60},
+    }
+
+    decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "matrix_not_strong_enough"
 
 
 def test_unknown_data_live_gate_shadows_weak_activity_without_quote(monkeypatch):

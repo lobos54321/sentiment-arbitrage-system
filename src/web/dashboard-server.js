@@ -129,8 +129,10 @@ function entryModeBucket(entryMode, positionSizeSol) {
   const size = Number(positionSizeSol || 0);
   if (mode.includes('gmgn') && mode.includes('tiny_scout')) return 'gmgn_tiny_scout';
   if (mode.includes('tiny_scout')) return 'tiny_scout';
+  if (mode.includes('tiny_probe')) return 'tiny_scout';
+  if (mode.includes('probe') && size > 0 && size <= 0.005) return 'tiny_scout';
   if (mode.includes('scout') && size > 0 && size <= 0.005) return 'tiny_scout';
-  if (mode.includes('scout')) return 'scout';
+  if (mode.includes('scout') || mode.includes('probe')) return 'scout';
   return 'primary';
 }
 
@@ -2894,7 +2896,8 @@ const server = http.createServer(async (req, res) => {
           summary.pnl_pct = trade.pnl_pct == null ? null : roundNumber(Number(trade.pnl_pct) * 100, 2);
           summary.peak_pnl_pct = trade.peak_pnl == null ? null : roundNumber(Number(trade.peak_pnl) * 100, 2);
           summary.position_size_sol = trade.position_size_sol;
-          summary.entry_mode = summary.entry_mode || inferEntryMode(trade);
+          if (summary.entry_mode) summary.event_entry_mode = summary.event_entry_mode || summary.entry_mode;
+          summary.entry_mode = inferEntryMode(trade);
           summary.entry_mode_bucket = entryModeBucket(summary.entry_mode, trade.position_size_sol);
           summary.final_status = trade.exit_ts || trade.exit_reason ? 'closed' : 'entered';
           summary.final_decision = summary.final_status;
