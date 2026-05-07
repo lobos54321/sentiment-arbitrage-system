@@ -69,6 +69,7 @@ from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
 from gmgn_policy import evaluate_gmgn_lotto_policy, evaluate_gmgn_tiny_scout_rescue
 from scout_quality import SCOUT_QUALITY_SIZE_CAP_SOL, evaluate_scout_quality
+from entry_mode_quality import evaluate_entry_mode_quality
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -125,6 +126,15 @@ MATRIX_ATH_FULL_SIZE_SOL = float(os.environ.get('MATRIX_ATH_FULL_SIZE_SOL', '0.0
 MATRIX_ATH_HALF_SIZE_SOL = float(os.environ.get('MATRIX_ATH_HALF_SIZE_SOL', '0.04'))
 PAPER_TINY_SCOUT_ENTRY_MODES = set(PAPER_TINY_SCOUT_MODES)
 PAPER_TINY_SCOUT_SIZE_SOL = float(os.environ.get('PAPER_TINY_SCOUT_SIZE_SOL', '0.003'))
+LOTTO_PULLBACK_SIZE_PROTECT_ENABLED = os.environ.get('LOTTO_PULLBACK_SIZE_PROTECT_ENABLED', 'true').lower() != 'false'
+LOTTO_PULLBACK_STRONG_MIN_TX_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_TX_M5', '150'))
+LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_VOL_M5', '15000'))
+LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_BS', '1.20'))
+DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
+TINY_EXIT_QUOTE_SANITY_ENABLED = os.environ.get('TINY_EXIT_QUOTE_SANITY_ENABLED', 'true').lower() != 'false'
+TINY_EXIT_QUOTE_SANITY_MIN_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MIN_PEAK', '0.06'))
+TINY_EXIT_QUOTE_SANITY_MAX_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MAX_PEAK', '0.10'))
+TINY_EXIT_QUOTE_SANITY_NEG_GAP = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_NEG_GAP', '0.10'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -4200,6 +4210,125 @@ def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top
     return None
 
 
+def _record_entry_mode_quality_decision(
+    db,
+    *,
+    decision,
+    token_ca=None,
+    symbol=None,
+    lifecycle_id=None,
+    signal_ts=None,
+    signal_id=None,
+    route=None,
+    event_type='live_gate',
+    data_source='paper_trades',
+    event_ts=None,
+):
+    try:
+        record_decision_event(
+            db,
+            component='entry_mode_quality',
+            event_type=event_type,
+            decision=decision.get('decision') or 'allow_live',
+            reason=decision.get('reason') or 'entry_mode_quality_pass',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            data_source=data_source,
+            payload=decision,
+            event_ts=event_ts,
+        )
+    except Exception as exc:
+        log.debug(f"  [ENTRY_MODE_QUALITY] record failed: {exc}")
+
+
+def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=None, lifecycle_id=None,
+                                    signal_ts=None, signal_id=None, route=None, event_ts=None,
+                                    data_source='paper_trades', force_live=False):
+    decision = evaluate_entry_mode_quality(
+        db,
+        entry_mode,
+        now_ts=event_ts or time.time(),
+        force_live=force_live,
+    )
+    if decision.get('decision') == 'shadow':
+        _record_entry_mode_quality_decision(
+            db,
+            decision=decision,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            event_type='live_gate',
+            data_source=data_source,
+            event_ts=event_ts,
+        )
+        log.info(
+            f"  [ENTRY_MODE_QUALITY] shadow {symbol or token_ca}: "
+            f"mode={entry_mode} reason={decision.get('reason')} "
+            f"remaining={decision.get('remaining_sec', 0):.0f}s"
+        )
+        return False, decision
+    if decision.get('reason') != 'entry_mode_quality_insufficient_samples':
+        _record_entry_mode_quality_decision(
+            db,
+            decision=decision,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            event_type='live_gate',
+            data_source=data_source,
+            event_ts=event_ts,
+        )
+    return True, decision
+
+
+def _lotto_pullback_has_strong_activity(lifecycle):
+    features = (lifecycle or {}).get('lifecycle_features') or {}
+    bs = _first_float_any(
+        features.get('buy_sell_ratio_m5'),
+        features.get('buy_sell_ratio'),
+        features.get('bs_m5'),
+        default=0.0,
+    ) or 0.0
+    vol_m5 = _first_float_any(
+        features.get('volume_m5'),
+        features.get('vol_m5'),
+        features.get('volume_5m'),
+        default=0.0,
+    ) or 0.0
+    tx_m5 = _first_float_any(
+        features.get('tx_m5'),
+        features.get('txns_m5'),
+        default=0.0,
+    ) or 0.0
+    return {
+        'pass': (
+            bs >= LOTTO_PULLBACK_STRONG_MIN_BS
+            and vol_m5 >= LOTTO_PULLBACK_STRONG_MIN_VOL_M5
+            and tx_m5 >= LOTTO_PULLBACK_STRONG_MIN_TX_M5
+        ),
+        'observed': {
+            'buy_sell_ratio': bs,
+            'vol_m5': vol_m5,
+            'tx_m5': tx_m5,
+        },
+        'thresholds': {
+            'min_buy_sell_ratio': LOTTO_PULLBACK_STRONG_MIN_BS,
+            'min_vol_m5': LOTTO_PULLBACK_STRONG_MIN_VOL_M5,
+            'min_tx_m5': LOTTO_PULLBACK_STRONG_MIN_TX_M5,
+        },
+    }
+
+
 def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
     route = str(candidate.get('route') or w_entry.get('type') or '').upper()
     size_sol = PAPER_TINY_SCOUT_SIZE_SOL
@@ -4325,28 +4454,53 @@ def process_discovery_tracking_candidates(
             )
             continue
         if now_ts >= float(candidate.get('expires_at') or now_ts):
-            discovery_candidates.pop(key, None)
-            record_decision_event(
-                db,
-                component='discovery_tracking',
-                event_type='candidate_expire',
-                decision='expire',
-                reason='tracking_ttl_expired',
-                token_ca=token_ca,
-                symbol=candidate.get('symbol'),
-                lifecycle_id=lifecycle_id,
-                signal_ts=candidate.get('signal_ts'),
-                signal_id=candidate.get('signal_id'),
-                route=route,
-                payload={
-                    'entry_mode': mode,
-                    'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
-                    'attempts': candidate.get('attempts'),
-                    'last_wait_reason': candidate.get('last_wait_reason'),
-                },
-                event_ts=now_ts,
-            )
-            continue
+            if DISCOVERY_FINAL_RECLAIM_ENABLED and not candidate.get('final_reclaim_attempted'):
+                candidate['final_reclaim_attempted'] = True
+                candidate['expires_at'] = now_ts + DISCOVERY_TRACKING_POLL_SEC
+                record_decision_event(
+                    db,
+                    component='discovery_tracking',
+                    event_type='candidate_recheck',
+                    decision='wait',
+                    reason='tracking_ttl_final_reclaim_check',
+                    token_ca=token_ca,
+                    symbol=candidate.get('symbol'),
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=candidate.get('signal_ts'),
+                    signal_id=candidate.get('signal_id'),
+                    route=route,
+                    payload={
+                        'entry_mode': mode,
+                        'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                        'attempts': candidate.get('attempts'),
+                        'last_wait_reason': candidate.get('last_wait_reason'),
+                    },
+                    event_ts=now_ts,
+                )
+            else:
+                discovery_candidates.pop(key, None)
+                record_decision_event(
+                    db,
+                    component='discovery_tracking',
+                    event_type='candidate_expire',
+                    decision='expire',
+                    reason='tracking_ttl_expired',
+                    token_ca=token_ca,
+                    symbol=candidate.get('symbol'),
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=candidate.get('signal_ts'),
+                    signal_id=candidate.get('signal_id'),
+                    route=route,
+                    payload={
+                        'entry_mode': mode,
+                        'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                        'attempts': candidate.get('attempts'),
+                        'last_wait_reason': candidate.get('last_wait_reason'),
+                        'final_reclaim_attempted': bool(candidate.get('final_reclaim_attempted')),
+                    },
+                    event_ts=now_ts,
+                )
+                continue
         if now_ts - float(candidate.get('last_check_ts') or 0.0) < DISCOVERY_TRACKING_POLL_SEC:
             continue
 
@@ -4639,6 +4793,39 @@ def process_discovery_tracking_candidates(
                 signal_id=candidate.get('signal_id'),
                 route=route,
                 data_source='discovery_tracking+dexscreener+lifecycle+paper_risk',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+            continue
+
+        live_allowed, entry_mode_quality = _entry_mode_quality_allows_live(
+            db,
+            entry_mode=mode,
+            token_ca=token_ca,
+            symbol=candidate.get('symbol'),
+            lifecycle_id=lifecycle_id,
+            signal_ts=candidate.get('signal_ts'),
+            signal_id=candidate.get('signal_id'),
+            route=route,
+            event_ts=now_ts,
+            data_source='discovery_tracking+paper_trades',
+        )
+        detail['entry_mode_quality'] = entry_mode_quality
+        if not live_allowed:
+            candidate['last_wait_reason'] = entry_mode_quality.get('reason') or 'entry_mode_shadow'
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='shadow',
+                reason='entry_mode_quality_shadow',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='discovery_tracking+paper_trades',
                 payload=with_lifecycle_payload(detail, lifecycle),
                 event_ts=now_ts,
             )
@@ -10676,6 +10863,67 @@ def run_monitor(db):
                             )
                             pending_entries.pop(lifecycle_id, None)
                             continue
+                        _entry_mode_live_allowed, _entry_mode_quality = _entry_mode_quality_allows_live(
+                            db,
+                            entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            event_ts=now,
+                            data_source='pending_entry+paper_trades',
+                        )
+                        pending['entry_mode_quality'] = _entry_mode_quality
+                        if not _entry_mode_live_allowed:
+                            _shadow_mode = (
+                                _discovery_mode_for_lotto_reason(pending.get('source_reject_reason'))
+                                if pending.get('is_lotto')
+                                else _discovery_mode_for_ath_reason(pending.get('source_reject_reason'))
+                            ) or pending.get('entry_mode') or pending.get('scout_mode')
+                            track_discovery_candidate(
+                                db,
+                                discovery_candidates,
+                                mode=_shadow_mode,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                pool=pending.get('pool'),
+                                watchlist_id=pending.get('watchlist_id'),
+                                watchlist_entry=pending_w_entry,
+                                source_component=pending.get('source_component') or 'entry_mode_quality',
+                                source_reject_reason='entry_mode_quality_shadow',
+                                source_detail={
+                                    'entry_mode': pending.get('entry_mode'),
+                                    'entry_mode_quality': _entry_mode_quality,
+                                },
+                                lifecycle=_entry_timing_lifecycle,
+                                now_ts=now,
+                            )
+                            record_decision_event(
+                                db,
+                                component='entry_mode_quality',
+                                event_type='entry_block',
+                                decision='shadow',
+                                reason='entry_mode_quality_shadow',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='pending_entry+paper_trades',
+                                payload=with_lifecycle_payload({
+                                    'entry_mode_quality': _entry_mode_quality,
+                                }, _entry_timing_lifecycle),
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
 
                     if pending.get('is_lotto'):
                         _lotto_timing_blocked, _lotto_timing_reason, _lotto_timing_detail = should_block_lotto_lifecycle_entry(
@@ -10733,6 +10981,49 @@ def run_monitor(db):
                             )
                             pending_entries.pop(lifecycle_id, None)
                             continue
+
+                    if (
+                        LOTTO_PULLBACK_SIZE_PROTECT_ENABLED
+                        and pending.get('is_lotto')
+                        and not pending_is_paper_tiny_scout(pending)
+                        and (pending.get('entry_mode') == 'smart_entry_pullback_bounce')
+                    ):
+                        _pullback_strength = _lotto_pullback_has_strong_activity(_entry_timing_lifecycle)
+                        pending['lotto_pullback_size_protect'] = _pullback_strength
+                        if not _pullback_strength.get('pass'):
+                            _old_size = float(pending.get('kelly_position_sol') or LOTTO_POSITION_SIZE_SOL)
+                            pending['kelly_position_sol'] = min(_old_size, PAPER_TINY_SCOUT_SIZE_SOL)
+                            pending['paper_only_scout'] = True
+                            pending['size_protected_scout'] = True
+                            if isinstance(pending.get('lotto_state'), dict):
+                                pending['lotto_state']['sizeProtectedScout'] = True
+                                pending['lotto_state']['sizeProtectReason'] = 'lotto_pullback_activity_not_strong'
+                            record_decision_event(
+                                db,
+                                component='entry_sizing',
+                                event_type='entry_size',
+                                decision='cap',
+                                reason='lotto_pullback_activity_not_strong',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='lifecycle+dexscreener',
+                                payload=with_lifecycle_payload({
+                                    'entry_mode': pending.get('entry_mode'),
+                                    'old_size_sol': _old_size,
+                                    'new_size_sol': pending['kelly_position_sol'],
+                                    'strength': _pullback_strength,
+                                }, _entry_timing_lifecycle),
+                            )
+                            log.info(
+                                f"  [ENTRY_SIZE] {pending['symbol']} LOTTO pullback size protected "
+                                f"{_old_size:.3f} -> {pending['kelly_position_sol']:.3f} SOL "
+                                f"strength={_pullback_strength.get('observed')}"
+                            )
 
                     # Paper tiny scouts must stay at the probe budget even when they come
                     # from a LOTTO pending entry with a larger fixed-size default.
@@ -11629,15 +11920,40 @@ def run_monitor(db):
                                                 trail_floor = exit_matrix.get('trail_floor')
                                                 if trail_floor is not None and quote_pnl >= trail_floor:
                                                     cancel = True
+                                                elif (
+                                                    TINY_EXIT_QUOTE_SANITY_ENABLED
+                                                    and position_is_probe_profit_capture_candidate(pos)
+                                                    and TINY_EXIT_QUOTE_SANITY_MIN_PEAK <= float(getattr(pos, 'peak_pnl', 0.0) or 0.0) <= TINY_EXIT_QUOTE_SANITY_MAX_PEAK
+                                                    and quote_pnl < 0
+                                                    and (trigger_pnl - quote_pnl) >= TINY_EXIT_QUOTE_SANITY_NEG_GAP
+                                                ):
+                                                    cancel = True
+                                            elif (
+                                                TINY_EXIT_QUOTE_SANITY_ENABLED
+                                                and position_is_probe_profit_capture_candidate(pos)
+                                                and TINY_EXIT_QUOTE_SANITY_MIN_PEAK <= float(getattr(pos, 'peak_pnl', 0.0) or 0.0) <= TINY_EXIT_QUOTE_SANITY_MAX_PEAK
+                                                and quote_pnl < 0
+                                                and (trigger_pnl - quote_pnl) >= TINY_EXIT_QUOTE_SANITY_NEG_GAP
+                                                and (
+                                                    'profit_protect' in reason
+                                                    or 'trail' in reason
+                                                    or 'crash_brake' in reason
+                                                )
+                                            ):
+                                                cancel = True
 
                                             if cancel:
                                                 log.warning(
                                                     f"  [PRICE_SANITY] {pos.symbol} EXIT CANCELLED — "
                                                     f"trigger_pnl={trigger_pnl:+.1%} but quote_pnl={quote_pnl:+.1%} "
                                                     f"(divergence={divergence:.1%}, src={pre_src}). "
-                                                    f"Trigger price was unreliable, holding position."
+                                                    f"Trigger/quote disagreement too large, holding position."
                                                 )
-                                                quote_sanity_status = 'exit_cancelled_quote_better'
+                                                quote_sanity_status = (
+                                                    'exit_cancelled_tiny_quote_gap'
+                                                    if quote_pnl < trigger_pnl
+                                                    else 'exit_cancelled_quote_better'
+                                                )
                                                 sanity_override = True
                                             else:
                                                 log.info(
