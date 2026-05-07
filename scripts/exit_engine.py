@@ -11,7 +11,7 @@ import logging
 import threading
 import os
 
-from profit_protect_policy import profit_protect_floor
+from profit_protect_policy import ath_moon_bag_floor, profit_protect_floor
 
 log = logging.getLogger('paper_trade_monitor')
 
@@ -866,20 +866,20 @@ class ExitGuardianThread(threading.Thread):
                         continue
 
                 elif _is_ath_entry and is_moon:
-                    # === ATH Phase 3 Moon Bag: absolute -40pp trail ===
+                    # === ATH Phase 3 Moon Bag: shared dynamic floor ===
                     moon_peak = pos.peak_pnl
-                    moon_floor = moon_peak - 0.40
-                    if moon_floor > 0 and pnl < moon_floor:
+                    moon_floor = ath_moon_bag_floor(moon_peak)
+                    if moon_floor is not None and moon_floor > 0 and pnl < moon_floor:
                         log.info(
                             f"[ExitGuardian] 📉 {pos.symbol} ATH PHASE3 MOON TRAIL: "
                             f"pnl={pnl*100:+.1f}% < floor={moon_floor*100:.1f}% "
-                            f"(peak={moon_peak*100:.1f}%, -40pp abs) price={price:.10f} src={src}"
+                            f"(peak={moon_peak*100:.1f}%, dynamic moon floor) price={price:.10f} src={src}"
                         )
                         with self.exit_queue_lock:
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
-                                'reason': f'guardian_ath_phase3_moon (pnl={pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, -40pp)',
+                                'reason': f'guardian_ath_phase3_moon (pnl={pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, dynamic)',
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
                             '_instant_sim': self._get_instant_quote(pos, ca),

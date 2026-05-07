@@ -53,3 +53,25 @@ def test_entry_mode_quality_degraded_path_shadows_future_entries():
     assert stats["peak_lt_3_rate"] == 1.0
     assert decision["decision"] == "shadow"
     assert decision["reason"] == "entry_mode_quality_degraded"
+
+
+def test_matrix_reclaim_shadows_when_peaks_are_given_back():
+    db = _db()
+    for idx in range(6):
+        _insert(db, "matrix_reclaim_tiny_probe", 0.10, -0.06, idx)
+
+    decision = evaluate_entry_mode_quality(db, "matrix_reclaim_tiny_probe", now_ts=2000)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_degraded"
+
+
+def test_pullback_tiny_scout_can_shadow_after_two_dead_probes():
+    db = _db()
+    for idx in range(2):
+        _insert(db, "pullback_tiny_scout", 0.0, -0.18, idx)
+
+    decision = evaluate_entry_mode_quality(db, "pullback_tiny_scout", now_ts=3000)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_degraded"

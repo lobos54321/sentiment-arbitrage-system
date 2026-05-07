@@ -33,6 +33,21 @@ SCOUT_QUALITY_RECLAIM_MIN_VOL_M5 = float(
 SCOUT_QUALITY_RECLAIM_MIN_TX_M5 = int(
     os.environ.get("SCOUT_QUALITY_RECLAIM_MIN_TX_M5", "120")
 )
+SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_M5 = float(
+    os.environ.get("SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_M5", "15")
+)
+SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_BS = float(
+    os.environ.get("SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_BS", "1.25")
+)
+SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_VOL_M5 = float(
+    os.environ.get("SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_VOL_M5", "8000")
+)
+SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_TX_M5 = int(
+    os.environ.get("SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_TX_M5", "80")
+)
+SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_LIQUIDITY = float(
+    os.environ.get("SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_LIQUIDITY", "5000")
+)
 
 
 _BASE_PROFILE = {
@@ -90,10 +105,10 @@ _PROFILE_OVERRIDES = {
         "block_recent_failures": True,
     },
     "matrix_reclaim_tiny_probe": {
-        "min_buy_sell_ratio": 1.05,
-        "min_vol_m5": 5000.0,
-        "min_tx_m5": 50,
-        "max_negative_m5": -5.0,
+        "min_buy_sell_ratio": 1.20,
+        "min_vol_m5": 12000.0,
+        "min_tx_m5": 120,
+        "max_negative_m5": 0.0,
         "block_recent_failures": True,
     },
     "unknown_data_activity_tiny_scout": {
@@ -262,6 +277,49 @@ def _result(passed, reason, *, mode, profile, observed, thresholds, extras=None)
     return payload
 
 
+def _recent_failure_reclaim_bypass(token_risk, observed):
+    token_risk = token_risk or {}
+    reclaim = token_risk.get("reclaim") if isinstance(token_risk.get("reclaim"), dict) else {}
+    thresholds = {
+        "cooldown_expired": True,
+        "price_change_m5": SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_M5,
+        "buy_sell_ratio": SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_BS,
+        "vol_m5": SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_VOL_M5,
+        "tx_m5": SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_TX_M5,
+        "liquidity_usd": SCOUT_QUALITY_RECENT_FAILURE_RECLAIM_LIQUIDITY,
+    }
+    observed_detail = {
+        "cooldown_expired": bool(token_risk.get("cooldown_expired")),
+        "reason": token_risk.get("reason"),
+        "reclaim_reason": reclaim.get("reason"),
+        "reclaim_confirmed": bool(reclaim.get("reclaim_confirmed")),
+        "price_change_m5": observed.get("price_change_m5"),
+        "buy_sell_ratio": observed.get("buy_sell_ratio"),
+        "vol_m5": observed.get("vol_m5"),
+        "tx_m5": observed.get("tx_m5"),
+        "liquidity_usd": observed.get("liquidity_usd"),
+    }
+    passed = (
+        bool(token_risk.get("cooldown_expired"))
+        and observed.get("price_change_m5") is not None
+        and observed["price_change_m5"] >= thresholds["price_change_m5"]
+        and observed.get("buy_sell_ratio") is not None
+        and observed["buy_sell_ratio"] >= thresholds["buy_sell_ratio"]
+        and observed.get("vol_m5") is not None
+        and observed["vol_m5"] >= thresholds["vol_m5"]
+        and observed.get("tx_m5") is not None
+        and observed["tx_m5"] >= thresholds["tx_m5"]
+        and observed.get("liquidity_usd") is not None
+        and observed["liquidity_usd"] >= thresholds["liquidity_usd"]
+    )
+    return {
+        "pass": passed,
+        "reason": "recent_failure_reclaim_bypass" if passed else "recent_failure_reclaim_not_strong",
+        "observed": observed_detail,
+        "thresholds": thresholds,
+    }
+
+
 def evaluate_scout_quality(
     *,
     mode=None,
@@ -330,7 +388,12 @@ def evaluate_scout_quality(
     ):
         reclaim_unlocked = bool(token_risk.get("reclaim_unlocked"))
         cooldown_expired = bool(token_risk.get("cooldown_expired"))
-        if not (reclaim_unlocked and cooldown_expired and not token_risk.get("blocked")):
+        recent_failure_bypass = _recent_failure_reclaim_bypass(token_risk, observed)
+        extras["recent_failure_reclaim_bypass"] = recent_failure_bypass
+        if not (
+            (reclaim_unlocked and cooldown_expired and not token_risk.get("blocked"))
+            or recent_failure_bypass.get("pass")
+        ):
             return _result(
                 False,
                 "scout_quality_recent_token_failure",

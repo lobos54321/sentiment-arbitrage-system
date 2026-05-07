@@ -20,6 +20,24 @@ ENTRY_MODE_QUALITY_LOW_PEAK_RATE = float(os.environ.get("ENTRY_MODE_QUALITY_LOW_
 ENTRY_MODE_QUALITY_MIN_AVG_PEAK = float(os.environ.get("ENTRY_MODE_QUALITY_MIN_AVG_PEAK", "0.05"))
 ENTRY_MODE_QUALITY_BAD_AVG_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_BAD_AVG_FINAL", "-0.08"))
 ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE = float(os.environ.get("ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE", "0.15"))
+ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL", "-0.05"))
+ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK", "0.12"))
+
+_MODE_OVERRIDES = {
+    # Matrix reclaim is currently the noisiest live probe path. It can produce
+    # >10% peaks, so a pure peak-rate controller is too slow; shadow it when the
+    # path repeatedly turns tradable peaks into negative final PnL.
+    "matrix_reclaim_tiny_probe": {
+        "min_samples": int(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_RECLAIM_MIN_SAMPLES", "6")),
+        "capture_bad_final": float(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_RECLAIM_BAD_FINAL", "-0.05")),
+        "capture_giveback": float(os.environ.get("ENTRY_MODE_QUALITY_MATRIX_RECLAIM_GIVEBACK", "0.12")),
+    },
+    "pullback_tiny_scout": {
+        "min_samples": int(os.environ.get("ENTRY_MODE_QUALITY_PULLBACK_MIN_SAMPLES", "2")),
+        "capture_bad_final": float(os.environ.get("ENTRY_MODE_QUALITY_PULLBACK_BAD_FINAL", "-0.05")),
+        "capture_giveback": float(os.environ.get("ENTRY_MODE_QUALITY_PULLBACK_GIVEBACK", "0.08")),
+    },
+}
 
 # Runtime memory keeps a degraded path shadow-only without needing a schema
 # migration. Historical trades are still queried after restart.
@@ -44,6 +62,22 @@ def _empty_stats(entry_mode):
         "peak_lt_3_rate": 0.0,
         "avg_peak": None,
         "avg_final": None,
+    }
+
+
+def _thresholds_for(entry_mode):
+    override = _MODE_OVERRIDES.get(str(entry_mode or ""), {})
+    return {
+        "min_samples": max(1, int(override.get("min_samples", ENTRY_MODE_QUALITY_MIN_SAMPLES))),
+        "peak_low": ENTRY_MODE_QUALITY_PEAK_LOW,
+        "peak_good": ENTRY_MODE_QUALITY_PEAK_GOOD,
+        "low_peak_rate": ENTRY_MODE_QUALITY_LOW_PEAK_RATE,
+        "min_avg_peak": ENTRY_MODE_QUALITY_MIN_AVG_PEAK,
+        "bad_avg_final": ENTRY_MODE_QUALITY_BAD_AVG_FINAL,
+        "min_good_peak_rate": ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE,
+        "capture_bad_final": float(override.get("capture_bad_final", ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL)),
+        "capture_giveback": float(override.get("capture_giveback", ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK)),
+        "shadow_sec": ENTRY_MODE_QUALITY_SHADOW_SEC,
     }
 
 
@@ -88,16 +122,7 @@ def recent_entry_mode_stats(db, entry_mode, *, window=None):
         "avg_peak": sum(peaks) / sample_n,
         "avg_final": sum(finals) / sample_n,
         "window": limit,
-        "thresholds": {
-            "min_samples": ENTRY_MODE_QUALITY_MIN_SAMPLES,
-            "peak_low": ENTRY_MODE_QUALITY_PEAK_LOW,
-            "peak_good": ENTRY_MODE_QUALITY_PEAK_GOOD,
-            "low_peak_rate": ENTRY_MODE_QUALITY_LOW_PEAK_RATE,
-            "min_avg_peak": ENTRY_MODE_QUALITY_MIN_AVG_PEAK,
-            "bad_avg_final": ENTRY_MODE_QUALITY_BAD_AVG_FINAL,
-            "min_good_peak_rate": ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE,
-            "shadow_sec": ENTRY_MODE_QUALITY_SHADOW_SEC,
-        },
+        "thresholds": _thresholds_for(entry_mode),
     }
 
 
@@ -127,7 +152,9 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
         })
         return base
 
-    if stats.get("sample_n", 0) < ENTRY_MODE_QUALITY_MIN_SAMPLES:
+    thresholds = _thresholds_for(entry_mode)
+
+    if stats.get("sample_n", 0) < thresholds["min_samples"]:
         base["reason"] = "entry_mode_quality_insufficient_samples"
         return base
 
@@ -135,13 +162,17 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
     peak_gt_rate = _safe_float(stats.get("peak_gt_10_rate"), 0.0)
     avg_peak = _safe_float(stats.get("avg_peak"), 0.0)
     avg_final = _safe_float(stats.get("avg_final"), 0.0)
+    avg_giveback = avg_peak - avg_final
 
     degraded = (
-        peak_lt_rate >= ENTRY_MODE_QUALITY_LOW_PEAK_RATE
-        and avg_peak < ENTRY_MODE_QUALITY_MIN_AVG_PEAK
+        peak_lt_rate >= thresholds["low_peak_rate"]
+        and avg_peak < thresholds["min_avg_peak"]
     ) or (
-        avg_final < ENTRY_MODE_QUALITY_BAD_AVG_FINAL
-        and peak_gt_rate < ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE
+        avg_final < thresholds["bad_avg_final"]
+        and peak_gt_rate < thresholds["min_good_peak_rate"]
+    ) or (
+        avg_final < thresholds["capture_bad_final"]
+        and avg_giveback > thresholds["capture_giveback"]
     )
 
     if degraded:

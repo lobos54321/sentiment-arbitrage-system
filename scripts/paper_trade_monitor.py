@@ -3844,6 +3844,9 @@ DISCOVERY_MATRIX_RECLAIM_REASONS = {
 }
 DISCOVERY_UNKNOWN_DATA_REASONS = {
     'not_ath_prebuy_kline_unknown_data_blocked',
+    'backfill_rate_limited',
+    'rate_limited',
+    'rate_limited_429',
 }
 DISCOVERY_LOTTO_HIGH_RISK_REASON_PREFIXES = (
     'lotto_observe_low_mc_vol',
@@ -4436,12 +4439,12 @@ def process_discovery_tracking_candidates(
             discovery_candidates.pop(key, None)
             continue
         if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
-            discovery_candidates.pop(key, None)
+            candidate['last_wait_reason'] = 'already_pending_or_holding'
             record_decision_event(
                 db,
                 component='discovery_tracking',
-                event_type='candidate_expire',
-                decision='expire',
+                event_type='candidate_recheck',
+                decision='wait',
                 reason='already_pending_or_holding',
                 token_ca=token_ca,
                 symbol=candidate.get('symbol'),
@@ -4449,7 +4452,13 @@ def process_discovery_tracking_candidates(
                 signal_ts=candidate.get('signal_ts'),
                 signal_id=candidate.get('signal_id'),
                 route=route,
-                payload={'entry_mode': mode},
+                payload={
+                    'entry_mode': mode,
+                    'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                    'attempts': candidate.get('attempts'),
+                    'pending': lifecycle_id in pending_entries,
+                    'holding': any(pos.token_ca == token_ca for pos in positions.values()),
+                },
                 event_ts=now_ts,
             )
             continue

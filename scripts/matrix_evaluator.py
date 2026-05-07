@@ -18,7 +18,7 @@ import time
 import logging
 import os
 
-from profit_protect_policy import profit_protect_floor
+from profit_protect_policy import ath_moon_bag_floor, profit_protect_floor
 
 log = logging.getLogger('matrix')
 
@@ -1349,20 +1349,19 @@ class ExitMatrixEvaluator:
                 'current_pnl': current_pnl,
             }
 
-        # === ATH Phase 3 Moon Bag: absolute -40pp trail (house money, let it moonshot) ===
+        # === ATH Phase 3 Moon Bag: shared dynamic floor (house money, let it moonshot) ===
         _is_ath_entry = entry.get('type') == 'ATH' or entry.get('signal_type') == 'ATH'
         if _is_ath_entry:
-            # floor = peak - 40pp absolute. At peak=150% → floor=110%. At peak=300% → floor=260%.
-            moon_floor = moon_peak - 0.40
-            if moon_floor > 0 and current_pnl < moon_floor:
+            moon_floor = ath_moon_bag_floor(moon_peak)
+            if moon_floor is not None and moon_floor > 0 and current_pnl < moon_floor:
                 return {
                     'action': 'exit',
-                    'reason': f'ath_phase3_moon_trail (pnl={current_pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, -40pp abs)',
+                    'reason': f'ath_phase3_moon_trail (pnl={current_pnl:.1%} < floor={moon_floor:.1%}, peak={moon_peak:.1%}, dynamic)',
                     'current_pnl': current_pnl,
                 }
             return {
                 'action': 'hold',
-                'reason': f'ath_phase3_moon_hold (floor={moon_floor:.1%}, peak={moon_peak:.1%})',
+                'reason': f'ath_phase3_moon_hold (floor={(moon_floor or 0.0):.1%}, peak={moon_peak:.1%})',
                 'current_pnl': current_pnl,
             }
 

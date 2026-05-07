@@ -5,6 +5,12 @@ import os
 
 
 PROFIT_PROTECT_SLIP_BUFFER = float(os.environ.get("PROFIT_PROTECT_SLIP_BUFFER", "0.015"))
+ATH_MOON_FLOOR_LOW_PEAK = float(os.environ.get("ATH_MOON_FLOOR_LOW_PEAK", "0.50"))
+ATH_MOON_FLOOR_BLEND_PEAK = float(os.environ.get("ATH_MOON_FLOOR_BLEND_PEAK", "0.70"))
+ATH_MOON_FLOOR_FULL_MOON_PEAK = float(os.environ.get("ATH_MOON_FLOOR_FULL_MOON_PEAK", "1.00"))
+ATH_MOON_FLOOR_TIGHT_MARGIN = float(os.environ.get("ATH_MOON_FLOOR_TIGHT_MARGIN", "0.25"))
+ATH_MOON_FLOOR_WIDE_MARGIN = float(os.environ.get("ATH_MOON_FLOOR_WIDE_MARGIN", "0.40"))
+ATH_MOON_FLOOR_MIN_FACTOR = float(os.environ.get("ATH_MOON_FLOOR_MIN_FACTOR", "0.55"))
 
 
 def profit_protect_floor(peak_pnl, *, slip_buffer=None):
@@ -31,3 +37,32 @@ def profit_protect_floor(peak_pnl, *, slip_buffer=None):
     else:
         desired_realized = max(peak * 0.65, 0.04)
     return desired_realized + max(0.0, slip)
+
+
+def ath_moon_bag_floor(peak_pnl):
+    """Return the ATH moon-bag floor for 50%+ peak winners.
+
+    The previous fixed `peak - 40pp` rule was fine for 80-100%+ runners, but too
+    loose for just-crossed 50% peaks. This keeps wide room for moonshots while
+    tightening the 50-70% band where giving back 40pp often means losing most of
+    the captured move.
+    """
+    try:
+        peak = float(peak_pnl or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if peak < ATH_MOON_FLOOR_LOW_PEAK:
+        floor = peak - ATH_MOON_FLOOR_WIDE_MARGIN
+        return floor if floor > 0 else None
+
+    tight_floor = max(peak - ATH_MOON_FLOOR_TIGHT_MARGIN, peak * ATH_MOON_FLOOR_MIN_FACTOR)
+    wide_floor = peak - ATH_MOON_FLOOR_WIDE_MARGIN
+
+    if peak < ATH_MOON_FLOOR_BLEND_PEAK:
+        return tight_floor
+    if peak >= ATH_MOON_FLOOR_FULL_MOON_PEAK:
+        return wide_floor
+
+    blend_width = max(ATH_MOON_FLOOR_FULL_MOON_PEAK - ATH_MOON_FLOOR_BLEND_PEAK, 1e-9)
+    blend = min(1.0, max(0.0, (peak - ATH_MOON_FLOOR_BLEND_PEAK) / blend_width))
+    return tight_floor * (1.0 - blend) + wide_floor * blend
