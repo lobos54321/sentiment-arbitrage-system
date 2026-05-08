@@ -99,6 +99,9 @@ SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_VOL_M5 = float(os.environ.get("SMART_ENTRY_RE
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5 = int(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_TX_M5", "80"))
 SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get("SMART_ENTRY_RECLAIM_TINY_SCOUT_MIN_LIQ_USD", "5000"))
 SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE = int(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE", "55"))
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_T = int(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_T", "60"))
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_P = int(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_P", "80"))
+SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_S = int(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_S", "100"))
 SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL = float(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL", "0.30"))
 SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS = float(os.environ.get("SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS", "1.15"))
 SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_SCORE = int(os.environ.get("SMART_ENTRY_ATH_FLAT_TINY_SCOUT_MIN_SCORE", "45"))
@@ -627,6 +630,67 @@ def _policy_gmgn_policy(entry_readiness_policy):
     return {}
 
 
+def _matrix_score(matrix_scores, key, default=0):
+    try:
+        return int(float((matrix_scores or {}).get(key, default) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _ath_no_kline_tiny_probe_detail(entry_readiness_policy, matrix_scores, total_score, bs_ratio, rvol):
+    profile_name = _policy_profile(entry_readiness_policy)
+    route_name = _policy_route(entry_readiness_policy)
+    ath_policy = route_name.upper() == "ATH" or profile_name.startswith("ATH_")
+    trend_score = _matrix_score(matrix_scores, "trend")
+    price_score = _matrix_score(matrix_scores, "price")
+    signal_score = _matrix_score(matrix_scores, "signal")
+    volume_score = _matrix_score(matrix_scores, "volume")
+    momentum_score = _matrix_score(matrix_scores, "momentum")
+    matrix_strong = (
+        trend_score >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_T
+        and price_score >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_P
+        and signal_score >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_S
+    )
+    score_strong = total_score >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE
+    bs_ok = bs_ratio >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS
+    rvol_ok = rvol >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL
+    if not ath_policy:
+        reason = "not_ath_policy"
+    elif not bs_ok:
+        reason = "buy_pressure_below_floor"
+    elif not rvol_ok:
+        reason = "rvol_below_floor"
+    elif not (matrix_strong or score_strong):
+        reason = "matrix_and_score_not_strong_enough"
+    else:
+        reason = "ath_no_kline_tiny_probe"
+    return {
+        "pass": ath_policy and bs_ok and rvol_ok and (matrix_strong or score_strong),
+        "reason": reason,
+        "ath_policy": ath_policy,
+        "profile": profile_name,
+        "route": route_name,
+        "total_score": total_score,
+        "score_strong": score_strong,
+        "matrix_strong": matrix_strong,
+        "matrix_scores": {
+            "trend": trend_score,
+            "volume": volume_score,
+            "price": price_score,
+            "signal": signal_score,
+            "momentum": momentum_score,
+        },
+        "thresholds": {
+            "total_score": SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE,
+            "trend": SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_T,
+            "price": SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_P,
+            "signal": SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_MATRIX_S,
+            "buy_sell_ratio": SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS,
+            "rvol": SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL,
+        },
+    }
+
+
 def _explosive_direct_scout_ok(entry_readiness_policy, cached_trend, bs_ratio):
     if not _policy_allows("explosive_newborn_direct_scout", entry_readiness_policy):
         return False, {}
@@ -900,7 +964,7 @@ def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, mo
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                          momentum_snapshots=None, momentum_pct=0, sustained_ath=False,
                          first_fire_pc_m5=None, spread_abort_count=0,
-                         entry_readiness_policy=None):
+                         entry_readiness_policy=None, matrix_scores=None):
     """
     Smart Entry Engine (V6 — Unified Scoring System)
     Replaces serial rejection with a 6-dimension scoring system (Total 100+ points).
@@ -1280,28 +1344,14 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
     # data ticket with clean attribution instead of sitting empty.
     _mc = cached_trend.get('fdv', 0) or cached_trend.get('market_cap', 0) if cached_trend else 0
     _vol_mc = (vol_m5 / _mc) if _mc > 0 else 0
-    _ath_no_kline_fallback_ok = False
-    _policy_profile = ''
-    _policy_route = ''
-    if entry_readiness_policy:
-        _policy_profile = str(
-            entry_readiness_policy.get('lifecycle_profile', '')
-            if isinstance(entry_readiness_policy, dict)
-            else getattr(entry_readiness_policy, 'lifecycle_profile', '')
-        )
-        _policy_detail = (
-            entry_readiness_policy.get('detail', {})
-            if isinstance(entry_readiness_policy, dict)
-            else getattr(entry_readiness_policy, 'detail', {})
-        ) or {}
-        _policy_route = str(_policy_detail.get('route') or '')
-        _ath_policy = _policy_route.upper() == 'ATH' or _policy_profile.startswith('ATH_')
-        _ath_no_kline_fallback_ok = (
-            _ath_policy
-            and total_score >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE
-            and rvol >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_RVOL
-            and bs_ratio >= SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_BS
-        )
+    _ath_no_kline_detail = _ath_no_kline_tiny_probe_detail(
+        entry_readiness_policy,
+        matrix_scores,
+        total_score,
+        bs_ratio,
+        rvol,
+    )
+    _ath_no_kline_fallback_ok = bool(_ath_no_kline_detail.get('pass'))
     if not _kline_confirmed and rvol < 2.0 and _vol_mc < 0.30:
         if _gmgn_tiny_ok:
             log.info(
@@ -1313,7 +1363,9 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
             node_detail = (
                 f"node=ath_no_kline_tiny_probe score={total_score} "
                 f"bs={bs_ratio:.2f} rvol={rvol:.1f}x vol/mc={_vol_mc:.1%} "
-                f"profile={_policy_profile or '?'} route={_policy_route or '?'} "
+                f"profile={_ath_no_kline_detail.get('profile') or '?'} "
+                f"route={_ath_no_kline_detail.get('route') or '?'} "
+                f"matrix={_ath_no_kline_detail.get('matrix_scores')} "
                 f"armed=({','.join(score_details)})"
             )
             log.info(
@@ -1321,11 +1373,26 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                 f"{node_detail}")
             return True, SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MODE, node_detail, price
         else:
+            if _ath_no_kline_detail.get('ath_policy'):
+                log.info(
+                    f"[SmartEntry] ⚠️  ATH_NO_KLINE_TINY_SKIP ${symbol}: "
+                    f"reason={_ath_no_kline_detail.get('reason')} "
+                    f"score={total_score}/{SMART_ENTRY_ATH_NO_KLINE_TINY_PROBE_MIN_SCORE} "
+                    f"matrix={_ath_no_kline_detail.get('matrix_scores')} "
+                    f"bs={bs_ratio:.2f} rvol={rvol:.1f}x vol/mc={_vol_mc:.1%}"
+                )
             log.info(
                 f"[SmartEntry] 🚫  REJECT: no_kline_low_volume - "
                 f"kline not confirmed + rvol={rvol:.1f}x < 2.0x + vol/mc={_vol_mc:.1%} < 30% "
                 f"(compound weakness: no trend proof + no volume surge)")
-            return False, 'no_kline_low_volume', f'kline_unconfirmed + rvol={rvol:.1f}x + vol/mc={_vol_mc:.1%}', None
+            _skip_detail = (
+                f" ath_no_kline_tiny_skip={_ath_no_kline_detail.get('reason')}"
+                if _ath_no_kline_detail.get('ath_policy')
+                else ""
+            )
+            return False, 'no_kline_low_volume', (
+                f'kline_unconfirmed + rvol={rvol:.1f}x + vol/mc={_vol_mc:.1%}{_skip_detail}'
+            ), None
     elif not _kline_confirmed and rvol < 2.0 and _vol_mc >= 0.30:
         log.info(
             f"[SmartEntry] ✅  VOL_MC_BYPASS: kline not confirmed + rvol={rvol:.1f}x < 2.0x "

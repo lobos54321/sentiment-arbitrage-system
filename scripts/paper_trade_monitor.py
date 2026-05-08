@@ -11019,6 +11019,7 @@ def run_monitor(db):
                                     else pending.get('spread_abort_count', 0)
                                 ),
                                 entry_readiness_policy=pending.get('entry_readiness_policy'),
+                                matrix_scores=pending.get('matrix_scores'),
                             )
                             pending['_smart_entry_future'] = _se_future
                             continue
@@ -11068,6 +11069,7 @@ def run_monitor(db):
                                     'max_retries': max_retries,
                                     'trigger_price': timing_trigger_price,
                                     'entry_readiness_policy': pending.get('entry_readiness_policy'),
+                                    'matrix_scores': pending.get('matrix_scores'),
                                 },
                             )
                             if pending_w_entry and _reclaimable_timing_reject:
@@ -11123,6 +11125,7 @@ def run_monitor(db):
                                 'parent_scout_mode': pending.get('parent_scout_mode'),
                                 'entry_trigger_mode': pending.get('entry_trigger_mode'),
                                 'entry_readiness_policy': pending.get('entry_readiness_policy'),
+                                'matrix_scores': pending.get('matrix_scores'),
                             },
                         )
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
