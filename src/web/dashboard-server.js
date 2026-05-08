@@ -3358,12 +3358,14 @@ const server = http.createServer(async (req, res) => {
             MIN(COALESCE(signal_ts, created_event_ts, baseline_ts, 0)) AS first_event_ts,
             MAX(COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)) AS max_pnl,
             ${hasTradability ? `
-            MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
-            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak,
-            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy` : `
-            NULL AS tradable_missed,
-            NULL AS would_stop_before_peak,
-            NULL AS quote_executable_proxy`}
+	            MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
+	            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak,
+	            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_proxy,
+	            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy` : `
+	            NULL AS tradable_missed,
+	            NULL AS would_stop_before_peak,
+	            NULL AS clean_tradable_proxy,
+	            NULL AS quote_executable_proxy`}
           FROM paper_missed_signal_attribution
           ${whereSql}
           GROUP BY token_ca
@@ -3371,11 +3373,11 @@ const server = http.createServer(async (req, res) => {
         SELECT
           COUNT(*) AS total_n,
           ${tierCaseSql('max_pnl')},
-          ${hasTradability ? `
-          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
-          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
-          SUM(CASE WHEN quote_executable_proxy = 1 THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
-          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
+	          ${hasTradability ? `
+	          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+	          SUM(CASE WHEN clean_tradable_proxy = 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+	          SUM(CASE WHEN quote_executable_proxy = 1 THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
+	          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
           NULL AS tradable_n,
           NULL AS clean_tradable_n,
           NULL AS quote_executable_proxy_n,
@@ -3404,12 +3406,14 @@ const server = http.createServer(async (req, res) => {
             token_ca,
             MAX(COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)) AS max_pnl,
             ${hasTradability ? `
-            MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
-            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak,
-            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy` : `
-            NULL AS tradable_missed,
-            NULL AS would_stop_before_peak,
-            NULL AS quote_executable_proxy`}
+	            MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
+	            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak,
+	            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_proxy,
+	            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy` : `
+	            NULL AS tradable_missed,
+	            NULL AS would_stop_before_peak,
+	            NULL AS clean_tradable_proxy,
+	            NULL AS quote_executable_proxy`}
           FROM paper_missed_signal_attribution
           ${whereSql ? `${whereSql} AND COALESCE(route, '') = 'ATH'` : "WHERE COALESCE(route, '') = 'ATH'"}
           GROUP BY token_ca
@@ -3417,11 +3421,11 @@ const server = http.createServer(async (req, res) => {
         SELECT
           COUNT(*) AS total_n,
           ${tierCaseSql('max_pnl')},
-          ${hasTradability ? `
-          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
-          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
-          SUM(CASE WHEN quote_executable_proxy = 1 THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
-          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
+	          ${hasTradability ? `
+	          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+	          SUM(CASE WHEN clean_tradable_proxy = 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+	          SUM(CASE WHEN quote_executable_proxy = 1 THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
+	          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
           NULL AS tradable_n,
           NULL AS clean_tradable_n,
           NULL AS quote_executable_proxy_n,
