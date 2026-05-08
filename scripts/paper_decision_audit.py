@@ -49,6 +49,7 @@ CREATE_DECISION_AUDIT_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_pde_trade ON paper_decision_events(trade_id)",
     "CREATE INDEX IF NOT EXISTS idx_pde_component ON paper_decision_events(component, decision)",
     "CREATE INDEX IF NOT EXISTS idx_pde_event_ts ON paper_decision_events(event_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pde_token_component_reason_ts ON paper_decision_events(token_ca, component, reason, event_ts)",
 ]
 
 
@@ -109,6 +110,9 @@ CREATE_MISSED_ATTRIBUTION_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_pmsa_status ON paper_missed_signal_attribution(status)",
     "CREATE INDEX IF NOT EXISTS idx_pmsa_route_component ON paper_missed_signal_attribution(route, component)",
     "CREATE INDEX IF NOT EXISTS idx_pmsa_signal_ts ON paper_missed_signal_attribution(signal_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pmsa_created_event_ts ON paper_missed_signal_attribution(created_event_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pmsa_baseline_ts ON paper_missed_signal_attribution(baseline_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pmsa_route_signal_ts ON paper_missed_signal_attribution(route, signal_ts)",
 ]
 
 

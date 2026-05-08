@@ -62,6 +62,97 @@ function parseUnixishTime(value) {
   return Math.floor(parsedMs / 1000);
 }
 
+function windowedSinceTs(url, defaultHours = 6) {
+  const explicit = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+  if (explicit) return explicit;
+  const all = String(url.searchParams.get('all') || '').toLowerCase();
+  if (['1', 'true', 'yes'].includes(all)) return null;
+  const hours = Math.max(1, Math.min(parseInt(url.searchParams.get('hours') || String(defaultHours), 10) || defaultHours, 168));
+  return Math.floor(Date.now() / 1000) - hours * 3600;
+}
+
+function missedAttributionTimeWhere(sinceTs, alias = '') {
+  if (!sinceTs) return '';
+  const prefix = alias ? `${alias}.` : '';
+  return `WHERE (
+    COALESCE(${prefix}signal_ts, 0) >= @since
+    OR COALESCE(${prefix}created_event_ts, 0) >= @since
+    OR COALESCE(${prefix}baseline_ts, 0) >= @since
+  )`;
+}
+
+function maskedSecret(value) {
+  const text = String(value || '');
+  if (!text) return null;
+  if (text.length <= 8) return `${text.slice(0, 2)}***`;
+  return `${text.slice(0, 4)}***${text.slice(-4)}`;
+}
+
+function heliusConfigHealth() {
+  const apiKey = process.env.HELIUS_API_KEY || '';
+  const rpcUrl = process.env.HELIUS_RPC_URL || (apiKey ? `https://mainnet.helius-rpc.com/?api-key=${apiKey}` : '');
+  const urlKey = (() => {
+    try {
+      return new URL(rpcUrl).searchParams.get('api-key') || '';
+    } catch {
+      return '';
+    }
+  })();
+  return {
+    api_key_present: Boolean(apiKey),
+    api_key_masked: maskedSecret(apiKey),
+    rpc_url_present: Boolean(rpcUrl),
+    rpc_url_has_api_key: Boolean(urlKey),
+    rpc_url_key_masked: maskedSecret(urlKey),
+    rpc_url_key_matches_api_key: Boolean(apiKey && urlKey && apiKey === urlKey),
+  };
+}
+
+async function probeHeliusRpcLive(timeoutMs = 5000) {
+  const config = heliusConfigHealth();
+  const apiKey = process.env.HELIUS_API_KEY || '';
+  const rpcUrl = process.env.HELIUS_RPC_URL || (apiKey ? `https://mainnet.helius-rpc.com/?api-key=${apiKey}` : '');
+  if (!rpcUrl) {
+    return { ok: false, status: 'disabled', config };
+  }
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'health', method: 'getHealth' }),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch {}
+    const rpcError = payload && payload.error ? payload.error : null;
+    return {
+      ok: response.ok && !rpcError,
+      status: response.ok && !rpcError ? 'ok' : 'error',
+      http_status: response.status,
+      latency_ms: Date.now() - started,
+      rpc_result: payload && payload.result !== undefined ? payload.result : null,
+      rpc_error_code: rpcError ? rpcError.code : null,
+      rpc_error_message: rpcError ? rpcError.message : null,
+      body_excerpt: rpcError ? null : String(text || '').slice(0, 160),
+      config,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: e.name === 'AbortError' ? 'timeout' : 'error',
+      latency_ms: Date.now() - started,
+      error: e.message,
+      config,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function tierCaseSql(expr, prefix = '') {
   return `
           SUM(CASE WHEN ${expr} >= 1.0 THEN 1 ELSE 0 END) AS ${prefix}gold_n,
@@ -2357,6 +2448,23 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/provider-live-health') {
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const timeoutMs = Math.max(1000, Math.min(parseInt(url.searchParams.get('timeout_ms') || '5000', 10) || 5000, 15000));
+      const helius = await probeHeliusRpcLive(timeoutMs);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        providers: {
+          helius,
+        },
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
   } else if (url.pathname === '/api/paper/data-source-health') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
@@ -2369,7 +2477,7 @@ const server = http.createServer(async (req, res) => {
     let signalDb;
     try {
       const nowSec = Math.floor(Date.now() / 1000);
-      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts')) || (nowSec - 6 * 60 * 60);
+      const sinceTs = windowedSinceTs(url, 6) || (nowSec - 6 * 60 * 60);
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const health = {
@@ -2389,6 +2497,9 @@ const server = http.createServer(async (req, res) => {
         counters: {},
         external_alpha_health: [],
         premium_signal_gate_health: null,
+        provider_config_health: {
+          helius: heliusConfigHealth(),
+        },
         signal_db_path: resolvedDbPath,
         open_exit_quote_risk: null,
         missed_attribution_coverage: null,
@@ -2779,7 +2890,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 500));
       const eventLimit = Math.max(limit, Math.min(parseInt(url.searchParams.get('event_limit') || '5000', 10) || 5000, 50000));
-      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      const sinceTs = windowedSinceTs(url, 6);
       const statusFilter = (url.searchParams.get('status') || 'all').toLowerCase();
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
@@ -3105,10 +3216,8 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '25', 10) || 25, 200));
-      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
-      const whereSql = sinceTs
-        ? 'WHERE COALESCE(signal_ts, created_event_ts, baseline_ts, 0) >= @since'
-        : '';
+      const sinceTs = windowedSinceTs(url, 6);
+      const whereSql = missedAttributionTimeWhere(sinceTs);
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(

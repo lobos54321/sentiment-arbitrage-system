@@ -14357,6 +14357,25 @@ def run_monitor(db):
                         realized_pnl = trigger_pnl
                         accounting_source = f'trigger_pnl_override(was={accounting_source})'
 
+                mark_peak_before_close = _safe_float(pos.peak_pnl, 0.0)
+                close_peak_candidates = [
+                    mark_peak_before_close,
+                    _safe_float(trigger_pnl, None),
+                    _safe_float(exit_quote_pnl, None),
+                    _safe_float(realized_pnl, None),
+                ]
+                close_peak_candidates = [
+                    value for value in close_peak_candidates
+                    if value is not None and value == value
+                ]
+                close_peak_pnl = max(close_peak_candidates) if close_peak_candidates else mark_peak_before_close
+                if close_peak_pnl > mark_peak_before_close:
+                    pos.peak_pnl = close_peak_pnl
+                    pos.monitor_state = dict(pos.monitor_state or {})
+                    pos.monitor_state['markPeakPnlBeforeClose'] = _safe_float(mark_peak_before_close, None)
+                    pos.monitor_state['peakPnlAdjustedByCloseQuote'] = True
+                    pos.monitor_state['closePeakPnl'] = _safe_float(close_peak_pnl, None)
+
                 pos.monitor_state = dict(pos.monitor_state or {})
                 pos.monitor_state['closed'] = True
                 pos.monitor_state['exitReason'] = reason
