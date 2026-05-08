@@ -21,6 +21,7 @@ from paper_trade_monitor import (  # noqa: E402
     _apply_actual_tiny_trigger_mode,
     _apply_primary_proving_cap,
     _ath_reentry_block_cooldown_sec,
+    _ath_no_kline_followthrough_guard,
     _ath_no_kline_reentry_guard,
     _ath_no_kline_scout_quality_soft_override,
     _ath_dynamic_ttl_extension_detail,
@@ -363,6 +364,29 @@ def test_ath_no_kline_reentry_guard_blocks_low_followthrough():
     assert decision["reason"] == "ath_no_kline_reentry_low_followthrough"
 
 
+def test_ath_no_kline_outcome_guard_blocks_cross_mode_low_followthrough():
+    db = _paper_trade_db([
+        {
+            "entry_mode": ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            "exit_reason": "guardian_hard_sl",
+            "pnl_pct": -0.12,
+            "peak_pnl": 0.03,
+            "exit_price": 1.0,
+        },
+    ])
+
+    decision = _ath_no_kline_reentry_guard(
+        db,
+        _ath_no_kline_pending(),
+        current_price=1.12,
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_no_kline_reentry_hard_loss_cooldown"
+    assert decision["latest_trade"]["entry_mode"] == ATH_UNCERTAINTY_TINY_SCOUT_MODE
+
+
 def test_ath_no_kline_reentry_guard_allows_recovered_prior_winner():
     db = _paper_trade_db([
         {"exit_reason": "tp", "pnl_pct": 0.18, "peak_pnl": 0.42, "exit_price": 1.0},
@@ -377,6 +401,27 @@ def test_ath_no_kline_reentry_guard_allows_recovered_prior_winner():
 
     assert decision["pass"] is True
     assert decision["reason"] == "ath_no_kline_reentry_allowed"
+
+
+def test_ath_no_kline_followthrough_blocks_weak_late_attempt():
+    decision = _ath_no_kline_followthrough_guard(
+        _ath_no_kline_pending(),
+        {"buys_m5": 10, "sells_m5": 10, "price_change_m5": -1.0, "vol_m5": 4000},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_no_kline_followthrough_buy_pressure_weak"
+
+
+def test_ath_no_kline_followthrough_allows_confirmed_activity():
+    decision = _ath_no_kline_followthrough_guard(
+        _ath_no_kline_pending(),
+        {"buys_m5": 24, "sells_m5": 16, "price_change_m5": 4.0, "vol_m5": 7000},
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "ath_no_kline_followthrough_confirmed"
+    assert decision["checks"]["tx_ok"] is True
 
 
 def test_tiny_probe_structure_sl_selects_tighter_stop():

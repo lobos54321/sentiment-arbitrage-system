@@ -280,6 +280,12 @@ ATH_NO_KLINE_REENTRY_MIN_T = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_T', '8
 ATH_NO_KLINE_REENTRY_MIN_P = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_P', '80'))
 ATH_NO_KLINE_REENTRY_MIN_S = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_S', '100'))
 ATH_NO_KLINE_REENTRY_WINNER_PEAK = float(os.environ.get('ATH_NO_KLINE_REENTRY_WINNER_PEAK', '0.30'))
+ATH_NO_KLINE_REENTRY_HARD_SL_LOW_PEAK = float(os.environ.get('ATH_NO_KLINE_REENTRY_HARD_SL_LOW_PEAK', '0.05'))
+ATH_NO_KLINE_FOLLOWTHROUGH_GUARD_ENABLED = os.environ.get('ATH_NO_KLINE_FOLLOWTHROUGH_GUARD_ENABLED', 'true').lower() != 'false'
+ATH_NO_KLINE_FOLLOWTHROUGH_MIN_BS = float(os.environ.get('ATH_NO_KLINE_FOLLOWTHROUGH_MIN_BS', '1.20'))
+ATH_NO_KLINE_FOLLOWTHROUGH_MIN_TX_M5 = float(os.environ.get('ATH_NO_KLINE_FOLLOWTHROUGH_MIN_TX_M5', '30'))
+ATH_NO_KLINE_FOLLOWTHROUGH_MIN_PC_M5 = float(os.environ.get('ATH_NO_KLINE_FOLLOWTHROUGH_MIN_PC_M5', '0.0'))
+ATH_NO_KLINE_FOLLOWTHROUGH_STRONG_PC_M5 = float(os.environ.get('ATH_NO_KLINE_FOLLOWTHROUGH_STRONG_PC_M5', '6.0'))
 ATH_REENTRY_MATRIX_BLOCK_SEC = int(os.environ.get('ATH_REENTRY_MATRIX_BLOCK_SEC', '120'))
 ATH_REENTRY_LOW_FOLLOW_BLOCK_SEC = int(os.environ.get('ATH_REENTRY_LOW_FOLLOW_BLOCK_SEC', '600'))
 ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED = os.environ.get('ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED', 'true').lower() != 'false'
@@ -331,6 +337,19 @@ UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE = 'unknown_data_activity_tiny_scout'
 MATRIX_RECLAIM_TINY_PROBE_MODE = 'matrix_reclaim_tiny_probe'
 MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE = 'matrix_micro_momentum_tiny_probe'
 LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE = 'lotto_high_risk_discovery_probe'
+ATH_OUTCOME_GUARD_ENTRY_MODES = {
+    ATH_NO_KLINE_TINY_PROBE_MODE,
+    ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+    ATH_HIGH_MC_TINY_PROBE_MODE,
+    ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+    ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+    ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+    'ath_flat_structure_tiny_scout',
+    'ath_soft_reclaim_tiny_scout',
+    'newborn_momentum_tiny_scout',
+    MATRIX_RECLAIM_TINY_PROBE_MODE,
+    MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
+}
 PROBE_PROFIT_CAPTURE_ENABLED = os.environ.get('PROBE_PROFIT_CAPTURE_ENABLED', 'true').lower() != 'false'
 PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL = float(os.environ.get('PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL', '0.02'))
 PROBE_PROFIT_CAPTURE_LOCK_PNL = float(os.environ.get('PROBE_PROFIT_CAPTURE_LOCK_PNL', '0.10'))
@@ -1260,17 +1279,18 @@ def _ath_no_kline_recent_trades(db, token_ca, *, now_ts=None, lookback_sec=None,
     if 'id' in columns:
         order_expr += ", id DESC"
     try:
+        placeholders = ','.join(['?'] * len(ATH_OUTCOME_GUARD_ENTRY_MODES))
         rows = db.execute(
             f"""
             SELECT {', '.join(select_exprs)}
             FROM paper_trades
             WHERE token_ca = ?
-              AND entry_mode = ?
+              AND entry_mode IN ({placeholders})
               AND {timestamp_expr} >= ?
             ORDER BY {order_expr}
             LIMIT ?
             """,
-            (token_ca, ATH_NO_KLINE_TINY_PROBE_MODE, cutoff_ts, int(limit)),
+            (token_ca, *sorted(ATH_OUTCOME_GUARD_ENTRY_MODES), cutoff_ts, int(limit)),
         ).fetchall()
     except Exception:
         return []
@@ -1311,13 +1331,82 @@ def _pnl_decimal(value):
     return pnl
 
 
+def _ath_no_kline_followthrough_guard(pending, dex_snapshot):
+    pending = pending or {}
+    entry_mode = str(pending.get('entry_mode') or pending.get('entry_trigger_mode') or pending.get('scout_mode') or '')
+    if not ATH_NO_KLINE_FOLLOWTHROUGH_GUARD_ENABLED:
+        return {'pass': True, 'reason': 'ath_no_kline_followthrough_guard_disabled'}
+    if entry_mode != ATH_NO_KLINE_TINY_PROBE_MODE:
+        return {'pass': True, 'reason': 'not_ath_no_kline_tiny_probe', 'entry_mode': entry_mode}
+    trend = dex_snapshot or {}
+    buys_m5 = _safe_float(trend.get('buys_m5'), None)
+    sells_m5 = _safe_float(trend.get('sells_m5'), None)
+    bs_ratio = _safe_float(trend.get('buy_sell_ratio'), None)
+    if bs_ratio is None and buys_m5 is not None:
+        bs_ratio = buys_m5 / max(sells_m5 or 0.0, 1.0)
+    tx_m5 = _safe_float(trend.get('tx_m5'), None)
+    if tx_m5 is None and buys_m5 is not None and sells_m5 is not None:
+        tx_m5 = buys_m5 + sells_m5
+    pc_m5 = _safe_float(trend.get('price_change_m5'), None)
+    matrix = _ath_no_kline_matrix_strong(pending.get('matrix_scores') or {})
+    observed = {
+        'buy_sell_ratio': bs_ratio,
+        'tx_m5': tx_m5,
+        'price_change_m5': pc_m5,
+        'scores': matrix.get('scores'),
+    }
+    thresholds = {
+        'buy_sell_ratio': ATH_NO_KLINE_FOLLOWTHROUGH_MIN_BS,
+        'tx_m5': ATH_NO_KLINE_FOLLOWTHROUGH_MIN_TX_M5,
+        'price_change_m5': ATH_NO_KLINE_FOLLOWTHROUGH_MIN_PC_M5,
+        'strong_price_change_m5': ATH_NO_KLINE_FOLLOWTHROUGH_STRONG_PC_M5,
+        'matrix': matrix.get('thresholds'),
+    }
+    if bs_ratio is None or bs_ratio < ATH_NO_KLINE_FOLLOWTHROUGH_MIN_BS:
+        return {
+            'pass': False,
+            'reason': 'ath_no_kline_followthrough_buy_pressure_weak',
+            'entry_mode': entry_mode,
+            'observed': observed,
+            'thresholds': thresholds,
+        }
+    if pc_m5 is not None and pc_m5 < ATH_NO_KLINE_FOLLOWTHROUGH_MIN_PC_M5:
+        return {
+            'pass': False,
+            'reason': 'ath_no_kline_followthrough_negative_m5',
+            'entry_mode': entry_mode,
+            'observed': observed,
+            'thresholds': thresholds,
+        }
+    tx_ok = tx_m5 is not None and tx_m5 >= ATH_NO_KLINE_FOLLOWTHROUGH_MIN_TX_M5
+    pc_strong = pc_m5 is not None and pc_m5 >= ATH_NO_KLINE_FOLLOWTHROUGH_STRONG_PC_M5
+    matrix_strong = bool(matrix.get('pass'))
+    if not (tx_ok or pc_strong or matrix_strong):
+        return {
+            'pass': False,
+            'reason': 'ath_no_kline_no_followthrough_block',
+            'entry_mode': entry_mode,
+            'observed': observed,
+            'thresholds': thresholds,
+            'checks': {'tx_ok': tx_ok, 'pc_strong': pc_strong, 'matrix_strong': matrix_strong},
+        }
+    return {
+        'pass': True,
+        'reason': 'ath_no_kline_followthrough_confirmed',
+        'entry_mode': entry_mode,
+        'observed': observed,
+        'thresholds': thresholds,
+        'checks': {'tx_ok': tx_ok, 'pc_strong': pc_strong, 'matrix_strong': matrix_strong},
+    }
+
+
 def _ath_no_kline_reentry_guard(db, pending, *, current_price=None, now_ts=None, recent_trades=None):
     pending = pending or {}
     entry_mode = str(pending.get('entry_mode') or pending.get('entry_trigger_mode') or pending.get('scout_mode') or '')
     if not ATH_NO_KLINE_REENTRY_GUARD_ENABLED:
         return {'pass': True, 'reason': 'ath_no_kline_reentry_guard_disabled'}
-    if entry_mode != ATH_NO_KLINE_TINY_PROBE_MODE:
-        return {'pass': True, 'reason': 'not_ath_no_kline_tiny_probe', 'entry_mode': entry_mode}
+    if entry_mode not in ATH_OUTCOME_GUARD_ENTRY_MODES:
+        return {'pass': True, 'reason': 'not_ath_outcome_guard_mode', 'entry_mode': entry_mode}
 
     now_ts = int(now_ts or time.time())
     trades = list(recent_trades) if recent_trades is not None else _ath_no_kline_recent_trades(
@@ -1362,6 +1451,7 @@ def _ath_no_kline_reentry_guard(db, pending, *, current_price=None, now_ts=None,
         'peak_pnl': latest_peak,
         'entry_price': _safe_float(latest.get('entry_price'), None),
         'exit_price': _safe_float(latest.get('exit_price'), None),
+        'entry_mode': latest.get('entry_mode'),
     }
     detail['observed'] = {
         'current_price': current_price,
@@ -1383,7 +1473,8 @@ def _ath_no_kline_reentry_guard(db, pending, *, current_price=None, now_ts=None,
         and (now_ts - latest_ts) < ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC
     )
     hard_sl_exit = 'hard_sl' in str(latest.get('exit_reason') or '').lower()
-    if hard_loss or (hard_sl_exit and (now_ts - latest_ts) < ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC):
+    hard_sl_low_peak = hard_sl_exit and latest_peak < ATH_NO_KLINE_REENTRY_HARD_SL_LOW_PEAK
+    if hard_loss or (hard_sl_low_peak and (now_ts - latest_ts) < ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC):
         detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_hard_loss_cooldown'})
         return detail
 
@@ -12382,6 +12473,36 @@ def run_monitor(db):
                         _entry_timing_dex = fetch_dexscreener_trend_snapshot(pending['token_ca'])
                     except Exception:
                         _entry_timing_dex = None
+                    _ath_no_kline_followthrough = _ath_no_kline_followthrough_guard(
+                        pending,
+                        _entry_timing_dex,
+                    )
+                    pending['ath_no_kline_followthrough_guard'] = _ath_no_kline_followthrough
+                    if _ath_no_kline_followthrough.get('reason') != 'not_ath_no_kline_tiny_probe':
+                        record_decision_event(
+                            db,
+                            component='ath_no_kline_quality',
+                            event_type='followthrough_gate',
+                            decision='pass' if _ath_no_kline_followthrough.get('pass') else 'block',
+                            reason=_ath_no_kline_followthrough.get('reason') or 'ath_no_kline_followthrough',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='dexscreener+matrix+pending_entry',
+                            payload=_ath_no_kline_followthrough,
+                        )
+                    if not _ath_no_kline_followthrough.get('pass'):
+                        log.info(
+                            f"  [ATH_NO_KLINE_QUALITY] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_ath_no_kline_followthrough.get('reason')} "
+                            f"observed={_ath_no_kline_followthrough.get('observed')}"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
                     _entry_lifecycle_entry = pending_w_entry or {
                         'ca': pending['token_ca'],
                         'symbol': pending['symbol'],

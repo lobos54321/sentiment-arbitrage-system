@@ -34,6 +34,9 @@ LOTTO_EPSILON = 1e-9
 LOTTO_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_SEC", "20"))
 LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.03"))
 LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.08"))
+ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC", "45"))
+ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.05"))
+ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.02"))
 QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
 OBSERVATION_PROBE_MAX_SIZE_SOL = float(os.environ.get("OBSERVATION_PROBE_MAX_SIZE_SOL", "0.02"))
 OBSERVATION_PROBE_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_HARD_SL", "-0.30"))
@@ -65,6 +68,43 @@ def _is_observation_probe_position(pos):
     if size_sol <= 0 or size_sol > OBSERVATION_PROBE_MAX_SIZE_SOL:
         return False
     return "scout" in entry_mode or "probe" in entry_mode
+
+
+def _entry_mode_for_position(pos):
+    state = getattr(pos, "monitor_state", None) or {}
+    return str(state.get("entryMode") or state.get("entry_mode") or getattr(pos, "entry_mode", "") or "")
+
+
+def _ath_no_kline_fast_fail_detail(pos, pnl, held_sec):
+    entry_mode = _entry_mode_for_position(pos)
+    peak_pnl = max(float(getattr(pos, "peak_pnl", 0) or 0), float(pnl or 0))
+    detail = {
+        "pass": False,
+        "entry_mode": entry_mode,
+        "held_sec": held_sec,
+        "peak_pnl": peak_pnl,
+        "current_pnl": pnl,
+        "thresholds": {
+            "held_sec": ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC,
+            "peak_pnl": ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX,
+            "current_pnl": ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX,
+        },
+    }
+    if entry_mode != "ath_no_kline_tiny_probe":
+        detail["reason"] = "not_ath_no_kline_tiny_probe"
+        return detail
+    if held_sec < ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC:
+        detail["reason"] = "ath_no_kline_fast_fail_waiting"
+        return detail
+    if peak_pnl > ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX:
+        detail["reason"] = "ath_no_kline_fast_fail_peak_ok"
+        return detail
+    if pnl > ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX:
+        detail["reason"] = "ath_no_kline_fast_fail_pnl_not_red_enough"
+        return detail
+    detail["pass"] = True
+    detail["reason"] = "guardian_ath_no_kline_no_follow_fast_fail"
+    return detail
 
 
 def _partial_target_from_command(command, *, prev_sold_pct, sell_pct):
@@ -405,6 +445,28 @@ class ExitGuardianThread(threading.Thread):
                             'trade_id': trade_id,
                             'symbol': pos.symbol,
                             'reason': f'guardian_lotto_fast_fail_20s (held={held_sec:.0f}s peak={getattr(pos, "peak_pnl", 0):.1%} pnl={pnl:.1%})',
+                            'trigger_price': price,
+                            'trigger_pnl': pnl,
+                            '_instant_sim': self._get_instant_quote(pos, ca),
+                        })
+                    self._exit_pending.add(trade_id)
+                    continue
+
+                _no_kline_fast_fail = _ath_no_kline_fast_fail_detail(pos, pnl, held_sec)
+                if _no_kline_fast_fail.get("pass"):
+                    log.info(
+                        f"[ExitGuardian] 🧯 {pos.symbol} ATH_NO_KLINE FAST FAIL: "
+                        f"held={held_sec:.0f}s peak={_no_kline_fast_fail.get('peak_pnl')*100:+.1f}% "
+                        f"pnl={pnl*100:+.1f}% — queued before hard SL"
+                    )
+                    with self.exit_queue_lock:
+                        self.exit_queue.append({
+                            'trade_id': trade_id,
+                            'symbol': pos.symbol,
+                            'reason': (
+                                f"guardian_ath_no_kline_no_follow_fast_fail "
+                                f"(held={held_sec:.0f}s peak={_no_kline_fast_fail.get('peak_pnl'):.1%} pnl={pnl:.1%})"
+                            ),
                             'trigger_price': price,
                             'trigger_pnl': pnl,
                             '_instant_sim': self._get_instant_quote(pos, ca),
