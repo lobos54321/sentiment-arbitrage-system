@@ -8790,6 +8790,7 @@ OBSERVABLE_NEW_TRENDING_STATUSES = {
     'RISK_BLOCKED',
     'LOTTO_OBSERVE_LOW_MC_VOL',
     'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
+    'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
     'NOT_ATH_V17',
     'ILLIQUID_JUNK',
 }
@@ -10533,6 +10534,7 @@ def run_monitor(db):
                     if signal_type == 'NEW_TRENDING' and hard_gate_status in {
                         'LOTTO_OBSERVE_LOW_MC_VOL',
                         'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
+                        'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
                         'NOT_ATH_V17',
                         'ILLIQUID_JUNK',
                     }:

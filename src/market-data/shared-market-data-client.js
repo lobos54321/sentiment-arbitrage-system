@@ -38,6 +38,21 @@ export class SharedMarketDataClient {
     };
   }
 
+  async fetchGmgnKlineWindow(params = {}, options = {}) {
+    const result = await this.poolOhlcvClient.fetchGmgnKlineWindow(params, options);
+    return {
+      ...result,
+      provenance: {
+        capability: 'ohlcv-gmgn-fallback',
+        provider: result.provider || 'gmgn',
+        source: result.source || 'shared-market-data-client',
+        reason: result.error || result.reason || null,
+        poolAddress: result.poolAddress || null,
+        barCount: Array.isArray(result.bars) ? result.bars.length : 0,
+      },
+    };
+  }
+
   async fetchRecentOhlcvByPool(tokenCa, poolAddress, options = {}) {
     const result = await this.poolOhlcvClient.fetchRecentOhlcvByPool(tokenCa, poolAddress, options);
     return {

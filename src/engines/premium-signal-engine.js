@@ -82,6 +82,10 @@ export class PremiumSignalEngine {
     this._klineLocalFreshnessSec = parseInt(process.env.KLINE_LOCAL_FRESHNESS_SEC || '120', 10);
     this._klineProviderFreshnessSec = parseInt(process.env.KLINE_PROVIDER_FRESHNESS_SEC || '120', 10);
     this._notAthPrebuyUnknownDataFailClosed = process.env.NOT_ATH_PREBUY_UNKNOWN_DATA_FAIL_OPEN !== 'true';
+    this._notAthPrebuyRetryEnabled = process.env.NOT_ATH_PREBUY_RETRY_ENABLED !== 'false';
+    this._notAthPrebuyRetryDelayMs = parseInt(process.env.NOT_ATH_PREBUY_RETRY_DELAY_MS || String(3 * 60_000), 10);
+    this._notAthPrebuyRetryMaxAttempts = parseInt(process.env.NOT_ATH_PREBUY_RETRY_MAX_ATTEMPTS || '1', 10);
+    this._notAthPrebuyRetryWatch = new Map();
 
     // 去重（短期 5 分钟）
     this.recentSignals = new Map(); // token_ca → timestamp
@@ -807,10 +811,26 @@ export class PremiumSignalEngine {
   }
 
   async _backfillPrebuyKlines(tokenCA, signalTsSec, targetBars = 5) {
+    const providerAttempts = [];
+    const recordProviderAttempt = (provider, capability, result = {}) => {
+      providerAttempts.push({
+        provider: provider || result.provider || null,
+        capability,
+        ok: Boolean(result.ok || result.enough || (Array.isArray(result.bars) && result.bars.length >= targetBars)),
+        reason: result.reason || result.error || null,
+        rateLimited: Boolean(result.rateLimited || result.reason === 'RATE_LIMITED' || result.error === 'RATE_LIMITED'),
+        bars: Number.isFinite(result.totalBefore)
+          ? result.totalBefore
+          : (Array.isArray(result.bars) ? result.bars.length : null),
+        cooldownMs: Number.isFinite(result.cooldownMs) ? result.cooldownMs : null,
+      });
+    };
     const existingBefore = this.marketDataBackfill.getBarsBefore(tokenCA, signalTsSec, targetBars).length;
 
     if (existingBefore >= targetBars) {
-      return { fetched: 0, existingBefore, totalBefore: existingBefore, enough: true, provider: 'local' };
+      const result = { fetched: 0, existingBefore, totalBefore: existingBefore, enough: true, provider: 'local', providerAttempts };
+      recordProviderAttempt('local_cache', 'pre_signal_ohlcv', result);
+      return result;
     }
 
     const lookbackStart = signalTsSec - Math.max(targetBars * 60, 30 * 60);
@@ -822,6 +842,11 @@ export class PremiumSignalEngine {
       minBars: targetBars
     });
     const heliusBarsBefore = this.marketDataBackfill.getBarsBefore(tokenCA, signalTsSec, Math.max(targetBars, 60)).length;
+    recordProviderAttempt(heliusResult.provider || 'helius', 'pre_signal_ohlcv', {
+      ...heliusResult,
+      enough: heliusBarsBefore >= targetBars,
+      totalBefore: heliusBarsBefore,
+    });
 
     if (heliusBarsBefore >= targetBars) {
       if (heliusResult.poolAddress) {
@@ -835,12 +860,42 @@ export class PremiumSignalEngine {
         enough: true,
         provider: 'helius',
         poolAddress: heliusResult.poolAddress || null,
-        metrics: heliusResult
+        metrics: heliusResult,
+        providerAttempts,
       };
     }
 
     const providerCooldownMs = this._prebuyBackfillCooldownRemainingMs();
     if (providerCooldownMs > 0) {
+      recordProviderAttempt('shared_market_data', 'provider_cooldown', {
+        enough: false,
+        reason: 'RATE_LIMITED',
+        cooldownMs: providerCooldownMs,
+      });
+      const gmgnFallback = await this._fetchPrebuyGmgnFallback(tokenCA, signalTsSec, lookbackStart, signalTsSec - 60, targetBars);
+      recordProviderAttempt('gmgn', 'pre_signal_ohlcv_fallback', gmgnFallback);
+      if ((gmgnFallback.bars?.length || 0) >= targetBars) {
+        const poolAddress = gmgnFallback.poolAddress || this._poolCache?.get(tokenCA) || null;
+        this._saveKlineBars(tokenCA, poolAddress || '', gmgnFallback.bars.map((bar) => ({
+          ts: bar.timestamp,
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+          volume: bar.volume,
+        })), { source: 'gmgn' });
+        return {
+          fetched: gmgnFallback.bars.length,
+          existingBefore,
+          totalBefore: gmgnFallback.bars.length,
+          enough: true,
+          provider: 'gmgn',
+          poolAddress,
+          reason: null,
+          providerAttempts,
+          fallbackProvider: 'gmgn',
+        };
+      }
       return {
         fetched: 0,
         existingBefore,
@@ -849,6 +904,7 @@ export class PremiumSignalEngine {
         provider: 'shared_market_data',
         reason: 'RATE_LIMITED',
         cooldownMs: providerCooldownMs,
+        providerAttempts,
       };
     }
 
@@ -869,6 +925,7 @@ export class PremiumSignalEngine {
           enough: false,
           provider: resolvedPool.provider || heliusResult.provider || null,
           reason: resolvedPool.error || heliusResult.error || 'no_pool',
+          providerAttempts,
         };
       }
     }
@@ -889,6 +946,7 @@ export class PremiumSignalEngine {
 
     if (ohlcvResult.rateLimited) {
       this._markPrebuyBackfillProviderCooldown(ohlcvResult.provider || 'shared_market_data');
+      recordProviderAttempt(ohlcvResult.provider || 'shared_market_data', 'pre_signal_ohlcv', ohlcvResult);
       return {
         fetched: 0,
         existingBefore,
@@ -897,6 +955,7 @@ export class PremiumSignalEngine {
         provider: ohlcvResult.provider || heliusResult.provider || null,
         poolAddress,
         reason: 'RATE_LIMITED',
+        providerAttempts,
       };
     }
 
@@ -916,6 +975,12 @@ export class PremiumSignalEngine {
     }
 
     const totalBefore = heliusBarsBefore + bars.length;
+    recordProviderAttempt(ohlcvResult.provider || 'shared_market_data', 'pre_signal_ohlcv', {
+      ...ohlcvResult,
+      bars,
+      totalBefore,
+      enough: totalBefore >= targetBars,
+    });
     return {
       fetched: Math.max(0, totalBefore - existingBefore),
       existingBefore,
@@ -925,7 +990,23 @@ export class PremiumSignalEngine {
       poolAddress,
       metrics: heliusResult,
       reason: bars.length ? null : (ohlcvResult.error || null),
+      providerAttempts,
     };
+  }
+
+  async _fetchPrebuyGmgnFallback(tokenCA, signalTsSec, startTs, endTs, targetBars = 5) {
+    if (typeof this.sharedMarketData?.fetchGmgnKlineWindow !== 'function') {
+      return { ok: false, provider: 'gmgn', bars: [], error: 'gmgn_fallback_unavailable', rateLimited: false };
+    }
+    return this.sharedMarketData.fetchGmgnKlineWindow({
+      tokenCa: tokenCA,
+      startTs,
+      endTs,
+      minBars: targetBars,
+      bars: Math.max(20, targetBars * 4),
+      cacheKey: `prebuy:${tokenCA}:${signalTsSec}:${targetBars}`,
+      ttlMs: 60_000,
+    });
   }
 
   async _waitForFreshLocalKlines(tokenCA, minBars = 4, waitMs = 1200) {
@@ -969,6 +1050,95 @@ export class PremiumSignalEngine {
       freshnessSec: null,
       timedOut: true,
     };
+  }
+
+  _notAthPrebuySignalStrength(signal = {}) {
+    const idx = signal.indices || {};
+    const readIndex = (name) => {
+      const node = idx?.[name] || {};
+      const value = Number(node.current ?? node.value ?? node.signal ?? 0);
+      return Number.isFinite(value) ? value : 0;
+    };
+    const superIndex = readIndex('super_index');
+    const tradeIndex = readIndex('trade_index');
+    const addressIndex = readIndex('address_index');
+    const securityIndex = readIndex('security_index');
+    const marketCap = Number(signal.market_cap || 0);
+    const volume24h = Number(signal.volume_24h || 0);
+    const strong = (
+      superIndex >= 85
+      || (superIndex >= 80 && tradeIndex >= 1 && addressIndex >= 3 && securityIndex >= 15)
+      || (superIndex >= 75 && volume24h >= 75_000 && marketCap >= 16_000)
+    );
+    return {
+      strong,
+      superIndex,
+      tradeIndex,
+      addressIndex,
+      securityIndex,
+      marketCap,
+      volume24h,
+      proxySource: 'premium_signal_indices',
+    };
+  }
+
+  _prebuyDataConfidence(gateDecision, provider, proxyDetail = {}) {
+    if (gateDecision === 'PASS' || gateDecision === 'BLOCK') {
+      if (provider === 'gmgn') return 'gmgn_kline';
+      if (provider) return 'full_kline';
+      return 'scored';
+    }
+    return proxyDetail.strong ? 'proxy_only' : 'none';
+  }
+
+  _isRetryablePrebuyUnknown(reason) {
+    return /rate_limited|cooldown|stale_local_bars|stale_primed_bars|local_wait_timeout|provider_no_bars|unknown_data/i.test(String(reason || ''));
+  }
+
+  _queueNotAthPrebuyRetry(ca, signal, prebuyGateResult) {
+    if (!this._notAthPrebuyRetryEnabled) return { queued: false, reason: 'retry_disabled' };
+    const attempt = Number(signal._prebuyRetryAttempt || 0);
+    const maxAttempts = Number.isFinite(this._notAthPrebuyRetryMaxAttempts) ? this._notAthPrebuyRetryMaxAttempts : 1;
+    if (attempt >= maxAttempts) return { queued: false, reason: 'retry_attempts_exhausted' };
+
+    const delayMs = Number.isFinite(this._notAthPrebuyRetryDelayMs) && this._notAthPrebuyRetryDelayMs > 0
+      ? this._notAthPrebuyRetryDelayMs
+      : 3 * 60_000;
+    const key = [
+      ca,
+      signal.source_event_id || signal.source_message_ts || signal.signal_ts || signal.timestamp || Date.now(),
+      attempt + 1,
+    ].join(':');
+    if (this._notAthPrebuyRetryWatch.has(key)) {
+      return { queued: true, reason: 'retry_already_queued', key, delayMs, attempt: attempt + 1 };
+    }
+
+    const retryPayload = {
+      key,
+      queuedAt: Date.now(),
+      dueAt: Date.now() + delayMs,
+      attempt: attempt + 1,
+      parentReason: prebuyGateResult?.gateReason || null,
+    };
+    const timer = setTimeout(async () => {
+      try {
+        const retrySignal = {
+          ...signal,
+          _prebuyRetryAttempt: attempt + 1,
+          _prebuyRetryParentGateResult: prebuyGateResult || null,
+          _prebuyGateResult: null,
+        };
+        await this._executeNotAth(ca, retrySignal);
+      } catch (error) {
+        console.warn(`⚠️ [NOT_ATH_PREBUY_RETRY] $${signal.symbol || ca.substring(0, 8)} retry failed: ${error.message}`);
+      } finally {
+        this._notAthPrebuyRetryWatch.delete(key);
+      }
+    }, delayMs);
+    timer.unref?.();
+    retryPayload.timer = timer;
+    this._notAthPrebuyRetryWatch.set(key, retryPayload);
+    return { queued: true, reason: 'retry_queued', key, delayMs, attempt: attempt + 1 };
   }
 
   recordPaperComparisons(signal) {
@@ -1314,6 +1484,12 @@ export class PremiumSignalEngine {
       for (const timer of this._klineTrackers.values()) clearTimeout(timer);
       this._klineTrackers.clear();
     }
+    if (this._notAthPrebuyRetryWatch) {
+      for (const retry of this._notAthPrebuyRetryWatch.values()) {
+        if (retry?.timer) clearTimeout(retry.timer);
+      }
+      this._notAthPrebuyRetryWatch.clear();
+    }
     // 停止前保存ATH计数
     this._saveAthCounts();
     if (this.shadowMode && this.shadowTracker) {
@@ -1402,6 +1578,11 @@ export class PremiumSignalEngine {
         return reason || 'unknown_data';
       };
       const normalizedUnknownReason = normalizeUnknownReason(klineCheck?.reason, klineCheck, backfill, waitResult);
+      const proxyDetail = this._notAthPrebuySignalStrength(signal);
+      const providerAttempts = Array.isArray(backfill?.providerAttempts) ? backfill.providerAttempts : [];
+      const finalDataSource = klineCheck?.provider || backfill?.provider || null;
+      const dataConfidence = this._prebuyDataConfidence(gateDecision, finalDataSource, proxyDetail);
+      const retryAttempt = Number(signal._prebuyRetryAttempt || 0);
       const prebuyGateResult = {
         auditVersion: 2,
         gateName: 'NOT_ATH_PREBUY_KLINE',
@@ -1420,13 +1601,19 @@ export class PremiumSignalEngine {
         decisionContinuedToBuy,
         blockedStructural,
         unknownDataBlocked,
+        dataConfidence,
+        finalDataSource,
+        providerAttempts,
+        proxyEligibility: proxyDetail,
+        retryAttempt,
+        retryParentReason: signal._prebuyRetryParentGateResult?.gateReason || null,
         observability: {
           backfillAttempted: Boolean(backfill),
           backfillEnough: Boolean(backfill?.enough),
           freshLocalBarsObserved: Boolean(waitResult?.ok),
           localWaitTimedOut: Boolean(waitResult?.timedOut),
           localWaitError: waitResult?.error || null,
-          dataSource: klineCheck?.provider || backfill?.provider || null,
+          dataSource: finalDataSource,
           truthSource: klineCheck?.truthSource || null,
           failOpenPrevented: Boolean(klineCheck?.failOpenPrevented),
           failClosedApplied: unknownDataBlocked,
@@ -1473,6 +1660,9 @@ export class PremiumSignalEngine {
         prebuyGateResult.backfill?.reason ? `backfillReason=${prebuyGateResult.backfill.reason}` : 'backfillReason=-',
         prebuyGateResult.localWait ? `localWaitOk=${prebuyGateResult.localWait.ok ? 1 : 0}` : 'localWaitOk=-',
         prebuyGateResult.localWait?.timedOut ? 'localWaitTimedOut=1' : null,
+        `dataConfidence=${dataConfidence}`,
+        providerAttempts.length ? `providers=${providerAttempts.map(a => `${a.provider || '?'}:${a.ok ? 'ok' : (a.reason || 'no')}`).join(',')}` : null,
+        retryAttempt > 0 ? `retryAttempt=${retryAttempt}` : null,
       ].filter(Boolean).join(' ');
 
       if (gateDecision === 'PASS') {
@@ -1491,7 +1681,19 @@ export class PremiumSignalEngine {
       if (unknownDataBlocked) {
         this.stats.not_ath_prebuy_kline_block++;
         console.log(logParts);
-        this.saveSignalRecord(signal, 'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED', null, false, { gateResult: prebuyGateResult });
+        const retryable = proxyDetail.strong && this._isRetryablePrebuyUnknown(normalizedUnknownReason);
+        if (retryable && retryAttempt === 0) {
+          const retryWatch = this._queueNotAthPrebuyRetry(ca, signal, prebuyGateResult);
+          prebuyGateResult.retryWatch = retryWatch;
+          if (retryWatch.queued) {
+            this.saveSignalRecord(signal, 'NOT_ATH_PREBUY_KLINE_RETRY_QUEUED', null, false, { gateResult: prebuyGateResult });
+            return { action: 'SKIP', reason: `prebuy_retry_watch:${normalizedUnknownReason}`, retryWatch };
+          }
+        }
+        const status = retryAttempt > 0
+          ? 'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED'
+          : 'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED';
+        this.saveSignalRecord(signal, status, null, false, { gateResult: prebuyGateResult });
         return { action: 'SKIP', reason: `prebuy_unknown_data:${normalizedUnknownReason}` };
       }
 
