@@ -30,12 +30,16 @@ export function summarizePremiumSignalGateHealth(rows = []) {
   const counters = {
     sampled_n: rows.length,
     unknown_data_blocked_n: 0,
+    unknown_data_blocked_recent_n: 0,
     fail_closed_n: 0,
     rate_limited_n: 0,
+    rate_limited_recent_n: 0,
+    local_cache_scored_recent_n: 0,
     invalid_api_key_n: 0,
     by_status: {},
     by_gate_reason: {},
     by_provider_data_state: {},
+    by_provider: {},
   };
   const samples = [];
 
@@ -47,11 +51,13 @@ export function summarizePremiumSignalGateHealth(rows = []) {
     const gateReason = gate.gateReason || gate.reason || gate.gate_reason || '';
     const providerDataState = observability.providerDataState || '';
     const backfillReason = backfill.reason || '';
+    const provider = gate.provider || backfill.provider || observability.provider || row.provider || null;
     const text = fieldText(status, gateReason, providerDataState, backfillReason, observability.localWaitError);
 
     pushCount(counters.by_status, status);
     if (gateReason) pushCount(counters.by_gate_reason, gateReason);
     if (providerDataState) pushCount(counters.by_provider_data_state, providerDataState);
+    if (provider) pushCount(counters.by_provider, provider);
 
     const unknownDataBlocked = (
       gate.unknownDataBlocked === true
@@ -61,10 +67,18 @@ export function summarizePremiumSignalGateHealth(rows = []) {
     const failClosed = gate.failClosedApplied === true || observability.failClosedApplied === true;
     const rateLimited = /rate[_ -]?limited|429/i.test(text);
     const invalidApiKey = /invalid api key|http\s*401|\b401\b|-32401/i.test(text);
+    const providerName = String(provider || '').toLowerCase();
+    const localCacheScored = (
+      ['local', 'local_cache'].includes(providerName)
+      && String(providerDataState || '').toLowerCase() === 'scored'
+    );
 
     if (unknownDataBlocked) counters.unknown_data_blocked_n += 1;
+    if (unknownDataBlocked) counters.unknown_data_blocked_recent_n += 1;
     if (failClosed) counters.fail_closed_n += 1;
     if (rateLimited) counters.rate_limited_n += 1;
+    if (rateLimited) counters.rate_limited_recent_n += 1;
+    if (localCacheScored) counters.local_cache_scored_recent_n += 1;
     if (invalidApiKey) counters.invalid_api_key_n += 1;
 
     if ((unknownDataBlocked || rateLimited || invalidApiKey) && samples.length < 30) {
@@ -77,7 +91,7 @@ export function summarizePremiumSignalGateHealth(rows = []) {
         gate_reason: gateReason || null,
         provider_data_state: providerDataState || null,
         backfill_reason: backfillReason || null,
-        provider: gate.provider || backfill.provider || null,
+        provider,
         pool_address: gate.poolAddress || backfill.poolAddress || null,
       });
     }

@@ -70,6 +70,11 @@ export class PremiumSignalEngine {
     this._klineResultCache = new Map();
     this._klineApiCooldownUntil = 0;
     this._lastKlineRateLimitLogAt = 0;
+    this._prebuyBackfillProviderCooldownUntil = new Map();
+    this._prebuyBackfillProviderCooldownMs = parseInt(
+      process.env.PREBUY_BACKFILL_PROVIDER_COOLDOWN_MS || String(10 * 60_000),
+      10
+    );
     this._klinePriming = new Map();
     this._klinePrimeCooldownUntil = 0;
     this._lastKlinePrimeLogAt = 0;
@@ -769,6 +774,38 @@ export class PremiumSignalEngine {
     return false;
   }
 
+  _prebuyBackfillCooldownMs() {
+    const configured = Number(this._prebuyBackfillProviderCooldownMs);
+    return Number.isFinite(configured) && configured > 0 ? configured : 10 * 60_000;
+  }
+
+  _markPrebuyBackfillProviderCooldown(provider = 'shared_market_data', reason = 'RATE_LIMITED') {
+    const providerName = provider || 'shared_market_data';
+    const cooldownMs = this._prebuyBackfillCooldownMs();
+    const until = Date.now() + cooldownMs;
+    if (!(this._prebuyBackfillProviderCooldownUntil instanceof Map)) {
+      this._prebuyBackfillProviderCooldownUntil = new Map();
+    }
+    this._prebuyBackfillProviderCooldownUntil.set(providerName, until);
+    this._klineApiCooldownUntil = Math.max(this._klineApiCooldownUntil || 0, until);
+    this._klinePrimeCooldownUntil = Math.max(this._klinePrimeCooldownUntil || 0, until);
+    return { provider: providerName, reason, cooldownMs, until };
+  }
+
+  _prebuyBackfillCooldownRemainingMs(provider = null, nowMs = Date.now()) {
+    let remainingMs = Math.max(0, (this._klineApiCooldownUntil || 0) - nowMs);
+    const cooldowns = this._prebuyBackfillProviderCooldownUntil;
+    if (cooldowns instanceof Map) {
+      const providerNames = provider
+        ? [provider, 'shared_market_data']
+        : ['shared_market_data', 'geckoterminal', 'gmgn', 'pool_resolver'];
+      for (const providerName of providerNames) {
+        remainingMs = Math.max(remainingMs, (cooldowns.get(providerName) || 0) - nowMs);
+      }
+    }
+    return Math.max(0, remainingMs);
+  }
+
   async _backfillPrebuyKlines(tokenCA, signalTsSec, targetBars = 5) {
     const existingBefore = this.marketDataBackfill.getBarsBefore(tokenCA, signalTsSec, targetBars).length;
 
@@ -802,6 +839,19 @@ export class PremiumSignalEngine {
       };
     }
 
+    const providerCooldownMs = this._prebuyBackfillCooldownRemainingMs();
+    if (providerCooldownMs > 0) {
+      return {
+        fetched: 0,
+        existingBefore,
+        totalBefore: heliusBarsBefore,
+        enough: false,
+        provider: 'shared_market_data',
+        reason: 'RATE_LIMITED',
+        cooldownMs: providerCooldownMs,
+      };
+    }
+
     let poolAddress = heliusResult.poolAddress || this._poolCache?.get(tokenCA) || null;
     if (!poolAddress) {
       const resolvedPool = await this.sharedMarketData.resolvePool(tokenCA);
@@ -810,7 +860,7 @@ export class PremiumSignalEngine {
         this._poolCache.set(tokenCA, poolAddress);
       } else {
         if (resolvedPool.rateLimited) {
-          this._klinePrimeCooldownUntil = Date.now() + 120_000;
+          this._markPrebuyBackfillProviderCooldown(resolvedPool.provider || 'pool_resolver');
         }
         return {
           fetched: 0,
@@ -838,8 +888,7 @@ export class PremiumSignalEngine {
     });
 
     if (ohlcvResult.rateLimited) {
-      this._klineApiCooldownUntil = Date.now() + 120_000;
-      this._klinePrimeCooldownUntil = Date.now() + 120_000;
+      this._markPrebuyBackfillProviderCooldown(ohlcvResult.provider || 'shared_market_data');
       return {
         fetched: 0,
         existingBefore,

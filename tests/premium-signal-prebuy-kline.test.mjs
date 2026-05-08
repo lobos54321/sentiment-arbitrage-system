@@ -78,3 +78,49 @@ test('prebuy kline backfill requests OHLCV before the signal timestamp', async (
   assert.equal(savedBars.bars.length, targetBars);
   assert.ok(savedBars.bars.every((bar) => bar.ts < signalTsSec));
 });
+
+test('prebuy kline backfill respects provider cooldown before resolving pools', async () => {
+  const tokenCa = 'TokenCooldown111111111111111111111111111111111';
+  const signalTsSec = 1_777_891_568;
+  const targetBars = 5;
+  let resolvePoolCalled = false;
+
+  const engine = Object.create(PremiumSignalEngine.prototype);
+  engine._poolCache = new Map();
+  engine._klineApiCooldownUntil = Date.now() + 60_000;
+  engine._prebuyBackfillProviderCooldownUntil = new Map();
+  engine.marketDataBackfill = {
+    getBarsBefore() {
+      return [];
+    },
+    async backfillWindow() {
+      return {
+        provider: null,
+        poolAddress: null,
+        error: 'helius_disabled',
+        signaturesFetched: 0,
+        transactionsFetched: 0,
+        tradesInserted: 0,
+        barsWritten: 0,
+        cacheHit: false,
+      };
+    },
+  };
+  engine.sharedMarketData = {
+    async resolvePool() {
+      resolvePoolCalled = true;
+      return { provider: 'geckoterminal', poolAddress: 'Pool', error: null };
+    },
+    async fetchOhlcvWindow() {
+      throw new Error('cooldown should skip provider OHLCV calls');
+    },
+  };
+
+  const result = await engine._backfillPrebuyKlines(tokenCa, signalTsSec, targetBars);
+
+  assert.equal(result.enough, false);
+  assert.equal(result.reason, 'RATE_LIMITED');
+  assert.equal(result.provider, 'shared_market_data');
+  assert.ok(result.cooldownMs > 0);
+  assert.equal(resolvePoolCalled, false);
+});

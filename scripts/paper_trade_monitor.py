@@ -239,6 +239,20 @@ ATH_NO_KLINE_TINY_PROBE_MODE = 'ath_no_kline_tiny_probe'
 ATH_HIGH_MC_TINY_PROBE_MODE = 'ath_high_mc_tiny_probe'
 ATH_HIGH_MC_TINY_PROBE_ENABLED = os.environ.get('ATH_HIGH_MC_TINY_PROBE_ENABLED', 'true').lower() != 'false'
 ATH_HIGH_MC_TINY_PROBE_MAX_MC = float(os.environ.get('ATH_HIGH_MC_TINY_PROBE_MAX_MC', str(ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC)))
+ATH_NO_KLINE_REENTRY_GUARD_ENABLED = os.environ.get('ATH_NO_KLINE_REENTRY_GUARD_ENABLED', 'true').lower() != 'false'
+ATH_NO_KLINE_REENTRY_LOOKBACK_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_LOOKBACK_SEC', str(4 * 60 * 60)))
+ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC', str(6 * 60 * 60)))
+ATH_NO_KLINE_REENTRY_HARD_LOSS_PNL = float(os.environ.get('ATH_NO_KLINE_REENTRY_HARD_LOSS_PNL', '-0.20'))
+ATH_NO_KLINE_REENTRY_LOW_FOLLOW_PEAK = float(os.environ.get('ATH_NO_KLINE_REENTRY_LOW_FOLLOW_PEAK', '0.10'))
+ATH_NO_KLINE_REENTRY_MIN_RECOVERY_PCT = float(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_RECOVERY_PCT', '8.0'))
+ATH_NO_KLINE_REENTRY_MAX_RECENT_ENTRIES = int(os.environ.get('ATH_NO_KLINE_REENTRY_MAX_RECENT_ENTRIES', '3'))
+ATH_NO_KLINE_REENTRY_MIN_T = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_T', '80'))
+ATH_NO_KLINE_REENTRY_MIN_P = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_P', '80'))
+ATH_NO_KLINE_REENTRY_MIN_S = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_S', '100'))
+ATH_NO_KLINE_REENTRY_WINNER_PEAK = float(os.environ.get('ATH_NO_KLINE_REENTRY_WINNER_PEAK', '0.30'))
+ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED = os.environ.get('ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED', 'true').lower() != 'false'
+ATH_NO_KLINE_VOLUME_LOW_WARN_MIN_BS = float(os.environ.get('ATH_NO_KLINE_VOLUME_LOW_WARN_MIN_BS', '1.20'))
+PULLBACK_TINY_SCOUT_FORCE_LIVE_ENABLED = os.environ.get('PULLBACK_TINY_SCOUT_FORCE_LIVE_ENABLED', 'false').lower() == 'true'
 ENTRY_MODE_QUALITY_HIGH_QUALITY_TINY_OVERRIDE_ENABLED = os.environ.get('ENTRY_MODE_QUALITY_HIGH_QUALITY_TINY_OVERRIDE_ENABLED', 'true').lower() != 'false'
 ENTRY_MODE_QUALITY_OVERRIDE_MIN_T = int(os.environ.get('ENTRY_MODE_QUALITY_OVERRIDE_MIN_T', '80'))
 ENTRY_MODE_QUALITY_OVERRIDE_MIN_P = int(os.environ.get('ENTRY_MODE_QUALITY_OVERRIDE_MIN_P', '80'))
@@ -1151,6 +1165,325 @@ def apply_paper_tiny_scout_size_cap(pending):
         'capped': actual_size < requested_size,
         'cap_sol': cap_sol,
     }
+
+
+def _score_int(scores, key, default=0):
+    try:
+        return int(float((scores or {}).get(key, default) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _paper_trade_columns(db):
+    if db is None:
+        return set()
+    try:
+        rows = db.execute("PRAGMA table_info(paper_trades)").fetchall()
+    except Exception:
+        return set()
+    columns = set()
+    for row in rows:
+        try:
+            columns.add(row['name'])
+        except Exception:
+            try:
+                columns.add(row[1])
+            except Exception:
+                continue
+    return columns
+
+
+def _row_to_dict(row, keys):
+    if row is None:
+        return {}
+    try:
+        return {key: row[key] for key in keys}
+    except Exception:
+        return {key: value for key, value in zip(keys, row)}
+
+
+def _ath_no_kline_recent_trades(db, token_ca, *, now_ts=None, lookback_sec=None, limit=20):
+    if not token_ca:
+        return []
+    columns = _paper_trade_columns(db)
+    if not {'token_ca', 'entry_mode'}.issubset(columns):
+        return []
+    lookback_sec = ATH_NO_KLINE_REENTRY_LOOKBACK_SEC if lookback_sec is None else lookback_sec
+    now_ts = int(now_ts or time.time())
+    cutoff_ts = now_ts - int(lookback_sec)
+    keys = [
+        'id',
+        'entry_ts',
+        'exit_ts',
+        'exit_reason',
+        'pnl_pct',
+        'peak_pnl',
+        'entry_price',
+        'exit_price',
+        'entry_mode',
+    ]
+    select_exprs = [f"{key} AS {key}" if key in columns else f"NULL AS {key}" for key in keys]
+    timestamp_expr = "COALESCE(exit_ts, entry_ts, 0)" if 'exit_ts' in columns and 'entry_ts' in columns else "entry_ts"
+    order_expr = f"{timestamp_expr} DESC"
+    if 'id' in columns:
+        order_expr += ", id DESC"
+    try:
+        rows = db.execute(
+            f"""
+            SELECT {', '.join(select_exprs)}
+            FROM paper_trades
+            WHERE token_ca = ?
+              AND entry_mode = ?
+              AND {timestamp_expr} >= ?
+            ORDER BY {order_expr}
+            LIMIT ?
+            """,
+            (token_ca, ATH_NO_KLINE_TINY_PROBE_MODE, cutoff_ts, int(limit)),
+        ).fetchall()
+    except Exception:
+        return []
+    return [_row_to_dict(row, keys) for row in rows]
+
+
+def _ath_no_kline_matrix_strong(scores):
+    trend = _score_int(scores, 'trend')
+    price = _score_int(scores, 'price')
+    signal = _score_int(scores, 'signal')
+    return {
+        'pass': (
+            trend >= ATH_NO_KLINE_REENTRY_MIN_T
+            and price >= ATH_NO_KLINE_REENTRY_MIN_P
+            and signal >= ATH_NO_KLINE_REENTRY_MIN_S
+        ),
+        'scores': {
+            'trend': trend,
+            'volume': _score_int(scores, 'volume'),
+            'price': price,
+            'signal': signal,
+            'momentum': _score_int(scores, 'momentum'),
+        },
+        'thresholds': {
+            'trend': ATH_NO_KLINE_REENTRY_MIN_T,
+            'price': ATH_NO_KLINE_REENTRY_MIN_P,
+            'signal': ATH_NO_KLINE_REENTRY_MIN_S,
+        },
+    }
+
+
+def _pnl_decimal(value):
+    pnl = _safe_float(value, None)
+    if pnl is None:
+        return None
+    if abs(pnl) > 3.0:
+        return pnl / 100.0
+    return pnl
+
+
+def _ath_no_kline_reentry_guard(db, pending, *, current_price=None, now_ts=None, recent_trades=None):
+    pending = pending or {}
+    entry_mode = str(pending.get('entry_mode') or pending.get('entry_trigger_mode') or pending.get('scout_mode') or '')
+    if not ATH_NO_KLINE_REENTRY_GUARD_ENABLED:
+        return {'pass': True, 'reason': 'ath_no_kline_reentry_guard_disabled'}
+    if entry_mode != ATH_NO_KLINE_TINY_PROBE_MODE:
+        return {'pass': True, 'reason': 'not_ath_no_kline_tiny_probe', 'entry_mode': entry_mode}
+
+    now_ts = int(now_ts or time.time())
+    trades = list(recent_trades) if recent_trades is not None else _ath_no_kline_recent_trades(
+        db,
+        pending.get('token_ca'),
+        now_ts=now_ts,
+    )
+    matrix = _ath_no_kline_matrix_strong(pending.get('matrix_scores') or {})
+    thresholds = {
+        'lookback_sec': ATH_NO_KLINE_REENTRY_LOOKBACK_SEC,
+        'hard_loss_cooldown_sec': ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC,
+        'hard_loss_pnl': ATH_NO_KLINE_REENTRY_HARD_LOSS_PNL,
+        'low_follow_peak': ATH_NO_KLINE_REENTRY_LOW_FOLLOW_PEAK,
+        'min_recovery_pct': ATH_NO_KLINE_REENTRY_MIN_RECOVERY_PCT,
+        'max_recent_entries': ATH_NO_KLINE_REENTRY_MAX_RECENT_ENTRIES,
+        'winner_peak': ATH_NO_KLINE_REENTRY_WINNER_PEAK,
+        'matrix': matrix.get('thresholds'),
+    }
+    detail = {
+        'pass': True,
+        'reason': 'ath_no_kline_first_entry',
+        'entry_mode': entry_mode,
+        'recent_trade_count': len(trades),
+        'scores': matrix.get('scores'),
+        'thresholds': thresholds,
+    }
+    if not trades:
+        return detail
+
+    latest = trades[0] or {}
+    latest_pnl = _pnl_decimal(latest.get('pnl_pct'))
+    latest_peak = _pnl_decimal(latest.get('peak_pnl')) or 0.0
+    latest_ts = _safe_float(latest.get('exit_ts') or latest.get('entry_ts'), 0.0)
+    latest_ref_price = _safe_float(latest.get('exit_price') or latest.get('entry_price'), None)
+    current_price = _safe_float(current_price or pending.get('trigger_price') or pending.get('entry_price'), None)
+    detail['latest_trade'] = {
+        'id': latest.get('id'),
+        'entry_ts': latest.get('entry_ts'),
+        'exit_ts': latest.get('exit_ts'),
+        'exit_reason': latest.get('exit_reason'),
+        'pnl_pct': latest_pnl,
+        'peak_pnl': latest_peak,
+        'entry_price': _safe_float(latest.get('entry_price'), None),
+        'exit_price': _safe_float(latest.get('exit_price'), None),
+    }
+    detail['observed'] = {
+        'current_price': current_price,
+        'reference_price': latest_ref_price,
+        'recovery_pct': (
+            ((current_price / latest_ref_price) - 1.0) * 100.0
+            if current_price is not None and latest_ref_price and latest_ref_price > 0
+            else None
+        ),
+    }
+
+    if len(trades) >= ATH_NO_KLINE_REENTRY_MAX_RECENT_ENTRIES:
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_max_recent_entries'})
+        return detail
+
+    hard_loss = (
+        latest_pnl is not None
+        and latest_pnl <= ATH_NO_KLINE_REENTRY_HARD_LOSS_PNL
+        and (now_ts - latest_ts) < ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC
+    )
+    hard_sl_exit = 'hard_sl' in str(latest.get('exit_reason') or '').lower()
+    if hard_loss or (hard_sl_exit and (now_ts - latest_ts) < ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC):
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_hard_loss_cooldown'})
+        return detail
+
+    if latest_peak < ATH_NO_KLINE_REENTRY_LOW_FOLLOW_PEAK and (latest_pnl is None or latest_pnl <= 0):
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_low_followthrough'})
+        return detail
+
+    if len(trades) >= 2 and not (latest_peak >= ATH_NO_KLINE_REENTRY_WINNER_PEAK and latest_pnl is not None and latest_pnl > 0):
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_needs_prior_winner'})
+        return detail
+
+    if not matrix.get('pass'):
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_matrix_not_strong'})
+        return detail
+
+    if not latest_ref_price or latest_ref_price <= 0 or current_price is None:
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_price_reference_missing'})
+        return detail
+
+    min_recovery = ATH_NO_KLINE_REENTRY_MIN_RECOVERY_PCT
+    recovery_pct = detail['observed']['recovery_pct']
+    if recovery_pct is None or recovery_pct < min_recovery:
+        detail.update({'pass': False, 'reason': 'ath_no_kline_reentry_recovery_not_confirmed'})
+        return detail
+
+    detail.update({'pass': True, 'reason': 'ath_no_kline_reentry_allowed'})
+    return detail
+
+
+def _ath_no_kline_scout_quality_soft_override(pending, scout_quality, *, route=None, scout_size=None):
+    if not ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED or not isinstance(scout_quality, dict):
+        return scout_quality
+    if scout_quality.get('pass') or scout_quality.get('reason') != 'scout_quality_volume_low':
+        return scout_quality
+    pending = pending or {}
+    entry_mode = str(pending.get('entry_mode') or pending.get('entry_trigger_mode') or pending.get('scout_mode') or '')
+    route_label = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    if entry_mode != ATH_NO_KLINE_TINY_PROBE_MODE or route_label != 'ATH':
+        return scout_quality
+
+    observed = scout_quality.get('observed') or {}
+    thresholds = scout_quality.get('thresholds') or {}
+    scores = pending.get('matrix_scores') or {}
+    score_detail = {
+        'trend': _score_int(scores, 'trend'),
+        'volume': _score_int(scores, 'volume'),
+        'price': _score_int(scores, 'price'),
+        'signal': _score_int(scores, 'signal'),
+        'momentum': _score_int(scores, 'momentum'),
+    }
+    matrix_strong = (
+        score_detail['trend'] >= 60
+        and score_detail['price'] >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
+        and score_detail['signal'] >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
+    )
+    size_detail = scout_size or {}
+    actual_size = _safe_float(
+        size_detail.get('actual_size_sol') if isinstance(size_detail, dict) else None,
+        _safe_float(pending.get('kelly_position_sol'), None),
+    )
+    tiny_size_ok = actual_size is not None and actual_size <= min(PAPER_TINY_SCOUT_SIZE_SOL, SCOUT_QUALITY_SIZE_CAP_SOL) + 1e-9
+    min_bs = max(
+        _safe_float(thresholds.get('min_buy_sell_ratio'), 0.0),
+        ATH_NO_KLINE_VOLUME_LOW_WARN_MIN_BS,
+    )
+    bs = _safe_float(observed.get('buy_sell_ratio'), None)
+    tx = _safe_float(observed.get('tx_m5'), None)
+    min_tx = _safe_float(thresholds.get('min_tx_m5'), 0.0)
+    price_change = _safe_float(observed.get('price_change_m5'), None)
+    max_negative = _safe_float(thresholds.get('max_negative_m5'), None)
+    top1 = _safe_float(observed.get('top1_pct'), None)
+    max_top1 = _safe_float(thresholds.get('max_top1_pct'), None)
+    top10 = _safe_float(observed.get('top10_pct'), None)
+    max_top10 = _safe_float(thresholds.get('max_top10_pct'), None)
+    liquidity = _safe_float(observed.get('liquidity_usd'), None)
+    min_liquidity = _safe_float(thresholds.get('min_liquidity_usd'), 0.0)
+    checks = {
+        'matrix_strong': matrix_strong,
+        'tiny_size_ok': tiny_size_ok,
+        'buy_pressure_ok': bs is not None and bs >= min_bs,
+        'tx_ok': tx is not None and tx >= min_tx,
+        'negative_trend_ok': price_change is None or max_negative is None or price_change >= max_negative,
+        'top1_ok': top1 is None or max_top1 is None or top1 <= max_top1,
+        'top10_ok': top10 is None or max_top10 is None or top10 <= max_top10,
+        'liquidity_ok': liquidity is None or min_liquidity <= 0 or liquidity >= min_liquidity,
+    }
+    if not all(checks.values()):
+        override = dict(scout_quality)
+        override['volume_low_soft_override'] = {
+            'pass': False,
+            'reason': 'ath_no_kline_volume_low_soft_override_checks_failed',
+            'checks': checks,
+            'scores': score_detail,
+            'observed': observed,
+            'thresholds': {
+                'trend': 60,
+                'price': ENTRY_MODE_QUALITY_OVERRIDE_MIN_P,
+                'signal': ENTRY_MODE_QUALITY_OVERRIDE_MIN_S,
+                'buy_sell_ratio': min_bs,
+                'tx_m5': min_tx,
+                'max_negative_m5': max_negative,
+                'max_top1_pct': max_top1,
+                'max_top10_pct': max_top10,
+            },
+        }
+        return override
+
+    override = dict(scout_quality)
+    override.update({
+        'pass': True,
+        'decision': 'warn',
+        'reason': 'scout_quality_volume_low_warn_ath_no_kline_override',
+        'original_reason': scout_quality.get('reason'),
+        'volume_low_soft_override': {
+            'pass': True,
+            'reason': 'ath_no_kline_volume_low_soft_warn',
+            'checks': checks,
+            'scores': score_detail,
+            'observed': observed,
+            'thresholds': {
+                'trend': 60,
+                'price': ENTRY_MODE_QUALITY_OVERRIDE_MIN_P,
+                'signal': ENTRY_MODE_QUALITY_OVERRIDE_MIN_S,
+                'buy_sell_ratio': min_bs,
+                'tx_m5': min_tx,
+                'max_negative_m5': max_negative,
+                'max_top1_pct': max_top1,
+                'max_top10_pct': max_top10,
+            },
+        },
+    })
+    return override
 
 
 def position_is_probe_profit_capture_candidate(pos):
@@ -4610,8 +4943,9 @@ def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=No
         ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
         MATRIX_RECLAIM_TINY_PROBE_MODE,
         MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
-        'pullback_tiny_scout',
     }
+    if PULLBACK_TINY_SCOUT_FORCE_LIVE_ENABLED:
+        tiny_modes_allowed.add('pullback_tiny_scout')
     matrix_strong = (
         trend >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_T
         and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
@@ -11129,6 +11463,38 @@ def run_monitor(db):
                             },
                         )
                         log.info(f"  [SmartEntry] {pending['symbol']} PASS: {timing_reason} trigger={timing_trigger_price}")
+                        _ath_reentry_guard = _ath_no_kline_reentry_guard(
+                            db,
+                            pending,
+                            current_price=timing_trigger_price or pending.get('trigger_price'),
+                            now_ts=now,
+                        )
+                        pending['ath_no_kline_reentry_guard'] = _ath_reentry_guard
+                        if not _ath_reentry_guard.get('pass'):
+                            record_decision_event(
+                                db,
+                                component='entry_reentry_guard',
+                                event_type='entry_block',
+                                decision='block',
+                                reason=_ath_reentry_guard.get('reason') or 'ath_no_kline_reentry_block',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=pending.get('strategy_stage') or 'stage1',
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                data_source='paper_trades+pending_entry',
+                                payload=_ath_reentry_guard,
+                            )
+                            log.info(
+                                f"  [ATH_REENTRY] 🚫 {pending['symbol']} BLOCKED: "
+                                f"{_ath_reentry_guard.get('reason')} "
+                                f"recent={_ath_reentry_guard.get('recent_trade_count')} "
+                                f"scores={_ath_reentry_guard.get('scores')}"
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
 
                     _pending_strategy_id = pending.get('strategy_id') or strategy_id
                     _pending_strategy_stage = pending.get('strategy_stage') or 'stage1'
@@ -11269,6 +11635,13 @@ def run_monitor(db):
                             spread_memory=pending.get('spread_abort_memory'),
                             position_size_sol=pending.get('kelly_position_sol'),
                         )
+                        _raw_scout_quality = _scout_quality
+                        _scout_quality = _ath_no_kline_scout_quality_soft_override(
+                            pending,
+                            _scout_quality,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            scout_size=_scout_size_detail,
+                        )
                         pending['scout_quality'] = _scout_quality
                         record_scout_quality_decision(
                             db,
@@ -11283,6 +11656,31 @@ def run_monitor(db):
                             source_reject_reason=pending.get('source_reject_reason'),
                             data_source='dexscreener+lifecycle+paper_risk',
                         )
+                        if _scout_quality.get('decision') == 'warn':
+                            record_decision_event(
+                                db,
+                                component='scout_quality',
+                                event_type='quality_gate',
+                                decision='warn',
+                                reason=_scout_quality.get('reason') or 'scout_quality_warn',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='dexscreener+lifecycle+paper_risk',
+                                payload=with_lifecycle_payload({
+                                    'scout_quality': _scout_quality,
+                                    'raw_scout_quality': _raw_scout_quality,
+                                    'scout_size': _scout_size_detail,
+                                }, _entry_timing_lifecycle),
+                            )
+                            log.info(
+                                f"  [SCOUT_QUALITY] ⚠️ {pending['symbol']} WARN: "
+                                f"{_scout_quality.get('reason')} original={_scout_quality.get('original_reason')}"
+                            )
                         if not _scout_quality.get('pass'):
                             if _discovery_is_soft_quality_reason(_scout_quality.get('reason')):
                                 _pending_route_for_tracking = _pending_signal_route or pending.get('signal_type')
