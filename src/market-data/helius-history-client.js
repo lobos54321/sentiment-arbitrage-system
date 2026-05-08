@@ -3,8 +3,16 @@ import { RateLimiter } from '../utils/rate-limiter.js';
 
 export class HeliusHistoryClient {
   constructor(config = {}) {
-    this.apiKey = config.apiKey || process.env.HELIUS_API_KEY || '';
-    this.rpcUrl = config.rpcUrl || (this.apiKey ? `https://mainnet.helius-rpc.com/?api-key=${this.apiKey}` : '');
+    const configuredApiKey = config.apiKey || process.env.HELIUS_API_KEY || '';
+    this.rpcUrl = config.rpcUrl || (configuredApiKey ? `https://mainnet.helius-rpc.com/?api-key=${configuredApiKey}` : '');
+    const rpcUrlApiKey = (() => {
+      try {
+        return this.rpcUrl ? (new URL(this.rpcUrl).searchParams.get('api-key') || '') : '';
+      } catch {
+        return '';
+      }
+    })();
+    this.apiKey = rpcUrlApiKey || configuredApiKey;
     this.enhancedUrl = config.enhancedUrl || 'https://api.helius.xyz/v0';
     this.signatureLimiter = new RateLimiter(Number(config.signatureRps || 2), 1);
     this.txLimiter = new RateLimiter(Number(config.transactionRps || 1), 1);

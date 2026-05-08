@@ -7368,7 +7368,12 @@ _timing_executor = ThreadPoolExecutor(
 # lifecycle_id -> {'future', 'ctx', 'submitted_at'}
 _timing_inflight = {}
 HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', '')
-HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+HELIUS_RPC_URL = os.environ.get('HELIUS_RPC_URL', '') or f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+if not HELIUS_API_KEY and HELIUS_RPC_URL:
+    try:
+        HELIUS_API_KEY = (urllib.parse.parse_qs(urllib.parse.urlparse(HELIUS_RPC_URL).query).get('api-key') or [''])[0]
+    except Exception:
+        HELIUS_API_KEY = ''
 
 # B+C: Helius volume polling cache for held positions
 # trade_id → {'last_check': ts, 'last_sig': str, 'tps': float, 'tps_history': [float]}

@@ -104,6 +104,8 @@ function heliusConfigHealth() {
     rpc_url_present: Boolean(rpcUrl),
     rpc_url_has_api_key: Boolean(urlKey),
     rpc_url_key_masked: maskedSecret(urlKey),
+    effective_api_key_masked: maskedSecret(urlKey || apiKey),
+    effective_api_key_source: urlKey ? 'HELIUS_RPC_URL' : (apiKey ? 'HELIUS_API_KEY' : null),
     rpc_url_key_matches_api_key: Boolean(apiKey && urlKey && apiKey === urlKey),
   };
 }
