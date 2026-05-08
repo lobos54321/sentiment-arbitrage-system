@@ -30,6 +30,9 @@ ATH_TINY_SCOUT_MODES = (
     "ath_uncertainty_tiny_scout",
     "ath_no_kline_tiny_probe",
     "ath_high_mc_tiny_probe",
+    "ath_reclaim_after_failure_tiny_probe",
+    "ath_matrix_dissonance_tiny_probe",
+    "ath_micro_reclaim_tiny_probe",
 )
 NEWBORN_TINY_SCOUT_MODES = (
     "newborn_momentum_tiny_scout",
@@ -180,7 +183,11 @@ def evaluate_entry_readiness_policy(*, route=None, lifecycle=None, pending=None,
     elif profile == "ATH_CONTINUATION":
         min_odds_r = 1.8
         min_p_follow = 0.62 if paper_tiny_scout else 0.56
-        max_spread_pct = 3.0 if paper_tiny_scout else 2.0  # V9: 2.0→3.0 for scouts; ATH tokens have wider spreads
+        max_spread_pct = (
+            3.0
+            if paper_tiny_scout and requested_entry_mode != "ath_flat_structure_tiny_scout"
+            else 2.0
+        )  # V9: 2.0→3.0 for scouts; flat structure keeps legacy 2.0.
         expected_loss_pct = 9.0
         if paper_tiny_scout:
             allowed_modes = (requested_entry_mode, "smart_entry_pullback_bounce")

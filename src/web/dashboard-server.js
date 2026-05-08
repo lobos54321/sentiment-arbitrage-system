@@ -136,6 +136,15 @@ function entryModeBucket(entryMode, positionSizeSol) {
   return 'primary';
 }
 
+function athRecoveryFamilyFor(entryMode, monitorState = {}) {
+  if (monitorState.athRecoveryFamily) return String(monitorState.athRecoveryFamily);
+  const mode = String(entryMode || '');
+  if (mode === 'ath_reclaim_after_failure_tiny_probe') return 'recent_failure_reclaim';
+  if (mode === 'ath_matrix_dissonance_tiny_probe') return 'matrix_dissonance';
+  if (mode === 'ath_micro_reclaim_tiny_probe') return 'micro_reclaim';
+  return null;
+}
+
 function lifecycleSummaryKey(row) {
   return row.lifecycle_id || `${row.token_ca || 'unknown'}:${row.signal_ts || ''}`;
 }
@@ -2619,9 +2628,13 @@ const server = http.createServer(async (req, res) => {
       const recent = [];
       for (const row of rows) {
         const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+        const monitorState = parseJsonObject(row.monitor_state_json);
         const entryMode = inferEntryMode(row);
         const bucket = entryModeBucket(entryMode, row.position_size_sol);
         const key = `${bucket}:${entryMode}`;
+        const athRecoveryFamily = athRecoveryFamilyFor(entryMode, monitorState);
+        const parentBlockReason = firstValue(monitorState.parentBlockReason, monitorState.parent_block_reason);
+        const recoveryProbeReason = firstValue(monitorState.recoveryProbeReason, monitorState.recovery_probe_reason);
         const closed = row.exit_ts != null || row.exit_reason != null;
         const pnl = row.pnl_pct == null ? null : Number(row.pnl_pct);
         const peak = row.peak_pnl == null ? null : Number(row.peak_pnl);
@@ -2645,6 +2658,9 @@ const server = http.createServer(async (req, res) => {
             est_pnl_sol: 0,
             entry_quote_success_n: 0,
             entry_quote_failure_n: 0,
+            ath_recovery_family: athRecoveryFamily,
+            parent_block_reasons: {},
+            recovery_probe_reasons: {},
           });
         }
         const g = groups.get(key);
@@ -2668,6 +2684,9 @@ const server = http.createServer(async (req, res) => {
         }
         if (entryQuoteSuccess) g.entry_quote_success_n += 1;
         if (entryQuoteFailure) g.entry_quote_failure_n += 1;
+        if (athRecoveryFamily && !g.ath_recovery_family) g.ath_recovery_family = athRecoveryFamily;
+        if (parentBlockReason) g.parent_block_reasons[parentBlockReason] = (g.parent_block_reasons[parentBlockReason] || 0) + 1;
+        if (recoveryProbeReason) g.recovery_probe_reasons[recoveryProbeReason] = (g.recovery_probe_reasons[recoveryProbeReason] || 0) + 1;
         if (recent.length < 50) {
           recent.push({
             id: row.id,
@@ -2685,6 +2704,9 @@ const server = http.createServer(async (req, res) => {
             peak_pnl_pct: peak == null ? null : roundNumber(peak * 100, 2),
             entry_quote_success: entryQuoteSuccess,
             entry_quote_failure_reason: entryAudit.failureReason || null,
+            ath_recovery_family: athRecoveryFamily,
+            parent_block_reason: parentBlockReason,
+            recovery_probe_reason: recoveryProbeReason,
           });
         }
       }
@@ -2702,6 +2724,9 @@ const server = http.createServer(async (req, res) => {
         avg_position_size_sol: g.position_n ? roundNumber(g.total_position_size_sol / g.position_n, 4) : null,
         est_pnl_sol: roundNumber(g.est_pnl_sol, 5),
         avg_ev_sol_per_trade: g.total ? roundNumber(g.est_pnl_sol / g.total, 6) : null,
+        ath_recovery_family: g.ath_recovery_family || null,
+        parent_block_reasons: g.parent_block_reasons,
+        recovery_probe_reasons: g.recovery_probe_reasons,
         entry_quote_success_n: g.entry_quote_success_n,
         entry_quote_failure_n: g.entry_quote_failure_n,
         entry_quote_success_rate_pct: (g.entry_quote_success_n + g.entry_quote_failure_n)
@@ -3246,6 +3271,69 @@ const server = http.createServer(async (req, res) => {
           NULL AS stop_before_peak_n`}
         FROM per_token
       `).get(whereParams);
+      const athEventTierSummary = paperDb.prepare(`
+        SELECT
+          COUNT(*) AS total_n,
+          ${tierCaseSql('COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)')},
+          ${hasTradability ? `
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
+          NULL AS tradable_n,
+          NULL AS clean_tradable_n,
+          NULL AS quote_executable_proxy_n,
+          NULL AS stop_before_peak_n`}
+        FROM paper_missed_signal_attribution
+        ${whereSql ? `${whereSql} AND COALESCE(route, '') = 'ATH'` : "WHERE COALESCE(route, '') = 'ATH'"}
+      `).get(whereParams);
+      const athUniqueTierSummary = paperDb.prepare(`
+        WITH per_token AS (
+          SELECT
+            token_ca,
+            MAX(COALESCE(max_pnl_recorded, pnl_60m, pnl_15m, pnl_5m, 0)) AS max_pnl,
+            ${hasTradability ? `
+            MAX(COALESCE(tradable_missed, 0)) AS tradable_missed,
+            MAX(COALESCE(would_stop_before_peak, 0)) AS would_stop_before_peak,
+            MAX(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 AND NOT (${spreadAbortExistsSql}) THEN 1 ELSE 0 END) AS quote_executable_proxy` : `
+            NULL AS tradable_missed,
+            NULL AS would_stop_before_peak,
+            NULL AS quote_executable_proxy`}
+          FROM paper_missed_signal_attribution
+          ${whereSql ? `${whereSql} AND COALESCE(route, '') = 'ATH'` : "WHERE COALESCE(route, '') = 'ATH'"}
+          GROUP BY token_ca
+        )
+        SELECT
+          COUNT(*) AS total_n,
+          ${tierCaseSql('max_pnl')},
+          ${hasTradability ? `
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_n,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+          SUM(CASE WHEN quote_executable_proxy = 1 THEN 1 ELSE 0 END) AS quote_executable_proxy_n,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_n` : `
+          NULL AS tradable_n,
+          NULL AS clean_tradable_n,
+          NULL AS quote_executable_proxy_n,
+          NULL AS stop_before_peak_n`}
+        FROM per_token
+      `).get(whereParams);
+      let athRecoveryActions = [];
+      if (hasDecisionEvents) {
+        const recoveryWhere = sinceTs ? 'AND event_ts >= @since' : '';
+        athRecoveryActions = paperDb.prepare(`
+          SELECT
+            reason AS recovery_action,
+            decision,
+            COUNT(*) AS n,
+            COUNT(DISTINCT token_ca) AS unique_tokens
+          FROM paper_decision_events
+          WHERE component = 'ath_recovery'
+            ${recoveryWhere}
+          GROUP BY reason, decision
+          ORDER BY n DESC
+          LIMIT @limit
+        `).all({ ...whereParams, limit });
+      }
       const topUniqueDogs = paperDb.prepare(`
         WITH ranked AS (
           SELECT
@@ -3292,10 +3380,13 @@ const server = http.createServer(async (req, res) => {
         tier_summary: {
           event_rows: eventTierSummary,
           unique_tokens: uniqueTierSummary,
+          ath_event_rows: athEventTierSummary,
+          ath_unique_tokens: athUniqueTierSummary,
         },
         top_dogs: topDogs,
         top_unique_dogs: topUniqueDogs,
         by_gate: byGate,
+        ath_recovery_actions: athRecoveryActions,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });

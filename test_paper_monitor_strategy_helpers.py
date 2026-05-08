@@ -8,7 +8,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 import paper_trade_monitor as monitor  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     ATH_HIGH_MC_TINY_PROBE_MODE,
+    ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+    ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
     ATH_NO_KLINE_TINY_PROBE_MODE,
+    ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
     ATH_UNCERTAINTY_TINY_SCOUT_MODE,
     MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
     PAPER_TINY_SCOUT_SIZE_SOL,
@@ -19,6 +22,9 @@ from paper_trade_monitor import (  # noqa: E402
     _apply_primary_proving_cap,
     _ath_no_kline_reentry_guard,
     _ath_no_kline_scout_quality_soft_override,
+    _ath_dynamic_ttl_extension_detail,
+    _ath_recovery_eligibility,
+    _ath_recovery_mode_for_candidate,
     _discovery_hard_block,
     _entry_mode_for_ath_uncertainty_reason,
     _entry_mode_quality_high_quality_tiny_override,
@@ -169,7 +175,13 @@ def test_smart_entry_pullback_bounce_degraded_force_live_caps_to_tiny():
 
 
 def test_new_ath_probe_modes_are_tiny_scouts_and_get_capped():
-    for mode in (ATH_NO_KLINE_TINY_PROBE_MODE, ATH_HIGH_MC_TINY_PROBE_MODE):
+    for mode in (
+        ATH_NO_KLINE_TINY_PROBE_MODE,
+        ATH_HIGH_MC_TINY_PROBE_MODE,
+        ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+        ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+        ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+    ):
         pending = {"entry_mode": mode, "kelly_position_sol": 0.1}
 
         assert monitor.pending_is_paper_tiny_scout(pending)
@@ -353,6 +365,168 @@ def test_ath_no_kline_volume_low_soft_override_does_not_hide_tx_weakness():
     assert decision["pass"] is False
     assert decision["reason"] == "scout_quality_volume_low"
     assert decision["volume_low_soft_override"]["checks"]["tx_ok"] is False
+
+
+def test_ath_recovery_mode_mapping_does_not_pollute_no_kline():
+    mode = _ath_recovery_mode_for_candidate(
+        ATH_NO_KLINE_TINY_PROBE_MODE,
+        route="ATH",
+        source_detail={"scout_quality": {"reason": "scout_quality_recent_token_failure"}},
+    )
+
+    assert mode == ATH_NO_KLINE_TINY_PROBE_MODE
+
+
+def test_ath_reclaim_after_failure_passes_only_after_reclaim():
+    db = _paper_trade_db([
+        {
+            "entry_mode": ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            "exit_reason": "timeout",
+            "pnl_pct": -0.10,
+            "peak_pnl": 0.04,
+            "exit_price": 1.0,
+        },
+    ])
+    candidate = {
+        "token_ca": "TokenCA",
+        "route": "ATH",
+        "source_detail": {
+            "scout_quality": {"reason": "scout_quality_recent_token_failure"},
+            "scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 60},
+        },
+    }
+
+    decision = _ath_recovery_eligibility(
+        db,
+        entry_mode=ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": True, "cooldown_expired": True},
+        dex_snapshot={"price": 1.09},
+        activity={"buy_sell_ratio": 1.30, "tx_m5": 100, "price_change_m5": 9.0},
+        liquidity_usd=12000,
+        top10_pct=20,
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "ath_reclaim_after_failure_pass"
+    assert decision["family"] == "recent_failure_reclaim"
+
+
+def test_ath_reclaim_after_failure_blocks_recent_hard_sl():
+    db = _paper_trade_db([
+        {
+            "entry_mode": ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            "exit_reason": "hard_sl",
+            "pnl_pct": -0.31,
+            "peak_pnl": 0.01,
+            "exit_price": 1.0,
+        },
+    ])
+    candidate = {
+        "token_ca": "TokenCA",
+        "route": "ATH",
+        "source_detail": {
+            "scout_quality": {"reason": "scout_quality_recent_token_failure"},
+            "scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100},
+        },
+    }
+
+    decision = _ath_recovery_eligibility(
+        db,
+        entry_mode=ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": True, "cooldown_expired": True},
+        dex_snapshot={"price": 1.20},
+        activity={"buy_sell_ratio": 1.40, "tx_m5": 120, "price_change_m5": 20.0},
+        liquidity_usd=12000,
+        top10_pct=20,
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_recovery_recent_hard_loss"
+
+
+def test_ath_matrix_dissonance_requires_quote_executable():
+    candidate = {
+        "token_ca": "TokenCA",
+        "route": "ATH",
+        "source_reject_reason": "matrices not yet aligned",
+        "source_detail": {"scores": {"trend": 40, "volume": 70, "price": 100, "signal": 80}},
+    }
+
+    decision = _ath_recovery_eligibility(
+        _paper_trade_db(),
+        entry_mode=ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": False},
+        activity={"buy_sell_ratio": 1.25, "tx_m5": 100, "price_change_m5": 2.0},
+        liquidity_usd=12000,
+        top10_pct=20,
+        quote_probe={"success": False, "reason": "no_route"},
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_matrix_dissonance_quote_not_executable"
+
+
+def test_ath_micro_reclaim_blocks_weak_buy_pressure():
+    candidate = {
+        "token_ca": "TokenCA",
+        "route": "ATH",
+        "source_detail": {
+            "scout_quality": {"reason": "scout_quality_negative_trend"},
+            "scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100},
+        },
+    }
+
+    decision = _ath_recovery_eligibility(
+        _paper_trade_db(),
+        entry_mode=ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": False},
+        current_reclaim={"bounce_from_low_pct": 7.0},
+        activity={"buy_sell_ratio": 1.05, "tx_m5": 100, "price_change_m5": 1.0},
+        liquidity_usd=12000,
+        top10_pct=20,
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_micro_reclaim_buy_pressure_weak"
+
+
+def test_dynamic_ath_ttl_only_extends_strong_quote_executable_candidate():
+    strong = _ath_dynamic_ttl_extension_detail(
+        {
+            "route": "ATH",
+            "mode": ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+            "source_detail": {"scores": {"trend": 40, "price": 100, "signal": 80}},
+        },
+        activity={"buy_sell_ratio": 1.25, "price_change_m5": 1.0},
+        quote_probe={"success": True},
+    )
+    weak = _ath_dynamic_ttl_extension_detail(
+        {
+            "route": "ATH",
+            "mode": ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+            "source_detail": {"scores": {"trend": 40, "price": 100, "signal": 80}},
+            "last_wait_reason": "scout_quality_negative_trend",
+        },
+        activity={"buy_sell_ratio": 1.25, "price_change_m5": 1.0},
+        quote_probe={"success": True},
+    )
+
+    assert strong["pass"] is True
+    assert strong["reason"] == "ath_tracking_ttl_extended"
+    assert weak["pass"] is False
+    assert weak["reason"] == "ath_dynamic_ttl_recent_quality_weak"
 
 
 def test_unknown_data_live_gate_shadows_weak_activity_without_quote(monkeypatch):

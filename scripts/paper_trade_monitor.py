@@ -237,8 +237,38 @@ ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('ATH_UNCERTAINTY_T
 ATH_UNCERTAINTY_TINY_SCOUT_MODE = 'ath_uncertainty_tiny_scout'
 ATH_NO_KLINE_TINY_PROBE_MODE = 'ath_no_kline_tiny_probe'
 ATH_HIGH_MC_TINY_PROBE_MODE = 'ath_high_mc_tiny_probe'
+ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE = 'ath_reclaim_after_failure_tiny_probe'
+ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE = 'ath_matrix_dissonance_tiny_probe'
+ATH_MICRO_RECLAIM_TINY_PROBE_MODE = 'ath_micro_reclaim_tiny_probe'
+PAPER_TINY_SCOUT_ENTRY_MODES.update({
+    ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+    ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+    ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+})
 ATH_HIGH_MC_TINY_PROBE_ENABLED = os.environ.get('ATH_HIGH_MC_TINY_PROBE_ENABLED', 'true').lower() != 'false'
 ATH_HIGH_MC_TINY_PROBE_MAX_MC = float(os.environ.get('ATH_HIGH_MC_TINY_PROBE_MAX_MC', str(ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC)))
+ATH_RECOVERY_TINY_PROBES_ENABLED = os.environ.get('ATH_RECOVERY_TINY_PROBES_ENABLED', 'true').lower() != 'false'
+ATH_RECLAIM_AFTER_FAILURE_ENABLED = os.environ.get('ATH_RECLAIM_AFTER_FAILURE_ENABLED', 'true').lower() != 'false'
+ATH_MATRIX_DISSONANCE_TINY_PROBE_ENABLED = os.environ.get('ATH_MATRIX_DISSONANCE_TINY_PROBE_ENABLED', 'true').lower() != 'false'
+ATH_MICRO_RECLAIM_WATCH_ENABLED = os.environ.get('ATH_MICRO_RECLAIM_WATCH_ENABLED', 'true').lower() != 'false'
+ATH_DYNAMIC_TTL_ENABLED = os.environ.get('ATH_DYNAMIC_TTL_ENABLED', 'true').lower() != 'false'
+ATH_RECOVERY_COOLDOWN_SEC = int(os.environ.get('ATH_RECOVERY_COOLDOWN_SEC', str(4 * 60 * 60)))
+ATH_RECOVERY_HARD_LOSS_COOLDOWN_SEC = int(os.environ.get('ATH_RECOVERY_HARD_LOSS_COOLDOWN_SEC', str(6 * 60 * 60)))
+ATH_RECOVERY_MAX_ATTEMPTS_PER_TOKEN = int(os.environ.get('ATH_RECOVERY_MAX_ATTEMPTS_PER_TOKEN', '1'))
+ATH_RECOVERY_MIN_RECLAIM_PCT = float(os.environ.get('ATH_RECOVERY_MIN_RECLAIM_PCT', '8.0'))
+ATH_RECOVERY_MIN_BS = float(os.environ.get('ATH_RECOVERY_MIN_BS', '1.25'))
+ATH_RECOVERY_MIN_TX_M5 = float(os.environ.get('ATH_RECOVERY_MIN_TX_M5', '80'))
+ATH_RECOVERY_MIN_T = int(os.environ.get('ATH_RECOVERY_MIN_T', '80'))
+ATH_RECOVERY_MIN_P = int(os.environ.get('ATH_RECOVERY_MIN_P', '80'))
+ATH_RECOVERY_MIN_S = int(os.environ.get('ATH_RECOVERY_MIN_S', '100'))
+ATH_MATRIX_DISSONANCE_MIN_T = int(os.environ.get('ATH_MATRIX_DISSONANCE_MIN_T', '40'))
+ATH_MATRIX_DISSONANCE_MIN_BS = float(os.environ.get('ATH_MATRIX_DISSONANCE_MIN_BS', '1.20'))
+ATH_MATRIX_DISSONANCE_MIN_LIQUIDITY_USD = float(os.environ.get('ATH_MATRIX_DISSONANCE_MIN_LIQUIDITY_USD', '5000'))
+ATH_MICRO_RECLAIM_MAX_WATCH_SEC = int(os.environ.get('ATH_MICRO_RECLAIM_MAX_WATCH_SEC', str(10 * 60)))
+ATH_MICRO_RECLAIM_MIN_BOUNCE_PCT = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_BOUNCE_PCT', '6.0'))
+ATH_MICRO_RECLAIM_MIN_BS = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_BS', '1.20'))
+ATH_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('ATH_DYNAMIC_TTL_EXTEND_SEC', str(15 * 60)))
+ATH_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('ATH_DYNAMIC_TTL_MAX_EXTENSIONS', '2'))
 ATH_NO_KLINE_REENTRY_GUARD_ENABLED = os.environ.get('ATH_NO_KLINE_REENTRY_GUARD_ENABLED', 'true').lower() != 'false'
 ATH_NO_KLINE_REENTRY_LOOKBACK_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_LOOKBACK_SEC', str(4 * 60 * 60)))
 ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC', str(6 * 60 * 60)))
@@ -1484,6 +1514,552 @@ def _ath_no_kline_scout_quality_soft_override(pending, scout_quality, *, route=N
         },
     })
     return override
+
+
+ATH_RECOVERY_TINY_PROBE_MODES = {
+    ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+    ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+    ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+}
+
+
+def _ath_recovery_family(entry_mode):
+    mode = str(entry_mode or '')
+    if mode == ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE:
+        return 'recent_failure_reclaim'
+    if mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE:
+        return 'matrix_dissonance'
+    if mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE:
+        return 'micro_reclaim'
+    return None
+
+
+def _ath_recovery_source_reason(candidate=None, source_detail=None):
+    candidate = candidate or {}
+    source_detail = source_detail or candidate.get('source_detail') or {}
+    scout_quality = source_detail.get('scout_quality') if isinstance(source_detail.get('scout_quality'), dict) else {}
+    reasons = [
+        source_detail.get('ath_uncertainty_reject_reason'),
+        source_detail.get('pending_entry_quality_reject_reason'),
+        source_detail.get('upstream_realtime_reject_reason'),
+        scout_quality.get('reason'),
+        candidate.get('source_reject_reason'),
+    ]
+    for reason in reasons:
+        text = str(reason or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _ath_recovery_parent_reason(candidate=None, source_detail=None):
+    candidate = candidate or {}
+    source_detail = source_detail or candidate.get('source_detail') or {}
+    return str(
+        source_detail.get('source_reject_reason')
+        or candidate.get('source_reject_reason')
+        or _ath_recovery_source_reason(candidate, source_detail)
+        or ''
+    )
+
+
+def _ath_recovery_mode_for_reason(reason, *, parent_reason=None):
+    reason = str(reason or '')
+    parent_reason = str(parent_reason or '')
+    if reason == 'scout_quality_recent_token_failure':
+        return ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE
+    if reason in {'scout_quality_negative_trend', 'scout_quality_buy_pressure_weak'}:
+        return ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+    if (
+        reason == 'matrices not yet aligned'
+        or parent_reason == 'matrices not yet aligned'
+        or _matrix_micro_momentum_reason(reason)
+        or _matrix_micro_momentum_reason(parent_reason)
+    ):
+        return ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE
+    return None
+
+
+def _ath_recovery_mode_for_candidate(mode, *, route=None, source_reject_reason=None, source_detail=None):
+    if str(route or '').upper() != 'ATH':
+        return mode
+    if mode == ATH_NO_KLINE_TINY_PROBE_MODE:
+        return mode
+    source_detail = source_detail or {}
+    reason = _ath_recovery_source_reason(
+        {'source_reject_reason': source_reject_reason, 'source_detail': source_detail},
+        source_detail,
+    )
+    parent = source_reject_reason or _ath_recovery_parent_reason(
+        {'source_reject_reason': source_reject_reason, 'source_detail': source_detail},
+        source_detail,
+    )
+    recovery_mode = _ath_recovery_mode_for_reason(reason, parent_reason=parent)
+    if recovery_mode in {ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE, ATH_MICRO_RECLAIM_TINY_PROBE_MODE}:
+        scores = _ath_recovery_scores(
+            {'source_reject_reason': source_reject_reason, 'source_detail': source_detail},
+            {'source_detail': source_detail},
+        )
+        if not _ath_recovery_matrix_detail(scores).get('pass'):
+            return mode
+    if recovery_mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE:
+        scores = _ath_recovery_scores(
+            {'source_reject_reason': source_reject_reason, 'source_detail': source_detail},
+            {'source_detail': source_detail},
+        )
+        if not _ath_recovery_matrix_detail(scores, matrix_dissonance=True).get('pass'):
+            return mode
+    return recovery_mode or mode
+
+
+def _ath_recovery_scores(candidate=None, detail=None):
+    candidate = candidate or {}
+    detail = detail or {}
+    source_detail = detail.get('source_detail') or candidate.get('source_detail') or {}
+    candidates = [
+        detail.get('scores'),
+        source_detail.get('scores'),
+        (source_detail.get('source_detail') or {}).get('scores') if isinstance(source_detail.get('source_detail'), dict) else None,
+        candidate.get('matrix_scores'),
+        detail.get('matrix_scores'),
+    ]
+    for scores in candidates:
+        if isinstance(scores, dict) and scores:
+            return scores
+    return {}
+
+
+def _ath_recovery_matrix_detail(scores, *, min_t=None, min_p=None, min_s=None, matrix_dissonance=False):
+    min_t = ATH_RECOVERY_MIN_T if min_t is None else min_t
+    min_p = ATH_RECOVERY_MIN_P if min_p is None else min_p
+    min_s = ATH_RECOVERY_MIN_S if min_s is None else min_s
+    observed = {
+        'trend': _score_int(scores, 'trend'),
+        'volume': _score_int(scores, 'volume'),
+        'price': _score_int(scores, 'price'),
+        'signal': _score_int(scores, 'signal'),
+        'momentum': _score_int(scores, 'momentum'),
+    }
+    if matrix_dissonance:
+        passed = (
+            observed['trend'] >= ATH_MATRIX_DISSONANCE_MIN_T
+            and (observed['price'] >= 100 or observed['signal'] >= 100)
+        )
+        thresholds = {
+            'trend': ATH_MATRIX_DISSONANCE_MIN_T,
+            'price_or_signal': 100,
+        }
+    else:
+        passed = (
+            observed['trend'] >= min_t
+            and observed['price'] >= min_p
+            and observed['signal'] >= min_s
+        )
+        thresholds = {
+            'trend': min_t,
+            'price': min_p,
+            'signal': min_s,
+        }
+    return {
+        'pass': passed,
+        'observed': observed,
+        'thresholds': thresholds,
+    }
+
+
+def _ath_recovery_recent_trades(db, token_ca, *, now_ts=None, lookback_sec=None, limit=20):
+    if not token_ca:
+        return []
+    columns = _paper_trade_columns(db)
+    if not {'token_ca', 'entry_ts'}.issubset(columns):
+        return []
+    now_ts = int(now_ts or time.time())
+    lookback_sec = ATH_RECOVERY_HARD_LOSS_COOLDOWN_SEC if lookback_sec is None else lookback_sec
+    cutoff_ts = now_ts - int(lookback_sec)
+    keys = [
+        'id',
+        'entry_mode',
+        'entry_ts',
+        'exit_ts',
+        'exit_reason',
+        'pnl_pct',
+        'peak_pnl',
+        'entry_price',
+        'exit_price',
+    ]
+    select_exprs = [f"{key} AS {key}" if key in columns else f"NULL AS {key}" for key in keys]
+    timestamp_expr = "COALESCE(exit_ts, entry_ts, 0)" if 'exit_ts' in columns else "entry_ts"
+    try:
+        rows = db.execute(
+            f"""
+            SELECT {', '.join(select_exprs)}
+            FROM paper_trades
+            WHERE token_ca = ?
+              AND {timestamp_expr} >= ?
+            ORDER BY {timestamp_expr} DESC
+            LIMIT ?
+            """,
+            (token_ca, cutoff_ts, int(limit)),
+        ).fetchall()
+    except Exception:
+        return []
+    return [_row_to_dict(row, keys) for row in rows]
+
+
+def _ath_recovery_cooldown_detail(db, token_ca, entry_mode, *, now_ts=None):
+    now_ts = float(now_ts or time.time())
+    trades = _ath_recovery_recent_trades(
+        db,
+        token_ca,
+        now_ts=now_ts,
+        lookback_sec=max(ATH_RECOVERY_COOLDOWN_SEC, ATH_RECOVERY_HARD_LOSS_COOLDOWN_SEC),
+    )
+    hard_loss = None
+    attempts = 0
+    latest_mode_trade = None
+    for trade in trades:
+        reason = str(trade.get('exit_reason') or '').lower()
+        pnl = _pnl_decimal(trade.get('pnl_pct'))
+        if hard_loss is None and (
+            'hard_sl' in reason
+            or 'hard_floor' in reason
+            or (pnl is not None and pnl <= -0.30)
+        ):
+            hard_loss = trade
+        if str(trade.get('entry_mode') or '') == str(entry_mode or ''):
+            attempts += 1
+            latest_mode_trade = latest_mode_trade or trade
+    if hard_loss:
+        return {
+            'pass': False,
+            'reason': 'ath_recovery_recent_hard_loss',
+            'hard_loss_trade': hard_loss,
+            'attempt_count': attempts,
+            'thresholds': {
+                'hard_loss_cooldown_sec': ATH_RECOVERY_HARD_LOSS_COOLDOWN_SEC,
+                'max_attempts_per_token': ATH_RECOVERY_MAX_ATTEMPTS_PER_TOKEN,
+            },
+        }
+    if attempts >= ATH_RECOVERY_MAX_ATTEMPTS_PER_TOKEN:
+        return {
+            'pass': False,
+            'reason': 'ath_recovery_token_attempt_limit',
+            'latest_trade': latest_mode_trade,
+            'attempt_count': attempts,
+            'thresholds': {
+                'cooldown_sec': ATH_RECOVERY_COOLDOWN_SEC,
+                'max_attempts_per_token': ATH_RECOVERY_MAX_ATTEMPTS_PER_TOKEN,
+            },
+        }
+    return {
+        'pass': True,
+        'reason': 'ath_recovery_cooldown_ok',
+        'attempt_count': attempts,
+        'recent_trade_count': len(trades),
+    }
+
+
+def _ath_recovery_reference_trade(db, token_ca, token_risk=None, *, now_ts=None):
+    token_risk = token_risk or {}
+    ref = {
+        'id': token_risk.get('last_failure_trade_id'),
+        'exit_ts': token_risk.get('last_failure_exit_ts'),
+        'exit_reason': token_risk.get('last_failure_reason'),
+        'pnl_pct': token_risk.get('last_failure_pnl'),
+    }
+    trades = _ath_recovery_recent_trades(
+        db,
+        token_ca,
+        now_ts=now_ts,
+        lookback_sec=max(ATH_RECOVERY_COOLDOWN_SEC, ATH_RECOVERY_HARD_LOSS_COOLDOWN_SEC),
+        limit=1,
+    )
+    if trades:
+        trade = trades[0]
+        ref.update(trade)
+    return ref if any(value is not None for value in ref.values()) else None
+
+
+def _ath_recovery_current_price(dex_snapshot=None, lifecycle=None, candidate=None, detail=None):
+    features = (lifecycle or {}).get('lifecycle_features') or {}
+    return _first_number(
+        (dex_snapshot or {}).get('price'),
+        (dex_snapshot or {}).get('price_usd'),
+        (dex_snapshot or {}).get('current_price'),
+        features.get('current_price'),
+        features.get('price'),
+        (detail or {}).get('current_price'),
+        (candidate or {}).get('signal_price'),
+        ((candidate or {}).get('watchlist_entry') or {}).get('signal_price'),
+    )
+
+
+def _ath_recovery_eligibility(
+    db,
+    *,
+    entry_mode,
+    candidate=None,
+    detail=None,
+    route=None,
+    token_risk=None,
+    current_reclaim=None,
+    dex_snapshot=None,
+    lifecycle=None,
+    activity=None,
+    liquidity_usd=None,
+    top1_pct=None,
+    top10_pct=None,
+    quote_probe=None,
+    now_ts=None,
+):
+    """Shared ATH recovery gate. It only evaluates new recovery modes, never no-kline."""
+    candidate = candidate or {}
+    detail = detail or {}
+    route = str(route or candidate.get('route') or '').upper()
+    entry_mode = str(entry_mode or '')
+    token_ca = candidate.get('token_ca') or detail.get('token_ca')
+    now_ts = float(now_ts or time.time())
+    source_reason = _ath_recovery_source_reason(candidate, detail.get('source_detail') or candidate.get('source_detail') or {})
+    parent_reason = _ath_recovery_parent_reason(candidate, detail.get('source_detail') or candidate.get('source_detail') or {})
+    activity = activity or {}
+    scores = _ath_recovery_scores(candidate, detail)
+    current_price = _ath_recovery_current_price(dex_snapshot, lifecycle, candidate, detail)
+    reference_trade = _ath_recovery_reference_trade(db, token_ca, token_risk, now_ts=now_ts)
+    reference_price = _first_number(
+        (reference_trade or {}).get('exit_price'),
+        (reference_trade or {}).get('entry_price'),
+        ((candidate.get('watchlist_entry') or {}) if isinstance(candidate.get('watchlist_entry'), dict) else {}).get('signal_price'),
+        candidate.get('signal_price'),
+    )
+    recovery_pct = (
+        ((current_price / reference_price) - 1.0) * 100.0
+        if current_price is not None and reference_price and reference_price > 0
+        else None
+    )
+    bs = _first_float_any(activity.get('buy_sell_ratio'), default=None)
+    tx_m5 = _first_float_any(activity.get('tx_m5'), default=None)
+    price_change_m5 = _first_float_any(activity.get('price_change_m5'), default=None)
+    bounce_pct = _first_number(
+        (current_reclaim or {}).get('bounce_from_low_pct'),
+        (current_reclaim or {}).get('bounce_pct'),
+        price_change_m5,
+    )
+    quote_ok = True
+    if quote_probe is not None:
+        quote_ok = bool(quote_probe.get('success'))
+    matrix = _ath_recovery_matrix_detail(
+        scores,
+        matrix_dissonance=(entry_mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE),
+    )
+    cooldown = _ath_recovery_cooldown_detail(db, token_ca, entry_mode, now_ts=now_ts)
+    observed = {
+        'source_reason': source_reason,
+        'parent_reason': parent_reason,
+        'current_price': current_price,
+        'reference_price': reference_price,
+        'recovery_pct': recovery_pct,
+        'buy_sell_ratio': bs,
+        'tx_m5': tx_m5,
+        'price_change_m5': price_change_m5,
+        'bounce_pct': bounce_pct,
+        'liquidity_usd': liquidity_usd,
+        'top1_pct': top1_pct,
+        'top10_pct': top10_pct,
+        'quote_probe': quote_probe,
+        'token_risk': token_risk or {},
+        'current_reclaim': current_reclaim or {},
+        'matrix': matrix,
+        'cooldown': cooldown,
+    }
+    thresholds = {
+        'size_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+        'recovery_pct': ATH_RECOVERY_MIN_RECLAIM_PCT,
+        'buy_sell_ratio': ATH_RECOVERY_MIN_BS,
+        'tx_m5': ATH_RECOVERY_MIN_TX_M5,
+        'matrix': matrix.get('thresholds'),
+        'liquidity_usd': ATH_MATRIX_DISSONANCE_MIN_LIQUIDITY_USD,
+        'micro_bounce_pct': ATH_MICRO_RECLAIM_MIN_BOUNCE_PCT,
+        'micro_buy_sell_ratio': ATH_MICRO_RECLAIM_MIN_BS,
+    }
+
+    def _result(passed, reason):
+        return {
+            'pass': bool(passed),
+            'reason': reason,
+            'entry_mode': entry_mode,
+            'family': _ath_recovery_family(entry_mode),
+            'source_reason': source_reason,
+            'parent_block_reason': parent_reason,
+            'observed': observed,
+            'thresholds': thresholds,
+        }
+
+    if not ATH_RECOVERY_TINY_PROBES_ENABLED:
+        return _result(False, 'ath_recovery_disabled')
+    if route != 'ATH':
+        return _result(False, 'not_ath_route')
+    if entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE:
+        return _result(False, 'ath_no_kline_path_not_recovery')
+    if entry_mode not in ATH_RECOVERY_TINY_PROBE_MODES:
+        return _result(False, 'not_ath_recovery_mode')
+    if not cooldown.get('pass'):
+        return _result(False, cooldown.get('reason') or 'ath_recovery_cooldown_block')
+    if top1_pct is not None and top1_pct > 50:
+        return _result(False, 'ath_recovery_top1_too_high')
+    if top10_pct is not None and top10_pct > 45:
+        return _result(False, 'ath_recovery_top10_too_high')
+
+    if entry_mode == ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE:
+        if not ATH_RECLAIM_AFTER_FAILURE_ENABLED:
+            return _result(False, 'ath_reclaim_after_failure_disabled')
+        if source_reason != 'scout_quality_recent_token_failure':
+            return _result(False, 'ath_reclaim_after_failure_wrong_source')
+        if (token_risk or {}).get('blocked') and not (token_risk or {}).get('cooldown_expired'):
+            return _result(False, 'ath_reclaim_after_failure_hard_cooldown')
+        if not matrix.get('pass'):
+            return _result(False, 'ath_reclaim_after_failure_matrix_not_strong')
+        if recovery_pct is None or recovery_pct < ATH_RECOVERY_MIN_RECLAIM_PCT:
+            return _result(False, 'ath_reclaim_after_failure_price_not_recovered')
+        if bs is None or bs < ATH_RECOVERY_MIN_BS:
+            return _result(False, 'ath_reclaim_after_failure_buy_pressure_weak')
+        if tx_m5 is None or tx_m5 < ATH_RECOVERY_MIN_TX_M5:
+            return _result(False, 'ath_reclaim_after_failure_tx_low')
+        return _result(True, 'ath_reclaim_after_failure_pass')
+
+    if entry_mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE:
+        if not ATH_MATRIX_DISSONANCE_TINY_PROBE_ENABLED:
+            return _result(False, 'ath_matrix_dissonance_disabled')
+        if not (
+            source_reason == 'matrices not yet aligned'
+            or parent_reason == 'matrices not yet aligned'
+            or _matrix_micro_momentum_reason(source_reason)
+            or _matrix_micro_momentum_reason(parent_reason)
+        ):
+            return _result(False, 'ath_matrix_dissonance_wrong_source')
+        if not matrix.get('pass'):
+            return _result(False, 'ath_matrix_dissonance_matrix_not_strong')
+        if liquidity_usd is None or liquidity_usd < ATH_MATRIX_DISSONANCE_MIN_LIQUIDITY_USD:
+            return _result(False, 'ath_matrix_dissonance_liquidity_low')
+        if bs is None or bs < ATH_MATRIX_DISSONANCE_MIN_BS:
+            return _result(False, 'ath_matrix_dissonance_buy_pressure_weak')
+        if tx_m5 is None or tx_m5 < ATH_RECOVERY_MIN_TX_M5:
+            return _result(False, 'ath_matrix_dissonance_tx_low')
+        if not quote_ok:
+            return _result(False, 'ath_matrix_dissonance_quote_not_executable')
+        if (token_risk or {}).get('blocked'):
+            return _result(False, (token_risk or {}).get('reason') or 'ath_matrix_dissonance_token_risk')
+        return _result(True, 'ath_matrix_dissonance_pass')
+
+    if entry_mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE:
+        if not ATH_MICRO_RECLAIM_WATCH_ENABLED:
+            return _result(False, 'ath_micro_reclaim_disabled')
+        if source_reason not in {'scout_quality_negative_trend', 'scout_quality_buy_pressure_weak'}:
+            return _result(False, 'ath_micro_reclaim_wrong_source')
+        if not matrix.get('pass'):
+            return _result(False, 'ath_micro_reclaim_matrix_not_strong')
+        if bounce_pct is None or bounce_pct < ATH_MICRO_RECLAIM_MIN_BOUNCE_PCT:
+            return _result(False, 'ath_micro_reclaim_bounce_not_confirmed')
+        if bs is None or bs < ATH_MICRO_RECLAIM_MIN_BS:
+            return _result(False, 'ath_micro_reclaim_buy_pressure_weak')
+        if tx_m5 is None or tx_m5 < ATH_RECOVERY_MIN_TX_M5:
+            return _result(False, 'ath_micro_reclaim_tx_low')
+        if price_change_m5 is not None and price_change_m5 < 0:
+            return _result(False, 'ath_micro_reclaim_negative_trend_still_active')
+        if (token_risk or {}).get('blocked'):
+            return _result(False, (token_risk or {}).get('reason') or 'ath_micro_reclaim_token_risk')
+        return _result(True, 'ath_micro_reclaim_probe_pass')
+
+    return _result(False, 'ath_recovery_unhandled_mode')
+
+
+def _ath_dynamic_ttl_extension_detail(candidate, *, dex_snapshot=None, lifecycle=None, activity=None, quote_probe=None):
+    if not ATH_DYNAMIC_TTL_ENABLED:
+        return {'pass': False, 'reason': 'ath_dynamic_ttl_disabled'}
+    candidate = candidate or {}
+    if str(candidate.get('route') or '').upper() != 'ATH':
+        return {'pass': False, 'reason': 'not_ath_route'}
+    if int(candidate.get('ttl_extend_count') or 0) >= ATH_DYNAMIC_TTL_MAX_EXTENSIONS:
+        return {'pass': False, 'reason': 'ath_dynamic_ttl_max_extensions'}
+    last_wait = str(candidate.get('last_wait_reason') or '')
+    if last_wait in {'scout_quality_buy_pressure_weak', 'scout_quality_negative_trend'}:
+        return {'pass': False, 'reason': 'ath_dynamic_ttl_recent_quality_weak'}
+    activity = activity or {}
+    scores = _ath_recovery_scores(candidate, {'source_detail': candidate.get('source_detail') or {}})
+    matrix = _ath_recovery_matrix_detail(scores, matrix_dissonance=True)
+    bs = _first_float_any(activity.get('buy_sell_ratio'), default=None)
+    pc_m5 = _first_float_any(activity.get('price_change_m5'), default=None)
+    quote_ok = True if quote_probe is None else bool(quote_probe.get('success'))
+    pass_detail = (
+        matrix.get('pass')
+        and (bs is None or bs >= ATH_MATRIX_DISSONANCE_MIN_BS)
+        and (pc_m5 is None or pc_m5 >= 0)
+        and quote_ok
+    )
+    reason = 'ath_tracking_ttl_extended' if pass_detail else 'ath_tracking_ttl_not_strong'
+    return {
+        'pass': bool(pass_detail),
+        'reason': reason,
+        'entry_mode': candidate.get('mode'),
+        'ttl_extend_count': int(candidate.get('ttl_extend_count') or 0),
+        'observed': {
+            'matrix': matrix,
+            'buy_sell_ratio': bs,
+            'price_change_m5': pc_m5,
+            'quote_probe': quote_probe,
+            'last_wait_reason': last_wait,
+            'lifecycle_state': (lifecycle or {}).get('lifecycle_state'),
+            'entry_bias': (lifecycle or {}).get('entry_bias'),
+        },
+        'thresholds': {
+            'max_extensions': ATH_DYNAMIC_TTL_MAX_EXTENSIONS,
+            'extend_sec': ATH_DYNAMIC_TTL_EXTEND_SEC,
+            'buy_sell_ratio': ATH_MATRIX_DISSONANCE_MIN_BS,
+        },
+    }
+
+
+def apply_ath_recovery_no_follow_exit(pos, exit_matrix, *, now_ts=None):
+    if not isinstance(exit_matrix, dict) or pos is None:
+        return exit_matrix
+    state = getattr(pos, 'monitor_state', None) or {}
+    entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    if entry_mode not in {ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE, ATH_MICRO_RECLAIM_TINY_PROBE_MODE}:
+        return exit_matrix
+    current_pnl = _safe_float(exit_matrix.get('current_pnl'), None)
+    if current_pnl is None:
+        return exit_matrix
+    now_ts = float(now_ts or time.time())
+    held_sec = max(0.0, now_ts - float(getattr(pos, 'entry_ts', now_ts) or now_ts))
+    peak_pnl = max(
+        _safe_float(exit_matrix.get('peak_pnl'), 0.0),
+        _safe_float(getattr(pos, 'peak_pnl', 0.0), 0.0),
+        current_pnl,
+    )
+    no_follow_sec = 120.0
+    min_peak = 0.05
+    if held_sec >= no_follow_sec and peak_pnl < min_peak and current_pnl <= 0:
+        updated = dict(exit_matrix)
+        updated.update({
+            'action': 'exit',
+            'reason': (
+                f"ath_recovery_no_follow_exit "
+                f"(held={held_sec:.0f}s peak={peak_pnl:.1%} < {min_peak:.1%})"
+            ),
+            'current_pnl': current_pnl,
+            'peak_pnl': peak_pnl,
+            'ath_recovery_no_follow_exit': {
+                'entry_mode': entry_mode,
+                'held_sec': held_sec,
+                'peak_pnl': peak_pnl,
+                'current_pnl': current_pnl,
+                'thresholds': {
+                    'held_sec': no_follow_sec,
+                    'min_peak': min_peak,
+                },
+            },
+        })
+        return updated
+    return exit_matrix
 
 
 def position_is_probe_profit_capture_candidate(pos):
@@ -3163,6 +3739,11 @@ def arm_ath_uncertainty_tiny_scout(
     except Exception as exc:
         token_risk = {'blocked': False, 'reason': 'token_risk_unavailable', 'error': str(exc)}
     entry_mode = _entry_mode_for_ath_uncertainty_reason(reason)
+    if (
+        _ath_recovery_mode_for_reason(reason) == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE
+        and _ath_recovery_matrix_detail(eval_res.get('scores') or {}, matrix_dissonance=True).get('pass')
+    ):
+        entry_mode = ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE
     detail = {
         'paper_only_scout': True,
         'probe': True,
@@ -4315,6 +4896,7 @@ def record_scout_quality_decision(
 
 DISCOVERY_SOFT_QUALITY_REASONS = {
     'ath_uncertainty_liquidity_too_low',
+    'scout_quality_recent_token_failure',
     'scout_quality_liquidity_low',
     'scout_quality_buy_pressure_weak',
     'scout_quality_volume_low',
@@ -4358,7 +4940,9 @@ def _discovery_mode_for_ath_reason(reason):
     reason = str(reason or '')
     if _matrix_micro_momentum_reason(reason):
         return MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE
-    if reason in DISCOVERY_MATRIX_RECLAIM_REASONS:
+    if reason == 'matrices not yet aligned':
+        return MATRIX_RECLAIM_TINY_PROBE_MODE
+    if reason == 'no_kline_low_volume':
         return MATRIX_RECLAIM_TINY_PROBE_MODE
     if reason.startswith('momentum check failed') or reason.startswith('momentum check waiting'):
         return ATH_SOFT_RECLAIM_TINY_SCOUT_MODE
@@ -4399,6 +4983,12 @@ def track_discovery_candidate(
     """Put a soft-blocked candidate into the 10-second discovery tracking pool."""
     if not DISCOVERY_TRACKING_ENABLED or discovery_candidates is None or not token_ca or not mode:
         return False
+    mode = _ath_recovery_mode_for_candidate(
+        mode,
+        route=route,
+        source_reject_reason=source_reject_reason,
+        source_detail=source_detail,
+    )
     if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
         return False
     now_ts = float(now_ts or time.time())
@@ -4406,6 +4996,7 @@ def track_discovery_candidate(
     key = discovery_candidate_key(token_ca, signal_ts, mode)
     existing = discovery_candidates.get(key)
     if existing:
+        existing['mode'] = mode
         existing['last_seen_ts'] = now_ts
         existing['source_reject_reason'] = source_reject_reason or existing.get('source_reject_reason')
         existing['source_component'] = source_component or existing.get('source_component')
@@ -4443,6 +5034,7 @@ def track_discovery_candidate(
                 event_ts=now_ts,
             )
 
+    candidate_ttl_sec = ATH_MICRO_RECLAIM_MAX_WATCH_SEC if mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE else DISCOVERY_TRACKING_TTL_SEC
     candidate = {
         'key': key,
         'mode': mode,
@@ -4461,7 +5053,8 @@ def track_discovery_candidate(
         'first_seen_ts': now_ts,
         'last_seen_ts': now_ts,
         'last_check_ts': 0.0,
-        'expires_at': now_ts + DISCOVERY_TRACKING_TTL_SEC,
+        'expires_at': now_ts + candidate_ttl_sec,
+        'ttl_extend_count': 0,
         'attempts': 0,
         'last_lifecycle': lifecycle,
     }
@@ -4482,7 +5075,8 @@ def track_discovery_candidate(
         payload=with_lifecycle_payload({
             'entry_mode': mode,
             'poll_sec': DISCOVERY_TRACKING_POLL_SEC,
-            'ttl_sec': DISCOVERY_TRACKING_TTL_SEC,
+            'ttl_sec': candidate_ttl_sec,
+            'ath_recovery_family': _ath_recovery_family(mode),
             'source_component': source_component,
             'source_reject_reason': source_reject_reason,
             'source_detail': source_detail or {},
@@ -4809,6 +5403,9 @@ def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top
         ATH_SOFT_RECLAIM_TINY_SCOUT_MODE,
         MATRIX_RECLAIM_TINY_PROBE_MODE,
         MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
+        ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+        ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+        ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
     }:
         mc_tier = _ath_uncertainty_mc_tier(current_mc)
         if mc_tier in {'invalid', 'blocked'}:
@@ -5034,6 +5631,10 @@ def _lotto_pullback_has_strong_activity(lifecycle):
 def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
     route = str(candidate.get('route') or w_entry.get('type') or '').upper()
     size_sol = PAPER_TINY_SCOUT_SIZE_SOL
+    recovery_family = _ath_recovery_family(mode)
+    parent_block_reason = _ath_recovery_parent_reason(candidate, detail.get('source_detail') or candidate.get('source_detail') or {})
+    recovery_probe_reason = (detail.get('ath_recovery_gate') or {}).get('reason')
+    matrix_scores = _ath_recovery_scores(candidate, detail)
     if route == 'LOTTO':
         lotto_detail = {
             **detail,
@@ -5080,12 +5681,15 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
         'trigger_price': None,
         'watchlist_id': w_entry.get('id'),
         'kelly_position_sol': size_sol,
-        'matrix_scores': {},
+        'matrix_scores': matrix_scores,
         'smart_entry_retries': 0,
         'w_entry': w_entry,
         'entry_mode': mode,
         'scout_mode': mode,
         'paper_only_scout': True,
+        'ath_recovery_family': recovery_family,
+        'parent_block_reason': parent_block_reason,
+        'recovery_probe_reason': recovery_probe_reason,
         'timing_passed': True,
         'replay_source': 'live_monitor_discovery_probe',
         'stage_outcome': 'discovery_probe_entered',
@@ -5097,6 +5701,9 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
             'source_reject_reason': candidate.get('source_reject_reason'),
             'first_seen_ts': candidate.get('first_seen_ts'),
             'attempts': candidate.get('attempts'),
+            'ath_recovery_family': recovery_family,
+            'parent_block_reason': parent_block_reason,
+            'recovery_probe_reason': recovery_probe_reason,
             'detail': detail,
         },
         'momentum_snapshots': [],
@@ -5162,6 +5769,77 @@ def process_discovery_tracking_candidates(
             )
             continue
         if now_ts >= float(candidate.get('expires_at') or now_ts):
+            if route == 'ATH' and ATH_DYNAMIC_TTL_ENABLED:
+                try:
+                    ttl_dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca) or {}
+                except Exception:
+                    ttl_dex_snapshot = {}
+                ttl_w_entry = candidate.get('watchlist_entry')
+                if not ttl_w_entry:
+                    try:
+                        ttl_w_entry = watchlist.get_by_ca(token_ca)
+                    except Exception:
+                        ttl_w_entry = None
+                ttl_lifecycle = lifecycle_payload_for(
+                    watchlist_entry=ttl_w_entry,
+                    dex_snapshot=ttl_dex_snapshot,
+                    route=route,
+                    signal_ts=candidate.get('signal_ts'),
+                    signal_price=candidate.get('signal_price'),
+                    now=now_ts,
+                )
+                ttl_activity = _discovery_activity_metrics(ttl_dex_snapshot, ttl_lifecycle)
+                ttl_detail = _ath_dynamic_ttl_extension_detail(
+                    candidate,
+                    dex_snapshot=ttl_dex_snapshot,
+                    lifecycle=ttl_lifecycle,
+                    activity=ttl_activity,
+                )
+                ttl_quote_probe = None
+                if ttl_detail.get('pass'):
+                    ttl_quote_probe = _discovery_quote_probe(
+                        token_ca,
+                        lifecycle_id=lifecycle_id,
+                        mode=mode,
+                        stage_name='ath_dynamic_ttl_quote_probe',
+                    )
+                    ttl_detail = _ath_dynamic_ttl_extension_detail(
+                        candidate,
+                        dex_snapshot=ttl_dex_snapshot,
+                        lifecycle=ttl_lifecycle,
+                        activity=ttl_activity,
+                        quote_probe=ttl_quote_probe,
+                    )
+                candidate['last_ath_strength_snapshot'] = ttl_detail
+                if ttl_detail.get('pass'):
+                    candidate['ttl_extend_count'] = int(candidate.get('ttl_extend_count') or 0) + 1
+                    candidate['ttl_extend_reason'] = ttl_detail.get('reason')
+                    candidate['expires_at'] = now_ts + ATH_DYNAMIC_TTL_EXTEND_SEC
+                    record_decision_event(
+                        db,
+                        component='discovery_tracking',
+                        event_type='candidate_recheck',
+                        decision='wait',
+                        reason='ath_tracking_ttl_extended',
+                        token_ca=token_ca,
+                        symbol=candidate.get('symbol'),
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=candidate.get('signal_ts'),
+                        signal_id=candidate.get('signal_id'),
+                        route=route,
+                        data_source='dexscreener+lifecycle+quote_probe',
+                        payload=with_lifecycle_payload({
+                            'entry_mode': mode,
+                            'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                            'attempts': candidate.get('attempts'),
+                            'ttl_extend_count': candidate.get('ttl_extend_count'),
+                            'ttl_extend_sec': ATH_DYNAMIC_TTL_EXTEND_SEC,
+                            'last_ath_strength_snapshot': ttl_detail,
+                            'quote_probe': ttl_quote_probe,
+                        }, ttl_lifecycle),
+                        event_ts=now_ts,
+                    )
+                    continue
             if DISCOVERY_FINAL_RECLAIM_ENABLED and not candidate.get('final_reclaim_attempted'):
                 candidate['final_reclaim_attempted'] = True
                 candidate['expires_at'] = now_ts + DISCOVERY_TRACKING_POLL_SEC
@@ -5182,6 +5860,8 @@ def process_discovery_tracking_candidates(
                         'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
                         'attempts': candidate.get('attempts'),
                         'last_wait_reason': candidate.get('last_wait_reason'),
+                        'ttl_extend_count': candidate.get('ttl_extend_count'),
+                        'last_ath_strength_snapshot': candidate.get('last_ath_strength_snapshot'),
                     },
                     event_ts=now_ts,
                 )
@@ -5205,6 +5885,8 @@ def process_discovery_tracking_candidates(
                         'attempts': candidate.get('attempts'),
                         'last_wait_reason': candidate.get('last_wait_reason'),
                         'final_reclaim_attempted': bool(candidate.get('final_reclaim_attempted')),
+                        'ttl_extend_count': candidate.get('ttl_extend_count'),
+                        'last_ath_strength_snapshot': candidate.get('last_ath_strength_snapshot'),
                     },
                     event_ts=now_ts,
                 )
@@ -5492,6 +6174,71 @@ def process_discovery_tracking_candidates(
             )
             continue
 
+        ath_recovery_gate = None
+        ath_recovery_quote_probe = None
+        if mode in ATH_RECOVERY_TINY_PROBE_MODES:
+            if mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE:
+                ath_recovery_quote_probe = _discovery_quote_probe(
+                    token_ca,
+                    lifecycle_id=lifecycle_id,
+                    mode=mode,
+                    stage_name='ath_matrix_dissonance_quote_probe',
+                )
+                detail['ath_recovery_quote_probe'] = ath_recovery_quote_probe
+            ath_recovery_gate = _ath_recovery_eligibility(
+                db,
+                entry_mode=mode,
+                candidate=candidate,
+                detail=detail,
+                route=route,
+                token_risk=token_risk,
+                current_reclaim=current_reclaim,
+                dex_snapshot=dex_snapshot,
+                lifecycle=lifecycle,
+                activity=activity,
+                liquidity_usd=liquidity_usd,
+                top1_pct=top1_pct,
+                top10_pct=top10_pct,
+                quote_probe=ath_recovery_quote_probe,
+                now_ts=now_ts,
+            )
+            detail['ath_recovery_gate'] = ath_recovery_gate
+            if not ath_recovery_gate.get('pass'):
+                candidate['last_wait_reason'] = ath_recovery_gate.get('reason')
+                record_decision_event(
+                    db,
+                    component='ath_recovery',
+                    event_type='candidate_recheck',
+                    decision='wait',
+                    reason=ath_recovery_gate.get('reason') or 'ath_recovery_wait',
+                    token_ca=token_ca,
+                    symbol=candidate.get('symbol'),
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=candidate.get('signal_ts'),
+                    signal_id=candidate.get('signal_id'),
+                    route=route,
+                    data_source='discovery_tracking+dexscreener+lifecycle+paper_risk',
+                    payload=with_lifecycle_payload(detail, lifecycle),
+                    event_ts=now_ts,
+                )
+                continue
+            record_decision_event(
+                db,
+                component='ath_recovery',
+                event_type='candidate_recheck',
+                decision='pass',
+                reason=ath_recovery_gate.get('reason') or 'ath_recovery_pass',
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                data_source='discovery_tracking+dexscreener+lifecycle+paper_risk',
+                payload=with_lifecycle_payload(detail, lifecycle),
+                event_ts=now_ts,
+            )
+
         scout_quality = evaluate_scout_quality(
             mode=mode,
             route=route,
@@ -5651,7 +6398,8 @@ def record_scout_funnel_summary(db, *, now_ts, lookback_sec=None):
                   'scout_quality', 'lotto_entry_gate', 'lotto_upstream_probe_live',
                   'lotto_upstream_realtime_scout', 'ath_uncertainty_scout',
                   'smart_entry', 'execution_api', 'execution_guard',
-                  'lotto_timing_gate', 'token_risk', 'discovery_tracking'
+                  'lotto_timing_gate', 'token_risk', 'discovery_tracking',
+                  'ath_recovery'
               )
           )
         ORDER BY event_ts ASC
@@ -12385,6 +13133,10 @@ def run_monitor(db):
                     }
                     if _pending_signal_route:
                         _monitor_state['signalRoute'] = _pending_signal_route
+                    if pending.get('ath_recovery_family'):
+                        _monitor_state['athRecoveryFamily'] = pending.get('ath_recovery_family')
+                        _monitor_state['parentBlockReason'] = pending.get('parent_block_reason')
+                        _monitor_state['recoveryProbeReason'] = pending.get('recovery_probe_reason')
                     if _pending_lotto_state:
                         _monitor_state['lottoState'] = _pending_lotto_state
                     _signal_ts_store = normalize_signal_ts_seconds(pending.get('signal_ts')) or pending.get('signal_ts')
@@ -12680,6 +13432,7 @@ def run_monitor(db):
                             if _pre_doa_peak is None and w_entry.get('peak_pnl') is not None:
                                 exit_matrix = {**exit_matrix, 'peak_pnl': w_entry.get('peak_pnl')}
                             exit_matrix = apply_matrix_doa_fast_exit(pos, exit_matrix)
+                            exit_matrix = apply_ath_recovery_no_follow_exit(pos, exit_matrix, now_ts=time.time())
 
                         _pre_capture_action = exit_matrix.get('action')
                         _pre_capture_reason = exit_matrix.get('reason')
