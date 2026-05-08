@@ -280,6 +280,8 @@ ATH_NO_KLINE_REENTRY_MIN_T = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_T', '8
 ATH_NO_KLINE_REENTRY_MIN_P = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_P', '80'))
 ATH_NO_KLINE_REENTRY_MIN_S = int(os.environ.get('ATH_NO_KLINE_REENTRY_MIN_S', '100'))
 ATH_NO_KLINE_REENTRY_WINNER_PEAK = float(os.environ.get('ATH_NO_KLINE_REENTRY_WINNER_PEAK', '0.30'))
+ATH_REENTRY_MATRIX_BLOCK_SEC = int(os.environ.get('ATH_REENTRY_MATRIX_BLOCK_SEC', '120'))
+ATH_REENTRY_LOW_FOLLOW_BLOCK_SEC = int(os.environ.get('ATH_REENTRY_LOW_FOLLOW_BLOCK_SEC', '600'))
 ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED = os.environ.get('ATH_NO_KLINE_VOLUME_LOW_WARN_ENABLED', 'true').lower() != 'false'
 ATH_NO_KLINE_VOLUME_LOW_WARN_MIN_BS = float(os.environ.get('ATH_NO_KLINE_VOLUME_LOW_WARN_MIN_BS', '1.20'))
 PULLBACK_TINY_SCOUT_FORCE_LIVE_ENABLED = os.environ.get('PULLBACK_TINY_SCOUT_FORCE_LIVE_ENABLED', 'false').lower() == 'true'
@@ -1409,6 +1411,94 @@ def _ath_no_kline_reentry_guard(db, pending, *, current_price=None, now_ts=None,
 
     detail.update({'pass': True, 'reason': 'ath_no_kline_reentry_allowed'})
     return detail
+
+
+def _ath_reentry_block_cooldown_sec(reason):
+    reason = str(reason or '')
+    if reason == 'ath_no_kline_reentry_hard_loss_cooldown':
+        return ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC
+    if reason == 'ath_no_kline_reentry_max_recent_entries':
+        return ATH_NO_KLINE_REENTRY_LOOKBACK_SEC
+    if reason in {
+        'ath_no_kline_reentry_low_followthrough',
+        'ath_no_kline_reentry_needs_prior_winner',
+        'ath_no_kline_reentry_recovery_not_confirmed',
+    }:
+        return ATH_REENTRY_LOW_FOLLOW_BLOCK_SEC
+    if reason in {
+        'ath_no_kline_reentry_matrix_not_strong',
+        'ath_no_kline_reentry_price_reference_missing',
+    }:
+        return ATH_REENTRY_MATRIX_BLOCK_SEC
+    return ATH_REENTRY_MATRIX_BLOCK_SEC
+
+
+def _defer_ath_reentry_block(watchlist, watchlist_entry, guard_detail):
+    if not watchlist or not watchlist_entry or not guard_detail:
+        return None
+    if guard_detail.get('pass'):
+        return None
+    entry_id = watchlist_entry.get('id')
+    if not entry_id:
+        return None
+    reason = guard_detail.get('reason') or 'ath_reentry_block'
+    cooldown_sec = _ath_reentry_block_cooldown_sec(reason)
+    try:
+        until = watchlist.defer_fire(entry_id, reason, cooldown_sec=cooldown_sec)
+        watchlist_entry['fire_block_until'] = until
+        watchlist_entry['fire_block_reason'] = reason
+        return {
+            'pass': False,
+            'reason': reason,
+            'cooldown_sec': cooldown_sec,
+            'fire_block_until': until,
+            'watchlist_id': entry_id,
+        }
+    except Exception as exc:
+        return {
+            'pass': False,
+            'reason': 'ath_reentry_block_defer_failed',
+            'error': str(exc),
+            'original_reason': reason,
+            'watchlist_id': entry_id,
+        }
+
+
+def _pending_watchlist_fire_block_detail(watchlist, pending, *, now_ts=None):
+    pending = pending or {}
+    now_ts = float(now_ts or time.time())
+    entry = pending.get('w_entry') or {}
+    watchlist_id = pending.get('watchlist_id') or entry.get('id')
+    latest = entry
+    if watchlist and watchlist_id:
+        try:
+            latest = watchlist.get_by_id(watchlist_id) or latest
+        except Exception:
+            latest = entry
+    block_until = _safe_float((latest or {}).get('fire_block_until'), 0.0)
+    reason = str((latest or {}).get('fire_block_reason') or '')
+    if block_until and block_until > now_ts:
+        return {
+            'pass': False,
+            'reason': reason or 'watchlist_fire_block_active',
+            'remaining_sec': max(0, int(block_until - now_ts)),
+            'fire_block_until': block_until,
+            'watchlist_id': watchlist_id,
+        }
+    return {
+        'pass': True,
+        'reason': 'no_watchlist_fire_block',
+        'watchlist_id': watchlist_id,
+    }
+
+
+def _select_structure_stop_loss(current_sl, structure_sl, pending=None):
+    current_sl = float(current_sl)
+    structure_sl = float(structure_sl)
+    pending = pending or {}
+    if pending_is_paper_tiny_scout(pending):
+        return max(current_sl, structure_sl), 'tiny_probe_tight_structure_sl'
+    return min(current_sl, structure_sl), 'primary_wide_structure_sl'
 
 
 def _ath_no_kline_scout_quality_soft_override(pending, scout_quality, *, route=None, scout_size=None):
@@ -3857,6 +3947,27 @@ def arm_ath_uncertainty_tiny_scout(
             route='ATH',
             data_source='matrix_inputs+dexscreener',
             payload=with_lifecycle_payload(detail, scout_lifecycle),
+            event_ts=now_ts,
+        )
+        record_decision_event(
+            db,
+            component='ath_recovery',
+            event_type='candidate_block',
+            decision='block',
+            reason=reject_reason,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=w_entry.get('signal_ts'),
+            signal_id=w_entry.get('premium_signal_id'),
+            route='ATH',
+            data_source='ath_uncertainty_scout+dexscreener+scout_quality',
+            payload=with_lifecycle_payload({
+                **detail,
+                'parent_block_reason': reason,
+                'candidate_entry_mode': entry_mode,
+                'candidate_block_reason': reject_reason,
+            }, scout_lifecycle),
             event_ts=now_ts,
         )
         return False
@@ -12219,6 +12330,13 @@ def run_monitor(db):
                         )
                         pending['ath_no_kline_reentry_guard'] = _ath_reentry_guard
                         if not _ath_reentry_guard.get('pass'):
+                            _ath_reentry_defer = _defer_ath_reentry_block(
+                                watchlist,
+                                pending_w_entry,
+                                _ath_reentry_guard,
+                            )
+                            if _ath_reentry_defer:
+                                _ath_reentry_guard['watchlist_fire_block'] = _ath_reentry_defer
                             record_decision_event(
                                 db,
                                 component='entry_reentry_guard',
@@ -12239,7 +12357,8 @@ def run_monitor(db):
                                 f"  [ATH_REENTRY] 🚫 {pending['symbol']} BLOCKED: "
                                 f"{_ath_reentry_guard.get('reason')} "
                                 f"recent={_ath_reentry_guard.get('recent_trade_count')} "
-                                f"scores={_ath_reentry_guard.get('scores')}"
+                                f"scores={_ath_reentry_guard.get('scores')} "
+                                f"fire_block={(_ath_reentry_defer or {}).get('cooldown_sec')}"
                             )
                             pending_entries.pop(lifecycle_id, None)
                             continue
@@ -13064,6 +13183,36 @@ def run_monitor(db):
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
+                    _final_fire_block = _pending_watchlist_fire_block_detail(
+                        watchlist,
+                        pending,
+                        now_ts=now,
+                    )
+                    if not _final_fire_block.get('pass'):
+                        record_decision_event(
+                            db,
+                            component='entry_reentry_guard',
+                            event_type='entry_block',
+                            decision='block',
+                            reason=_final_fire_block.get('reason') or 'watchlist_fire_block_active',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='watchlist_fire_block',
+                            payload=_final_fire_block,
+                        )
+                        log.info(
+                            f"  [ENTRY_FINAL_GUARD] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_final_fire_block.get('reason')} "
+                            f"remaining={_final_fire_block.get('remaining_sec')}s"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
                     _entry_decision_contract = build_entry_decision_contract(
                         entry_readiness_policy=pending.get('entry_readiness_policy'),
                         entry_mode=pending.get('entry_mode') or timing_reason,
@@ -13313,13 +13462,20 @@ def run_monitor(db):
                                     f"  [KLINE_SL] {pending['symbol']} structure_low={_structure_low:.10f} "
                                     f"→ SL={_structure_sl:.1f}% (vs fixed={_final_sl*100:.1f}%)"
                                 )
-                                # Use the WIDER (more lenient) of structure SL and fixed SL.
-                                # BUG FIX (2026-04-25): was max() which picked TIGHTER SL.
-                                # For negative numbers: max(-0.15, -0.05) = -0.05 (tighter!).
-                                # This caused 154 to be stopped out at -5% (3-bar low was close to
-                                # entry price → structure_sl = -5%). Meme coins need the WIDER SL
-                                # to survive normal volatility. min(-0.15, -0.05) = -0.15 (wider).
-                                _final_sl = min(_final_sl, _structure_sl / 100.0)
+                                # Primary positions keep the legacy wider SL to survive meme
+                                # volatility. Tiny probes are different: they are data-gathering
+                                # scouts, so use the tighter structural SL and fail fast.
+                                _selected_sl, _sl_reason = _select_structure_stop_loss(
+                                    _final_sl,
+                                    _structure_sl / 100.0,
+                                    pending,
+                                )
+                                if _selected_sl != _final_sl:
+                                    log.info(
+                                        f"  [KLINE_SL] {pending['symbol']} selected "
+                                        f"{_selected_sl*100:.1f}% reason={_sl_reason}"
+                                    )
+                                _final_sl = _selected_sl
                         
                         watchlist.mark_holding(
                             pending['watchlist_id'], 

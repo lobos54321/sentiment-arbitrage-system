@@ -20,15 +20,19 @@ from paper_trade_monitor import (  # noqa: E402
     SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL,
     _apply_actual_tiny_trigger_mode,
     _apply_primary_proving_cap,
+    _ath_reentry_block_cooldown_sec,
     _ath_no_kline_reentry_guard,
     _ath_no_kline_scout_quality_soft_override,
     _ath_dynamic_ttl_extension_detail,
     _ath_recovery_eligibility,
     _ath_recovery_mode_for_candidate,
+    _defer_ath_reentry_block,
     _discovery_hard_block,
     _entry_mode_for_ath_uncertainty_reason,
     _entry_mode_quality_high_quality_tiny_override,
     _matrix_micro_momentum_reason,
+    _pending_watchlist_fire_block_detail,
+    _select_structure_stop_loss,
 )
 
 
@@ -84,6 +88,30 @@ def _ath_no_kline_pending():
         "signal_type": "ATH",
         "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 60},
     }
+
+
+class _FakeWatchlist:
+    def __init__(self, entry=None):
+        self.entry = dict(entry or {"id": 7})
+        self.deferred = None
+
+    def defer_fire(self, entry_id, reason, cooldown_sec=300):
+        self.deferred = {
+            "entry_id": entry_id,
+            "reason": reason,
+            "cooldown_sec": cooldown_sec,
+        }
+        until = 1_778_223_700
+        self.entry.update({
+            "fire_block_until": until,
+            "fire_block_reason": reason,
+        })
+        return until
+
+    def get_by_id(self, entry_id):
+        if entry_id == self.entry.get("id"):
+            return dict(self.entry)
+        return None
 
 
 def test_micro_momentum_reasons_are_split_from_broad_matrix_reclaim():
@@ -264,6 +292,61 @@ def test_ath_no_kline_reentry_guard_blocks_recent_hard_loss():
     assert decision["reason"] == "ath_no_kline_reentry_hard_loss_cooldown"
 
 
+def test_ath_reentry_block_is_written_to_watchlist_fire_block():
+    guard = {
+        "pass": False,
+        "reason": "ath_no_kline_reentry_matrix_not_strong",
+    }
+    watchlist_entry = {"id": 7}
+    watchlist = _FakeWatchlist(watchlist_entry)
+
+    detail = _defer_ath_reentry_block(watchlist, watchlist_entry, guard)
+
+    assert detail["pass"] is False
+    assert detail["reason"] == "ath_no_kline_reentry_matrix_not_strong"
+    assert detail["cooldown_sec"] == _ath_reentry_block_cooldown_sec(
+        "ath_no_kline_reentry_matrix_not_strong"
+    )
+    assert watchlist.deferred["entry_id"] == 7
+    assert watchlist_entry["fire_block_reason"] == "ath_no_kline_reentry_matrix_not_strong"
+
+
+def test_final_entry_guard_blocks_stale_pending_when_watchlist_fire_block_active():
+    watchlist = _FakeWatchlist({
+        "id": 7,
+        "fire_block_until": 1_778_223_700,
+        "fire_block_reason": "ath_no_kline_reentry_matrix_not_strong",
+    })
+    pending = {"watchlist_id": 7, "w_entry": {"id": 7}}
+
+    detail = _pending_watchlist_fire_block_detail(
+        watchlist,
+        pending,
+        now_ts=1_778_223_600,
+    )
+
+    assert detail["pass"] is False
+    assert detail["reason"] == "ath_no_kline_reentry_matrix_not_strong"
+    assert detail["remaining_sec"] == 100
+
+
+def test_final_entry_guard_allows_when_watchlist_fire_block_expired():
+    watchlist = _FakeWatchlist({
+        "id": 7,
+        "fire_block_until": 1_778_223_500,
+        "fire_block_reason": "ath_no_kline_reentry_matrix_not_strong",
+    })
+
+    detail = _pending_watchlist_fire_block_detail(
+        watchlist,
+        {"watchlist_id": 7, "w_entry": {"id": 7}},
+        now_ts=1_778_223_600,
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "no_watchlist_fire_block"
+
+
 def test_ath_no_kline_reentry_guard_blocks_low_followthrough():
     db = _paper_trade_db([
         {"exit_reason": "timeout", "pnl_pct": -0.02, "peak_pnl": 0.05, "exit_price": 1.0},
@@ -294,6 +377,28 @@ def test_ath_no_kline_reentry_guard_allows_recovered_prior_winner():
 
     assert decision["pass"] is True
     assert decision["reason"] == "ath_no_kline_reentry_allowed"
+
+
+def test_tiny_probe_structure_sl_selects_tighter_stop():
+    sl, reason = _select_structure_stop_loss(
+        -0.30,
+        -0.121,
+        _ath_no_kline_pending(),
+    )
+
+    assert sl == -0.121
+    assert reason == "tiny_probe_tight_structure_sl"
+
+
+def test_primary_structure_sl_keeps_legacy_wider_stop():
+    sl, reason = _select_structure_stop_loss(
+        -0.30,
+        -0.121,
+        {"entry_mode": "stage1", "paper_only_scout": False},
+    )
+
+    assert sl == -0.30
+    assert reason == "primary_wide_structure_sl"
 
 
 def test_ath_no_kline_volume_low_soft_override_turns_block_into_warn():

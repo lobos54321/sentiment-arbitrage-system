@@ -18,6 +18,8 @@ PROBE_RUNNER_FLOOR_LOW_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_LOW_MIN", 
 PROBE_RUNNER_FLOOR_MID_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_MID_MIN", "0.07"))
 PROBE_RUNNER_FLOOR_HIGH_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_HIGH_MIN", "0.12"))
 PROBE_RUNNER_FLOOR_FACTOR = float(os.environ.get("PROBE_RUNNER_FLOOR_FACTOR", "0.35"))
+PROBE_RUNNER_FULL_MOON_MARGIN = float(os.environ.get("PROBE_RUNNER_FULL_MOON_MARGIN", "0.25"))
+PROBE_RUNNER_FULL_MOON_FACTOR = float(os.environ.get("PROBE_RUNNER_FULL_MOON_FACTOR", "0.65"))
 
 
 def profit_protect_floor(peak_pnl, *, slip_buffer=None):
@@ -82,7 +84,10 @@ def probe_runner_floor(peak_pnl):
     except (TypeError, ValueError):
         return None
     if peak >= ATH_MOON_FLOOR_LOW_PEAK:
-        return ath_moon_bag_floor(peak)
+        return max(
+            peak - PROBE_RUNNER_FULL_MOON_MARGIN,
+            peak * PROBE_RUNNER_FULL_MOON_FACTOR,
+        )
     if peak < PROBE_RUNNER_FLOOR_START_PEAK:
         return None
     if peak >= PROBE_RUNNER_FLOOR_HIGH_PEAK:

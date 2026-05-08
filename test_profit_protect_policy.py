@@ -28,5 +28,7 @@ def test_probe_runner_floor_protects_10_to_45pct_probe_peaks():
     assert round(probe_runner_floor(0.45), 4) == 0.1575
 
 
-def test_probe_runner_floor_reuses_ath_floor_after_50pct_peak():
-    assert probe_runner_floor(0.525) == ath_moon_bag_floor(0.525)
+def test_probe_runner_floor_tightens_after_50pct_peak_without_changing_main_moon_floor():
+    assert ath_moon_bag_floor(1.50) == 1.10
+    assert probe_runner_floor(0.525) > ath_moon_bag_floor(0.525)
+    assert probe_runner_floor(1.50) == 1.25
