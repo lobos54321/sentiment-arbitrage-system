@@ -3521,7 +3521,7 @@ const server = http.createServer(async (req, res) => {
       const queryStartedAt = Date.now();
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
       const whereSql = sinceTs ? `WHERE ${eventTsExpr} >= @since` : '';
-      const whereParams = sinceTs ? { since: sinceTs, spread_since: Math.max(0, sinceTs - 60) } : { spread_since: 0 };
+      const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
@@ -3536,22 +3536,10 @@ const server = http.createServer(async (req, res) => {
       );
       const hasTradability = missedCols.has('tradable_missed');
       const hasDecisionEvents = tableNames.has('paper_decision_events');
-      const spreadAbortCte = hasDecisionEvents ? `
-        spread_abort AS (
-          SELECT token_ca, 1 AS had_spread_abort
-          FROM paper_decision_events
-          WHERE component = 'execution_guard'
-            AND reason IN ('entry_edge_spread_too_high', 'spread_guard')
-            AND event_ts >= @spread_since
-          GROUP BY token_ca
-        ),` : '';
-      const spreadAbortJoin = hasDecisionEvents ? 'LEFT JOIN spread_abort s ON s.token_ca = m.token_ca' : '';
-      const spreadAbortCleanExpr = hasDecisionEvents ? 'AND COALESCE(s.had_spread_abort, 0) = 0' : '';
       const quoteExecExpr = hasTradability ? `
           CASE
             WHEN COALESCE(m.tradable_missed, 0) = 1
              AND COALESCE(m.would_stop_before_peak, 0) != 1
-             ${spreadAbortCleanExpr}
             THEN 1 ELSE 0
           END` : 'NULL';
       const tradableSelect = hasTradability ? `
@@ -3568,8 +3556,7 @@ const server = http.createServer(async (req, res) => {
             NULL AS first_tradable_pnl,
             NULL AS tradable_peak_pnl,`;
       const baseCte = `
-        WITH ${spreadAbortCte}
-        base AS (
+        WITH base AS (
           SELECT
             m.token_ca,
             COALESCE(m.symbol, substr(m.token_ca, 1, 8), '?') AS symbol,
@@ -3585,7 +3572,6 @@ const server = http.createServer(async (req, res) => {
             ${tradableSelect}
             ${quoteExecExpr} AS quote_exec
           FROM paper_missed_signal_attribution m
-          ${spreadAbortJoin}
           ${whereSql}
         ),
         ranked AS (
@@ -3765,8 +3751,8 @@ const server = http.createServer(async (req, res) => {
           since_ts: sinceTs,
           since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
           tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
-          clean_quote_definition: 'tradable_missed=1 and would_stop_before_peak!=1 and no spread abort decision near signal',
-          quote_executable_proxy_note: 'spread abort is filtered by token within the requested window for speed; use missed-attribution for exact per-row spread timing',
+          clean_quote_definition: 'tradable_missed=1 and would_stop_before_peak!=1',
+          quote_executable_proxy_note: 'spread-abort timing is not checked in this endpoint so the dashboard stays non-blocking; use offline analysis for exact per-row spread timing',
         },
         query_ms: Date.now() - queryStartedAt,
         overall_unique: overall,
