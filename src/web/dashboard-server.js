@@ -3221,7 +3221,7 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = windowedSinceTs(url, 6);
       const queryStartedAt = Date.now();
       const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
-      const whereSql = sinceTs ? `WHERE ${missedEventTsExpr} >= @since` : '';
+      const whereSql = sinceTs ? 'WHERE created_event_ts >= @since' : '';
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
@@ -3520,7 +3520,7 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = windowedSinceTs(url, 6);
       const queryStartedAt = Date.now();
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
-      const whereSql = sinceTs ? `WHERE ${eventTsExpr} >= @since` : '';
+      const whereSql = sinceTs ? 'WHERE m.created_event_ts >= @since' : '';
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
