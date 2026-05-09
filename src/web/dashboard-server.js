@@ -3219,7 +3219,9 @@ const server = http.createServer(async (req, res) => {
     try {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '25', 10) || 25, 200));
       const sinceTs = windowedSinceTs(url, 6);
-      const whereSql = missedAttributionTimeWhere(sinceTs);
+      const queryStartedAt = Date.now();
+      const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
+      const whereSql = sinceTs ? `WHERE ${missedEventTsExpr} >= @since` : '';
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
@@ -3235,16 +3237,7 @@ const server = http.createServer(async (req, res) => {
       );
       const hasTradability = missedCols.has('tradable_missed');
       const hasDecisionEvents = tableNames.has('paper_decision_events');
-      const spreadAbortExistsSql = hasDecisionEvents ? `
-            EXISTS (
-              SELECT 1
-              FROM paper_decision_events e
-              WHERE e.token_ca = paper_missed_signal_attribution.token_ca
-                AND e.component = 'execution_guard'
-                AND e.reason IN ('entry_edge_spread_too_high', 'spread_guard')
-                AND e.event_ts >= COALESCE(paper_missed_signal_attribution.signal_ts, paper_missed_signal_attribution.created_event_ts, paper_missed_signal_attribution.baseline_ts, 0) - 60
-                AND e.event_ts <= COALESCE(paper_missed_signal_attribution.signal_ts, paper_missed_signal_attribution.created_event_ts, paper_missed_signal_attribution.baseline_ts, 0) + 3600
-            )` : '0';
+      const spreadAbortExistsSql = '0';
       const quoteExecutableBaseExpression = hasTradability ? `
           CASE
             WHEN tradable_missed = 1
@@ -3491,7 +3484,9 @@ const server = http.createServer(async (req, res) => {
           since_ts: sinceTs,
           since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
           tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
+          quote_executable_proxy_note: 'spread-abort timing is not checked in this endpoint so the summary stays non-blocking; use missed-recovery-summary for token-window spread filtering',
         },
+        query_ms: Date.now() - queryStartedAt,
         tier_summary: {
           event_rows: eventTierSummary,
           unique_tokens: uniqueTierSummary,
@@ -3523,8 +3518,10 @@ const server = http.createServer(async (req, res) => {
     try {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 200));
       const sinceTs = windowedSinceTs(url, 6);
-      const whereSql = missedAttributionTimeWhere(sinceTs, 'm');
-      const whereParams = sinceTs ? { since: sinceTs } : {};
+      const queryStartedAt = Date.now();
+      const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
+      const whereSql = sinceTs ? `WHERE ${eventTsExpr} >= @since` : '';
+      const whereParams = sinceTs ? { since: sinceTs, spread_since: Math.max(0, sinceTs - 60) } : { spread_since: 0 };
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
@@ -3539,21 +3536,22 @@ const server = http.createServer(async (req, res) => {
       );
       const hasTradability = missedCols.has('tradable_missed');
       const hasDecisionEvents = tableNames.has('paper_decision_events');
-      const spreadAbortExistsSql = hasDecisionEvents ? `
-            EXISTS (
-              SELECT 1
-              FROM paper_decision_events e
-              WHERE e.token_ca = m.token_ca
-                AND e.component = 'execution_guard'
-                AND e.reason IN ('entry_edge_spread_too_high', 'spread_guard')
-                AND e.event_ts >= COALESCE(m.signal_ts, m.created_event_ts, m.baseline_ts, 0) - 60
-                AND e.event_ts <= COALESCE(m.signal_ts, m.created_event_ts, m.baseline_ts, 0) + 3600
-            )` : '0';
+      const spreadAbortCte = hasDecisionEvents ? `
+        spread_abort AS (
+          SELECT token_ca, 1 AS had_spread_abort
+          FROM paper_decision_events
+          WHERE component = 'execution_guard'
+            AND reason IN ('entry_edge_spread_too_high', 'spread_guard')
+            AND event_ts >= @spread_since
+          GROUP BY token_ca
+        ),` : '';
+      const spreadAbortJoin = hasDecisionEvents ? 'LEFT JOIN spread_abort s ON s.token_ca = m.token_ca' : '';
+      const spreadAbortCleanExpr = hasDecisionEvents ? 'AND COALESCE(s.had_spread_abort, 0) = 0' : '';
       const quoteExecExpr = hasTradability ? `
           CASE
             WHEN COALESCE(m.tradable_missed, 0) = 1
              AND COALESCE(m.would_stop_before_peak, 0) != 1
-             AND NOT (${spreadAbortExistsSql})
+             ${spreadAbortCleanExpr}
             THEN 1 ELSE 0
           END` : 'NULL';
       const tradableSelect = hasTradability ? `
@@ -3570,14 +3568,15 @@ const server = http.createServer(async (req, res) => {
             NULL AS first_tradable_pnl,
             NULL AS tradable_peak_pnl,`;
       const baseCte = `
-        WITH base AS (
+        WITH ${spreadAbortCte}
+        base AS (
           SELECT
             m.token_ca,
             COALESCE(m.symbol, substr(m.token_ca, 1, 8), '?') AS symbol,
             COALESCE(m.route, '-') AS route,
             COALESCE(m.component, '-') AS component,
             COALESCE(m.reject_reason, '-') AS reject_reason,
-            COALESCE(m.signal_ts, m.created_event_ts, m.baseline_ts, 0) AS event_ts,
+            ${eventTsExpr} AS event_ts,
             COALESCE(m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
             m.pnl_5m,
             m.pnl_15m,
@@ -3586,6 +3585,7 @@ const server = http.createServer(async (req, res) => {
             ${tradableSelect}
             ${quoteExecExpr} AS quote_exec
           FROM paper_missed_signal_attribution m
+          ${spreadAbortJoin}
           ${whereSql}
         ),
         ranked AS (
@@ -3600,75 +3600,106 @@ const server = http.createServer(async (req, res) => {
         per_token AS (
           SELECT * FROM ranked WHERE rn = 1
         )`;
-      const overall = paperDb.prepare(`
+      const summaryRows = paperDb.prepare(`
         ${baseCte}
-        SELECT
-          COUNT(*) AS unique_tokens,
-          ${tierCaseSql('max_pnl')},
+        SELECT * FROM (
+          SELECT
+            'overall' AS section,
+            NULL AS route,
+            NULL AS component,
+            NULL AS reject_reason,
+            COUNT(*) AS unique_tokens,
+            ${tierCaseSql('max_pnl')},
+            ${hasTradability ? `
+            SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
+            SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+            SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
+            SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,` : `
+            NULL AS quote_executable_unique,
+            NULL AS clean_tradable_unique,
+            NULL AS tradable_unique,
+            NULL AS stop_before_peak_unique,`}
+            MAX(max_pnl) AS max_pnl,
+            AVG(max_pnl) AS avg_max_pnl
+          FROM per_token
+          UNION ALL
+          SELECT
+            'by_route' AS section,
+            route,
+            NULL AS component,
+            NULL AS reject_reason,
+            COUNT(*) AS unique_tokens,
+            ${tierCaseSql('max_pnl')},
+            ${hasTradability ? `
+            SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
+            SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+            SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
+            SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,` : `
+            NULL AS quote_executable_unique,
+            NULL AS clean_tradable_unique,
+            NULL AS tradable_unique,
+            NULL AS stop_before_peak_unique,`}
+            MAX(max_pnl) AS max_pnl,
+            AVG(max_pnl) AS avg_max_pnl
+          FROM per_token
+          GROUP BY route
+          UNION ALL
+          SELECT
+            'by_blocker_clean_quote' AS section,
+            route,
+            component,
+            reject_reason,
+            COUNT(*) AS unique_tokens,
+            ${tierCaseSql('max_pnl')},
+            COUNT(*) AS quote_executable_unique,
+            SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+            SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
+            SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,
+            MAX(max_pnl) AS max_pnl,
+            AVG(max_pnl) AS avg_max_pnl
+          FROM per_token
+          WHERE quote_exec = 1
+          GROUP BY route, component, reject_reason
+          UNION ALL
+          SELECT
+            'by_blocker_all_unique' AS section,
+            route,
+            component,
+            reject_reason,
+            COUNT(*) AS unique_tokens,
+            ${tierCaseSql('max_pnl')},
           ${hasTradability ? `
+          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
           SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
-          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
-          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
           SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique` : `
+          NULL AS quote_executable_unique,
+          NULL AS clean_tradable_unique,
           NULL AS tradable_unique,
-          NULL AS clean_tradable_unique,
-          NULL AS quote_executable_unique,
           NULL AS stop_before_peak_unique`}
-        FROM per_token
-      `).get(whereParams);
-      const byRoute = paperDb.prepare(`
-        ${baseCte}
-        SELECT
-          route,
-          COUNT(*) AS unique_tokens,
-          ${tierCaseSql('max_pnl')},
-          ${hasTradability ? `
-          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
-          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
-          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique` : `
-          NULL AS quote_executable_unique,
-          NULL AS clean_tradable_unique,
-          NULL AS stop_before_peak_unique`}
-        FROM per_token
-        GROUP BY route
-        ORDER BY gold_n DESC, silver_n DESC, bronze_n DESC, unique_tokens DESC
+            ,
+            MAX(max_pnl) AS max_pnl,
+            AVG(max_pnl) AS avg_max_pnl
+          FROM per_token
+          GROUP BY route, component, reject_reason
+        )
+        ORDER BY
+          CASE section
+            WHEN 'overall' THEN 0
+            WHEN 'by_route' THEN 1
+            WHEN 'by_blocker_clean_quote' THEN 2
+            ELSE 3
+          END,
+          gold_n DESC,
+          silver_n DESC,
+          bronze_n DESC,
+          unique_tokens DESC,
+          max_pnl DESC
       `).all(whereParams);
-      const byBlockerCleanQuote = paperDb.prepare(`
-        ${baseCte}
-        SELECT
-          route,
-          component,
-          reject_reason,
-          COUNT(*) AS unique_tokens,
-          ${tierCaseSql('max_pnl')},
-          MAX(max_pnl) AS max_pnl,
-          AVG(max_pnl) AS avg_max_pnl
-        FROM per_token
-        WHERE quote_exec = 1
-        GROUP BY route, component, reject_reason
-        ORDER BY gold_n DESC, silver_n DESC, bronze_n DESC, max_pnl DESC
-        LIMIT @limit
-      `).all({ ...whereParams, limit });
-      const byBlockerAllUnique = paperDb.prepare(`
-        ${baseCte}
-        SELECT
-          route,
-          component,
-          reject_reason,
-          COUNT(*) AS unique_tokens,
-          ${tierCaseSql('max_pnl')},
-          ${hasTradability ? `
-          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
-          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
-          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique` : `
-          NULL AS quote_executable_unique,
-          NULL AS clean_tradable_unique,
-          NULL AS stop_before_peak_unique`}
-        FROM per_token
-        GROUP BY route, component, reject_reason
-        ORDER BY gold_n DESC, silver_n DESC, bronze_n DESC, unique_tokens DESC
-        LIMIT @limit
-      `).all({ ...whereParams, limit });
+      const overall = summaryRows.find((row) => row.section === 'overall') || null;
+      const byRoute = summaryRows.filter((row) => row.section === 'by_route');
+      const byBlockerCleanQuote = summaryRows.filter((row) => row.section === 'by_blocker_clean_quote').slice(0, limit);
+      const byBlockerAllUnique = summaryRows.filter((row) => row.section === 'by_blocker_all_unique').slice(0, limit);
       const topCleanQuoteDogs = paperDb.prepare(`
         ${baseCte}
         SELECT
@@ -3735,7 +3766,9 @@ const server = http.createServer(async (req, res) => {
           since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
           tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
           clean_quote_definition: 'tradable_missed=1 and would_stop_before_peak!=1 and no spread abort decision near signal',
+          quote_executable_proxy_note: 'spread abort is filtered by token within the requested window for speed; use missed-attribution for exact per-row spread timing',
         },
+        query_ms: Date.now() - queryStartedAt,
         overall_unique: overall,
         by_route: byRoute,
         by_blocker_clean_quote: byBlockerCleanQuote,

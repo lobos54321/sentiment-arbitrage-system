@@ -334,6 +334,14 @@ DISCOVERY_TRACKING_TTL_SEC = max(30, int(os.environ.get('DISCOVERY_TRACKING_TTL_
 DISCOVERY_TRACKING_MAX_CANDIDATES = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_CANDIDATES', '120')))
 DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE', '2')))
 DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE', '12')))
+DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC = max(
+    30,
+    int(os.environ.get('DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC', '300')),
+)
+DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS = max(
+    1,
+    int(os.environ.get('DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS', '3')),
+)
 DISCOVERY_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_MIN_LIQUIDITY_USD', '5000'))
 DISCOVERY_LOW_LIQ_BYPASS_ENABLED = os.environ.get('DISCOVERY_LOW_LIQ_BYPASS_ENABLED', 'true').lower() != 'false'
 DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_LOTTO_HIGH_RISK_MIN_LIQUIDITY_USD', '5000'))
@@ -5709,6 +5717,36 @@ def _discovery_hard_block(mode, *, current_mc, liquidity_usd, top1_pct=None, top
     return None
 
 
+DISCOVERY_LOW_LIQUIDITY_HARD_REASONS = {
+    'discovery_liquidity_too_low',
+    'discovery_lotto_high_risk_liquidity_too_low',
+}
+
+
+def _discovery_low_liquidity_backoff_detail(candidate, hard_reason, *, now_ts):
+    if hard_reason not in DISCOVERY_LOW_LIQUIDITY_HARD_REASONS:
+        return {'pass': False, 'reason': 'not_low_liquidity_hard_block'}
+    attempts = int((candidate or {}).get('attempts') or 0)
+    if attempts >= DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS:
+        return {
+            'pass': True,
+            'action': 'expire',
+            'reason': f'{hard_reason}_final',
+            'attempts': attempts,
+            'max_rechecks': DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS,
+        }
+    next_check_ts = float(now_ts or time.time()) + DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC
+    return {
+        'pass': True,
+        'action': 'backoff',
+        'reason': f'{hard_reason}_backoff',
+        'attempts': attempts,
+        'max_rechecks': DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS,
+        'backoff_sec': DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC,
+        'next_check_ts': next_check_ts,
+    }
+
+
 def _record_entry_mode_quality_decision(
     db,
     *,
@@ -6352,6 +6390,53 @@ def process_discovery_tracking_candidates(
             low_liquidity_bypass=low_liquidity_bypass,
         )
         if hard_reason:
+            low_liquidity_backoff = _discovery_low_liquidity_backoff_detail(
+                candidate,
+                hard_reason,
+                now_ts=now_ts,
+            )
+            if low_liquidity_backoff.get('pass'):
+                detail['low_liquidity_backoff'] = low_liquidity_backoff
+                candidate['last_wait_reason'] = low_liquidity_backoff.get('reason') or hard_reason
+                if low_liquidity_backoff.get('action') == 'backoff':
+                    next_check_ts = float(low_liquidity_backoff.get('next_check_ts') or now_ts)
+                    candidate['last_check_ts'] = next_check_ts - DISCOVERY_TRACKING_POLL_SEC
+                    record_decision_event(
+                        db,
+                        component='discovery_tracking',
+                        event_type='candidate_recheck',
+                        decision='wait',
+                        reason=low_liquidity_backoff.get('reason') or hard_reason,
+                        token_ca=token_ca,
+                        symbol=candidate.get('symbol'),
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=candidate.get('signal_ts'),
+                        signal_id=candidate.get('signal_id'),
+                        route=route,
+                        data_source='dexscreener+gmgn+helius+lifecycle',
+                        payload=with_lifecycle_payload(detail, lifecycle),
+                        event_ts=now_ts,
+                    )
+                    continue
+                if low_liquidity_backoff.get('action') == 'expire':
+                    discovery_candidates.pop(key, None)
+                    record_decision_event(
+                        db,
+                        component='discovery_tracking',
+                        event_type='candidate_expire',
+                        decision='expire',
+                        reason=low_liquidity_backoff.get('reason') or hard_reason,
+                        token_ca=token_ca,
+                        symbol=candidate.get('symbol'),
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=candidate.get('signal_ts'),
+                        signal_id=candidate.get('signal_id'),
+                        route=route,
+                        data_source='dexscreener+gmgn+helius+lifecycle',
+                        payload=with_lifecycle_payload(detail, lifecycle),
+                        event_ts=now_ts,
+                    )
+                    continue
             candidate['last_wait_reason'] = hard_reason
             record_decision_event(
                 db,

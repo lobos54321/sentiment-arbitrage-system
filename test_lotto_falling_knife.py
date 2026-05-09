@@ -44,6 +44,7 @@ from paper_trade_monitor import (  # noqa: E402
     should_block_lotto_lifecycle_entry,
     token_quarantine_state,
     track_discovery_candidate,
+    _discovery_low_liquidity_backoff_detail,
 )
 
 
@@ -89,6 +90,34 @@ def test_allows_non_newborn_even_when_low_liq_m5_down():
         },
     )
     assert blocked is False
+
+
+def test_discovery_low_liquidity_backoff_then_final_expire():
+    backoff = _discovery_low_liquidity_backoff_detail(
+        {"attempts": 1},
+        "discovery_liquidity_too_low",
+        now_ts=1000.0,
+    )
+    assert backoff["pass"] is True
+    assert backoff["action"] == "backoff"
+    assert backoff["reason"] == "discovery_liquidity_too_low_backoff"
+    assert backoff["next_check_ts"] == 1000.0 + backoff["backoff_sec"]
+
+    final = _discovery_low_liquidity_backoff_detail(
+        {"attempts": 3},
+        "discovery_liquidity_too_low",
+        now_ts=1000.0,
+    )
+    assert final["pass"] is True
+    assert final["action"] == "expire"
+    assert final["reason"] == "discovery_liquidity_too_low_final"
+
+    unrelated = _discovery_low_liquidity_backoff_detail(
+        {"attempts": 3},
+        "discovery_ath_mc_gate",
+        now_ts=1000.0,
+    )
+    assert unrelated["pass"] is False
 
 
 def test_real_probe_requires_tradable_reclaim_not_reason_text():
