@@ -13,6 +13,9 @@ from paper_trade_monitor import (  # noqa: E402
     ATH_NO_KLINE_TINY_PROBE_MODE,
     ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
     ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+    LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+    LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
     MATRIX_MICRO_MOMENTUM_TINY_PROBE_MODE,
     PAPER_TINY_SCOUT_SIZE_SOL,
     PRIMARY_PROVING_CAP_SIZE_SOL,
@@ -29,6 +32,9 @@ from paper_trade_monitor import (  # noqa: E402
     _ath_recovery_mode_for_candidate,
     _defer_ath_reentry_block,
     _discovery_hard_block,
+    _discovery_mode_for_lotto_reason,
+    _lotto_dynamic_ttl_extension_detail,
+    _lotto_recovery_activity_gate,
     _entry_mode_for_ath_uncertainty_reason,
     _entry_mode_quality_high_quality_tiny_override,
     _matrix_micro_momentum_reason,
@@ -218,6 +224,105 @@ def test_new_ath_probe_modes_are_tiny_scouts_and_get_capped():
 
         assert pending["kelly_position_sol"] == PAPER_TINY_SCOUT_SIZE_SOL
         assert detail["capped"] is True
+
+
+def test_lotto_recovery_probe_modes_are_tiny_scouts_and_get_capped():
+    for mode in (
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    ):
+        pending = {"entry_mode": mode, "kelly_position_sol": 0.1}
+
+        assert monitor.pending_is_paper_tiny_scout(pending)
+        detail = monitor.apply_paper_tiny_scout_size_cap(pending)
+
+        assert pending["kelly_position_sol"] == PAPER_TINY_SCOUT_SIZE_SOL
+        assert detail["capped"] is True
+
+
+def test_lotto_recovery_reason_mapping_splits_missed_blockers():
+    assert _discovery_mode_for_lotto_reason("not_ath_v17") == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("tracking_ttl_expired") == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    assert (
+        _discovery_mode_for_lotto_reason("upstream_realtime_liquidity_too_low")
+        == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    )
+    assert _discovery_mode_for_lotto_reason("scout_quality_volume_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("score_too_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+
+
+def test_lotto_recovery_gate_requires_quote_and_current_reclaim():
+    weak = _lotto_recovery_activity_gate(
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000},
+        activity={"buy_sell_ratio": 1.3, "vol_m5": 12000, "tx_m5": 100, "price_change_m5": 4},
+        quote_probe={"success": False, "reason": "quote_not_executable"},
+        current_mc=42000,
+        liquidity_usd=12000,
+        top1_pct=35,
+        top10_pct=60,
+        now_ts=1060,
+    )
+    assert weak["pass"] is False
+    assert "quote_not_executable" in weak["failures"]
+
+    strong = _lotto_recovery_activity_gate(
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000},
+        activity={"buy_sell_ratio": 1.3, "vol_m5": 12000, "tx_m5": 100, "price_change_m5": 4},
+        quote_probe={"success": True},
+        current_mc=42000,
+        liquidity_usd=12000,
+        top1_pct=35,
+        top10_pct=60,
+        now_ts=1060,
+    )
+    assert strong["pass"] is True
+    assert strong["reason"] == "lotto_not_ath_reclaim_live_reclaim_pass"
+
+
+def test_lotto_micro_reclaim_expires_after_short_watch():
+    detail = _lotto_recovery_activity_gate(
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000},
+        activity={"buy_sell_ratio": 1.4, "vol_m5": 9000, "tx_m5": 90, "price_change_m5": 9},
+        quote_probe={"success": True},
+        current_mc=52000,
+        liquidity_usd=9000,
+        top1_pct=30,
+        top10_pct=65,
+        now_ts=1701,
+    )
+
+    assert detail["pass"] is False
+    assert "max_watch_sec_expired" in detail["failures"]
+
+
+def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():
+    candidate = {
+        "mode": LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        "first_seen_ts": 1000,
+        "ttl_extend_count": 0,
+    }
+    prelim = _lotto_dynamic_ttl_extension_detail(
+        candidate,
+        dex_snapshot={"market_cap": 40000, "liquidity_usd": 2500, "vol_m5": 4000, "buys_m5": 60, "sells_m5": 40, "price_change_m5": 3},
+        activity={"buy_sell_ratio": 1.5, "vol_m5": 4000, "tx_m5": 100, "price_change_m5": 3},
+        now_ts=1200,
+    )
+    assert prelim["pass"] is True
+
+    final = _lotto_dynamic_ttl_extension_detail(
+        candidate,
+        dex_snapshot={"market_cap": 40000, "liquidity_usd": 2500, "vol_m5": 4000, "buys_m5": 60, "sells_m5": 40, "price_change_m5": 3},
+        activity={"buy_sell_ratio": 1.5, "vol_m5": 4000, "tx_m5": 100, "price_change_m5": 3},
+        quote_probe={"success": True},
+        require_quote=True,
+        now_ts=1200,
+    )
+    assert final["pass"] is True
+    assert final["reason"] == "lotto_tracking_ttl_extended"
 
 
 def test_entry_mode_quality_high_quality_tiny_override_allows_strong_ath():

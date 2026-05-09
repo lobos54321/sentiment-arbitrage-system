@@ -34,6 +34,9 @@ from paper_trade_monitor import (  # noqa: E402
     find_ath_real_probe_candidates,
     find_lotto_real_probe_candidates,
     find_lotto_upstream_miss_tiny_scout_candidates,
+    LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+    LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
     normalize_price_age_ms,
     process_discovery_tracking_candidates,
     record_scout_funnel_summary,
@@ -876,6 +879,31 @@ def test_entry_edge_budget_keeps_lotto_discovery_probe_spread_strict():
     assert budget["profile"] == "lotto_probe"
     assert budget["max_spread_pct"] == 2.0
     assert budget["tiny_scout_spread_cap_pct"] == 2.0
+
+
+def test_entry_edge_budget_keeps_lotto_recovery_probe_spread_strict():
+    for mode in (
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    ):
+        budget = evaluate_entry_edge_budget(
+            route="LOTTO",
+            trigger_price=1.0,
+            quote_price=1.025,
+            lifecycle={"lifecycle_features": {"liquidity_unknown": False, "live_top1_pct": 40}},
+            pending={
+                "is_lotto": True,
+                "paper_only_scout": True,
+                "entry_mode": mode,
+                "replay_source": "live_monitor_discovery_probe",
+            },
+        )
+        assert budget["pass"] is False
+        assert budget["reason"] == "entry_edge_spread_too_high"
+        assert budget["profile"] == "lotto_probe"
+        assert budget["max_spread_pct"] == 2.0
+        assert budget["tiny_scout_spread_cap_pct"] == 2.0
 
 
 def test_entry_edge_budget_keeps_ath_uncertainty_tiny_scout_spread_capped():
@@ -1881,6 +1909,35 @@ def test_entry_readiness_discovery_lotto_probe_uses_real_probe_profile():
     assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
 
 
+def test_entry_readiness_lotto_recovery_probes_use_real_probe_profile():
+    for mode in (
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    ):
+        policy = evaluate_entry_readiness_policy(
+            route="LOTTO",
+            lifecycle={
+                "lifecycle_state": "FIRST_PUMP",
+                "entry_bias": "PROBE",
+                "lifecycle_features": {
+                    "age_sec": 240,
+                    "price_change_m5": 9,
+                    "buy_sell_ratio": 1.4,
+                },
+            },
+            pending={
+                "is_lotto": True,
+                "paper_only_scout": True,
+                "entry_mode": mode,
+                "replay_source": "live_monitor_discovery_probe",
+            },
+        )
+        assert policy.lifecycle_profile == "LOTTO_REAL_PROBE"
+        assert entry_mode_allowed("momentum_direct_entry", policy) is False
+        assert entry_mode_allowed("smart_entry_pullback_bounce", policy) is True
+
+
 def test_ath_uncertainty_scout_arms_tiny_pending(monkeypatch):
     import paper_trade_monitor as monitor_module
 
@@ -2138,6 +2195,116 @@ def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
     assert pending["timing_passed"] is True
     assert pending["kelly_position_sol"] == 0.003
     assert pending["paper_only_scout"] is True
+
+
+def test_discovery_tracking_arms_lotto_low_liquidity_reclaim_with_quote(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    class FakeWatchlist:
+        def __init__(self):
+            self.entry = {
+                "id": 8,
+                "ca": "LowLiqToken",
+                "symbol": "LLIQ",
+                "type": "LOTTO",
+                "pool_address": "PoolL",
+                "signal_ts": 1000,
+                "premium_signal_id": 100,
+                "signal_price": 1.0,
+                "signal_mc": 38000,
+                "signal_top10": 70,
+                "added_at": 1000,
+            }
+
+        def get_by_id(self, entry_id):
+            return dict(self.entry) if entry_id == self.entry["id"] else None
+
+        def get_by_ca(self, ca):
+            return dict(self.entry) if ca == self.entry["ca"] else None
+
+        def register(self, **kwargs):
+            self.entry.update({
+                "ca": kwargs["ca"],
+                "symbol": kwargs["symbol"],
+                "type": kwargs["signal_type"],
+                "pool_address": kwargs["pool_address"],
+                "signal_ts": kwargs["signal_ts"],
+                "premium_signal_id": kwargs.get("premium_signal_id"),
+                "signal_mc": kwargs.get("signal_mc"),
+                "signal_top10": kwargs.get("signal_top10"),
+            })
+            return dict(self.entry)
+
+        def update_position_state(self, entry_id, **kwargs):
+            self.entry.update(kwargs)
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 38000,
+        "liquidity_usd": 2500,
+        "price_change_m5": 3,
+        "vol_m5": 0,
+        "buys_m5": 45,
+        "sells_m5": 15,
+        "pair_address": "PoolL",
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolL")
+    monkeypatch.setattr(monitor_module, "helius_token_concentration", lambda *_args, **_kwargs: {
+        "top1_pct": 40,
+        "top10_pct": 70,
+    })
+    monkeypatch.setattr(monitor_module, "fetch_gmgn_token_enrichment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(monitor_module, "simulate_entry_execution", lambda *_args, **_kwargs: {
+        "success": True,
+        "effectivePrice": 1.01,
+        "routeAvailable": True,
+    })
+
+    watchlist = FakeWatchlist()
+    discovery_candidates = {}
+    track_discovery_candidate(
+        db,
+        discovery_candidates,
+        mode=LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        route="LOTTO",
+        token_ca="LowLiqToken",
+        symbol="LLIQ",
+        lifecycle_id="LowLiqToken:1000",
+        signal_ts=1000,
+        signal_id=100,
+        pool="PoolL",
+        watchlist_id=8,
+        watchlist_entry=watchlist.entry,
+        source_component="upstream_gate",
+        source_reject_reason="upstream_realtime_liquidity_too_low",
+        now_ts=1200,
+    )
+
+    pending_entries = {}
+    armed = process_discovery_tracking_candidates(
+        db,
+        watchlist,
+        discovery_candidates,
+        pending_entries,
+        {},
+        now_ts=1211,
+        max_positions=10,
+    )
+
+    assert armed == 1
+    assert discovery_candidates == {}
+    pending = pending_entries["LowLiqToken:1000"]
+    assert pending["entry_mode"] == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    assert pending["kelly_position_sol"] == 0.003
+    assert pending["paper_only_scout"] is True
+
+    row = db.execute(
+        "SELECT decision, reason FROM paper_decision_events WHERE component = 'lotto_recovery'"
+    ).fetchone()
+    assert row["decision"] == "pass"
+    assert row["reason"] == "lotto_low_liquidity_reclaim_live_reclaim_pass"
 
 
 def test_ath_uncertainty_scout_allows_experimental_midcap_probe(monkeypatch):

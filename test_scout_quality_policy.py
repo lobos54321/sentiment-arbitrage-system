@@ -111,3 +111,43 @@ def test_matrix_micro_momentum_probe_blocks_deeper_negative_trend():
 
     assert quality["pass"] is False
     assert quality["reason"] == "scout_quality_negative_trend"
+
+
+def test_lotto_low_liquidity_reclaim_uses_quote_tx_bs_profile():
+    quality = evaluate_scout_quality(
+        mode="lotto_low_liquidity_reclaim_tiny_probe",
+        route="LOTTO",
+        trend={
+            "liquidity_usd": 5000,
+            "price_change_m5": 0,
+            "vol_m5": 0,
+            "tx_m5": 55,
+            "buy_sell_ratio": 1.25,
+            "top1_pct": 40,
+            "top10_pct": 75,
+        },
+        position_size_sol=0.003,
+    )
+
+    assert quality["pass"] is True
+    assert quality["reason"] == "scout_quality_pass"
+
+
+def test_lotto_micro_reclaim_requires_positive_bounce_quality():
+    quality = evaluate_scout_quality(
+        mode="lotto_micro_reclaim_tiny_probe",
+        route="LOTTO",
+        trend={
+            "liquidity_usd": 10000,
+            "price_change_m5": -1,
+            "vol_m5": 5000,
+            "tx_m5": 50,
+            "buy_sell_ratio": 1.3,
+            "top1_pct": 40,
+            "top10_pct": 70,
+        },
+        position_size_sol=0.003,
+    )
+
+    assert quality["pass"] is False
+    assert quality["reason"] == "scout_quality_negative_trend"

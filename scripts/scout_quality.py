@@ -96,6 +96,30 @@ _PROFILE_OVERRIDES = {
     "lotto_upstream_realtime_tiny_scout": {
         "max_negative_m5": -15.0,
     },
+    "lotto_not_ath_reclaim_tiny_probe": {
+        "min_buy_sell_ratio": 1.15,
+        "min_vol_m5": 5000.0,
+        "min_tx_m5": 70,
+        "max_negative_m5": 0.0,
+        "max_top1_pct": 62.0,
+        "max_top10_pct": 85.0,
+    },
+    "lotto_low_liquidity_reclaim_tiny_probe": {
+        "min_buy_sell_ratio": 1.20,
+        "min_vol_m5": 0.0,
+        "min_tx_m5": 50,
+        "max_negative_m5": 0.0,
+        "max_top1_pct": 62.0,
+        "max_top10_pct": 85.0,
+    },
+    "lotto_micro_reclaim_tiny_probe": {
+        "min_buy_sell_ratio": 1.20,
+        "min_vol_m5": 4000.0,
+        "min_tx_m5": 40,
+        "max_negative_m5": 0.0,
+        "max_top1_pct": 62.0,
+        "max_top10_pct": 85.0,
+    },
     "ath_soft_reclaim_tiny_scout": {
         "min_buy_sell_ratio": 1.05,
         "min_vol_m5": 5000.0,
