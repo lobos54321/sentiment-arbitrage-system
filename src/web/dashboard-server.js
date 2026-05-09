@@ -3519,6 +3519,7 @@ const server = http.createServer(async (req, res) => {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 200));
       const sinceTs = windowedSinceTs(url, 6);
       const queryStartedAt = Date.now();
+      const includeRecoveryActions = String(url.searchParams.get('include_actions') || '').toLowerCase() === '1';
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
       const whereSql = sinceTs ? 'WHERE m.created_event_ts >= @since' : '';
       const whereParams = sinceTs ? { since: sinceTs } : {};
@@ -3745,7 +3746,7 @@ const server = http.createServer(async (req, res) => {
         LIMIT @limit
       `).all({ ...whereParams, limit });
       let recoveryActions = [];
-      if (hasDecisionEvents) {
+      if (hasDecisionEvents && includeRecoveryActions) {
         const recoveryWhere = sinceTs ? 'AND event_ts >= @since' : '';
         recoveryActions = paperDb.prepare(`
           SELECT
@@ -3788,6 +3789,7 @@ const server = http.createServer(async (req, res) => {
           tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
           clean_quote_definition: 'tradable_missed=1 and would_stop_before_peak!=1',
           quote_executable_proxy_note: 'spread-abort timing is not checked in this endpoint so the dashboard stays non-blocking; use offline analysis for exact per-row spread timing',
+          include_actions: includeRecoveryActions,
         },
         query_ms: Date.now() - queryStartedAt,
         overall_unique: overall,
@@ -3798,6 +3800,7 @@ const server = http.createServer(async (req, res) => {
         recovery_actions: recoveryActions,
         notes: {
           endpoint_goal: 'fast closed-loop summary for missed gold/silver/bronze recovery, avoiding full attribution scans',
+          recovery_actions: includeRecoveryActions ? 'included' : 'omitted by default; pass include_actions=1 for the slower decision-events breakdown',
           anchor_mismatch: 'not computed here; use lifecycle-summary for trade anchor audit',
         },
       }, null, 2));
