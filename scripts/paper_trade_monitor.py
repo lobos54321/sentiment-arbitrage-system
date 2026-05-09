@@ -5245,13 +5245,23 @@ LOTTO_NOT_ATH_RECLAIM_SOURCE_REASONS = {
     'not_ath_prebuy_kline_unknown_data_blocked',
     'tracking_ttl_expired',
     'trend_bearish_timeout',
+    'upstream_probe_mc_gate',
 }
 LOTTO_LOW_LIQUIDITY_RECLAIM_SOURCE_REASONS = {
     'upstream_realtime_liquidity_too_low',
     'discovery_liquidity_too_low',
+    'discovery_liquidity_too_low_final',
+    'discovery_lotto_recovery_liquidity_too_low',
+    'discovery_lotto_recovery_liquidity_too_low_final',
+    'discovery_lotto_high_risk_liquidity_too_low',
+    'discovery_lotto_high_risk_liquidity_too_low_final',
     'liquidity_too_low',
+    'scout_quality_liquidity_low',
+    'liquidity_or_quote_not_ready',
 }
 LOTTO_MICRO_RECLAIM_SOURCE_REASONS = {
+    'weak_buying_pressure',
+    'chasing_top',
     'scout_quality_volume_low',
     'scout_quality_negative_trend',
     'scout_quality_buy_pressure_weak',
@@ -5468,11 +5478,94 @@ def _discovery_mode_for_lotto_reason(reason):
         return LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
     if reason in LOTTO_MICRO_RECLAIM_SOURCE_REASONS:
         return LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    if reason.startswith((
+        'dead_cat_below_high_',
+        'lotto_live_top1_',
+        'lotto_live_top10_',
+        'lotto_top10_',
+    )):
+        return LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     if reason.startswith(DISCOVERY_LOTTO_HIGH_RISK_REASON_PREFIXES):
         if reason.startswith(('lotto_liq_low_', 'upstream_realtime_liquidity_too_low')):
             return LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
         return LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE
     return None
+
+
+def _lotto_recovery_mode_for_blocker(*, primary_reason=None, secondary_reason=None, current_mode=None):
+    """Pick the live LOTTO recovery mode from the newest blocker, not only the first reject."""
+    for reason in (secondary_reason, primary_reason):
+        mapped = _discovery_mode_for_lotto_reason(reason)
+        if mapped in LOTTO_RECOVERY_TINY_PROBE_MODES:
+            return mapped
+    if current_mode in LOTTO_RECOVERY_TINY_PROBE_MODES:
+        return current_mode
+    for reason in (secondary_reason, primary_reason):
+        mapped = _discovery_mode_for_lotto_reason(reason)
+        if mapped:
+            return mapped
+    return current_mode
+
+
+def _retarget_discovery_candidate(
+    db,
+    discovery_candidates,
+    key,
+    candidate,
+    *,
+    new_mode,
+    reason,
+    now_ts,
+    lifecycle=None,
+    detail=None,
+):
+    old_mode = candidate.get('mode')
+    if not new_mode or new_mode == old_mode:
+        return key
+    discovery_candidates.pop(key, None)
+    token_ca = candidate.get('token_ca')
+    signal_ts = candidate.get('signal_ts')
+    new_key = discovery_candidate_key(token_ca, signal_ts, new_mode)
+    candidate['key'] = new_key
+    candidate['mode'] = new_mode
+    candidate['last_check_ts'] = 0.0
+    candidate['last_wait_reason'] = reason
+    candidate['retarget_count'] = int(candidate.get('retarget_count') or 0) + 1
+    candidate['retarget_reason'] = reason
+    candidate['retarget_from_mode'] = old_mode
+    candidate['source_detail'] = {
+        **(candidate.get('source_detail') or {}),
+        'previous_mode': old_mode,
+        'retarget_reason': reason,
+        'retarget_to_mode': new_mode,
+        **(detail or {}),
+    }
+    discovery_candidates[new_key] = candidate
+    record_decision_event(
+        db,
+        component='discovery_tracking',
+        event_type='candidate_retarget',
+        decision='track',
+        reason=reason or 'lotto_recovery_mode_retarget',
+        token_ca=token_ca,
+        symbol=candidate.get('symbol'),
+        lifecycle_id=candidate.get('lifecycle_id'),
+        signal_ts=signal_ts,
+        signal_id=candidate.get('signal_id'),
+        route=candidate.get('route'),
+        data_source='discovery_tracking+latest_blocker',
+        payload=with_lifecycle_payload({
+            'old_mode': old_mode,
+            'new_mode': new_mode,
+            'source_component': candidate.get('source_component'),
+            'source_reject_reason': candidate.get('source_reject_reason'),
+            'last_wait_reason': candidate.get('last_wait_reason'),
+            'retarget_count': candidate.get('retarget_count'),
+            'detail': detail or {},
+        }, lifecycle or candidate.get('last_lifecycle') or {}),
+        event_ts=now_ts,
+    )
+    return new_key
 
 
 def track_discovery_candidate(
@@ -6207,6 +6300,13 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
     recovery_probe_reason = (detail.get('ath_recovery_gate') or {}).get('reason')
     matrix_scores = _ath_recovery_scores(candidate, detail)
     if route == 'LOTTO':
+        lotto_recovery_family = _lotto_recovery_family(mode) if mode in LOTTO_RECOVERY_TINY_PROBE_MODES else None
+        lotto_probe_reason = (detail.get('lotto_recovery_gate') or {}).get('reason')
+        parent_reason = (
+            candidate.get('source_reject_reason')
+            or (detail.get('source_detail') or {}).get('original_source_reject_reason')
+            or (detail.get('source_detail') or {}).get('source_reject_reason')
+        )
         lotto_detail = {
             **detail,
             'entry_mode': mode,
@@ -6225,16 +6325,26 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
         pending['stage_outcome'] = 'discovery_probe_entered'
         pending['source_component'] = candidate.get('source_component')
         pending['source_reject_reason'] = candidate.get('source_reject_reason')
+        pending['lotto_recovery_family'] = lotto_recovery_family
+        pending['parent_block_reason'] = parent_reason
+        pending['recovery_probe_reason'] = lotto_probe_reason
         pending['lotto_state']['probe'] = True
         pending['lotto_state']['probeSource'] = 'discovery_tracking'
         pending['lotto_state']['probeEntryMode'] = mode
         pending['lotto_state']['paper_only_scout'] = True
+        if lotto_recovery_family:
+            pending['lotto_state']['lottoRecoveryFamily'] = lotto_recovery_family
+            pending['lotto_state']['parentBlockReason'] = parent_reason
+            pending['lotto_state']['recoveryProbeReason'] = lotto_probe_reason
         pending['lotto_state']['discoveryCandidate'] = {
             'mode': mode,
             'source_component': candidate.get('source_component'),
             'source_reject_reason': candidate.get('source_reject_reason'),
             'first_seen_ts': candidate.get('first_seen_ts'),
             'attempts': candidate.get('attempts'),
+            'lotto_recovery_family': lotto_recovery_family,
+            'parent_block_reason': parent_reason,
+            'recovery_probe_reason': lotto_probe_reason,
         }
         return pending
 
@@ -6340,6 +6450,30 @@ def process_discovery_tracking_candidates(
             )
             continue
         if now_ts >= float(candidate.get('expires_at') or now_ts):
+            if route == 'LOTTO' and not candidate.get('lotto_ttl_retargeted'):
+                retarget_mode = _lotto_recovery_mode_for_blocker(
+                    primary_reason=candidate.get('source_reject_reason'),
+                    secondary_reason=candidate.get('last_wait_reason') or 'tracking_ttl_expired',
+                    current_mode=mode,
+                )
+                if retarget_mode and retarget_mode != mode:
+                    candidate['lotto_ttl_retargeted'] = True
+                    candidate['expires_at'] = now_ts + DISCOVERY_TRACKING_POLL_SEC
+                    _retarget_discovery_candidate(
+                        db,
+                        discovery_candidates,
+                        key,
+                        candidate,
+                        new_mode=retarget_mode,
+                        reason='lotto_ttl_latest_blocker_retarget',
+                        now_ts=now_ts,
+                        detail={
+                            'ttl_reason': 'tracking_ttl_expired',
+                            'latest_blocker': candidate.get('last_wait_reason'),
+                            'source_reject_reason': candidate.get('source_reject_reason'),
+                        },
+                    )
+                    continue
             if route == 'ATH' and ATH_DYNAMIC_TTL_ENABLED:
                 try:
                     ttl_dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca) or {}
@@ -6719,6 +6853,29 @@ def process_discovery_tracking_candidates(
             low_liquidity_bypass=low_liquidity_bypass,
         )
         if hard_reason:
+            if route == 'LOTTO':
+                retarget_mode = _lotto_recovery_mode_for_blocker(
+                    primary_reason=candidate.get('source_reject_reason'),
+                    secondary_reason=hard_reason,
+                    current_mode=mode,
+                )
+                if retarget_mode and retarget_mode != mode:
+                    _retarget_discovery_candidate(
+                        db,
+                        discovery_candidates,
+                        key,
+                        candidate,
+                        new_mode=retarget_mode,
+                        reason='lotto_latest_hard_blocker_retarget',
+                        now_ts=now_ts,
+                        lifecycle=lifecycle,
+                        detail={
+                            'hard_reason': hard_reason,
+                            'source_reject_reason': candidate.get('source_reject_reason'),
+                            'old_mode': mode,
+                        },
+                    )
+                    continue
             low_liquidity_backoff = _discovery_low_liquidity_backoff_detail(
                 candidate,
                 hard_reason,
@@ -7029,6 +7186,30 @@ def process_discovery_tracking_candidates(
         )
         if not scout_quality.get('pass'):
             wait_reason = scout_quality.get('reason') or 'scout_quality_reject'
+            if route == 'LOTTO':
+                retarget_mode = _lotto_recovery_mode_for_blocker(
+                    primary_reason=candidate.get('source_reject_reason'),
+                    secondary_reason=wait_reason,
+                    current_mode=mode,
+                )
+                if retarget_mode and retarget_mode != mode:
+                    _retarget_discovery_candidate(
+                        db,
+                        discovery_candidates,
+                        key,
+                        candidate,
+                        new_mode=retarget_mode,
+                        reason='lotto_latest_scout_quality_retarget',
+                        now_ts=now_ts,
+                        lifecycle=lifecycle,
+                        detail={
+                            'scout_quality_reason': wait_reason,
+                            'source_reject_reason': candidate.get('source_reject_reason'),
+                            'old_mode': mode,
+                            'scout_quality': scout_quality,
+                        },
+                    )
+                    continue
             candidate['last_wait_reason'] = wait_reason
             record_decision_event(
                 db,
@@ -13233,7 +13414,11 @@ def run_monitor(db):
                                 _pending_source_reason = pending.get('source_reject_reason') or pending.get('entry_mode')
                                 if str(_pending_route_for_tracking or '').upper() == 'LOTTO' or pending.get('is_lotto'):
                                     _pending_discovery_mode = (
-                                        _discovery_mode_for_lotto_reason(_pending_source_reason)
+                                        _lotto_recovery_mode_for_blocker(
+                                            primary_reason=_pending_source_reason,
+                                            secondary_reason=_scout_quality.get('reason'),
+                                            current_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                                        )
                                         or pending.get('entry_mode')
                                         or pending.get('scout_mode')
                                     )
@@ -13253,8 +13438,13 @@ def run_monitor(db):
                                     watchlist_id=pending.get('watchlist_id'),
                                     watchlist_entry=pending_w_entry,
                                     source_component=pending.get('source_component') or 'pending_entry',
-                                    source_reject_reason=_pending_source_reason,
+                                    source_reject_reason=(
+                                        _scout_quality.get('reason')
+                                        if (str(_pending_route_for_tracking or '').upper() == 'LOTTO' or pending.get('is_lotto'))
+                                        else _pending_source_reason
+                                    ),
                                     source_detail={
+                                        'original_source_reject_reason': _pending_source_reason,
                                         'pending_entry_quality_reject_reason': _scout_quality.get('reason'),
                                         'entry_mode': pending.get('entry_mode'),
                                         'scout_quality': _scout_quality,
@@ -13373,7 +13563,11 @@ def run_monitor(db):
                         if _lotto_timing_blocked:
                             if pending_is_paper_tiny_scout(pending) and _lotto_timing_reason == 'lotto_timing_negative_m5':
                                 _lotto_discovery_mode = (
-                                    _discovery_mode_for_lotto_reason(pending.get('source_reject_reason'))
+                                    _lotto_recovery_mode_for_blocker(
+                                        primary_reason=pending.get('source_reject_reason'),
+                                        secondary_reason=_lotto_timing_reason,
+                                        current_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                                    )
                                     or pending.get('entry_mode')
                                     or pending.get('scout_mode')
                                 )
@@ -13391,8 +13585,9 @@ def run_monitor(db):
                                     watchlist_id=pending.get('watchlist_id'),
                                     watchlist_entry=pending_w_entry,
                                     source_component=pending.get('source_component') or 'lotto_timing_gate',
-                                    source_reject_reason=pending.get('source_reject_reason') or _lotto_timing_reason,
+                                    source_reject_reason=_lotto_timing_reason,
                                     source_detail={
+                                        'original_source_reject_reason': pending.get('source_reject_reason'),
                                         'lotto_timing_reason': _lotto_timing_reason,
                                         'lotto_timing_detail': _lotto_timing_detail,
                                         'entry_mode': pending.get('entry_mode'),
@@ -13963,6 +14158,10 @@ def run_monitor(db):
                         _monitor_state['signalRoute'] = _pending_signal_route
                     if pending.get('ath_recovery_family'):
                         _monitor_state['athRecoveryFamily'] = pending.get('ath_recovery_family')
+                        _monitor_state['parentBlockReason'] = pending.get('parent_block_reason')
+                        _monitor_state['recoveryProbeReason'] = pending.get('recovery_probe_reason')
+                    if pending.get('lotto_recovery_family'):
+                        _monitor_state['lottoRecoveryFamily'] = pending.get('lotto_recovery_family')
                         _monitor_state['parentBlockReason'] = pending.get('parent_block_reason')
                         _monitor_state['recoveryProbeReason'] = pending.get('recovery_probe_reason')
                     if _pending_lotto_state:

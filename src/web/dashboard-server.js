@@ -2746,6 +2746,7 @@ const server = http.createServer(async (req, res) => {
         const bucket = entryModeBucket(entryMode, row.position_size_sol);
         const key = `${bucket}:${entryMode}`;
         const athRecoveryFamily = athRecoveryFamilyFor(entryMode, monitorState);
+        const lottoRecoveryFamily = firstValue(monitorState.lottoRecoveryFamily, (monitorState.lottoState || {}).lottoRecoveryFamily);
         const parentBlockReason = firstValue(monitorState.parentBlockReason, monitorState.parent_block_reason);
         const recoveryProbeReason = firstValue(monitorState.recoveryProbeReason, monitorState.recovery_probe_reason);
         const closed = row.exit_ts != null || row.exit_reason != null;
@@ -2772,6 +2773,7 @@ const server = http.createServer(async (req, res) => {
             entry_quote_success_n: 0,
             entry_quote_failure_n: 0,
             ath_recovery_family: athRecoveryFamily,
+            lotto_recovery_family: lottoRecoveryFamily,
             parent_block_reasons: {},
             recovery_probe_reasons: {},
           });
@@ -2798,6 +2800,7 @@ const server = http.createServer(async (req, res) => {
         if (entryQuoteSuccess) g.entry_quote_success_n += 1;
         if (entryQuoteFailure) g.entry_quote_failure_n += 1;
         if (athRecoveryFamily && !g.ath_recovery_family) g.ath_recovery_family = athRecoveryFamily;
+        if (lottoRecoveryFamily && !g.lotto_recovery_family) g.lotto_recovery_family = lottoRecoveryFamily;
         if (parentBlockReason) g.parent_block_reasons[parentBlockReason] = (g.parent_block_reasons[parentBlockReason] || 0) + 1;
         if (recoveryProbeReason) g.recovery_probe_reasons[recoveryProbeReason] = (g.recovery_probe_reasons[recoveryProbeReason] || 0) + 1;
         if (recent.length < 50) {
@@ -2818,6 +2821,7 @@ const server = http.createServer(async (req, res) => {
             entry_quote_success: entryQuoteSuccess,
             entry_quote_failure_reason: entryAudit.failureReason || null,
             ath_recovery_family: athRecoveryFamily,
+            lotto_recovery_family: lottoRecoveryFamily,
             parent_block_reason: parentBlockReason,
             recovery_probe_reason: recoveryProbeReason,
           });
@@ -2838,6 +2842,7 @@ const server = http.createServer(async (req, res) => {
         est_pnl_sol: roundNumber(g.est_pnl_sol, 5),
         avg_ev_sol_per_trade: g.total ? roundNumber(g.est_pnl_sol / g.total, 6) : null,
         ath_recovery_family: g.ath_recovery_family || null,
+        lotto_recovery_family: g.lotto_recovery_family || null,
         parent_block_reasons: g.parent_block_reasons,
         recovery_probe_reasons: g.recovery_probe_reasons,
         entry_quote_success_n: g.entry_quote_success_n,

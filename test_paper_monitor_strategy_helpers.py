@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 import paper_trade_monitor as monitor  # noqa: E402
+from paper_decision_audit import init_decision_audit  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     ATH_HIGH_MC_TINY_PROBE_MODE,
     ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
@@ -35,6 +36,9 @@ from paper_trade_monitor import (  # noqa: E402
     _discovery_mode_for_lotto_reason,
     _lotto_dynamic_ttl_extension_detail,
     _lotto_recovery_activity_gate,
+    _lotto_recovery_mode_for_blocker,
+    _retarget_discovery_candidate,
+    _build_discovery_pending,
     _entry_mode_for_ath_uncertainty_reason,
     _entry_mode_quality_high_quality_tiny_override,
     _matrix_micro_momentum_reason,
@@ -244,12 +248,119 @@ def test_lotto_recovery_probe_modes_are_tiny_scouts_and_get_capped():
 def test_lotto_recovery_reason_mapping_splits_missed_blockers():
     assert _discovery_mode_for_lotto_reason("not_ath_v17") == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("tracking_ttl_expired") == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("upstream_probe_mc_gate") == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
     assert (
         _discovery_mode_for_lotto_reason("upstream_realtime_liquidity_too_low")
         == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
     )
+    assert _discovery_mode_for_lotto_reason("scout_quality_liquidity_low") == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("discovery_lotto_recovery_liquidity_too_low") == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("weak_buying_pressure") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("chasing_top") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("dead_cat_below_high_37.5pct_gt_10.0pct") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("lotto_live_top1_38pct") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("scout_quality_volume_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("score_too_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+
+
+def test_lotto_recovery_mode_uses_latest_blocker_over_original_reason():
+    assert (
+        _lotto_recovery_mode_for_blocker(
+            primary_reason="not_ath_v17",
+            secondary_reason="scout_quality_liquidity_low",
+            current_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        )
+        == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    )
+    assert (
+        _lotto_recovery_mode_for_blocker(
+            primary_reason="not_ath_v17",
+            secondary_reason="scout_quality_buy_pressure_weak",
+            current_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        )
+        == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    )
+
+
+def test_retarget_discovery_candidate_rekeys_and_audits_latest_blocker():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    old_key = "TokenCA:1000:lotto_not_ath_reclaim_tiny_probe"
+    candidates = {
+        old_key: {
+            "key": old_key,
+            "mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            "route": "LOTTO",
+            "token_ca": "TokenCA",
+            "symbol": "DOG",
+            "lifecycle_id": "TokenCA:1000",
+            "signal_ts": 1000,
+            "source_component": "upstream_gate",
+            "source_reject_reason": "not_ath_v17",
+            "first_seen_ts": 1000,
+        }
+    }
+
+    new_key = _retarget_discovery_candidate(
+        db,
+        candidates,
+        old_key,
+        candidates[old_key],
+        new_mode=LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        reason="lotto_latest_scout_quality_retarget",
+        now_ts=1100,
+        detail={"scout_quality_reason": "scout_quality_liquidity_low"},
+    )
+
+    assert old_key not in candidates
+    assert new_key in candidates
+    assert candidates[new_key]["mode"] == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    row = db.execute(
+        "SELECT component, event_type, decision, reason FROM paper_decision_events"
+    ).fetchone()
+    assert dict(row) == {
+        "component": "discovery_tracking",
+        "event_type": "candidate_retarget",
+        "decision": "track",
+        "reason": "lotto_latest_scout_quality_retarget",
+    }
+
+
+def test_lotto_discovery_pending_records_recovery_attribution():
+    pending = _build_discovery_pending(
+        {
+            "id": 9,
+            "ca": "TokenCA",
+            "symbol": "DOG",
+            "type": "LOTTO",
+            "signal_ts": 1000,
+            "premium_signal_id": 123,
+            "pool_address": "Pool",
+            "signal_mc": 42000,
+        },
+        {
+            "route": "LOTTO",
+            "token_ca": "TokenCA",
+            "symbol": "DOG",
+            "signal_ts": 1000,
+            "source_component": "scout_quality",
+            "source_reject_reason": "scout_quality_liquidity_low",
+            "first_seen_ts": 1010,
+            "attempts": 2,
+        },
+        "TokenCA:1000",
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        {
+            "current_mc": 43000,
+            "lotto_recovery_gate": {"reason": "lotto_low_liquidity_reclaim_live_reclaim_pass"},
+        },
+    )
+
+    assert pending["lotto_recovery_family"] == "lotto_low_liquidity_reclaim"
+    assert pending["parent_block_reason"] == "scout_quality_liquidity_low"
+    assert pending["recovery_probe_reason"] == "lotto_low_liquidity_reclaim_live_reclaim_pass"
+    assert pending["lotto_state"]["lottoRecoveryFamily"] == "lotto_low_liquidity_reclaim"
 
 
 def test_lotto_recovery_gate_requires_quote_and_current_reclaim():
