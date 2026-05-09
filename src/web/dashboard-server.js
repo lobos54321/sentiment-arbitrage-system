@@ -3574,17 +3574,52 @@ const server = http.createServer(async (req, res) => {
           FROM paper_missed_signal_attribution m
           ${whereSql}
         ),
-        ranked AS (
-          SELECT
-            *,
-            ROW_NUMBER() OVER (
-              PARTITION BY token_ca
-              ORDER BY max_pnl DESC, event_ts DESC
-            ) AS rn
-          FROM base
-        ),
         per_token AS (
-          SELECT * FROM ranked WHERE rn = 1
+          SELECT
+            token_ca,
+            MAX(symbol) AS symbol,
+            MAX(route) AS route,
+            MAX(component) AS component,
+            MAX(reject_reason) AS reject_reason,
+            MAX(event_ts) AS event_ts,
+            MAX(max_pnl) AS max_pnl,
+            MAX(pnl_5m) AS pnl_5m,
+            MAX(pnl_15m) AS pnl_15m,
+            MAX(pnl_60m) AS pnl_60m,
+            MAX(pnl_24h) AS pnl_24h,
+            MAX(tradable_missed) AS tradable_missed,
+            MAX(would_stop_before_peak) AS would_stop_before_peak,
+            MAX(tradability_status) AS tradability_status,
+            MAX(tradability_reason) AS tradability_reason,
+            MAX(first_tradable_pnl) AS first_tradable_pnl,
+            MAX(tradable_peak_pnl) AS tradable_peak_pnl,
+            MAX(quote_exec) AS quote_exec
+          FROM base
+          GROUP BY token_ca
+        ),
+        per_route_token AS (
+          SELECT
+            route,
+            token_ca,
+            MAX(max_pnl) AS max_pnl,
+            MAX(tradable_missed) AS tradable_missed,
+            MAX(would_stop_before_peak) AS would_stop_before_peak,
+            MAX(quote_exec) AS quote_exec
+          FROM base
+          GROUP BY route, token_ca
+        ),
+        per_blocker_token AS (
+          SELECT
+            route,
+            component,
+            reject_reason,
+            token_ca,
+            MAX(max_pnl) AS max_pnl,
+            MAX(tradable_missed) AS tradable_missed,
+            MAX(would_stop_before_peak) AS would_stop_before_peak,
+            MAX(quote_exec) AS quote_exec
+          FROM base
+          GROUP BY route, component, reject_reason, token_ca
         )`;
       const summaryRows = paperDb.prepare(`
         ${baseCte}
@@ -3627,7 +3662,7 @@ const server = http.createServer(async (req, res) => {
             NULL AS stop_before_peak_unique,`}
             MAX(max_pnl) AS max_pnl,
             AVG(max_pnl) AS avg_max_pnl
-          FROM per_token
+          FROM per_route_token
           GROUP BY route
           UNION ALL
           SELECT
@@ -3643,7 +3678,7 @@ const server = http.createServer(async (req, res) => {
             SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,
             MAX(max_pnl) AS max_pnl,
             AVG(max_pnl) AS avg_max_pnl
-          FROM per_token
+          FROM per_blocker_token
           WHERE quote_exec = 1
           GROUP BY route, component, reject_reason
           UNION ALL
@@ -3666,7 +3701,7 @@ const server = http.createServer(async (req, res) => {
             ,
             MAX(max_pnl) AS max_pnl,
             AVG(max_pnl) AS avg_max_pnl
-          FROM per_token
+          FROM per_blocker_token
           GROUP BY route, component, reject_reason
         )
         ORDER BY
