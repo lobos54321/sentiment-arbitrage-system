@@ -37,6 +37,9 @@ LOTTO_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("LOTTO_GUARDIAN_FAST_FAI
 ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC", "45"))
 ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX", "0.05"))
 ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX", "-0.02"))
+ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_SEC = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_SEC", "20"))
+ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PEAK_MAX = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PEAK_MAX", "0.01"))
+ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PNL_MAX = float(os.environ.get("ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PNL_MAX", "-0.08"))
 QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PNL", "0.0"))
 OBSERVATION_PROBE_MAX_SIZE_SOL = float(os.environ.get("OBSERVATION_PROBE_MAX_SIZE_SOL", "0.02"))
 OBSERVATION_PROBE_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_HARD_SL", "-0.30"))
@@ -88,10 +91,21 @@ def _ath_no_kline_fast_fail_detail(pos, pnl, held_sec):
             "held_sec": ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC,
             "peak_pnl": ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PEAK_MAX,
             "current_pnl": ATH_NO_KLINE_GUARDIAN_FAST_FAIL_PNL_MAX,
+            "emergency_held_sec": ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_SEC,
+            "emergency_peak_pnl": ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PEAK_MAX,
+            "emergency_current_pnl": ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PNL_MAX,
         },
     }
     if entry_mode != "ath_no_kline_tiny_probe":
         detail["reason"] = "not_ath_no_kline_tiny_probe"
+        return detail
+    if (
+        held_sec >= ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_SEC
+        and peak_pnl <= ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PEAK_MAX
+        and pnl <= ATH_NO_KLINE_GUARDIAN_EMERGENCY_FAIL_PNL_MAX
+    ):
+        detail["pass"] = True
+        detail["reason"] = "guardian_ath_no_kline_emergency_fast_fail"
         return detail
     if held_sec < ATH_NO_KLINE_GUARDIAN_FAST_FAIL_SEC:
         detail["reason"] = "ath_no_kline_fast_fail_waiting"
@@ -464,7 +478,7 @@ class ExitGuardianThread(threading.Thread):
                             'trade_id': trade_id,
                             'symbol': pos.symbol,
                             'reason': (
-                                f"guardian_ath_no_kline_no_follow_fast_fail "
+                                f"{_no_kline_fast_fail.get('reason')} "
                                 f"(held={held_sec:.0f}s peak={_no_kline_fast_fail.get('peak_pnl'):.1%} pnl={pnl:.1%})"
                             ),
                             'trigger_price': price,

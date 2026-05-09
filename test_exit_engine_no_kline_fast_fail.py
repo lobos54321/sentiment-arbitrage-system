@@ -20,6 +20,18 @@ def test_ath_no_kline_fast_fail_triggers_on_low_peak_red_probe():
     assert detail["reason"] == "guardian_ath_no_kline_no_follow_fast_fail"
 
 
+def test_ath_no_kline_emergency_fast_fail_triggers_before_standard_timer():
+    pos = SimpleNamespace(
+        peak_pnl=0.0,
+        monitor_state={"entryMode": "ath_no_kline_tiny_probe"},
+    )
+
+    detail = _ath_no_kline_fast_fail_detail(pos, -0.09, 22)
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "guardian_ath_no_kline_emergency_fast_fail"
+
+
 def test_ath_no_kline_fast_fail_does_not_touch_other_modes():
     pos = SimpleNamespace(
         peak_pnl=0.0,

@@ -284,6 +284,31 @@ def test_lotto_upstream_miss_probe_targets_only_clean_upstream_blockers():
     assert [row["symbol"] for row in candidates] == ["NATH", "UNK"]
 
 
+def test_lotto_upstream_miss_probe_includes_tracking_ttl_near_miss():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+            (created_event_ts, token_ca, symbol, signal_ts, route, component,
+             decision, reject_reason, baseline_price, baseline_ts,
+             pnl_5m, pnl_15m, max_pnl_recorded, status,
+             tradable_missed, tradability_status, would_stop_before_peak,
+             first_tradable_pnl, tradable_peak_pnl)
+        VALUES (1000, 'TtlToken', 'TTL', 900, 'LOTTO', 'discovery_tracking',
+                'expire', 'tracking_ttl_expired', 1.0, 900,
+                0.40, 1.10, 1.10, 'pending',
+                1, 'tradable_reclaim', 0, 0.40, 1.10)
+        """
+    )
+    db.commit()
+
+    candidates = find_lotto_upstream_miss_tiny_scout_candidates(db, now_ts=1200, limit=5)
+
+    assert [row["symbol"] for row in candidates] == ["TTL"]
+
+
 def test_lotto_upstream_miss_probe_skips_already_armed_token():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

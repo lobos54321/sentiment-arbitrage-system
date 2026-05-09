@@ -3510,6 +3510,250 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/missed-recovery-summary') {
+    // Fast missed-dog recovery loop summary: unique clean/quote-executable dogs by route/blocker.
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 200));
+      const sinceTs = windowedSinceTs(url, 6);
+      const whereSql = missedAttributionTimeWhere(sinceTs, 'm');
+      const whereParams = sinceTs ? { since: sinceTs } : {};
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      if (!tableNames.has('paper_missed_signal_attribution')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
+        return;
+      }
+      const missedCols = new Set(
+        paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
+      );
+      const hasTradability = missedCols.has('tradable_missed');
+      const hasDecisionEvents = tableNames.has('paper_decision_events');
+      const spreadAbortExistsSql = hasDecisionEvents ? `
+            EXISTS (
+              SELECT 1
+              FROM paper_decision_events e
+              WHERE e.token_ca = m.token_ca
+                AND e.component = 'execution_guard'
+                AND e.reason IN ('entry_edge_spread_too_high', 'spread_guard')
+                AND e.event_ts >= COALESCE(m.signal_ts, m.created_event_ts, m.baseline_ts, 0) - 60
+                AND e.event_ts <= COALESCE(m.signal_ts, m.created_event_ts, m.baseline_ts, 0) + 3600
+            )` : '0';
+      const quoteExecExpr = hasTradability ? `
+          CASE
+            WHEN COALESCE(m.tradable_missed, 0) = 1
+             AND COALESCE(m.would_stop_before_peak, 0) != 1
+             AND NOT (${spreadAbortExistsSql})
+            THEN 1 ELSE 0
+          END` : 'NULL';
+      const tradableSelect = hasTradability ? `
+            COALESCE(m.tradable_missed, 0) AS tradable_missed,
+            COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
+            m.tradability_status,
+            m.tradability_reason,
+            m.first_tradable_pnl,
+            m.tradable_peak_pnl,` : `
+            NULL AS tradable_missed,
+            NULL AS would_stop_before_peak,
+            NULL AS tradability_status,
+            NULL AS tradability_reason,
+            NULL AS first_tradable_pnl,
+            NULL AS tradable_peak_pnl,`;
+      const baseCte = `
+        WITH base AS (
+          SELECT
+            m.token_ca,
+            COALESCE(m.symbol, substr(m.token_ca, 1, 8), '?') AS symbol,
+            COALESCE(m.route, '-') AS route,
+            COALESCE(m.component, '-') AS component,
+            COALESCE(m.reject_reason, '-') AS reject_reason,
+            COALESCE(m.signal_ts, m.created_event_ts, m.baseline_ts, 0) AS event_ts,
+            COALESCE(m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+            m.pnl_5m,
+            m.pnl_15m,
+            m.pnl_60m,
+            m.pnl_24h,
+            ${tradableSelect}
+            ${quoteExecExpr} AS quote_exec
+          FROM paper_missed_signal_attribution m
+          ${whereSql}
+        ),
+        ranked AS (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY token_ca
+              ORDER BY max_pnl DESC, event_ts DESC
+            ) AS rn
+          FROM base
+        ),
+        per_token AS (
+          SELECT * FROM ranked WHERE rn = 1
+        )`;
+      const overall = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          COUNT(*) AS unique_tokens,
+          ${tierCaseSql('max_pnl')},
+          ${hasTradability ? `
+          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique` : `
+          NULL AS tradable_unique,
+          NULL AS clean_tradable_unique,
+          NULL AS quote_executable_unique,
+          NULL AS stop_before_peak_unique`}
+        FROM per_token
+      `).get(whereParams);
+      const byRoute = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          route,
+          COUNT(*) AS unique_tokens,
+          ${tierCaseSql('max_pnl')},
+          ${hasTradability ? `
+          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique` : `
+          NULL AS quote_executable_unique,
+          NULL AS clean_tradable_unique,
+          NULL AS stop_before_peak_unique`}
+        FROM per_token
+        GROUP BY route
+        ORDER BY gold_n DESC, silver_n DESC, bronze_n DESC, unique_tokens DESC
+      `).all(whereParams);
+      const byBlockerCleanQuote = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          route,
+          component,
+          reject_reason,
+          COUNT(*) AS unique_tokens,
+          ${tierCaseSql('max_pnl')},
+          MAX(max_pnl) AS max_pnl,
+          AVG(max_pnl) AS avg_max_pnl
+        FROM per_token
+        WHERE quote_exec = 1
+        GROUP BY route, component, reject_reason
+        ORDER BY gold_n DESC, silver_n DESC, bronze_n DESC, max_pnl DESC
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
+      const byBlockerAllUnique = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          route,
+          component,
+          reject_reason,
+          COUNT(*) AS unique_tokens,
+          ${tierCaseSql('max_pnl')},
+          ${hasTradability ? `
+          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
+          SUM(CASE WHEN tradable_missed = 1 AND COALESCE(would_stop_before_peak, 0) != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+          SUM(CASE WHEN COALESCE(would_stop_before_peak, 0) = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique` : `
+          NULL AS quote_executable_unique,
+          NULL AS clean_tradable_unique,
+          NULL AS stop_before_peak_unique`}
+        FROM per_token
+        GROUP BY route, component, reject_reason
+        ORDER BY gold_n DESC, silver_n DESC, bronze_n DESC, unique_tokens DESC
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
+      const topCleanQuoteDogs = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          symbol,
+          token_ca,
+          route,
+          component,
+          reject_reason,
+          max_pnl,
+          pnl_5m,
+          pnl_15m,
+          pnl_60m,
+          pnl_24h,
+          tradability_status,
+          tradability_reason,
+          first_tradable_pnl,
+          tradable_peak_pnl,
+          event_ts
+        FROM per_token
+        WHERE quote_exec = 1
+        ORDER BY max_pnl DESC
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
+      let recoveryActions = [];
+      if (hasDecisionEvents) {
+        const recoveryWhere = sinceTs ? 'AND event_ts >= @since' : '';
+        recoveryActions = paperDb.prepare(`
+          SELECT
+            component,
+            decision,
+            reason,
+            COUNT(*) AS n,
+            COUNT(DISTINCT token_ca) AS unique_tokens
+          FROM paper_decision_events
+          WHERE component IN ('ath_recovery', 'discovery_tracking', 'lotto_upstream_probe_live')
+            ${recoveryWhere}
+            AND reason IN (
+              'ath_reclaim_after_failure_pass',
+              'ath_reclaim_after_failure_price_not_recovered',
+              'ath_reclaim_after_failure_buy_pressure_weak',
+              'ath_reclaim_after_failure_tx_low',
+              'ath_reclaim_after_failure_quote_not_executable',
+              'ath_matrix_dissonance_pass',
+              'ath_matrix_dissonance_not_live_confirmed',
+              'ath_matrix_dissonance_quote_not_executable',
+              'ath_micro_reclaim_probe_pass',
+              'ath_micro_reclaim_bounce_not_confirmed',
+              'ath_micro_reclaim_buy_pressure_weak',
+              'ath_micro_reclaim_quote_not_executable',
+              'tracking_ttl_expired',
+              'tracking_ttl_final_reclaim_check'
+            )
+          GROUP BY component, decision, reason
+          ORDER BY n DESC
+          LIMIT @limit
+        `).all({ ...whereParams, limit });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
+          clean_quote_definition: 'tradable_missed=1 and would_stop_before_peak!=1 and no spread abort decision near signal',
+        },
+        overall_unique: overall,
+        by_route: byRoute,
+        by_blocker_clean_quote: byBlockerCleanQuote,
+        by_blocker_all_unique: byBlockerAllUnique,
+        top_clean_quote_dogs: topCleanQuoteDogs,
+        recovery_actions: recoveryActions,
+        notes: {
+          endpoint_goal: 'fast closed-loop summary for missed gold/silver/bronze recovery, avoiding full attribution scans',
+          anchor_mismatch: 'not computed here; use lifecycle-summary for trade anchor audit',
+        },
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/stats/missed-gates') {
     // Most expensive gates: which SmartEntry reject reasons caused the most missed gold/silver dogs.
     // Query paper_decision_events (timing rejects) joined against paper_missed_signal_attribution.

@@ -424,6 +424,18 @@ def test_ath_no_kline_followthrough_allows_confirmed_activity():
     assert decision["checks"]["tx_ok"] is True
 
 
+def test_ath_no_kline_followthrough_blocks_matrix_only_without_live_activity():
+    decision = _ath_no_kline_followthrough_guard(
+        _ath_no_kline_pending(),
+        {"buys_m5": 3, "sells_m5": 2, "price_change_m5": 1.0, "vol_m5": 2500},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_no_kline_no_followthrough_block"
+    assert decision["checks"]["matrix_strong"] is True
+    assert decision["checks"]["tx_ok"] is False
+
+
 def test_tiny_probe_structure_sl_selects_tighter_stop():
     sl, reason = _select_structure_stop_loss(
         -0.30,
@@ -527,6 +539,19 @@ def test_ath_recovery_mode_mapping_does_not_pollute_no_kline():
     assert mode == ATH_NO_KLINE_TINY_PROBE_MODE
 
 
+def test_ath_uncertainty_mc_shadow_tracks_micro_reclaim_watch():
+    mode = _ath_recovery_mode_for_candidate(
+        ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        route="ATH",
+        source_detail={
+            "ath_uncertainty_reject_reason": "ath_uncertainty_mc_shadow_only",
+            "scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100},
+        },
+    )
+
+    assert mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+
+
 def test_ath_reclaim_after_failure_passes_only_after_reclaim():
     db = _paper_trade_db([
         {
@@ -552,16 +577,54 @@ def test_ath_reclaim_after_failure_passes_only_after_reclaim():
         candidate=candidate,
         route="ATH",
         token_risk={"blocked": True, "cooldown_expired": True},
-        dex_snapshot={"price": 1.09},
-        activity={"buy_sell_ratio": 1.30, "tx_m5": 100, "price_change_m5": 9.0},
+        dex_snapshot={"price": 1.13},
+        activity={"buy_sell_ratio": 1.40, "tx_m5": 60, "price_change_m5": 13.0},
         liquidity_usd=12000,
         top10_pct=20,
+        quote_probe={"success": True, "reason": "quote_executable"},
         now_ts=1_778_223_600,
     )
 
     assert decision["pass"] is True
     assert decision["reason"] == "ath_reclaim_after_failure_pass"
     assert decision["family"] == "recent_failure_reclaim"
+
+
+def test_ath_reclaim_after_failure_does_not_blanket_block_moderate_prior_hard_sl():
+    db = _paper_trade_db([
+        {
+            "entry_mode": "momentum_direct_entry",
+            "exit_reason": "hard_sl",
+            "pnl_pct": -0.18,
+            "peak_pnl": 0.08,
+            "exit_price": 1.0,
+        },
+    ])
+    candidate = {
+        "token_ca": "TokenCA",
+        "route": "ATH",
+        "source_detail": {
+            "scout_quality": {"reason": "scout_quality_recent_token_failure"},
+            "scores": {"trend": 55, "volume": 70, "price": 100, "signal": 100},
+        },
+    }
+
+    decision = _ath_recovery_eligibility(
+        db,
+        entry_mode=ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": True, "cooldown_expired": True},
+        dex_snapshot={"price": 1.14},
+        activity={"buy_sell_ratio": 1.40, "tx_m5": 60, "price_change_m5": 14.0},
+        liquidity_usd=12000,
+        top10_pct=20,
+        quote_probe={"success": True, "reason": "quote_executable"},
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "ath_reclaim_after_failure_pass"
 
 
 def test_ath_reclaim_after_failure_blocks_recent_hard_sl():
@@ -623,6 +686,31 @@ def test_ath_matrix_dissonance_requires_quote_executable():
 
     assert decision["pass"] is False
     assert decision["reason"] == "ath_matrix_dissonance_quote_not_executable"
+
+
+def test_ath_matrix_dissonance_waits_for_live_price_confirmation():
+    candidate = {
+        "token_ca": "TokenCA",
+        "route": "ATH",
+        "source_reject_reason": "matrices not yet aligned",
+        "source_detail": {"scores": {"trend": 40, "volume": 70, "price": 100, "signal": 80}},
+    }
+
+    decision = _ath_recovery_eligibility(
+        _paper_trade_db(),
+        entry_mode=ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": False},
+        activity={"buy_sell_ratio": 1.25, "tx_m5": 100, "price_change_m5": -0.1},
+        liquidity_usd=12000,
+        top10_pct=20,
+        quote_probe={"success": True, "reason": "quote_executable"},
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "ath_matrix_dissonance_not_live_confirmed"
 
 
 def test_ath_micro_reclaim_blocks_weak_buy_pressure():
