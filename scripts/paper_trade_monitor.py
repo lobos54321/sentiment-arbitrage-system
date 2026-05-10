@@ -2487,7 +2487,7 @@ def _phase_policy_live_exit_detail(pos, phase_policy_payload, *, policy_route=No
                 'live_reason': f"phase_probe_rug_defense_exit ({phase_reason})",
                 'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
             }
-        if phase_reason in {'no_follow_fast_fail_20s', 'no_follow_60s_shadow'}:
+        if phase_reason in {'no_follow_fast_fail_20s', 'no_follow_decay_30s', 'no_follow_60s_shadow'}:
             return {
                 'pass': True,
                 'reason': 'tiny_phase_no_follow_live_exit',
@@ -2503,11 +2503,11 @@ def _phase_policy_live_exit_detail(pos, phase_policy_payload, *, policy_route=No
                 'live_reason': f"phase_rug_defense_exit ({phase_reason})",
                 'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
             }
-        if phase_reason == 'no_follow_fast_fail_20s':
+        if phase_reason in {'no_follow_fast_fail_20s', 'no_follow_decay_30s', 'no_follow_60s_shadow'}:
             return {
                 'pass': True,
-                'reason': 'lotto_phase_no_follow_fast_live_exit',
-                'live_reason': 'phase_no_follow_fast_fail_20s',
+                'reason': 'lotto_phase_no_follow_live_exit',
+                'live_reason': f"phase_{phase_reason}",
                 'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
             }
 

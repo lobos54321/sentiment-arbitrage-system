@@ -291,6 +291,9 @@ def evaluate_phase_policy(
         if held_sec >= 20 and peak_pnl < 0.03 and current_pnl <= -0.08:
             action = "EXIT"
             reason = "no_follow_fast_fail_20s"
+        elif held_sec >= 30 and peak_pnl < 0.03 and current_pnl <= -0.05:
+            action = "EXIT"
+            reason = "no_follow_decay_30s"
         elif held_sec >= 60:
             action = "EXIT"
             reason = "no_follow_60s_shadow"

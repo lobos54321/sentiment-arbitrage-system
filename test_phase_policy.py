@@ -82,6 +82,21 @@ def test_no_follow_fast_fail_exits_after_20s():
     assert decision.reason == "no_follow_fast_fail_20s"
 
 
+def test_no_follow_decay_exits_before_full_stop_loss():
+    decision = evaluate_phase_policy(
+        current_pnl=-0.055,
+        peak_pnl=0.018,
+        held_sec=35,
+        sold_pct=0.0,
+        dex_snapshot={"buys_m5": 8, "sells_m5": 9, "liquidity_usd": 20_000},
+        kline_bars=rising_bars(),
+        current_price=1.11,
+    )
+    assert decision.phase_state == "NO_FOLLOW"
+    assert decision.shadow_action == "EXIT"
+    assert decision.reason == "no_follow_decay_30s"
+
+
 def run_tests():
     tests = [
         test_kline_classifies_above_rising_ema,
@@ -89,6 +104,7 @@ def run_tests():
         test_peak_25_to_50_recommends_recover_principal,
         test_high_rug_risk_overrides_phase,
         test_no_follow_fast_fail_exits_after_20s,
+        test_no_follow_decay_exits_before_full_stop_loss,
     ]
     for test in tests:
         test()

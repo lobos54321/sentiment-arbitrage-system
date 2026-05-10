@@ -715,6 +715,19 @@ def test_phase_policy_live_exit_allows_tiny_probe_no_follow_and_rug_defense():
     assert rug["live_reason"] == "phase_probe_rug_defense_exit (rug_risk_78)"
 
 
+def test_phase_policy_live_exit_allows_lotto_primary_no_follow_decay():
+    pos = _DummyPos(entry_mode="momentum_direct_entry", size_sol=0.01)
+
+    detail = _phase_policy_live_exit_detail(
+        pos,
+        {"shadow_action": "EXIT", "phase_state": "NO_FOLLOW", "reason": "no_follow_decay_30s"},
+        policy_route="LOTTO",
+    )
+
+    assert detail["pass"] is True
+    assert detail["live_reason"] == "phase_no_follow_decay_30s"
+
+
 def test_lotto_sl_quote_gap_protection_cancels_when_quote_above_stop_floor():
     detail = _exit_stop_quote_gap_protection(
         "lotto_sl (-19.0% <= -18.0%)",
