@@ -316,6 +316,7 @@ ATH_MICRO_RECLAIM_MIN_BS = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_BS', '1.2
 ATH_MICRO_RECLAIM_MIN_TX_M5 = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_TX_M5', '80'))
 ATH_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('ATH_DYNAMIC_TTL_EXTEND_SEC', str(15 * 60)))
 ATH_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('ATH_DYNAMIC_TTL_MAX_EXTENSIONS', '2'))
+ATH_TTL_FINAL_RECLAIM_EXTEND_SEC = int(os.environ.get('ATH_TTL_FINAL_RECLAIM_EXTEND_SEC', str(5 * 60)))
 ATH_NO_KLINE_REENTRY_GUARD_ENABLED = os.environ.get('ATH_NO_KLINE_REENTRY_GUARD_ENABLED', 'true').lower() != 'false'
 ATH_NO_KLINE_REENTRY_LOOKBACK_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_LOOKBACK_SEC', str(4 * 60 * 60)))
 ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC', str(6 * 60 * 60)))
@@ -1768,6 +1769,7 @@ ATH_MICRO_RECLAIM_SOURCE_REASONS = {
     'trend_bearish_timeout',
     'odds_after_cost_below_policy',
     'p_follow_below_policy',
+    'tracking_ttl_expired',
     'ath_uncertainty_mc_shadow_only',
     'ath_uncertainty_mc_gate',
     'discovery_ath_mc_shadow_only',
@@ -6684,6 +6686,59 @@ def process_discovery_tracking_candidates(
                         event_ts=now_ts,
                     )
                     continue
+                if not candidate.get('ath_ttl_retargeted'):
+                    retarget_mode = _ath_recovery_mode_for_reason(
+                        candidate.get('last_wait_reason') or 'tracking_ttl_expired',
+                        parent_reason=candidate.get('source_reject_reason'),
+                    )
+                    if retarget_mode:
+                        candidate['ath_ttl_retargeted'] = True
+                        candidate['expires_at'] = now_ts + ATH_TTL_FINAL_RECLAIM_EXTEND_SEC
+                        if retarget_mode != mode:
+                            _retarget_discovery_candidate(
+                                db,
+                                discovery_candidates,
+                                key,
+                                candidate,
+                                new_mode=retarget_mode,
+                                reason='ath_ttl_final_reclaim_retarget',
+                                now_ts=now_ts,
+                                lifecycle=ttl_lifecycle,
+                                detail={
+                                    'ttl_reason': 'tracking_ttl_expired',
+                                    'latest_blocker': candidate.get('last_wait_reason'),
+                                    'source_reject_reason': candidate.get('source_reject_reason'),
+                                    'old_mode': mode,
+                                    'ttl_extend_sec': ATH_TTL_FINAL_RECLAIM_EXTEND_SEC,
+                                    'last_ath_strength_snapshot': ttl_detail,
+                                },
+                            )
+                            continue
+                        record_decision_event(
+                            db,
+                            component='discovery_tracking',
+                            event_type='candidate_recheck',
+                            decision='wait',
+                            reason='ath_ttl_final_reclaim_watch_extended',
+                            token_ca=token_ca,
+                            symbol=candidate.get('symbol'),
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=candidate.get('signal_ts'),
+                            signal_id=candidate.get('signal_id'),
+                            route=route,
+                            data_source='dexscreener+lifecycle',
+                            payload=with_lifecycle_payload({
+                                'entry_mode': mode,
+                                'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                                'attempts': candidate.get('attempts'),
+                                'ttl_extend_sec': ATH_TTL_FINAL_RECLAIM_EXTEND_SEC,
+                                'last_wait_reason': candidate.get('last_wait_reason'),
+                                'source_reject_reason': candidate.get('source_reject_reason'),
+                                'last_ath_strength_snapshot': ttl_detail,
+                            }, ttl_lifecycle),
+                            event_ts=now_ts,
+                        )
+                        continue
             if route == 'LOTTO' and mode in LOTTO_RECOVERY_TINY_PROBE_MODES and LOTTO_DYNAMIC_TTL_ENABLED:
                 try:
                     ttl_dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca) or {}

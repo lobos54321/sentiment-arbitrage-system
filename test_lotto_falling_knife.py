@@ -34,6 +34,7 @@ from paper_trade_monitor import (  # noqa: E402
     find_ath_real_probe_candidates,
     find_lotto_real_probe_candidates,
     find_lotto_upstream_miss_tiny_scout_candidates,
+    ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
     ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
@@ -2308,6 +2309,93 @@ def test_discovery_tracking_arms_lotto_low_liquidity_reclaim_with_quote(monkeypa
     ).fetchone()
     assert row["decision"] == "pass"
     assert row["reason"] == "lotto_low_liquidity_reclaim_live_reclaim_pass"
+
+
+def test_ath_tracking_ttl_expiry_gets_final_micro_reclaim_watch(monkeypatch):
+    import paper_trade_monitor as monitor_module
+
+    class FakeWatchlist:
+        def __init__(self):
+            self.entry = {
+                "id": 11,
+                "ca": "AthTtlToken",
+                "symbol": "ATTL",
+                "type": "ATH",
+                "pool_address": "PoolA",
+                "signal_ts": 1000,
+                "premium_signal_id": 111,
+                "signal_price": 1.0,
+                "signal_mc": 50000,
+                "signal_top10": 30,
+                "added_at": 1000,
+            }
+
+        def get_by_id(self, entry_id):
+            return dict(self.entry) if entry_id == self.entry["id"] else None
+
+        def get_by_ca(self, ca):
+            return dict(self.entry) if ca == self.entry["ca"] else None
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor_module, "fetch_dexscreener_trend_snapshot", lambda *_args, **_kwargs: {
+        "market_cap": 50000,
+        "liquidity_usd": 12000,
+        "price_change_m5": -1,
+        "vol_m5": 3000,
+        "buys_m5": 20,
+        "sells_m5": 25,
+        "pair_address": "PoolA",
+    })
+    monkeypatch.setattr(monitor_module, "get_pool_address", lambda *_args, **_kwargs: "PoolA")
+
+    watchlist = FakeWatchlist()
+    discovery_candidates = {}
+    track_discovery_candidate(
+        db,
+        discovery_candidates,
+        mode=ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+        route="ATH",
+        token_ca="AthTtlToken",
+        symbol="ATTL",
+        lifecycle_id="AthTtlToken:1000",
+        signal_ts=1000,
+        signal_id=111,
+        pool="PoolA",
+        watchlist_id=11,
+        watchlist_entry=watchlist.entry,
+        source_component="matrix_evaluator",
+        source_reject_reason="matrices not yet aligned",
+        source_detail={"scores": {"trend": 20, "volume": 40, "price": 40, "signal": 40}},
+        now_ts=1200,
+    )
+    old_key = next(iter(discovery_candidates))
+    discovery_candidates[old_key]["expires_at"] = 1210
+
+    pending_entries = {}
+    armed = process_discovery_tracking_candidates(
+        db,
+        watchlist,
+        discovery_candidates,
+        pending_entries,
+        {},
+        now_ts=1211,
+        max_positions=10,
+    )
+
+    assert armed == 0
+    assert pending_entries == {}
+    assert old_key not in discovery_candidates
+    candidate = next(iter(discovery_candidates.values()))
+    assert candidate["mode"] == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["ath_ttl_retargeted"] is True
+    assert candidate["expires_at"] > 1211
+    row = db.execute(
+        "SELECT event_type, reason FROM paper_decision_events WHERE component = 'discovery_tracking' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["event_type"] == "candidate_retarget"
+    assert row["reason"] == "ath_ttl_final_reclaim_retarget"
 
 
 def test_ath_uncertainty_scout_allows_experimental_midcap_probe(monkeypatch):

@@ -1003,6 +1003,10 @@ def test_ath_uncertainty_matrix_dissonance_tracks_watch_even_when_initial_matrix
     assert mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE
 
 
+def test_ath_tracking_ttl_expiry_maps_to_micro_reclaim_watch():
+    assert monitor._ath_recovery_mode_for_reason("tracking_ttl_expired") == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+
+
 def test_ath_reclaim_after_failure_passes_only_after_reclaim():
     db = _paper_trade_db([
         {
