@@ -768,6 +768,33 @@ def test_ath_uncertainty_mc_shadow_tracks_micro_reclaim_watch():
     assert mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
 
 
+def test_ath_uncertainty_soft_quality_tracks_micro_reclaim_even_when_initial_matrix_is_weak():
+    mode = _ath_recovery_mode_for_candidate(
+        ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        route="ATH",
+        source_reject_reason="matrices not yet aligned",
+        source_detail={
+            "ath_uncertainty_reject_reason": "scout_quality_negative_trend",
+            "scores": {"trend": 20, "volume": 25, "price": 40, "signal": 35, "momentum": 10},
+        },
+    )
+
+    assert mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+
+
+def test_ath_uncertainty_matrix_dissonance_tracks_watch_even_when_initial_matrix_is_weak():
+    mode = _ath_recovery_mode_for_candidate(
+        ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        route="ATH",
+        source_reject_reason="matrices not yet aligned",
+        source_detail={
+            "scores": {"trend": 20, "volume": 25, "price": 40, "signal": 35, "momentum": 10},
+        },
+    )
+
+    assert mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE
+
+
 def test_ath_reclaim_after_failure_passes_only_after_reclaim():
     db = _paper_trade_db([
         {

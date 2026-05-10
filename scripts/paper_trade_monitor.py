@@ -1847,20 +1847,6 @@ def _ath_recovery_mode_for_candidate(mode, *, route=None, source_reject_reason=N
         )
         if not _ath_reclaim_after_failure_matrix_detail(scores).get('pass'):
             return mode
-    if recovery_mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE:
-        scores = _ath_recovery_scores(
-            {'source_reject_reason': source_reject_reason, 'source_detail': source_detail},
-            {'source_detail': source_detail},
-        )
-        if not _ath_recovery_matrix_detail(scores).get('pass'):
-            return mode
-    if recovery_mode == ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE:
-        scores = _ath_recovery_scores(
-            {'source_reject_reason': source_reject_reason, 'source_detail': source_detail},
-            {'source_detail': source_detail},
-        )
-        if not _ath_recovery_matrix_detail(scores, matrix_dissonance=True).get('pass'):
-            return mode
     return recovery_mode or mode
 
 
@@ -4106,7 +4092,10 @@ def arm_ath_uncertainty_tiny_scout(
         reject_reason = scout_quality.get('reason') or 'scout_quality_reject'
     if reject_reason:
         if _discovery_is_soft_quality_reason(reject_reason):
-            discovery_mode = _discovery_mode_for_ath_reason(reason)
+            discovery_mode = (
+                _ath_recovery_mode_for_reason(reject_reason, parent_reason=reason)
+                or _discovery_mode_for_ath_reason(reason)
+            )
             track_discovery_candidate(
                 db,
                 discovery_candidates,
@@ -6692,6 +6681,9 @@ def process_discovery_tracking_candidates(
                 w_entry = None
         if not w_entry:
             w_entry = candidate.get('watchlist_entry') or watchlist.get_by_ca(token_ca)
+        latest_matrix_scores = _json_dict((w_entry or {}).get('last_scores_json'))
+        if latest_matrix_scores:
+            candidate['matrix_scores'] = latest_matrix_scores
         synthetic_entry = _discovery_synthetic_watchlist_entry(candidate, dex_snapshot)
         entry_for_lifecycle = w_entry or synthetic_entry
         pool = (
@@ -6867,6 +6859,28 @@ def process_discovery_tracking_candidates(
                         candidate,
                         new_mode=retarget_mode,
                         reason='lotto_latest_hard_blocker_retarget',
+                        now_ts=now_ts,
+                        lifecycle=lifecycle,
+                        detail={
+                            'hard_reason': hard_reason,
+                            'source_reject_reason': candidate.get('source_reject_reason'),
+                            'old_mode': mode,
+                        },
+                    )
+                    continue
+            if route == 'ATH':
+                retarget_mode = _ath_recovery_mode_for_reason(
+                    hard_reason,
+                    parent_reason=candidate.get('source_reject_reason'),
+                )
+                if retarget_mode and retarget_mode != mode:
+                    _retarget_discovery_candidate(
+                        db,
+                        discovery_candidates,
+                        key,
+                        candidate,
+                        new_mode=retarget_mode,
+                        reason='ath_latest_hard_blocker_retarget',
                         now_ts=now_ts,
                         lifecycle=lifecycle,
                         detail={
@@ -7200,6 +7214,29 @@ def process_discovery_tracking_candidates(
                         candidate,
                         new_mode=retarget_mode,
                         reason='lotto_latest_scout_quality_retarget',
+                        now_ts=now_ts,
+                        lifecycle=lifecycle,
+                        detail={
+                            'scout_quality_reason': wait_reason,
+                            'source_reject_reason': candidate.get('source_reject_reason'),
+                            'old_mode': mode,
+                            'scout_quality': scout_quality,
+                        },
+                    )
+                    continue
+            if route == 'ATH':
+                retarget_mode = _ath_recovery_mode_for_reason(
+                    wait_reason,
+                    parent_reason=candidate.get('source_reject_reason'),
+                )
+                if retarget_mode and retarget_mode != mode:
+                    _retarget_discovery_candidate(
+                        db,
+                        discovery_candidates,
+                        key,
+                        candidate,
+                        new_mode=retarget_mode,
+                        reason='ath_latest_scout_quality_retarget',
                         now_ts=now_ts,
                         lifecycle=lifecycle,
                         detail={

@@ -34,6 +34,7 @@ from paper_trade_monitor import (  # noqa: E402
     find_ath_real_probe_candidates,
     find_lotto_real_probe_candidates,
     find_lotto_upstream_miss_tiny_scout_candidates,
+    ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
@@ -2089,7 +2090,9 @@ def test_ath_uncertainty_soft_quality_reject_enters_discovery_tracking(monkeypat
     assert armed is False
     assert len(discovery_candidates) == 1
     candidate = next(iter(discovery_candidates.values()))
-    assert candidate["mode"] == "matrix_reclaim_tiny_probe"
+    assert candidate["mode"] == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["source_reject_reason"] == "matrices not yet aligned"
+    assert candidate["source_detail"]["ath_uncertainty_reject_reason"] == "scout_quality_buy_pressure_weak"
     row = db.execute(
         "SELECT component, event_type, reason FROM paper_decision_events WHERE component = 'discovery_tracking'"
     ).fetchone()
