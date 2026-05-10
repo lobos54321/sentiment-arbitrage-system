@@ -47,6 +47,7 @@ from paper_trade_monitor import (  # noqa: E402
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
     _post_exit_runner_watch_detail,
+    _update_candidate_quote_confirmation,
     track_post_exit_runner_candidate,
 )
 
@@ -646,7 +647,7 @@ def test_lotto_recovery_gate_requires_quote_and_current_reclaim():
         LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
         candidate={"first_seen_ts": 1000},
         activity={"buy_sell_ratio": 1.3, "vol_m5": 12000, "tx_m5": 100, "price_change_m5": 4},
-        quote_probe={"success": True},
+        quote_probe={"success": True, "consecutive_successes": 2},
         current_mc=42000,
         liquidity_usd=12000,
         top1_pct=35,
@@ -662,7 +663,7 @@ def test_lotto_micro_reclaim_expires_after_short_watch():
         LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
         candidate={"first_seen_ts": 1000},
         activity={"buy_sell_ratio": 1.4, "vol_m5": 9000, "tx_m5": 90, "price_change_m5": 9},
-        quote_probe={"success": True},
+        quote_probe={"success": True, "consecutive_successes": 2},
         current_mc=52000,
         liquidity_usd=9000,
         top1_pct=30,
@@ -754,7 +755,25 @@ def test_post_exit_runner_watch_allows_lotto_stop_as_tiny_reclaim_watch():
 
     assert detail["pass"] is True
     assert detail["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert detail["source_reject_reason"] == "volatile_runner_watch"
+    assert detail["watch_family"] == "volatile_runner"
+
+
+def test_post_exit_runner_watch_keeps_high_peak_as_runner_watch():
+    pos = _DummyPos(entry_mode="momentum_direct_entry", size_sol=0.01, route="LOTTO")
+    pos.peak_pnl = 0.25
+
+    detail = _post_exit_runner_watch_detail(
+        pos,
+        "guardian_trail_stop (pnl=12.0% < floor=15.0%, peak=25.0%)",
+        realized_pnl=0.12,
+        trigger_pnl=0.12,
+        exit_quote_pnl=0.12,
+    )
+
+    assert detail["pass"] is True
     assert detail["source_reject_reason"] == "post_exit_runner_watch"
+    assert detail["watch_family"] == "post_exit_runner"
 
 
 def test_post_exit_runner_watch_rejects_toxic_rug_exit():
@@ -802,6 +821,61 @@ def test_track_post_exit_runner_candidate_uses_new_exit_lifecycle_and_ttl():
     assert candidate["expires_at"] >= 1_778_221_800 + 30 * 60
 
 
+def test_low_liq_quote_confirmation_requires_two_consecutive_successes():
+    candidate = {}
+    first_probe = {"success": True, "effective_price": 1.0}
+    first = _update_candidate_quote_confirmation(
+        candidate,
+        first_probe,
+        key="low_liq_quote",
+        min_successes=2,
+        now_ts=1000,
+    )
+    second_probe = {"success": True, "effective_price": 1.01}
+    second = _update_candidate_quote_confirmation(
+        candidate,
+        second_probe,
+        key="low_liq_quote",
+        min_successes=2,
+        now_ts=1010,
+    )
+
+    assert first["pass"] is False
+    assert first_probe["confirmed"] is False
+    assert second["pass"] is True
+    assert second_probe["confirmed"] is True
+    assert candidate["low_liq_quote_success_count"] == 2
+
+
+def test_lotto_low_liq_reclaim_gate_waits_for_quote_confirmation():
+    weak = _lotto_recovery_activity_gate(
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000},
+        activity={"buy_sell_ratio": 1.5, "vol_m5": 5000, "tx_m5": 100, "price_change_m5": 3},
+        quote_probe={"success": True, "consecutive_successes": 1},
+        current_mc=40000,
+        liquidity_usd=2500,
+        top1_pct=30,
+        top10_pct=60,
+        now_ts=1010,
+    )
+    strong = _lotto_recovery_activity_gate(
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000},
+        activity={"buy_sell_ratio": 1.5, "vol_m5": 5000, "tx_m5": 100, "price_change_m5": 3},
+        quote_probe={"success": True, "consecutive_successes": 2},
+        current_mc=40000,
+        liquidity_usd=2500,
+        top1_pct=30,
+        top10_pct=60,
+        now_ts=1010,
+    )
+
+    assert weak["pass"] is False
+    assert "low_liq_quote_confirmation_pending" in weak["failures"]
+    assert strong["pass"] is True
+
+
 def test_lotto_sl_quote_gap_protection_cancels_when_quote_above_stop_floor():
     detail = _exit_stop_quote_gap_protection(
         "lotto_sl (-19.0% <= -18.0%)",
@@ -845,12 +919,13 @@ def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():
         candidate,
         dex_snapshot={"market_cap": 40000, "liquidity_usd": 2500, "vol_m5": 4000, "buys_m5": 60, "sells_m5": 40, "price_change_m5": 3},
         activity={"buy_sell_ratio": 1.5, "vol_m5": 4000, "tx_m5": 100, "price_change_m5": 3},
-        quote_probe={"success": True},
+        quote_probe={"success": True, "consecutive_successes": 2},
         require_quote=True,
         now_ts=1200,
     )
     assert final["pass"] is True
     assert final["reason"] == "lotto_tracking_ttl_extended"
+    assert final["thresholds"]["max_extensions"] == 4
 
 
 def test_entry_mode_quality_high_quality_tiny_override_allows_strong_ath():
@@ -1427,6 +1502,7 @@ def test_dynamic_ath_ttl_only_extends_strong_quote_executable_candidate():
 
     assert strong["pass"] is True
     assert strong["reason"] == "ath_tracking_ttl_extended"
+    assert strong["thresholds"]["max_extensions"] == 4
     assert weak["pass"] is False
     assert weak["reason"] == "ath_dynamic_ttl_recent_quality_weak"
 

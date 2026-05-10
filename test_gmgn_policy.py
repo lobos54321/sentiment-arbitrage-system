@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 from gmgn_policy import (  # noqa: E402
     evaluate_gmgn_lotto_policy,
     evaluate_gmgn_tiny_scout_rescue,
+    gmgn_policy_allows_bundler_only_tiny_rescue,
     gmgn_policy_blocks_explosive_direct,
 )
 from entry_engine import evaluate_smart_entry  # noqa: E402
@@ -144,6 +145,59 @@ def test_gmgn_tiny_scout_does_not_rescue_toxic_policy():
     )
 
     assert rescue["allow"] is False
+
+
+def test_gmgn_bundler_only_toxic_can_rescue_tiny_scout():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "smart_degen_count": 4,
+            "renowned_count": 2,
+            "creator_close": True,
+            "top10_holder_rate": 0.18,
+            "bundler_rate": 0.72,
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+            "creator_hold_rate": 0.0,
+            "dev_team_hold_rate": 0.0,
+        }
+    )
+    rescue = evaluate_gmgn_tiny_scout_rescue(
+        "lotto_live_top1_36pct",
+        policy,
+        {
+            "live_top1_pct": 36.4,
+            "live_top10_pct": 62.5,
+            "liquidity_usd": 6500,
+            "vol_m5": 18000,
+            "tx_m5": 180,
+            "price_change_m5": -8,
+        },
+    )
+
+    assert policy["action"] == "reject"
+    assert policy["reason"] == "gmgn_toxic_bundler"
+    assert gmgn_policy_allows_bundler_only_tiny_rescue(policy) is True
+    assert rescue["allow"] is True
+    assert rescue["position_size_sol"] == 0.003
+
+
+def test_gmgn_bundler_rescue_still_blocks_other_hard_toxicity():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "smart_degen_count": 4,
+            "renowned_count": 2,
+            "top10_holder_rate": 0.18,
+            "bundler_rate": 0.72,
+            "rat_trader_amount_rate": 0.42,
+            "entrapment_ratio": 0.01,
+            "creator_hold_rate": 0.0,
+            "dev_team_hold_rate": 0.0,
+        }
+    )
+
+    assert gmgn_policy_allows_bundler_only_tiny_rescue(policy) is False
 
 
 def test_gmgn_tiny_scout_rescues_unknown_data_with_clean_high_activity():

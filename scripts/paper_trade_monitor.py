@@ -202,6 +202,7 @@ PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE = os.environ.get('PHASE_POLICY_LIVE_EXIT_R
 EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED = os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED', 'true').lower() != 'false'
 EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP', '0.05'))
 EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER', '0.005'))
+DOG_CANDIDATE_WATCH_ENABLED = os.environ.get('DOG_CANDIDATE_WATCH_ENABLED', 'true').lower() != 'false'
 POST_EXIT_RUNNER_WATCH_ENABLED = os.environ.get('POST_EXIT_RUNNER_WATCH_ENABLED', 'true').lower() != 'false'
 POST_EXIT_RUNNER_WATCH_TTL_SEC = int(os.environ.get('POST_EXIT_RUNNER_WATCH_TTL_SEC', str(30 * 60)))
 POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN = max(1, int(os.environ.get('POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN', '1')))
@@ -250,14 +251,15 @@ LOTTO_MICRO_RECLAIM_MIN_BOUNCE_PCT = float(os.environ.get('LOTTO_MICRO_RECLAIM_M
 LOTTO_MICRO_RECLAIM_MIN_BS = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_BS', '1.20'))
 LOTTO_MICRO_RECLAIM_MIN_VOL_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_VOL_M5', '4000'))
 LOTTO_MICRO_RECLAIM_MIN_TX_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_TX_M5', '40'))
+LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES = max(1, int(os.environ.get('LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES', '2')))
 LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED = os.environ.get('LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED', 'true').lower() != 'false'
 LOTTO_STRICT_RECOVERY_MIN_BS = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_BS', '1.35'))
 LOTTO_STRICT_RECOVERY_MIN_VOL_M5 = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_VOL_M5', '8000'))
 LOTTO_STRICT_RECOVERY_MIN_TX_M5 = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_TX_M5', '80'))
 LOTTO_STRICT_RECOVERY_MIN_PC_M5 = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_PC_M5', '8.0'))
 LOTTO_DYNAMIC_TTL_ENABLED = os.environ.get('LOTTO_DYNAMIC_TTL_ENABLED', 'true').lower() != 'false'
-LOTTO_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('LOTTO_DYNAMIC_TTL_EXTEND_SEC', str(15 * 60)))
-LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS', '2'))
+LOTTO_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('LOTTO_DYNAMIC_TTL_EXTEND_SEC', str(30 * 60)))
+LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS', '4'))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_REASONS = {
     'not_ath_v17',
     'not_ath_prebuy_kline_unknown_data_blocked',
@@ -328,8 +330,8 @@ ATH_MICRO_RECLAIM_MAX_WATCH_SEC = int(os.environ.get('ATH_MICRO_RECLAIM_MAX_WATC
 ATH_MICRO_RECLAIM_MIN_BOUNCE_PCT = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_BOUNCE_PCT', '6.0'))
 ATH_MICRO_RECLAIM_MIN_BS = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_BS', '1.25'))
 ATH_MICRO_RECLAIM_MIN_TX_M5 = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_TX_M5', '80'))
-ATH_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('ATH_DYNAMIC_TTL_EXTEND_SEC', str(15 * 60)))
-ATH_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('ATH_DYNAMIC_TTL_MAX_EXTENSIONS', '2'))
+ATH_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('ATH_DYNAMIC_TTL_EXTEND_SEC', str(30 * 60)))
+ATH_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('ATH_DYNAMIC_TTL_MAX_EXTENSIONS', '4'))
 ATH_TTL_FINAL_RECLAIM_EXTEND_SEC = int(os.environ.get('ATH_TTL_FINAL_RECLAIM_EXTEND_SEC', str(5 * 60)))
 ATH_NO_KLINE_REENTRY_GUARD_ENABLED = os.environ.get('ATH_NO_KLINE_REENTRY_GUARD_ENABLED', 'true').lower() != 'false'
 ATH_NO_KLINE_REENTRY_LOOKBACK_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_LOOKBACK_SEC', str(4 * 60 * 60)))
@@ -1790,6 +1792,7 @@ ATH_MICRO_RECLAIM_SOURCE_REASONS = {
     'discovery_ath_mc_shadow_only',
     'discovery_ath_mc_gate',
     'post_exit_runner_watch',
+    'volatile_runner_watch',
 }
 ATH_MICRO_RECLAIM_SOURCE_PREFIXES = (
     'dead_cat_below_high_',
@@ -5415,6 +5418,7 @@ LOTTO_MICRO_RECLAIM_SOURCE_REASONS = {
     'odds_after_cost_below_policy',
     'p_follow_below_policy',
     'post_exit_runner_watch',
+    'volatile_runner_watch',
 }
 LOTTO_RECOVERY_TINY_PROBE_MODES = {
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
@@ -5430,6 +5434,7 @@ LOTTO_STRICT_RECOVERY_SOURCE_REASONS = {
     'scout_quality_volume_low',
     'chasing_top',
     'post_exit_runner_watch',
+    'volatile_runner_watch',
 }
 
 
@@ -5468,6 +5473,7 @@ def _lotto_recovery_thresholds(mode):
             'min_tx_m5': LOTTO_LOW_LIQ_RECLAIM_MIN_TX_M5,
             'min_price_change_m5': LOTTO_LOW_LIQ_RECLAIM_MIN_PC_M5,
             'min_vol_m5': LOTTO_LOW_LIQ_RECLAIM_MIN_VOL_M5,
+            'min_quote_successes': LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES,
         }
     if mode == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE:
         return {
@@ -5599,6 +5605,13 @@ def _lotto_recovery_activity_gate(
         failures.append(gmgn_policy.get('reason') or 'gmgn_policy_reject')
     if require_quote and thresholds.get('requires_quote') and not quote_ok:
         failures.append((quote_probe or {}).get('reason') or 'quote_not_executable')
+    if (
+        require_quote
+        and mode == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+        and liq < thresholds['min_liquidity_usd']
+        and int((quote_probe or {}).get('consecutive_successes') or 0) < LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES
+    ):
+        failures.append('low_liq_quote_confirmation_pending')
     if bs < thresholds['min_buy_sell_ratio']:
         failures.append('buy_sell_ratio_low')
     if vol_m5 < thresholds['min_vol_m5']:
@@ -5679,6 +5692,11 @@ def _lotto_dynamic_ttl_extension_detail(
         detail['reason'] = 'lotto_dynamic_ttl_not_strong'
         return detail
     detail['reason'] = 'lotto_tracking_ttl_extended'
+    detail['thresholds'] = {
+        **(detail.get('thresholds') or {}),
+        'max_extensions': LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS,
+        'extend_sec': LOTTO_DYNAMIC_TTL_EXTEND_SEC,
+    }
     return detail
 
 
@@ -5940,10 +5958,37 @@ def track_discovery_candidate(
         }, lifecycle),
         event_ts=now_ts,
     )
+    if DOG_CANDIDATE_WATCH_ENABLED:
+        record_decision_event(
+            db,
+            component='dog_candidate_watch',
+            event_type='candidate_tracked',
+            decision='track',
+            reason=source_reject_reason or mode,
+            token_ca=token_ca,
+            symbol=candidate['symbol'],
+            lifecycle_id=candidate['lifecycle_id'],
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            data_source=source_component or 'discovery_tracking',
+            payload=with_lifecycle_payload({
+                'entry_mode': mode,
+                'watch_layer': 'discovery_tracking',
+                'poll_sec': DISCOVERY_TRACKING_POLL_SEC,
+                'ttl_sec': candidate_ttl_sec,
+                'source_component': source_component,
+                'source_reject_reason': source_reject_reason,
+                'source_detail': source_detail or {},
+                'tiny_only': True,
+            }, lifecycle),
+            event_ts=now_ts,
+        )
     return True
 
 
 POST_EXIT_RUNNER_SOURCE_REASON = 'post_exit_runner_watch'
+VOLATILE_RUNNER_SOURCE_REASON = 'volatile_runner_watch'
 POST_EXIT_RUNNER_TOXIC_REASON_MARKERS = (
     'rug',
     'hard_floor',
@@ -6083,13 +6128,21 @@ def _post_exit_runner_watch_detail(
             'peak_pnl': peak,
         }
 
+    source_reason = POST_EXIT_RUNNER_SOURCE_REASON
+    if (
+        is_loss
+        and peak < 0.05
+        and any(marker in reason_l for marker in ('no_follow', 'fast_fail', 'lotto_sl', 'hard_sl', 'stop_loss'))
+    ):
+        source_reason = VOLATILE_RUNNER_SOURCE_REASON
+
     mode = ATH_MICRO_RECLAIM_TINY_PROBE_MODE if route == 'ATH' else LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     return {
         'pass': True,
-        'reason': POST_EXIT_RUNNER_SOURCE_REASON,
+        'reason': source_reason,
         'mode': mode,
         'route': route,
-        'source_reject_reason': POST_EXIT_RUNNER_SOURCE_REASON,
+        'source_reject_reason': source_reason,
         'ttl_sec': POST_EXIT_RUNNER_WATCH_TTL_SEC,
         'parent_trade_id': getattr(pos, 'trade_id', None),
         'parent_lifecycle_id': getattr(pos, 'lifecycle_id', None),
@@ -6102,6 +6155,7 @@ def _post_exit_runner_watch_detail(
         'peak_pnl': peak,
         'loss_watchable': loss_watchable,
         'win_watchable': win_watchable,
+        'watch_family': 'volatile_runner' if source_reason == VOLATILE_RUNNER_SOURCE_REASON else 'post_exit_runner',
     }
 
 
@@ -6134,7 +6188,7 @@ def track_post_exit_runner_candidate(
     token_ca = getattr(pos, 'token_ca', None)
     signal_ts = int(now_ts)
     source_detail = {
-        'source_reject_reason': POST_EXIT_RUNNER_SOURCE_REASON,
+        'source_reject_reason': detail.get('source_reject_reason') or POST_EXIT_RUNNER_SOURCE_REASON,
         'parent_trade_id': detail.get('parent_trade_id'),
         'parent_lifecycle_id': detail.get('parent_lifecycle_id'),
         'parent_entry_mode': detail.get('parent_entry_mode'),
@@ -6164,7 +6218,7 @@ def track_post_exit_runner_candidate(
         watchlist_id=(watchlist_entry or {}).get('id') if isinstance(watchlist_entry, dict) else None,
         watchlist_entry=watchlist_entry,
         source_component='post_exit_runner_watch',
-        source_reject_reason=POST_EXIT_RUNNER_SOURCE_REASON,
+        source_reject_reason=detail.get('source_reject_reason') or POST_EXIT_RUNNER_SOURCE_REASON,
         source_detail=source_detail,
         lifecycle=lifecycle,
         ttl_sec=POST_EXIT_RUNNER_WATCH_TTL_SEC,
@@ -6176,7 +6230,7 @@ def track_post_exit_runner_candidate(
             component='post_exit_runner_watch',
             event_type='candidate_tracked',
             decision='track',
-            reason=POST_EXIT_RUNNER_SOURCE_REASON,
+            reason=detail.get('source_reject_reason') or POST_EXIT_RUNNER_SOURCE_REASON,
             token_ca=token_ca,
             symbol=getattr(pos, 'symbol', None),
             lifecycle_id=build_lifecycle_id(token_ca, signal_ts),
@@ -6506,6 +6560,34 @@ def _discovery_quote_probe(token_ca, *, lifecycle_id=None, mode=None, stage_name
         'quoted_out_amount_raw': execution.get('quotedOutAmountRaw'),
         'route_available': execution.get('routeAvailable'),
         'entry_mode': mode,
+    }
+
+
+def _update_candidate_quote_confirmation(candidate, quote_probe, *, key='quote', min_successes=1, now_ts=None):
+    candidate = {} if candidate is None else candidate
+    quote_probe = quote_probe or {}
+    field = f'{key}_success_count'
+    now_ts = float(now_ts or time.time())
+    if quote_probe.get('success'):
+        count = int(candidate.get(field) or 0) + 1
+        candidate[field] = count
+        candidate[f'{key}_last_success_ts'] = now_ts
+        candidate[f'{key}_last_effective_price'] = quote_probe.get('effective_price')
+    else:
+        count = 0
+        candidate[field] = 0
+        candidate[f'{key}_last_failure_ts'] = now_ts
+        candidate[f'{key}_last_failure_reason'] = quote_probe.get('reason')
+    confirmed = count >= int(min_successes or 1)
+    quote_probe['consecutive_successes'] = count
+    quote_probe['required_successes'] = int(min_successes or 1)
+    quote_probe['confirmed'] = confirmed
+    return {
+        'pass': confirmed,
+        'reason': 'quote_confirmation_pass' if confirmed else 'quote_confirmation_pending',
+        'consecutive_successes': count,
+        'required_successes': int(min_successes or 1),
+        'quote_probe': quote_probe,
     }
 
 
@@ -7262,6 +7344,14 @@ def process_discovery_tracking_candidates(
                         mode=mode,
                         stage_name='lotto_dynamic_ttl_quote_probe',
                     )
+                    if mode == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE:
+                        ttl_detail['quote_confirmation'] = _update_candidate_quote_confirmation(
+                            candidate,
+                            ttl_quote_probe,
+                            key='low_liq_quote',
+                            min_successes=LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES,
+                            now_ts=now_ts,
+                        )
                     ttl_detail = _lotto_dynamic_ttl_extension_detail(
                         candidate,
                         dex_snapshot=ttl_dex_snapshot,
@@ -7470,9 +7560,17 @@ def process_discovery_tracking_candidates(
                 lifecycle_id=lifecycle_id,
                 mode=mode,
             )
+            quote_confirmation = _update_candidate_quote_confirmation(
+                candidate,
+                quote_probe,
+                key='low_liq_quote',
+                min_successes=LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES,
+                now_ts=now_ts,
+            )
             low_liquidity_bypass['quote_probe'] = quote_probe
+            low_liquidity_bypass['quote_confirmation'] = quote_confirmation
             low_liquidity_bypass['quote_executable'] = bool(quote_probe.get('success'))
-            low_liquidity_bypass['live_eligible'] = bool(quote_probe.get('success'))
+            low_liquidity_bypass['live_eligible'] = bool(quote_confirmation.get('pass'))
         effective_liquidity_usd = (
             DISCOVERY_MIN_LIQUIDITY_USD
             if (low_liquidity_bypass or {}).get('live_eligible') and liquidity_usd < DISCOVERY_MIN_LIQUIDITY_USD
@@ -7741,6 +7839,14 @@ def process_discovery_tracking_candidates(
                 mode=mode,
                 stage_name=f'{mode}_quote_probe',
             )
+            if mode == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE:
+                detail['lotto_low_liq_quote_confirmation'] = _update_candidate_quote_confirmation(
+                    candidate,
+                    lotto_recovery_quote_probe,
+                    key='low_liq_quote',
+                    min_successes=LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES,
+                    now_ts=now_ts,
+                )
             detail['lotto_recovery_quote_probe'] = lotto_recovery_quote_probe
             lotto_recovery_gate = _lotto_recovery_activity_gate(
                 mode,

@@ -10,6 +10,7 @@ import time
 import logging
 import threading
 import os
+import re
 
 from profit_protect_policy import ath_moon_bag_floor, probe_runner_floor, profit_protect_floor
 
@@ -45,7 +46,14 @@ OBSERVATION_PROBE_MAX_SIZE_SOL = float(os.environ.get("OBSERVATION_PROBE_MAX_SIZ
 OBSERVATION_PROBE_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_HARD_SL", "-0.30"))
 OBSERVATION_PROBE_LOTTO_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_LOTTO_HARD_SL", "-0.35"))
 QUOTE_MARK_REPRICE_DIVERGENCE = float(os.environ.get("EXIT_QUOTE_REPRICE_DIVERGENCE_PCT", "0.20"))
+QUOTE_PRIMARY_GUARDIAN_EXITS = os.environ.get("QUOTE_PRIMARY_GUARDIAN_EXITS", "true").lower() != "false"
 PARTIAL_IDEMPOTENCY_EPSILON = 1e-9
+QUOTE_PRIMARY_EXIT_MARKERS = (
+    "profit_protect",
+    "trail",
+    "runner_floor",
+    "moon",
+)
 
 
 def _pct(value, default=0.0):
@@ -170,6 +178,37 @@ def _quote_pnl_from_sim(sim, entry_price):
     if quote_price <= 0 or entry_price <= 0:
         return None
     return (quote_price - entry_price) / entry_price
+
+
+def _quote_primary_exit_confirmation(reason, *, quote_pnl=None):
+    if not QUOTE_PRIMARY_GUARDIAN_EXITS:
+        return {"pass": True, "reason": "quote_primary_disabled"}
+    reason_text = str(reason or "")
+    reason_l = reason_text.lower()
+    if not any(marker in reason_l for marker in QUOTE_PRIMARY_EXIT_MARKERS):
+        return {"pass": True, "reason": "not_quote_primary_exit"}
+    if quote_pnl is None:
+        return {"pass": False, "reason": "quote_primary_missing_quote"}
+    floor = None
+    match = re.search(r"floor=([+-]?\d+(?:\.\d+)?)%", reason_text)
+    if match:
+        try:
+            floor = float(match.group(1)) / 100.0
+        except (TypeError, ValueError):
+            floor = None
+    if floor is not None and quote_pnl >= floor:
+        return {
+            "pass": False,
+            "reason": "quote_primary_floor_not_breached",
+            "quote_pnl": quote_pnl,
+            "floor": floor,
+        }
+    return {
+        "pass": True,
+        "reason": "quote_primary_exit_confirmed",
+        "quote_pnl": quote_pnl,
+        "floor": floor,
+    }
 
 
 def _clear_pending_partial_lock(pos, tp_name):
@@ -1469,6 +1508,16 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
         )
         gx_realized_pnl = gx_trigger_pnl
         gx_quote_sanity = 'quote_checked' if gx_quote_pnl is not None else 'quote_unavailable'
+        gx_quote_primary = _quote_primary_exit_confirmation(gx.get('reason'), quote_pnl=gx_quote_pnl)
+        if not gx_quote_primary.get('pass'):
+            log.warning(
+                f"  [GUARDIAN_EXIT] quote-primary skipped {gx['symbol']}: "
+                f"reason={gx_quote_primary.get('reason')} trigger={gx_trigger_pnl:+.1%} "
+                f"quote={gx_quote_pnl:+.1%}" if gx_quote_pnl is not None else
+                f"  [GUARDIAN_EXIT] quote-primary skipped {gx['symbol']}: "
+                f"reason={gx_quote_primary.get('reason')} trigger={gx_trigger_pnl:+.1%} quote=na"
+            )
+            continue
         if gx_quote_mark_gap is not None and abs(gx_quote_mark_gap) >= QUOTE_MARK_REPRICE_DIVERGENCE:
             gx_realized_pnl = gx_quote_pnl
             gx_quote_sanity = 'exit_repriced_quote_mark_divergence'
@@ -1491,6 +1540,7 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 'quotePnl': gx_quote_pnl,
                 'quoteMarkGap': gx_quote_mark_gap,
                 'quoteSanityStatus': gx_quote_sanity,
+                'quotePrimary': gx_quote_primary,
             },
         })
         # IMPORTANT: Do NOT pop positions[gx_trade_id] here!

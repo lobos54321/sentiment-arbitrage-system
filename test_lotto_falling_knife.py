@@ -2191,7 +2191,6 @@ def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
         now_ts=1211,
         max_positions=10,
     )
-
     assert armed == 1
     assert discovery_candidates == {}
     pending = pending_entries["BossToken:1000"]
@@ -2287,7 +2286,7 @@ def test_discovery_tracking_arms_lotto_low_liquidity_reclaim_with_quote(monkeypa
     )
 
     pending_entries = {}
-    armed = process_discovery_tracking_candidates(
+    armed_first = process_discovery_tracking_candidates(
         db,
         watchlist,
         discovery_candidates,
@@ -2296,7 +2295,18 @@ def test_discovery_tracking_arms_lotto_low_liquidity_reclaim_with_quote(monkeypa
         now_ts=1211,
         max_positions=10,
     )
+    assert armed_first == 0
+    assert next(iter(discovery_candidates.values()))["low_liq_quote_success_count"] == 1
 
+    armed = process_discovery_tracking_candidates(
+        db,
+        watchlist,
+        discovery_candidates,
+        pending_entries,
+        {},
+        now_ts=1512,
+        max_positions=10,
+    )
     assert armed == 1
     assert discovery_candidates == {}
     pending = pending_entries["LowLiqToken:1000"]

@@ -39,6 +39,9 @@ GMGN_TOXIC_SPREAD_PENALTY_PCT = float(os.environ.get("GMGN_TOXIC_SPREAD_PENALTY_
 GMGN_DOWNSIZE_SPREAD_PENALTY_PCT = float(os.environ.get("GMGN_DOWNSIZE_SPREAD_PENALTY_PCT", "0.25"))
 GMGN_TINY_SCOUT_ENABLED = os.environ.get("GMGN_TINY_SCOUT_ENABLED", "true").lower() != "false"
 GMGN_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_TINY_SCOUT_SIZE_SOL", "0.003"))
+GMGN_BUNDLER_ONLY_TINY_RESCUE_ENABLED = os.environ.get("GMGN_BUNDLER_ONLY_TINY_RESCUE_ENABLED", "true").lower() != "false"
+GMGN_BUNDLER_ONLY_TINY_RESCUE_MIN_EDGE_SCORE = int(os.environ.get("GMGN_BUNDLER_ONLY_TINY_RESCUE_MIN_EDGE_SCORE", "4"))
+GMGN_BUNDLER_ONLY_TINY_RESCUE_MAX_BUNDLER_RATE = float(os.environ.get("GMGN_BUNDLER_ONLY_TINY_RESCUE_MAX_BUNDLER_RATE", "0.90"))
 GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL = float(os.environ.get("GMGN_CONCENTRATION_TINY_SCOUT_SIZE_SOL", "0.003"))
 GMGN_TINY_SCOUT_MIN_EDGE_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MIN_EDGE_SCORE", "4"))
 GMGN_TINY_SCOUT_MAX_TOXIC_SCORE = int(os.environ.get("GMGN_TINY_SCOUT_MAX_TOXIC_SCORE", "1"))
@@ -241,10 +244,13 @@ def gmgn_policy_allows_tiny_scout(policy):
     policy = policy or {}
     if not GMGN_TINY_SCOUT_ENABLED:
         return False
+    bundler_only_rescue = gmgn_policy_allows_bundler_only_tiny_rescue(policy)
     if policy.get("action") in {"reject", "shadow_reject"}:
-        return False
+        if not bundler_only_rescue:
+            return False
     if _i(policy.get("toxic_score")) > GMGN_TINY_SCOUT_MAX_TOXIC_SCORE:
-        return False
+        if not bundler_only_rescue:
+            return False
     if _i(policy.get("edge_score")) < GMGN_TINY_SCOUT_MIN_EDGE_SCORE:
         return False
     features = policy.get("features") or {}
@@ -252,11 +258,45 @@ def gmgn_policy_allows_tiny_scout(policy):
         return False
     if _f(features.get("entrapment_ratio")) > GMGN_ENTRAPMENT_REJECT_RATE:
         return False
-    if _f(features.get("bundler_rate")) > GMGN_BUNDLER_REJECT_RATE:
+    if _f(features.get("bundler_rate")) > GMGN_BUNDLER_REJECT_RATE and not bundler_only_rescue:
         return False
     if _f(features.get("creator_hold_rate")) > GMGN_CREATOR_HOLD_REJECT_RATE:
         return False
     if _f(features.get("dev_team_hold_rate")) > GMGN_DEV_TEAM_HOLD_REJECT_RATE:
+        return False
+    return True
+
+
+def gmgn_policy_allows_bundler_only_tiny_rescue(policy):
+    policy = policy or {}
+    if not GMGN_BUNDLER_ONLY_TINY_RESCUE_ENABLED:
+        return False
+    flags = set(policy.get("flags") or [])
+    features = policy.get("features") or {}
+    if "gmgn_toxic_bundler" not in flags and policy.get("reason") != "gmgn_toxic_bundler":
+        return False
+    hard_toxic = {
+        "gmgn_toxic_rat_trader",
+        "gmgn_toxic_entrapment",
+        "gmgn_creator_holding",
+        "gmgn_dev_team_holding",
+        "gmgn_high_top10_concentration",
+    }
+    if flags.intersection(hard_toxic):
+        return False
+    if _f(features.get("rat_trader_amount_rate")) > GMGN_RAT_REJECT_RATE:
+        return False
+    if _f(features.get("entrapment_ratio")) > GMGN_ENTRAPMENT_REJECT_RATE:
+        return False
+    if _f(features.get("creator_hold_rate")) > GMGN_CREATOR_HOLD_REJECT_RATE:
+        return False
+    if _f(features.get("dev_team_hold_rate")) > GMGN_DEV_TEAM_HOLD_REJECT_RATE:
+        return False
+    if _f(features.get("top10_holder_rate")) > GMGN_TOP10_REJECT_RATE:
+        return False
+    if _f(features.get("bundler_rate")) > GMGN_BUNDLER_ONLY_TINY_RESCUE_MAX_BUNDLER_RATE:
+        return False
+    if _i(policy.get("edge_score")) < GMGN_BUNDLER_ONLY_TINY_RESCUE_MIN_EDGE_SCORE:
         return False
     return True
 
