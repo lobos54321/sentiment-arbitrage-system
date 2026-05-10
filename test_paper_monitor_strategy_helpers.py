@@ -351,6 +351,68 @@ def test_smart_entry_reject_routes_not_ath_to_lotto_recovery_tracking():
     assert candidate["source_reject_reason"] == "trend_bearish_timeout"
 
 
+def test_smart_entry_reject_tracks_ath_micro_recovery_candidate():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pending = {
+        "token_ca": "AthToken",
+        "symbol": "ATHDOG",
+        "signal_ts": 1000,
+        "signal_route": "ATH",
+        "entry_mode": "smart_entry_pullback_bounce",
+        "source_reject_reason": "matrices not yet aligned",
+        "pool": "PoolA",
+    }
+
+    tracked = monitor._track_smart_entry_reject_recovery_candidate(
+        db,
+        candidates,
+        pending,
+        {"id": 9, "pool_address": "PoolA"},
+        lifecycle_id="AthToken:1000",
+        timing_reason="chasing_top",
+        timing_detail="near local high",
+        now_ts=1200,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["mode"] == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["route"] == "ATH"
+    assert candidate["source_component"] == "smart_entry"
+    assert candidate["source_reject_reason"] == "chasing_top"
+
+
+def test_ath_micro_reclaim_allows_dead_cat_smart_entry_source_after_live_reclaim():
+    candidate = {
+        "token_ca": "AthToken",
+        "route": "ATH",
+        "source_reject_reason": "dead_cat_below_high_23.7pct_gt_15.0pct",
+        "source_detail": {
+            "scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100},
+        },
+    }
+
+    decision = _ath_recovery_eligibility(
+        _paper_trade_db(),
+        entry_mode=ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+        candidate=candidate,
+        route="ATH",
+        token_risk={"blocked": False},
+        current_reclaim={"bounce_from_low_pct": 8.0},
+        activity={"buy_sell_ratio": 1.40, "tx_m5": 120, "price_change_m5": 4.0},
+        liquidity_usd=12000,
+        top10_pct=20,
+        quote_probe={"success": True, "reason": "quote_executable"},
+        now_ts=1_778_223_600,
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "ath_micro_reclaim_probe_pass"
+
+
 def test_retarget_discovery_candidate_rekeys_and_audits_latest_blocker():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

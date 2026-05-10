@@ -1761,11 +1761,24 @@ ATH_MICRO_RECLAIM_SOURCE_REASONS = {
     'scout_quality_negative_trend',
     'scout_quality_buy_pressure_weak',
     'scout_quality_volume_low',
+    'chasing_top',
+    'weak_buying_pressure',
+    'kline_trend_reversed',
+    'negative_trend',
+    'trend_bearish_timeout',
     'ath_uncertainty_mc_shadow_only',
     'ath_uncertainty_mc_gate',
     'discovery_ath_mc_shadow_only',
     'discovery_ath_mc_gate',
 }
+ATH_MICRO_RECLAIM_SOURCE_PREFIXES = (
+    'dead_cat_below_high_',
+)
+
+
+def _ath_micro_reclaim_source_reason(reason):
+    reason = str(reason or '')
+    return reason in ATH_MICRO_RECLAIM_SOURCE_REASONS or reason.startswith(ATH_MICRO_RECLAIM_SOURCE_PREFIXES)
 
 
 def _ath_recovery_family(entry_mode):
@@ -1813,7 +1826,7 @@ def _ath_recovery_mode_for_reason(reason, *, parent_reason=None):
     parent_reason = str(parent_reason or '')
     if reason == 'scout_quality_recent_token_failure':
         return ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE
-    if reason in ATH_MICRO_RECLAIM_SOURCE_REASONS or parent_reason in ATH_MICRO_RECLAIM_SOURCE_REASONS:
+    if _ath_micro_reclaim_source_reason(reason) or _ath_micro_reclaim_source_reason(parent_reason):
         return ATH_MICRO_RECLAIM_TINY_PROBE_MODE
     if (
         reason == 'matrices not yet aligned'
@@ -2221,7 +2234,7 @@ def _ath_recovery_eligibility(
     if entry_mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE:
         if not ATH_MICRO_RECLAIM_WATCH_ENABLED:
             return _result(False, 'ath_micro_reclaim_disabled')
-        if source_reason not in ATH_MICRO_RECLAIM_SOURCE_REASONS and parent_reason not in ATH_MICRO_RECLAIM_SOURCE_REASONS:
+        if not _ath_micro_reclaim_source_reason(source_reason) and not _ath_micro_reclaim_source_reason(parent_reason):
             return _result(False, 'ath_micro_reclaim_wrong_source')
         if not matrix.get('pass'):
             return _result(False, 'ath_micro_reclaim_matrix_not_strong')
