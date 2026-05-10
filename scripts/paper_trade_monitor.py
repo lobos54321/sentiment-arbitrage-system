@@ -5689,6 +5689,73 @@ def track_discovery_candidate(
     return True
 
 
+def _smart_entry_reject_recovery_mode(route, pending=None, timing_reason=None):
+    pending = pending or {}
+    route_upper = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    current_mode = pending.get('entry_mode') or pending.get('scout_mode')
+    parent_reason = pending.get('source_reject_reason') or current_mode
+    if route_upper in {'LOTTO', 'NOT_ATH'} or pending.get('is_lotto'):
+        return _lotto_recovery_mode_for_blocker(
+            primary_reason=parent_reason,
+            secondary_reason=timing_reason,
+            current_mode=current_mode,
+        )
+    if route_upper == 'ATH':
+        return (
+            _ath_recovery_mode_for_reason(timing_reason, parent_reason=parent_reason)
+            or _ath_recovery_mode_for_reason(parent_reason)
+        )
+    return None
+
+
+def _track_smart_entry_reject_recovery_candidate(
+    db,
+    discovery_candidates,
+    pending,
+    pending_w_entry,
+    *,
+    lifecycle_id,
+    timing_reason,
+    timing_detail=None,
+    lifecycle=None,
+    now_ts=None,
+):
+    pending = pending or {}
+    route = pending.get('signal_route') or pending.get('signal_type')
+    mode = _smart_entry_reject_recovery_mode(route, pending=pending, timing_reason=timing_reason)
+    if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return False
+    route_upper = str(route or '').upper()
+    recovery_route = 'LOTTO' if route_upper in {'LOTTO', 'NOT_ATH'} or pending.get('is_lotto') else route
+    return track_discovery_candidate(
+        db,
+        discovery_candidates,
+        mode=mode,
+        route=recovery_route,
+        token_ca=pending.get('token_ca'),
+        symbol=pending.get('symbol'),
+        lifecycle_id=lifecycle_id,
+        signal_ts=pending.get('signal_ts'),
+        signal_id=pending.get('premium_signal_id'),
+        pool=pending.get('pool') or pending.get('pool_address') or (pending_w_entry or {}).get('pool_address'),
+        watchlist_id=(pending_w_entry or {}).get('id') or pending.get('watchlist_id'),
+        watchlist_entry=pending_w_entry,
+        source_component='smart_entry',
+        source_reject_reason=timing_reason,
+        source_detail={
+            'original_source_reject_reason': pending.get('source_reject_reason'),
+            'timing_reason': timing_reason,
+            'timing_detail': timing_detail,
+            'entry_mode': pending.get('entry_mode'),
+            'scout_mode': pending.get('scout_mode'),
+            'route': route,
+            'recovery_route': recovery_route,
+        },
+        lifecycle=lifecycle,
+        now_ts=now_ts,
+    )
+
+
 def _discovery_synthetic_watchlist_entry(candidate, dex_snapshot=None):
     dex_snapshot = dex_snapshot or {}
     return {
@@ -13140,6 +13207,17 @@ def run_monitor(db):
                                     'retry_count': retry_count,
                                     'max_retries': max_retries,
                                 }
+                            _track_smart_entry_reject_recovery_candidate(
+                                db,
+                                discovery_candidates,
+                                pending,
+                                pending_w_entry,
+                                lifecycle_id=lifecycle_id,
+                                timing_reason=timing_reason,
+                                timing_detail=timing_detail,
+                                lifecycle=pending.get('entry_readiness_lifecycle'),
+                                now_ts=now,
+                            )
                             if retry_count >= max_retries:
                                 log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
                                 _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)

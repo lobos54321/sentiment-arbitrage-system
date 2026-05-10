@@ -282,6 +282,75 @@ def test_lotto_recovery_mode_uses_latest_blocker_over_original_reason():
     )
 
 
+def test_smart_entry_reject_tracks_lotto_micro_recovery_candidate():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_route": "LOTTO",
+        "is_lotto": True,
+        "entry_mode": "smart_entry_pullback_bounce",
+        "source_reject_reason": "not_ath_v17",
+        "pool": "PoolA",
+    }
+
+    tracked = monitor._track_smart_entry_reject_recovery_candidate(
+        db,
+        candidates,
+        pending,
+        {"id": 9, "pool_address": "PoolA"},
+        lifecycle_id="TokenCA:1000",
+        timing_reason="weak_buying_pressure",
+        timing_detail="bs=0.92 < 1.05",
+        now_ts=1200,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["route"] == "LOTTO"
+    assert candidate["source_component"] == "smart_entry"
+    assert candidate["source_reject_reason"] == "weak_buying_pressure"
+
+
+def test_smart_entry_reject_routes_not_ath_to_lotto_recovery_tracking():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_route": "NOT_ATH",
+        "entry_mode": "smart_entry_pullback_bounce",
+        "source_reject_reason": "not_ath_v17",
+        "pool": "PoolA",
+    }
+
+    tracked = monitor._track_smart_entry_reject_recovery_candidate(
+        db,
+        candidates,
+        pending,
+        {"id": 9, "pool_address": "PoolA"},
+        lifecycle_id="TokenCA:1000",
+        timing_reason="trend_bearish_timeout",
+        timing_detail="phase bearish timeout",
+        now_ts=1200,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["mode"] == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    assert candidate["route"] == "LOTTO"
+    assert candidate["source_component"] == "smart_entry"
+    assert candidate["source_reject_reason"] == "trend_bearish_timeout"
+
+
 def test_retarget_discovery_candidate_rekeys_and_audits_latest_blocker():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
