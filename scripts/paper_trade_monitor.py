@@ -1767,6 +1767,7 @@ ATH_MICRO_RECLAIM_SOURCE_REASONS = {
     'kline_trend_reversed',
     'negative_trend',
     'trend_bearish_timeout',
+    'ema_extreme',
     'odds_after_cost_below_policy',
     'p_follow_below_policy',
     'tracking_ttl_expired',
@@ -5275,6 +5276,7 @@ LOTTO_MICRO_RECLAIM_SOURCE_REASONS = {
     'score_too_low',
     'no_kline_low_volume',
     'lotto_timing_negative_m5',
+    'ema_extreme',
     'odds_after_cost_below_policy',
     'p_follow_below_policy',
 }

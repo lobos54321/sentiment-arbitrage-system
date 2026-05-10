@@ -258,6 +258,7 @@ def test_lotto_recovery_reason_mapping_splits_missed_blockers():
     assert _discovery_mode_for_lotto_reason("weak_buying_pressure") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("chasing_top") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("dead_cat_below_high_37.5pct_gt_10.0pct") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert _discovery_mode_for_lotto_reason("ema_extreme") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("lotto_live_top1_38pct") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("scout_quality_volume_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert _discovery_mode_for_lotto_reason("score_too_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
@@ -383,6 +384,39 @@ def test_smart_entry_reject_tracks_ath_micro_recovery_candidate():
     assert candidate["route"] == "ATH"
     assert candidate["source_component"] == "smart_entry"
     assert candidate["source_reject_reason"] == "chasing_top"
+
+
+def test_smart_entry_ema_extreme_tracks_ath_micro_recovery_candidate():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pending = {
+        "token_ca": "AthToken",
+        "symbol": "ATHDOG",
+        "signal_ts": 1000,
+        "signal_route": "ATH",
+        "entry_mode": "smart_entry_pullback_bounce",
+        "source_reject_reason": "matrices not yet aligned",
+        "pool": "PoolA",
+    }
+
+    tracked = monitor._track_smart_entry_reject_recovery_candidate(
+        db,
+        candidates,
+        pending,
+        {"id": 9, "pool_address": "PoolA"},
+        lifecycle_id="AthToken:1000",
+        timing_reason="ema_extreme",
+        timing_detail="ema deviation too high",
+        now_ts=1200,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["mode"] == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["source_component"] == "smart_entry"
+    assert candidate["source_reject_reason"] == "ema_extreme"
 
 
 def test_ath_micro_reclaim_allows_dead_cat_smart_entry_source_after_live_reclaim():
