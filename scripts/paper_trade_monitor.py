@@ -197,6 +197,11 @@ TRAPPED_NO_ROUTE_PNL_PCT = float(os.environ.get('TRAPPED_NO_ROUTE_PNL_PCT', '-1.
 ENTRY_QUOTE_MAX_ATTEMPTS = max(1, int(os.environ.get('ENTRY_QUOTE_MAX_ATTEMPTS', '5')))
 ENTRY_QUOTE_MAX_AGE_SEC = max(30, int(os.environ.get('ENTRY_QUOTE_MAX_AGE_SEC', '180')))
 LOTTO_PHASE_POLICY_LIVE_EXIT = os.environ.get('LOTTO_PHASE_POLICY_LIVE_EXIT', 'true').lower() != 'false'
+TINY_PHASE_POLICY_LIVE_EXIT = os.environ.get('TINY_PHASE_POLICY_LIVE_EXIT', 'true').lower() != 'false'
+PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE = os.environ.get('PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE', 'true').lower() != 'false'
+EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED = os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED', 'true').lower() != 'false'
+EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP', '0.05'))
+EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER', '0.005'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -241,6 +246,11 @@ LOTTO_MICRO_RECLAIM_MIN_BOUNCE_PCT = float(os.environ.get('LOTTO_MICRO_RECLAIM_M
 LOTTO_MICRO_RECLAIM_MIN_BS = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_BS', '1.20'))
 LOTTO_MICRO_RECLAIM_MIN_VOL_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_VOL_M5', '4000'))
 LOTTO_MICRO_RECLAIM_MIN_TX_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_TX_M5', '40'))
+LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED = os.environ.get('LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED', 'true').lower() != 'false'
+LOTTO_STRICT_RECOVERY_MIN_BS = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_BS', '1.35'))
+LOTTO_STRICT_RECOVERY_MIN_VOL_M5 = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_VOL_M5', '8000'))
+LOTTO_STRICT_RECOVERY_MIN_TX_M5 = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_TX_M5', '80'))
+LOTTO_STRICT_RECOVERY_MIN_PC_M5 = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_PC_M5', '8.0'))
 LOTTO_DYNAMIC_TTL_ENABLED = os.environ.get('LOTTO_DYNAMIC_TTL_ENABLED', 'true').lower() != 'false'
 LOTTO_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('LOTTO_DYNAMIC_TTL_EXTEND_SEC', str(15 * 60)))
 LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('LOTTO_DYNAMIC_TTL_MAX_EXTENSIONS', '2'))
@@ -2389,6 +2399,126 @@ def position_is_observation_probe(pos):
     if size_sol <= 0 or size_sol > PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL:
         return False
     return entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES or 'scout' in entry_mode or 'probe' in entry_mode
+
+
+def _exit_reason_is_stop_loss(reason):
+    reason = str(reason or '').lower()
+    return any(marker in reason for marker in (
+        'hard_sl',
+        'lotto_sl',
+        'stop_loss',
+        'hard_floor',
+    ))
+
+
+def _exit_reason_threshold_pnl(reason):
+    reason = str(reason or '')
+    match = re.search(r'<=\s*([+-]?\d+(?:\.\d+)?)%', reason)
+    if not match:
+        return None
+    try:
+        return float(match.group(1)) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _stop_loss_threshold_for_quote_sanity(reason, pos=None, w_entry=None):
+    parsed = _exit_reason_threshold_pnl(reason)
+    if parsed is not None:
+        return parsed
+    if pos is not None:
+        try:
+            rules = getattr(pos, 'exit_rules', None) or {}
+            if rules.get('stopLossPct') is not None:
+                return -abs(float(rules.get('stopLossPct')) / 100.0)
+        except (TypeError, ValueError):
+            pass
+    try:
+        if w_entry and w_entry.get('dynamic_sl') is not None:
+            return float(w_entry.get('dynamic_sl'))
+    except (TypeError, ValueError):
+        pass
+    return -0.075
+
+
+def _exit_stop_quote_gap_protection(reason, *, quote_pnl=None, trigger_pnl=None, pos=None, w_entry=None):
+    if not EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED:
+        return {'cancel': False, 'reason': 'disabled'}
+    if not _exit_reason_is_stop_loss(reason):
+        return {'cancel': False, 'reason': 'not_stop_loss'}
+    quote_pnl = _safe_float(quote_pnl, None)
+    trigger_pnl = _safe_float(trigger_pnl, None)
+    if quote_pnl is None or trigger_pnl is None:
+        return {'cancel': False, 'reason': 'missing_quote_or_trigger'}
+    gap = quote_pnl - trigger_pnl
+    if abs(gap) < EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP:
+        return {'cancel': False, 'reason': 'gap_below_threshold', 'quote_mark_gap': gap}
+    threshold = _stop_loss_threshold_for_quote_sanity(reason, pos=pos, w_entry=w_entry)
+    cancel = quote_pnl > (threshold + EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER)
+    return {
+        'cancel': bool(cancel),
+        'reason': 'stop_quote_above_floor' if cancel else 'quote_confirms_stop',
+        'quote_pnl': quote_pnl,
+        'trigger_pnl': trigger_pnl,
+        'quote_mark_gap': gap,
+        'stop_threshold': threshold,
+        'buffer': EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER,
+    }
+
+
+def _phase_policy_live_exit_detail(pos, phase_policy_payload, *, policy_route=None, w_entry=None):
+    payload = phase_policy_payload or {}
+    action = str(payload.get('shadow_action') or '').upper()
+    if action != 'EXIT':
+        return {'pass': False, 'reason': 'phase_action_not_exit'}
+    phase_state = payload.get('phase_state')
+    phase_reason = payload.get('reason')
+    is_probe = position_is_observation_probe(pos)
+    is_lotto_route = (
+        str(policy_route or '').upper() == 'LOTTO'
+        or (w_entry is not None and is_lotto_position(pos, w_entry))
+    )
+
+    if is_probe and TINY_PHASE_POLICY_LIVE_EXIT:
+        if phase_state == 'RUG_DEFENSE':
+            return {
+                'pass': True,
+                'reason': 'tiny_phase_rug_defense_live_exit',
+                'live_reason': f"phase_probe_rug_defense_exit ({phase_reason})",
+                'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
+            }
+        if phase_reason in {'no_follow_fast_fail_20s', 'no_follow_60s_shadow'}:
+            return {
+                'pass': True,
+                'reason': 'tiny_phase_no_follow_live_exit',
+                'live_reason': f"phase_probe_{phase_reason}",
+                'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
+            }
+
+    if is_lotto_route:
+        if phase_state == 'RUG_DEFENSE':
+            return {
+                'pass': True,
+                'reason': 'lotto_phase_rug_defense_live_exit',
+                'live_reason': f"phase_rug_defense_exit ({phase_reason})",
+                'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
+            }
+        if phase_reason == 'no_follow_fast_fail_20s':
+            return {
+                'pass': True,
+                'reason': 'lotto_phase_no_follow_fast_live_exit',
+                'live_reason': 'phase_no_follow_fast_fail_20s',
+                'requires_quote': PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE,
+            }
+
+    return {
+        'pass': False,
+        'reason': 'phase_exit_not_live_mapped',
+        'phase_state': phase_state,
+        'phase_reason': phase_reason,
+        'is_probe': is_probe,
+        'is_lotto_route': is_lotto_route,
+    }
 
 
 def apply_matrix_doa_fast_exit(pos, exit_matrix, *, now_ts=None):
@@ -5285,6 +5415,15 @@ LOTTO_RECOVERY_TINY_PROBE_MODES = {
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
 }
+LOTTO_STRICT_RECOVERY_SOURCE_REASONS = {
+    'entry_mode_quality_shadow',
+    'lotto_newborn_falling_knife_low_liq',
+    'weak_buying_pressure',
+    'scout_quality_buy_pressure_weak',
+    'scout_quality_negative_trend',
+    'scout_quality_volume_low',
+    'chasing_top',
+}
 
 
 def _lotto_recovery_family(entry_mode):
@@ -5333,6 +5472,77 @@ def _lotto_recovery_thresholds(mode):
             'max_watch_sec': LOTTO_MICRO_RECLAIM_MAX_WATCH_SEC,
         }
     return base
+
+
+def _lotto_recovery_source_reasons(candidate=None):
+    candidate = candidate or {}
+    detail = candidate.get('source_detail') or {}
+    if not isinstance(detail, dict):
+        detail = {}
+    reasons = set()
+    for value in (
+        candidate.get('source_reject_reason'),
+        detail.get('source_reject_reason'),
+        detail.get('original_source_reject_reason'),
+        detail.get('timing_reason'),
+        detail.get('entry_mode'),
+        detail.get('scout_mode'),
+    ):
+        if value:
+            reasons.add(str(value))
+    scout_quality = detail.get('scout_quality') if isinstance(detail.get('scout_quality'), dict) else {}
+    if scout_quality.get('reason'):
+        reasons.add(str(scout_quality.get('reason')))
+    return reasons
+
+
+def _lotto_recovery_strict_followthrough_detail(mode, *, candidate=None, activity=None):
+    if not LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED:
+        return {'required': False, 'reason': 'strict_followthrough_disabled'}
+    if str(mode or '') != LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE:
+        return {'required': False, 'reason': 'not_lotto_micro_reclaim'}
+    source_reasons = _lotto_recovery_source_reasons(candidate)
+    strict_sources = sorted(source_reasons.intersection(LOTTO_STRICT_RECOVERY_SOURCE_REASONS))
+    if not strict_sources:
+        return {
+            'required': False,
+            'reason': 'source_not_strict',
+            'source_reasons': sorted(source_reasons),
+        }
+    activity = activity or {}
+    bs = _first_float_any(activity.get('buy_sell_ratio'), default=0.0) or 0.0
+    vol_m5 = _first_float_any(activity.get('vol_m5'), default=0.0) or 0.0
+    tx_m5 = _first_float_any(activity.get('tx_m5'), default=0.0) or 0.0
+    pc_m5 = _first_float_any(activity.get('price_change_m5'), default=0.0) or 0.0
+    failures = []
+    if bs < LOTTO_STRICT_RECOVERY_MIN_BS:
+        failures.append('strict_buy_sell_ratio_low')
+    if vol_m5 < LOTTO_STRICT_RECOVERY_MIN_VOL_M5:
+        failures.append('strict_vol_m5_low')
+    if tx_m5 < LOTTO_STRICT_RECOVERY_MIN_TX_M5:
+        failures.append('strict_tx_m5_low')
+    if pc_m5 < LOTTO_STRICT_RECOVERY_MIN_PC_M5:
+        failures.append('strict_price_change_m5_not_reclaimed')
+    return {
+        'required': True,
+        'pass': not failures,
+        'reason': 'strict_followthrough_pass' if not failures else 'strict_followthrough_not_confirmed',
+        'source_reasons': sorted(source_reasons),
+        'strict_sources': strict_sources,
+        'failures': failures,
+        'observed': {
+            'buy_sell_ratio': bs,
+            'vol_m5': vol_m5,
+            'tx_m5': tx_m5,
+            'price_change_m5': pc_m5,
+        },
+        'thresholds': {
+            'buy_sell_ratio': LOTTO_STRICT_RECOVERY_MIN_BS,
+            'vol_m5': LOTTO_STRICT_RECOVERY_MIN_VOL_M5,
+            'tx_m5': LOTTO_STRICT_RECOVERY_MIN_TX_M5,
+            'price_change_m5': LOTTO_STRICT_RECOVERY_MIN_PC_M5,
+        },
+    }
 
 
 def _lotto_recovery_activity_gate(
@@ -5393,6 +5603,13 @@ def _lotto_recovery_activity_gate(
     max_watch_sec = thresholds.get('max_watch_sec')
     if max_watch_sec is not None and age_sec > max_watch_sec:
         failures.append('max_watch_sec_expired')
+    strict_followthrough = _lotto_recovery_strict_followthrough_detail(
+        mode,
+        candidate=candidate,
+        activity=activity,
+    )
+    if strict_followthrough.get('required') and not strict_followthrough.get('pass'):
+        failures.extend(strict_followthrough.get('failures') or ['strict_followthrough_not_confirmed'])
     return {
         'pass': not failures,
         'reason': f'{_lotto_recovery_family(mode)}_live_reclaim_pass' if not failures else 'lotto_recovery_shadow_activity_not_enough',
@@ -5413,6 +5630,7 @@ def _lotto_recovery_activity_gate(
             'quote_success': quote_ok,
         },
         'thresholds': thresholds,
+        'strict_followthrough': strict_followthrough,
         'quote_probe': quote_probe,
     }
 
@@ -14913,10 +15131,16 @@ def run_monitor(db):
                                             reason = exit_matrix.get('reason', '')
                                             cancel = False
 
-                                            if 'hard_sl' in reason:
-                                                sl_threshold = w_entry.get('dynamic_sl', -0.075) if w_entry else -0.075
-                                                if quote_pnl > sl_threshold:
-                                                    cancel = True
+                                            stop_gap_protection = _exit_stop_quote_gap_protection(
+                                                reason,
+                                                quote_pnl=quote_pnl,
+                                                trigger_pnl=trigger_pnl,
+                                                pos=pos,
+                                                w_entry=w_entry,
+                                            )
+                                            if stop_gap_protection.get('cancel'):
+                                                cancel = True
+                                                quote_sanity_status = 'exit_cancelled_stop_quote_gap'
                                             elif 'trail_stop' in reason:
                                                 trail_floor = exit_matrix.get('trail_floor')
                                                 if trail_floor is not None and quote_pnl >= trail_floor:
@@ -14950,11 +15174,12 @@ def run_monitor(db):
                                                     f"(divergence={divergence:.1%}, src={pre_src}). "
                                                     f"Trigger/quote disagreement too large, holding position."
                                                 )
-                                                quote_sanity_status = (
-                                                    'exit_cancelled_tiny_quote_gap'
-                                                    if quote_pnl < trigger_pnl
-                                                    else 'exit_cancelled_quote_better'
-                                                )
+                                                if quote_sanity_status == 'quote_checked':
+                                                    quote_sanity_status = (
+                                                        'exit_cancelled_tiny_quote_gap'
+                                                        if quote_pnl < trigger_pnl
+                                                        else 'exit_cancelled_quote_better'
+                                                    )
                                                 sanity_override = True
                                             else:
                                                 log.info(
@@ -15113,30 +15338,24 @@ def run_monitor(db):
                         log.debug(f"  [PHASE_POLICY] shadow eval failed for {pos.symbol}: {_phase_err}")
 
                     if (
-                        LOTTO_PHASE_POLICY_LIVE_EXIT
+                        (LOTTO_PHASE_POLICY_LIVE_EXIT or TINY_PHASE_POLICY_LIVE_EXIT)
                         and phase_policy_payload
                         and action not in ('partial_sell', 'exit')
                         and not should_exit
-                        and not position_is_observation_probe(pos)
                     ):
                         _policy_route = (
                             (w_entry or {}).get('signal_route')
                             or (pos.monitor_state or {}).get('signalRoute')
                             or getattr(pos, 'signal_type', None)
                         )
-                        _is_lotto_policy_route = (
-                            str(_policy_route or '').upper() == 'LOTTO'
-                            or (w_entry is not None and is_lotto_position(pos, w_entry))
+                        _phase_live_detail = _phase_policy_live_exit_detail(
+                            pos,
+                            phase_policy_payload,
+                            policy_route=_policy_route,
+                            w_entry=w_entry,
                         )
-                        _phase_state = phase_policy_payload.get('phase_state')
-                        _phase_action = phase_policy_payload.get('shadow_action')
                         _phase_reason = phase_policy_payload.get('reason')
-                        _live_reason = None
-                        if _is_lotto_policy_route and _phase_action == 'EXIT':
-                            if _phase_state == 'RUG_DEFENSE':
-                                _live_reason = f"phase_rug_defense_exit ({_phase_reason})"
-                            elif _phase_reason == 'no_follow_fast_fail_20s':
-                                _live_reason = "phase_no_follow_fast_fail_20s"
+                        _live_reason = _phase_live_detail.get('live_reason') if _phase_live_detail.get('pass') else None
 
                         if _live_reason:
                             _sell_amount_raw = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
@@ -15153,6 +15372,34 @@ def run_monitor(db):
                                 _phase_quote_pnl - trigger_pnl
                                 if _phase_quote_pnl is not None and trigger_pnl is not None else None
                             )
+                            if (
+                                _phase_live_detail.get('requires_quote')
+                                and (not _phase_sim.get('success') or _phase_quote_pnl is None)
+                            ):
+                                record_decision_event(
+                                    db,
+                                    component='phase_policy',
+                                    event_type='control_decision',
+                                    decision='wait',
+                                    reason='phase_policy_live_quote_not_executable',
+                                    token_ca=pos.token_ca,
+                                    symbol=pos.symbol,
+                                    lifecycle_id=pos.lifecycle_id,
+                                    trade_id=pos.trade_id,
+                                    signal_ts=pos.signal_ts,
+                                    signal_id=getattr(pos, 'premium_signal_id', None),
+                                    strategy_stage=pos.strategy_stage,
+                                    route=_policy_route,
+                                    data_source='phase_policy_live',
+                                    payload={
+                                        **phase_policy_payload,
+                                        'live_exit_detail': _phase_live_detail,
+                                        'execution_success': bool(_phase_sim.get('success')),
+                                        'failure_reason': _phase_sim.get('failureReason'),
+                                    },
+                                )
+                                _live_reason = None
+                        if _live_reason:
                             exit_eval.update({
                                 'shouldExit': True,
                                 'action': 'exit',
@@ -15187,10 +15434,11 @@ def run_monitor(db):
                                 signal_ts=pos.signal_ts,
                                 signal_id=getattr(pos, 'premium_signal_id', None),
                                 strategy_stage=pos.strategy_stage,
-                                route='LOTTO',
+                                route=_policy_route,
                                 data_source='phase_policy_live',
                                 payload={
                                     **phase_policy_payload,
+                                    'live_exit_detail': _phase_live_detail,
                                     'current_pnl': trigger_pnl,
                                     'peak_pnl': pos.peak_pnl,
                                     'quote_pnl': _phase_quote_pnl,

@@ -41,6 +41,8 @@ from paper_trade_monitor import (  # noqa: E402
     _build_discovery_pending,
     _entry_mode_for_ath_uncertainty_reason,
     _entry_mode_quality_high_quality_tiny_override,
+    _exit_stop_quote_gap_protection,
+    _phase_policy_live_exit_detail,
     _matrix_micro_momentum_reason,
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
@@ -88,6 +90,14 @@ def _paper_trade_db(rows=()):
         )
     db.commit()
     return db
+
+
+class _DummyPos:
+    def __init__(self, *, entry_mode="lotto_micro_reclaim_tiny_probe", size_sol=0.003, exit_rules=None):
+        self.monitor_state = {"entryMode": entry_mode, "entrySol": size_sol}
+        self.entry_mode = entry_mode
+        self.position_size_sol = size_sol
+        self.exit_rules = exit_rules or {"stopLossPct": 18}
 
 
 def _ath_no_kline_pending():
@@ -650,6 +660,84 @@ def test_lotto_micro_reclaim_expires_after_short_watch():
 
     assert detail["pass"] is False
     assert "max_watch_sec_expired" in detail["failures"]
+
+
+def test_lotto_micro_reclaim_strict_sources_need_stronger_followthrough():
+    weak = _lotto_recovery_activity_gate(
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000, "source_reject_reason": "entry_mode_quality_shadow"},
+        activity={"buy_sell_ratio": 1.25, "vol_m5": 5000, "tx_m5": 50, "price_change_m5": 6.5},
+        quote_probe={"success": True},
+        current_mc=52000,
+        liquidity_usd=9000,
+        top1_pct=30,
+        top10_pct=65,
+        now_ts=1060,
+    )
+
+    assert weak["pass"] is False
+    assert "strict_buy_sell_ratio_low" in weak["failures"]
+    assert "strict_tx_m5_low" in weak["failures"]
+
+    strong = _lotto_recovery_activity_gate(
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        candidate={"first_seen_ts": 1000, "source_reject_reason": "entry_mode_quality_shadow"},
+        activity={"buy_sell_ratio": 1.45, "vol_m5": 12000, "tx_m5": 95, "price_change_m5": 10},
+        quote_probe={"success": True},
+        current_mc=52000,
+        liquidity_usd=9000,
+        top1_pct=30,
+        top10_pct=65,
+        now_ts=1060,
+    )
+
+    assert strong["pass"] is True
+    assert strong["strict_followthrough"]["reason"] == "strict_followthrough_pass"
+
+
+def test_phase_policy_live_exit_allows_tiny_probe_no_follow_and_rug_defense():
+    pos = _DummyPos(entry_mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE)
+
+    no_follow = _phase_policy_live_exit_detail(
+        pos,
+        {"shadow_action": "EXIT", "phase_state": "NO_FOLLOW", "reason": "no_follow_60s_shadow"},
+        policy_route="ATH",
+    )
+    rug = _phase_policy_live_exit_detail(
+        pos,
+        {"shadow_action": "EXIT", "phase_state": "RUG_DEFENSE", "reason": "rug_risk_78"},
+        policy_route="ATH",
+    )
+
+    assert no_follow["pass"] is True
+    assert no_follow["live_reason"] == "phase_probe_no_follow_60s_shadow"
+    assert rug["pass"] is True
+    assert rug["live_reason"] == "phase_probe_rug_defense_exit (rug_risk_78)"
+
+
+def test_lotto_sl_quote_gap_protection_cancels_when_quote_above_stop_floor():
+    detail = _exit_stop_quote_gap_protection(
+        "lotto_sl (-19.0% <= -18.0%)",
+        quote_pnl=-0.0827,
+        trigger_pnl=-0.19,
+        pos=_DummyPos(exit_rules={"stopLossPct": 18}),
+    )
+
+    assert detail["cancel"] is True
+    assert detail["reason"] == "stop_quote_above_floor"
+    assert round(detail["stop_threshold"], 2) == -0.18
+
+
+def test_lotto_sl_quote_gap_protection_confirms_when_quote_breaches_stop_floor():
+    detail = _exit_stop_quote_gap_protection(
+        "lotto_sl (-19.0% <= -18.0%)",
+        quote_pnl=-0.25,
+        trigger_pnl=-0.19,
+        pos=_DummyPos(exit_rules={"stopLossPct": 18}),
+    )
+
+    assert detail["cancel"] is False
+    assert detail["reason"] == "quote_confirms_stop"
 
 
 def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():
