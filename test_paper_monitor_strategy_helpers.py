@@ -413,6 +413,83 @@ def test_ath_micro_reclaim_allows_dead_cat_smart_entry_source_after_live_reclaim
     assert decision["reason"] == "ath_micro_reclaim_probe_pass"
 
 
+def test_entry_contract_reject_tracks_ath_micro_recovery_candidate():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pending = {
+        "token_ca": "AthToken",
+        "symbol": "ATHDOG",
+        "signal_ts": 1000,
+        "signal_route": "ATH",
+        "entry_mode": "smart_entry_pullback_bounce",
+        "source_reject_reason": "matrices not yet aligned",
+        "pool": "PoolA",
+    }
+    contract = {
+        "decision": "reject",
+        "reason": "odds_after_cost_below_policy",
+        "entry_mode": "smart_entry_pullback_bounce",
+    }
+
+    tracked = monitor._track_entry_contract_recovery_candidate(
+        db,
+        candidates,
+        pending,
+        {"id": 9, "pool_address": "PoolA"},
+        lifecycle_id="AthToken:1000",
+        entry_decision_contract=contract,
+        now_ts=1200,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["mode"] == ATH_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["route"] == "ATH"
+    assert candidate["source_component"] == "entry_decision_contract"
+    assert candidate["source_reject_reason"] == "odds_after_cost_below_policy"
+
+
+def test_entry_contract_reject_tracks_lotto_micro_recovery_candidate():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pending = {
+        "token_ca": "LottoToken",
+        "symbol": "LDOG",
+        "signal_ts": 1000,
+        "signal_route": "LOTTO",
+        "is_lotto": True,
+        "entry_mode": "smart_entry_pullback_bounce",
+        "source_reject_reason": "not_ath_v17",
+        "pool": "PoolA",
+    }
+    contract = {
+        "decision": "reject",
+        "reason": "odds_after_cost_below_policy",
+        "entry_mode": "smart_entry_pullback_bounce",
+    }
+
+    tracked = monitor._track_entry_contract_recovery_candidate(
+        db,
+        candidates,
+        pending,
+        {"id": 9, "pool_address": "PoolA"},
+        lifecycle_id="LottoToken:1000",
+        entry_decision_contract=contract,
+        now_ts=1200,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["route"] == "LOTTO"
+    assert candidate["source_component"] == "entry_decision_contract"
+    assert candidate["source_reject_reason"] == "odds_after_cost_below_policy"
+
+
 def test_retarget_discovery_candidate_rekeys_and_audits_latest_blocker():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

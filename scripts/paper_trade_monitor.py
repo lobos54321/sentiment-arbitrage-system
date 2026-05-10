@@ -1766,6 +1766,8 @@ ATH_MICRO_RECLAIM_SOURCE_REASONS = {
     'kline_trend_reversed',
     'negative_trend',
     'trend_bearish_timeout',
+    'odds_after_cost_below_policy',
+    'p_follow_below_policy',
     'ath_uncertainty_mc_shadow_only',
     'ath_uncertainty_mc_gate',
     'discovery_ath_mc_shadow_only',
@@ -5271,6 +5273,8 @@ LOTTO_MICRO_RECLAIM_SOURCE_REASONS = {
     'score_too_low',
     'no_kline_low_volume',
     'lotto_timing_negative_m5',
+    'odds_after_cost_below_policy',
+    'p_follow_below_policy',
 }
 LOTTO_RECOVERY_TINY_PROBE_MODES = {
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
@@ -5761,6 +5765,72 @@ def _track_smart_entry_reject_recovery_candidate(
             'timing_detail': timing_detail,
             'entry_mode': pending.get('entry_mode'),
             'scout_mode': pending.get('scout_mode'),
+            'route': route,
+            'recovery_route': recovery_route,
+        },
+        lifecycle=lifecycle,
+        now_ts=now_ts,
+    )
+
+
+def _track_entry_contract_recovery_candidate(
+    db,
+    discovery_candidates,
+    pending,
+    pending_w_entry,
+    *,
+    lifecycle_id,
+    entry_decision_contract,
+    lifecycle=None,
+    now_ts=None,
+):
+    pending = pending or {}
+    contract = entry_decision_contract.to_dict() if hasattr(entry_decision_contract, 'to_dict') else (entry_decision_contract or {})
+    contract_reason = str(contract.get('reason') or '')
+    contract_decision = str(contract.get('decision') or '').lower()
+    if contract_decision not in {'reject', 'observe'} or not contract_reason:
+        return False
+    route = pending.get('signal_route') or pending.get('signal_type')
+    route_upper = str(route or '').upper()
+    current_mode = pending.get('entry_mode') or pending.get('scout_mode')
+    parent_reason = pending.get('source_reject_reason') or current_mode
+    if route_upper in {'LOTTO', 'NOT_ATH'} or pending.get('is_lotto'):
+        mode = _lotto_recovery_mode_for_blocker(
+            primary_reason=parent_reason,
+            secondary_reason=contract_reason,
+            current_mode=current_mode,
+        )
+        recovery_route = 'LOTTO'
+    elif route_upper == 'ATH':
+        mode = (
+            _ath_recovery_mode_for_reason(contract_reason, parent_reason=parent_reason)
+            or _ath_recovery_mode_for_reason(parent_reason)
+        )
+        recovery_route = 'ATH'
+    else:
+        mode = None
+        recovery_route = route
+    if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return False
+    return track_discovery_candidate(
+        db,
+        discovery_candidates,
+        mode=mode,
+        route=recovery_route,
+        token_ca=pending.get('token_ca'),
+        symbol=pending.get('symbol'),
+        lifecycle_id=lifecycle_id,
+        signal_ts=pending.get('signal_ts'),
+        signal_id=pending.get('premium_signal_id'),
+        pool=pending.get('pool') or pending.get('pool_address') or (pending_w_entry or {}).get('pool_address'),
+        watchlist_id=(pending_w_entry or {}).get('id') or pending.get('watchlist_id'),
+        watchlist_entry=pending_w_entry,
+        source_component='entry_decision_contract',
+        source_reject_reason=contract_reason,
+        source_detail={
+            'original_source_reject_reason': pending.get('source_reject_reason'),
+            'entry_decision_contract': contract,
+            'entry_mode': current_mode,
             'route': route,
             'recovery_route': recovery_route,
         },
@@ -14239,6 +14309,16 @@ def run_monitor(db):
                         route=_pending_signal_route or pending.get('signal_type'),
                         data_source='entry_readiness+smart_entry+execution_guard',
                         payload=_entry_decision_contract.to_dict(),
+                    )
+                    _track_entry_contract_recovery_candidate(
+                        db,
+                        discovery_candidates,
+                        pending,
+                        pending_w_entry,
+                        lifecycle_id=lifecycle_id,
+                        entry_decision_contract=_entry_decision_contract,
+                        lifecycle=pending.get('entry_readiness_lifecycle'),
+                        now_ts=now,
                     )
 
                     try:
