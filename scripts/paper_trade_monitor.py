@@ -202,6 +202,10 @@ PHASE_POLICY_LIVE_EXIT_REQUIRES_QUOTE = os.environ.get('PHASE_POLICY_LIVE_EXIT_R
 EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED = os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_ENABLED', 'true').lower() != 'false'
 EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP', '0.05'))
 EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER', '0.005'))
+POST_EXIT_RUNNER_WATCH_ENABLED = os.environ.get('POST_EXIT_RUNNER_WATCH_ENABLED', 'true').lower() != 'false'
+POST_EXIT_RUNNER_WATCH_TTL_SEC = int(os.environ.get('POST_EXIT_RUNNER_WATCH_TTL_SEC', str(30 * 60)))
+POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN = max(1, int(os.environ.get('POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN', '1')))
+POST_EXIT_RUNNER_WATCH_MAX_LOSS_PNL = float(os.environ.get('POST_EXIT_RUNNER_WATCH_MAX_LOSS_PNL', '-0.30'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -1785,6 +1789,7 @@ ATH_MICRO_RECLAIM_SOURCE_REASONS = {
     'ath_uncertainty_mc_gate',
     'discovery_ath_mc_shadow_only',
     'discovery_ath_mc_gate',
+    'post_exit_runner_watch',
 }
 ATH_MICRO_RECLAIM_SOURCE_PREFIXES = (
     'dead_cat_below_high_',
@@ -5409,6 +5414,7 @@ LOTTO_MICRO_RECLAIM_SOURCE_REASONS = {
     'ema_extreme',
     'odds_after_cost_below_policy',
     'p_follow_below_policy',
+    'post_exit_runner_watch',
 }
 LOTTO_RECOVERY_TINY_PROBE_MODES = {
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
@@ -5423,6 +5429,7 @@ LOTTO_STRICT_RECOVERY_SOURCE_REASONS = {
     'scout_quality_negative_trend',
     'scout_quality_volume_low',
     'chasing_top',
+    'post_exit_runner_watch',
 }
 
 
@@ -5814,6 +5821,7 @@ def track_discovery_candidate(
     source_reject_reason=None,
     source_detail=None,
     lifecycle=None,
+    ttl_sec=None,
     now_ts=None,
 ):
     """Put a soft-blocked candidate into the 10-second discovery tracking pool."""
@@ -5842,6 +5850,11 @@ def track_discovery_candidate(
             existing['watchlist_id'] = watchlist_entry.get('id') or watchlist_id or existing.get('watchlist_id')
         if lifecycle:
             existing['last_lifecycle'] = lifecycle
+        if ttl_sec:
+            try:
+                existing['expires_at'] = max(float(existing.get('expires_at') or 0.0), now_ts + float(ttl_sec))
+            except (TypeError, ValueError):
+                existing['expires_at'] = now_ts + float(ttl_sec)
         return False
 
     if len(discovery_candidates) >= DISCOVERY_TRACKING_MAX_CANDIDATES:
@@ -5876,6 +5889,8 @@ def track_discovery_candidate(
         candidate_ttl_sec = LOTTO_MICRO_RECLAIM_MAX_WATCH_SEC
     else:
         candidate_ttl_sec = DISCOVERY_TRACKING_TTL_SEC
+    if ttl_sec:
+        candidate_ttl_sec = max(candidate_ttl_sec, int(ttl_sec))
     candidate = {
         'key': key,
         'mode': mode,
@@ -5926,6 +5941,259 @@ def track_discovery_candidate(
         event_ts=now_ts,
     )
     return True
+
+
+POST_EXIT_RUNNER_SOURCE_REASON = 'post_exit_runner_watch'
+POST_EXIT_RUNNER_TOXIC_REASON_MARKERS = (
+    'rug',
+    'hard_floor',
+    'trapped_no_route',
+    'no_route',
+    'not_tradable',
+    'honeypot',
+    'sell_fail',
+    'sell_not_executable',
+    'token_quarantine',
+    'force_timeout',
+)
+POST_EXIT_RUNNER_LOSS_REASON_MARKERS = (
+    'no_follow',
+    'fast_fail',
+    'decay',
+    'lotto_sl',
+    'hard_sl',
+    'stop_loss',
+    'guardian_doa',
+    'phase_',
+)
+POST_EXIT_RUNNER_WIN_REASON_MARKERS = (
+    'profit',
+    'trail',
+    'capture',
+    'take',
+    'tp',
+)
+
+
+def _post_exit_runner_route(pos):
+    state = getattr(pos, 'monitor_state', None) or {}
+    route = (
+        state.get('signalRoute')
+        or state.get('signal_route')
+        or state.get('signalType')
+        or getattr(pos, 'signal_type', None)
+        or getattr(pos, 'strategy_stage', None)
+    )
+    route = str(route or '').upper()
+    entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    if route in {'LOTTO', 'ATH', 'NOT_ATH'}:
+        return route
+    if 'lotto' in entry_mode:
+        return 'LOTTO'
+    if 'ath' in entry_mode:
+        return 'ATH'
+    return route
+
+
+def _post_exit_runner_watch_count(db, token_ca):
+    if not db or not token_ca:
+        return 0
+    try:
+        row = db.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM paper_decision_events
+            WHERE component = 'post_exit_runner_watch'
+              AND event_type = 'candidate_tracked'
+              AND token_ca = ?
+            """,
+            (token_ca,),
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row['n'])
+        except (KeyError, TypeError, IndexError):
+            return int(row[0])
+    except Exception:
+        return 0
+
+
+def _post_exit_runner_watch_detail(
+    pos,
+    reason,
+    *,
+    realized_pnl=None,
+    trigger_pnl=None,
+    exit_quote_pnl=None,
+    watch_count=0,
+):
+    if not POST_EXIT_RUNNER_WATCH_ENABLED:
+        return {'pass': False, 'reason': 'post_exit_runner_watch_disabled'}
+    if pos is None:
+        return {'pass': False, 'reason': 'missing_position'}
+
+    route = _post_exit_runner_route(pos)
+    if route not in {'LOTTO', 'ATH', 'NOT_ATH'}:
+        return {'pass': False, 'reason': 'route_not_runner_watchable', 'route': route}
+    if watch_count >= POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN:
+        return {
+            'pass': False,
+            'reason': 'post_exit_runner_watch_limit_reached',
+            'watch_count': watch_count,
+            'max_watch_count': POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN,
+        }
+
+    reason_text = str(reason or '')
+    reason_l = reason_text.lower()
+    if any(marker in reason_l for marker in POST_EXIT_RUNNER_TOXIC_REASON_MARKERS):
+        return {'pass': False, 'reason': 'toxic_exit_not_runner_watchable', 'exit_reason': reason_text}
+
+    realized = _safe_float(realized_pnl, None)
+    trigger = _safe_float(trigger_pnl, None)
+    quote = _safe_float(exit_quote_pnl, None)
+    peak = _safe_float(getattr(pos, 'peak_pnl', None), 0.0) or 0.0
+    entry_mode = str((getattr(pos, 'monitor_state', None) or {}).get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    is_loss = realized is not None and realized < 0
+    is_win_or_flat = realized is not None and realized >= 0
+
+    if realized is not None and realized <= POST_EXIT_RUNNER_WATCH_MAX_LOSS_PNL:
+        return {
+            'pass': False,
+            'reason': 'loss_too_deep_for_runner_watch',
+            'realized_pnl': realized,
+            'max_loss_pnl': POST_EXIT_RUNNER_WATCH_MAX_LOSS_PNL,
+        }
+
+    loss_watchable = is_loss and any(marker in reason_l for marker in POST_EXIT_RUNNER_LOSS_REASON_MARKERS)
+    win_watchable = (
+        is_win_or_flat
+        and (
+            peak >= 0.20
+            or (realized is not None and realized >= 0.10)
+            or any(marker in reason_l for marker in POST_EXIT_RUNNER_WIN_REASON_MARKERS)
+        )
+    )
+    if not loss_watchable and not win_watchable:
+        return {
+            'pass': False,
+            'reason': 'exit_not_runner_watchable',
+            'exit_reason': reason_text,
+            'realized_pnl': realized,
+            'peak_pnl': peak,
+        }
+
+    mode = ATH_MICRO_RECLAIM_TINY_PROBE_MODE if route == 'ATH' else LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    return {
+        'pass': True,
+        'reason': POST_EXIT_RUNNER_SOURCE_REASON,
+        'mode': mode,
+        'route': route,
+        'source_reject_reason': POST_EXIT_RUNNER_SOURCE_REASON,
+        'ttl_sec': POST_EXIT_RUNNER_WATCH_TTL_SEC,
+        'parent_trade_id': getattr(pos, 'trade_id', None),
+        'parent_lifecycle_id': getattr(pos, 'lifecycle_id', None),
+        'parent_entry_mode': entry_mode,
+        'parent_is_probe': position_is_observation_probe(pos),
+        'exit_reason': reason_text,
+        'realized_pnl': realized,
+        'trigger_pnl': trigger,
+        'exit_quote_pnl': quote,
+        'peak_pnl': peak,
+        'loss_watchable': loss_watchable,
+        'win_watchable': win_watchable,
+    }
+
+
+def track_post_exit_runner_candidate(
+    db,
+    discovery_candidates,
+    *,
+    pos,
+    reason,
+    realized_pnl=None,
+    trigger_pnl=None,
+    exit_quote_pnl=None,
+    watchlist_entry=None,
+    lifecycle=None,
+    now_ts=None,
+):
+    now_ts = float(now_ts or time.time())
+    watch_count = _post_exit_runner_watch_count(db, getattr(pos, 'token_ca', None))
+    detail = _post_exit_runner_watch_detail(
+        pos,
+        reason,
+        realized_pnl=realized_pnl,
+        trigger_pnl=trigger_pnl,
+        exit_quote_pnl=exit_quote_pnl,
+        watch_count=watch_count,
+    )
+    if not detail.get('pass'):
+        return False, detail
+
+    token_ca = getattr(pos, 'token_ca', None)
+    signal_ts = int(now_ts)
+    source_detail = {
+        'source_reject_reason': POST_EXIT_RUNNER_SOURCE_REASON,
+        'parent_trade_id': detail.get('parent_trade_id'),
+        'parent_lifecycle_id': detail.get('parent_lifecycle_id'),
+        'parent_entry_mode': detail.get('parent_entry_mode'),
+        'parent_is_probe': detail.get('parent_is_probe'),
+        'parent_exit_reason': detail.get('exit_reason'),
+        'parent_realized_pnl': detail.get('realized_pnl'),
+        'parent_trigger_pnl': detail.get('trigger_pnl'),
+        'parent_exit_quote_pnl': detail.get('exit_quote_pnl'),
+        'parent_peak_pnl': detail.get('peak_pnl'),
+        'scores': (
+            (getattr(pos, 'monitor_state', None) or {}).get('matrixScores')
+            or (getattr(pos, 'monitor_state', None) or {}).get('matrix_scores')
+            or (getattr(pos, 'monitor_state', None) or {}).get('scores')
+        ),
+    }
+    tracked = track_discovery_candidate(
+        db,
+        discovery_candidates,
+        mode=detail.get('mode'),
+        route=detail.get('route'),
+        token_ca=token_ca,
+        symbol=getattr(pos, 'symbol', None),
+        lifecycle_id=build_lifecycle_id(token_ca, signal_ts),
+        signal_ts=signal_ts,
+        signal_id=getattr(pos, 'premium_signal_id', None),
+        pool=getattr(pos, 'pool_address', None),
+        watchlist_id=(watchlist_entry or {}).get('id') if isinstance(watchlist_entry, dict) else None,
+        watchlist_entry=watchlist_entry,
+        source_component='post_exit_runner_watch',
+        source_reject_reason=POST_EXIT_RUNNER_SOURCE_REASON,
+        source_detail=source_detail,
+        lifecycle=lifecycle,
+        ttl_sec=POST_EXIT_RUNNER_WATCH_TTL_SEC,
+        now_ts=now_ts,
+    )
+    if tracked:
+        record_decision_event(
+            db,
+            component='post_exit_runner_watch',
+            event_type='candidate_tracked',
+            decision='track',
+            reason=POST_EXIT_RUNNER_SOURCE_REASON,
+            token_ca=token_ca,
+            symbol=getattr(pos, 'symbol', None),
+            lifecycle_id=build_lifecycle_id(token_ca, signal_ts),
+            trade_id=getattr(pos, 'trade_id', None),
+            signal_ts=signal_ts,
+            signal_id=getattr(pos, 'premium_signal_id', None),
+            strategy_stage=getattr(pos, 'strategy_stage', None),
+            route=detail.get('route'),
+            data_source='post_exit',
+            payload={
+                **detail,
+                'watch_count_before': watch_count,
+            },
+            event_ts=now_ts,
+        )
+    detail['tracked'] = bool(tracked)
+    return bool(tracked), detail
 
 
 def _smart_entry_reject_recovery_mode(route, pending=None, timing_reason=None):
@@ -15864,6 +16132,27 @@ def run_monitor(db):
                 
                 # Update Watchlist Status
                 w_entry_close = watchlist.get_by_ca(pos.token_ca)
+                try:
+                    post_exit_tracked, post_exit_detail = track_post_exit_runner_candidate(
+                        db,
+                        discovery_candidates,
+                        pos=pos,
+                        reason=reason,
+                        realized_pnl=realized_pnl,
+                        trigger_pnl=trigger_pnl,
+                        exit_quote_pnl=exit_quote_pnl,
+                        watchlist_entry=w_entry_close,
+                        now_ts=exit_ts,
+                    )
+                    if post_exit_tracked:
+                        _post_exit_realized_text = f"{realized_pnl*100:+.1f}%" if realized_pnl is not None else 'na'
+                        log.info(
+                            f"  [POST_EXIT_RUNNER_WATCH] {pos.symbol}/{pos.strategy_stage} "
+                            f"mode={post_exit_detail.get('mode')} reason={reason} "
+                            f"realized={_post_exit_realized_text} peak={pos.peak_pnl*100:+.1f}%"
+                        )
+                except Exception as e:
+                    log.debug(f"  [POST_EXIT_RUNNER_WATCH] skip {pos.symbol}: {e}", exc_info=True)
                 if w_entry_close:
                     if position_is_observation_probe(pos):
                         _toxic_probe_exit = _token_risk_probe_loss_should_poison(reason)

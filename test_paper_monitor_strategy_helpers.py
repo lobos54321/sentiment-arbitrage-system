@@ -46,6 +46,8 @@ from paper_trade_monitor import (  # noqa: E402
     _matrix_micro_momentum_reason,
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
+    _post_exit_runner_watch_detail,
+    track_post_exit_runner_candidate,
 )
 
 
@@ -93,11 +95,21 @@ def _paper_trade_db(rows=()):
 
 
 class _DummyPos:
-    def __init__(self, *, entry_mode="lotto_micro_reclaim_tiny_probe", size_sol=0.003, exit_rules=None):
-        self.monitor_state = {"entryMode": entry_mode, "entrySol": size_sol}
+    def __init__(self, *, entry_mode="lotto_micro_reclaim_tiny_probe", size_sol=0.003, exit_rules=None, route="LOTTO"):
+        self.monitor_state = {"entryMode": entry_mode, "entrySol": size_sol, "signalRoute": route}
         self.entry_mode = entry_mode
         self.position_size_sol = size_sol
         self.exit_rules = exit_rules or {"stopLossPct": 18}
+        self.token_ca = "TokenCA"
+        self.symbol = "DUMMY"
+        self.trade_id = 42
+        self.lifecycle_id = "life-parent"
+        self.signal_ts = 1_778_220_000
+        self.premium_signal_id = None
+        self.strategy_stage = "paper"
+        self.signal_type = route
+        self.pool_address = "PoolCA"
+        self.peak_pnl = 0.0
 
 
 def _ath_no_kline_pending():
@@ -726,6 +738,68 @@ def test_phase_policy_live_exit_allows_lotto_primary_no_follow_decay():
 
     assert detail["pass"] is True
     assert detail["live_reason"] == "phase_no_follow_decay_30s"
+
+
+def test_post_exit_runner_watch_allows_lotto_stop_as_tiny_reclaim_watch():
+    pos = _DummyPos(entry_mode="momentum_direct_entry", size_sol=0.01, route="LOTTO")
+    pos.peak_pnl = 0.018
+
+    detail = _post_exit_runner_watch_detail(
+        pos,
+        "lotto_sl (-20.3% <= -18.0%)",
+        realized_pnl=-0.2095,
+        trigger_pnl=-0.203,
+        exit_quote_pnl=-0.2095,
+    )
+
+    assert detail["pass"] is True
+    assert detail["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert detail["source_reject_reason"] == "post_exit_runner_watch"
+
+
+def test_post_exit_runner_watch_rejects_toxic_rug_exit():
+    pos = _DummyPos(entry_mode="lotto_micro_reclaim_tiny_probe", size_sol=0.003, route="LOTTO")
+
+    detail = _post_exit_runner_watch_detail(
+        pos,
+        "phase_probe_rug_defense_exit (rug_risk_78)",
+        realized_pnl=-0.09,
+        trigger_pnl=-0.08,
+        exit_quote_pnl=-0.09,
+    )
+
+    assert detail["pass"] is False
+    assert detail["reason"] == "toxic_exit_not_runner_watchable"
+
+
+def test_track_post_exit_runner_candidate_uses_new_exit_lifecycle_and_ttl():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+    pos = _DummyPos(entry_mode="momentum_direct_entry", size_sol=0.01, route="LOTTO")
+    pos.peak_pnl = 0.25
+
+    tracked, detail = track_post_exit_runner_candidate(
+        db,
+        candidates,
+        pos=pos,
+        reason="trail_stop_capture",
+        realized_pnl=0.18,
+        trigger_pnl=0.18,
+        exit_quote_pnl=0.18,
+        watchlist_entry={"id": 7, "pool_address": "PoolCA"},
+        now_ts=1_778_221_800,
+    )
+
+    assert tracked is True
+    assert detail["tracked"] is True
+    assert len(candidates) == 1
+    candidate = next(iter(candidates.values()))
+    assert candidate["source_reject_reason"] == "post_exit_runner_watch"
+    assert candidate["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    assert candidate["signal_ts"] == 1_778_221_800
+    assert candidate["expires_at"] >= 1_778_221_800 + 30 * 60
 
 
 def test_lotto_sl_quote_gap_protection_cancels_when_quote_above_stop_floor():
