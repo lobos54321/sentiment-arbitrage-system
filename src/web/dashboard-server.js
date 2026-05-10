@@ -20,6 +20,10 @@ import {
   finalBlockerFromTrade,
 } from './lifecycle-summary-utils.js';
 import { summarizePremiumSignalGateHealth } from './data-source-health-utils.js';
+import {
+  buildTradeReplay,
+  summarizeTradeReplays,
+} from './trade-replay-utils.js';
 
 dotenv.config();
 
@@ -2877,6 +2881,125 @@ const server = http.createServer(async (req, res) => {
         bucket_summary: bucketSummary,
         by_entry_mode: byMode,
         recent,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/trade-replay') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const startedAt = Date.now();
+      const tradeIdRaw = parseInt(url.searchParams.get('trade_id') || url.searchParams.get('id') || '', 10);
+      const tradeId = Number.isFinite(tradeIdRaw) && tradeIdRaw > 0 ? tradeIdRaw : null;
+      const sinceTs = tradeId ? null : windowedSinceTs(url, 6);
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || (tradeId ? '1' : '25'), 10) || 25, 100));
+      const pathLimit = Math.max(1, Math.min(parseInt(url.searchParams.get('path_limit') || '240', 10) || 240, 1000));
+      const eventLimit = Math.max(1, Math.min(parseInt(url.searchParams.get('event_limit') || '240', 10) || 240, 1000));
+      const lossOnly = !['0', 'false', 'no'].includes(String(url.searchParams.get('loss_only') || (tradeId ? '0' : '1')).toLowerCase());
+      const includeTimeline = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_timeline') || (tradeId ? '1' : '0')).toLowerCase());
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('paper_trades')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_trades table not found' }));
+        return;
+      }
+
+      const where = [];
+      const params = { limit };
+      if (tradeId) {
+        where.push('id = @tradeId');
+        params.tradeId = tradeId;
+      } else if (sinceTs) {
+        where.push('entry_ts >= @since');
+        params.since = sinceTs;
+      }
+      if (lossOnly) {
+        where.push('exit_ts IS NOT NULL');
+        where.push('COALESCE(pnl_pct, 0) < 0');
+      }
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const trades = paperDb.prepare(`
+        SELECT *
+        FROM paper_trades
+        ${whereSql}
+        ORDER BY entry_ts DESC, id DESC
+        LIMIT @limit
+      `).all(params);
+
+      const eventStmt = tableNames.has('paper_decision_events') ? paperDb.prepare(`
+        SELECT id, event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
+               signal_ts, strategy_stage, route, component, event_type, decision,
+               reason, data_source, lifecycle_state, vitality_score, entry_bias, payload_json
+        FROM paper_decision_events
+        WHERE trade_id = @tradeId
+           OR (lifecycle_id IS NOT NULL AND lifecycle_id = @lifecycleId)
+           OR (token_ca = @tokenCa AND event_ts BETWEEN @startTs AND @endTs)
+        ORDER BY event_ts ASC, id ASC
+        LIMIT @eventLimit
+      `) : null;
+      const pathStmt = tableNames.has('paper_trade_path_samples') ? paperDb.prepare(`
+        SELECT id, trade_id, lifecycle_id, token_ca, symbol, strategy_stage, sample_ts,
+               action, reason, mark_price, mark_pnl, quote_price, quote_pnl, peak_pnl,
+               sold_pct, mark_source, quote_success, quote_failure_reason, quote_out_sol,
+               partial_realized_sol, remaining_cost_basis_sol, blended_mark_pnl,
+               blended_quote_pnl, payload_json
+        FROM paper_trade_path_samples
+        WHERE trade_id = @tradeId
+        ORDER BY sample_ts ASC, id ASC
+        LIMIT @pathLimit
+      `) : null;
+
+      const replays = [];
+      for (const trade of trades) {
+        const signalTs = parseUnixishTime(trade.signal_ts);
+        const entryTs = Number(trade.entry_ts || signalTs || Math.floor(Date.now() / 1000));
+        const exitTs = Number(trade.exit_ts || Math.floor(Date.now() / 1000));
+        const eventParams = {
+          tradeId: trade.id,
+          lifecycleId: trade.lifecycle_id || '__no_lifecycle__',
+          tokenCa: trade.token_ca || '__no_token__',
+          startTs: Math.max(0, Math.min(signalTs || entryTs, entryTs) - 900),
+          endTs: Math.max(exitTs, entryTs) + 900,
+          eventLimit,
+        };
+        const events = eventStmt ? eventStmt.all(eventParams) : [];
+        const pathSamples = pathStmt ? pathStmt.all({ tradeId: trade.id, pathLimit }) : [];
+        replays.push(buildTradeReplay(trade, pathSamples, events, { includeTimeline }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          trade_id: tradeId,
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          limit,
+          loss_only: lossOnly,
+          include_timeline: includeTimeline,
+          path_limit: pathLimit,
+          event_limit: eventLimit,
+        },
+        query_ms: Date.now() - startedAt,
+        summary: summarizeTradeReplays(replays),
+        replay_notes: [
+          'decision_events show why the trade was allowed or blocked before entry',
+          'path_samples show mark/quote PnL while the position was alive',
+          'loss_attribution is rule-based diagnosis, not a strategy change',
+        ],
+        trades: replays,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
