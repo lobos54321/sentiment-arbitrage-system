@@ -32,6 +32,12 @@ const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
 const getExperimentLeaderboard = () => [];
 const listRecentExperiments = () => [];
+const PAPER_REPORT_COOLDOWN_MS = Math.max(
+  0,
+  parseInt(process.env.PAPER_REPORT_COOLDOWN_MS || '5000', 10) || 5000
+);
+let paperReportBusy = false;
+let paperReportCooldownUntil = 0;
 
 /**
  * 验证敏感 API 的访问令牌
@@ -89,6 +95,60 @@ export function boundedWindowedSinceTs(url, defaultHours = 1, maxHours = 2, opti
   const nowSec = Number.isFinite(options.nowSec) ? options.nowSec : Math.floor(Date.now() / 1000);
   const hours = boundedIntParam(url, 'hours', defaultHours, 1, maxHours);
   return nowSec - hours * 3600;
+}
+
+export function resetPaperReportGateForTest() {
+  paperReportBusy = false;
+  paperReportCooldownUntil = 0;
+}
+
+export function tryBeginPaperReport(endpoint = 'paper_report', nowMs = Date.now()) {
+  if (paperReportBusy) {
+    return {
+      allowed: false,
+      reason: 'paper_report_busy',
+      endpoint,
+      retry_after_ms: PAPER_REPORT_COOLDOWN_MS,
+    };
+  }
+  if (nowMs < paperReportCooldownUntil) {
+    return {
+      allowed: false,
+      reason: 'paper_report_cooldown',
+      endpoint,
+      retry_after_ms: paperReportCooldownUntil - nowMs,
+    };
+  }
+  paperReportBusy = true;
+  let released = false;
+  return {
+    allowed: true,
+    endpoint,
+    release(releaseNowMs = Date.now()) {
+      if (released) return;
+      released = true;
+      paperReportBusy = false;
+      paperReportCooldownUntil = Math.max(
+        paperReportCooldownUntil,
+        releaseNowMs + PAPER_REPORT_COOLDOWN_MS
+      );
+    },
+  };
+}
+
+function beginLivePaperReport(res, endpoint) {
+  const gate = tryBeginPaperReport(endpoint);
+  if (gate.allowed) return gate.release;
+  res.writeHead(429, {
+    'Content-Type': 'application/json',
+    'Retry-After': String(Math.max(1, Math.ceil((gate.retry_after_ms || PAPER_REPORT_COOLDOWN_MS) / 1000))),
+  });
+  res.end(JSON.stringify({
+    error: gate.reason,
+    endpoint,
+    retry_after_ms: gate.retry_after_ms,
+  }));
+  return null;
 }
 
 function missedAttributionTimeWhere(sinceTs, alias = '') {
@@ -2398,8 +2458,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '250', 10) || 250, 1000));
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const limit = boundedIntParam(url, 'limit', 50, 1, 100);
       const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
@@ -2467,6 +2530,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
@@ -2497,7 +2561,10 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     let signalDb;
+    let releasePaperReport;
     try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
@@ -2715,6 +2782,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
       try { if (signalDb) signalDb.close(); } catch {}
     }
@@ -2913,7 +2981,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       const startedAt = Date.now();
       const tradeIdRaw = parseInt(url.searchParams.get('trade_id') || url.searchParams.get('id') || '', 10);
       const tradeId = Number.isFinite(tradeIdRaw) && tradeIdRaw > 0 ? tradeIdRaw : null;
@@ -3020,6 +3091,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
@@ -3032,7 +3104,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 80, 1, 120);
       const eventLimit = Math.max(limit, boundedIntParam(url, 'event_limit', 3000, 100, 8000));
       const sinceTs = boundedWindowedSinceTs(url, 1, 2);
@@ -3346,6 +3421,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
@@ -3359,7 +3435,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 25, 1, 80);
       const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       const queryStartedAt = Date.now();
@@ -3645,6 +3724,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
@@ -3658,7 +3738,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 50, 1, 80);
       const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       const queryStartedAt = Date.now();
@@ -3951,6 +4034,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
@@ -3965,7 +4049,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       const hoursBack = boundedIntParam(url, 'hours', 24, 1, 24);
       const sinceTs = Math.floor(Date.now() / 1000) - hoursBack * 3600;
       paperDb = new Database(paperDbPath, { readonly: true });
@@ -4060,6 +4147,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
