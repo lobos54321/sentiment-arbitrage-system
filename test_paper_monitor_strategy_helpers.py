@@ -47,6 +47,9 @@ from paper_trade_monitor import (  # noqa: E402
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
     _post_exit_runner_watch_detail,
+    _post_exit_reclaim_entry_mode_force_live,
+    _watchlist_hard_loss_reentry_bypass_detail,
+    position_is_observation_probe,
     _update_candidate_quote_confirmation,
     track_post_exit_runner_candidate,
 )
@@ -741,6 +744,12 @@ def test_phase_policy_live_exit_allows_lotto_primary_no_follow_decay():
     assert detail["live_reason"] == "phase_no_follow_decay_30s"
 
 
+def test_lotto_proving_cap_position_is_observation_probe():
+    pos = _DummyPos(entry_mode="momentum_direct_entry", size_sol=0.005, route="LOTTO")
+
+    assert position_is_observation_probe(pos) is True
+
+
 def test_post_exit_runner_watch_allows_lotto_stop_as_tiny_reclaim_watch():
     pos = _DummyPos(entry_mode="momentum_direct_entry", size_sol=0.01, route="LOTTO")
     pos.peak_pnl = 0.018
@@ -757,6 +766,7 @@ def test_post_exit_runner_watch_allows_lotto_stop_as_tiny_reclaim_watch():
     assert detail["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert detail["source_reject_reason"] == "volatile_runner_watch"
     assert detail["watch_family"] == "volatile_runner"
+    assert detail["ttl_sec"] >= 75 * 60
 
 
 def test_post_exit_runner_watch_keeps_high_peak_as_runner_watch():
@@ -774,6 +784,7 @@ def test_post_exit_runner_watch_keeps_high_peak_as_runner_watch():
     assert detail["pass"] is True
     assert detail["source_reject_reason"] == "post_exit_runner_watch"
     assert detail["watch_family"] == "post_exit_runner"
+    assert detail["ttl_sec"] >= 90 * 60
 
 
 def test_post_exit_runner_watch_rejects_toxic_rug_exit():
@@ -818,7 +829,47 @@ def test_track_post_exit_runner_candidate_uses_new_exit_lifecycle_and_ttl():
     assert candidate["source_reject_reason"] == "post_exit_runner_watch"
     assert candidate["mode"] == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     assert candidate["signal_ts"] == 1_778_221_800
-    assert candidate["expires_at"] >= 1_778_221_800 + 30 * 60
+    assert candidate["expires_at"] >= 1_778_221_800 + 90 * 60
+
+
+def test_post_exit_reclaim_force_live_requires_passed_recovery_and_quote():
+    candidate = {
+        "source_component": "post_exit_runner_watch",
+        "source_reject_reason": "volatile_runner_watch",
+    }
+    detail = {
+        "lotto_recovery_gate": {"pass": True, "reason": "lotto_micro_reclaim_ready"},
+        "lotto_recovery_quote_probe": {"success": True},
+    }
+
+    decision = _post_exit_reclaim_entry_mode_force_live(
+        candidate,
+        detail,
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "post_exit_lotto_reclaim_quote_confirmed_force_live"
+
+
+def test_post_exit_reclaim_force_live_rejects_missing_quote():
+    candidate = {
+        "source_component": "post_exit_runner_watch",
+        "source_reject_reason": "volatile_runner_watch",
+    }
+    detail = {
+        "lotto_recovery_gate": {"pass": True, "reason": "lotto_micro_reclaim_ready"},
+        "lotto_recovery_quote_probe": {"success": False, "reason": "quote_not_executable"},
+    }
+
+    decision = _post_exit_reclaim_entry_mode_force_live(
+        candidate,
+        detail,
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "lotto_recovery_quote_not_executable"
 
 
 def test_low_liq_quote_confirmation_requires_two_consecutive_successes():
@@ -934,13 +985,28 @@ def test_entry_mode_quality_high_quality_tiny_override_allows_strong_ath():
         "paper_only_scout": True,
         "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
         "signal_type": "ATH",
-        "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 60},
+        "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 70},
     }
 
     decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
 
     assert decision["pass"] is True
     assert decision["reason"] == "entry_mode_quality_high_quality_tiny_override"
+
+
+def test_entry_mode_quality_high_quality_tiny_override_blocks_no_kline_weak_momentum():
+    pending = {
+        "entry_mode": ATH_NO_KLINE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "signal_type": "ATH",
+        "matrix_scores": {"trend": 60, "volume": 70, "price": 100, "signal": 100, "momentum": 60},
+    }
+
+    decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "matrix_not_strong_enough"
 
 
 def test_entry_mode_quality_high_quality_tiny_override_keeps_weak_scores_shadowed():
@@ -971,6 +1037,41 @@ def test_entry_mode_quality_high_quality_tiny_override_keeps_pullback_shadowed_b
 
     assert decision["pass"] is False
     assert decision["reason"] == "mode_not_overrideable"
+
+
+def test_hard_loss_reentry_bypass_allows_strong_reclaim_above_last_entry():
+    decision = _watchlist_hard_loss_reentry_bypass_detail(
+        {"last_exit_price": 1.0},
+        {
+            "current_price": 1.03,
+            "scores": {"trend": 80, "volume": 70, "price": 70, "signal": 100, "momentum": 100},
+        },
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "hard_loss_reentry_strong_reclaim_bypass"
+
+
+def test_hard_loss_reentry_bypass_rejects_weak_momentum_or_no_recovery():
+    weak_momentum = _watchlist_hard_loss_reentry_bypass_detail(
+        {"last_exit_price": 1.0},
+        {
+            "current_price": 1.10,
+            "scores": {"trend": 80, "volume": 70, "price": 70, "signal": 100, "momentum": 60},
+        },
+    )
+    below_entry = _watchlist_hard_loss_reentry_bypass_detail(
+        {"last_exit_price": 1.0},
+        {
+            "current_price": 0.99,
+            "scores": {"trend": 80, "volume": 70, "price": 70, "signal": 100, "momentum": 100},
+        },
+    )
+
+    assert weak_momentum["pass"] is False
+    assert weak_momentum["reason"] == "hard_loss_bypass_momentum_too_low"
+    assert below_entry["pass"] is False
+    assert below_entry["reason"] == "hard_loss_bypass_recovery_too_low"
 
 
 def test_ath_no_kline_reentry_guard_allows_first_entry():

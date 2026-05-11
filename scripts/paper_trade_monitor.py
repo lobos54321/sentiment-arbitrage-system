@@ -204,9 +204,18 @@ EXIT_STOP_QUOTE_GAP_PROTECTION_MIN_GAP = float(os.environ.get('EXIT_STOP_QUOTE_G
 EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER = float(os.environ.get('EXIT_STOP_QUOTE_GAP_PROTECTION_BUFFER', '0.005'))
 DOG_CANDIDATE_WATCH_ENABLED = os.environ.get('DOG_CANDIDATE_WATCH_ENABLED', 'true').lower() != 'false'
 POST_EXIT_RUNNER_WATCH_ENABLED = os.environ.get('POST_EXIT_RUNNER_WATCH_ENABLED', 'true').lower() != 'false'
-POST_EXIT_RUNNER_WATCH_TTL_SEC = int(os.environ.get('POST_EXIT_RUNNER_WATCH_TTL_SEC', str(30 * 60)))
+POST_EXIT_RUNNER_WATCH_TTL_SEC = int(os.environ.get('POST_EXIT_RUNNER_WATCH_TTL_SEC', str(90 * 60)))
+POST_EXIT_VOLATILE_RUNNER_WATCH_TTL_SEC = int(os.environ.get('POST_EXIT_VOLATILE_RUNNER_WATCH_TTL_SEC', str(75 * 60)))
 POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN = max(1, int(os.environ.get('POST_EXIT_RUNNER_WATCH_MAX_PER_TOKEN', '1')))
 POST_EXIT_RUNNER_WATCH_MAX_LOSS_PNL = float(os.environ.get('POST_EXIT_RUNNER_WATCH_MAX_LOSS_PNL', '-0.30'))
+POST_EXIT_RECLAIM_ENTRY_MODE_FORCE_LIVE_ENABLED = os.environ.get('POST_EXIT_RECLAIM_ENTRY_MODE_FORCE_LIVE_ENABLED', 'true').lower() != 'false'
+REENTRY_HARD_LOSS_BYPASS_ENABLED = os.environ.get('REENTRY_HARD_LOSS_BYPASS_ENABLED', 'true').lower() != 'false'
+REENTRY_HARD_LOSS_BYPASS_MIN_T = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_T', '60'))
+REENTRY_HARD_LOSS_BYPASS_MIN_V = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_V', '70'))
+REENTRY_HARD_LOSS_BYPASS_MIN_P = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_P', '70'))
+REENTRY_HARD_LOSS_BYPASS_MIN_S = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_S', '100'))
+REENTRY_HARD_LOSS_BYPASS_MIN_M = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_M', '100'))
+REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT = float(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT', '0.02'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -2396,6 +2405,7 @@ def position_is_observation_probe(pos):
         return False
     state = getattr(pos, 'monitor_state', None) or {}
     entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    signal_route = str(state.get('signalRoute') or getattr(pos, 'signal_type', '') or '').upper()
     try:
         size_sol = float(
             state.get('entrySol')
@@ -2406,7 +2416,71 @@ def position_is_observation_probe(pos):
         size_sol = 0.0
     if size_sol <= 0 or size_sol > PROBE_PROFIT_CAPTURE_MAX_SIZE_SOL:
         return False
+    if signal_route == 'LOTTO' and size_sol <= PRIMARY_PROVING_CAP_SIZE_SOL:
+        return True
     return entry_mode in PAPER_TINY_SCOUT_ENTRY_MODES or 'scout' in entry_mode or 'probe' in entry_mode
+
+
+def _watchlist_hard_loss_reentry_bypass_detail(w_entry, eval_res):
+    if not REENTRY_HARD_LOSS_BYPASS_ENABLED:
+        return {'pass': False, 'reason': 'hard_loss_reentry_bypass_disabled'}
+    w_entry = w_entry or {}
+    eval_res = eval_res or {}
+    scores = eval_res.get('scores') or {}
+    try:
+        trend = int(float(scores.get('trend', 0) or 0))
+        volume = int(float(scores.get('volume', 0) or 0))
+        price = int(float(scores.get('price', 0) or 0))
+        signal = int(float(scores.get('signal', 0) or 0))
+        momentum = int(float(scores.get('momentum', 0) or 0))
+    except (TypeError, ValueError):
+        trend = volume = price = signal = momentum = 0
+
+    current_price = _safe_float(eval_res.get('current_price'), 0.0) or 0.0
+    last_entry_price = _safe_float(w_entry.get('last_exit_price'), 0.0) or 0.0
+    recovery_pct = None
+    if current_price > 0 and last_entry_price > 0:
+        recovery_pct = (current_price - last_entry_price) / last_entry_price
+
+    thresholds = {
+        'trend': REENTRY_HARD_LOSS_BYPASS_MIN_T,
+        'volume': REENTRY_HARD_LOSS_BYPASS_MIN_V,
+        'price': REENTRY_HARD_LOSS_BYPASS_MIN_P,
+        'signal': REENTRY_HARD_LOSS_BYPASS_MIN_S,
+        'momentum': REENTRY_HARD_LOSS_BYPASS_MIN_M,
+        'min_recovery_pct': REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT,
+    }
+    observed = {
+        'trend': trend,
+        'volume': volume,
+        'price': price,
+        'signal': signal,
+        'momentum': momentum,
+        'current_price': current_price,
+        'last_entry_price': last_entry_price,
+        'recovery_pct': recovery_pct,
+    }
+
+    if trend < REENTRY_HARD_LOSS_BYPASS_MIN_T:
+        return {'pass': False, 'reason': 'hard_loss_bypass_trend_too_low', 'observed': observed, 'thresholds': thresholds}
+    if volume < REENTRY_HARD_LOSS_BYPASS_MIN_V:
+        return {'pass': False, 'reason': 'hard_loss_bypass_volume_too_low', 'observed': observed, 'thresholds': thresholds}
+    if price < REENTRY_HARD_LOSS_BYPASS_MIN_P:
+        return {'pass': False, 'reason': 'hard_loss_bypass_price_too_low', 'observed': observed, 'thresholds': thresholds}
+    if signal < REENTRY_HARD_LOSS_BYPASS_MIN_S:
+        return {'pass': False, 'reason': 'hard_loss_bypass_signal_too_low', 'observed': observed, 'thresholds': thresholds}
+    if momentum < REENTRY_HARD_LOSS_BYPASS_MIN_M:
+        return {'pass': False, 'reason': 'hard_loss_bypass_momentum_too_low', 'observed': observed, 'thresholds': thresholds}
+    if recovery_pct is None:
+        return {'pass': False, 'reason': 'hard_loss_bypass_missing_price_recovery', 'observed': observed, 'thresholds': thresholds}
+    if recovery_pct < REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT:
+        return {'pass': False, 'reason': 'hard_loss_bypass_recovery_too_low', 'observed': observed, 'thresholds': thresholds}
+    return {
+        'pass': True,
+        'reason': 'hard_loss_reentry_strong_reclaim_bypass',
+        'observed': observed,
+        'thresholds': thresholds,
+    }
 
 
 def _exit_reason_is_stop_loss(reason):
@@ -6137,13 +6211,18 @@ def _post_exit_runner_watch_detail(
         source_reason = VOLATILE_RUNNER_SOURCE_REASON
 
     mode = ATH_MICRO_RECLAIM_TINY_PROBE_MODE if route == 'ATH' else LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    ttl_sec = (
+        POST_EXIT_VOLATILE_RUNNER_WATCH_TTL_SEC
+        if source_reason == VOLATILE_RUNNER_SOURCE_REASON
+        else POST_EXIT_RUNNER_WATCH_TTL_SEC
+    )
     return {
         'pass': True,
         'reason': source_reason,
         'mode': mode,
         'route': route,
         'source_reject_reason': source_reason,
-        'ttl_sec': POST_EXIT_RUNNER_WATCH_TTL_SEC,
+        'ttl_sec': ttl_sec,
         'parent_trade_id': getattr(pos, 'trade_id', None),
         'parent_lifecycle_id': getattr(pos, 'lifecycle_id', None),
         'parent_entry_mode': entry_mode,
@@ -6221,7 +6300,7 @@ def track_post_exit_runner_candidate(
         source_reject_reason=detail.get('source_reject_reason') or POST_EXIT_RUNNER_SOURCE_REASON,
         source_detail=source_detail,
         lifecycle=lifecycle,
-        ttl_sec=POST_EXIT_RUNNER_WATCH_TTL_SEC,
+        ttl_sec=detail.get('ttl_sec') or POST_EXIT_RUNNER_WATCH_TTL_SEC,
         now_ts=now_ts,
     )
     if tracked:
@@ -6932,8 +7011,10 @@ def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=No
     no_kline_strong = (
         entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE
         and trend >= 60
+        and volume >= 70
         and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
         and signal >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
+        and momentum >= 70
     )
     if entry_mode not in tiny_modes_allowed:
         return {'pass': False, 'reason': 'mode_not_overrideable', 'entry_mode': entry_mode}
@@ -6945,8 +7026,10 @@ def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=No
             'scores': scores,
             'thresholds': {
                 'trend': ENTRY_MODE_QUALITY_OVERRIDE_MIN_T,
+                'volume': 70 if entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE else None,
                 'price': ENTRY_MODE_QUALITY_OVERRIDE_MIN_P,
                 'signal': ENTRY_MODE_QUALITY_OVERRIDE_MIN_S,
+                'momentum': 70 if entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE else None,
             },
         }
 
@@ -6963,6 +7046,63 @@ def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=No
             'momentum': momentum,
         },
     }
+
+
+def _post_exit_reclaim_entry_mode_force_live(candidate, detail, mode):
+    if not POST_EXIT_RECLAIM_ENTRY_MODE_FORCE_LIVE_ENABLED:
+        return {'pass': False, 'reason': 'post_exit_reclaim_force_live_disabled'}
+    candidate = candidate or {}
+    detail = detail or {}
+    mode = str(mode or candidate.get('mode') or '')
+    source_component = str(candidate.get('source_component') or '')
+    source_reason = str(
+        candidate.get('source_reject_reason')
+        or (candidate.get('source_detail') or {}).get('source_reject_reason')
+        or ''
+    )
+    post_exit_source = (
+        source_component == 'post_exit_runner_watch'
+        or source_reason in {POST_EXIT_RUNNER_SOURCE_REASON, VOLATILE_RUNNER_SOURCE_REASON}
+    )
+    if not post_exit_source:
+        return {
+            'pass': False,
+            'reason': 'not_post_exit_reclaim_candidate',
+            'source_component': source_component,
+            'source_reject_reason': source_reason,
+        }
+
+    if mode == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE:
+        gate = detail.get('lotto_recovery_gate') or {}
+        quote_probe = detail.get('lotto_recovery_quote_probe') or gate.get('quote_probe') or {}
+        if not gate.get('pass'):
+            return {'pass': False, 'reason': 'lotto_recovery_gate_not_passed', 'gate': gate}
+        if not quote_probe.get('success'):
+            return {'pass': False, 'reason': 'lotto_recovery_quote_not_executable', 'quote_probe': quote_probe}
+        return {
+            'pass': True,
+            'reason': 'post_exit_lotto_reclaim_quote_confirmed_force_live',
+            'mode': mode,
+            'source_reject_reason': source_reason,
+            'gate_reason': gate.get('reason'),
+        }
+
+    if mode == ATH_MICRO_RECLAIM_TINY_PROBE_MODE:
+        gate = detail.get('ath_recovery_gate') or {}
+        quote_probe = detail.get('ath_recovery_quote_probe') or gate.get('quote_probe') or {}
+        if not gate.get('pass'):
+            return {'pass': False, 'reason': 'ath_recovery_gate_not_passed', 'gate': gate}
+        if not quote_probe.get('success'):
+            return {'pass': False, 'reason': 'ath_recovery_quote_not_executable', 'quote_probe': quote_probe}
+        return {
+            'pass': True,
+            'reason': 'post_exit_ath_reclaim_quote_confirmed_force_live',
+            'mode': mode,
+            'source_reject_reason': source_reason,
+            'gate_reason': gate.get('reason'),
+        }
+
+    return {'pass': False, 'reason': 'mode_not_post_exit_reclaim', 'mode': mode}
 
 
 def _lotto_pullback_has_strong_activity(lifecycle):
@@ -8065,6 +8205,8 @@ def process_discovery_tracking_candidates(
             )
             continue
 
+        post_exit_reclaim_force_live = _post_exit_reclaim_entry_mode_force_live(candidate, detail, mode)
+        detail['post_exit_reclaim_entry_mode_force_live'] = post_exit_reclaim_force_live
         live_allowed, entry_mode_quality = _entry_mode_quality_allows_live(
             db,
             entry_mode=mode,
@@ -8076,6 +8218,7 @@ def process_discovery_tracking_candidates(
             route=route,
             event_ts=now_ts,
             data_source='discovery_tracking+paper_trades',
+            force_live=bool(post_exit_reclaim_force_live.get('pass')),
         )
         detail['entry_mode_quality'] = entry_mode_quality
         if not live_allowed:
@@ -13267,12 +13410,20 @@ def run_monitor(db):
                         _last_exit_pnl = w_entry.get('last_exit_pnl')
                         _m_score = (eval_res.get('scores') or {}).get('momentum', 0) or 0
                         if _last_exit_pnl is not None and _last_exit_pnl < -0.08:
+                            _hard_loss_bypass = _watchlist_hard_loss_reentry_bypass_detail(w_entry, eval_res)
+                            if not _hard_loss_bypass.get('pass'):
+                                log.info(
+                                    f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
+                                    f"re-entry #{_entry_count+1}, last_exit_pnl={_last_exit_pnl:.1%} < -8% "
+                                    f"(crash exit, too risky to re-enter), "
+                                    f"bypass_reason={_hard_loss_bypass.get('reason')}"
+                                )
+                                continue
                             log.info(
-                                f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
-                                f"re-entry #{_entry_count+1}, last_exit_pnl={_last_exit_pnl:.1%} < -8% "
-                                f"(crash exit, too risky to re-enter)"
+                                f"  [WATCHLIST] ✅ {w_entry['symbol']} HARD_LOSS_REENTRY_BYPASS: "
+                                f"re-entry #{_entry_count+1}, last_exit_pnl={_last_exit_pnl:.1%}, "
+                                f"reason={_hard_loss_bypass.get('reason')}"
                             )
-                            continue
                         if _m_score < 60:
                             log.info(
                                 f"  [WATCHLIST] 🚫 {w_entry['symbol']} REENTRY_BLOCK: "
@@ -13282,7 +13433,7 @@ def run_monitor(db):
                             continue
                         log.info(
                             f"  [WATCHLIST] ✅ {w_entry['symbol']} REENTRY ALLOWED: "
-                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%} > -8%, M={_m_score} >= 60"
+                            f"re-entry #{_entry_count+1}, last_pnl={_last_exit_pnl:.1%}, M={_m_score} >= 60"
                         )
 
                     # PRICE-GATE: For re-entries, current price must be above last entry price.
