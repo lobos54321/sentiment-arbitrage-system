@@ -216,6 +216,8 @@ REENTRY_HARD_LOSS_BYPASS_MIN_P = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MI
 REENTRY_HARD_LOSS_BYPASS_MIN_S = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_S', '100'))
 REENTRY_HARD_LOSS_BYPASS_MIN_M = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_M', '100'))
 REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT = float(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT', '0.02'))
+REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_RECOVERY_PCT = float(os.environ.get('REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_RECOVERY_PCT', '0.20'))
+REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_M = int(os.environ.get('REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_M', '60'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -2451,6 +2453,8 @@ def _watchlist_hard_loss_reentry_bypass_detail(w_entry, eval_res):
         'signal': REENTRY_HARD_LOSS_BYPASS_MIN_S,
         'momentum': REENTRY_HARD_LOSS_BYPASS_MIN_M,
         'min_recovery_pct': REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT,
+        'flat_reclaim_min_recovery_pct': REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_RECOVERY_PCT,
+        'flat_reclaim_min_momentum': REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_M,
     }
     observed = {
         'trend': trend,
@@ -2462,6 +2466,22 @@ def _watchlist_hard_loss_reentry_bypass_detail(w_entry, eval_res):
         'last_entry_price': last_entry_price,
         'recovery_pct': recovery_pct,
     }
+
+    flat_reclaim_pass = (
+        recovery_pct is not None
+        and recovery_pct >= REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_RECOVERY_PCT
+        and trend >= max(REENTRY_HARD_LOSS_BYPASS_MIN_T, 80)
+        and signal >= REENTRY_HARD_LOSS_BYPASS_MIN_S
+        and momentum >= REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_M
+        and (volume >= REENTRY_HARD_LOSS_BYPASS_MIN_V or momentum >= REENTRY_HARD_LOSS_BYPASS_MIN_M)
+    )
+    if flat_reclaim_pass:
+        return {
+            'pass': True,
+            'reason': 'hard_loss_reentry_flat_reclaim_bypass',
+            'observed': observed,
+            'thresholds': thresholds,
+        }
 
     if trend < REENTRY_HARD_LOSS_BYPASS_MIN_T:
         return {'pass': False, 'reason': 'hard_loss_bypass_trend_too_low', 'observed': observed, 'thresholds': thresholds}
@@ -2790,6 +2810,15 @@ def supersede_stale_pending_for_signal(pending_entries, token_ca, signal_ts, sig
         superseded.append((lifecycle_id, pending))
         pending_entries.pop(lifecycle_id, None)
     return superseded
+
+
+def _pending_entry_exists_for_token(pending_entries, token_ca):
+    if not pending_entries or not token_ca:
+        return False
+    for pending in pending_entries.values():
+        if isinstance(pending, dict) and pending.get('token_ca') == token_ca:
+            return True
+    return False
 
 
 def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=None,
@@ -7013,16 +7042,20 @@ def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=No
     }
     if PULLBACK_TINY_SCOUT_FORCE_LIVE_ENABLED:
         tiny_modes_allowed.add('pullback_tiny_scout')
+    matrix_activity_strong = volume >= 70 and momentum >= 70
     matrix_strong = (
         trend >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_T
+        and matrix_activity_strong
         and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
         and signal >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
     )
     flat_structure_strong = (
         entry_mode in {ATH_HIGH_MC_TINY_PROBE_MODE, 'ath_flat_structure_tiny_scout'}
         and trend >= 60
+        and volume >= 70
         and price >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_P
         and signal >= ENTRY_MODE_QUALITY_OVERRIDE_MIN_S
+        and momentum >= 60
     )
     no_kline_strong = (
         entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE
@@ -7042,10 +7075,10 @@ def _entry_mode_quality_high_quality_tiny_override(pending=None, *, lifecycle=No
             'scores': scores,
             'thresholds': {
                 'trend': ENTRY_MODE_QUALITY_OVERRIDE_MIN_T,
-                'volume': 70 if entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE else None,
+                'volume': 70,
                 'price': ENTRY_MODE_QUALITY_OVERRIDE_MIN_P,
                 'signal': ENTRY_MODE_QUALITY_OVERRIDE_MIN_S,
-                'momentum': 70 if entry_mode == ATH_NO_KLINE_TINY_PROBE_MODE else None,
+                'momentum': 60 if entry_mode in {ATH_HIGH_MC_TINY_PROBE_MODE, 'ath_flat_structure_tiny_scout'} else 70,
             },
         }
 
@@ -7292,7 +7325,10 @@ def process_discovery_tracking_candidates(
         if not token_ca or not mode:
             discovery_candidates.pop(key, None)
             continue
-        if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+        same_lifecycle_pending = lifecycle_id in pending_entries
+        same_token_pending = _pending_entry_exists_for_token(pending_entries, token_ca)
+        same_token_holding = any(pos.token_ca == token_ca for pos in positions.values())
+        if same_lifecycle_pending or same_token_pending or same_token_holding:
             candidate['last_wait_reason'] = 'already_pending_or_holding'
             record_decision_event(
                 db,
@@ -7310,8 +7346,9 @@ def process_discovery_tracking_candidates(
                     'entry_mode': mode,
                     'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
                     'attempts': candidate.get('attempts'),
-                    'pending': lifecycle_id in pending_entries,
-                    'holding': any(pos.token_ca == token_ca for pos in positions.values()),
+                    'pending': same_lifecycle_pending,
+                    'same_token_pending': same_token_pending,
+                    'holding': same_token_holding,
                 },
                 event_ts=now_ts,
             )

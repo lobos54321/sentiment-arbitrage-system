@@ -44,6 +44,7 @@ from paper_trade_monitor import (  # noqa: E402
     _exit_stop_quote_gap_protection,
     _phase_policy_live_exit_detail,
     _matrix_micro_momentum_reason,
+    _pending_entry_exists_for_token,
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
     _post_exit_runner_watch_detail,
@@ -126,6 +127,16 @@ def _ath_no_kline_pending():
         "signal_type": "ATH",
         "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 60},
     }
+
+
+def test_pending_entry_exists_for_token_matches_different_lifecycle():
+    pending_entries = {
+        "TokenCA:100": {"token_ca": "TokenCA"},
+        "OtherCA:101": {"token_ca": "OtherCA"},
+    }
+
+    assert _pending_entry_exists_for_token(pending_entries, "TokenCA") is True
+    assert _pending_entry_exists_for_token(pending_entries, "MissingCA") is False
 
 
 class _FakeWatchlist:
@@ -1035,6 +1046,51 @@ def test_entry_mode_quality_high_quality_tiny_override_blocks_no_kline_weak_mome
     assert decision["reason"] == "matrix_not_strong_enough"
 
 
+def test_entry_mode_quality_high_quality_tiny_override_blocks_no_kline_zero_momentum_matrix():
+    pending = {
+        "entry_mode": ATH_NO_KLINE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "signal_type": "ATH",
+        "matrix_scores": {"trend": 80, "volume": 40, "price": 100, "signal": 100, "momentum": 0},
+    }
+
+    decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "matrix_not_strong_enough"
+
+
+def test_entry_mode_quality_high_quality_tiny_override_blocks_uncertainty_zero_momentum():
+    pending = {
+        "entry_mode": ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "signal_type": "ATH",
+        "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 0},
+    }
+
+    decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "matrix_not_strong_enough"
+
+
+def test_entry_mode_quality_high_quality_tiny_override_allows_uncertainty_with_live_activity():
+    pending = {
+        "entry_mode": ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "signal_type": "ATH",
+        "matrix_scores": {"trend": 80, "volume": 70, "price": 100, "signal": 100, "momentum": 70},
+    }
+
+    decision = _entry_mode_quality_high_quality_tiny_override(pending, route="ATH")
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "entry_mode_quality_high_quality_tiny_override"
+
+
 def test_entry_mode_quality_high_quality_tiny_override_keeps_weak_scores_shadowed():
     pending = {
         "entry_mode": ATH_NO_KLINE_TINY_PROBE_MODE,
@@ -1098,6 +1154,32 @@ def test_hard_loss_reentry_bypass_rejects_weak_momentum_or_no_recovery():
     assert weak_momentum["reason"] == "hard_loss_bypass_momentum_too_low"
     assert below_entry["pass"] is False
     assert below_entry["reason"] == "hard_loss_bypass_recovery_too_low"
+
+
+def test_hard_loss_reentry_bypass_allows_flat_reclaim_after_large_recovery():
+    decision = _watchlist_hard_loss_reentry_bypass_detail(
+        {"last_exit_price": 1.0},
+        {
+            "current_price": 1.35,
+            "scores": {"trend": 80, "volume": 40, "price": 30, "signal": 100, "momentum": 100},
+        },
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "hard_loss_reentry_flat_reclaim_bypass"
+
+
+def test_hard_loss_reentry_bypass_blocks_flat_reclaim_without_large_recovery():
+    decision = _watchlist_hard_loss_reentry_bypass_detail(
+        {"last_exit_price": 1.0},
+        {
+            "current_price": 1.10,
+            "scores": {"trend": 80, "volume": 40, "price": 30, "signal": 100, "momentum": 100},
+        },
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "hard_loss_bypass_volume_too_low"
 
 
 def test_ath_no_kline_reentry_guard_allows_first_entry():
