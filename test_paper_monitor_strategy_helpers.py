@@ -449,6 +449,42 @@ def test_lotto_not_ath_watch_shadow_wait_is_throttled():
     assert [row["event_type"] for row in events] == ["watch_opened", "watch_wait"]
 
 
+def test_lotto_not_ath_watch_shadow_can_rehydrate_after_missing_sample_expiry():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    _insert_not_ath_missed(db, created_event_ts=1000, pnl_5m=None, pnl_15m=None)
+
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 31 * 60, limit=10) == 2
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 32 * 60, limit=10) == 0
+
+    _insert_not_ath_missed(
+        db,
+        created_event_ts=1000,
+        pnl_5m=0.08,
+        pnl_15m=0.14,
+        pnl_60m=0.30,
+        max_pnl_recorded=0.30,
+    )
+
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 33 * 60, limit=10) == 1
+    events = db.execute(
+        """
+        SELECT event_type, decision, reason
+        FROM paper_decision_events
+        WHERE component = 'lotto_not_ath_watch_shadow'
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [row["event_type"] for row in events] == [
+        "watch_opened",
+        "watch_expired",
+        "would_enter",
+    ]
+    assert events[-1]["decision"] == "WOULD_ENTER"
+    assert events[-1]["reason"] == "not_ath_two_horizon_reclaim_confirmed"
+
+
 def test_lotto_not_ath_watch_shadow_decision_expires_missing_samples():
     detail = _lotto_not_ath_watch_shadow_decision(
         {"created_event_ts": 1000, "pnl_5m": 0.08, "pnl_15m": None},

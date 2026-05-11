@@ -1284,29 +1284,65 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
         return 0
     rows = db.execute(
         """
+        WITH candidates AS (
+            SELECT
+                m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
+                m.route, m.component, m.reject_reason, m.created_event_ts,
+                m.baseline_price, m.pnl_5m, m.pnl_15m, m.pnl_60m, m.pnl_24h,
+                m.max_pnl_recorded, m.tradable_missed, m.tradability_status,
+                m.tradability_reason, m.first_tradable_pnl, m.tradable_peak_pnl,
+                m.would_stop_before_peak, m.lifecycle_state, m.vitality_score,
+                m.entry_bias
+            FROM paper_missed_signal_attribution m
+            WHERE m.route = 'LOTTO'
+              AND m.component IN ('upstream_gate', 'lotto_entry_gate')
+              AND m.reject_reason = 'not_ath_v17'
+              AND m.baseline_price IS NOT NULL
+              AND m.created_event_ts >= ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM paper_decision_events e
+                  WHERE e.component = 'lotto_not_ath_watch_shadow'
+                    AND e.token_ca = m.token_ca
+                    AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
+                    AND e.event_type IN ('would_enter', 'watch_rejected')
+              )
+        ),
+        ranked AS (
+            SELECT
+                c.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.token_ca, COALESCE(c.signal_ts, 0)
+                    ORDER BY
+                        CASE WHEN c.pnl_5m IS NOT NULL AND c.pnl_15m IS NOT NULL THEN 1 ELSE 0 END DESC,
+                        COALESCE(c.tradable_peak_pnl, c.max_pnl_recorded, c.pnl_24h, c.pnl_60m, c.pnl_15m, c.pnl_5m, 0) DESC,
+                        c.created_event_ts DESC,
+                        c.id DESC
+                ) AS rn
+            FROM candidates c
+        )
         SELECT
-            m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
-            m.route, m.component, m.reject_reason, m.created_event_ts,
-            m.baseline_price, m.pnl_5m, m.pnl_15m, m.pnl_60m, m.pnl_24h,
-            m.max_pnl_recorded, m.tradable_missed, m.tradability_status,
-            m.tradability_reason, m.first_tradable_pnl, m.tradable_peak_pnl,
-            m.would_stop_before_peak, m.lifecycle_state, m.vitality_score,
-            m.entry_bias
-        FROM paper_missed_signal_attribution m
-        WHERE m.route = 'LOTTO'
-          AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-          AND m.reject_reason = 'not_ath_v17'
-          AND m.baseline_price IS NOT NULL
-          AND m.created_event_ts >= ?
-          AND NOT EXISTS (
-              SELECT 1
-              FROM paper_decision_events e
-              WHERE e.component = 'lotto_not_ath_watch_shadow'
-                AND e.token_ca = m.token_ca
-                AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
-                AND e.event_type IN ('would_enter', 'watch_rejected', 'watch_expired')
+            r.id, r.token_ca, r.symbol, r.lifecycle_id, r.signal_id, r.signal_ts,
+            r.route, r.component, r.reject_reason, r.created_event_ts,
+            r.baseline_price, r.pnl_5m, r.pnl_15m, r.pnl_60m, r.pnl_24h,
+            r.max_pnl_recorded, r.tradable_missed, r.tradability_status,
+            r.tradability_reason, r.first_tradable_pnl, r.tradable_peak_pnl,
+            r.would_stop_before_peak, r.lifecycle_state, r.vitality_score,
+            r.entry_bias
+        FROM ranked r
+        WHERE r.rn = 1
+          AND (
+              (r.pnl_5m IS NOT NULL AND r.pnl_15m IS NOT NULL)
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM paper_decision_events e
+                  WHERE e.component = 'lotto_not_ath_watch_shadow'
+                    AND e.token_ca = r.token_ca
+                    AND COALESCE(e.signal_ts, 0) = COALESCE(r.signal_ts, 0)
+                    AND e.event_type = 'watch_expired'
+              )
           )
-        ORDER BY m.created_event_ts DESC
+        ORDER BY r.created_event_ts DESC
         LIMIT ?
         """,
         (now_ts - LOTTO_NOT_ATH_WATCH_SHADOW_MAX_AGE_SEC, limit),

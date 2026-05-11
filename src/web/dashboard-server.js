@@ -4336,7 +4336,7 @@ const server = http.createServer(async (req, res) => {
           ORDER BY n DESC
         `).all(params);
         const shadowOutcomeCte = `
-          WITH terminal AS (
+          WITH terminal_ranked AS (
             SELECT
               e.id AS event_id,
               e.event_ts,
@@ -4345,11 +4345,35 @@ const server = http.createServer(async (req, res) => {
               e.signal_ts,
               e.event_type,
               e.decision,
-              e.reason
+              e.reason,
+              ROW_NUMBER() OVER (
+                PARTITION BY e.token_ca, COALESCE(e.signal_ts, 0)
+                ORDER BY
+                  CASE e.event_type
+                    WHEN 'would_enter' THEN 3
+                    WHEN 'watch_rejected' THEN 2
+                    ELSE 1
+                  END DESC,
+                  e.event_ts DESC,
+                  e.id DESC
+              ) AS terminal_rn
             FROM paper_decision_events e
             WHERE e.component = 'lotto_not_ath_watch_shadow'
               ${eventWhereSql}
               AND e.event_type IN ('would_enter', 'watch_rejected', 'watch_expired')
+          ),
+          terminal AS (
+            SELECT
+              event_id,
+              event_ts,
+              token_ca,
+              event_symbol,
+              signal_ts,
+              event_type,
+              decision,
+              reason
+            FROM terminal_ranked
+            WHERE terminal_rn = 1
           ),
           joined AS (
             SELECT
