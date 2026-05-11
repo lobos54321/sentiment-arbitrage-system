@@ -22,6 +22,22 @@ ENTRY_MODE_QUALITY_BAD_AVG_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_BAD_
 ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE = float(os.environ.get("ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE", "0.15"))
 ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL", "-0.05"))
 ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK", "0.12"))
+ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES_DEFAULT = ",".join(
+    [
+        "ath_micro_reclaim_tiny_probe",
+        "lotto_micro_reclaim_tiny_probe",
+        "ath_no_kline_tiny_probe",
+        "momentum_direct_entry",
+    ]
+)
+ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES = {
+    item.strip()
+    for item in os.environ.get(
+        "ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES",
+        ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES_DEFAULT,
+    ).split(",")
+    if item.strip()
+}
 
 _MODE_OVERRIDES = {
     # Matrix reclaim is currently the noisiest live probe path. It can produce
@@ -146,11 +162,21 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
         "shadow_until": shadow_until if shadow_until > now_ts else None,
         "stats": stats,
     }
-    if force_live:
-        base["reason"] = "entry_mode_quality_force_live"
-        return base
 
     if not ENTRY_MODE_QUALITY_ENABLED or not entry_mode:
+        return base
+
+    if entry_mode in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES:
+        base.update({
+            "decision": "shadow",
+            "reason": "entry_mode_quality_shadow_only_mode",
+            "shadow_only_mode": True,
+            "configured_shadow_only_modes": sorted(ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES),
+        })
+        return base
+
+    if force_live:
+        base["reason"] = "entry_mode_quality_force_live"
         return base
 
     if shadow_until > now_ts:

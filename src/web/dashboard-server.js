@@ -24,6 +24,7 @@ import {
   buildTradeReplay,
   summarizeTradeReplays,
 } from './trade-replay-utils.js';
+import { buildModeEvReport } from './mode-ev-utils.js';
 
 dotenv.config();
 
@@ -78,6 +79,23 @@ function windowedSinceTs(url, defaultHours = 6) {
   const all = String(url.searchParams.get('all') || '').toLowerCase();
   if (['1', 'true', 'yes'].includes(all)) return null;
   const hours = Math.max(1, Math.min(parseInt(url.searchParams.get('hours') || String(defaultHours), 10) || defaultHours, 168));
+  return Math.floor(Date.now() / 1000) - hours * 3600;
+}
+
+function reportSinceTs(url, defaultWindow = '72h') {
+  const explicit = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+  if (explicit) return explicit;
+  const all = String(url.searchParams.get('all') || '').toLowerCase();
+  const windowParam = String(url.searchParams.get('window') || defaultWindow).trim().toLowerCase();
+  if (['1', 'true', 'yes'].includes(all) || windowParam === 'all') return null;
+  const match = windowParam.match(/^(\d+)(h|hr|hrs|hour|hours|d|day|days)$/);
+  if (match) {
+    const amount = Math.max(1, parseInt(match[1], 10) || 1);
+    const unit = match[2];
+    const hours = unit.startsWith('d') ? amount * 24 : amount;
+    return Math.floor(Date.now() / 1000) - hours * 3600;
+  }
+  const hours = Math.max(1, Math.min(parseInt(url.searchParams.get('hours') || '72', 10) || 72, 24 * 120));
   return Math.floor(Date.now() / 1000) - hours * 3600;
 }
 
@@ -2785,6 +2803,104 @@ const server = http.createServer(async (req, res) => {
       try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
       try { if (signalDb) signalDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/mode-ev') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '10000', 10) || 10000, 20000));
+      const sinceTs = reportSinceTs(url, '72h');
+      const clean = String(url.searchParams.get('clean') || 'all').toLowerCase() === 'quote' ? 'quote' : 'all';
+      const quoteGapMaxPctRaw = Number(url.searchParams.get('quote_gap_max_pct') || '8');
+      const extraCostPctRaw = Number(url.searchParams.get('extra_cost_pct') || '0');
+      const quoteGapMaxPct = Number.isFinite(quoteGapMaxPctRaw) ? quoteGapMaxPctRaw : 8;
+      const extraCostPct = Number.isFinite(extraCostPctRaw) ? extraCostPctRaw : 0;
+      const bootstrapIterations = Math.max(250, Math.min(parseInt(url.searchParams.get('bootstrap_iterations') || '3000', 10) || 3000, 10000));
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
+      if (!hasTable) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_trades table not found' }));
+        return;
+      }
+      const cols = getTableColumns(paperDb, 'paper_trades');
+      const selectCols = [
+        'id',
+        'symbol',
+        'token_ca',
+        'lifecycle_id',
+        'entry_ts',
+        'exit_ts',
+        'exit_reason',
+        'pnl_pct',
+        'peak_pnl',
+        'position_size_sol',
+        'signal_route',
+        'strategy_stage',
+        cols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode',
+        cols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json',
+        cols.has('lotto_state_json') ? 'lotto_state_json' : 'NULL AS lotto_state_json',
+        cols.has('entry_execution_audit_json') ? 'entry_execution_audit_json' : 'NULL AS entry_execution_audit_json',
+        cols.has('exit_execution_audit_json') ? 'exit_execution_audit_json' : 'NULL AS exit_execution_audit_json',
+        cols.has('accounting_source') ? 'accounting_source' : 'NULL AS accounting_source',
+        cols.has('exit_quote_mark_gap_pct') ? 'exit_quote_mark_gap_pct' : 'NULL AS exit_quote_mark_gap_pct',
+        cols.has('max_path_quote_gap_pct') ? 'max_path_quote_gap_pct' : 'NULL AS max_path_quote_gap_pct',
+      ];
+      const where = ['pnl_pct IS NOT NULL', '(exit_ts IS NOT NULL OR exit_reason IS NOT NULL)'];
+      const params = { limit };
+      if (sinceTs) {
+        where.push('entry_ts >= @since');
+        params.since = sinceTs;
+      }
+      const rows = paperDb.prepare(`
+        SELECT ${selectCols.join(', ')}
+        FROM paper_trades
+        WHERE ${where.join(' AND ')}
+        ORDER BY entry_ts DESC, id DESC
+        LIMIT @limit
+      `).all(params);
+      const report = buildModeEvReport(rows, {
+        clean,
+        quoteGapMaxPct,
+        extraCostPct,
+        bootstrapIterations,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          window: url.searchParams.get('window') || null,
+          clean,
+          limit,
+          quote_gap_max_pct: quoteGapMaxPct,
+          extra_cost_pct: extraCostPct,
+          bootstrap_iterations: bootstrapIterations,
+          unit_economics_min_net_pct: 1.5,
+          unit_economics_min_net_sol: 0.000045,
+        },
+        query_ms: Date.now() - startedAt,
+        ...report,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {

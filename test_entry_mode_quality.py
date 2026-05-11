@@ -53,6 +53,25 @@ def test_entry_mode_quality_force_live_bypasses_degraded_shadow():
     assert decision["reason"] == "entry_mode_quality_force_live"
 
 
+def test_shadow_only_mode_overrides_force_live():
+    db = _db()
+
+    decision = evaluate_entry_mode_quality(db, "ath_micro_reclaim_tiny_probe", now_ts=1000, force_live=True)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+    assert decision["shadow_only_mode"] is True
+
+
+def test_lotto_micro_reclaim_is_shadow_only_by_default():
+    db = _db()
+
+    decision = evaluate_entry_mode_quality(db, "lotto_micro_reclaim_tiny_probe", now_ts=1000)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+
+
 def test_entry_mode_quality_degraded_path_shadows_future_entries():
     db = _db()
     for idx in range(8):
