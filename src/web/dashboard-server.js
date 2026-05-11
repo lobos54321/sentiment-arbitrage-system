@@ -4319,6 +4319,8 @@ const server = http.createServer(async (req, res) => {
         LIMIT @limit
       `).all(params);
       let shadowEvents = [];
+      let shadowOutcomeSummary = null;
+      let shadowOutcomeByReason = [];
       if (tableNames.has('paper_decision_events')) {
         shadowEvents = paperDb.prepare(`
           SELECT
@@ -4332,6 +4334,78 @@ const server = http.createServer(async (req, res) => {
             ${eventWhereSql}
           GROUP BY event_type, decision, reason
           ORDER BY n DESC
+        `).all(params);
+        const shadowOutcomeCte = `
+          WITH terminal AS (
+            SELECT
+              e.id AS event_id,
+              e.event_ts,
+              e.token_ca,
+              e.symbol AS event_symbol,
+              e.signal_ts,
+              e.event_type,
+              e.decision,
+              e.reason
+            FROM paper_decision_events e
+            WHERE e.component = 'lotto_not_ath_watch_shadow'
+              ${eventWhereSql}
+              AND e.event_type IN ('would_enter', 'watch_rejected', 'watch_expired')
+          ),
+          joined AS (
+            SELECT
+              t.*,
+              COALESCE(m.symbol, t.event_symbol, substr(t.token_ca, 1, 8), '?') AS symbol,
+              COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+              COALESCE(m.tradable_missed, 0) AS tradable_missed,
+              COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
+              m.tradability_status,
+              ROW_NUMBER() OVER (
+                PARTITION BY t.event_id
+                ORDER BY COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC
+              ) AS rn
+            FROM terminal t
+            LEFT JOIN paper_missed_signal_attribution m
+              ON m.token_ca = t.token_ca
+             AND COALESCE(m.signal_ts, 0) = COALESCE(t.signal_ts, 0)
+             AND m.route = 'LOTTO'
+             AND m.reject_reason = 'not_ath_v17'
+          ),
+          one AS (
+            SELECT * FROM joined WHERE rn = 1
+          )`;
+        shadowOutcomeSummary = paperDb.prepare(`
+          ${shadowOutcomeCte}
+          SELECT
+            COUNT(*) AS terminal_events,
+            COUNT(DISTINCT token_ca) AS unique_tokens,
+            COALESCE(SUM(CASE WHEN event_type = 'would_enter' THEN 1 ELSE 0 END), 0) AS would_enter_n,
+            COUNT(DISTINCT CASE WHEN event_type = 'would_enter' THEN token_ca END) AS would_enter_unique,
+            COALESCE(SUM(CASE WHEN event_type = 'would_enter' AND tradable_missed = 1 AND would_stop_before_peak != 1 THEN 1 ELSE 0 END), 0) AS would_enter_clean_tradable,
+            COALESCE(SUM(CASE WHEN event_type = 'would_enter' AND max_pnl >= 1.0 THEN 1 ELSE 0 END), 0) AS would_enter_gold_n,
+            COALESCE(SUM(CASE WHEN event_type = 'would_enter' AND max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END), 0) AS would_enter_silver_n,
+            COALESCE(SUM(CASE WHEN event_type = 'would_enter' AND max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END), 0) AS would_enter_bronze_n,
+            COALESCE(SUM(CASE WHEN event_type != 'would_enter' AND max_pnl >= 1.0 THEN 1 ELSE 0 END), 0) AS rejected_gold_n,
+            COALESCE(SUM(CASE WHEN event_type != 'would_enter' AND max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END), 0) AS rejected_silver_n,
+            COALESCE(SUM(CASE WHEN event_type != 'would_enter' AND max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END), 0) AS rejected_bronze_n,
+            MAX(max_pnl) AS max_pnl
+          FROM one
+        `).get(params);
+        shadowOutcomeByReason = paperDb.prepare(`
+          ${shadowOutcomeCte}
+          SELECT
+            event_type,
+            decision,
+            reason,
+            COUNT(*) AS n,
+            COUNT(DISTINCT token_ca) AS unique_tokens,
+            SUM(CASE WHEN tradable_missed = 1 AND would_stop_before_peak != 1 THEN 1 ELSE 0 END) AS clean_tradable_n,
+            SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_n,
+            SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_n,
+            SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_n,
+            MAX(max_pnl) AS max_pnl
+          FROM one
+          GROUP BY event_type, decision, reason
+          ORDER BY n DESC, gold_n DESC
         `).all(params);
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -4354,6 +4428,11 @@ const server = http.createServer(async (req, res) => {
         top_would_enter: topWouldEnter,
         top_missed_still_rejected: topMissedStillRejected,
         shadow_events: shadowEvents,
+        shadow_outcomes: {
+          summary: shadowOutcomeSummary,
+          by_reason: shadowOutcomeByReason,
+          note: 'Uses only actual lotto_not_ath_watch_shadow terminal events; this is the future shadow promotion view, not the historical proxy.',
+        },
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
