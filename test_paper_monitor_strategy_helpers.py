@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -37,6 +38,7 @@ from paper_trade_monitor import (  # noqa: E402
     _lotto_dynamic_ttl_extension_detail,
     _lotto_recovery_activity_gate,
     _lotto_recovery_mode_for_blocker,
+    _lotto_not_ath_watch_shadow_decision,
     _retarget_discovery_candidate,
     _build_discovery_pending,
     _entry_mode_for_ath_uncertainty_reason,
@@ -52,6 +54,7 @@ from paper_trade_monitor import (  # noqa: E402
     _watchlist_hard_loss_reentry_bypass_detail,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
+    record_lotto_not_ath_watch_shadow_candidates,
     track_discovery_candidate,
     track_post_exit_runner_candidate,
 )
@@ -319,6 +322,141 @@ def test_lotto_recovery_mode_uses_latest_blocker_over_original_reason():
         )
         == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
     )
+
+
+def _insert_not_ath_missed(
+    db,
+    *,
+    token_ca="TokenCA",
+    symbol="DOG",
+    signal_ts=1000,
+    created_event_ts=1000,
+    pnl_5m=0.07,
+    pnl_15m=0.12,
+    pnl_60m=0.30,
+    max_pnl_recorded=0.30,
+):
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            decision_event_id, created_event_ts, token_ca, symbol, lifecycle_id,
+            signal_id, signal_ts, route, component, decision, reject_reason,
+            baseline_price, baseline_source, baseline_ts, pnl_5m, pnl_15m,
+            pnl_60m, max_pnl_recorded, tradable_missed, tradability_status,
+            tradability_reason, first_tradable_pnl, tradable_peak_pnl,
+            would_stop_before_peak
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            None,
+            created_event_ts,
+            token_ca,
+            symbol,
+            f"{token_ca}:{signal_ts}",
+            123,
+            signal_ts,
+            "LOTTO",
+            "upstream_gate",
+            "skip",
+            "not_ath_v17",
+            1.0,
+            "test",
+            signal_ts,
+            pnl_5m,
+            pnl_15m,
+            pnl_60m,
+            max_pnl_recorded,
+            1,
+            "tradable_reclaim",
+            "test",
+            pnl_15m,
+            max_pnl_recorded,
+            0,
+        ),
+    )
+    db.commit()
+
+
+def test_lotto_not_ath_watch_shadow_confirms_without_live_pending():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    _insert_not_ath_missed(db)
+
+    recorded = record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10)
+
+    assert recorded == 2
+    events = db.execute(
+        """
+        SELECT event_type, decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE component = 'lotto_not_ath_watch_shadow'
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [row["event_type"] for row in events] == ["watch_opened", "would_enter"]
+    assert events[1]["decision"] == "WOULD_ENTER"
+    assert events[1]["reason"] == "not_ath_two_horizon_reclaim_confirmed"
+    payload = json.loads(events[1]["payload_json"])
+    assert payload["live_entry_enabled"] is False
+    assert payload["watch_ledger_mvp"]["parent_blocker"] == "not_ath_v17"
+    assert payload["suggested_entry_mode"] == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1360, limit=10) == 0
+
+
+def test_lotto_not_ath_watch_shadow_rejects_weak_first_reclaim():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    _insert_not_ath_missed(db, pnl_5m=0.02, pnl_15m=0.16)
+
+    recorded = record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10)
+
+    assert recorded == 2
+    terminal = db.execute(
+        """
+        SELECT event_type, decision, reason
+        FROM paper_decision_events
+        WHERE component = 'lotto_not_ath_watch_shadow'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert dict(terminal) == {
+        "event_type": "watch_rejected",
+        "decision": "SHADOW_REJECT",
+        "reason": "not_ath_watch_5m_reclaim_weak",
+    }
+
+
+def test_lotto_not_ath_watch_shadow_wait_is_throttled():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    _insert_not_ath_missed(db, created_event_ts=1200, pnl_5m=0.08, pnl_15m=None)
+
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10) == 2
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1360, limit=10) == 0
+    events = db.execute(
+        """
+        SELECT event_type
+        FROM paper_decision_events
+        WHERE component = 'lotto_not_ath_watch_shadow'
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [row["event_type"] for row in events] == ["watch_opened", "watch_wait"]
+
+
+def test_lotto_not_ath_watch_shadow_decision_expires_missing_samples():
+    detail = _lotto_not_ath_watch_shadow_decision(
+        {"created_event_ts": 1000, "pnl_5m": 0.08, "pnl_15m": None},
+        now_ts=1000 + 31 * 60,
+    )
+
+    assert detail["event_type"] == "watch_expired"
+    assert detail["decision"] == "SHADOW_EXPIRE"
 
 
 def test_smart_entry_reject_tracks_lotto_micro_recovery_candidate():

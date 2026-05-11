@@ -4154,6 +4154,215 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/not-ath-watch-shadow-backtest') {
+    // Single-blocker MVP backtest for LOTTO/not_ath_v17 shadow watch.
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const queryStartedAt = Date.now();
+      const sinceTs = reportSinceTs(url, '7d');
+      const limit = boundedIntParam(url, 'limit', 25, 1, 100);
+      const min5m = Number(url.searchParams.get('min_5m') || '0.05');
+      const min15m = Number(url.searchParams.get('min_15m') || '0.10');
+      const retention = Number(url.searchParams.get('retention') || '0.50');
+      const params = {
+        since: sinceTs || 0,
+        min5m: Number.isFinite(min5m) ? min5m : 0.05,
+        min15m: Number.isFinite(min15m) ? min15m : 0.10,
+        retention: Number.isFinite(retention) ? retention : 0.50,
+        limit,
+      };
+      const whereSql = sinceTs ? 'AND m.created_event_ts >= @since' : '';
+      const eventWhereSql = sinceTs ? 'AND event_ts >= @since' : '';
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      if (!tableNames.has('paper_missed_signal_attribution')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
+        return;
+      }
+      const baseCte = `
+        WITH base AS (
+          SELECT
+            m.id,
+            m.token_ca,
+            COALESCE(m.symbol, substr(m.token_ca, 1, 8), '?') AS symbol,
+            m.signal_ts,
+            m.created_event_ts,
+            m.baseline_price,
+            m.pnl_5m,
+            m.pnl_15m,
+            m.pnl_60m,
+            m.pnl_24h,
+            COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+            COALESCE(m.tradable_missed, 0) AS tradable_missed,
+            COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
+            m.tradability_status,
+            CASE
+              WHEN m.pnl_5m IS NULL OR m.pnl_15m IS NULL THEN 'awaiting_two_horizon_confirmation'
+              WHEN m.pnl_5m < @min5m THEN 'not_ath_watch_5m_reclaim_weak'
+              WHEN m.pnl_15m < @min15m THEN 'not_ath_watch_15m_reclaim_weak'
+              WHEN m.pnl_15m < m.pnl_5m * @retention THEN 'not_ath_watch_reclaim_decayed'
+              ELSE 'not_ath_two_horizon_reclaim_confirmed'
+            END AS shadow_reason,
+            CASE
+              WHEN m.pnl_5m IS NOT NULL
+               AND m.pnl_15m IS NOT NULL
+               AND m.pnl_5m >= @min5m
+               AND m.pnl_15m >= @min15m
+               AND m.pnl_15m >= m.pnl_5m * @retention
+              THEN 1 ELSE 0
+            END AS would_enter
+          FROM paper_missed_signal_attribution m
+          WHERE m.route = 'LOTTO'
+            AND m.component IN ('upstream_gate', 'lotto_entry_gate')
+            AND m.reject_reason = 'not_ath_v17'
+            AND m.baseline_price IS NOT NULL
+            ${whereSql}
+        ),
+        ranked AS (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY token_ca
+              ORDER BY max_pnl DESC, created_event_ts DESC
+            ) AS rn
+          FROM base
+        ),
+        unique_token AS (
+          SELECT * FROM ranked WHERE rn = 1
+        )`;
+      const summary = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          COUNT(*) AS unique_tokens,
+          SUM(CASE WHEN pnl_5m IS NOT NULL THEN 1 ELSE 0 END) AS has_5m,
+          SUM(CASE WHEN pnl_15m IS NOT NULL THEN 1 ELSE 0 END) AS has_15m,
+          SUM(CASE WHEN would_enter = 1 THEN 1 ELSE 0 END) AS would_enter_unique,
+          SUM(CASE WHEN would_enter = 1 AND tradable_missed = 1 AND would_stop_before_peak != 1 THEN 1 ELSE 0 END) AS would_enter_clean_tradable,
+          SUM(CASE WHEN tradable_missed = 1 AND would_stop_before_peak != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+          SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_n,
+          SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_n,
+          SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_n,
+          SUM(CASE WHEN would_enter = 1 AND max_pnl >= 1.0 THEN 1 ELSE 0 END) AS would_enter_gold_n,
+          SUM(CASE WHEN would_enter = 1 AND max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS would_enter_silver_n,
+          SUM(CASE WHEN would_enter = 1 AND max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS would_enter_bronze_n,
+          MAX(max_pnl) AS max_pnl,
+          AVG(max_pnl) AS avg_max_pnl
+        FROM unique_token
+      `).get(params);
+      const byReason = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          shadow_reason,
+          COUNT(*) AS unique_tokens,
+          SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_n,
+          SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_n,
+          SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_n,
+          SUM(CASE WHEN tradable_missed = 1 AND would_stop_before_peak != 1 THEN 1 ELSE 0 END) AS clean_tradable_unique,
+          MAX(max_pnl) AS max_pnl
+        FROM unique_token
+        GROUP BY shadow_reason
+        ORDER BY unique_tokens DESC, gold_n DESC
+      `).all(params);
+      const topWouldEnter = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          symbol,
+          token_ca,
+          signal_ts,
+          created_event_ts,
+          pnl_5m,
+          pnl_15m,
+          pnl_60m,
+          pnl_24h,
+          max_pnl,
+          tradable_missed,
+          would_stop_before_peak,
+          tradability_status,
+          shadow_reason
+        FROM unique_token
+        WHERE would_enter = 1
+        ORDER BY max_pnl DESC
+        LIMIT @limit
+      `).all(params);
+      const topMissedStillRejected = paperDb.prepare(`
+        ${baseCte}
+        SELECT
+          symbol,
+          token_ca,
+          signal_ts,
+          created_event_ts,
+          pnl_5m,
+          pnl_15m,
+          pnl_60m,
+          pnl_24h,
+          max_pnl,
+          tradable_missed,
+          would_stop_before_peak,
+          tradability_status,
+          shadow_reason
+        FROM unique_token
+        WHERE would_enter = 0
+        ORDER BY max_pnl DESC
+        LIMIT @limit
+      `).all(params);
+      let shadowEvents = [];
+      if (tableNames.has('paper_decision_events')) {
+        shadowEvents = paperDb.prepare(`
+          SELECT
+            event_type,
+            decision,
+            reason,
+            COUNT(*) AS n,
+            COUNT(DISTINCT token_ca) AS unique_tokens
+          FROM paper_decision_events
+          WHERE component = 'lotto_not_ath_watch_shadow'
+            ${eventWhereSql}
+          GROUP BY event_type, decision, reason
+          ORDER BY n DESC
+        `).all(params);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          parent_blocker: 'LOTTO/upstream_gate/not_ath_v17',
+          min_5m_pnl: params.min5m,
+          min_15m_pnl: params.min15m,
+          min_retention: params.retention,
+          tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
+          caveat: 'historical proxy uses stored 5m/15m missed-attribution samples; live promotion still requires quote-clean robust EV',
+        },
+        query_ms: Date.now() - queryStartedAt,
+        summary,
+        by_reason: byReason,
+        top_would_enter: topWouldEnter,
+        top_missed_still_rejected: topMissedStillRejected,
+        shadow_events: shadowEvents,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/stats/missed-gates') {
     // Most expensive gates: which SmartEntry reject reasons caused the most missed gold/silver dogs.
     // Query paper_decision_events (timing rejects) joined against paper_missed_signal_attribution.

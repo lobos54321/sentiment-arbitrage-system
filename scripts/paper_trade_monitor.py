@@ -229,7 +229,7 @@ LOTTO_REAL_PROBE_MIN_15M_PNL = float(os.environ.get('LOTTO_REAL_PROBE_MIN_15M_PN
 LOTTO_REAL_PROBE_SIZE_SOL = float(os.environ.get('LOTTO_REAL_PROBE_SIZE_SOL', '0.03'))
 LOTTO_REAL_PROBE_MAX_AGE_SEC = int(os.environ.get('LOTTO_REAL_PROBE_MAX_AGE_SEC', str(30 * 60)))
 LOTTO_REAL_PROBE_DECAY_FACTOR = float(os.environ.get('LOTTO_REAL_PROBE_DECAY_FACTOR', '0.5'))
-LOTTO_UPSTREAM_MISS_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
+LOTTO_UPSTREAM_MISS_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_ENABLED', 'false').lower() == 'true'
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_AGE_SEC = int(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_AGE_SEC', str(45 * 60)))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_MAX_PNL = float(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_MAX_PNL', '0.25'))
@@ -237,6 +237,12 @@ LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_RECLAIM_PNL = float(os.environ.get('LOTTO_UPS
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_MC = float(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_MC', '200000'))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_LIQ_USD', '5000'))
 LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE = 'lotto_upstream_miss_tiny_scout'
+LOTTO_NOT_ATH_WATCH_SHADOW_ENABLED = os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_ENABLED', 'true').lower() != 'false'
+LOTTO_NOT_ATH_WATCH_SHADOW_MAX_AGE_SEC = int(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MAX_AGE_SEC', str(90 * 60)))
+LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC = int(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC', str(30 * 60)))
+LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL', '0.05'))
+LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL', '0.10'))
+LOTTO_NOT_ATH_WATCH_SHADOW_MIN_RETENTION = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_RETENTION', '0.50'))
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC', '200000'))
@@ -1139,6 +1145,238 @@ def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
             signal_id=row['signal_id'],
             route='LOTTO',
             data_source='missed_attribution',
+            payload=payload,
+            event_ts=now_ts,
+        )
+        recorded += 1
+    return recorded
+
+
+def _row_value(row, key, default=None):
+    try:
+        return row[key]
+    except Exception:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+
+def _lotto_not_ath_watch_shadow_decision(row, *, now_ts):
+    """Historical-proxy confirmation for NOT_ATH watch candidates.
+
+    The live-safe invariant is that this only returns shadow decisions.  It
+    uses the missed-attribution horizon samples we already store, so it can be
+    backtested without creating a new tick replay table.
+    """
+    created_ts = _safe_float(_row_value(row, 'created_event_ts'), now_ts) or now_ts
+    age_sec = max(0.0, float(now_ts) - float(created_ts))
+    pnl_5m = _safe_float(_row_value(row, 'pnl_5m'), None)
+    pnl_15m = _safe_float(_row_value(row, 'pnl_15m'), None)
+    max_recovery_pnl = max(
+        [
+            v for v in (
+                _safe_float(_row_value(row, 'tradable_peak_pnl'), None),
+                _safe_float(_row_value(row, 'max_pnl_recorded'), None),
+                _safe_float(_row_value(row, 'pnl_24h'), None),
+                _safe_float(_row_value(row, 'pnl_60m'), None),
+                pnl_15m,
+                pnl_5m,
+            )
+            if v is not None
+        ] or [0.0]
+    )
+    base = {
+        'age_sec': age_sec,
+        'pnl_5m': pnl_5m,
+        'pnl_15m': pnl_15m,
+        'max_recovery_pnl': max_recovery_pnl,
+        'min_5m_pnl': LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL,
+        'min_15m_pnl': LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL,
+        'min_retention': LOTTO_NOT_ATH_WATCH_SHADOW_MIN_RETENTION,
+        'confirm_by_sec': LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC,
+    }
+    if pnl_5m is None or pnl_15m is None:
+        if age_sec >= LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC:
+            return {
+                **base,
+                'event_type': 'watch_expired',
+                'decision': 'SHADOW_EXPIRE',
+                'reason': 'not_ath_watch_missing_confirmation_samples',
+            }
+        return {
+            **base,
+            'event_type': 'watch_wait',
+            'decision': 'WAIT',
+            'reason': 'awaiting_two_horizon_confirmation',
+        }
+    if pnl_5m < LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL:
+        return {
+            **base,
+            'event_type': 'watch_rejected',
+            'decision': 'SHADOW_REJECT',
+            'reason': 'not_ath_watch_5m_reclaim_weak',
+        }
+    if pnl_15m < LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL:
+        return {
+            **base,
+            'event_type': 'watch_rejected',
+            'decision': 'SHADOW_REJECT',
+            'reason': 'not_ath_watch_15m_reclaim_weak',
+        }
+    if pnl_15m < pnl_5m * LOTTO_NOT_ATH_WATCH_SHADOW_MIN_RETENTION:
+        return {
+            **base,
+            'event_type': 'watch_rejected',
+            'decision': 'SHADOW_REJECT',
+            'reason': 'not_ath_watch_reclaim_decayed',
+        }
+    return {
+        **base,
+        'event_type': 'would_enter',
+        'decision': 'WOULD_ENTER',
+        'reason': 'not_ath_two_horizon_reclaim_confirmed',
+    }
+
+
+def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts):
+    token_ca = _row_value(row, 'token_ca')
+    created_ts = _safe_float(_row_value(row, 'created_event_ts'), now_ts) or now_ts
+    return {
+        'missed_attribution_id': _row_value(row, 'id'),
+        'source_component': _row_value(row, 'component'),
+        'source_reject_reason': _row_value(row, 'reject_reason'),
+        'parent_blocker': 'not_ath_v17',
+        'watch_family': 'lotto_not_ath_watch',
+        'watch_mode': 'shadow_only',
+        'live_entry_enabled': False,
+        'suggested_entry_mode': LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        'suggested_position_size_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+        'baseline_price': _row_value(row, 'baseline_price'),
+        'first_tradable_pnl': _row_value(row, 'first_tradable_pnl'),
+        'tradable_peak_pnl': _row_value(row, 'tradable_peak_pnl'),
+        'tradability_status': _row_value(row, 'tradability_status'),
+        'tradability_reason': _row_value(row, 'tradability_reason'),
+        'would_stop_before_peak': _row_value(row, 'would_stop_before_peak'),
+        'confirmation': decision_detail,
+        'watch_ledger_mvp': {
+            'token_ca': token_ca,
+            'parent_blocker': 'not_ath_v17',
+            'first_seen_ts': created_ts,
+            'last_seen_ts': now_ts,
+            'max_recovery_pnl': decision_detail.get('max_recovery_pnl'),
+        },
+        'lifecycle': {
+            'lifecycle_state': _row_value(row, 'lifecycle_state'),
+            'vitality_score': _row_value(row, 'vitality_score'),
+            'entry_bias': _row_value(row, 'entry_bias'),
+        },
+    }
+
+
+def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
+    """Record the first single-blocker watch MVP for LOTTO/not_ath_v17.
+
+    This is deliberately shadow-only.  It opens a lightweight watch event, then
+    records a would-enter/reject/expire decision from existing 5m and 15m
+    missed-attribution samples.  No watchlist row or pending entry is created.
+    """
+    if not LOTTO_NOT_ATH_WATCH_SHADOW_ENABLED:
+        return 0
+    rows = db.execute(
+        """
+        SELECT
+            m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
+            m.route, m.component, m.reject_reason, m.created_event_ts,
+            m.baseline_price, m.pnl_5m, m.pnl_15m, m.pnl_60m, m.pnl_24h,
+            m.max_pnl_recorded, m.tradable_missed, m.tradability_status,
+            m.tradability_reason, m.first_tradable_pnl, m.tradable_peak_pnl,
+            m.would_stop_before_peak, m.lifecycle_state, m.vitality_score,
+            m.entry_bias
+        FROM paper_missed_signal_attribution m
+        WHERE m.route = 'LOTTO'
+          AND m.component IN ('upstream_gate', 'lotto_entry_gate')
+          AND m.reject_reason = 'not_ath_v17'
+          AND m.baseline_price IS NOT NULL
+          AND m.created_event_ts >= ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM paper_decision_events e
+              WHERE e.component = 'lotto_not_ath_watch_shadow'
+                AND e.token_ca = m.token_ca
+                AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
+                AND e.event_type IN ('would_enter', 'watch_rejected', 'watch_expired')
+          )
+        ORDER BY m.created_event_ts DESC
+        LIMIT ?
+        """,
+        (now_ts - LOTTO_NOT_ATH_WATCH_SHADOW_MAX_AGE_SEC, limit),
+    ).fetchall()
+    recorded = 0
+    for row in rows:
+        token_ca = row['token_ca']
+        symbol = row['symbol'] or token_ca[:8]
+        lifecycle_id = row['lifecycle_id'] or build_lifecycle_id(token_ca, row['signal_ts'] or int(row['created_event_ts']))
+        opened = db.execute(
+            """
+            SELECT 1
+            FROM paper_decision_events
+            WHERE component = 'lotto_not_ath_watch_shadow'
+              AND token_ca = ?
+              AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
+              AND event_type = 'watch_opened'
+            LIMIT 1
+            """,
+            (token_ca, row['signal_ts']),
+        ).fetchone()
+        decision_detail = _lotto_not_ath_watch_shadow_decision(row, now_ts=now_ts)
+        payload = _lotto_not_ath_watch_payload(row, decision_detail, now_ts=now_ts)
+        if not opened:
+            record_decision_event(
+                db,
+                component='lotto_not_ath_watch_shadow',
+                event_type='watch_opened',
+                decision='WATCH',
+                reason='not_ath_v17',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=row['signal_ts'],
+                signal_id=row['signal_id'],
+                route='LOTTO',
+                data_source='paper_missed_signal_attribution',
+                payload=payload,
+                event_ts=now_ts,
+            )
+            recorded += 1
+        if decision_detail['event_type'] == 'watch_wait':
+            recent_wait = db.execute(
+                """
+                SELECT 1
+                FROM paper_decision_events
+                WHERE component = 'lotto_not_ath_watch_shadow'
+                  AND token_ca = ?
+                  AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
+                  AND event_type = 'watch_wait'
+                  AND event_ts >= ?
+                LIMIT 1
+                """,
+                (token_ca, row['signal_ts'], now_ts - 5 * 60),
+            ).fetchone()
+            if recent_wait:
+                continue
+        record_decision_event(
+            db,
+            component='lotto_not_ath_watch_shadow',
+            event_type=decision_detail['event_type'],
+            decision=decision_detail['decision'],
+            reason=decision_detail['reason'],
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=row['signal_ts'],
+            signal_id=row['signal_id'],
+            route='LOTTO',
+            data_source='paper_missed_signal_attribution+horizon_samples',
             payload=payload,
             event_ts=now_ts,
         )
@@ -3154,8 +3392,6 @@ def find_lotto_real_probe_candidates(db, *, now_ts, limit=3):
 
 
 def find_lotto_upstream_miss_tiny_scout_candidates(db, *, now_ts, limit=3):
-    if not LOTTO_UPSTREAM_MISS_TINY_SCOUT_ENABLED:
-        return []
     rows = db.execute(
         """
         WITH ranked AS (
@@ -3213,6 +3449,8 @@ def find_lotto_upstream_miss_tiny_scout_candidates(db, *, now_ts, limit=3):
 
 
 def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_entries, positions, *, now_ts, limit=1, max_positions=None):
+    if not LOTTO_UPSTREAM_MISS_TINY_SCOUT_ENABLED:
+        return 0
     if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
         return 0
     rows = find_lotto_upstream_miss_tiny_scout_candidates(db, now_ts=now_ts, limit=limit)
@@ -12218,6 +12456,17 @@ def run_monitor(db):
                         )
                 except Exception as _probe_shadow_err:
                     log.debug(f"  [LOTTO_PROBE_SHADOW] scan failed: {_probe_shadow_err}")
+                try:
+                    _not_ath_watch_shadow_n = record_lotto_not_ath_watch_shadow_candidates(db, now_ts=now, limit=60)
+                    if _not_ath_watch_shadow_n:
+                        log.info(
+                            f"  [LOTTO_NOT_ATH_WATCH_SHADOW] events={_not_ath_watch_shadow_n} "
+                            f"5m>={LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL:.0%} "
+                            f"15m>={LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL:.0%} "
+                            f"mode=shadow_only live_entry=false"
+                        )
+                except Exception as _not_ath_watch_shadow_err:
+                    log.debug(f"  [LOTTO_NOT_ATH_WATCH_SHADOW] scan failed: {_not_ath_watch_shadow_err}")
                 try:
                     _explosive_shadow_n = record_explosive_continuation_shadow_candidates(db, now_ts=now, limit=30)
                     if _explosive_shadow_n:
