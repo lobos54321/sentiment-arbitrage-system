@@ -2127,7 +2127,7 @@ def test_ath_uncertainty_soft_quality_reject_enters_discovery_tracking(monkeypat
     assert row["reason"] == "matrices not yet aligned"
 
 
-def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
+def test_discovery_tracking_keeps_lotto_high_risk_probe_shadow_only(monkeypatch):
     import paper_trade_monitor as monitor_module
 
     class FakeWatchlist:
@@ -2217,16 +2217,25 @@ def test_discovery_tracking_arms_lotto_high_risk_probe(monkeypatch):
         now_ts=1211,
         max_positions=10,
     )
-    assert armed == 1
-    assert discovery_candidates == {}
-    pending = pending_entries["BossToken:1000"]
-    assert pending["entry_mode"] == "lotto_high_risk_discovery_probe"
-    assert pending["timing_passed"] is True
-    assert pending["kelly_position_sol"] == 0.003
-    assert pending["paper_only_scout"] is True
+    assert armed == 0
+    assert pending_entries == {}
+    candidate = next(iter(discovery_candidates.values()))
+    assert candidate["last_wait_reason"] == "entry_mode_quality_shadow_only_mode"
+    row = db.execute(
+        """
+        SELECT decision, reason
+        FROM paper_decision_events
+        WHERE component = 'discovery_tracking'
+          AND event_type = 'candidate_recheck'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert row["decision"] == "shadow"
+    assert row["reason"] == "entry_mode_quality_shadow"
 
 
-def test_discovery_tracking_arms_lotto_low_liquidity_reclaim_with_quote(monkeypatch):
+def test_discovery_tracking_keeps_lotto_low_liquidity_reclaim_shadow_after_quote(monkeypatch):
     import paper_trade_monitor as monitor_module
 
     class FakeWatchlist:
@@ -2333,18 +2342,28 @@ def test_discovery_tracking_arms_lotto_low_liquidity_reclaim_with_quote(monkeypa
         now_ts=1512,
         max_positions=10,
     )
-    assert armed == 1
-    assert discovery_candidates == {}
-    pending = pending_entries["LowLiqToken:1000"]
-    assert pending["entry_mode"] == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
-    assert pending["kelly_position_sol"] == 0.003
-    assert pending["paper_only_scout"] is True
+    assert armed == 0
+    assert pending_entries == {}
+    candidate = next(iter(discovery_candidates.values()))
+    assert candidate["last_wait_reason"] == "entry_mode_quality_shadow_only_mode"
 
     row = db.execute(
         "SELECT decision, reason FROM paper_decision_events WHERE component = 'lotto_recovery'"
     ).fetchone()
     assert row["decision"] == "pass"
     assert row["reason"] == "lotto_low_liquidity_reclaim_live_reclaim_pass"
+    shadow_row = db.execute(
+        """
+        SELECT decision, reason
+        FROM paper_decision_events
+        WHERE component = 'discovery_tracking'
+          AND event_type = 'candidate_recheck'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert shadow_row["decision"] == "shadow"
+    assert shadow_row["reason"] == "entry_mode_quality_shadow"
 
 
 def test_ath_tracking_ttl_expiry_gets_final_micro_reclaim_watch(monkeypatch):

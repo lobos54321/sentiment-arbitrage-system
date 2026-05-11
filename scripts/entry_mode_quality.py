@@ -24,10 +24,32 @@ ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_
 ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK", "0.12"))
 ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES_DEFAULT = ",".join(
     [
+        "ath_flat_structure_tiny_scout",
+        "ath_high_mc_tiny_probe",
+        "ath_matrix_dissonance_tiny_probe",
         "ath_micro_reclaim_tiny_probe",
-        "lotto_micro_reclaim_tiny_probe",
         "ath_no_kline_tiny_probe",
+        "ath_reclaim_after_failure_tiny_probe",
+        "ath_soft_reclaim_tiny_scout",
+        "ath_uncertainty_tiny_scout",
+        "gmgn_concentration_tiny_scout",
+        "gmgn_low_kline_tiny_scout",
+        "gmgn_midcap_near_miss_scout",
+        "gmgn_reclaim_tiny_scout",
+        "gmgn_unknown_data_tiny_scout",
+        "lotto_high_risk_discovery_probe",
+        "lotto_low_liquidity_reclaim_tiny_probe",
+        "lotto_micro_reclaim_tiny_probe",
+        "lotto_not_ath_reclaim_tiny_probe",
+        "lotto_upstream_miss_tiny_scout",
+        "lotto_upstream_realtime_tiny_scout",
+        "matrix_micro_momentum_tiny_probe",
+        "matrix_reclaim_tiny_probe",
         "momentum_direct_entry",
+        "newborn_momentum_tiny_scout",
+        "pullback_tiny_scout",
+        "smart_entry_reclaim_tiny_scout",
+        "unknown_data_activity_tiny_scout",
     ]
 )
 ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES = {

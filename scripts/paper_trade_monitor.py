@@ -14808,33 +14808,34 @@ def run_monitor(db):
                             _entry_mode_quality['force_live_detail'] = _entry_mode_force_live
                         pending['entry_mode_quality'] = _entry_mode_quality
                         if not _entry_mode_live_allowed:
-                            _shadow_mode = (
-                                _discovery_mode_for_lotto_reason(pending.get('source_reject_reason'))
-                                if pending.get('is_lotto')
-                                else _discovery_mode_for_ath_reason(pending.get('source_reject_reason'))
-                            ) or pending.get('entry_mode') or pending.get('scout_mode')
-                            track_discovery_candidate(
-                                db,
-                                discovery_candidates,
-                                mode=_shadow_mode,
-                                route=_pending_signal_route or pending.get('signal_type'),
-                                token_ca=pending['token_ca'],
-                                symbol=pending['symbol'],
-                                lifecycle_id=lifecycle_id,
-                                signal_ts=pending['signal_ts'],
-                                signal_id=pending.get('premium_signal_id'),
-                                pool=pending.get('pool'),
-                                watchlist_id=pending.get('watchlist_id'),
-                                watchlist_entry=pending_w_entry,
-                                source_component=pending.get('source_component') or 'entry_mode_quality',
-                                source_reject_reason='entry_mode_quality_shadow',
-                                source_detail={
-                                    'entry_mode': pending.get('entry_mode'),
-                                    'entry_mode_quality': _entry_mode_quality,
-                                },
-                                lifecycle=_entry_timing_lifecycle,
-                                now_ts=now,
-                            )
+                            if not _entry_mode_quality.get('shadow_only_mode'):
+                                _shadow_mode = (
+                                    _discovery_mode_for_lotto_reason(pending.get('source_reject_reason'))
+                                    if pending.get('is_lotto')
+                                    else _discovery_mode_for_ath_reason(pending.get('source_reject_reason'))
+                                ) or pending.get('entry_mode') or pending.get('scout_mode')
+                                track_discovery_candidate(
+                                    db,
+                                    discovery_candidates,
+                                    mode=_shadow_mode,
+                                    route=_pending_signal_route or pending.get('signal_type'),
+                                    token_ca=pending['token_ca'],
+                                    symbol=pending['symbol'],
+                                    lifecycle_id=lifecycle_id,
+                                    signal_ts=pending['signal_ts'],
+                                    signal_id=pending.get('premium_signal_id'),
+                                    pool=pending.get('pool'),
+                                    watchlist_id=pending.get('watchlist_id'),
+                                    watchlist_entry=pending_w_entry,
+                                    source_component=pending.get('source_component') or 'entry_mode_quality',
+                                    source_reject_reason='entry_mode_quality_shadow',
+                                    source_detail={
+                                        'entry_mode': pending.get('entry_mode'),
+                                        'entry_mode_quality': _entry_mode_quality,
+                                    },
+                                    lifecycle=_entry_timing_lifecycle,
+                                    now_ts=now,
+                                )
                             record_decision_event(
                                 db,
                                 component='entry_mode_quality',
