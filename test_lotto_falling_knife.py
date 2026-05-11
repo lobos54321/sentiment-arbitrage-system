@@ -117,6 +117,32 @@ def test_discovery_low_liquidity_backoff_then_final_expire():
     assert final["action"] == "expire"
     assert final["reason"] == "discovery_liquidity_too_low_final"
 
+    recovery_backoff = _discovery_low_liquidity_backoff_detail(
+        {
+            "attempts": 3,
+            "mode": LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+            "source_reject_reason": "upstream_realtime_liquidity_too_low",
+        },
+        "discovery_lotto_recovery_liquidity_too_low",
+        now_ts=1000.0,
+    )
+    assert recovery_backoff["pass"] is True
+    assert recovery_backoff["action"] == "backoff"
+    assert recovery_backoff["recovery_candidate"] is True
+    assert recovery_backoff["max_rechecks"] > final["max_rechecks"]
+
+    recovery_final = _discovery_low_liquidity_backoff_detail(
+        {
+            "attempts": recovery_backoff["max_rechecks"],
+            "mode": LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+            "source_reject_reason": "upstream_realtime_liquidity_too_low",
+        },
+        "discovery_lotto_recovery_liquidity_too_low",
+        now_ts=1000.0,
+    )
+    assert recovery_final["action"] == "expire"
+    assert recovery_final["reason"] == "discovery_lotto_recovery_liquidity_too_low_final"
+
     unrelated = _discovery_low_liquidity_backoff_detail(
         {"attempts": 3},
         "discovery_ath_mc_gate",

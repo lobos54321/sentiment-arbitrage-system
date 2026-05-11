@@ -255,7 +255,7 @@ LOTTO_LOW_LIQ_RECLAIM_MIN_BS = float(os.environ.get('LOTTO_LOW_LIQ_RECLAIM_MIN_B
 LOTTO_LOW_LIQ_RECLAIM_MIN_VOL_M5 = float(os.environ.get('LOTTO_LOW_LIQ_RECLAIM_MIN_VOL_M5', '0'))
 LOTTO_LOW_LIQ_RECLAIM_MIN_TX_M5 = float(os.environ.get('LOTTO_LOW_LIQ_RECLAIM_MIN_TX_M5', '50'))
 LOTTO_LOW_LIQ_RECLAIM_MIN_PC_M5 = float(os.environ.get('LOTTO_LOW_LIQ_RECLAIM_MIN_PC_M5', '0.0'))
-LOTTO_MICRO_RECLAIM_MAX_WATCH_SEC = int(os.environ.get('LOTTO_MICRO_RECLAIM_MAX_WATCH_SEC', str(10 * 60)))
+LOTTO_MICRO_RECLAIM_MAX_WATCH_SEC = int(os.environ.get('LOTTO_MICRO_RECLAIM_MAX_WATCH_SEC', str(30 * 60)))
 LOTTO_MICRO_RECLAIM_MIN_BOUNCE_PCT = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_BOUNCE_PCT', '6.0'))
 LOTTO_MICRO_RECLAIM_MIN_BS = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_BS', '1.20'))
 LOTTO_MICRO_RECLAIM_MIN_VOL_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_VOL_M5', '4000'))
@@ -341,7 +341,7 @@ ATH_MICRO_RECLAIM_MIN_BS = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_BS', '1.2
 ATH_MICRO_RECLAIM_MIN_TX_M5 = float(os.environ.get('ATH_MICRO_RECLAIM_MIN_TX_M5', '80'))
 ATH_DYNAMIC_TTL_EXTEND_SEC = int(os.environ.get('ATH_DYNAMIC_TTL_EXTEND_SEC', str(30 * 60)))
 ATH_DYNAMIC_TTL_MAX_EXTENSIONS = int(os.environ.get('ATH_DYNAMIC_TTL_MAX_EXTENSIONS', '4'))
-ATH_TTL_FINAL_RECLAIM_EXTEND_SEC = int(os.environ.get('ATH_TTL_FINAL_RECLAIM_EXTEND_SEC', str(5 * 60)))
+ATH_TTL_FINAL_RECLAIM_EXTEND_SEC = int(os.environ.get('ATH_TTL_FINAL_RECLAIM_EXTEND_SEC', str(20 * 60)))
 ATH_NO_KLINE_REENTRY_GUARD_ENABLED = os.environ.get('ATH_NO_KLINE_REENTRY_GUARD_ENABLED', 'true').lower() != 'false'
 ATH_NO_KLINE_REENTRY_LOOKBACK_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_LOOKBACK_SEC', str(4 * 60 * 60)))
 ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC = int(os.environ.get('ATH_NO_KLINE_REENTRY_HARD_LOSS_COOLDOWN_SEC', str(6 * 60 * 60)))
@@ -398,6 +398,10 @@ DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC = max(
 DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS = max(
     1,
     int(os.environ.get('DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS', '3')),
+)
+DISCOVERY_LIQUIDITY_LOW_RECOVERY_MAX_RECHECKS = max(
+    DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS,
+    int(os.environ.get('DISCOVERY_LIQUIDITY_LOW_RECOVERY_MAX_RECHECKS', '12')),
 )
 DISCOVERY_MIN_LIQUIDITY_USD = float(os.environ.get('DISCOVERY_MIN_LIQUIDITY_USD', '5000'))
 DISCOVERY_LOW_LIQ_BYPASS_ENABLED = os.environ.get('DISCOVERY_LOW_LIQ_BYPASS_ENABLED', 'true').lower() != 'false'
@@ -2296,8 +2300,6 @@ def _ath_dynamic_ttl_extension_detail(candidate, *, dex_snapshot=None, lifecycle
     if int(candidate.get('ttl_extend_count') or 0) >= ATH_DYNAMIC_TTL_MAX_EXTENSIONS:
         return {'pass': False, 'reason': 'ath_dynamic_ttl_max_extensions'}
     last_wait = str(candidate.get('last_wait_reason') or '')
-    if last_wait in {'scout_quality_buy_pressure_weak', 'scout_quality_negative_trend'}:
-        return {'pass': False, 'reason': 'ath_dynamic_ttl_recent_quality_weak'}
     activity = activity or {}
     scores = _ath_recovery_scores(candidate, {'source_detail': candidate.get('source_detail') or {}})
     matrix = _ath_recovery_matrix_detail(scores, matrix_dissonance=True)
@@ -6862,14 +6864,27 @@ DISCOVERY_LOW_LIQUIDITY_HARD_REASONS = {
 def _discovery_low_liquidity_backoff_detail(candidate, hard_reason, *, now_ts):
     if hard_reason not in DISCOVERY_LOW_LIQUIDITY_HARD_REASONS:
         return {'pass': False, 'reason': 'not_low_liquidity_hard_block'}
+    candidate = candidate or {}
     attempts = int((candidate or {}).get('attempts') or 0)
-    if attempts >= DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS:
+    mode = str(candidate.get('mode') or '')
+    source_reason = str(candidate.get('source_reject_reason') or '')
+    is_recovery_candidate = (
+        mode in LOTTO_RECOVERY_TINY_PROBE_MODES
+        or _discovery_mode_for_lotto_reason(source_reason) in LOTTO_RECOVERY_TINY_PROBE_MODES
+    )
+    max_rechecks = (
+        DISCOVERY_LIQUIDITY_LOW_RECOVERY_MAX_RECHECKS
+        if is_recovery_candidate
+        else DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS
+    )
+    if attempts >= max_rechecks:
         return {
             'pass': True,
             'action': 'expire',
             'reason': f'{hard_reason}_final',
             'attempts': attempts,
-            'max_rechecks': DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS,
+            'max_rechecks': max_rechecks,
+            'recovery_candidate': is_recovery_candidate,
         }
     next_check_ts = float(now_ts or time.time()) + DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC
     return {
@@ -6877,7 +6892,8 @@ def _discovery_low_liquidity_backoff_detail(candidate, hard_reason, *, now_ts):
         'action': 'backoff',
         'reason': f'{hard_reason}_backoff',
         'attempts': attempts,
-        'max_rechecks': DISCOVERY_LIQUIDITY_LOW_MAX_RECHECKS,
+        'max_rechecks': max_rechecks,
+        'recovery_candidate': is_recovery_candidate,
         'backoff_sec': DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC,
         'next_check_ts': next_check_ts,
     }

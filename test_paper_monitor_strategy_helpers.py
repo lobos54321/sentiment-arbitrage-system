@@ -51,6 +51,7 @@ from paper_trade_monitor import (  # noqa: E402
     _watchlist_hard_loss_reentry_bypass_detail,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
+    track_discovery_candidate,
     track_post_exit_runner_candidate,
 )
 
@@ -661,7 +662,7 @@ def test_lotto_recovery_gate_requires_quote_and_current_reclaim():
     assert strong["reason"] == "lotto_not_ath_reclaim_live_reclaim_pass"
 
 
-def test_lotto_micro_reclaim_expires_after_short_watch():
+def test_lotto_micro_reclaim_expires_after_extended_watch():
     detail = _lotto_recovery_activity_gate(
         LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
         candidate={"first_seen_ts": 1000},
@@ -671,7 +672,7 @@ def test_lotto_micro_reclaim_expires_after_short_watch():
         liquidity_usd=9000,
         top1_pct=30,
         top10_pct=65,
-        now_ts=1701,
+        now_ts=1000 + 31 * 60,
     )
 
     assert detail["pass"] is False
@@ -870,6 +871,31 @@ def test_post_exit_reclaim_force_live_rejects_missing_quote():
 
     assert decision["pass"] is False
     assert decision["reason"] == "lotto_recovery_quote_not_executable"
+
+
+def test_lotto_micro_reclaim_tracking_keeps_longer_reclaim_window():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    candidates = {}
+
+    tracked = track_discovery_candidate(
+        db,
+        candidates,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        route="LOTTO",
+        token_ca="TokenCA",
+        symbol="DUMMY",
+        lifecycle_id="TokenCA:1000",
+        signal_ts=1000,
+        source_component="scout_quality",
+        source_reject_reason="scout_quality_buy_pressure_weak",
+        now_ts=2000,
+    )
+
+    assert tracked is True
+    candidate = next(iter(candidates.values()))
+    assert candidate["expires_at"] >= 2000 + 30 * 60
 
 
 def test_low_liq_quote_confirmation_requires_two_consecutive_successes():
@@ -1600,12 +1626,25 @@ def test_dynamic_ath_ttl_only_extends_strong_quote_executable_candidate():
         activity={"buy_sell_ratio": 1.25, "price_change_m5": 1.0},
         quote_probe={"success": True},
     )
+    still_negative = _ath_dynamic_ttl_extension_detail(
+        {
+            "route": "ATH",
+            "mode": ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+            "source_detail": {"scores": {"trend": 40, "price": 100, "signal": 80}},
+            "last_wait_reason": "scout_quality_negative_trend",
+        },
+        activity={"buy_sell_ratio": 1.25, "price_change_m5": -1.0},
+        quote_probe={"success": True},
+    )
 
     assert strong["pass"] is True
     assert strong["reason"] == "ath_tracking_ttl_extended"
     assert strong["thresholds"]["max_extensions"] == 4
-    assert weak["pass"] is False
-    assert weak["reason"] == "ath_dynamic_ttl_recent_quality_weak"
+    assert weak["pass"] is True
+    assert weak["reason"] == "ath_tracking_ttl_extended"
+    assert weak["observed"]["last_wait_reason"] == "scout_quality_negative_trend"
+    assert still_negative["pass"] is False
+    assert still_negative["reason"] == "ath_tracking_ttl_not_strong"
 
 
 def test_unknown_data_live_gate_shadows_weak_activity_without_quote(monkeypatch):
