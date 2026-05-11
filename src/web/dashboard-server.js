@@ -75,6 +75,22 @@ function windowedSinceTs(url, defaultHours = 6) {
   return Math.floor(Date.now() / 1000) - hours * 3600;
 }
 
+export function boundedIntParam(url, name, defaultValue, minValue, maxValue) {
+  const raw = parseInt(url.searchParams.get(name) || String(defaultValue), 10);
+  const value = Number.isFinite(raw) ? raw : defaultValue;
+  return Math.max(minValue, Math.min(value, maxValue));
+}
+
+export function boundedWindowedSinceTs(url, defaultHours = 1, maxHours = 2, options = {}) {
+  const explicit = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+  if (explicit) return explicit;
+  const all = String(url.searchParams.get('all') || '').toLowerCase();
+  if (options.allowAll && ['1', 'true', 'yes'].includes(all)) return null;
+  const nowSec = Number.isFinite(options.nowSec) ? options.nowSec : Math.floor(Date.now() / 1000);
+  const hours = boundedIntParam(url, 'hours', defaultHours, 1, maxHours);
+  return nowSec - hours * 3600;
+}
+
 function missedAttributionTimeWhere(sinceTs, alias = '') {
   if (!sinceTs) return '';
   const prefix = alias ? `${alias}.` : '';
@@ -2482,8 +2498,7 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     let signalDb;
     try {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const sinceTs = windowedSinceTs(url, 6) || (nowSec - 6 * 60 * 60);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const health = {
@@ -2902,10 +2917,10 @@ const server = http.createServer(async (req, res) => {
       const startedAt = Date.now();
       const tradeIdRaw = parseInt(url.searchParams.get('trade_id') || url.searchParams.get('id') || '', 10);
       const tradeId = Number.isFinite(tradeIdRaw) && tradeIdRaw > 0 ? tradeIdRaw : null;
-      const sinceTs = tradeId ? null : windowedSinceTs(url, 6);
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || (tradeId ? '1' : '25'), 10) || 25, 100));
-      const pathLimit = Math.max(1, Math.min(parseInt(url.searchParams.get('path_limit') || '240', 10) || 240, 1000));
-      const eventLimit = Math.max(1, Math.min(parseInt(url.searchParams.get('event_limit') || '240', 10) || 240, 1000));
+      const sinceTs = tradeId ? null : boundedWindowedSinceTs(url, 1, 2);
+      const limit = boundedIntParam(url, 'limit', tradeId ? 1 : 25, 1, 80);
+      const pathLimit = boundedIntParam(url, 'path_limit', 240, 1, 500);
+      const eventLimit = boundedIntParam(url, 'event_limit', 240, 1, 500);
       const lossOnly = !['0', 'false', 'no'].includes(String(url.searchParams.get('loss_only') || (tradeId ? '0' : '1')).toLowerCase());
       const includeTimeline = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_timeline') || (tradeId ? '1' : '0')).toLowerCase());
       paperDb = new Database(paperDbPath, { readonly: true });
@@ -3018,9 +3033,9 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 500));
-      const eventLimit = Math.max(limit, Math.min(parseInt(url.searchParams.get('event_limit') || '5000', 10) || 5000, 50000));
-      const sinceTs = windowedSinceTs(url, 6);
+      const limit = boundedIntParam(url, 'limit', 80, 1, 120);
+      const eventLimit = Math.max(limit, boundedIntParam(url, 'event_limit', 3000, 100, 8000));
+      const sinceTs = boundedWindowedSinceTs(url, 1, 2);
       const statusFilter = (url.searchParams.get('status') || 'all').toLowerCase();
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
@@ -3345,8 +3360,8 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '25', 10) || 25, 200));
-      const sinceTs = windowedSinceTs(url, 6);
+      const limit = boundedIntParam(url, 'limit', 25, 1, 80);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       const queryStartedAt = Date.now();
       const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
       const whereSql = sinceTs ? 'WHERE created_event_ts >= @since' : '';
@@ -3644,8 +3659,8 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 200));
-      const sinceTs = windowedSinceTs(url, 6);
+      const limit = boundedIntParam(url, 'limit', 50, 1, 80);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       const queryStartedAt = Date.now();
       const includeRecoveryActions = String(url.searchParams.get('include_actions') || '').toLowerCase() === '1';
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
@@ -3951,7 +3966,7 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      const hoursBack = Math.max(1, Math.min(parseInt(url.searchParams.get('hours') || '24', 10) || 24, 168));
+      const hoursBack = boundedIntParam(url, 'hours', 24, 1, 24);
       const sinceTs = Math.floor(Date.now() / 1000) - hoursBack * 3600;
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(

@@ -47,12 +47,20 @@ OBSERVATION_PROBE_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_HARD_SL", "-
 OBSERVATION_PROBE_LOTTO_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_LOTTO_HARD_SL", "-0.35"))
 QUOTE_MARK_REPRICE_DIVERGENCE = float(os.environ.get("EXIT_QUOTE_REPRICE_DIVERGENCE_PCT", "0.20"))
 QUOTE_PRIMARY_GUARDIAN_EXITS = os.environ.get("QUOTE_PRIMARY_GUARDIAN_EXITS", "true").lower() != "false"
+EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC = float(os.environ.get("EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC", "10"))
+EXIT_STOP_QUOTE_CONFIRMATION_BUFFER = float(os.environ.get("EXIT_STOP_QUOTE_CONFIRMATION_BUFFER", "0.0"))
 PARTIAL_IDEMPOTENCY_EPSILON = 1e-9
 QUOTE_PRIMARY_EXIT_MARKERS = (
     "profit_protect",
     "trail",
     "runner_floor",
     "moon",
+)
+QUOTE_STOP_EXIT_MARKERS = (
+    "hard_sl",
+    "hard_floor",
+    "lotto_sl",
+    "stop_loss",
 )
 
 
@@ -178,6 +186,111 @@ def _quote_pnl_from_sim(sim, entry_price):
     if quote_price <= 0 or entry_price <= 0:
         return None
     return (quote_price - entry_price) / entry_price
+
+
+def _quote_ts_sec(sim):
+    sim = sim or {}
+    quote_ts = (
+        sim.get("quoteTs")
+        or sim.get("quote_ts")
+        or sim.get("quoteTimestamp")
+        or sim.get("quote_timestamp")
+    )
+    try:
+        quote_ts = float(quote_ts)
+    except (TypeError, ValueError):
+        return None
+    if quote_ts <= 0:
+        return None
+    return quote_ts / 1000.0 if quote_ts > 1_000_000_000_000 else quote_ts
+
+
+def _quote_freshness_detail(sim, *, now_ts=None, max_age_sec=None):
+    sim = sim or {}
+    if not sim.get("success"):
+        return {
+            "pass": False,
+            "reason": sim.get("failureReason") or "exit_quote_not_executable",
+        }
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    max_age_sec = float(max_age_sec if max_age_sec is not None else EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC)
+    quote_ts = _quote_ts_sec(sim)
+    if quote_ts is None:
+        return {
+            "pass": False,
+            "reason": "missing_exit_quote_ts",
+            "max_age_sec": max_age_sec,
+        }
+    quote_age_sec = max(0.0, now_ts - quote_ts)
+    if quote_age_sec > max_age_sec:
+        return {
+            "pass": False,
+            "reason": "stale_exit_quote",
+            "quote_ts": quote_ts,
+            "now_ts": now_ts,
+            "quote_age_sec": quote_age_sec,
+            "max_age_sec": max_age_sec,
+        }
+    return {
+        "pass": True,
+        "reason": "fresh_exit_quote",
+        "quote_ts": quote_ts,
+        "now_ts": now_ts,
+        "quote_age_sec": quote_age_sec,
+        "max_age_sec": max_age_sec,
+    }
+
+
+def _exit_reason_threshold_pnl(reason):
+    reason = str(reason or "")
+    match = re.search(r"<=\s*([+-]?\d+(?:\.\d+)?)%", reason)
+    if not match:
+        return None
+    try:
+        return float(match.group(1)) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _exit_reason_is_quote_stop(reason):
+    reason_l = str(reason or "").lower()
+    return any(marker in reason_l for marker in QUOTE_STOP_EXIT_MARKERS)
+
+
+def _quote_stop_exit_confirmation(reason, *, quote_pnl=None, trigger_pnl=None):
+    if not _exit_reason_is_quote_stop(reason):
+        return {"pass": True, "reason": "not_quote_stop_exit"}
+    if quote_pnl is None:
+        return {
+            "pass": False,
+            "reason": "quote_stop_missing_quote",
+            "trigger_pnl": trigger_pnl,
+        }
+    floor = _exit_reason_threshold_pnl(reason)
+    if floor is None:
+        return {
+            "pass": False,
+            "reason": "quote_stop_missing_floor",
+            "quote_pnl": quote_pnl,
+            "trigger_pnl": trigger_pnl,
+        }
+    if quote_pnl > floor + EXIT_STOP_QUOTE_CONFIRMATION_BUFFER:
+        return {
+            "pass": False,
+            "reason": "quote_stop_floor_not_breached",
+            "quote_pnl": quote_pnl,
+            "trigger_pnl": trigger_pnl,
+            "floor": floor,
+            "buffer": EXIT_STOP_QUOTE_CONFIRMATION_BUFFER,
+        }
+    return {
+        "pass": True,
+        "reason": "quote_stop_exit_confirmed",
+        "quote_pnl": quote_pnl,
+        "trigger_pnl": trigger_pnl,
+        "floor": floor,
+        "buffer": EXIT_STOP_QUOTE_CONFIRMATION_BUFFER,
+    }
 
 
 def _quote_primary_exit_confirmation(reason, *, quote_pnl=None):
@@ -1486,21 +1599,69 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
             })
             continue
 
-        # Simulate exit execution — use instant quote if Guardian already got one
+        # Simulate exit execution. A Guardian quote is only valid if it is still
+        # fresh when the main loop consumes the queue; stale quotes recreate the
+        # mark/quote gap that made TINY #2952 sell on an old executable price.
         gx_sell_amount = int(float(gx_pos.token_amount_raw)) if gx_pos.token_amount_raw else 0
         _instant_sim = gx.get('_instant_sim')
+        gx_sim = None
+        gx_quote_freshness = None
         if _instant_sim and _instant_sim.get('success'):
-            # Guardian already got the quote at SL trigger time — use it (fresher!)
-            gx_sim = _instant_sim
-            log.info(f"  [GUARDIAN_EXIT] ⚡ Using instant quote for {gx['symbol']} (no delay)")
-        else:
-            # Fallback: get quote now (may be stale if main loop was blocked)
+            gx_quote_freshness = _quote_freshness_detail(_instant_sim)
+            if gx_quote_freshness.get('pass'):
+                # Guardian already got the quote at SL trigger time and it is
+                # still fresh enough to be executable evidence.
+                gx_sim = _instant_sim
+                log.info(f"  [GUARDIAN_EXIT] ⚡ Using instant quote for {gx['symbol']} (fresh)")
+            else:
+                log.warning(
+                    f"  [GUARDIAN_EXIT] stale instant quote discarded for {gx['symbol']}: "
+                    f"reason={gx_quote_freshness.get('reason')} "
+                    f"age={gx_quote_freshness.get('quote_age_sec', 'na')}s"
+                )
+        if gx_sim is None:
+            # Fallback: get a fresh quote now.
             gx_sim = simulate_exit_fn(
                 gx_pos.token_ca, str(gx_sell_amount),
                 getattr(gx_pos, 'token_decimals', 0) or 0,
                 gx_pos.strategy_stage, strategy_id=strategy_id,
                 lifecycle_id=gx_lifecycle_id
+            ) if simulate_exit_fn else None
+            gx_quote_freshness = _quote_freshness_detail(gx_sim)
+            if gx_quote_freshness.get('pass'):
+                log.info(f"  [GUARDIAN_EXIT] ⚡ Using fresh quote for {gx['symbol']}")
+        if not gx_quote_freshness or not gx_quote_freshness.get('pass'):
+            failure_reason = (
+                (gx_sim or {}).get('failureReason')
+                or (gx_quote_freshness or {}).get('reason')
+                or 'exit_quote_not_executable'
             )
+            failed_execution = dict(gx_sim or {})
+            failed_execution['success'] = False
+            failed_execution['failureReason'] = failure_reason
+            failed_execution['quoteFreshness'] = gx_quote_freshness
+            log.warning(
+                f"  [GUARDIAN_EXIT] skipped {gx['symbol']}: "
+                f"fresh executable quote required reason={failure_reason}"
+            )
+            to_close.append({
+                'trade_id': gx_trade_id,
+                'reason': gx['reason'],
+                'pnl': gx_trigger_pnl,
+                'trigger_pnl': gx_trigger_pnl,
+                'exit_price': gx.get('trigger_price', gx_pos.entry_price),
+                'exit_ts': int(time.time()),
+                'mark_source': 'exit_guardian',
+                'exit_eval': {
+                    'action': 'exit',
+                    'execution': failed_execution,
+                    'quotePnl': None,
+                    'quoteMarkGap': None,
+                    'quoteSanityStatus': failure_reason,
+                    'quoteFreshness': gx_quote_freshness,
+                },
+            })
+            continue
         gx_quote_pnl = _quote_pnl_from_sim(gx_sim, gx_pos.entry_price) if gx_sim else None
         gx_quote_mark_gap = (
             gx_quote_pnl - gx_trigger_pnl
@@ -1508,6 +1669,20 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
         )
         gx_realized_pnl = gx_trigger_pnl
         gx_quote_sanity = 'quote_checked' if gx_quote_pnl is not None else 'quote_unavailable'
+        gx_quote_stop = _quote_stop_exit_confirmation(
+            gx.get('reason'),
+            quote_pnl=gx_quote_pnl,
+            trigger_pnl=gx_trigger_pnl,
+        )
+        if not gx_quote_stop.get('pass'):
+            log.warning(
+                f"  [GUARDIAN_EXIT] quote-stop skipped {gx['symbol']}: "
+                f"reason={gx_quote_stop.get('reason')} trigger={gx_trigger_pnl:+.1%} "
+                f"quote={gx_quote_pnl:+.1%}" if gx_quote_pnl is not None else
+                f"  [GUARDIAN_EXIT] quote-stop skipped {gx['symbol']}: "
+                f"reason={gx_quote_stop.get('reason')} trigger={gx_trigger_pnl:+.1%} quote=na"
+            )
+            continue
         gx_quote_primary = _quote_primary_exit_confirmation(gx.get('reason'), quote_pnl=gx_quote_pnl)
         if not gx_quote_primary.get('pass'):
             log.warning(
@@ -1540,6 +1715,8 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 'quotePnl': gx_quote_pnl,
                 'quoteMarkGap': gx_quote_mark_gap,
                 'quoteSanityStatus': gx_quote_sanity,
+                'quoteFreshness': gx_quote_freshness,
+                'quoteStop': gx_quote_stop,
                 'quotePrimary': gx_quote_primary,
             },
         })
