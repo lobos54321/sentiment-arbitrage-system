@@ -11,6 +11,7 @@ shutdown() {
     "${LIFECYCLE_PID:-}" \
     "${PAPER_PID:-}" \
     "${SCOUT_PID:-}" \
+    "${RESONANCE_PID:-}" \
     "${SOCIAL_PID:-}" 2>/dev/null || true
   wait || true
   exit 0
@@ -90,6 +91,7 @@ PAPER_PID=$!
 echo "[STARTUP] Starting GMGN external-alpha scout..."
 (
   while true; do
+    echo "[gmgn-scout] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/gmgn-scout.log
     PAPER_DB=/app/data/paper_trades.db \
     EXTERNAL_ALPHA_DB=/app/data/paper_trades.db \
     PYTHONUNBUFFERED=1 \
@@ -105,6 +107,26 @@ echo "[STARTUP] Starting GMGN external-alpha scout..."
 ) &
 SCOUT_PID=$!
 
+echo "[STARTUP] Starting source-resonance shadow..."
+(
+  while true; do
+    echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/source-resonance.log
+    PAPER_DB=/app/data/paper_trades.db \
+    SENTIMENT_DB=/app/data/sentiment_arb.db \
+    PYTHONUNBUFFERED=1 \
+    python3 scripts/source_resonance_shadow.py \
+      --loop \
+      --interval "${SOURCE_RESONANCE_INTERVAL_SEC:-60}" \
+      --lookback-hours "${SOURCE_RESONANCE_LOOKBACK_HOURS:-24}" \
+      --limit "${SOURCE_RESONANCE_LIMIT:-500}" \
+      --paper-db /app/data/paper_trades.db \
+      --signal-db /app/data/sentiment_arb.db 2>&1 | tee -a /app/data/source-resonance.log
+    echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/source-resonance.log
+    sleep 15
+  done
+) &
+RESONANCE_PID=$!
+
 echo "[STARTUP] Starting social-signal-service..."
 (
   while true; do
@@ -117,12 +139,13 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID node=$NODE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID scout=$SCOUT_PID social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID node=$NODE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID scout=$SCOUT_PID resonance=$RESONANCE_PID social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$NODE_PID" 2>/dev/null || echo "WARN: NODE dead"
 kill -0 "$LIFECYCLE_PID" 2>/dev/null || echo "WARN: LIFECYCLE dead"
 kill -0 "$PAPER_PID" 2>/dev/null || echo "WARN: PAPER dead"
 kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"
+kill -0 "$RESONANCE_PID" 2>/dev/null || echo "WARN: SOURCE_RESONANCE dead"
 kill -0 "$SOCIAL_PID" 2>/dev/null || echo "WARN: SOCIAL dead"
 wait

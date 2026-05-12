@@ -14,7 +14,8 @@ from external_alpha_shadow import (  # noqa: E402
     record_external_alpha_candidates,
     record_external_alpha_health,
 )
-from gmgn_candidate_scout import normalize_token  # noqa: E402
+import gmgn_candidate_scout  # noqa: E402
+from gmgn_candidate_scout import collect_candidates_with_errors, normalize_token  # noqa: E402
 
 
 def candidate(mc, *, volume=10000, swaps=100, buys=60, sells=40, captured_at=1000):
@@ -133,3 +134,17 @@ def test_gmgn_candidate_normalize_accepts_ca_and_camel_base_token():
     assert normalized["symbol"] == "DOG"
     assert normalized["name"] == "Dog Token"
     assert normalized["market_cap"] == 12345
+
+
+def test_gmgn_candidate_collect_keeps_working_source_when_one_source_fails(monkeypatch):
+    def fake_run_gmgn(args, timeout=20):
+        if args[:2] == ["market", "trending"]:
+            return {"data": {"rank": [{"address": "TokenCA", "symbol": "DOG", "market_cap": 10000}]}}
+        raise RuntimeError("upstream failed")
+
+    monkeypatch.setattr(gmgn_candidate_scout, "run_gmgn", fake_run_gmgn)
+
+    candidates, errors = collect_candidates_with_errors(chain="sol", limit=3)
+
+    assert [candidate["ca"] for candidate in candidates] == ["TokenCA"]
+    assert len(errors) == 2

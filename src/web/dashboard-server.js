@@ -11,7 +11,7 @@ import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import {
   applyFinalBlocker,
   chooseFinalBlocker,
@@ -4726,6 +4726,81 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/source-resonance') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const limit = boundedIntParam(url, 'limit', 50, 1, 200);
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      const health = tableNames.has('source_resonance_health')
+        ? paperDb.prepare("SELECT * FROM source_resonance_health ORDER BY updated_at DESC").all()
+        : [];
+      const cohortSummary = tableNames.has('source_resonance_candidates')
+        ? paperDb.prepare(`
+            SELECT
+              cohort,
+              COUNT(*) AS n,
+              COUNT(DISTINCT token_ca) AS unique_tokens,
+              SUM(CASE WHEN gmgn_pre_seen = 1 THEN 1 ELSE 0 END) AS gmgn_pre_seen_n,
+              SUM(CASE WHEN quote_clean_seen = 1 THEN 1 ELSE 0 END) AS quote_clean_n,
+              AVG(resonance_score) AS avg_resonance_score,
+              MAX(updated_at) AS latest_updated_at
+            FROM source_resonance_candidates
+            GROUP BY cohort
+            ORDER BY n DESC
+          `).all()
+        : [];
+      const recent = tableNames.has('source_resonance_candidates')
+        ? paperDb.prepare(`
+            SELECT
+              token_ca, symbol, signal_ts, telegram_signal_id, signal_type,
+              gmgn_pre_seen, gmgn_lead_time_sec, gmgn_momentum_rounds,
+              gmgn_momentum_confirmed, quote_clean_seen, two_quote_clean_snapshots,
+              source_count, resonance_level, resonance_score, cohort, updated_at
+            FROM source_resonance_candidates
+            ORDER BY updated_at DESC, signal_ts DESC
+            LIMIT @limit
+          `).all({ limit })
+        : [];
+      const latencySummary = tableNames.has('latency_audit_events')
+        ? paperDb.prepare(`
+            SELECT
+              stage,
+              COUNT(*) AS n,
+              AVG(lag_from_source_ms) AS avg_lag_from_source_ms,
+              MAX(lag_from_source_ms) AS max_lag_from_source_ms,
+              AVG(lag_from_receive_ms) AS avg_lag_from_receive_ms
+            FROM latency_audit_events
+            GROUP BY stage
+            ORDER BY stage
+          `).all()
+        : [];
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: tableNames.has('source_resonance_candidates'),
+        health,
+        cohort_summary: cohortSummary,
+        latency_summary: latencySummary,
+        recent,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/download/paper_trades') {
     // Paper trades数据库下载 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
@@ -4913,6 +4988,32 @@ const server = http.createServer(async (req, res) => {
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `paper-trader.log not found at ${paperTraderLogPath}` }));
+    }
+    return;
+  } else if (url.pathname === '/api/logs/gmgn-scout' || url.pathname === '/api/logs/source-resonance') {
+    if (!checkAuth(req, url, res)) return;
+    const logPath = url.pathname.endsWith('/gmgn-scout')
+      ? (process.env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log')
+      : (process.env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log');
+    const tailLines = boundedIntParam(url, 'lines', 500, 1, 5000);
+    if (fs.existsSync(logPath)) {
+      try {
+        execFile('tail', ['-n', String(tailLines), logPath], { maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
+          if (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: error.message }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(stdout);
+        });
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `log not found at ${logPath}` }));
     }
     return;
   } else if (url.pathname === '/logs') {

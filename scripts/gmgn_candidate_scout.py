@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -17,17 +18,38 @@ from external_alpha_shadow import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = PROJECT_ROOT / "data" / "gmgn_candidates.jsonl"
+GMGN_DEMO_API_KEY = "gmgn_solbscbaseethmonadtron"
+
+
+def env_flag(name, default="false"):
+    return os.environ.get(name, default).strip().lower() == "true"
 
 
 def gmgn_cli_path():
     local_cli = PROJECT_ROOT / "node_modules" / ".bin" / "gmgn-cli"
     if local_cli.exists():
         return str(local_cli)
-    return "gmgn-cli"
+    return shutil.which("gmgn-cli") or "gmgn-cli"
+
+
+def gmgn_scout_runtime_status():
+    api_key = os.environ.get("GMGN_API_KEY", "").strip()
+    allow_demo = env_flag("GMGN_SCOUT_ALLOW_DEMO_KEY") or env_flag("GMGN_ALLOW_DEMO_KEY")
+    return {
+        "gmgn_cli": gmgn_cli_path(),
+        "api_key_present": bool(api_key),
+        "api_key_prefix": api_key[:8] if api_key else "",
+        "allow_demo_key": allow_demo,
+    }
 
 
 def run_gmgn(args, timeout=20):
     env = dict(os.environ)
+    if (
+        not env.get("GMGN_API_KEY")
+        and (env_flag("GMGN_SCOUT_ALLOW_DEMO_KEY") or env_flag("GMGN_ALLOW_DEMO_KEY"))
+    ):
+        env["GMGN_API_KEY"] = GMGN_DEMO_API_KEY
     completed = subprocess.run(
         [gmgn_cli_path(), *args, "--raw"],
         capture_output=True,
@@ -107,45 +129,55 @@ def normalize_token(raw, *, source, category=None, captured_at=None):
     }
 
 
-def collect_candidates(chain="sol", limit=50):
+def collect_candidates_with_errors(chain="sol", limit=50):
     captured_at = int(time.time())
     candidates = []
+    errors = []
 
-    trending = run_gmgn([
-        "market", "trending",
-        "--chain", chain,
-        "--interval", "1m",
-        "--order-by", "volume",
-        "--limit", str(limit),
-    ])
-    for item in as_list(trending, ("data", "rank"), ("rank",)):
-        candidates.append(normalize_token(item, source="gmgn_trending_1m", captured_at=captured_at))
+    try:
+        trending = run_gmgn([
+            "market", "trending",
+            "--chain", chain,
+            "--interval", "1m",
+            "--order-by", "volume",
+            "--limit", str(limit),
+        ])
+        for item in as_list(trending, ("data", "rank"), ("rank",)):
+            candidates.append(normalize_token(item, source="gmgn_trending_1m", captured_at=captured_at))
+    except Exception as exc:
+        errors.append(f"gmgn_trending_1m:{exc}")
 
-    signals = run_gmgn(["market", "signal", "--chain", chain])
-    for group_name in ("data", "list", "rank"):
-        for item in as_list(signals, (group_name,)):
-            candidates.append(normalize_token(item, source="gmgn_signal", captured_at=captured_at))
-    if isinstance(signals, list):
-        for item in signals:
-            candidates.append(normalize_token(item, source="gmgn_signal", captured_at=captured_at))
-    elif isinstance(signals.get("data"), dict):
-        for category, items in signals["data"].items():
+    try:
+        signals = run_gmgn(["market", "signal", "--chain", chain])
+        for group_name in ("data", "list", "rank"):
+            for item in as_list(signals, (group_name,)):
+                candidates.append(normalize_token(item, source="gmgn_signal", captured_at=captured_at))
+        if isinstance(signals, list):
+            for item in signals:
+                candidates.append(normalize_token(item, source="gmgn_signal", captured_at=captured_at))
+        elif isinstance(signals.get("data"), dict):
+            for category, items in signals["data"].items():
+                if isinstance(items, list):
+                    for item in items:
+                        candidates.append(normalize_token(item, source="gmgn_signal", category=category, captured_at=captured_at))
+    except Exception as exc:
+        errors.append(f"gmgn_signal:{exc}")
+
+    try:
+        trenches = run_gmgn([
+            "market", "trenches",
+            "--chain", chain,
+            "--type", "new_creation", "near_completion", "completed",
+            "--limit", str(min(limit, 80)),
+            "--filter-preset", "safe",
+        ])
+        data = trenches.get("data") if isinstance(trenches.get("data"), dict) else {}
+        for category, items in data.items():
             if isinstance(items, list):
                 for item in items:
-                    candidates.append(normalize_token(item, source="gmgn_signal", category=category, captured_at=captured_at))
-
-    trenches = run_gmgn([
-        "market", "trenches",
-        "--chain", chain,
-        "--type", "new_creation", "near_completion", "completed",
-        "--limit", str(min(limit, 80)),
-        "--filter-preset", "safe",
-    ])
-    data = trenches.get("data") if isinstance(trenches.get("data"), dict) else {}
-    for category, items in data.items():
-        if isinstance(items, list):
-            for item in items:
-                candidates.append(normalize_token(item, source="gmgn_trenches", category=category, captured_at=captured_at))
+                    candidates.append(normalize_token(item, source="gmgn_trenches", category=category, captured_at=captured_at))
+    except Exception as exc:
+        errors.append(f"gmgn_trenches:{exc}")
 
     seen = set()
     deduped = []
@@ -155,7 +187,14 @@ def collect_candidates(chain="sol", limit=50):
             continue
         seen.add(key)
         deduped.append(cand)
-    return deduped
+    return deduped, errors
+
+
+def collect_candidates(chain="sol", limit=50):
+    candidates, errors = collect_candidates_with_errors(chain=chain, limit=limit)
+    if errors and not candidates:
+        raise RuntimeError("; ".join(errors))
+    return candidates
 
 
 def main():
@@ -172,10 +211,21 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     db = connect_external_alpha_db(args.state_db)
     try:
+        startup_ts = int(time.time())
+        runtime_status = gmgn_scout_runtime_status()
+        record_external_alpha_health(
+            db,
+            run_ts=startup_ts,
+            success=False,
+            error=f"startup_pending_first_collection runtime={json.dumps(runtime_status, sort_keys=True)}",
+        )
+        print(f"gmgn candidate scout starting: {json.dumps(runtime_status, sort_keys=True)}", flush=True)
         while True:
             captured_at = int(time.time())
             try:
-                candidates = collect_candidates(chain=args.chain, limit=args.limit)
+                candidates, partial_errors = collect_candidates_with_errors(chain=args.chain, limit=args.limit)
+                if partial_errors and not candidates:
+                    raise RuntimeError("; ".join(partial_errors))
                 with out_path.open("a", encoding="utf-8") as fh:
                     for cand in candidates:
                         fh.write(json.dumps(cand, ensure_ascii=False, sort_keys=True) + "\n")
@@ -190,9 +240,12 @@ def main():
                 )
                 print(
                     f"wrote {len(candidates)} GMGN candidates to {out_path}; "
-                    f"state_recorded={state['recorded']} momentum_confirmed={state['momentum_confirmed']}",
+                    f"state_recorded={state['recorded']} momentum_confirmed={state['momentum_confirmed']} "
+                    f"partial_errors={len(partial_errors)}",
                     flush=True,
                 )
+                for err in partial_errors[:3]:
+                    print(f"gmgn candidate scout partial error: {err}", flush=True)
             except Exception as exc:
                 record_external_alpha_health(db, run_ts=captured_at, success=False, error=exc)
                 print(f"gmgn candidate scout error: {exc}", flush=True)
