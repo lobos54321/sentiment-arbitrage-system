@@ -17839,6 +17839,17 @@ def run_monitor(db):
                 pos = positions.get(trade_id)
                 if pos is None:
                     continue
+                lifecycle = lifecycles.setdefault(
+                    pos.lifecycle_id,
+                    build_lifecycle_state(
+                        pos.lifecycle_id,
+                        pos.token_ca,
+                        pos.symbol,
+                        pos.signal_ts,
+                        getattr(pos, 'premium_signal_id', None),
+                        getattr(pos, 'signal_type', None),
+                    ),
+                )
                 if mark_source in ('exit_guardian', 'force_timeout'):
                     record_trade_path_sample(
                         db,
@@ -18004,7 +18015,6 @@ def run_monitor(db):
 
                 with positions_lock:
                     positions.pop(trade_id, None)
-                lifecycle = lifecycles.setdefault(pos.lifecycle_id, build_lifecycle_state(pos.lifecycle_id, pos.token_ca, pos.symbol, pos.signal_ts, getattr(pos, 'premium_signal_id', None), getattr(pos, 'signal_type', None)))
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
                 quoted_exit_price = exit_execution.get('effectivePrice')
