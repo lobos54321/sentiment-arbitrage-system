@@ -5747,12 +5747,35 @@ def arm_ath_uncertainty_tiny_scout(
         'ath_uncertainty_tiny_scout': True,
         'source_reject_reason': reason,
     }
+    _source_resonance_ath_probe = _maybe_upgrade_pending_to_source_resonance_probe(
+        db,
+        pending_entries[lifecycle_id],
+        w_entry,
+        lifecycle_id=lifecycle_id,
+        route='ATH',
+        parent_component='ath_uncertainty_scout',
+        parent_decision='pending',
+        parent_reason=reason,
+        dex_snapshot=dex_snapshot,
+        lifecycle=scout_lifecycle,
+        now_ts=now_ts,
+        data_source='ath_uncertainty_scout+external_alpha+dexscreener+helius',
+    )
+    if _source_resonance_ath_probe and _source_resonance_ath_probe.get('pass'):
+        detail = {
+            **detail,
+            **_source_resonance_ath_probe,
+        }
+        log.info(
+            f"  [SOURCE_RESONANCE_PROBE] {symbol} ATH uncertainty upgrade "
+            f"size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL parent={reason}"
+        )
     record_decision_event(
         db,
         component='ath_uncertainty_scout',
         event_type='pending_entry',
         decision='pending',
-        reason=entry_mode,
+        reason=pending_entries[lifecycle_id].get('entry_mode') or entry_mode,
         token_ca=token_ca,
         symbol=symbol,
         lifecycle_id=lifecycle_id,
