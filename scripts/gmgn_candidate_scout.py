@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import time
 
+import fcntl
+
 from external_alpha_shadow import (
     connect_external_alpha_db,
     record_external_alpha_candidates,
@@ -41,6 +43,20 @@ def gmgn_scout_runtime_status():
         "api_key_prefix": api_key[:8] if api_key else "",
         "allow_demo_key": allow_demo,
     }
+
+
+def acquire_process_lock(path):
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"gmgn candidate scout lock held at {lock_path}; duplicate worker idling", flush=True)
+        return None
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
 
 
 def run_gmgn(args, timeout=20):
@@ -205,7 +221,13 @@ def main():
     parser.add_argument("--state-db", default=os.environ.get("EXTERNAL_ALPHA_DB") or os.environ.get("PAPER_DB"))
     parser.add_argument("--loop", action="store_true", help="Run continuously and update external alpha shadow state")
     parser.add_argument("--interval", type=float, default=60.0)
+    parser.add_argument("--lock-file", default=os.environ.get("GMGN_SCOUT_LOCK_FILE", "/tmp/gmgn_candidate_scout.lock"))
     args = parser.parse_args()
+
+    lock_fh = acquire_process_lock(args.lock_file)
+    if lock_fh is None:
+        while True:
+            time.sleep(300)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

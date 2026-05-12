@@ -9,6 +9,7 @@ not change routing.
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -115,6 +116,20 @@ def connect_db(path, *, readonly=False):
         db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     return db
+
+
+def acquire_process_lock(path):
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"source resonance shadow lock held at {lock_path}; duplicate worker idling", flush=True)
+        return None
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
 
 
 def candidate_signal_db_paths(primary):
@@ -601,7 +616,13 @@ def main():
     parser.add_argument("--limit", type=int, default=int(os.environ.get("SOURCE_RESONANCE_LIMIT", "500")))
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=float, default=float(os.environ.get("SOURCE_RESONANCE_INTERVAL_SEC", "60")))
+    parser.add_argument("--lock-file", default=os.environ.get("SOURCE_RESONANCE_LOCK_FILE", "/tmp/source_resonance_shadow.lock"))
     args = parser.parse_args()
+
+    lock_fh = acquire_process_lock(args.lock_file)
+    if lock_fh is None:
+        while True:
+            time.sleep(300)
 
     while True:
         try:

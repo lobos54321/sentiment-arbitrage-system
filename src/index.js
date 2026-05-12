@@ -15,6 +15,9 @@
 
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
+import fs from 'fs';
+import { spawn } from 'child_process';
+import { dirname } from 'path';
 import { TelegramUserListener } from './inputs/telegram-user-listener.js';
 import { SolanaSnapshotService } from './inputs/chain-snapshot-sol.js';
 import { BSCSnapshotService } from './inputs/chain-snapshot-bsc.js';
@@ -49,6 +52,105 @@ process.on('uncaughtException', (error) => {
   // 给一点时间让日志写完，然后退出（uncaughtException 后状态不可信）
   setTimeout(() => process.exit(1), 3000);
 });
+
+function envFlag(name, defaultValue = true) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return defaultValue;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+}
+
+function startPythonSidecar({ name, args, env = {}, logPath }) {
+  let child = null;
+  let stopped = false;
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+
+  const launch = () => {
+    if (stopped) return;
+    logStream.write(`[node-supervisor] ${new Date().toISOString()} starting ${name}: python3 ${args.join(' ')}\n`);
+    child = spawn('python3', args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        ...env,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.pipe(logStream, { end: false });
+    child.stderr.pipe(logStream, { end: false });
+    child.on('exit', (code, signal) => {
+      logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} exited code=${code} signal=${signal}\n`);
+      if (!stopped) setTimeout(launch, 15000);
+    });
+    child.on('error', (error) => {
+      logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} spawn error: ${error.message}\n`);
+      if (!stopped) setTimeout(launch, 15000);
+    });
+  };
+
+  launch();
+  return {
+    name,
+    stop() {
+      stopped = true;
+      try { if (child && !child.killed) child.kill('SIGTERM'); } catch {}
+      try { logStream.end(`[node-supervisor] ${new Date().toISOString()} stopping ${name}\n`); } catch {}
+    },
+  };
+}
+
+function startShadowDataSidecars(config) {
+  if (!envFlag('SOURCE_SHADOW_WORKERS_ENABLED', true)) {
+    console.log('[ShadowWorkers] disabled by SOURCE_SHADOW_WORKERS_ENABLED=false');
+    return [];
+  }
+  const paperDb = process.env.PAPER_DB || './data/paper_trades.db';
+  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || './data/sentiment_arb.db';
+  const gmgnLog = process.env.GMGN_SCOUT_LOG || './data/gmgn-scout.log';
+  const resonanceLog = process.env.SOURCE_RESONANCE_LOG || './data/source-resonance.log';
+
+  const workers = [
+    startPythonSidecar({
+      name: 'gmgn-candidate-scout',
+      logPath: gmgnLog,
+      args: [
+        'scripts/gmgn_candidate_scout.py',
+        '--loop',
+        '--interval', process.env.GMGN_SCOUT_INTERVAL_SEC || '60',
+        '--limit', process.env.GMGN_SCOUT_LIMIT || '50',
+        '--state-db', paperDb,
+        '--out', process.env.GMGN_CANDIDATES_OUT || './data/gmgn_candidates.jsonl',
+        '--lock-file', process.env.GMGN_SCOUT_LOCK_FILE || '/tmp/gmgn_candidate_scout.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        EXTERNAL_ALPHA_DB: paperDb,
+      },
+    }),
+    startPythonSidecar({
+      name: 'source-resonance-shadow',
+      logPath: resonanceLog,
+      args: [
+        'scripts/source_resonance_shadow.py',
+        '--loop',
+        '--interval', process.env.SOURCE_RESONANCE_INTERVAL_SEC || '60',
+        '--lookback-hours', process.env.SOURCE_RESONANCE_LOOKBACK_HOURS || '24',
+        '--limit', process.env.SOURCE_RESONANCE_LIMIT || '500',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--lock-file', process.env.SOURCE_RESONANCE_LOCK_FILE || '/tmp/source_resonance_shadow.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        SENTIMENT_DB: signalDb,
+        DB_PATH: signalDb,
+      },
+    }),
+  ];
+  console.log(`[ShadowWorkers] started ${workers.map((w) => w.name).join(', ')}`);
+  return workers;
+}
 
 class SentimentArbitrageSystem {
   constructor() {
@@ -700,6 +802,7 @@ class PremiumChannelSystem {
     this.listener = new PremiumChannelListener(this.config);
     this.engine = new PremiumSignalEngine(this.config, this.db);
     this.autonomySidecar = null;
+    this.shadowDataSidecars = [];
 
     // 实盘组件（SHADOW_MODE=false 时启用）
     this.jupiterExecutor = null;
@@ -765,6 +868,7 @@ class PremiumChannelSystem {
         // Previously this was at the end of start(), but Telegram listener init
         // could take 30-60s, causing Zeabur to kill the container before port 3000 responded.
         startDashboardServer();
+        this.shadowDataSidecars = startShadowDataSidecars(this.config);
 
         const isLive = process.env.SHADOW_MODE === 'false';
         const premiumMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_PREMIUM');
@@ -878,6 +982,9 @@ class PremiumChannelSystem {
     await this.engine.stop();
     if (this.autonomySidecar) {
       this.autonomySidecar.stop();
+    }
+    for (const worker of this.shadowDataSidecars || []) {
+      worker.stop();
     }
     if (this.livePositionMonitor) {
       this.livePositionMonitor.stop();
