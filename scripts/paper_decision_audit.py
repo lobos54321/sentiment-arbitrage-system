@@ -116,6 +116,52 @@ CREATE_MISSED_ATTRIBUTION_INDEXES = [
 ]
 
 
+CREATE_LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_SQL = """
+CREATE TABLE IF NOT EXISTS lotto_not_ath_watch_shadow_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_ca TEXT NOT NULL,
+    symbol TEXT,
+    lifecycle_id TEXT,
+    signal_id INTEGER,
+    signal_ts INTEGER,
+    parent_blocker TEXT NOT NULL,
+    snapshot_ts REAL NOT NULL,
+    first_seen_ts REAL,
+    horizon_sec INTEGER,
+    mark_price REAL,
+    quote_price REAL,
+    quote_gap_pct REAL,
+    spread_pct REAL,
+    liquidity_usd REAL,
+    volume_m5 REAL,
+    tx_m5 REAL,
+    buys_m5 REAL,
+    sells_m5 REAL,
+    buy_sell_ratio REAL,
+    price_change_m5 REAL,
+    quote_clean INTEGER,
+    activity_reclaim INTEGER,
+    volume_reclaim INTEGER,
+    momentum_reclaim INTEGER,
+    snapshot_pass INTEGER,
+    quote_source TEXT,
+    mark_source TEXT,
+    data_source TEXT,
+    reason TEXT,
+    payload_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+
+CREATE_LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_lnawss_token_signal ON lotto_not_ath_watch_shadow_snapshots(token_ca, signal_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_lnawss_snapshot_ts ON lotto_not_ath_watch_shadow_snapshots(snapshot_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_lnawss_horizon ON lotto_not_ath_watch_shadow_snapshots(token_ca, signal_ts, horizon_sec)",
+    "CREATE INDEX IF NOT EXISTS idx_lnawss_pass ON lotto_not_ath_watch_shadow_snapshots(snapshot_pass, quote_clean)",
+]
+
+
 MISSED_HORIZONS = {
     "5m": 5 * 60,
     "15m": 15 * 60,
@@ -140,6 +186,9 @@ def init_decision_audit(db):
         db.execute(sql)
     db.execute(CREATE_MISSED_ATTRIBUTION_SQL)
     for sql in CREATE_MISSED_ATTRIBUTION_INDEXES:
+        db.execute(sql)
+    db.execute(CREATE_LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_SQL)
+    for sql in CREATE_LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INDEXES:
         db.execute(sql)
     for table_name in ("paper_decision_events", "paper_missed_signal_attribution"):
         for column_sql in [

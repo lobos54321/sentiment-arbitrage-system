@@ -4183,6 +4183,7 @@ const server = http.createServer(async (req, res) => {
       };
       const whereSql = sinceTs ? 'AND m.created_event_ts >= @since' : '';
       const eventWhereSql = sinceTs ? 'AND event_ts >= @since' : '';
+      const snapshotWhereSql = sinceTs ? 'AND snapshot_ts >= @since' : '';
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
@@ -4321,6 +4322,8 @@ const server = http.createServer(async (req, res) => {
       let shadowEvents = [];
       let shadowOutcomeSummary = null;
       let shadowOutcomeByReason = [];
+      let shadowSnapshotSummary = null;
+      let shadowSnapshotByReason = [];
       if (tableNames.has('paper_decision_events')) {
         shadowEvents = paperDb.prepare(`
           SELECT
@@ -4432,6 +4435,61 @@ const server = http.createServer(async (req, res) => {
           ORDER BY n DESC, gold_n DESC
         `).all(params);
       }
+      if (tableNames.has('lotto_not_ath_watch_shadow_snapshots')) {
+        shadowSnapshotSummary = paperDb.prepare(`
+          WITH base AS (
+            SELECT *
+            FROM lotto_not_ath_watch_shadow_snapshots
+            WHERE parent_blocker = 'not_ath_v17'
+              ${snapshotWhereSql}
+          ),
+          pass_pairs AS (
+            SELECT
+              s1.token_ca,
+              COALESCE(s1.signal_ts, 0) AS signal_ts
+            FROM base s1
+            JOIN base s2
+              ON s2.token_ca = s1.token_ca
+             AND COALESCE(s2.signal_ts, 0) = COALESCE(s1.signal_ts, 0)
+             AND s2.horizon_sec = s1.horizon_sec + 300
+            WHERE s1.snapshot_pass = 1
+              AND s2.snapshot_pass = 1
+            GROUP BY s1.token_ca, COALESCE(s1.signal_ts, 0)
+          )
+          SELECT
+            COUNT(*) AS snapshots,
+            COUNT(DISTINCT token_ca) AS unique_tokens,
+            COALESCE(SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_n,
+            COUNT(DISTINCT CASE WHEN quote_clean = 1 THEN token_ca END) AS quote_clean_unique,
+            COALESCE(SUM(CASE WHEN snapshot_pass = 1 THEN 1 ELSE 0 END), 0) AS snapshot_pass_n,
+            COUNT(DISTINCT CASE WHEN snapshot_pass = 1 THEN token_ca END) AS snapshot_pass_unique,
+            (SELECT COUNT(*) FROM pass_pairs) AS two_snapshot_confirmations,
+            AVG(quote_gap_pct) AS avg_quote_gap_pct,
+            MAX(ABS(quote_gap_pct)) AS max_abs_quote_gap_pct,
+            AVG(spread_pct) AS avg_spread_pct,
+            MAX(spread_pct) AS max_spread_pct,
+            AVG(liquidity_usd) AS avg_liquidity_usd,
+            MIN(snapshot_ts) AS first_snapshot_ts,
+            MAX(snapshot_ts) AS last_snapshot_ts
+          FROM base
+        `).get(params);
+        shadowSnapshotByReason = paperDb.prepare(`
+          SELECT
+            reason,
+            COUNT(*) AS snapshots,
+            COUNT(DISTINCT token_ca) AS unique_tokens,
+            COALESCE(SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_n,
+            COALESCE(SUM(CASE WHEN snapshot_pass = 1 THEN 1 ELSE 0 END), 0) AS snapshot_pass_n,
+            AVG(quote_gap_pct) AS avg_quote_gap_pct,
+            AVG(spread_pct) AS avg_spread_pct,
+            AVG(liquidity_usd) AS avg_liquidity_usd
+          FROM lotto_not_ath_watch_shadow_snapshots
+          WHERE parent_blocker = 'not_ath_v17'
+            ${snapshotWhereSql}
+          GROUP BY reason
+          ORDER BY snapshots DESC, snapshot_pass_n DESC
+        `).all(params);
+      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
@@ -4456,6 +4514,11 @@ const server = http.createServer(async (req, res) => {
           summary: shadowOutcomeSummary,
           by_reason: shadowOutcomeByReason,
           note: 'Uses only actual lotto_not_ath_watch_shadow terminal events; this is the future shadow promotion view, not the historical proxy.',
+        },
+        shadow_snapshots: {
+          summary: shadowSnapshotSummary,
+          by_reason: shadowSnapshotByReason,
+          note: 'Real future quote-clean snapshot collection for not_ath_v17; promotion requires two consecutive 5m snapshot_pass samples.',
         },
       }, null, 2));
     } catch (e) {

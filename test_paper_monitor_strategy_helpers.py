@@ -377,15 +377,61 @@ def _insert_not_ath_missed(
     db.commit()
 
 
-def test_lotto_not_ath_watch_shadow_confirms_without_live_pending():
+def _patch_not_ath_shadow_snapshot_sources(
+    monkeypatch,
+    *,
+    quote_gap_pct=0.0,
+    liquidity_usd=12000.0,
+    vol_m5=8000.0,
+    buys_m5=90,
+    sells_m5=20,
+    price_change_m5=3.0,
+    quote_success=True,
+):
+    price_usd = 0.001
+    sol_usd = 100.0
+    mark_price = price_usd / sol_usd
+    quote_price = mark_price * (1.0 + quote_gap_pct / 100.0)
+
+    monkeypatch.setattr(monitor, "get_sol_price", lambda: sol_usd)
+    monkeypatch.setattr(
+        monitor,
+        "fetch_dexscreener_trend_snapshot",
+        lambda _token_ca: {
+            "price_usd": price_usd,
+            "liquidity_usd": liquidity_usd,
+            "vol_m5": vol_m5,
+            "buys_m5": buys_m5,
+            "sells_m5": sells_m5,
+            "price_change_m5": price_change_m5,
+            "dex_id": "raydium",
+            "pair_address": "PairA",
+        },
+    )
+    monkeypatch.setattr(
+        monitor,
+        "simulate_entry_execution",
+        lambda *_args, **_kwargs: {
+            "success": quote_success,
+            "effectivePrice": quote_price if quote_success else None,
+            "failureReason": None if quote_success else "quote_not_executable",
+            "quotedOutAmountRaw": "1000" if quote_success else None,
+            "routeAvailable": quote_success,
+        },
+    )
+
+
+def test_lotto_not_ath_watch_shadow_confirms_without_live_pending(monkeypatch):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
     _insert_not_ath_missed(db)
+    _patch_not_ath_shadow_snapshot_sources(monkeypatch)
 
-    recorded = record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10)
+    recorded = record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000, limit=10)
 
     assert recorded == 2
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10) == 1
     events = db.execute(
         """
         SELECT event_type, decision, reason, payload_json
@@ -394,47 +440,51 @@ def test_lotto_not_ath_watch_shadow_confirms_without_live_pending():
         ORDER BY id
         """
     ).fetchall()
-    assert [row["event_type"] for row in events] == ["watch_opened", "would_enter"]
-    assert events[1]["decision"] == "WOULD_ENTER"
-    assert events[1]["reason"] == "not_ath_two_horizon_reclaim_confirmed"
-    payload = json.loads(events[1]["payload_json"])
+    assert [row["event_type"] for row in events] == ["watch_opened", "watch_wait", "would_enter"]
+    assert events[2]["decision"] == "WOULD_ENTER"
+    assert events[2]["reason"] == "not_ath_two_snapshot_quote_clean_reclaim_confirmed"
+    payload = json.loads(events[2]["payload_json"])
     assert payload["live_entry_enabled"] is False
     assert payload["watch_ledger_mvp"]["parent_blocker"] == "not_ath_v17"
     assert payload["suggested_entry_mode"] == LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    assert payload["confirmation"]["quote_clean_samples"] == 2
+    assert payload["confirmation"]["snapshot_pass_samples"] == 2
+    assert payload["historical_proxy_confirmation"]["reason"] == "not_ath_two_horizon_reclaim_confirmed"
+
+    snapshots = db.execute("SELECT horizon_sec, quote_clean, snapshot_pass FROM lotto_not_ath_watch_shadow_snapshots ORDER BY id").fetchall()
+    assert [row["horizon_sec"] for row in snapshots] == [0, 300]
+    assert all(row["quote_clean"] == 1 and row["snapshot_pass"] == 1 for row in snapshots)
 
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1360, limit=10) == 0
 
 
-def test_lotto_not_ath_watch_shadow_rejects_weak_first_reclaim():
-    db = sqlite3.connect(":memory:")
-    db.row_factory = sqlite3.Row
-    init_decision_audit(db)
-    _insert_not_ath_missed(db, pnl_5m=0.02, pnl_15m=0.16)
+def test_lotto_not_ath_watch_historical_proxy_rejects_weak_first_reclaim():
+    detail = _lotto_not_ath_watch_shadow_decision(
+        {"created_event_ts": 1000, "pnl_5m": 0.02, "pnl_15m": 0.16},
+        now_ts=1300,
+    )
 
-    recorded = record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10)
-
-    assert recorded == 2
-    terminal = db.execute(
-        """
-        SELECT event_type, decision, reason
-        FROM paper_decision_events
-        WHERE component = 'lotto_not_ath_watch_shadow'
-        ORDER BY id DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    assert dict(terminal) == {
+    assert detail == {
+        "age_sec": 300.0,
+        "pnl_5m": 0.02,
+        "pnl_15m": 0.16,
+        "max_recovery_pnl": 0.16,
+        "min_5m_pnl": 0.05,
+        "min_15m_pnl": 0.10,
+        "min_retention": 0.50,
+        "confirm_by_sec": 1800,
         "event_type": "watch_rejected",
         "decision": "SHADOW_REJECT",
         "reason": "not_ath_watch_5m_reclaim_weak",
     }
 
 
-def test_lotto_not_ath_watch_shadow_wait_is_throttled():
+def test_lotto_not_ath_watch_shadow_wait_is_throttled(monkeypatch):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
     _insert_not_ath_missed(db, created_event_ts=1200, pnl_5m=0.08, pnl_15m=None)
+    _patch_not_ath_shadow_snapshot_sources(monkeypatch)
 
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1300, limit=10) == 2
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1360, limit=10) == 0
@@ -447,13 +497,24 @@ def test_lotto_not_ath_watch_shadow_wait_is_throttled():
         """
     ).fetchall()
     assert [row["event_type"] for row in events] == ["watch_opened", "watch_wait"]
+    snapshots = db.execute("SELECT COUNT(*) AS n FROM lotto_not_ath_watch_shadow_snapshots").fetchone()
+    assert snapshots["n"] == 1
 
 
-def test_lotto_not_ath_watch_shadow_can_rehydrate_after_missing_sample_expiry():
+def test_lotto_not_ath_watch_shadow_expires_without_two_snapshot_confirmation(monkeypatch):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
     _insert_not_ath_missed(db, created_event_ts=1000, pnl_5m=None, pnl_15m=None)
+    _patch_not_ath_shadow_snapshot_sources(
+        monkeypatch,
+        quote_success=False,
+        liquidity_usd=1000.0,
+        vol_m5=500.0,
+        buys_m5=5,
+        sells_m5=20,
+        price_change_m5=-3.0,
+    )
 
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 31 * 60, limit=10) == 2
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 32 * 60, limit=10) == 0
@@ -467,7 +528,7 @@ def test_lotto_not_ath_watch_shadow_can_rehydrate_after_missing_sample_expiry():
         max_pnl_recorded=0.30,
     )
 
-    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 33 * 60, limit=10) == 1
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 33 * 60, limit=10) == 0
     events = db.execute(
         """
         SELECT event_type, decision, reason
@@ -479,10 +540,9 @@ def test_lotto_not_ath_watch_shadow_can_rehydrate_after_missing_sample_expiry():
     assert [row["event_type"] for row in events] == [
         "watch_opened",
         "watch_expired",
-        "would_enter",
     ]
-    assert events[-1]["decision"] == "WOULD_ENTER"
-    assert events[-1]["reason"] == "not_ath_two_horizon_reclaim_confirmed"
+    assert events[-1]["decision"] == "SHADOW_EXPIRE"
+    assert events[-1]["reason"] == "not_ath_watch_missing_two_quote_clean_reclaim_snapshots"
 
 
 def test_lotto_not_ath_watch_shadow_decision_expires_missing_samples():

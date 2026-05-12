@@ -243,6 +243,11 @@ LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC = int(os.environ.get('LOTTO_NOT_ATH_WA
 LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_5M_PNL', '0.05'))
 LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_15M_PNL', '0.10'))
 LOTTO_NOT_ATH_WATCH_SHADOW_MIN_RETENTION = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_RETENTION', '0.50'))
+LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC = int(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC', str(5 * 60)))
+LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT', '8.0'))
+LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT', '5.0'))
+LOTTO_NOT_ATH_WATCH_SHADOW_MIN_LIQ_USD = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_LIQ_USD', '5000'))
+LOTTO_NOT_ATH_WATCH_SHADOW_MIN_VOL_M5 = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_VOL_M5', '5000'))
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC', '200000'))
@@ -1161,18 +1166,19 @@ def _row_value(row, key, default=None):
         return default
 
 
-def _lotto_not_ath_watch_shadow_decision(row, *, now_ts):
-    """Historical-proxy confirmation for NOT_ATH watch candidates.
+def _lotto_not_ath_watch_created_ts(row, now_ts):
+    return _safe_float(_row_value(row, 'created_event_ts'), now_ts) or now_ts
 
-    The live-safe invariant is that this only returns shadow decisions.  It
-    uses the missed-attribution horizon samples we already store, so it can be
-    backtested without creating a new tick replay table.
-    """
-    created_ts = _safe_float(_row_value(row, 'created_event_ts'), now_ts) or now_ts
-    age_sec = max(0.0, float(now_ts) - float(created_ts))
+
+def _lotto_not_ath_watch_age_sec(row, now_ts):
+    created_ts = _lotto_not_ath_watch_created_ts(row, now_ts)
+    return max(0.0, float(now_ts) - float(created_ts))
+
+
+def _lotto_not_ath_watch_max_recovery_pnl(row):
     pnl_5m = _safe_float(_row_value(row, 'pnl_5m'), None)
     pnl_15m = _safe_float(_row_value(row, 'pnl_15m'), None)
-    max_recovery_pnl = max(
+    return max(
         [
             v for v in (
                 _safe_float(_row_value(row, 'tradable_peak_pnl'), None),
@@ -1185,6 +1191,350 @@ def _lotto_not_ath_watch_shadow_decision(row, *, now_ts):
             if v is not None
         ] or [0.0]
     )
+
+
+def _lotto_not_ath_watch_horizon_sec(row, now_ts):
+    interval = max(60, int(LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC or 300))
+    return int(_lotto_not_ath_watch_age_sec(row, now_ts) // interval) * interval
+
+
+def _lotto_not_ath_snapshot_detail(row):
+    if not row:
+        return None
+    return {
+        'id': _row_value(row, 'id'),
+        'token_ca': _row_value(row, 'token_ca'),
+        'symbol': _row_value(row, 'symbol'),
+        'signal_ts': _row_value(row, 'signal_ts'),
+        'snapshot_ts': _row_value(row, 'snapshot_ts'),
+        'horizon_sec': _row_value(row, 'horizon_sec'),
+        'mark_price': _row_value(row, 'mark_price'),
+        'quote_price': _row_value(row, 'quote_price'),
+        'quote_gap_pct': _row_value(row, 'quote_gap_pct'),
+        'spread_pct': _row_value(row, 'spread_pct'),
+        'liquidity_usd': _row_value(row, 'liquidity_usd'),
+        'volume_m5': _row_value(row, 'volume_m5'),
+        'tx_m5': _row_value(row, 'tx_m5'),
+        'buys_m5': _row_value(row, 'buys_m5'),
+        'sells_m5': _row_value(row, 'sells_m5'),
+        'buy_sell_ratio': _row_value(row, 'buy_sell_ratio'),
+        'price_change_m5': _row_value(row, 'price_change_m5'),
+        'quote_clean': bool(_row_value(row, 'quote_clean')),
+        'activity_reclaim': bool(_row_value(row, 'activity_reclaim')),
+        'volume_reclaim': bool(_row_value(row, 'volume_reclaim')),
+        'momentum_reclaim': bool(_row_value(row, 'momentum_reclaim')),
+        'snapshot_pass': bool(_row_value(row, 'snapshot_pass')),
+        'reason': _row_value(row, 'reason'),
+    }
+
+
+def _record_lotto_not_ath_watch_shadow_snapshot(db, row, *, now_ts, lifecycle_id=None):
+    token_ca = _row_value(row, 'token_ca')
+    if not token_ca:
+        return {'inserted': False, 'reason': 'missing_token_ca'}
+    signal_ts = _row_value(row, 'signal_ts')
+    horizon_sec = _lotto_not_ath_watch_horizon_sec(row, now_ts)
+    try:
+        existing = db.execute(
+            """
+            SELECT *
+            FROM lotto_not_ath_watch_shadow_snapshots
+            WHERE token_ca = ?
+              AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
+              AND horizon_sec = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (token_ca, signal_ts, horizon_sec),
+        ).fetchone()
+    except Exception as exc:
+        return {'inserted': False, 'reason': 'snapshot_table_unavailable', 'error': str(exc)}
+    if existing:
+        detail = _lotto_not_ath_snapshot_detail(existing) or {}
+        detail.update({'inserted': False, 'deduped': True})
+        return detail
+
+    symbol = _row_value(row, 'symbol') or token_ca[:8]
+    created_ts = _lotto_not_ath_watch_created_ts(row, now_ts)
+    dex_snapshot = {}
+    dex_error = None
+    try:
+        dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca) or {}
+    except Exception as exc:
+        dex_error = str(exc)
+        dex_snapshot = {}
+
+    activity = _discovery_activity_metrics(dex_snapshot, {})
+    thresholds = _lotto_recovery_thresholds(LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE)
+    min_liquidity_usd = max(
+        LOTTO_NOT_ATH_WATCH_SHADOW_MIN_LIQ_USD,
+        _safe_float(thresholds.get('min_liquidity_usd'), 0.0) or 0.0,
+    )
+    min_vol_m5 = max(
+        LOTTO_NOT_ATH_WATCH_SHADOW_MIN_VOL_M5,
+        _safe_float(thresholds.get('min_vol_m5'), 0.0) or 0.0,
+    )
+    min_buy_sell_ratio = _safe_float(thresholds.get('min_buy_sell_ratio'), 0.0) or 0.0
+    min_tx_m5 = _safe_float(thresholds.get('min_tx_m5'), 0.0) or 0.0
+    min_price_change_m5 = _safe_float(thresholds.get('min_price_change_m5'), 0.0) or 0.0
+
+    try:
+        execution = simulate_entry_execution(
+            token_ca,
+            PAPER_TINY_SCOUT_SIZE_SOL,
+            'lotto_not_ath_watch_shadow_quote_probe',
+            strategy_id='lotto_not_ath_watch_shadow',
+            lifecycle_id=lifecycle_id,
+        ) or {}
+    except Exception as exc:
+        execution = {'success': False, 'failureReason': f'quote_probe_exception:{exc}'}
+
+    quote_price = _safe_float(execution.get('effectivePrice'), None) if execution.get('success') else None
+    price_usd = _first_number(dex_snapshot.get('price_usd'), dex_snapshot.get('priceUsd'))
+    sol_usd = _safe_float(get_sol_price(), None)
+    mark_price = (price_usd / sol_usd) if price_usd > 0 and sol_usd and sol_usd > 0 else None
+    quote_gap_pct = calculate_entry_spread_pct(mark_price, quote_price)
+    spread_pct = abs(quote_gap_pct) if quote_gap_pct is not None else None
+    liquidity_usd = _first_number(dex_snapshot.get('liquidity_usd'))
+    vol_m5 = _safe_float(activity.get('vol_m5'), 0.0) or 0.0
+    tx_m5 = _safe_float(activity.get('tx_m5'), 0.0) or 0.0
+    buys_m5 = _safe_float(activity.get('buys_m5'), 0.0) or 0.0
+    sells_m5 = _safe_float(activity.get('sells_m5'), 0.0) or 0.0
+    buy_sell_ratio = _safe_float(activity.get('buy_sell_ratio'), 0.0) or 0.0
+    price_change_m5 = _safe_float(activity.get('price_change_m5'), 0.0) or 0.0
+
+    quote_failures = []
+    if not execution.get('success'):
+        quote_failures.append(execution.get('failureReason') or 'quote_not_executable')
+    if mark_price is None:
+        quote_failures.append('mark_missing')
+    if quote_price is None:
+        quote_failures.append('quote_missing')
+    if quote_gap_pct is None:
+        quote_failures.append('quote_gap_missing')
+    elif abs(quote_gap_pct) > LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT:
+        quote_failures.append('quote_gap_high')
+    if spread_pct is None:
+        quote_failures.append('spread_missing')
+    elif spread_pct > LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT:
+        quote_failures.append('spread_high')
+    if liquidity_usd < min_liquidity_usd:
+        quote_failures.append('liquidity_low')
+
+    quote_clean = not quote_failures
+    activity_reclaim = buy_sell_ratio >= min_buy_sell_ratio and tx_m5 >= min_tx_m5
+    volume_reclaim = vol_m5 >= min_vol_m5
+    momentum_reclaim = price_change_m5 >= min_price_change_m5
+    reclaim_failures = []
+    if not activity_reclaim:
+        reclaim_failures.append('activity_not_reclaimed')
+    if not volume_reclaim:
+        reclaim_failures.append('volume_not_reclaimed')
+    if not momentum_reclaim:
+        reclaim_failures.append('momentum_not_reclaimed')
+    snapshot_pass = quote_clean and activity_reclaim and volume_reclaim and momentum_reclaim
+    reason = 'quote_clean_reclaim_snapshot_pass' if snapshot_pass else '|'.join(quote_failures + reclaim_failures)
+
+    payload = {
+        'thresholds': {
+            'max_quote_gap_pct': LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT,
+            'max_spread_pct': LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT,
+            'min_liquidity_usd': min_liquidity_usd,
+            'min_vol_m5': min_vol_m5,
+            'min_buy_sell_ratio': min_buy_sell_ratio,
+            'min_tx_m5': min_tx_m5,
+            'min_price_change_m5': min_price_change_m5,
+        },
+        'dex_snapshot': {
+            'price_usd': dex_snapshot.get('price_usd'),
+            'liquidity_usd': dex_snapshot.get('liquidity_usd'),
+            'dex_id': dex_snapshot.get('dex_id'),
+            'pair_address': dex_snapshot.get('pair_address'),
+            'fdv': dex_snapshot.get('fdv'),
+            'market_cap': dex_snapshot.get('market_cap'),
+            'error': dex_error,
+        },
+        'activity': activity,
+        'execution': build_execution_audit(execution),
+        'sol_usd': sol_usd,
+    }
+    db.execute(
+        """
+        INSERT INTO lotto_not_ath_watch_shadow_snapshots (
+            token_ca, symbol, lifecycle_id, signal_id, signal_ts, parent_blocker,
+            snapshot_ts, first_seen_ts, horizon_sec, mark_price, quote_price,
+            quote_gap_pct, spread_pct, liquidity_usd, volume_m5, tx_m5, buys_m5,
+            sells_m5, buy_sell_ratio, price_change_m5, quote_clean,
+            activity_reclaim, volume_reclaim, momentum_reclaim, snapshot_pass,
+            quote_source, mark_source, data_source, reason, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            token_ca,
+            symbol,
+            lifecycle_id,
+            _row_value(row, 'signal_id'),
+            signal_ts,
+            'not_ath_v17',
+            now_ts,
+            created_ts,
+            horizon_sec,
+            mark_price,
+            quote_price,
+            quote_gap_pct,
+            spread_pct,
+            liquidity_usd,
+            vol_m5,
+            tx_m5,
+            buys_m5,
+            sells_m5,
+            buy_sell_ratio,
+            price_change_m5,
+            1 if quote_clean else 0,
+            1 if activity_reclaim else 0,
+            1 if volume_reclaim else 0,
+            1 if momentum_reclaim else 0,
+            1 if snapshot_pass else 0,
+            'execution_bridge' if execution.get('success') else 'execution_bridge_failed',
+            'dexscreener_price_usd/sol_usd' if mark_price is not None else 'mark_unavailable',
+            'dexscreener+execution_bridge',
+            reason,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+        ),
+    )
+    db.commit()
+    return {
+        'inserted': True,
+        'token_ca': token_ca,
+        'symbol': symbol,
+        'signal_ts': signal_ts,
+        'snapshot_ts': now_ts,
+        'horizon_sec': horizon_sec,
+        'mark_price': mark_price,
+        'quote_price': quote_price,
+        'quote_gap_pct': quote_gap_pct,
+        'spread_pct': spread_pct,
+        'liquidity_usd': liquidity_usd,
+        'volume_m5': vol_m5,
+        'tx_m5': tx_m5,
+        'buys_m5': buys_m5,
+        'sells_m5': sells_m5,
+        'buy_sell_ratio': buy_sell_ratio,
+        'price_change_m5': price_change_m5,
+        'quote_clean': quote_clean,
+        'activity_reclaim': activity_reclaim,
+        'volume_reclaim': volume_reclaim,
+        'momentum_reclaim': momentum_reclaim,
+        'snapshot_pass': snapshot_pass,
+        'reason': reason,
+    }
+
+
+def _lotto_not_ath_watch_snapshot_confirmation(db, row, *, now_ts):
+    token_ca = _row_value(row, 'token_ca')
+    signal_ts = _row_value(row, 'signal_ts')
+    age_sec = _lotto_not_ath_watch_age_sec(row, now_ts)
+    max_recovery_pnl = _lotto_not_ath_watch_max_recovery_pnl(row)
+    base = {
+        'age_sec': age_sec,
+        'snapshot_interval_sec': LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC,
+        'confirm_by_sec': LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC,
+        'max_quote_gap_pct': LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT,
+        'max_spread_pct': LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT,
+        'min_liquidity_usd': LOTTO_NOT_ATH_WATCH_SHADOW_MIN_LIQ_USD,
+        'max_recovery_pnl': max_recovery_pnl,
+    }
+    try:
+        snapshot_rows = db.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    s.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY s.horizon_sec
+                        ORDER BY s.snapshot_ts DESC, s.id DESC
+                    ) AS rn
+                FROM lotto_not_ath_watch_shadow_snapshots s
+                WHERE s.token_ca = ?
+                  AND COALESCE(s.signal_ts, 0) = COALESCE(?, 0)
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY horizon_sec ASC
+            """,
+            (token_ca, signal_ts),
+        ).fetchall()
+    except Exception as exc:
+        return {
+            **base,
+            'event_type': 'watch_wait',
+            'decision': 'WAIT',
+            'reason': 'snapshot_table_unavailable',
+            'error': str(exc),
+            'snapshot_count': 0,
+            'quote_clean_samples': 0,
+            'snapshot_pass_samples': 0,
+        }
+
+    snapshots = [_lotto_not_ath_snapshot_detail(snapshot_row) for snapshot_row in snapshot_rows]
+    quote_clean_samples = sum(1 for snapshot in snapshots if snapshot and snapshot.get('quote_clean'))
+    snapshot_pass_samples = sum(1 for snapshot in snapshots if snapshot and snapshot.get('snapshot_pass'))
+    interval = max(60, int(LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC or 300))
+    for prev_snapshot, snapshot in zip(snapshots, snapshots[1:]):
+        if not prev_snapshot or not snapshot:
+            continue
+        prev_horizon = _safe_int(prev_snapshot.get('horizon_sec'), -1)
+        horizon = _safe_int(snapshot.get('horizon_sec'), -1)
+        if horizon - prev_horizon != interval:
+            continue
+        if prev_snapshot.get('snapshot_pass') and snapshot.get('snapshot_pass'):
+            return {
+                **base,
+                'event_type': 'would_enter',
+                'decision': 'WOULD_ENTER',
+                'reason': 'not_ath_two_snapshot_quote_clean_reclaim_confirmed',
+                'snapshot_count': len(snapshots),
+                'quote_clean_samples': quote_clean_samples,
+                'snapshot_pass_samples': snapshot_pass_samples,
+                'confirming_horizons': [prev_horizon, horizon],
+                'confirming_snapshots': [prev_snapshot, snapshot],
+                'latest_snapshot': snapshots[-1] if snapshots else None,
+            }
+    if age_sec >= LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC:
+        return {
+            **base,
+            'event_type': 'watch_expired',
+            'decision': 'SHADOW_EXPIRE',
+            'reason': 'not_ath_watch_missing_two_quote_clean_reclaim_snapshots',
+            'snapshot_count': len(snapshots),
+            'quote_clean_samples': quote_clean_samples,
+            'snapshot_pass_samples': snapshot_pass_samples,
+            'latest_snapshot': snapshots[-1] if snapshots else None,
+        }
+    return {
+        **base,
+        'event_type': 'watch_wait',
+        'decision': 'WAIT',
+        'reason': 'awaiting_two_quote_clean_reclaim_snapshots',
+        'snapshot_count': len(snapshots),
+        'quote_clean_samples': quote_clean_samples,
+        'snapshot_pass_samples': snapshot_pass_samples,
+        'latest_snapshot': snapshots[-1] if snapshots else None,
+    }
+
+
+def _lotto_not_ath_watch_shadow_decision(row, *, now_ts):
+    """Historical-proxy confirmation for NOT_ATH watch candidates.
+
+    The live-safe invariant is that this only returns shadow decisions.  It
+    uses the missed-attribution horizon samples we already store, so it can be
+    backtested without creating a new tick replay table.
+    """
+    age_sec = _lotto_not_ath_watch_age_sec(row, now_ts)
+    pnl_5m = _safe_float(_row_value(row, 'pnl_5m'), None)
+    pnl_15m = _safe_float(_row_value(row, 'pnl_15m'), None)
+    max_recovery_pnl = _lotto_not_ath_watch_max_recovery_pnl(row)
     base = {
         'age_sec': age_sec,
         'pnl_5m': pnl_5m,
@@ -1238,9 +1588,9 @@ def _lotto_not_ath_watch_shadow_decision(row, *, now_ts):
     }
 
 
-def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts):
+def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts, historical_proxy_detail=None, snapshot_detail=None):
     token_ca = _row_value(row, 'token_ca')
-    created_ts = _safe_float(_row_value(row, 'created_event_ts'), now_ts) or now_ts
+    created_ts = _lotto_not_ath_watch_created_ts(row, now_ts)
     return {
         'missed_attribution_id': _row_value(row, 'id'),
         'source_component': _row_value(row, 'component'),
@@ -1258,6 +1608,8 @@ def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts):
         'tradability_reason': _row_value(row, 'tradability_reason'),
         'would_stop_before_peak': _row_value(row, 'would_stop_before_peak'),
         'confirmation': decision_detail,
+        'historical_proxy_confirmation': historical_proxy_detail,
+        'latest_snapshot': snapshot_detail,
         'watch_ledger_mvp': {
             'token_ca': token_ca,
             'parent_blocker': 'not_ath_v17',
@@ -1277,8 +1629,9 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
     """Record the first single-blocker watch MVP for LOTTO/not_ath_v17.
 
     This is deliberately shadow-only.  It opens a lightweight watch event, then
-    records a would-enter/reject/expire decision from existing 5m and 15m
-    missed-attribution samples.  No watchlist row or pending entry is created.
+    persists one quote-clean reclaim snapshot per 5-minute horizon and only
+    records WOULD_ENTER after two consecutive passing snapshots.  No watchlist
+    row or pending entry is created.
     """
     if not LOTTO_NOT_ATH_WATCH_SHADOW_ENABLED:
         return 0
@@ -1305,7 +1658,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
                   WHERE e.component = 'lotto_not_ath_watch_shadow'
                     AND e.token_ca = m.token_ca
                     AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
-                    AND e.event_type IN ('would_enter', 'watch_rejected')
+                    AND e.event_type IN ('would_enter', 'watch_rejected', 'watch_expired')
               )
         ),
         ranked AS (
@@ -1331,17 +1684,6 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
             r.entry_bias
         FROM ranked r
         WHERE r.rn = 1
-          AND (
-              (r.pnl_5m IS NOT NULL AND r.pnl_15m IS NOT NULL)
-              OR NOT EXISTS (
-                  SELECT 1
-                  FROM paper_decision_events e
-                  WHERE e.component = 'lotto_not_ath_watch_shadow'
-                    AND e.token_ca = r.token_ca
-                    AND COALESCE(e.signal_ts, 0) = COALESCE(r.signal_ts, 0)
-                    AND e.event_type = 'watch_expired'
-              )
-          )
         ORDER BY r.created_event_ts DESC
         LIMIT ?
         """,
@@ -1364,8 +1706,21 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
             """,
             (token_ca, row['signal_ts']),
         ).fetchone()
-        decision_detail = _lotto_not_ath_watch_shadow_decision(row, now_ts=now_ts)
-        payload = _lotto_not_ath_watch_payload(row, decision_detail, now_ts=now_ts)
+        snapshot_detail = _record_lotto_not_ath_watch_shadow_snapshot(
+            db,
+            row,
+            now_ts=now_ts,
+            lifecycle_id=lifecycle_id,
+        )
+        historical_proxy_detail = _lotto_not_ath_watch_shadow_decision(row, now_ts=now_ts)
+        decision_detail = _lotto_not_ath_watch_snapshot_confirmation(db, row, now_ts=now_ts)
+        payload = _lotto_not_ath_watch_payload(
+            row,
+            decision_detail,
+            now_ts=now_ts,
+            historical_proxy_detail=historical_proxy_detail,
+            snapshot_detail=snapshot_detail,
+        )
         if not opened:
             record_decision_event(
                 db,
@@ -1379,7 +1734,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
                 signal_ts=row['signal_ts'],
                 signal_id=row['signal_id'],
                 route='LOTTO',
-                data_source='paper_missed_signal_attribution',
+                data_source='paper_missed_signal_attribution+quote_clean_shadow_snapshots',
                 payload=payload,
                 event_ts=now_ts,
             )
@@ -1412,7 +1767,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
             signal_ts=row['signal_ts'],
             signal_id=row['signal_id'],
             route='LOTTO',
-            data_source='paper_missed_signal_attribution+horizon_samples',
+            data_source='paper_missed_signal_attribution+quote_clean_shadow_snapshots',
             payload=payload,
             event_ts=now_ts,
         )
