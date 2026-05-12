@@ -142,6 +142,7 @@ function startShadowDataSidecars(config) {
         '--interval', process.env.SOURCE_RESONANCE_INTERVAL_SEC || '60',
         '--lookback-hours', process.env.SOURCE_RESONANCE_LOOKBACK_HOURS || '24',
         '--limit', process.env.SOURCE_RESONANCE_LIMIT || '500',
+        '--initial-delay', process.env.SOURCE_RESONANCE_INITIAL_DELAY_SEC || '20',
         '--paper-db', paperDb,
         '--signal-db', signalDb,
         '--lock-file', process.env.SOURCE_RESONANCE_LOCK_FILE || '/tmp/source_resonance_shadow.lock',

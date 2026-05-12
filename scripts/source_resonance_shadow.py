@@ -116,6 +116,11 @@ def connect_db(path, *, readonly=False):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(db_path, timeout=timeout_sec)
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
+    if not readonly:
+        try:
+            db.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
     db.row_factory = sqlite3.Row
     return db
 
@@ -623,6 +628,7 @@ def main():
     parser.add_argument("--limit", type=int, default=int(os.environ.get("SOURCE_RESONANCE_LIMIT", "500")))
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=float, default=float(os.environ.get("SOURCE_RESONANCE_INTERVAL_SEC", "60")))
+    parser.add_argument("--initial-delay", type=float, default=float(os.environ.get("SOURCE_RESONANCE_INITIAL_DELAY_SEC", "0")))
     parser.add_argument("--lock-file", default=os.environ.get("SOURCE_RESONANCE_LOCK_FILE", "/tmp/source_resonance_shadow.lock"))
     args = parser.parse_args()
 
@@ -630,6 +636,10 @@ def main():
     if lock_fh is None:
         while True:
             time.sleep(300)
+
+    if args.loop and args.initial_delay > 0:
+        print(f"source resonance shadow initial delay {args.initial_delay:.1f}s", flush=True)
+        time.sleep(args.initial_delay)
 
     while True:
         try:

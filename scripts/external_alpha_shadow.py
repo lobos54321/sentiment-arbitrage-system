@@ -141,6 +141,10 @@ def connect_external_alpha_db(db_path=None):
     timeout_sec = float(os.environ.get("EXTERNAL_ALPHA_SQLITE_TIMEOUT_SEC", "30"))
     db = sqlite3.connect(path, timeout=timeout_sec)
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
+    try:
+        db.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
     db.row_factory = sqlite3.Row
     init_external_alpha_shadow(db)
     return db
