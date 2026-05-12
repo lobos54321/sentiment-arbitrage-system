@@ -70,6 +70,7 @@ from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
 from gmgn_policy import evaluate_gmgn_lotto_policy, evaluate_gmgn_tiny_scout_rescue
 from scout_quality import SCOUT_QUALITY_SIZE_CAP_SOL, evaluate_scout_quality
+from entry_mode_registry import entry_mode_registry_entry
 from entry_mode_quality import evaluate_entry_mode_quality
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
 from lotto_engine import (
@@ -15009,6 +15010,54 @@ def run_monitor(db):
                                 f"  [TOKEN_RISK] 🚫 {pending['symbol']} BLOCKED: "
                                 f"{_token_risk.get('reason')} remaining={_token_risk.get('remaining_sec', 0):.0f}s "
                                 f"failures={_token_risk.get('severe_failure_count')}"
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+
+                    _pending_registry_entry = entry_mode_registry_entry(
+                        pending.get('entry_mode') or pending.get('scout_mode')
+                    ) or {}
+                    if (
+                        not pending_is_paper_tiny_scout(pending)
+                        and _pending_registry_entry.get('paper_enabled') is False
+                    ):
+                        _entry_mode_live_allowed, _entry_mode_quality = _entry_mode_quality_allows_live(
+                            db,
+                            entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            event_ts=now,
+                            data_source='pending_entry+entry_mode_registry',
+                            force_live=False,
+                        )
+                        pending['entry_mode_quality'] = _entry_mode_quality
+                        if not _entry_mode_live_allowed:
+                            record_decision_event(
+                                db,
+                                component='entry_mode_quality',
+                                event_type='entry_block',
+                                decision='shadow',
+                                reason='entry_mode_quality_shadow',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='pending_entry+entry_mode_registry',
+                                payload=with_lifecycle_payload({
+                                    'entry_mode_quality': _entry_mode_quality,
+                                    'registry': _pending_registry_entry,
+                                }, _entry_timing_lifecycle),
+                            )
+                            log.info(
+                                f"  [ENTRY_MODE_QUALITY] registry shadow {pending['symbol']}: "
+                                f"mode={pending.get('entry_mode')} tier={_pending_registry_entry.get('tier')}"
                             )
                             pending_entries.pop(lifecycle_id, None)
                             continue

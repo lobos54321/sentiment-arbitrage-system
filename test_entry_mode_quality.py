@@ -83,6 +83,7 @@ def test_entry_mode_registry_drives_shadow_only_defaults():
     assert "shadow_watch_only" in summary["by_tier"]
     assert "isolated_paper_capped" in summary["by_tier"]
     assert "lotto_low_liquidity_reclaim_tiny_probe" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "momentum_direct_entry" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
     assert "lotto_fast_lane" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
 
 
@@ -96,6 +97,16 @@ def test_grey_zone_modes_are_registered_but_still_blocked_until_caps_exist():
     assert registry_entry["paper_enabled"] is False
     assert decision["decision"] == "shadow"
     assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+
+
+def test_momentum_direct_entry_is_registry_hard_shadow():
+    db = _db()
+
+    decision = evaluate_entry_mode_quality(db, "momentum_direct_entry", now_ts=1000, force_live=True)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+    assert decision["registry"]["tier"] == "hard_shadow"
 
 
 def test_lotto_micro_reclaim_is_shadow_only_by_default():
