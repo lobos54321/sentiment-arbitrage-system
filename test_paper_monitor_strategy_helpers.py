@@ -56,6 +56,7 @@ from paper_trade_monitor import (  # noqa: E402
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
     build_paper_tiny_scout_dex_fallback_entry_execution,
+    evaluate_entry_edge_budget,
     evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
@@ -2231,6 +2232,25 @@ def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price():
     assert event["reason"] == "source_resonance_telegram_gmgn_probe"
     assert payload["source_resonance_parent_decision"]["component"] == "smart_entry"
     assert payload["source_resonance_parent_decision"]["reason"] == "no_price"
+
+
+def test_source_resonance_tiny_probe_uses_tiny_scout_spread_budget():
+    decision = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.029,
+        pending={
+            "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+            "replay_source": "live_monitor_source_resonance_probe",
+        },
+    )
+
+    assert decision["pass"] is True
+    assert decision["profile"] == "lotto_probe"
+    assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT
+    assert decision["spread_pct"] > monitor.ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):
