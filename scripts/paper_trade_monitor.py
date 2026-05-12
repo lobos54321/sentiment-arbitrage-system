@@ -175,6 +175,18 @@ PAPER_TINY_SCOUT_DEX_FALLBACK_REASONS = {
     if item.strip()
 }
 PAPER_TINY_SCOUT_DEX_FALLBACK_DECIMALS = int(os.environ.get('PAPER_TINY_SCOUT_DEX_FALLBACK_DECIMALS', '6'))
+PAPER_OBSERVATION_PROBE_SYNTHETIC_EXIT_ENABLED = os.environ.get(
+    'PAPER_OBSERVATION_PROBE_SYNTHETIC_EXIT_ENABLED',
+    'true',
+).lower() != 'false'
+PAPER_OBSERVATION_PROBE_SYNTHETIC_EXIT_REASONS = {
+    item.strip()
+    for item in os.environ.get(
+        'PAPER_OBSERVATION_PROBE_SYNTHETIC_EXIT_REASONS',
+        'RATE_LIMITED,no_route,token_not_tradable,force_timeout_no_quote,quote_failed,daemon_timeout',
+    ).split(',')
+    if item.strip()
+}
 
 SOL_MINT = 'So11111111111111111111111111111111111111112'
 PRICE_UNIT_SOL_PER_TOKEN = 'SOL_PER_TOKEN'
@@ -1067,44 +1079,54 @@ def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, 
     payload = build_execution_audit(execution) if execution else {}
     if phase_policy:
         payload['phase_policy'] = phase_policy
-    db.execute(
-        """
-        INSERT INTO paper_trade_path_samples
-            (trade_id, lifecycle_id, token_ca, symbol, strategy_stage, sample_ts,
-             action, reason, mark_price, mark_pnl, quote_price, quote_pnl,
-             peak_pnl, sold_pct, token_amount_raw, mark_source, quote_success,
-             quote_failure_reason, quote_out_sol, partial_realized_sol,
-             remaining_cost_basis_sol, blended_mark_pnl, blended_quote_pnl,
-             payload_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            pos.trade_id,
-            pos.lifecycle_id,
-            pos.token_ca,
-            pos.symbol,
-            pos.strategy_stage,
-            _safe_int(sample_ts, int(time.time())),
-            action,
-            reason,
-            _safe_float(mark_price, None),
-            _safe_float(mark_pnl, None),
-            quote_price,
-            quote_pnl,
-            _safe_float(peak_pnl if peak_pnl is not None else pos.peak_pnl, None),
-            _safe_float(state.get('soldPct'), 0.0),
-            str(pos.token_amount_raw) if pos.token_amount_raw is not None else None,
-            mark_source,
-            1 if execution.get('success') else 0 if execution else None,
-            execution.get('failureReason'),
-            quote_out_sol,
-            _safe_float(state.get('partialRealizedSol'), _safe_float(state.get('totalSolReceived'), None)),
-            _safe_float(state.get('remainingCostBasisSol'), None),
-            blended_mark_pnl_from_state(state, mark_pnl),
-            blended_quote_pnl_from_state(state, quote_out_sol) if action in ('exit', 'close') else None,
-            json.dumps(payload) if payload else None,
-        ),
-    )
+    try:
+        db.execute(
+            """
+            INSERT INTO paper_trade_path_samples
+                (trade_id, lifecycle_id, token_ca, symbol, strategy_stage, sample_ts,
+                 action, reason, mark_price, mark_pnl, quote_price, quote_pnl,
+                 peak_pnl, sold_pct, token_amount_raw, mark_source, quote_success,
+                 quote_failure_reason, quote_out_sol, partial_realized_sol,
+                 remaining_cost_basis_sol, blended_mark_pnl, blended_quote_pnl,
+                 payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pos.trade_id,
+                pos.lifecycle_id,
+                pos.token_ca,
+                pos.symbol,
+                pos.strategy_stage,
+                _safe_int(sample_ts, int(time.time())),
+                action,
+                reason,
+                _safe_float(mark_price, None),
+                _safe_float(mark_pnl, None),
+                quote_price,
+                quote_pnl,
+                _safe_float(peak_pnl if peak_pnl is not None else pos.peak_pnl, None),
+                _safe_float(state.get('soldPct'), 0.0),
+                str(pos.token_amount_raw) if pos.token_amount_raw is not None else None,
+                mark_source,
+                1 if execution.get('success') else 0 if execution else None,
+                execution.get('failureReason'),
+                quote_out_sol,
+                _safe_float(state.get('partialRealizedSol'), _safe_float(state.get('totalSolReceived'), None)),
+                _safe_float(state.get('remainingCostBasisSol'), None),
+                blended_mark_pnl_from_state(state, mark_pnl),
+                blended_quote_pnl_from_state(state, quote_out_sol) if action in ('exit', 'close') else None,
+                json.dumps(payload) if payload else None,
+            ),
+        )
+    except sqlite3.OperationalError as exc:
+        if 'locked' in str(exc).lower():
+            log.warning(
+                f"  [PATH_SAMPLE] skipped for trade_id={getattr(pos, 'trade_id', None)} "
+                f"reason=database_locked action={action}"
+            )
+            return False
+        raise
+    return True
 
 
 def record_lotto_probe_shadow_candidates(db, *, now_ts, limit=40):
@@ -2140,6 +2162,69 @@ def build_paper_tiny_scout_dex_fallback_entry_execution(pending, amount_sol, fai
             'dex_id': (dex_snapshot or {}).get('dex_id'),
             'pair_address': (dex_snapshot or {}).get('pair_address'),
         },
+    }
+
+
+def build_paper_observation_probe_synthetic_exit_execution(pos, mark_price, *, failed_execution=None, sell_pct=1.0, reason='synthetic_exit'):
+    failed_execution = failed_execution or {}
+    failure_reason = failed_execution.get('failureReason') or failed_execution.get('reason') or reason or 'exit_quote_failed'
+    if not PAPER_OBSERVATION_PROBE_SYNTHETIC_EXIT_ENABLED:
+        return None
+    allowed_reasons = {str(item).lower() for item in PAPER_OBSERVATION_PROBE_SYNTHETIC_EXIT_REASONS}
+    if str(failure_reason).lower() not in allowed_reasons:
+        return None
+    if not position_is_observation_probe(pos):
+        return None
+
+    price_sol = _safe_float(mark_price, None)
+    if price_sol is None or price_sol <= 0:
+        return None
+    try:
+        token_amount_raw = int(str(getattr(pos, 'token_amount_raw', 0) or 0))
+    except (TypeError, ValueError):
+        token_amount_raw = 0
+    if token_amount_raw <= 0:
+        return None
+    try:
+        decimals = int(getattr(pos, 'token_decimals', 6) or 6)
+    except (TypeError, ValueError):
+        decimals = 6
+    decimals = max(0, min(decimals, 12))
+    pct = min(1.0, max(0.0, _safe_float(sell_pct, 1.0)))
+    sell_amount_raw = max(1, int(token_amount_raw * pct))
+    token_amount = sell_amount_raw / (10 ** decimals)
+    quoted_out_amount = token_amount * price_sol
+    quote_ts = int(time.time() * 1000)
+
+    return {
+        'mode': 'paper_synthetic',
+        'side': 'sell',
+        'success': True,
+        'routeAvailable': False,
+        'requestId': None,
+        'quotedOutAmount': quoted_out_amount,
+        'quotedOutAmountRaw': str(int(quoted_out_amount * 1_000_000_000)),
+        'effectivePrice': price_sol,
+        'slippageBps': None,
+        'quoteTs': quote_ts,
+        'feeEstimate': 0,
+        'failureReason': failure_reason,
+        'txHash': None,
+        'actualAmountOut': None,
+        'actualAmountOutRaw': None,
+        'inputAmount': token_amount,
+        'inputAmountRaw': str(sell_amount_raw),
+        'inputMint': getattr(pos, 'token_ca', None),
+        'outputMint': SOL_MINT,
+        'inputDecimals': decimals,
+        'outputDecimals': 9,
+        'tokenCA': getattr(pos, 'token_ca', None),
+        'penaltyApplied': False,
+        'syntheticPaperExit': True,
+        'syntheticExitReason': 'observation_probe_mark_fallback',
+        'syntheticExitSource': 'mark_price',
+        'originalFailureReason': failure_reason,
+        'originalExecution': build_execution_audit(failed_execution),
     }
 
 
@@ -17100,6 +17185,7 @@ def run_monitor(db):
                     )
                     smart_exit_triggered = False
                     smart_exit_reason = None
+                    exit_matrix = None
 
                     if pre_price and pre_price > 0:
                         pre_ts = int(time.time() - (pre_age_ms or 0) / 1000)
@@ -17438,24 +17524,53 @@ def run_monitor(db):
                         # Force timeout exit if position held far beyond timeout limit
                         timeout_min = int(pos.exit_rules.get('timeoutMinutes', 120))
                         if held_min >= timeout_min * 2:
+                            timeout_matrix = exit_matrix if isinstance(exit_matrix, dict) else {}
+                            timeout_price = _safe_float(exit_eval.get('currentPrice'), None)
+                            if timeout_price is None or timeout_price <= 0:
+                                timeout_price = _safe_float(pre_price, None)
+                            if timeout_price is None or timeout_price <= 0:
+                                timeout_price = _safe_float(pos.entry_price, 0.0)
+                            timeout_pnl = _safe_float(timeout_matrix.get('current_pnl'), None)
+                            if timeout_pnl is None and timeout_price and pos.entry_price and pos.entry_price > 0:
+                                timeout_pnl = (timeout_price - pos.entry_price) / pos.entry_price
+                            if timeout_pnl is None:
+                                timeout_pnl = 0.0
+                            failed_execution = exit_eval.get('execution') or {
+                                'success': False,
+                                'failureReason': failure_info or 'force_timeout_no_quote',
+                            }
+                            timeout_execution = {'success': False, 'failureReason': 'force_timeout_no_quote'}
+                            synthetic_timeout_execution = build_paper_observation_probe_synthetic_exit_execution(
+                                pos,
+                                timeout_price,
+                                failed_execution=failed_execution,
+                                sell_pct=1.0,
+                                reason=failed_execution.get('failureReason') or 'force_timeout_no_quote',
+                            )
+                            quote_sanity_status = None
+                            if synthetic_timeout_execution:
+                                timeout_execution = synthetic_timeout_execution
+                                quote_sanity_status = 'synthetic_mark_force_timeout'
                             log.warning(
                                 f"  [FORCE_TIMEOUT] {pos.symbol}/{pos.strategy_stage}: held {held_min}min "
-                                f"(2x timeout={timeout_min}min), force closing as timeout"
+                                f"(2x timeout={timeout_min}min), force closing as timeout "
+                                f"pnl={timeout_pnl * 100:+.1f}% synthetic={1 if synthetic_timeout_execution else 0}"
                             )
                             to_close.append({
                                 'trade_id': trade_id,
                                 'reason': 'timeout',
-                                'pnl': 0.0,
-                                'trigger_pnl': 0.0,
-                                'exit_price': pos.entry_price,
+                                'pnl': timeout_pnl,
+                                'trigger_pnl': timeout_pnl,
+                                'exit_price': timeout_price,
                                 'exit_ts': int(time.time()),
                                 'mark_source': 'force_timeout',
                                 'exit_eval': {
                                     'action': 'exit',
                                     'shouldExit': True,
                                     'exitReason': 'timeout',
-                                    'execution': {'success': False, 'failureReason': 'force_timeout_no_quote'},
+                                    'execution': timeout_execution,
                                     'updatedState': pos.monitor_state,
+                                    'quoteSanityStatus': quote_sanity_status,
                                 },
                             })
                         continue
@@ -17990,6 +18105,7 @@ def run_monitor(db):
                 pos.monitor_state['exitQuoteSanity'] = exit_eval.get('quoteSanityStatus')
                 if total_realized_sol is not None:
                     pos.monitor_state['totalSolReceived'] = _safe_float(total_realized_sol, None)
+                synthetic_exit = bool(exit_execution.get('syntheticPaperExit'))
 
                 log.info(
                     f"ACCOUNTING_SOURCE trade_id={pos.trade_id} lifecycle={pos.lifecycle_id} stage={pos.strategy_stage} "
@@ -18003,7 +18119,7 @@ def run_monitor(db):
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
                         peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
                         exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
-                        strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0,
+                        strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?,
                         monitor_state_json = ?
                     WHERE id = ?
                 """, (
@@ -18041,9 +18157,10 @@ def run_monitor(db):
                         'triggerPrice': _safe_float(exit_price, None),
                         'effectiveExitPrice': _safe_float(effective_exit_price, None),
                     })),
-                    'force_timeout' if is_force_timeout else reason,
-                    'unavailable' if is_force_timeout else 'available',
-                    'closed_force_timeout' if is_force_timeout else 'closed_real',
+                    'synthetic_mark_exit' if synthetic_exit else ('force_timeout' if is_force_timeout else reason),
+                    'synthetic_mark' if synthetic_exit else ('unavailable' if is_force_timeout else 'available'),
+                    'closed_synthetic_mark' if synthetic_exit else ('closed_force_timeout' if is_force_timeout else 'closed_real'),
+                    1 if synthetic_exit else 0,
                     json.dumps(pos.monitor_state),
                     pos.trade_id,
                 ))
@@ -18069,7 +18186,7 @@ def run_monitor(db):
                         'peak_pnl': pos.peak_pnl,
                         'bars_held': pos.bars_held,
                         'accounting_source': accounting_source,
-                        'execution_availability': 'unavailable' if is_force_timeout else 'available',
+                        'execution_availability': 'synthetic_mark' if synthetic_exit else ('unavailable' if is_force_timeout else 'available'),
                     },
                 )
                 

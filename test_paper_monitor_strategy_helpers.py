@@ -55,11 +55,13 @@ from paper_trade_monitor import (  # noqa: E402
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
+    build_paper_observation_probe_synthetic_exit_execution,
     build_paper_tiny_scout_dex_fallback_entry_execution,
     evaluate_entry_edge_budget,
     evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
+    record_trade_path_sample,
     record_lotto_not_ath_watch_shadow_candidates,
     track_discovery_candidate,
     track_post_exit_runner_candidate,
@@ -2304,3 +2306,67 @@ def test_tiny_scout_dex_fallback_ignores_non_probe(monkeypatch):
     )
 
     assert execution is None
+
+
+def test_observation_probe_synthetic_exit_uses_mark_price_when_quote_blocked():
+    class Pos:
+        trade_id = 3003
+        lifecycle_id = "lc-3003"
+        token_ca = "TokenCA"
+        symbol = "UNKNOWN"
+        strategy_stage = "lotto"
+        entry_mode = SOURCE_RESONANCE_TINY_PROBE_MODE
+        position_size_sol = PAPER_TINY_SCOUT_SIZE_SOL
+        token_amount_raw = "300000000"
+        token_decimals = 6
+        monitor_state = {
+            "entryMode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "entrySol": PAPER_TINY_SCOUT_SIZE_SOL,
+            "signalRoute": "LOTTO",
+        }
+
+    execution = build_paper_observation_probe_synthetic_exit_execution(
+        Pos(),
+        0.00000079,
+        failed_execution={"success": False, "failureReason": "RATE_LIMITED"},
+        sell_pct=1.0,
+        reason="RATE_LIMITED",
+    )
+
+    assert execution["success"] is True
+    assert execution["syntheticPaperExit"] is True
+    assert execution["effectivePrice"] == 0.00000079
+    assert execution["quotedOutAmount"] == 0.00000079 * 300
+    assert execution["originalFailureReason"] == "RATE_LIMITED"
+
+
+def test_path_sample_database_lock_does_not_block_close_path():
+    class LockedDb:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    class Pos:
+        trade_id = 3003
+        lifecycle_id = "lc-3003"
+        token_ca = "TokenCA"
+        symbol = "UNKNOWN"
+        strategy_stage = "lotto"
+        entry_price = 0.0000006
+        peak_pnl = 3.488
+        token_amount_raw = "300000000"
+        monitor_state = {"entryMode": SOURCE_RESONANCE_TINY_PROBE_MODE}
+
+    assert (
+        record_trade_path_sample(
+            LockedDb(),
+            Pos(),
+            sample_ts=1778620714,
+            action="exit",
+            reason="timeout",
+            mark_price=0.00000079,
+            mark_pnl=0.319,
+            mark_source="force_timeout",
+            quote_execution={"success": True, "effectivePrice": 0.00000079},
+        )
+        is False
+    )
