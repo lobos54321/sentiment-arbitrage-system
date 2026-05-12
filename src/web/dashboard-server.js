@@ -31,6 +31,7 @@ import {
   registryModesByTier,
   summarizeEntryModeRegistry,
 } from './mode-registry-utils.js';
+import { buildNotAthRelaxedShadowCohorts } from './not-ath-watch-shadow-utils.js';
 
 dotenv.config();
 
@@ -4353,6 +4354,12 @@ const server = http.createServer(async (req, res) => {
       let shadowOutcomeByReason = [];
       let shadowSnapshotSummary = null;
       let shadowSnapshotByReason = [];
+      let relaxedShadowCohorts = {
+        available: false,
+        cohorts: [],
+        top_hits: [],
+        note: 'Not evaluated.',
+      };
       if (tableNames.has('paper_decision_events')) {
         shadowEvents = paperDb.prepare(`
           SELECT
@@ -4519,6 +4526,15 @@ const server = http.createServer(async (req, res) => {
           ORDER BY snapshots DESC, snapshot_pass_n DESC
         `).all(params);
       }
+      relaxedShadowCohorts = buildNotAthRelaxedShadowCohorts(paperDb, {
+        sinceTs,
+        limit,
+        snapshotIntervalSec: 300,
+        strictConfirmBySec: 30 * 60,
+        relaxedLiquidityUsd: Number(url.searchParams.get('relaxed_liq') || '2500'),
+        maxQuoteGapPct: Number(url.searchParams.get('max_quote_gap_pct') || '8'),
+        maxSpreadPct: Number(url.searchParams.get('max_spread_pct') || '5'),
+      });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
@@ -4549,6 +4565,7 @@ const server = http.createServer(async (req, res) => {
           by_reason: shadowSnapshotByReason,
           note: 'Real future quote-clean snapshot collection for not_ath_v17; promotion requires two consecutive 5m snapshot_pass samples.',
         },
+        relaxed_shadow_cohorts: relaxedShadowCohorts,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });

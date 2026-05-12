@@ -1626,6 +1626,89 @@ def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts, historical_pro
     }
 
 
+def _record_lotto_not_ath_watch_relaxed_observation_snapshots(db, *, now_ts, limit=60):
+    """Keep collecting post-terminal snapshots for relaxed shadow cohorts.
+
+    Strict NOT_ATH watch still expires at the configured confirm window and
+    never creates paper/live entries here.  These late snapshots only make the
+    dashboard able to answer whether a wider age/liquidity shadow net would
+    have recovered missed dogs.
+    """
+    rows = db.execute(
+        """
+        WITH candidates AS (
+            SELECT
+                m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
+                m.route, m.component, m.reject_reason, m.created_event_ts,
+                m.baseline_price, m.pnl_5m, m.pnl_15m, m.pnl_60m, m.pnl_24h,
+                m.max_pnl_recorded, m.tradable_missed, m.tradability_status,
+                m.tradability_reason, m.first_tradable_pnl, m.tradable_peak_pnl,
+                m.would_stop_before_peak, m.lifecycle_state, m.vitality_score,
+                m.entry_bias
+            FROM paper_missed_signal_attribution m
+            WHERE m.route = 'LOTTO'
+              AND m.component IN ('upstream_gate', 'lotto_entry_gate')
+              AND m.reject_reason = 'not_ath_v17'
+              AND m.baseline_price IS NOT NULL
+              AND m.created_event_ts >= ?
+              AND m.created_event_ts <= ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM paper_decision_events e
+                  WHERE e.component = 'lotto_not_ath_watch_shadow'
+                    AND e.token_ca = m.token_ca
+                    AND COALESCE(e.signal_ts, 0) = COALESCE(m.signal_ts, 0)
+                    AND e.event_type IN ('watch_rejected', 'watch_expired')
+              )
+        ),
+        ranked AS (
+            SELECT
+                c.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.token_ca, COALESCE(c.signal_ts, 0)
+                    ORDER BY
+                        COALESCE(c.tradable_peak_pnl, c.max_pnl_recorded, c.pnl_24h, c.pnl_60m, c.pnl_15m, c.pnl_5m, 0) DESC,
+                        c.created_event_ts DESC,
+                        c.id DESC
+                ) AS rn
+            FROM candidates c
+        )
+        SELECT
+            r.id, r.token_ca, r.symbol, r.lifecycle_id, r.signal_id, r.signal_ts,
+            r.route, r.component, r.reject_reason, r.created_event_ts,
+            r.baseline_price, r.pnl_5m, r.pnl_15m, r.pnl_60m, r.pnl_24h,
+            r.max_pnl_recorded, r.tradable_missed, r.tradability_status,
+            r.tradability_reason, r.first_tradable_pnl, r.tradable_peak_pnl,
+            r.would_stop_before_peak, r.lifecycle_state, r.vitality_score,
+            r.entry_bias
+        FROM ranked r
+        WHERE r.rn = 1
+        ORDER BY r.created_event_ts DESC
+        LIMIT ?
+        """,
+        (
+            now_ts - LOTTO_NOT_ATH_WATCH_SHADOW_MAX_AGE_SEC,
+            now_ts - LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC,
+            max(1, min(int(limit or 60), 60)),
+        ),
+    ).fetchall()
+    inserted = 0
+    for row in rows:
+        lifecycle_id = row['lifecycle_id'] or build_lifecycle_id(
+            row['token_ca'],
+            row['signal_ts'] or int(row['created_event_ts']),
+        )
+        detail = _record_lotto_not_ath_watch_shadow_snapshot(
+            db,
+            row,
+            now_ts=now_ts,
+            lifecycle_id=lifecycle_id,
+        )
+        if detail.get('inserted'):
+            inserted += 1
+    return inserted
+
+
 def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
     """Record the first single-blocker watch MVP for LOTTO/not_ath_v17.
 
@@ -1773,6 +1856,10 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
             event_ts=now_ts,
         )
         recorded += 1
+    try:
+        _record_lotto_not_ath_watch_relaxed_observation_snapshots(db, now_ts=now_ts, limit=limit)
+    except Exception as exc:
+        log.debug(f"  [LOTTO_NOT_ATH_WATCH_RELAXED_SHADOW] snapshot scan failed: {exc}")
     return recorded
 
 

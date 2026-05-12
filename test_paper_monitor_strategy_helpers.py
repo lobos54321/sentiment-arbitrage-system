@@ -545,6 +545,56 @@ def test_lotto_not_ath_watch_shadow_expires_without_two_snapshot_confirmation(mo
     assert events[-1]["reason"] == "not_ath_watch_missing_two_quote_clean_reclaim_snapshots"
 
 
+def test_lotto_not_ath_watch_shadow_keeps_relaxed_snapshots_after_strict_expire(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    _insert_not_ath_missed(db, created_event_ts=1000, pnl_5m=None, pnl_15m=None)
+    _patch_not_ath_shadow_snapshot_sources(
+        monkeypatch,
+        quote_success=False,
+        liquidity_usd=1000.0,
+        vol_m5=500.0,
+        buys_m5=5,
+        sells_m5=20,
+        price_change_m5=-3.0,
+    )
+
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 31 * 60, limit=10) == 2
+    first = db.execute(
+        """
+        SELECT horizon_sec, quote_clean, snapshot_pass
+        FROM lotto_not_ath_watch_shadow_snapshots
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [(row["horizon_sec"], row["quote_clean"], row["snapshot_pass"]) for row in first] == [(1800, 0, 0)]
+
+    _patch_not_ath_shadow_snapshot_sources(monkeypatch)
+
+    assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1000 + 37 * 60, limit=10) == 0
+    snapshots = db.execute(
+        """
+        SELECT horizon_sec, quote_clean, snapshot_pass
+        FROM lotto_not_ath_watch_shadow_snapshots
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [(row["horizon_sec"], row["quote_clean"], row["snapshot_pass"]) for row in snapshots] == [
+        (1800, 0, 0),
+        (2100, 1, 1),
+    ]
+    terminal_events = db.execute(
+        """
+        SELECT event_type
+        FROM paper_decision_events
+        WHERE component = 'lotto_not_ath_watch_shadow'
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [row["event_type"] for row in terminal_events] == ["watch_opened", "watch_expired"]
+
+
 def test_lotto_not_ath_watch_shadow_decision_expires_missing_samples():
     detail = _lotto_not_ath_watch_shadow_decision(
         {"created_event_ts": 1000, "pnl_5m": 0.08, "pnl_15m": None},
