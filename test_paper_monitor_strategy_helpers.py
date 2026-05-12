@@ -48,6 +48,7 @@ from paper_trade_monitor import (  # noqa: E402
     _exit_stop_quote_gap_protection,
     _phase_policy_live_exit_detail,
     _matrix_micro_momentum_reason,
+    _maybe_upgrade_pending_to_source_resonance_probe,
     _pending_entry_exists_for_token,
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
@@ -2160,6 +2161,76 @@ def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
     assert pending["timing_passed"] is True
     assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_source_resonance_probe"
+
+
+def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_type": "LOTTO",
+        "signal_route": "LOTTO",
+        "kelly_position_sol": 0.05,
+        "trigger_price": None,
+    }
+    watchlist_entry = {
+        "ca": "TokenCA",
+        "symbol": "DOG",
+        "type": "LOTTO",
+        "signal_ts": 1000,
+        "signal_mc": 42000,
+        "signal_top10": 20,
+    }
+    external_alpha = {
+        "available": True,
+        "source": "external_alpha_shadow",
+        "gmgn_pre_seen": True,
+        "gmgn_lead_time_sec": 240,
+        "last_seen_age_sec": 30,
+        "gmgn_momentum_rounds": 2,
+        "gmgn_momentum_gain_pct": 4,
+        "gmgn_momentum_confirmed": False,
+        "gmgn_volume_confirmed": False,
+        "last_market_cap": 42000,
+    }
+
+    detail = _maybe_upgrade_pending_to_source_resonance_probe(
+        db,
+        pending,
+        watchlist_entry,
+        lifecycle_id="TokenCA:1000",
+        route="LOTTO",
+        parent_component="smart_entry",
+        parent_decision="reject",
+        parent_reason="no_price",
+        dex_snapshot={"market_cap": 42000, "liquidity_usd": 15000, "vol_m5": 9000},
+        live_concentration={"top1_pct": 20, "top10_pct": 40},
+        external_alpha=external_alpha,
+        now_ts=1300,
+        data_source="smart_entry+external_alpha+dexscreener+helius",
+    )
+
+    assert detail["pass"] is True
+    assert pending["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+    assert pending["paper_only_scout"] is True
+    assert pending["timing_passed"] is True
+    assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+    event = db.execute(
+        """
+        SELECT component, event_type, decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE component = 'source_resonance_probe'
+        """
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "pending_upgrade"
+    assert event["decision"] == "pending"
+    assert event["reason"] == "source_resonance_telegram_gmgn_probe"
+    assert payload["source_resonance_parent_decision"]["component"] == "smart_entry"
+    assert payload["source_resonance_parent_decision"]["reason"] == "no_price"
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):

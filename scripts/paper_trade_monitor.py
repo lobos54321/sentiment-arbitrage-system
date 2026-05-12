@@ -282,6 +282,7 @@ SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TI
 SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
 SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
+SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED', 'true').lower() != 'false'
 PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
 LOTTO_RECOVERY_TINY_PROBES_ENABLED = os.environ.get('LOTTO_RECOVERY_TINY_PROBES_ENABLED', 'true').lower() != 'false'
 LOTTO_RECLAIM_MAX_MC = float(os.environ.get('LOTTO_RECLAIM_MAX_MC', '250000'))
@@ -5019,6 +5020,122 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
                 'timing_passed': bool(detail.get('timing_passed')),
             })
     return pending
+
+
+def _maybe_upgrade_pending_to_source_resonance_probe(
+    db,
+    pending,
+    pending_w_entry=None,
+    *,
+    lifecycle_id=None,
+    route=None,
+    parent_component='pending_entry',
+    parent_decision=None,
+    parent_reason=None,
+    dex_snapshot=None,
+    live_concentration=None,
+    lifecycle=None,
+    external_alpha=None,
+    signal=None,
+    now_ts=None,
+    event_type='pending_upgrade',
+    data_source='external_alpha+dexscreener+helius',
+):
+    if not pending or pending.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE:
+        return None
+    token_ca = pending.get('token_ca') or (pending_w_entry or {}).get('ca')
+    if not token_ca:
+        return None
+    route_name = str(
+        route
+        or pending.get('signal_route')
+        or pending.get('signal_type')
+        or (pending_w_entry or {}).get('type')
+        or ('LOTTO' if pending.get('is_lotto') else '')
+    ).upper()
+    signal_ts = pending.get('signal_ts') or (pending_w_entry or {}).get('signal_ts')
+    if external_alpha is None:
+        external_alpha = safe_external_alpha_lookup(
+            db,
+            token_ca,
+            now=now_ts,
+            signal_ts=signal_ts,
+        )
+    if dex_snapshot is None:
+        try:
+            dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca)
+        except Exception:
+            dex_snapshot = None
+    if live_concentration is None:
+        try:
+            live_concentration = helius_token_concentration(token_ca)
+        except Exception:
+            live_concentration = None
+    lifecycle_entry = pending_w_entry or {
+        'ca': token_ca,
+        'symbol': pending.get('symbol'),
+        'type': route_name,
+        'signal_ts': signal_ts,
+        'signal_price': pending.get('signal_price') or pending.get('entry_price'),
+        'signal_mc': pending.get('market_cap') or pending.get('signal_mc') or 0,
+        'added_at': pending.get('added_at') or pending.get('staged_at') or signal_ts,
+    }
+    if lifecycle is None:
+        lifecycle = lifecycle_payload_for(
+            signal=signal,
+            watchlist_entry=lifecycle_entry,
+            dex_snapshot=dex_snapshot,
+            live_concentration=live_concentration,
+            route=route_name,
+            signal_ts=signal_ts,
+            signal_price=pending.get('signal_price') or pending.get('entry_price'),
+            now=now_ts,
+        )
+    detail = evaluate_source_resonance_tiny_probe(
+        external_alpha,
+        signal=signal,
+        watchlist_entry=lifecycle_entry,
+        route=route_name,
+        hard_gate_status=parent_reason,
+        dex_snapshot=dex_snapshot,
+        live_concentration=live_concentration,
+        lifecycle=lifecycle,
+        now_ts=now_ts,
+    )
+    if not detail.get('pass'):
+        return detail
+    detail = {
+        **detail,
+        'source_resonance_parent_decision': {
+            'component': parent_component,
+            'action': parent_decision,
+            'reason': parent_reason,
+        },
+        'trigger_price': pending.get('trigger_price') or pending.get('signal_price') or pending.get('entry_price'),
+    }
+    _apply_source_resonance_probe_to_pending(
+        pending,
+        detail,
+        route=route_name,
+        stage_outcome='source_resonance_tiny_probe_armed',
+    )
+    record_decision_event(
+        db,
+        component='source_resonance_probe',
+        event_type=event_type,
+        decision='pending',
+        reason=detail.get('reason') or SOURCE_RESONANCE_TINY_PROBE_MODE,
+        token_ca=token_ca,
+        symbol=pending.get('symbol') or (pending_w_entry or {}).get('symbol'),
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts,
+        signal_id=pending.get('premium_signal_id') or (pending_w_entry or {}).get('premium_signal_id'),
+        route=route_name,
+        data_source=data_source,
+        payload=with_lifecycle_payload(detail, lifecycle),
+        event_ts=now_ts,
+    )
+    return detail
 
 
 def arm_source_resonance_lotto_probe(
@@ -14586,6 +14703,33 @@ def run_monitor(db):
                                     route='LOTTO',
                                     stage_outcome='source_resonance_tiny_probe_armed',
                                 )
+                            else:
+                                _lotto_source_probe = _maybe_upgrade_pending_to_source_resonance_probe(
+                                    db,
+                                    pending_entries[_lotto_lc_id],
+                                    w_entry,
+                                    lifecycle_id=_lotto_lc_id,
+                                    route='LOTTO',
+                                    parent_component='lotto_entry_gate',
+                                    parent_decision=_lotto_decision.action,
+                                    parent_reason=_lotto_decision.reason,
+                                    dex_snapshot=_lotto_dex,
+                                    live_concentration=_lotto_live,
+                                    lifecycle=_lotto_lifecycle,
+                                    external_alpha=_external_alpha,
+                                    now_ts=now,
+                                    data_source='lotto_entry_gate+external_alpha+dexscreener+helius',
+                                )
+                                if _lotto_source_probe and _lotto_source_probe.get('pass'):
+                                    _lotto_detail = {
+                                        **_lotto_detail,
+                                        **_lotto_source_probe,
+                                    }
+                                    log.info(
+                                        f"  [SOURCE_RESONANCE_PROBE] {w_entry['symbol']} lotto-fire upgrade "
+                                        f"size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL "
+                                        f"parent={_lotto_decision.reason}"
+                                    )
                             pending_entries[_lotto_lc_id]['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(_lotto_lc_id, 0)
                             record_decision_event(
                                 db,
@@ -15477,19 +15621,54 @@ def run_monitor(db):
                                 lifecycle=pending.get('entry_readiness_lifecycle'),
                                 now_ts=now,
                             )
-                            if retry_count >= max_retries:
-                                log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
-                                _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
-                                pending_entries.pop(lifecycle_id, None)
-                            else:
-                                log.info(
-                                    f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
-                                    f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                            _source_resonance_no_price_probe = None
+                            if (
+                                SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED
+                                and timing_reason == 'no_price'
+                            ):
+                                _source_resonance_no_price_probe = _maybe_upgrade_pending_to_source_resonance_probe(
+                                    db,
+                                    pending,
+                                    pending_w_entry,
+                                    lifecycle_id=lifecycle_id,
+                                    route=pending.get('signal_route') or pending.get('signal_type'),
+                                    parent_component='smart_entry',
+                                    parent_decision='reject',
+                                    parent_reason=timing_reason,
+                                    lifecycle=pending.get('entry_readiness_lifecycle'),
+                                    now_ts=now,
+                                    event_type='pending_upgrade',
+                                    data_source='smart_entry+external_alpha+dexscreener+helius',
                                 )
-                                if pending_w_entry:
-                                    pending_w_entry['_smart_entry_retries'] = retry_count + 1
-                                pending_entries.pop(lifecycle_id, None)
-                            continue
+                            if _source_resonance_no_price_probe and _source_resonance_no_price_probe.get('pass'):
+                                _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
+                                pending.pop('_smart_entry_future', None)
+                                should_enter = True
+                                timing_reason = 'source_resonance_smart_entry_no_price_probe'
+                                timing_detail = {
+                                    'original_timing_reason': 'no_price',
+                                    'original_timing_detail': timing_detail,
+                                    'source_resonance_probe': _source_resonance_no_price_probe,
+                                }
+                                timing_trigger_price = pending.get('trigger_price') or timing_trigger_price
+                                log.info(
+                                    f"  [SOURCE_RESONANCE_PROBE] {pending['symbol']} SmartEntry no_price "
+                                    f"upgraded to tiny paper probe size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL"
+                                )
+                            else:
+                                if retry_count >= max_retries:
+                                    log.info(f"  [SmartEntry] {pending['symbol']} REJECT (final, {retry_count}/{max_retries}): {timing_reason} {timing_detail}")
+                                    _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
+                                    pending_entries.pop(lifecycle_id, None)
+                                else:
+                                    log.info(
+                                        f"  [SmartEntry] {pending['symbol']} REJECT → back to watchlist "
+                                        f"(retry {retry_count+1}/{max_retries}): {timing_reason} {timing_detail}"
+                                    )
+                                    if pending_w_entry:
+                                        pending_w_entry['_smart_entry_retries'] = retry_count + 1
+                                    pending_entries.pop(lifecycle_id, None)
+                                continue
                             
                         # Smart entry passed — update trigger price to the confirmed entry price
                         pending['timing_passed'] = True
