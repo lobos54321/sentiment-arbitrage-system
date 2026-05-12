@@ -59,6 +59,11 @@ function envFlag(name, defaultValue = true) {
   return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
 }
 
+function premiumLiveExecutionEnabled(config = {}) {
+  return process.env.SHADOW_MODE === 'false'
+    && Boolean(config.PREMIUM_LIVE_EXECUTION_ENABLED);
+}
+
 function startPythonSidecar({ name, args, env = {}, logPath }) {
   let child = null;
   let stopped = false;
@@ -804,19 +809,19 @@ class PremiumChannelSystem {
     this.autonomySidecar = null;
     this.shadowDataSidecars = [];
 
-    // 实盘组件（SHADOW_MODE=false 时启用）
+    // 实盘组件（必须显式 PREMIUM_LIVE_EXECUTION_ENABLED=true 才启用）
     this.jupiterExecutor = null;
     this.liveExecutionExecutor = null;
     this.livePriceMonitor = null;
     this.livePositionMonitor = null;
     this.quoteClient = null;
 
-    const isLive = process.env.SHADOW_MODE === 'false';
+    const isLive = premiumLiveExecutionEnabled(this.config);
 
     console.log('\n' + '═'.repeat(80));
     console.log('💎 PREMIUM CHANNEL MODE');
     console.log('═'.repeat(80));
-    console.log(`Mode: ${isLive ? '💰 LIVE' : '🎭 SHADOW'}`);
+    console.log(`Mode: ${isLive ? '💰 LIVE' : '📋 PAPER_ONLY'}`);
     if (isLive) {
       console.log(`执行器: Jupiter Swap`);
       console.log(`仓位: ${process.env.PREMIUM_POSITION_SOL || '0.12'} SOL`);
@@ -830,6 +835,8 @@ class PremiumChannelSystem {
     return {
       DB_PATH: process.env.DB_PATH || './data/sentiment_arb.db',
       SHADOW_MODE: process.env.SHADOW_MODE !== 'false',
+      PREMIUM_LIVE_EXECUTION_ENABLED: envFlag('PREMIUM_LIVE_EXECUTION_ENABLED', false),
+      PAPER_ONLY_MODE: !envFlag('PREMIUM_LIVE_EXECUTION_ENABLED', false),
       AUTO_BUY_ENABLED: process.env.AUTO_BUY_ENABLED === 'true',
       total_capital_sol: process.env.TOTAL_CAPITAL_SOL || '10.0',
       hard_gate_thresholds: {
@@ -870,7 +877,7 @@ class PremiumChannelSystem {
         startDashboardServer();
         this.shadowDataSidecars = startShadowDataSidecars(this.config);
 
-        const isLive = process.env.SHADOW_MODE === 'false';
+        const isLive = premiumLiveExecutionEnabled(this.config);
         const premiumMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_PREMIUM');
 
     try {
@@ -880,7 +887,7 @@ class PremiumChannelSystem {
         this.liveExecutionExecutor = new ParityExecutor({ mode: 'live', executor: this.jupiterExecutor });
       }
 
-      console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'SHADOW'}) | unified=${premiumMarketDataEnabled}`);
+      console.log(`📡 [价格监控] Premium 统一使用 LivePriceMonitorV2 (${isLive ? 'LIVE' : 'PAPER_ONLY'}) | unified=${premiumMarketDataEnabled}`);
       this.quoteClient = new SharedQuoteClient(undefined, {
         jupiterApiKey: process.env.JUPITER_API_KEY || '',
         sharedQuotesEnabled: premiumMarketDataEnabled && isMarketDataProcessEnabled('MARKET_DATA_UNIFIED_PREMIUM')

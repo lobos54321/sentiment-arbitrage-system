@@ -29,7 +29,10 @@ import { MarketDataBackfillService } from '../market-data/market-data-backfill-s
 import { SharedMarketDataClient } from '../market-data/shared-market-data-client.js';
 import { normalizeUnixTimestampSec } from '../utils/time-normalization.js';
 import { scoreNarrativeFeatures } from '../scoring/signal-narrative-features.js';
+import { resolvePremiumPaperOnlyMode } from './premium-mode.js';
 import axios from 'axios';
+
+export { resolvePremiumPaperOnlyMode } from './premium-mode.js';
 
 export function normalizeSignalTimestampSec(value, fallbackSec = Math.floor(Date.now() / 1000)) {
   return normalizeUnixTimestampSec(value, fallbackSec);
@@ -42,7 +45,8 @@ export class PremiumSignalEngine {
     this.riskManager = new RiskManager(config, db);
 
     // 配置
-    this.shadowMode = process.env.SHADOW_MODE !== 'false';
+    this.paperOnlyMode = resolvePremiumPaperOnlyMode(config);
+    this.shadowMode = process.env.SHADOW_MODE !== 'false' || this.paperOnlyMode;
     this.autoBuyEnabled = process.env.AUTO_BUY_ENABLED === 'true';
     this.positionSol = parseFloat(process.env.PREMIUM_POSITION_SOL || '0.12');
     this.maxPositions = parseInt(process.env.PREMIUM_MAX_POSITIONS || '8');
@@ -131,7 +135,7 @@ export class PremiumSignalEngine {
 
     console.log('\n' + '─'.repeat(60));
     console.log('💎 [Premium Engine] 初始化');
-    console.log(`   模式: ${this.shadowMode ? '🎭 SHADOW' : '💰 LIVE'}`);
+    console.log(`   模式: ${this.paperOnlyMode ? '📋 PAPER_ONLY' : (this.shadowMode ? '🎭 SHADOW' : '💰 LIVE')}`);
     console.log(`   自动买入: ${this.autoBuyEnabled ? '✅' : '❌'}`);
     console.log(`   仓位: ${this.positionSol} SOL`);
     console.log(`   最大持仓: ${this.maxPositions}`);
@@ -1510,7 +1514,7 @@ export class PremiumSignalEngine {
   getStats() {
     return {
       ...this.stats,
-      mode: this.shadowMode ? 'PAPER_ONLY' : 'LIVE',
+      mode: (this.paperOnlyMode || this.shadowMode) ? 'PAPER_ONLY' : 'LIVE',
       position_sol: this.positionSol,
       max_positions: this.maxPositions,
       dedup_cache_size: this.recentSignals.size
