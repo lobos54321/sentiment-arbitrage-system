@@ -333,7 +333,12 @@ def lookup_entry_quote_audit(paper_db, token_ca, signal_ts):
         """
         SELECT
             MIN(event_ts) AS first_decision_ts,
-            MAX(CASE WHEN component = 'execution_api' AND event_type = 'entry_quote' AND decision != 'fail' THEN 1 ELSE 0 END) AS entry_quote_success_seen,
+            MAX(CASE
+                WHEN component = 'execution_api'
+                 AND event_type = 'entry_quote'
+                 AND decision NOT IN ('fail', 'fallback', 'filled_synthetic_paper')
+                THEN 1 ELSE 0
+            END) AS entry_quote_success_seen,
             MAX(CASE WHEN component = 'execution_api' AND event_type = 'entry_quote' AND decision = 'fail' THEN 1 ELSE 0 END) AS entry_quote_fail_seen
         FROM paper_decision_events
         WHERE token_ca = ?

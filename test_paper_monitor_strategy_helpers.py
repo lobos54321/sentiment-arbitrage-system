@@ -54,6 +54,7 @@ from paper_trade_monitor import (  # noqa: E402
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
+    build_paper_tiny_scout_dex_fallback_entry_execution,
     evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
@@ -2159,3 +2160,56 @@ def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
     assert pending["timing_passed"] is True
     assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_source_resonance_probe"
+
+
+def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):
+    monkeypatch.setattr(
+        monitor,
+        "fetch_dexscreener_trend_snapshot",
+        lambda _token_ca: {
+            "price_usd": 0.001,
+            "liquidity_usd": 12000,
+            "vol_m5": 9000,
+            "buys_m5": 70,
+            "sells_m5": 35,
+            "price_change_m5": 4.0,
+            "dex_id": "pumpswap",
+            "pair_address": "PairA",
+        },
+    )
+    pending = {
+        "token_ca": "TokenCA",
+        "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+    }
+
+    execution = build_paper_tiny_scout_dex_fallback_entry_execution(
+        pending,
+        PAPER_TINY_SCOUT_SIZE_SOL,
+        failed_execution={"success": False, "failureReason": "no_route", "routeAvailable": False},
+        sol_price=100,
+    )
+
+    assert execution["success"] is True
+    assert execution["routeAvailable"] is False
+    assert execution["syntheticPaperEntry"] is True
+    assert execution["effectivePrice"] == 0.00001
+    assert execution["quotedOutAmountRaw"] == "300000000"
+    assert execution["outputDecimals"] == 6
+
+
+def test_tiny_scout_dex_fallback_ignores_non_probe(monkeypatch):
+    monkeypatch.setattr(
+        monitor,
+        "fetch_dexscreener_trend_snapshot",
+        lambda _token_ca: {"price_usd": 0.001},
+    )
+    execution = build_paper_tiny_scout_dex_fallback_entry_execution(
+        {"token_ca": "TokenCA", "entry_mode": "stage1", "kelly_position_sol": 0.06},
+        0.06,
+        failed_execution={"success": False, "failureReason": "no_route"},
+        sol_price=100,
+    )
+
+    assert execution is None

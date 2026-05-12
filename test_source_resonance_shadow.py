@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 from external_alpha_shadow import init_external_alpha_shadow, record_external_alpha_candidates  # noqa: E402
-from source_resonance_shadow import run_once  # noqa: E402
+from source_resonance_shadow import lookup_entry_quote_audit, run_once  # noqa: E402
 
 
 def test_source_resonance_builds_gmgn_quote_clean_cohort(tmp_path):
@@ -132,4 +132,37 @@ def test_source_resonance_builds_gmgn_quote_clean_cohort(tmp_path):
         for row in db.execute("SELECT stage FROM latency_audit_events WHERE token_ca = 'TokenCA'")
     }
     assert {"source_event", "telegram_receive", "premium_signal_recorded", "paper_first_decision"} <= stages
+    db.close()
+
+
+def test_entry_quote_audit_excludes_synthetic_fallback_from_quote_clean(tmp_path):
+    paper_db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(paper_db_path)
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE paper_decision_events (
+            event_ts REAL,
+            token_ca TEXT,
+            signal_ts INTEGER,
+            component TEXT,
+            event_type TEXT,
+            decision TEXT
+        )
+        """
+    )
+    db.executemany(
+        "INSERT INTO paper_decision_events VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1001, "TokenCA", 1000, "execution_api", "entry_quote", "fallback"),
+            (1002, "TokenCA", 1000, "execution_api", "entry_quote", "filled_synthetic_paper"),
+        ],
+    )
+    db.commit()
+
+    audit = lookup_entry_quote_audit(db, "TokenCA", 1000)
+
+    assert audit["entry_quote_success_seen"] == 0
+    assert audit["entry_quote_fail_seen"] == 0
+    assert audit["first_decision_ts"] == 1001
     db.close()

@@ -164,6 +164,16 @@ DEFAULT_PAPER_EXECUTION = {
     'tokenNotTradableFailureThreshold': 1,
     'tokenNotTradableTrapMinutes': 1,
 }
+PAPER_TINY_SCOUT_DEX_FALLBACK_ENTRY_ENABLED = os.environ.get(
+    'PAPER_TINY_SCOUT_DEX_FALLBACK_ENTRY_ENABLED',
+    'true',
+).lower() != 'false'
+PAPER_TINY_SCOUT_DEX_FALLBACK_REASONS = {
+    item.strip()
+    for item in os.environ.get('PAPER_TINY_SCOUT_DEX_FALLBACK_REASONS', 'no_route').split(',')
+    if item.strip()
+}
+PAPER_TINY_SCOUT_DEX_FALLBACK_DECIMALS = int(os.environ.get('PAPER_TINY_SCOUT_DEX_FALLBACK_DECIMALS', '6'))
 
 SOL_MINT = 'So11111111111111111111111111111111111111112'
 PRICE_UNIT_SOL_PER_TOKEN = 'SOL_PER_TOKEN'
@@ -2033,6 +2043,101 @@ def apply_paper_tiny_scout_size_cap(pending):
         'actual_size_sol': actual_size,
         'capped': actual_size < requested_size,
         'cap_sol': cap_sol,
+    }
+
+
+def build_paper_tiny_scout_dex_fallback_entry_execution(pending, amount_sol, failed_execution=None, sol_price=None):
+    pending = pending or {}
+    failed_execution = failed_execution or {}
+    failure_reason = failed_execution.get('failureReason') or failed_execution.get('reason') or 'entry_quote_failed'
+    if not PAPER_TINY_SCOUT_DEX_FALLBACK_ENTRY_ENABLED:
+        return None
+    if failure_reason not in PAPER_TINY_SCOUT_DEX_FALLBACK_REASONS:
+        return None
+    if not pending_is_paper_tiny_scout(pending):
+        return None
+
+    token_ca = pending.get('token_ca')
+    amount = _safe_float(amount_sol, 0.0)
+    if not token_ca or amount <= 0:
+        return None
+
+    try:
+        dex_snapshot = fetch_dexscreener_trend_snapshot(token_ca) or {}
+    except Exception:
+        dex_snapshot = {}
+
+    pending_dex = pending.get('dex_snapshot') if isinstance(pending.get('dex_snapshot'), dict) else {}
+    price_usd = _first_number((dex_snapshot or {}).get('price_usd'), pending_dex.get('price_usd'))
+    sol_usd = _safe_float(sol_price, None)
+    if sol_usd is None or sol_usd <= 0:
+        try:
+            sol_usd = _safe_float(get_sol_price(), None)
+        except Exception:
+            sol_usd = None
+
+    price_sol = None
+    if price_usd is not None and price_usd > 0 and sol_usd is not None and sol_usd > 0:
+        price_sol = price_usd / sol_usd
+    if price_sol is None or price_sol <= 0:
+        price_sol = _safe_float(pending.get('trigger_price'), None)
+    if price_sol is None or price_sol <= 0:
+        return None
+
+    decimals = int(
+        _safe_float(
+            failed_execution.get('outputDecimals')
+            or pending.get('token_decimals')
+            or PAPER_TINY_SCOUT_DEX_FALLBACK_DECIMALS,
+            PAPER_TINY_SCOUT_DEX_FALLBACK_DECIMALS,
+        )
+    )
+    decimals = max(0, min(decimals, 12))
+    quoted_out_amount = amount / price_sol
+    quoted_out_amount_raw = str(max(1, int(quoted_out_amount * (10 ** decimals))))
+    amount_lamports = int(amount * 1_000_000_000)
+    quote_ts = int(time.time() * 1000)
+
+    return {
+        'mode': 'paper_synthetic',
+        'side': 'buy',
+        'success': True,
+        'routeAvailable': False,
+        'requestId': None,
+        'quotedOutAmount': quoted_out_amount,
+        'quotedOutAmountRaw': quoted_out_amount_raw,
+        'effectivePrice': price_sol,
+        'slippageBps': None,
+        'quoteTs': quote_ts,
+        'feeEstimate': 0,
+        'failureReason': failure_reason,
+        'txHash': None,
+        'actualAmountOut': None,
+        'actualAmountOutRaw': None,
+        'inputAmount': amount,
+        'inputAmountRaw': amount_lamports,
+        'inputMint': SOL_MINT,
+        'outputMint': token_ca,
+        'inputDecimals': 9,
+        'outputDecimals': decimals,
+        'tokenCA': token_ca,
+        'penaltyApplied': False,
+        'syntheticPaperEntry': True,
+        'syntheticEntryReason': 'jupiter_no_route_dex_fallback',
+        'syntheticEntrySource': 'dexscreener',
+        'originalFailureReason': failure_reason,
+        'originalExecution': build_execution_audit(failed_execution),
+        'dexSnapshot': {
+            'price_usd': price_usd,
+            'sol_usd': sol_usd,
+            'price_sol': price_sol,
+            'liquidity_usd': (dex_snapshot or {}).get('liquidity_usd'),
+            'vol_m5': (dex_snapshot or {}).get('vol_m5'),
+            'tx_m5': int((dex_snapshot or {}).get('buys_m5') or 0) + int((dex_snapshot or {}).get('sells_m5') or 0),
+            'price_change_m5': (dex_snapshot or {}).get('price_change_m5'),
+            'dex_id': (dex_snapshot or {}).get('dex_id'),
+            'pair_address': (dex_snapshot or {}).get('pair_address'),
+        },
     }
 
 
@@ -16051,34 +16156,64 @@ def run_monitor(db):
                     )
                     if not execution.get('success'):
                         failure_reason = execution.get('failureReason') or 'entry_quote_failed'
-                        record_decision_event(
-                            db,
-                            component='execution_api',
-                            event_type='entry_quote',
-                            decision='fail',
-                            reason=failure_reason,
-                            token_ca=pending['token_ca'],
-                            symbol=pending['symbol'],
-                            lifecycle_id=lifecycle_id,
-                            signal_ts=pending['signal_ts'],
-                            signal_id=pending.get('premium_signal_id'),
-                            strategy_stage=_pending_strategy_stage,
-                            route=_pending_signal_route or pending.get('signal_type'),
-                            data_source='jupiter_quote',
-                            payload=execution,
-                        )
-                        log_pending_entry_issue(
+                        fallback_execution = build_paper_tiny_scout_dex_fallback_entry_execution(
                             pending,
-                            f"entry quote failed reason={failure_reason} route={execution.get('routeAvailable')}",
-                            level='warning'
+                            actual_position_size_sol,
+                            failed_execution=execution,
+                            sol_price=sol_price,
                         )
-                        staged_age_sec = int(max(0, time.time() - (pending.get('staged_at') or time.time())))
-                        if failure_reason in {'rate_limited_429', 'quote_failed', 'no_route', 'missing_taker', 'unknown'} \
-                                and pending['attempts'] < paper_execution['quoteRetries'] \
-                                and staged_age_sec < paper_execution['maxQuoteAgeSec']:
+                        if fallback_execution:
+                            execution = fallback_execution
+                            record_decision_event(
+                                db,
+                                component='execution_api',
+                                event_type='entry_quote',
+                                decision='fallback',
+                                reason='jupiter_no_route_dex_fallback',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='dexscreener_synthetic_quote+jupiter_quote',
+                                payload=execution,
+                            )
+                            log.info(
+                                f"  [PAPER_SYNTHETIC_ENTRY] {pending['symbol']} "
+                                f"mode={pending.get('entry_mode')} using Dex fallback after "
+                                f"Jupiter {failure_reason}; routeAvailable=false"
+                            )
+                        else:
+                            record_decision_event(
+                                db,
+                                component='execution_api',
+                                event_type='entry_quote',
+                                decision='fail',
+                                reason=failure_reason,
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='jupiter_quote',
+                                payload=execution,
+                            )
+                            log_pending_entry_issue(
+                                pending,
+                                f"entry quote failed reason={failure_reason} route={execution.get('routeAvailable')}",
+                                level='warning'
+                            )
+                            staged_age_sec = int(max(0, time.time() - (pending.get('staged_at') or time.time())))
+                            if failure_reason in {'rate_limited_429', 'quote_failed', 'no_route', 'missing_taker', 'unknown'} \
+                                    and pending['attempts'] < paper_execution['quoteRetries'] \
+                                    and staged_age_sec < paper_execution['maxQuoteAgeSec']:
+                                continue
+                            pending_entries.pop(lifecycle_id, None)
                             continue
-                        pending_entries.pop(lifecycle_id, None)
-                        continue
 
                     quote_price_sol = execution.get('effectivePrice')
                     token_amount_raw = execution.get('quotedOutAmountRaw')
@@ -16496,6 +16631,16 @@ def run_monitor(db):
                         _monitor_state['lottoState'] = _pending_lotto_state
                     _signal_ts_store = normalize_signal_ts_seconds(pending.get('signal_ts')) or pending.get('signal_ts')
                     _trigger_price_store = trigger_price_val if trigger_price_val else price
+                    _entry_execution_data_source = (
+                        'dexscreener_synthetic_quote+jupiter_no_route'
+                        if execution.get('syntheticPaperEntry')
+                        else 'jupiter_quote'
+                    )
+                    _entry_execution_availability = (
+                        'synthetic_unrouted'
+                        if execution.get('syntheticPaperEntry')
+                        else 'available'
+                    )
                     db.execute("""
                         INSERT INTO paper_trades
                             (strategy_id, strategy_role, strategy_stage, stage_outcome,
@@ -16527,13 +16672,17 @@ def run_monitor(db):
                             'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                             'entryDecisionContract': _entry_decision_contract.to_dict(),
                             'positionSizeSol': actual_position_size_sol,
+                            'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
+                            'syntheticEntryReason': execution.get('syntheticEntryReason'),
+                            'syntheticEntrySource': execution.get('syntheticEntrySource'),
+                            'originalFailureReason': execution.get('originalFailureReason'),
                         })), json.dumps(_monitor_state),
                         pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
                         _pending_signal_route, pending.get('entry_mode') or timing_reason,
                         json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
                         _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
                         _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
-                        'entered', 'available', 'open'
+                        'entered', _entry_execution_availability, 'open'
                     ))
                     trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
@@ -16541,8 +16690,8 @@ def run_monitor(db):
                         db,
                         component='execution_api',
                         event_type='entry_quote',
-                        decision='filled_paper',
-                        reason='entry_quote_success',
+                        decision='filled_synthetic_paper' if execution.get('syntheticPaperEntry') else 'filled_paper',
+                        reason='synthetic_entry_quote_fallback' if execution.get('syntheticPaperEntry') else 'entry_quote_success',
                         token_ca=pending['token_ca'],
                         symbol=pending['symbol'],
                         lifecycle_id=lifecycle_id,
@@ -16551,7 +16700,7 @@ def run_monitor(db):
                         signal_id=pending.get('premium_signal_id'),
                         strategy_stage=_pending_strategy_stage,
                         route=_pending_signal_route or pending.get('signal_type'),
-                        data_source='jupiter_quote',
+                        data_source=_entry_execution_data_source,
                         payload=with_lifecycle_payload({
                             'entry_price': price,
                             'entry_price_unit': PRICE_UNIT_SOL_PER_TOKEN,
@@ -16564,7 +16713,12 @@ def run_monitor(db):
                             'entry_edge_budget': _entry_edge_budget,
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             'entry_decision_contract': _entry_decision_contract.to_dict(),
-                            'execution': build_execution_audit(execution),
+                            'execution': build_execution_audit(execution, {
+                                'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
+                                'syntheticEntryReason': execution.get('syntheticEntryReason'),
+                                'syntheticEntrySource': execution.get('syntheticEntrySource'),
+                                'originalFailureReason': execution.get('originalFailureReason'),
+                            }),
                         }, _entry_lifecycle),
                     )
 
@@ -16607,7 +16761,8 @@ def run_monitor(db):
                     log.info(
                         f"  Entered {pending['symbol']}/{_pending_strategy_stage} @ {price:.10f} "
                         f"(quote_sol={quote_price_sol:.12f}, decimals={token_decimals or 0}) "
-                        f"mode={pending.get('entry_mode', 'default')} lifecycle={lifecycle_id} via quoted execution"
+                        f"mode={pending.get('entry_mode', 'default')} lifecycle={lifecycle_id} "
+                        f"via {_entry_execution_data_source}"
                     )
                     if 'watchlist_id' in pending:
                         if pending.get('is_lotto'):
