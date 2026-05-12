@@ -1068,6 +1068,29 @@ def quote_pnl_from_execution(execution, entry_price):
     return (quote_price - entry_price) / entry_price
 
 
+def _sqlite_is_locked_error(exc):
+    return isinstance(exc, sqlite3.OperationalError) and 'locked' in str(exc).lower()
+
+
+def run_db_write_with_retry(db, writer, *, label, attempts=3, base_sleep_sec=0.35):
+    last_exc = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return writer()
+        except sqlite3.OperationalError as exc:
+            if not _sqlite_is_locked_error(exc):
+                raise
+            last_exc = exc
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"  [DB_RETRY] {label} database_locked attempt={attempt}/{attempts}")
+            if attempt < attempts:
+                time.sleep(base_sleep_sec * attempt)
+    raise last_exc
+
+
 def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, mark_pnl, mark_source, quote_execution=None, peak_pnl=None, phase_policy=None):
     execution = quote_execution if isinstance(quote_execution, dict) else {}
     quote_price = _safe_float(execution.get('effectivePrice'), None)
@@ -1119,7 +1142,7 @@ def record_trade_path_sample(db, pos, *, sample_ts, action, reason, mark_price, 
             ),
         )
     except sqlite3.OperationalError as exc:
-        if 'locked' in str(exc).lower():
+        if _sqlite_is_locked_error(exc):
             log.warning(
                 f"  [PATH_SAMPLE] skipped for trade_id={getattr(pos, 'trade_id', None)} "
                 f"reason=database_locked action={action}"
@@ -16931,51 +16954,60 @@ def run_monitor(db):
                         if execution.get('syntheticPaperEntry')
                         else 'available'
                     )
-                    db.execute("""
-                        INSERT INTO paper_trades
-                            (strategy_id, strategy_role, strategy_stage, stage_outcome,
-                             token_ca, symbol, signal_ts, entry_price, entry_ts,
-                             market_regime, replay_source, peak_pnl, trailing_active,
-                             lifecycle_id, stage_seq, trigger_ts, trigger_price,
-                             position_size_sol, token_amount_raw, token_decimals,
-                             entry_execution_json, entry_execution_audit_json, monitor_state_json,
-                             premium_signal_id, signal_type, signal_route, entry_mode, lotto_state_json,
-                             lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
-                             strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """, (
-                        _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
-                        pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts,
-                        regime, _pending_replay_source, lifecycle_id, stage_seq(_pending_strategy_stage), entry_ts, _trigger_price_store,
-                        actual_position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
-                            'auditVersion': 1,
-                            'stage': _pending_strategy_stage,
-                            'lifecycleId': lifecycle_id,
-                            'signalTs': _signal_ts_store,
-                            'rawSignalTs': pending.get('signal_ts'),
-                            'entryPriceSolPerToken': price,
-                            'entryTriggerPriceSolPerToken': trigger_price_val,
-                            'entryQuotePriceSolPerToken': price,
-                            **price_unit_contract_payload(),
-                            'entrySpreadPct': _spread,
-                            'entryEdgeBudget': _entry_edge_budget,
-                            'entryReadinessPolicy': pending.get('entry_readiness_policy'),
-                            'entryDecisionContract': _entry_decision_contract.to_dict(),
-                            'positionSizeSol': actual_position_size_sol,
-                            'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
-                            'syntheticEntryReason': execution.get('syntheticEntryReason'),
-                            'syntheticEntrySource': execution.get('syntheticEntrySource'),
-                            'originalFailureReason': execution.get('originalFailureReason'),
-                        })), json.dumps(_monitor_state),
-                        pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
-                        _pending_signal_route, pending.get('entry_mode') or timing_reason,
-                        json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
-                        _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
-                        _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
-                        'entered', _entry_execution_availability, 'open'
-                    ))
-                    trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-                    db.commit()
+                    def _insert_paper_trade():
+                        db.execute("""
+                            INSERT INTO paper_trades
+                                (strategy_id, strategy_role, strategy_stage, stage_outcome,
+                                 token_ca, symbol, signal_ts, entry_price, entry_ts,
+                                 market_regime, replay_source, peak_pnl, trailing_active,
+                                 lifecycle_id, stage_seq, trigger_ts, trigger_price,
+                                 position_size_sol, token_amount_raw, token_decimals,
+                                 entry_execution_json, entry_execution_audit_json, monitor_state_json,
+                                 premium_signal_id, signal_type, signal_route, entry_mode, lotto_state_json,
+                                 lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
+                                 strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        """, (
+                            _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
+                            pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts,
+                            regime, _pending_replay_source, lifecycle_id, stage_seq(_pending_strategy_stage), entry_ts, _trigger_price_store,
+                            actual_position_size_sol, str(token_amount_raw), token_decimals or 0, json.dumps(execution), json.dumps(build_execution_audit(execution, {
+                                'auditVersion': 1,
+                                'stage': _pending_strategy_stage,
+                                'lifecycleId': lifecycle_id,
+                                'signalTs': _signal_ts_store,
+                                'rawSignalTs': pending.get('signal_ts'),
+                                'entryPriceSolPerToken': price,
+                                'entryTriggerPriceSolPerToken': trigger_price_val,
+                                'entryQuotePriceSolPerToken': price,
+                                **price_unit_contract_payload(),
+                                'entrySpreadPct': _spread,
+                                'entryEdgeBudget': _entry_edge_budget,
+                                'entryReadinessPolicy': pending.get('entry_readiness_policy'),
+                                'entryDecisionContract': _entry_decision_contract.to_dict(),
+                                'positionSizeSol': actual_position_size_sol,
+                                'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
+                                'syntheticEntryReason': execution.get('syntheticEntryReason'),
+                                'syntheticEntrySource': execution.get('syntheticEntrySource'),
+                                'originalFailureReason': execution.get('originalFailureReason'),
+                            })), json.dumps(_monitor_state),
+                            pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
+                            _pending_signal_route, pending.get('entry_mode') or timing_reason,
+                            json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
+                            _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
+                            _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
+                            'entered', _entry_execution_availability, 'open'
+                        ))
+                        new_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                        db.commit()
+                        return new_trade_id
+
+                    trade_id = run_db_write_with_retry(
+                        db,
+                        _insert_paper_trade,
+                        label=f"paper_entry_insert:{pending.get('symbol')}:{lifecycle_id}",
+                        attempts=5,
+                    )
                     record_decision_event(
                         db,
                         component='execution_api',
@@ -17825,6 +17857,16 @@ def run_monitor(db):
                     time.sleep(0.05)
                 except Exception as e:
                     log.error(f"  Position update error for {pos.symbol}: {e}")
+
+            def _close_event_priority(close_event):
+                exit_execution = ((close_event or {}).get('exit_eval') or {}).get('execution') or {}
+                if (close_event or {}).get('mark_source') == 'force_timeout' and exit_execution.get('syntheticPaperExit'):
+                    return 0
+                if (close_event or {}).get('mark_source') == 'force_timeout':
+                    return 1
+                return 2
+
+            to_close.sort(key=_close_event_priority)
 
             for close_event in to_close:
               try:
