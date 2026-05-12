@@ -117,6 +117,45 @@ def connect_db(path, *, readonly=False):
     return db
 
 
+def candidate_signal_db_paths(primary):
+    paths = [
+        primary,
+        os.environ.get("DB_PATH"),
+        os.environ.get("SENTIMENT_DB"),
+        "/app/data/sentiment_arb.db",
+        "/app/data/sentiment.db",
+        PROJECT_ROOT / "data" / "sentiment_arb.db",
+        PROJECT_ROOT / "data" / "sentiment.db",
+    ]
+    seen = set()
+    result = []
+    for path in paths:
+        if not path:
+            continue
+        text = str(path)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def connect_signal_db(primary):
+    checked = []
+    for path in candidate_signal_db_paths(primary):
+        checked.append(path)
+        try:
+            if not Path(path).exists():
+                continue
+            db = connect_db(path, readonly=True)
+            if table_exists(db, "premium_signals"):
+                return db, path
+            db.close()
+        except sqlite3.Error:
+            continue
+    raise FileNotFoundError(f"premium_signals table not found in signal DB candidates: {checked}")
+
+
 def init_source_resonance_shadow(db):
     db.execute(CREATE_SOURCE_RESONANCE_CANDIDATES_SQL)
     db.execute(CREATE_SOURCE_RESONANCE_HEALTH_SQL)
@@ -506,10 +545,10 @@ def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limi
     now = int(now or time.time())
     paper_db = connect_db(paper_db_path or os.environ.get("PAPER_DB") or DEFAULT_PAPER_DB)
     init_source_resonance_shadow(paper_db)
-    signal_path = signal_db_path or os.environ.get("SENTIMENT_DB") or DEFAULT_SIGNAL_DB
+    signal_path = signal_db_path or os.environ.get("SENTIMENT_DB") or os.environ.get("DB_PATH") or DEFAULT_SIGNAL_DB
     signal_db = None
     try:
-        signal_db = connect_db(signal_path, readonly=True)
+        signal_db, _selected_signal_path = connect_signal_db(signal_path)
         signals = load_recent_signals(signal_db, lookback_hours=lookback_hours, limit=limit, now=now)
         candidates = []
         for signal in signals:

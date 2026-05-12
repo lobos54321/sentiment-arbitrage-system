@@ -2591,6 +2591,7 @@ const server = http.createServer(async (req, res) => {
       releasePaperReport = beginLivePaperReport(res, url.pathname);
       if (!releasePaperReport) return;
       const sinceTs = boundedWindowedSinceTs(url, 2, 2);
+      const nowSec = Math.floor(Date.now() / 1000);
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const health = {

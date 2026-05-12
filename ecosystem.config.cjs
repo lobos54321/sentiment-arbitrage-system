@@ -95,5 +95,64 @@ module.exports = {
             },
             kill_timeout: 30000
         },
+
+        // === GMGN 独立外部 alpha shadow scout（只记录，不交易） ===
+        {
+            name: 'gmgn-candidate-scout',
+            script: 'scripts/gmgn_candidate_scout.py',
+            args: '--loop --state-db /app/data/paper_trades.db --out /app/data/gmgn_candidates.jsonl',
+            interpreter: 'python3',
+            cwd: '/app',
+
+            max_memory_restart: '256M',
+            autorestart: true,
+            watch: false,
+            exp_backoff_restart_delay: 10000,
+            max_restarts: 10,
+            min_uptime: '30s',
+
+            log_file: '/app/data/gmgn-scout.log',
+            out_file: '/app/data/gmgn-scout.log',
+            error_file: '/app/data/gmgn-scout.log',
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            merge_logs: true,
+
+            env: {
+                PYTHONUNBUFFERED: '1',
+                PAPER_DB: '/app/data/paper_trades.db',
+                EXTERNAL_ALPHA_DB: '/app/data/paper_trades.db',
+            },
+            kill_timeout: 30000
+        },
+
+        // === 多源共振 shadow cohort collector（只归因，不交易） ===
+        {
+            name: 'source-resonance-shadow',
+            script: 'scripts/source_resonance_shadow.py',
+            args: '--loop --paper-db /app/data/paper_trades.db --signal-db /app/data/sentiment_arb.db',
+            interpreter: 'python3',
+            cwd: '/app',
+
+            max_memory_restart: '256M',
+            autorestart: true,
+            watch: false,
+            exp_backoff_restart_delay: 10000,
+            max_restarts: 10,
+            min_uptime: '30s',
+
+            log_file: '/app/data/source-resonance.log',
+            out_file: '/app/data/source-resonance.log',
+            error_file: '/app/data/source-resonance.log',
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            merge_logs: true,
+
+            env: {
+                PYTHONUNBUFFERED: '1',
+                PAPER_DB: '/app/data/paper_trades.db',
+                SENTIMENT_DB: '/app/data/sentiment_arb.db',
+                DB_PATH: '/app/data/sentiment_arb.db',
+            },
+            kill_timeout: 30000
+        },
     ]
 };
