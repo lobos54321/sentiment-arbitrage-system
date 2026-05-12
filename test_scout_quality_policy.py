@@ -151,3 +151,22 @@ def test_lotto_micro_reclaim_requires_positive_bounce_quality():
 
     assert quality["pass"] is False
     assert quality["reason"] == "scout_quality_negative_trend"
+
+
+def test_source_resonance_probe_uses_relaxed_tiny_profile():
+    quality = evaluate_scout_quality(
+        mode="source_resonance_tiny_probe",
+        route="LOTTO",
+        trend={
+            "price_change_m5": -10,
+            "vol_m5": 4500,
+            "tx_m5": 45,
+            "buy_sell_ratio": 1.08,
+            "top1_pct": 50,
+            "top10_pct": 80,
+        },
+        position_size_sol=0.003,
+    )
+
+    assert quality["pass"] is True
+    assert quality["reason"] == "scout_quality_pass"

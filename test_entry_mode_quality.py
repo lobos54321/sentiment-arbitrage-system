@@ -85,6 +85,7 @@ def test_entry_mode_registry_drives_shadow_only_defaults():
     assert "lotto_low_liquidity_reclaim_tiny_probe" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
     assert "momentum_direct_entry" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
     assert "lotto_fast_lane" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "source_resonance_tiny_probe" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
 
 
 def test_grey_zone_modes_are_registered_but_still_blocked_until_caps_exist():

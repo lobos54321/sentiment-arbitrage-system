@@ -103,6 +103,14 @@
       "size_class": "small",
       "reason": "Small live newborn path; explicitly registered so it cannot bypass governance."
     },
+    "source_resonance_tiny_probe": {
+      "tier": "live",
+      "route": "MIXED",
+      "family": "small_live_probe",
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Tiny paper-only probe for Telegram + GMGN pre-seen resonance; explicitly registered for attribution."
+    },
     "ath_micro_reclaim_tiny_probe": {
       "tier": "hard_shadow",
       "route": "ATH",

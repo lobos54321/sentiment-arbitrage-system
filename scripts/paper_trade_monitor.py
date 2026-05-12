@@ -98,6 +98,8 @@ CONFIG_DIR = PROJECT_ROOT / 'config'
 SENTIMENT_DB = os.environ.get('SENTIMENT_DB', str(DATA_DIR / 'sentiment_arb.db'))
 PAPER_DB = os.environ.get('PAPER_DB', str(DATA_DIR / 'paper_trades.db'))
 KLINE_DB = os.environ.get('KLINE_DB', str(DATA_DIR / 'kline_cache.db'))
+PAPER_SQLITE_TIMEOUT_SEC = float(os.environ.get('PAPER_SQLITE_TIMEOUT_SEC', '30'))
+PAPER_SQLITE_BUSY_TIMEOUT_MS = int(PAPER_SQLITE_TIMEOUT_SEC * 1000)
 REGISTRY_JSON = os.environ.get('PAPER_STRATEGY_REGISTRY', str(CONFIG_DIR / 'paper-strategy-registry.json'))
 REMOTE_SIGNAL_URL = os.environ.get('REMOTE_SIGNAL_URL', '').strip()
 REMOTE_SIGNAL_TOKEN = os.environ.get('REMOTE_SIGNAL_TOKEN', '').strip()
@@ -259,6 +261,18 @@ LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE = 'lotto_upstream_realtime_tiny_scout'
 LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE = 'lotto_not_ath_reclaim_tiny_probe'
 LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE = 'lotto_low_liquidity_reclaim_tiny_probe'
 LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE = 'lotto_micro_reclaim_tiny_probe'
+SOURCE_RESONANCE_TINY_PROBE_MODE = 'source_resonance_tiny_probe'
+SOURCE_RESONANCE_TINY_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_ENABLED', 'true').lower() != 'false'
+SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
+SOURCE_RESONANCE_TINY_PROBE_MAX_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_MC', '250000'))
+SOURCE_RESONANCE_TINY_PROBE_MIN_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_MC', '0'))
+SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC', '60'))
+SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC', '900'))
+SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS', '2'))
+SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
+SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
+SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
+PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
 LOTTO_RECOVERY_TINY_PROBES_ENABLED = os.environ.get('LOTTO_RECOVERY_TINY_PROBES_ENABLED', 'true').lower() != 'false'
 LOTTO_RECLAIM_MAX_MC = float(os.environ.get('LOTTO_RECLAIM_MAX_MC', '250000'))
 LOTTO_RECLAIM_MIN_LIQ_USD = float(os.environ.get('LOTTO_RECLAIM_MIN_LIQ_USD', '5000'))
@@ -3554,9 +3568,11 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         or pending.get('replay_source') == 'live_monitor_lotto_upstream_realtime'
         or pending.get('replay_source') == 'live_monitor_ath_uncertainty'
         or pending.get('replay_source') == 'live_monitor_discovery_probe'
+        or pending.get('replay_source') == 'live_monitor_source_resonance_probe'
         or pending.get('entry_mode') == 'lotto_real_probe_reentry_arm'
         or pending.get('entry_mode') == LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
         or pending.get('entry_mode') == LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
+        or pending.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE
         or pending.get('entry_mode') in LOTTO_RECOVERY_TINY_PROBE_MODES
         or pending.get('entry_mode') == ATH_UNCERTAINTY_TINY_SCOUT_MODE
         or pending.get('entry_mode') in {
@@ -3643,6 +3659,7 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         if entry_mode in {
             LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
             LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+            SOURCE_RESONANCE_TINY_PROBE_MODE,
             UNKNOWN_DATA_ACTIVITY_TINY_SCOUT_MODE,
             LOTTO_HIGH_RISK_DISCOVERY_PROBE_MODE,
             *LOTTO_RECOVERY_TINY_PROBE_MODES,
@@ -4694,6 +4711,350 @@ def _apply_primary_proving_cap(pending, size_sol):
         pending['kelly_position_sol'] = capped_size
         pending['primary_proving_cap'] = detail
     return capped_size, detail
+
+
+def _source_resonance_number(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _source_resonance_first_number(*values, positive=False, default=None):
+    for value in values:
+        number = _source_resonance_number(value, None)
+        if number is None:
+            continue
+        if positive and number <= 0:
+            continue
+        return number
+    return default
+
+
+def evaluate_source_resonance_tiny_probe(
+    external_alpha,
+    *,
+    signal=None,
+    watchlist_entry=None,
+    route=None,
+    hard_gate_status=None,
+    dex_snapshot=None,
+    live_concentration=None,
+    lifecycle=None,
+    now_ts=None,
+):
+    """Turn Telegram+GMGN pre-seen evidence into a tiny paper-only probe decision."""
+    signal = signal or {}
+    watchlist_entry = watchlist_entry or {}
+    dex_snapshot = dex_snapshot or {}
+    live_concentration = live_concentration or {}
+    lifecycle = lifecycle or {}
+    external_alpha = external_alpha or {}
+    route_name = str(
+        route
+        or signal.get('signal_type')
+        or watchlist_entry.get('type')
+        or ''
+    ).upper()
+    gate = str(hard_gate_status or '').upper()
+    current_mc = _source_resonance_first_number(
+        signal.get('market_cap'),
+        watchlist_entry.get('signal_mc'),
+        dex_snapshot.get('market_cap'),
+        dex_snapshot.get('fdv'),
+        external_alpha.get('last_market_cap'),
+        positive=True,
+        default=0.0,
+    )
+    top1_pct = _source_resonance_first_number(
+        live_concentration.get('top1_pct'),
+        dex_snapshot.get('top1_pct'),
+        default=None,
+    )
+    top10_pct = _source_resonance_first_number(
+        live_concentration.get('top10_pct'),
+        watchlist_entry.get('signal_top10'),
+        dex_snapshot.get('top10_pct'),
+        dex_snapshot.get('top10_holder_pct'),
+        default=None,
+    )
+    alpha_age_sec = _source_resonance_number(external_alpha.get('last_seen_age_sec'), 10**9)
+    lead_sec = _source_resonance_number(external_alpha.get('gmgn_lead_time_sec'), None)
+    rounds = _source_resonance_number(external_alpha.get('gmgn_momentum_rounds'), 0.0) or 0.0
+    gain_pct = _source_resonance_number(external_alpha.get('gmgn_momentum_gain_pct'), 0.0) or 0.0
+    momentum_confirmed = bool(external_alpha.get('gmgn_momentum_confirmed'))
+    volume_confirmed = bool(external_alpha.get('gmgn_volume_confirmed'))
+    observed = {
+        'route': route_name,
+        'hard_gate_status': gate,
+        'current_mc': current_mc,
+        'top1_pct': top1_pct,
+        'top10_pct': top10_pct,
+        'gmgn_lead_time_sec': lead_sec,
+        'last_seen_age_sec': alpha_age_sec,
+        'gmgn_momentum_rounds': rounds,
+        'gmgn_momentum_gain_pct': gain_pct,
+        'gmgn_momentum_confirmed': momentum_confirmed,
+        'gmgn_volume_confirmed': volume_confirmed,
+        'lifecycle_state': lifecycle.get('lifecycle_state'),
+        'entry_bias': lifecycle.get('entry_bias'),
+    }
+    thresholds = {
+        'size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+        'min_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC,
+        'max_alpha_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC,
+        'min_rounds': SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS,
+        'min_gain_pct': SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT,
+        'min_mc': SOURCE_RESONANCE_TINY_PROBE_MIN_MC,
+        'max_mc': SOURCE_RESONANCE_TINY_PROBE_MAX_MC,
+        'max_top1_pct': 62.0,
+        'max_top10_pct': 85.0,
+    }
+
+    def _result(passed, reason):
+        return {
+            'pass': bool(passed),
+            'reason': reason,
+            'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
+            'position_size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            'paper_only_scout': True,
+            'probe': True,
+            'probe_source': 'source_resonance',
+            'resonance_cohort': 'telegram_gmgn',
+            'source_component': 'source_resonance_probe',
+            'source_reject_reason': str(hard_gate_status or '').lower(),
+            'timing_passed': bool(SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY),
+            'external_alpha': external_alpha,
+            'gmgn_policy': {
+                'action': 'observe',
+                'reason': 'source_resonance_external_alpha',
+                'source': external_alpha.get('source'),
+            },
+            'observed': observed,
+            'thresholds': thresholds,
+            'lifecycle': lifecycle,
+        }
+
+    if not SOURCE_RESONANCE_TINY_PROBE_ENABLED:
+        return _result(False, 'source_resonance_probe_disabled')
+    if route_name not in {'LOTTO', 'ATH', 'NOT_ATH', 'NEW_TRENDING', 'MATRIX_NORMAL', 'MIXED'}:
+        return _result(False, 'source_resonance_route_not_supported')
+    if gate in {'ILLIQUID_JUNK', 'HONEYPOT', 'RUG_PULL_RISK'}:
+        return _result(False, 'source_resonance_hard_safety_gate')
+    if not external_alpha.get('available'):
+        return _result(False, external_alpha.get('reason') or 'source_resonance_external_alpha_missing')
+    if not external_alpha.get('gmgn_pre_seen'):
+        return _result(False, 'source_resonance_gmgn_not_pre_seen')
+    if alpha_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC:
+        return _result(False, 'source_resonance_external_alpha_stale')
+    if lead_sec is None or lead_sec < SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC:
+        return _result(False, 'source_resonance_lead_time_too_short')
+    if SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM and not momentum_confirmed:
+        return _result(False, 'source_resonance_momentum_not_confirmed')
+    if not (
+        momentum_confirmed
+        or volume_confirmed
+        or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
+        or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
+    ):
+        return _result(False, 'source_resonance_gmgn_activity_not_confirmed')
+    if current_mc > 0 and current_mc < SOURCE_RESONANCE_TINY_PROBE_MIN_MC:
+        return _result(False, 'source_resonance_mc_too_low')
+    if current_mc > SOURCE_RESONANCE_TINY_PROBE_MAX_MC:
+        return _result(False, 'source_resonance_mc_too_high')
+    if top1_pct is not None and top1_pct > thresholds['max_top1_pct']:
+        return _result(False, 'source_resonance_top1_too_high')
+    if top10_pct is not None and top10_pct > thresholds['max_top10_pct']:
+        return _result(False, 'source_resonance_top10_too_high')
+    return _result(True, 'source_resonance_telegram_gmgn_probe')
+
+
+def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, stage_outcome=None):
+    if not pending or not detail or not detail.get('pass'):
+        return pending
+    route_name = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    pending['entry_mode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
+    pending['scout_mode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
+    pending['paper_only_scout'] = True
+    pending['kelly_position_sol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+    pending['timing_passed'] = bool(detail.get('timing_passed'))
+    pending['replay_source'] = 'live_monitor_source_resonance_probe'
+    pending['stage_outcome'] = stage_outcome or 'source_resonance_tiny_probe_armed'
+    pending['source_component'] = 'source_resonance_probe'
+    pending['source_reject_reason'] = detail.get('source_reject_reason')
+    pending['source_resonance_probe'] = detail
+    pending['external_alpha'] = detail.get('external_alpha')
+    if route_name:
+        pending['signal_route'] = route_name
+    if not pending.get('trigger_price'):
+        observed = detail.get('observed') or {}
+        pending['trigger_price'] = (
+            detail.get('trigger_price')
+            or observed.get('current_price')
+            or pending.get('signal_price')
+            or pending.get('entry_price')
+        )
+    lotto_state = pending.get('lotto_state')
+    if isinstance(lotto_state, dict):
+        lotto_state['probe'] = True
+        lotto_state['probeSource'] = 'source_resonance'
+        lotto_state['probeEntryMode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
+        lotto_state['paper_only_scout'] = True
+        lotto_state['positionSizeSol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+        lotto_state['sourceResonanceProbe'] = detail
+        entry_decision = lotto_state.get('entryDecision')
+        if isinstance(entry_decision, dict):
+            entry_decision.update({
+                'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
+                'position_size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+                'paper_only_scout': True,
+                'source_resonance_probe': detail,
+                'timing_passed': bool(detail.get('timing_passed')),
+            })
+    return pending
+
+
+def arm_source_resonance_lotto_probe(
+    db,
+    pending_entries,
+    positions,
+    *,
+    sig,
+    registered_entry,
+    pool,
+    lifecycle_id,
+    signal_lifecycle,
+    signal_audit_payload,
+    hard_gate_status,
+    external_alpha,
+    now_ts,
+):
+    if lifecycle_id in pending_entries:
+        return False
+    token_ca = sig['token_ca']
+    symbol = sig.get('symbol') or token_ca[:8]
+    if any(pos.token_ca == token_ca for pos in positions.values()):
+        return False
+    if not registered_entry or not pool:
+        return False
+    try:
+        realtime_dex = fetch_dexscreener_trend_snapshot(token_ca)
+    except Exception:
+        realtime_dex = None
+    try:
+        live_concentration = helius_token_concentration(token_ca)
+    except Exception:
+        live_concentration = None
+    probe_lifecycle = lifecycle_payload_for(
+        signal=sig,
+        watchlist_entry=registered_entry,
+        dex_snapshot=realtime_dex,
+        live_concentration=live_concentration,
+        route='LOTTO',
+        signal_ts=sig.get('timestamp'),
+        signal_price=registered_entry.get('signal_price'),
+        now=now_ts,
+    )
+    detail = evaluate_source_resonance_tiny_probe(
+        external_alpha,
+        signal=sig,
+        watchlist_entry=registered_entry,
+        route='LOTTO',
+        hard_gate_status=hard_gate_status,
+        dex_snapshot=realtime_dex,
+        live_concentration=live_concentration,
+        lifecycle=probe_lifecycle,
+        now_ts=now_ts,
+    )
+    detail = {
+        **(signal_audit_payload or {}),
+        **detail,
+        'pool': pool,
+        'watchlist_id': registered_entry.get('id'),
+    }
+    if not detail.get('pass'):
+        return False
+    scout_quality = evaluate_scout_quality(
+        mode=SOURCE_RESONANCE_TINY_PROBE_MODE,
+        route='LOTTO',
+        trend=realtime_dex,
+        lifecycle=probe_lifecycle,
+        gmgn=detail.get('gmgn_policy'),
+        live_concentration=live_concentration,
+        position_size_sol=SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+        current_mc=(detail.get('observed') or {}).get('current_mc'),
+        top1_pct=(detail.get('observed') or {}).get('top1_pct'),
+        top10_pct=(detail.get('observed') or {}).get('top10_pct'),
+    )
+    detail['scout_quality'] = scout_quality
+    record_scout_quality_decision(
+        db,
+        scout_quality=scout_quality,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=sig.get('timestamp'),
+        signal_id=sig.get('id'),
+        route='LOTTO',
+        lifecycle=probe_lifecycle,
+        scout_size={
+            'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
+            'actual_size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            'cap_sol': SCOUT_QUALITY_SIZE_CAP_SOL,
+        },
+        source_component='source_resonance_probe',
+        source_reject_reason=str(hard_gate_status or '').lower(),
+        data_source='premium_signals+external_alpha+dexscreener+helius',
+        event_ts=now_ts,
+    )
+    if not scout_quality.get('pass'):
+        record_decision_event(
+            db,
+            component='source_resonance_probe',
+            event_type='scout_reject',
+            decision='reject',
+            reason=scout_quality.get('reason') or 'scout_quality_reject',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=sig.get('timestamp'),
+            signal_id=sig.get('id'),
+            route='LOTTO',
+            data_source='premium_signals+external_alpha+dexscreener+helius',
+            payload=with_lifecycle_payload(detail, probe_lifecycle or signal_lifecycle),
+            event_ts=now_ts,
+        )
+        return False
+
+    pending = build_lotto_pending(registered_entry, lifecycle_id, detail=detail)
+    pending['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
+    pending['trigger_price'] = registered_entry.get('signal_price')
+    _apply_source_resonance_probe_to_pending(
+        pending,
+        detail,
+        route='LOTTO',
+        stage_outcome='source_resonance_tiny_probe_armed',
+    )
+    pending_entries[lifecycle_id] = pending
+    record_decision_event(
+        db,
+        component='source_resonance_probe',
+        event_type='pending_entry',
+        decision='pending',
+        reason=detail.get('reason') or SOURCE_RESONANCE_TINY_PROBE_MODE,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=sig.get('timestamp'),
+        signal_id=sig.get('id'),
+        route='LOTTO',
+        data_source='premium_signals+external_alpha+dexscreener+helius',
+        payload=with_lifecycle_payload(detail, probe_lifecycle or signal_lifecycle),
+        event_ts=now_ts,
+    )
+    return True
 
 
 def arm_lotto_upstream_realtime_tiny_scout(
@@ -9447,6 +9808,16 @@ def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
 
 # === Database Setup ===
 
+def connect_paper_db(path):
+    db = sqlite3.connect(path, timeout=PAPER_SQLITE_TIMEOUT_SEC)
+    db.execute(f"PRAGMA busy_timeout = {PAPER_SQLITE_BUSY_TIMEOUT_MS}")
+    try:
+        db.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
+    return db
+
+
 def init_paper_db(db_path=None):
     """Create paper_trades table if not exists."""
     path = db_path or PAPER_DB
@@ -9603,14 +9974,14 @@ def init_paper_db(db_path=None):
         db_conn.commit()
     
     try:
-        db = sqlite3.connect(path)
+        db = connect_paper_db(path)
         _create_schema(db)
     except sqlite3.DatabaseError as e:
         if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
             logging.getLogger('paper_trade').warning(f"Paper DB corrupted ({e}), recreating {path}")
             if os.path.exists(path):
                 os.remove(path)
-            db = sqlite3.connect(path)
+            db = connect_paper_db(path)
             _create_schema(db)
         else:
             raise
@@ -13261,26 +13632,47 @@ def run_monitor(db):
                                 'top10_pct': top10_pct,
                             }, observe_lifecycle),
                         )
-                        _upstream_realtime_armed = arm_lotto_upstream_realtime_tiny_scout(
+                        _registered_entry_latest = watchlist.get_by_id(registered_entry['id']) if registered_entry else None
+                        _source_resonance_armed = arm_source_resonance_lotto_probe(
                             db,
-                            watchlist,
                             pending_entries,
                             dict(positions),
                             sig=sig,
-                            registered_entry=watchlist.get_by_id(registered_entry['id']) if registered_entry else None,
+                            registered_entry=_registered_entry_latest,
                             pool=pool,
                             lifecycle_id=lifecycle_id,
                             signal_lifecycle=observe_lifecycle,
                             signal_audit_payload=signal_audit_payload,
                             hard_gate_status=hard_gate_status,
+                            external_alpha=external_alpha,
                             now_ts=now,
-                            discovery_candidates=discovery_candidates,
                         )
-                        if _upstream_realtime_armed:
+                        if _source_resonance_armed:
                             log.info(
-                                f"  [LOTTO_UPSTREAM_REALTIME_SCOUT] {symbol} pending "
-                                f"status={hard_gate_status} size={LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL:.3f}SOL"
+                                f"  [SOURCE_RESONANCE_PROBE] {symbol} pending "
+                                f"status={hard_gate_status} size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL"
                             )
+                        else:
+                            _upstream_realtime_armed = arm_lotto_upstream_realtime_tiny_scout(
+                                db,
+                                watchlist,
+                                pending_entries,
+                                dict(positions),
+                                sig=sig,
+                                registered_entry=_registered_entry_latest,
+                                pool=pool,
+                                lifecycle_id=lifecycle_id,
+                                signal_lifecycle=observe_lifecycle,
+                                signal_audit_payload=signal_audit_payload,
+                                hard_gate_status=hard_gate_status,
+                                now_ts=now,
+                                discovery_candidates=discovery_candidates,
+                            )
+                            if _upstream_realtime_armed:
+                                log.info(
+                                    f"  [LOTTO_UPSTREAM_REALTIME_SCOUT] {symbol} pending "
+                                    f"status={hard_gate_status} size={LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL:.3f}SOL"
+                                )
                         log.info(
                             f"  [LOTTO_OBSERVE] {symbol} added to LOTTO watchlist for second-pass filtering: "
                             f"status={hard_gate_status} MC=${sig.get('market_cap') or 0:,.0f} "
@@ -13932,6 +14324,47 @@ def run_monitor(db):
                             "smart_entry_reclaim_watch_ok",
                             _lotto_detail,
                         )
+                    if not _lotto_decision.allow and not _lotto_decision.expire:
+                        _source_probe = evaluate_source_resonance_tiny_probe(
+                            _external_alpha,
+                            watchlist_entry=w_entry,
+                            route='LOTTO',
+                            hard_gate_status=_lotto_decision.reason,
+                            dex_snapshot=_lotto_dex,
+                            live_concentration=_lotto_live,
+                            lifecycle=_lotto_lifecycle,
+                            now_ts=now,
+                        )
+                        if _source_probe.get('pass'):
+                            _lotto_detail = {
+                                **_lotto_detail,
+                                **_source_probe,
+                                'source_resonance_parent_decision': {
+                                    'action': _lotto_decision.action,
+                                    'reason': _lotto_decision.reason,
+                                },
+                            }
+                            _lotto_decision = LottoDecision(
+                                "allow",
+                                _source_probe.get('reason') or 'source_resonance_telegram_gmgn_probe',
+                                _lotto_detail,
+                            )
+                            record_decision_event(
+                                db,
+                                component='source_resonance_probe',
+                                event_type='scout_candidate',
+                                decision='candidate',
+                                reason=_source_probe.get('reason'),
+                                token_ca=w_entry['ca'],
+                                symbol=w_entry['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=w_entry['signal_ts'],
+                                signal_id=w_entry.get('premium_signal_id'),
+                                route='LOTTO',
+                                data_source='external_alpha+dexscreener+helius',
+                                payload=with_lifecycle_payload(_lotto_detail, _lotto_lifecycle),
+                                event_ts=now,
+                            )
                     _token_risk = token_quarantine_state(db, w_entry['ca'], now_ts=now, reclaim=_lotto_reclaim)
                     if _token_risk.get('blocked') and _lotto_decision.allow:
                         _lotto_decision = LottoDecision(
@@ -14041,6 +14474,13 @@ def run_monitor(db):
                                 _lotto_lc_id,
                                 detail=_lotto_detail,
                             )
+                            if _lotto_detail.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE:
+                                _apply_source_resonance_probe_to_pending(
+                                    pending_entries[_lotto_lc_id],
+                                    _lotto_detail,
+                                    route='LOTTO',
+                                    stage_outcome='source_resonance_tiny_probe_armed',
+                                )
                             pending_entries[_lotto_lc_id]['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(_lotto_lc_id, 0)
                             record_decision_event(
                                 db,
@@ -14524,6 +14964,56 @@ def run_monitor(db):
                         signal_price=w_entry.get('signal_price'),
                         now=now,
                     )
+                    _source_probe = evaluate_source_resonance_tiny_probe(
+                        _external_alpha,
+                        watchlist_entry=w_entry,
+                        route=w_entry.get('type'),
+                        hard_gate_status=eval_res.get('action_reason'),
+                        dex_snapshot=_fire_dex,
+                        lifecycle=_preflight_lifecycle,
+                        now_ts=now,
+                    )
+                    if _source_probe.get('pass'):
+                        _source_probe = {
+                            **_source_probe,
+                            'trigger_price': eval_res.get('momentum_final_price') or eval_res.get('current_price'),
+                            'matrix_scores': eval_res.get('scores'),
+                            'source_resonance_parent_decision': {
+                                'action': eval_res.get('action'),
+                                'reason': eval_res.get('action_reason'),
+                            },
+                        }
+                        _source_probe['observed'] = {
+                            **(_source_probe.get('observed') or {}),
+                            'current_price': eval_res.get('current_price'),
+                            'momentum_pct': eval_res.get('momentum_pct'),
+                        }
+                        _apply_source_resonance_probe_to_pending(
+                            pending_entries[lifecycle_id],
+                            _source_probe,
+                            route=w_entry.get('type'),
+                            stage_outcome='source_resonance_tiny_probe_armed',
+                        )
+                        record_decision_event(
+                            db,
+                            component='source_resonance_probe',
+                            event_type='pending_upgrade',
+                            decision='pending',
+                            reason=_source_probe.get('reason'),
+                            token_ca=w_entry['ca'],
+                            symbol=w_entry['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=w_entry['signal_ts'],
+                            signal_id=w_entry.get('premium_signal_id'),
+                            route=w_entry.get('type'),
+                            data_source='matrix_evaluator+external_alpha+dexscreener',
+                            payload=with_lifecycle_payload(_source_probe, _preflight_lifecycle),
+                            event_ts=now,
+                        )
+                        log.info(
+                            f"  [SOURCE_RESONANCE_PROBE] {w_entry['symbol']} pending-upgrade "
+                            f"route={w_entry.get('type')} size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL"
+                        )
                     _preflight_policy = evaluate_entry_readiness_policy(
                         route=w_entry.get('type'),
                         lifecycle=_preflight_lifecycle,

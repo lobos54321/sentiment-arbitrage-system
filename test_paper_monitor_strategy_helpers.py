@@ -23,8 +23,10 @@ from paper_trade_monitor import (  # noqa: E402
     PRIMARY_PROVING_CAP_SIZE_SOL,
     SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL,
     SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL,
+    SOURCE_RESONANCE_TINY_PROBE_MODE,
     _apply_actual_tiny_trigger_mode,
     _apply_primary_proving_cap,
+    _apply_source_resonance_probe_to_pending,
     _ath_reentry_block_cooldown_sec,
     _ath_no_kline_followthrough_guard,
     _ath_no_kline_reentry_guard,
@@ -52,6 +54,7 @@ from paper_trade_monitor import (  # noqa: E402
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
+    evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
     record_lotto_not_ath_watch_shadow_candidates,
@@ -2086,3 +2089,73 @@ def test_unknown_data_live_gate_allows_extreme_activity_without_quote(monkeypatc
     assert gate["pass"] is True
     assert gate["reason"] == "unknown_data_extreme_activity"
     assert called is False
+
+
+def test_source_resonance_tiny_probe_requires_gmgn_lead_and_activity():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": 180,
+            "last_seen_age_sec": 30,
+            "gmgn_momentum_rounds": 2,
+            "gmgn_momentum_gain_pct": 4,
+            "gmgn_momentum_confirmed": False,
+            "gmgn_volume_confirmed": False,
+            "last_market_cap": 42000,
+        },
+        route="LOTTO",
+        hard_gate_status="NOT_ATH_V17",
+        dex_snapshot={"vol_m5": 5000, "tx_m5": 50, "buy_sell_ratio": 1.1},
+    )
+
+    assert decision["pass"] is True
+    assert decision["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+    assert decision["timing_passed"] is True
+
+
+def test_source_resonance_tiny_probe_blocks_late_gmgn_seen():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": -20,
+            "last_seen_age_sec": 30,
+            "gmgn_momentum_rounds": 3,
+            "gmgn_momentum_gain_pct": 10,
+        },
+        route="LOTTO",
+        hard_gate_status="NOT_ATH_V17",
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "source_resonance_lead_time_too_short"
+
+
+def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_type": "ATH",
+        "kelly_position_sol": 0.08,
+        "trigger_price": 0.00001,
+    }
+    detail = {
+        "pass": True,
+        "reason": "source_resonance_telegram_gmgn_probe",
+        "source_reject_reason": "no_kline_low_volume",
+        "external_alpha": {"available": True},
+        "timing_passed": True,
+    }
+
+    _apply_source_resonance_probe_to_pending(pending, detail, route="ATH")
+
+    assert pending["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+    assert pending["scout_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+    assert pending["paper_only_scout"] is True
+    assert pending["timing_passed"] is True
+    assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+    assert pending["replay_source"] == "live_monitor_source_resonance_probe"

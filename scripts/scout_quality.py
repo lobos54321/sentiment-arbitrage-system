@@ -120,6 +120,16 @@ _PROFILE_OVERRIDES = {
         "max_top1_pct": 62.0,
         "max_top10_pct": 85.0,
     },
+    "source_resonance_tiny_probe": {
+        "min_liquidity_usd": 0.0,
+        "allow_unknown_liquidity": True,
+        "min_buy_sell_ratio": 1.05,
+        "min_vol_m5": 4000.0,
+        "min_tx_m5": 40,
+        "max_negative_m5": -12.0,
+        "max_top1_pct": 62.0,
+        "max_top10_pct": 85.0,
+    },
     "ath_soft_reclaim_tiny_scout": {
         "min_buy_sell_ratio": 1.05,
         "min_vol_m5": 5000.0,

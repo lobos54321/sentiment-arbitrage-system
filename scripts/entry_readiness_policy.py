@@ -44,6 +44,9 @@ LOTTO_UPSTREAM_TINY_SCOUT_MODES = (
     "lotto_low_liquidity_reclaim_tiny_probe",
     "lotto_micro_reclaim_tiny_probe",
 )
+SOURCE_RESONANCE_TINY_PROBE_MODES = (
+    "source_resonance_tiny_probe",
+)
 PULLBACK_TINY_SCOUT_MODES = (
     "pullback_tiny_scout",
 )
@@ -60,6 +63,7 @@ PAPER_TINY_SCOUT_MODES = (
     + ATH_TINY_SCOUT_MODES
     + NEWBORN_TINY_SCOUT_MODES
     + LOTTO_UPSTREAM_TINY_SCOUT_MODES
+    + SOURCE_RESONANCE_TINY_PROBE_MODES
     + PULLBACK_TINY_SCOUT_MODES
     + DISCOVERY_TINY_SCOUT_MODES
 )
@@ -108,6 +112,7 @@ def _profile_from_lifecycle(route=None, lifecycle=None, pending=None, now_ts=Non
         or pending.get("replay_source") == "live_monitor_lotto_upstream_realtime"
         or pending.get("entry_mode") == "lotto_real_probe_reentry_arm"
         or pending.get("entry_mode") in LOTTO_UPSTREAM_TINY_SCOUT_MODES
+        or pending.get("entry_mode") in SOURCE_RESONANCE_TINY_PROBE_MODES
         or pending.get("entry_mode") in DISCOVERY_TINY_SCOUT_MODES
     )
     liquidity_unknown = bool(features.get("liquidity_unknown"))
