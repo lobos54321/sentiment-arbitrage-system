@@ -1,6 +1,15 @@
 import sqlite3
 
-from scripts.entry_mode_quality import evaluate_entry_mode_quality, recent_entry_mode_stats
+from scripts.entry_mode_quality import (
+    ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES,
+    evaluate_entry_mode_quality,
+    recent_entry_mode_stats,
+)
+from scripts.entry_mode_registry import (
+    ENTRY_MODE_REGISTRY,
+    entry_mode_registry_entry,
+    entry_mode_registry_summary,
+)
 
 
 def _db():
@@ -61,6 +70,32 @@ def test_shadow_only_mode_overrides_force_live():
     assert decision["decision"] == "shadow"
     assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
     assert decision["shadow_only_mode"] is True
+    assert decision["registry"]["tier"] == "hard_shadow"
+    assert decision["registry_enforced"] is True
+
+
+def test_entry_mode_registry_drives_shadow_only_defaults():
+    summary = entry_mode_registry_summary(ENTRY_MODE_REGISTRY)
+
+    assert summary["mode_count"] >= 32
+    assert "live" in summary["by_tier"]
+    assert "hard_shadow" in summary["by_tier"]
+    assert "shadow_watch_only" in summary["by_tier"]
+    assert "isolated_paper_capped" in summary["by_tier"]
+    assert "lotto_low_liquidity_reclaim_tiny_probe" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "lotto_fast_lane" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+
+
+def test_grey_zone_modes_are_registered_but_still_blocked_until_caps_exist():
+    db = _db()
+
+    decision = evaluate_entry_mode_quality(db, "lotto_low_liquidity_reclaim_tiny_probe", now_ts=1000)
+    registry_entry = entry_mode_registry_entry("lotto_low_liquidity_reclaim_tiny_probe")
+
+    assert registry_entry["tier"] == "isolated_paper_capped"
+    assert registry_entry["paper_enabled"] is False
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
 
 
 def test_lotto_micro_reclaim_is_shadow_only_by_default():

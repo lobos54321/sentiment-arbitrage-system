@@ -9,6 +9,19 @@ that path should remain live or temporarily fall back to shadow observation.
 import os
 import time
 
+try:
+    from entry_mode_registry import (
+        ENTRY_MODE_REGISTRY,
+        entry_mode_registry_entry,
+        entry_mode_registry_shadow_only_modes,
+    )
+except ImportError:
+    from .entry_mode_registry import (
+        ENTRY_MODE_REGISTRY,
+        entry_mode_registry_entry,
+        entry_mode_registry_shadow_only_modes,
+    )
+
 
 ENTRY_MODE_QUALITY_ENABLED = os.environ.get("ENTRY_MODE_QUALITY_ENABLED", "true").lower() != "false"
 ENTRY_MODE_QUALITY_WINDOW = max(5, int(os.environ.get("ENTRY_MODE_QUALITY_WINDOW", "20")))
@@ -23,34 +36,7 @@ ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE = float(os.environ.get("ENTRY_MODE_QUALITY
 ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL", "-0.05"))
 ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK", "0.12"))
 ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES_DEFAULT = ",".join(
-    [
-        "ath_flat_structure_tiny_scout",
-        "ath_high_mc_tiny_probe",
-        "ath_matrix_dissonance_tiny_probe",
-        "ath_micro_reclaim_tiny_probe",
-        "ath_no_kline_tiny_probe",
-        "ath_reclaim_after_failure_tiny_probe",
-        "ath_soft_reclaim_tiny_scout",
-        "ath_uncertainty_tiny_scout",
-        "gmgn_concentration_tiny_scout",
-        "gmgn_low_kline_tiny_scout",
-        "gmgn_midcap_near_miss_scout",
-        "gmgn_reclaim_tiny_scout",
-        "gmgn_unknown_data_tiny_scout",
-        "lotto_high_risk_discovery_probe",
-        "lotto_low_liquidity_reclaim_tiny_probe",
-        "lotto_micro_reclaim_tiny_probe",
-        "lotto_not_ath_reclaim_tiny_probe",
-        "lotto_upstream_miss_tiny_scout",
-        "lotto_upstream_realtime_tiny_scout",
-        "matrix_micro_momentum_tiny_probe",
-        "matrix_reclaim_tiny_probe",
-        "momentum_direct_entry",
-        "newborn_momentum_tiny_scout",
-        "pullback_tiny_scout",
-        "smart_entry_reclaim_tiny_scout",
-        "unknown_data_activity_tiny_scout",
-    ]
+    sorted(entry_mode_registry_shadow_only_modes(ENTRY_MODE_REGISTRY))
 )
 ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES = {
     item.strip()
@@ -183,6 +169,7 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
         "reason": "entry_mode_quality_pass",
         "shadow_until": shadow_until if shadow_until > now_ts else None,
         "stats": stats,
+        "registry": entry_mode_registry_entry(entry_mode),
     }
 
     if not ENTRY_MODE_QUALITY_ENABLED or not entry_mode:
@@ -194,6 +181,7 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
             "reason": "entry_mode_quality_shadow_only_mode",
             "shadow_only_mode": True,
             "configured_shadow_only_modes": sorted(ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES),
+            "registry_enforced": True,
         })
         return base
 

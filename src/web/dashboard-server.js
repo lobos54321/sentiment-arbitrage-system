@@ -25,6 +25,12 @@ import {
   summarizeTradeReplays,
 } from './trade-replay-utils.js';
 import { buildModeEvReport } from './mode-ev-utils.js';
+import {
+  DEFAULT_ENTRY_MODE_REGISTRY_PATH,
+  loadEntryModeRegistry,
+  registryModesByTier,
+  summarizeEntryModeRegistry,
+} from './mode-registry-utils.js';
 
 dotenv.config();
 
@@ -2901,6 +2907,29 @@ const server = http.createServer(async (req, res) => {
     } finally {
       try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/mode-registry') {
+    if (!checkAuth(req, url, res)) return;
+    try {
+      const registry = loadEntryModeRegistry();
+      const summary = summarizeEntryModeRegistry(registry);
+      const includeModes = String(url.searchParams.get('include_modes') || 'true').toLowerCase() !== 'false';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        registry_path: DEFAULT_ENTRY_MODE_REGISTRY_PATH,
+        summary,
+        tiers: registry.tiers || {},
+        promotion_policy: registry.promotion_policy || {},
+        decision_gates: registry.decision_gates || {},
+        modes_by_tier: includeModes ? registryModesByTier(registry) : undefined,
+        virtual_modes: includeModes ? (registry.virtual_modes || {}) : undefined,
+        note: 'Registry is observational/governance only for now. Non-live tiers remain blocked by entry_mode_quality until isolated paper caps are implemented and NOT_ATH watch evidence passes the gate.',
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
     }
     return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {

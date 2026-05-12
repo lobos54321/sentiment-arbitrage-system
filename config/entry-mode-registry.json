@@ -1,0 +1,303 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-12T00:00:00.000Z",
+  "notes": "MVP governance registry. It classifies entry modes and keeps all non-live tiny paths blocked until NOT_ATH quote-clean shadow evidence justifies isolated paper work.",
+  "tiers": {
+    "live": {
+      "description": "Paper-live modes currently allowed to open entries.",
+      "paper_enabled": true
+    },
+    "isolated_paper_capped": {
+      "description": "Candidate modes that may deserve capped paper later, but remain blocked until cap/loss/cooldown isolation is implemented.",
+      "paper_enabled": false
+    },
+    "shadow_watch_only": {
+      "description": "Raw and quote-clean signal validation only; no pending entry or paper fill.",
+      "paper_enabled": false
+    },
+    "hard_shadow": {
+      "description": "Paper EV is already poor enough that more live paper would mostly repeat known loss.",
+      "paper_enabled": false
+    },
+    "deprecated_shadow": {
+      "description": "No executable signal for the review window; candidate for deletion after review.",
+      "paper_enabled": false
+    }
+  },
+  "promotion_policy": {
+    "shadow_watch_to_isolated": {
+      "min_unique_tokens": 30,
+      "min_quote_clean_samples": 20,
+      "min_two_snapshot_confirmations": 10,
+      "requires_manual_review": true
+    },
+    "isolated_to_live": {
+      "min_unique_tokens": 30,
+      "bootstrap_lb_gt_pct": 0,
+      "median_pnl_pct_gte": -2,
+      "leave_one_out_total_sol_gt": 0,
+      "max_single_trade_contribution_pct_lte": 50,
+      "requires_manual_review": true
+    },
+    "deprecation": {
+      "window_days": 14,
+      "min_candidate_tokens": 10,
+      "max_quote_clean_or_snapshot_pass_rate_pct": 5,
+      "requires_manual_review": true
+    }
+  },
+  "decision_gates": {
+    "not_ath_watch_before_registry_expansion": {
+      "window_hours": 72,
+      "min_would_enter_clean": 10,
+      "if_fail": "Do not invest in broader isolated paper governance; archive tiny probe/reclaim work and return to primary selector work.",
+      "if_pass": "Implement isolated paper caps and focused snapshot collection for the highest-priority capped modes."
+    }
+  },
+  "modes": {
+    "stage1": {
+      "tier": "live",
+      "route": "ATH",
+      "family": "primary",
+      "paper_enabled": true,
+      "size_class": "primary",
+      "reason": "Primary ATH entry path."
+    },
+    "lotto_fast_lane": {
+      "tier": "live",
+      "route": "LOTTO",
+      "family": "primary",
+      "paper_enabled": true,
+      "size_class": "primary",
+      "reason": "Primary LOTTO entry path after timing passes."
+    },
+    "lotto_fast_arm": {
+      "tier": "live",
+      "route": "LOTTO",
+      "family": "primary",
+      "paper_enabled": true,
+      "size_class": "primary",
+      "reason": "Primary LOTTO armed state before timing passes."
+    },
+    "smart_entry_pullback_bounce": {
+      "tier": "live",
+      "route": "MIXED",
+      "family": "primary",
+      "paper_enabled": true,
+      "size_class": "primary",
+      "reason": "Main pullback entry path; still governed by mode EV."
+    },
+    "lotto_concentrated_scout": {
+      "tier": "live",
+      "route": "LOTTO",
+      "family": "small_live_probe",
+      "paper_enabled": true,
+      "size_class": "small",
+      "reason": "Small live scout path; explicitly registered so it cannot bypass governance."
+    },
+    "explosive_newborn_direct_scout": {
+      "tier": "live",
+      "route": "LOTTO",
+      "family": "small_live_probe",
+      "paper_enabled": true,
+      "size_class": "small",
+      "reason": "Small live newborn path; explicitly registered so it cannot bypass governance."
+    },
+    "ath_micro_reclaim_tiny_probe": {
+      "tier": "hard_shadow",
+      "route": "ATH",
+      "family": "reclaim_tiny",
+      "paper_enabled": false,
+      "reason": "Observed quote-clean paper EV is strongly negative."
+    },
+    "ath_no_kline_tiny_probe": {
+      "tier": "hard_shadow",
+      "route": "ATH",
+      "family": "no_kline_tiny",
+      "paper_enabled": false,
+      "reason": "Observed paper win rate and robust EV are poor."
+    },
+    "lotto_micro_reclaim_tiny_probe": {
+      "tier": "hard_shadow",
+      "route": "LOTTO",
+      "family": "reclaim_tiny",
+      "paper_enabled": false,
+      "reason": "Largest negative tiny reclaim sample; keep stopped."
+    },
+    "momentum_direct_entry": {
+      "tier": "hard_shadow",
+      "route": "MIXED",
+      "family": "proving_cap",
+      "paper_enabled": false,
+      "reason": "Proving-cap path is negative and should not bypass tiny governance."
+    },
+    "matrix_reclaim_tiny_probe": {
+      "tier": "hard_shadow",
+      "route": "MATRIX_NORMAL",
+      "family": "reclaim_tiny",
+      "paper_enabled": false,
+      "reason": "Known noisy giveback path; keep hard-shadowed until redesigned."
+    },
+    "lotto_high_risk_discovery_probe": {
+      "tier": "hard_shadow",
+      "route": "LOTTO",
+      "family": "high_risk_discovery",
+      "paper_enabled": false,
+      "reason": "High-risk fallback probe; stopped until isolated paper caps exist."
+    },
+    "lotto_not_ath_reclaim_tiny_probe": {
+      "tier": "shadow_watch_only",
+      "route": "LOTTO",
+      "family": "not_ath_reclaim",
+      "paper_enabled": false,
+      "reason": "Old paper path is hindsight-contaminated; use lotto_not_ath_watch_shadow first."
+    },
+    "lotto_upstream_miss_tiny_scout": {
+      "tier": "shadow_watch_only",
+      "route": "LOTTO",
+      "family": "upstream_miss",
+      "paper_enabled": false,
+      "reason": "Finder/backtest only; no live paper arm."
+    },
+    "lotto_upstream_realtime_tiny_scout": {
+      "tier": "shadow_watch_only",
+      "route": "LOTTO",
+      "family": "upstream_realtime",
+      "paper_enabled": false,
+      "reason": "Needs quote-clean shadow evidence before any paper restore."
+    },
+    "ath_flat_structure_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "ATH",
+      "family": "ath_real_probe_wrapper",
+      "paper_enabled": false,
+      "reason": "ATH real-probe wrapper mode; keep blocked until cap enforcement exists."
+    },
+    "ath_high_mc_tiny_probe": {
+      "tier": "isolated_paper_capped",
+      "route": "ATH",
+      "family": "high_mc_tiny",
+      "paper_enabled": false,
+      "reason": "Grey-zone ATH tiny mode; requires isolated caps before more paper."
+    },
+    "ath_matrix_dissonance_tiny_probe": {
+      "tier": "isolated_paper_capped",
+      "route": "ATH",
+      "family": "matrix_dissonance",
+      "paper_enabled": false,
+      "reason": "Grey-zone ATH tiny mode; requires isolated caps before more paper."
+    },
+    "ath_reclaim_after_failure_tiny_probe": {
+      "tier": "isolated_paper_capped",
+      "route": "ATH",
+      "family": "post_failure_reclaim",
+      "paper_enabled": false,
+      "reason": "Grey-zone ATH tiny mode; requires isolated caps before more paper."
+    },
+    "ath_soft_reclaim_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "ATH",
+      "family": "soft_reclaim",
+      "paper_enabled": false,
+      "reason": "Grey-zone ATH tiny scout; requires isolated caps before more paper."
+    },
+    "ath_uncertainty_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "ATH",
+      "family": "uncertainty",
+      "paper_enabled": false,
+      "reason": "Grey-zone ATH tiny scout; requires isolated caps before more paper."
+    },
+    "gmgn_concentration_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "gmgn",
+      "paper_enabled": false,
+      "reason": "Low sample GMGN path; collect shadow evidence before capped paper."
+    },
+    "gmgn_low_kline_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "gmgn",
+      "paper_enabled": false,
+      "reason": "Low sample GMGN path; collect shadow evidence before capped paper."
+    },
+    "gmgn_midcap_near_miss_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "gmgn",
+      "paper_enabled": false,
+      "reason": "Low sample GMGN path; collect shadow evidence before capped paper."
+    },
+    "gmgn_reclaim_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "gmgn",
+      "paper_enabled": false,
+      "reason": "Low sample GMGN path; collect shadow evidence before capped paper."
+    },
+    "gmgn_unknown_data_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "gmgn",
+      "paper_enabled": false,
+      "reason": "Low sample GMGN path; collect shadow evidence before capped paper."
+    },
+    "lotto_low_liquidity_reclaim_tiny_probe": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "low_liquidity_reclaim",
+      "paper_enabled": false,
+      "reason": "Near flat but under-sampled; do not restore until isolated caps exist."
+    },
+    "matrix_micro_momentum_tiny_probe": {
+      "tier": "isolated_paper_capped",
+      "route": "MATRIX_NORMAL",
+      "family": "micro_momentum",
+      "paper_enabled": false,
+      "reason": "Grey-zone matrix tiny mode; requires isolated caps before more paper."
+    },
+    "newborn_momentum_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "LOTTO",
+      "family": "newborn_momentum",
+      "paper_enabled": false,
+      "reason": "Low sample newborn path; collect shadow evidence before capped paper."
+    },
+    "pullback_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "MIXED",
+      "family": "pullback",
+      "paper_enabled": false,
+      "reason": "Too little paper data; requires isolated caps before more paper."
+    },
+    "smart_entry_reclaim_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "MIXED",
+      "family": "smart_entry_reclaim",
+      "paper_enabled": false,
+      "reason": "Low sample reclaim path; collect shadow evidence before capped paper."
+    },
+    "unknown_data_activity_tiny_scout": {
+      "tier": "isolated_paper_capped",
+      "route": "MIXED",
+      "family": "unknown_data_activity",
+      "paper_enabled": false,
+      "reason": "Low sample unknown-data path; collect shadow evidence before capped paper."
+    }
+  },
+  "virtual_modes": {
+    "ath_real_probe": {
+      "tier": "isolated_paper_capped",
+      "paper_enabled": false,
+      "mapped_entry_mode": "ath_flat_structure_tiny_scout",
+      "reason": "Live probe wrapper maps to ath_flat_structure_tiny_scout and is blocked by that registry entry."
+    },
+    "lotto_not_ath_watch_shadow": {
+      "tier": "shadow_watch_only",
+      "paper_enabled": false,
+      "mapped_entry_mode": null,
+      "reason": "Independent NOT_ATH watch layer with quote-clean double-snapshot confirmation."
+    }
+  }
+}
