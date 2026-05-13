@@ -73,6 +73,29 @@ from paper_trade_monitor import (  # noqa: E402
 )
 
 
+def _gmgn_resonance_context(cohort="telegram_gmgn", lead=180, quote_clean=False):
+    return {
+        "resonance_cohort": "telegram_gmgn_quote_clean" if quote_clean else cohort,
+        "cohort_priority": 100 if quote_clean else 80,
+        "gmgn_pre_seen": True,
+        "gmgn_pre_seen_raw": True,
+        "gmgn_lead_time_sec": lead,
+        "lead_time_sec": lead,
+        "timestamp_valid": True,
+        "timestamp_anomaly_reason": None,
+        "last_seen_age_sec": 30,
+        "quote_clean_seen": quote_clean,
+        "external_alpha_available": True,
+        "external_alpha": {
+            "available": True,
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": lead,
+            "last_seen_age_sec": 30,
+            "timestamp_valid": True,
+        },
+    }
+
+
 def _paper_trade_db(rows=()):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
@@ -2210,6 +2233,7 @@ def test_hard_gate_pass_tiny_probe_allows_pass_quote_executable(monkeypatch):
         },
         hard_gate_status="PASS",
         live_concentration={"top1_pct": 18, "top10_pct": 32},
+        resonance_context=_gmgn_resonance_context(),
         now_ts=1000,
     )
 
@@ -2218,6 +2242,33 @@ def test_hard_gate_pass_tiny_probe_allows_pass_quote_executable(monkeypatch):
     assert decision["paper_only_scout"] is True
     assert decision["execution_scope"] == "paper_only"
     assert decision["observed"]["quote_executable"] is True
+    assert decision["resonance_cohort"] == "telegram_gmgn"
+    assert decision["gmgn_pre_seen"] is True
+
+
+def test_hard_gate_pass_tiny_probe_requires_gmgn_pre_seen(monkeypatch):
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN", True)
+
+    decision = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "ATH", "market_cap": 48000},
+        watchlist_entry={"type": "ATH", "signal_price": 0.000001, "signal_mc": 48000},
+        hard_gate_status="PASS",
+        resonance_context={
+            **_gmgn_resonance_context(cohort="telegram_only"),
+            "gmgn_pre_seen": False,
+            "gmgn_pre_seen_raw": False,
+            "resonance_cohort": "telegram_only",
+            "cohort_priority": 10,
+        },
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "gmgn_pre_seen_required"
 
 
 def test_hard_gate_pass_tiny_probe_requires_pass_and_quote(monkeypatch):
@@ -2230,12 +2281,14 @@ def test_hard_gate_pass_tiny_probe_requires_pass_and_quote(monkeypatch):
         watchlist_entry={"type": "ATH", "signal_mc": 48000, "signal_top10": 32},
         hard_gate_status="PASS",
         live_concentration={"top1_pct": 18, "top10_pct": 32},
+        resonance_context=_gmgn_resonance_context(),
         now_ts=1000,
     )
     blocked_gate = evaluate_hard_gate_pass_tiny_probe(
         "TokenCA",
         watchlist_entry={"type": "ATH", "signal_price": 0.000001, "signal_mc": 48000},
         hard_gate_status="NOT_ATH_V17",
+        resonance_context=_gmgn_resonance_context(),
         now_ts=1000,
     )
 
@@ -2263,6 +2316,7 @@ def test_hard_gate_pass_tiny_probe_dedupes_existing_token_probe(monkeypatch):
                 "execution_scope": "paper_only",
             }
         },
+        resonance_context=_gmgn_resonance_context(),
         now_ts=1000,
     )
 
@@ -2316,6 +2370,11 @@ def test_hard_gate_pass_quote_retry_schedules_and_arms(monkeypatch):
         monitor,
         "helius_token_concentration",
         lambda _token_ca: {"top1_pct": 18, "top10_pct": 32},
+    )
+    monkeypatch.setattr(
+        monitor,
+        "safe_external_alpha_lookup",
+        lambda *_args, **_kwargs: _gmgn_resonance_context()["external_alpha"],
     )
 
     registered_entry = {
@@ -2383,6 +2442,8 @@ def test_hard_gate_pass_quote_retry_schedules_and_arms(monkeypatch):
     assert pending_entries["TokenCA:1000"]["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
     assert pending_entries["TokenCA:1000"]["paper_only_scout"] is True
     assert pending_entries["TokenCA:1000"]["execution_scope"] == "paper_only"
+    assert pending_entries["TokenCA:1000"]["resonance_cohort"] == "telegram_gmgn"
+    assert pending_entries["TokenCA:1000"]["gmgn_pre_seen"] is True
     reasons = [
         row["reason"]
         for row in db.execute("SELECT reason FROM paper_decision_events ORDER BY id").fetchall()
@@ -2449,6 +2510,7 @@ def test_legacy_new_trending_statuses_are_observable_but_not_pass_probes():
             "TokenCA",
             watchlist_entry={"type": "LOTTO", "signal_price": 0.000001, "signal_mc": 48000},
             hard_gate_status=status,
+            resonance_context=_gmgn_resonance_context(),
             now_ts=1000,
         )
         assert decision["pass"] is False
@@ -2553,6 +2615,11 @@ def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
         "helius_token_concentration",
         lambda _token_ca: {"top1_pct": 18, "top10_pct": 32},
     )
+    monkeypatch.setattr(
+        monitor,
+        "safe_external_alpha_lookup",
+        lambda *_args, **_kwargs: _gmgn_resonance_context()["external_alpha"],
+    )
     pending_entries = {}
     registered_entry = {
         "id": 7,
@@ -2595,9 +2662,12 @@ def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
     assert pending_entries["TokenCA:1000"]["paper_only_scout"] is True
     assert pending_entries["TokenCA:1000"]["execution_scope"] == "paper_only"
     assert pending_entries["TokenCA:1000"]["timing_passed"] is True
+    assert pending_entries["TokenCA:1000"]["resonance_cohort"] == "telegram_gmgn"
+    assert pending_entries["TokenCA:1000"]["gmgn_pre_seen"] is True
 
 
-def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price():
+def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price(monkeypatch):
+    monkeypatch.setattr(monitor, "SOURCE_RESONANCE_DIRECT_PROBE_ENABLED", True)
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
@@ -2665,6 +2735,38 @@ def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price():
     assert event["reason"] == "source_resonance_telegram_gmgn_probe"
     assert payload["source_resonance_parent_decision"]["component"] == "smart_entry"
     assert payload["source_resonance_parent_decision"]["reason"] == "no_price"
+
+
+def test_source_resonance_direct_probe_default_disabled(monkeypatch):
+    monkeypatch.setattr(monitor, "SOURCE_RESONANCE_DIRECT_PROBE_ENABLED", False)
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_type": "LOTTO",
+        "signal_route": "LOTTO",
+        "kelly_position_sol": 0.05,
+    }
+
+    detail = _maybe_upgrade_pending_to_source_resonance_probe(
+        db,
+        pending,
+        {"ca": "TokenCA", "symbol": "DOG", "type": "LOTTO", "signal_ts": 1000},
+        lifecycle_id="TokenCA:1000",
+        route="LOTTO",
+        parent_component="smart_entry",
+        parent_decision="reject",
+        parent_reason="no_price",
+        external_alpha=_gmgn_resonance_context()["external_alpha"],
+        now_ts=1300,
+    )
+
+    assert detail["pass"] is False
+    assert detail["reason"] == "source_resonance_direct_probe_disabled"
+    assert pending.get("entry_mode") != SOURCE_RESONANCE_TINY_PROBE_MODE
 
 
 def test_source_resonance_tiny_probe_uses_tiny_scout_spread_budget():

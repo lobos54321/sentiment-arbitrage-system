@@ -3564,7 +3564,9 @@ const server = http.createServer(async (req, res) => {
               peak_pnl,
               position_size_sol,
               signal_route,
-              ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'}
+              ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'},
+              ${tradeCols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json'},
+              ${tradeCols.has('entry_execution_audit_json') ? 'entry_execution_audit_json' : 'NULL AS entry_execution_audit_json'}
             FROM paper_trades
             ${tradeWhere}
             ORDER BY entry_ts DESC, id DESC
@@ -3594,38 +3596,29 @@ const server = http.createServer(async (req, res) => {
           ].filter(Boolean).join(', ')})`;
           const hasSourceResonance = paperTables.has('source_resonance_candidates');
           const sourceCols = hasSourceResonance ? getTableColumns(paperDb, 'source_resonance_candidates') : new Set();
-          const sourceColumn = (name, fallback = 'NULL') => sourceCols.has(name) ? name : `${fallback} AS ${name}`;
-          const sourceOrderTs = sourceCols.has('signal_ts') ? 'COALESCE(signal_ts, 0)' : '0';
-          const sourceOrderUpdated = sourceCols.has('updated_at') ? 'COALESCE(updated_at, 0)' : '0';
-          const sourceResonanceCte = hasSourceResonance ? `
-            sr_latest AS (
-              SELECT
-                token_ca,
-                ${sourceColumn('cohort')},
-                ${sourceColumn('resonance_level')},
-                ${sourceColumn('resonance_score')},
-                ${sourceColumn('gmgn_pre_seen', '0')},
-                ${sourceColumn('gmgn_lead_time_sec')},
-                ROW_NUMBER() OVER (
-                  PARTITION BY token_ca
-                  ORDER BY ${sourceOrderTs} DESC, ${sourceOrderUpdated} DESC
-                ) AS rn
-              FROM source_resonance_candidates
-            ),` : '';
-          const sourceResonanceJoin = hasSourceResonance
-            ? 'LEFT JOIN sr_latest sr ON sr.token_ca = m.token_ca AND sr.rn = 1'
-            : '';
-          const sourceResonanceSelect = hasSourceResonance ? `
-              sr.cohort AS source_resonance_cohort,
-              sr.resonance_level AS source_resonance_level,
-              sr.resonance_score AS source_resonance_score,
-              sr.gmgn_pre_seen AS gmgn_pre_seen,
-              sr.gmgn_lead_time_sec AS gmgn_lead_time_sec,` : `
-              NULL AS source_resonance_cohort,
-              NULL AS source_resonance_level,
-              NULL AS source_resonance_score,
-              NULL AS gmgn_pre_seen,
-              NULL AS gmgn_lead_time_sec,`;
+          const missedSignalTs = missedCols.has('signal_ts') ? 'COALESCE(m.signal_ts, 0)' : '0';
+          const sourceSignalTs = sourceCols.has('signal_ts') ? 'COALESCE(sr.signal_ts, 0)' : '0';
+          const sourceUpdatedTs = sourceCols.has('updated_at') ? 'COALESCE(sr.updated_at, 0)' : '0';
+          const sourceOrder = `
+            CASE
+              WHEN ${sourceSignalTs} = ${missedSignalTs} THEN 0
+              WHEN ${sourceSignalTs} <= ${missedSignalTs} THEN 1
+              ELSE 2
+            END,
+            ABS(${sourceSignalTs} - ${missedSignalTs}) ASC,
+            ${sourceUpdatedTs} DESC
+          `;
+          const sourceExpr = (name, alias = name, fallback = 'NULL') => (
+            hasSourceResonance && sourceCols.has(name)
+              ? `(SELECT sr.${name} FROM source_resonance_candidates sr WHERE sr.token_ca = m.token_ca ORDER BY ${sourceOrder} LIMIT 1) AS ${alias}`
+              : `${fallback} AS ${alias}`
+          );
+          const sourceResonanceSelect = `
+              ${sourceExpr('cohort', 'source_resonance_cohort')},
+              ${sourceExpr('resonance_level', 'source_resonance_level')},
+              ${sourceExpr('resonance_score', 'source_resonance_score')},
+              ${sourceExpr('gmgn_pre_seen', 'gmgn_pre_seen', '0')},
+              ${sourceExpr('gmgn_lead_time_sec', 'gmgn_lead_time_sec')},`;
           const quoteCleanExpr = missedCols.has('tradable_missed')
             ? `CASE
                 WHEN COALESCE(m.tradable_missed, 0) = 1
@@ -3634,7 +3627,7 @@ const server = http.createServer(async (req, res) => {
               END`
             : 'NULL';
           missedAttributions = paperDb.prepare(`
-            WITH ${sourceResonanceCte}
+            WITH
             base AS (
               SELECT
                 m.token_ca,
@@ -3666,7 +3659,6 @@ const server = http.createServer(async (req, res) => {
                   ORDER BY ${maxPnlExpr} DESC, ${missedEventTsExpr} DESC
                 ) AS rn
               FROM paper_missed_signal_attribution m
-              ${sourceResonanceJoin}
               ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
             ),
             counts AS (

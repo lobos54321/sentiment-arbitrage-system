@@ -36,6 +36,7 @@ from paper_trade_monitor import (  # noqa: E402
     find_lotto_upstream_miss_tiny_scout_candidates,
     ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
     ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+    HARD_GATE_PASS_TINY_PROBE_MODE,
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
@@ -449,6 +450,57 @@ def test_probe_profit_capture_locks_small_scout_at_ten_percent():
     assert exit_matrix["action"] == "lock_profit"
     assert exit_matrix["sell_pct"] == 0.75
     assert exit_matrix["reason"].startswith("probe_profit_lock")
+
+
+def test_hard_gate_baseline_profit_capture_waits_for_twenty_percent():
+    class Pos:
+        position_size_sol = 0.002
+        peak_pnl = 0.12
+        signal_type = "ATH"
+        monitor_state = {
+            "entryMode": HARD_GATE_PASS_TINY_PROBE_MODE,
+            "signalRoute": "ATH",
+            "entrySol": 0.002,
+        }
+
+    early = apply_probe_profit_capture(
+        Pos(),
+        {},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.12, "peak_pnl": 0.12},
+    )
+    locked = apply_probe_profit_capture(
+        Pos(),
+        {},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.22, "peak_pnl": 0.22},
+    )
+
+    assert early["action"] == "hold"
+    assert locked["action"] == "lock_profit"
+    assert locked["sell_pct"] == 0.50
+    assert locked["reason"].startswith("hard_gate_baseline_profit_lock")
+
+
+def test_hard_gate_baseline_profit_capture_exits_peak35_giveback():
+    class Pos:
+        position_size_sol = 0.002
+        peak_pnl = 0.37
+        signal_type = "ATH"
+        monitor_state = {
+            "entryMode": HARD_GATE_PASS_TINY_PROBE_MODE,
+            "signalRoute": "ATH",
+            "entrySol": 0.002,
+            "soldPct": 0.50,
+        }
+
+    exit_matrix = apply_probe_profit_capture(
+        Pos(),
+        {"has_locked_profit": True},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.17, "peak_pnl": 0.37},
+    )
+
+    assert exit_matrix["action"] == "exit"
+    assert exit_matrix["trail_floor"] == 0.18
+    assert exit_matrix["reason"].startswith("hard_gate_baseline_peak35_floor")
 
 
 def test_observation_probe_late_locks_when_ten_percent_peak_gives_back_to_three():

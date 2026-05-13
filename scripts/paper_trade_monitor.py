@@ -299,17 +299,31 @@ SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANC
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
 SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
 SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED', 'true').lower() != 'false'
+SOURCE_RESONANCE_DIRECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_DIRECT_PROBE_ENABLED', 'false').lower() == 'true'
 PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
 
-# --- hard_gate_pass_tiny_probe: baseline paper-only probe for every hard-gate
-# PASS + quote-executable unique token.  Unlike source_resonance it does NOT
-# require GMGN pre-seen or momentum confirmation.  It lets us answer "of the
-# hard-gate PASS tokens, which should we have bought?" without opening 26
-# historically-negative blocked modes.
+# --- hard_gate_pass_tiny_probe: baseline paper-only probe for Telegram premium
+# hard-gate PASS + GMGN pre-seen + quote-executable unique tokens.  Source
+# resonance supplies evidence/cohort priority; this mode owns tiny paper entry.
 HARD_GATE_PASS_TINY_PROBE_MODE = 'hard_gate_pass_tiny_probe'
 HARD_GATE_PASS_TINY_PROBE_ENABLED = os.environ.get(
     'HARD_GATE_PASS_TINY_PROBE_ENABLED', 'true'
 ).lower() != 'false'
+HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN = os.environ.get(
+    'HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN', 'true'
+).lower() != 'false'
+HARD_GATE_PASS_ALLOW_TELEGRAM_ONLY = os.environ.get(
+    'HARD_GATE_PASS_ALLOW_TELEGRAM_ONLY', 'false'
+).lower() == 'true'
+HARD_GATE_PASS_MIN_GMGN_LEAD_SEC = int(
+    os.environ.get('HARD_GATE_PASS_MIN_GMGN_LEAD_SEC', str(SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC))
+)
+HARD_GATE_PASS_MAX_GMGN_LEAD_SEC = int(
+    os.environ.get('HARD_GATE_PASS_MAX_GMGN_LEAD_SEC', str(SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC))
+)
+HARD_GATE_PASS_MAX_ALPHA_AGE_SEC = int(
+    os.environ.get('HARD_GATE_PASS_MAX_ALPHA_AGE_SEC', str(SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC))
+)
 HARD_GATE_PASS_TINY_PROBE_SIZE_SOL = float(
     os.environ.get('HARD_GATE_PASS_TINY_PROBE_SIZE_SOL', '0.002')
 )
@@ -340,9 +354,21 @@ HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC = int(
 HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC = int(
     os.environ.get('HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC', '15')
 )
+HARD_GATE_PASS_BASELINE_LOCK_PNL = float(os.environ.get('HARD_GATE_PASS_BASELINE_LOCK_PNL', '0.20'))
+HARD_GATE_PASS_BASELINE_LOCK_SELL_PCT = float(os.environ.get('HARD_GATE_PASS_BASELINE_LOCK_SELL_PCT', '0.50'))
+HARD_GATE_PASS_BASELINE_PEAK35_FLOOR = float(os.environ.get('HARD_GATE_PASS_BASELINE_PEAK35_FLOOR', '0.18'))
+HARD_GATE_PASS_BASELINE_PEAK50_FLOOR = float(os.environ.get('HARD_GATE_PASS_BASELINE_PEAK50_FLOOR', '0.30'))
+HARD_GATE_PASS_BASELINE_NO_FOLLOW_EXIT_SEC = int(os.environ.get('HARD_GATE_PASS_BASELINE_NO_FOLLOW_EXIT_SEC', str(20 * 60)))
+HARD_GATE_PASS_BASELINE_NO_FOLLOW_MIN_PEAK = float(os.environ.get('HARD_GATE_PASS_BASELINE_NO_FOLLOW_MIN_PEAK', '0.08'))
+HARD_GATE_PASS_COHORT_PRIORITY = {
+    'telegram_gmgn_quote_clean': 100,
+    'telegram_gmgn': 80,
+    'telegram_quote_clean': 40,
+    'telegram_only': 10,
+}
 PAPER_TINY_SCOUT_ENTRY_MODES.add(HARD_GATE_PASS_TINY_PROBE_MODE)
-# Rate-limit state: list of arm timestamps for sliding-window enforcement
-_hard_gate_pass_probe_arm_ts = []  # type: list[float]
+# Rate-limit state: arm events for sliding-window enforcement.
+_hard_gate_pass_probe_arm_ts = []  # type: list[dict | float]
 # Per-token cooldown: {token_ca: last_arm_ts}
 _hard_gate_pass_probe_cooldown = {}  # type: dict[str, float]
 # Quote retry candidates for PASS signals that could not get a signal price yet.
@@ -3750,9 +3776,10 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
         _safe_float((w_entry or {}).get('peak_pnl'), 0.0),
         current_pnl,
     )
-    entry_mode = str(state.get('entryMode') or '')
+    entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
     sold_pct = max(0.0, min(1.0, _safe_float(state.get('soldPct'), 0.0)))
     already_locked = bool((w_entry or {}).get('has_locked_profit')) or sold_pct > 0
+    held_sec = max(0.0, float(now_ts or time.time()) - float(getattr(pos, 'entry_ts', now_ts or time.time()) or now_ts or time.time()))
 
     def _override(action, reason, *, trail_floor=None, sell_pct=None):
         updated = dict(exit_matrix)
@@ -3783,6 +3810,52 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
         if sell_pct is not None:
             updated['sell_pct'] = sell_pct
         return updated
+
+    if entry_mode == HARD_GATE_PASS_TINY_PROBE_MODE:
+        if not already_locked and current_pnl >= HARD_GATE_PASS_BASELINE_LOCK_PNL:
+            return _override(
+                'lock_profit',
+                (
+                    f"hard_gate_baseline_profit_lock "
+                    f"(pnl={current_pnl:.1%} >= {HARD_GATE_PASS_BASELINE_LOCK_PNL:.1%}, "
+                    f"sell={HARD_GATE_PASS_BASELINE_LOCK_SELL_PCT:.0%})"
+                ),
+                sell_pct=HARD_GATE_PASS_BASELINE_LOCK_SELL_PCT,
+            )
+        if peak_pnl >= 0.50 and current_pnl <= HARD_GATE_PASS_BASELINE_PEAK50_FLOOR:
+            return _override(
+                'exit',
+                (
+                    f"hard_gate_baseline_peak50_floor "
+                    f"(pnl={current_pnl:.1%} <= floor={HARD_GATE_PASS_BASELINE_PEAK50_FLOOR:.1%}, "
+                    f"peak={peak_pnl:.1%})"
+                ),
+                trail_floor=HARD_GATE_PASS_BASELINE_PEAK50_FLOOR,
+            )
+        if peak_pnl >= 0.35 and current_pnl <= HARD_GATE_PASS_BASELINE_PEAK35_FLOOR:
+            return _override(
+                'exit',
+                (
+                    f"hard_gate_baseline_peak35_floor "
+                    f"(pnl={current_pnl:.1%} <= floor={HARD_GATE_PASS_BASELINE_PEAK35_FLOOR:.1%}, "
+                    f"peak={peak_pnl:.1%})"
+                ),
+                trail_floor=HARD_GATE_PASS_BASELINE_PEAK35_FLOOR,
+            )
+        if (
+            held_sec >= HARD_GATE_PASS_BASELINE_NO_FOLLOW_EXIT_SEC
+            and peak_pnl < HARD_GATE_PASS_BASELINE_NO_FOLLOW_MIN_PEAK
+            and current_pnl <= 0
+        ):
+            return _override(
+                'exit',
+                (
+                    f"hard_gate_baseline_no_follow_exit "
+                    f"(held={held_sec:.0f}s peak={peak_pnl:.1%} < "
+                    f"{HARD_GATE_PASS_BASELINE_NO_FOLLOW_MIN_PEAK:.1%})"
+                ),
+            )
+        return exit_matrix
 
     if not already_locked and current_pnl >= PROBE_PROFIT_CAPTURE_LOCK_PNL:
         return _override(
@@ -5185,6 +5258,78 @@ def _source_resonance_first_number(*values, positive=False, default=None):
     return default
 
 
+def build_hard_gate_resonance_context(external_alpha=None, *, quote_context=None):
+    """Normalize Telegram+GMGN evidence for hard_gate_pass_tiny_probe."""
+    external_alpha = external_alpha or {}
+    quote_context = quote_context or {}
+    lead_sec = _source_resonance_number(external_alpha.get('gmgn_lead_time_sec'), None)
+    last_seen_age_sec = _source_resonance_number(external_alpha.get('last_seen_age_sec'), None)
+    timestamp_valid = external_alpha.get('timestamp_valid')
+    timestamp_valid = True if timestamp_valid is None else bool(timestamp_valid)
+    anomaly_reasons = []
+    if external_alpha.get('timestamp_anomaly_reason'):
+        anomaly_reasons.append(str(external_alpha.get('timestamp_anomaly_reason')))
+    if lead_sec is not None and lead_sec < HARD_GATE_PASS_MIN_GMGN_LEAD_SEC:
+        anomaly_reasons.append('gmgn_lead_time_too_short')
+    if lead_sec is not None and lead_sec > HARD_GATE_PASS_MAX_GMGN_LEAD_SEC:
+        anomaly_reasons.append('gmgn_lead_time_unreasonable')
+    if last_seen_age_sec is not None and last_seen_age_sec < -SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC:
+        anomaly_reasons.append('gmgn_last_seen_in_future')
+    if last_seen_age_sec is not None and last_seen_age_sec > HARD_GATE_PASS_MAX_ALPHA_AGE_SEC:
+        anomaly_reasons.append('gmgn_alpha_stale')
+    gmgn_pre_seen_raw = bool(external_alpha.get('available') and external_alpha.get('gmgn_pre_seen'))
+    gmgn_pre_seen = bool(gmgn_pre_seen_raw and timestamp_valid and not anomaly_reasons)
+    quote_clean_seen = bool(quote_context.get('quote_clean_seen'))
+    quote_executable = bool(quote_context.get('quote_executable'))
+    if gmgn_pre_seen and quote_clean_seen:
+        cohort = 'telegram_gmgn_quote_clean'
+    elif gmgn_pre_seen:
+        cohort = 'telegram_gmgn'
+    elif quote_clean_seen:
+        cohort = 'telegram_quote_clean'
+    else:
+        cohort = 'telegram_only'
+    priority = HARD_GATE_PASS_COHORT_PRIORITY.get(cohort, 0)
+    return {
+        'resonance_cohort': cohort,
+        'cohort_priority': priority,
+        'gmgn_pre_seen': gmgn_pre_seen,
+        'gmgn_pre_seen_raw': gmgn_pre_seen_raw,
+        'gmgn_lead_time_sec': lead_sec,
+        'lead_time_sec': lead_sec,
+        'gmgn_first_seen_ts': external_alpha.get('gmgn_first_seen_ts'),
+        'gmgn_last_seen_ts': external_alpha.get('gmgn_last_seen_ts'),
+        'signal_ts_sec': external_alpha.get('signal_ts_sec'),
+        'last_seen_age_sec': last_seen_age_sec,
+        'timestamp_valid': timestamp_valid,
+        'timestamp_anomaly_reason': ','.join(anomaly_reasons) if anomaly_reasons else None,
+        'quote_clean_seen': quote_clean_seen,
+        'quote_executable': quote_executable,
+        'source_resonance_score': external_alpha.get('source_resonance_score') or external_alpha.get('resonance_score'),
+        'source_resonance_level': external_alpha.get('source_resonance_level') or external_alpha.get('resonance_level'),
+        'external_alpha_available': bool(external_alpha.get('available')),
+        'external_alpha_reason': external_alpha.get('reason'),
+        'external_alpha': external_alpha,
+    }
+
+
+def _hard_gate_arm_event_ts(event):
+    if isinstance(event, dict):
+        return _source_resonance_number(event.get('ts'), 0.0) or 0.0
+    return _source_resonance_number(event, 0.0) or 0.0
+
+
+def _hard_gate_hourly_capacity_for_cohort(cohort):
+    max_hourly = max(0, int(HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR))
+    if cohort == 'telegram_gmgn_quote_clean':
+        return max_hourly
+    if cohort == 'telegram_gmgn':
+        return max(0, max_hourly - 1)
+    if cohort == 'telegram_quote_clean':
+        return max(0, max_hourly - 2)
+    return max(0, max_hourly - 4)
+
+
 def evaluate_source_resonance_tiny_probe(
     external_alpha,
     *,
@@ -5409,6 +5554,15 @@ def _maybe_upgrade_pending_to_source_resonance_probe(
 ):
     if not pending or pending.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE:
         return None
+    if not SOURCE_RESONANCE_DIRECT_PROBE_ENABLED:
+        return {
+            'pass': False,
+            'reason': 'source_resonance_direct_probe_disabled',
+            'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
+            'paper_only_scout': True,
+            'execution_scope': 'paper_only',
+            'probe_source': 'source_resonance',
+        }
     token_ca = pending.get('token_ca') or (pending_w_entry or {}).get('ca')
     if not token_ca:
         return None
@@ -5519,6 +5673,8 @@ def arm_source_resonance_lotto_probe(
     external_alpha,
     now_ts,
 ):
+    if not SOURCE_RESONANCE_DIRECT_PROBE_ENABLED:
+        return False
     if lifecycle_id in pending_entries:
         return False
     token_ca = sig['token_ca']
@@ -5669,6 +5825,8 @@ def evaluate_hard_gate_pass_tiny_probe(
     hard_gate_status=None,
     dex_snapshot=None,
     live_concentration=None,
+    external_alpha=None,
+    resonance_context=None,
     pending_entries=None,
     positions=None,
     now_ts=None,
@@ -5678,6 +5836,7 @@ def evaluate_hard_gate_pass_tiny_probe(
     This is intentionally simpler than source_resonance — it only checks:
     - feature flag enabled
     - hard_gate == PASS
+    - GMGN pre-seen evidence, unless explicitly disabled for experiments
     - basic safety (MC range, concentration caps)
     - rate limit (max N probes per hour)
     - per-token cooldown (no duplicate probes within 5 min)
@@ -5689,6 +5848,7 @@ def evaluate_hard_gate_pass_tiny_probe(
     watchlist_entry = watchlist_entry or {}
     dex_snapshot = dex_snapshot or {}
     live_concentration = live_concentration or {}
+    external_alpha = external_alpha or {}
     pending_entries = pending_entries or {}
     positions = positions or {}
     now_ts = now_ts or time.time()
@@ -5722,29 +5882,65 @@ def evaluate_hard_gate_pass_tiny_probe(
         default=None,
     )
 
+    quote_executable = bool(
+        _source_resonance_first_number(
+            signal.get('signal_price'),
+            watchlist_entry.get('signal_price'),
+            positive=True,
+            default=0.0,
+        )
+    )
+    if resonance_context is None:
+        resonance_context = build_hard_gate_resonance_context(
+            external_alpha,
+            quote_context={
+                'quote_executable': quote_executable,
+                'quote_clean_seen': bool(
+                    signal.get('quote_clean')
+                    or watchlist_entry.get('quote_clean')
+                    or watchlist_entry.get('quote_executable_clean')
+                ),
+            },
+        )
+    resonance_context = dict(resonance_context or {})
+
     observed = {
         'route': route_name,
         'hard_gate_status': gate,
         'current_mc': current_mc,
         'top1_pct': top1_pct,
         'top10_pct': top10_pct,
-        'quote_executable': bool(
-            _source_resonance_first_number(
-                signal.get('signal_price'),
-                watchlist_entry.get('signal_price'),
-                positive=True,
-                default=0.0,
-            )
-        ),
+        'quote_executable': quote_executable,
+        'resonance_cohort': resonance_context.get('resonance_cohort'),
+        'cohort_priority': resonance_context.get('cohort_priority'),
+        'gmgn_pre_seen': resonance_context.get('gmgn_pre_seen'),
+        'gmgn_pre_seen_raw': resonance_context.get('gmgn_pre_seen_raw'),
+        'gmgn_lead_time_sec': resonance_context.get('gmgn_lead_time_sec'),
+        'lead_time_sec': resonance_context.get('lead_time_sec'),
+        'gmgn_first_seen_ts': resonance_context.get('gmgn_first_seen_ts'),
+        'gmgn_last_seen_ts': resonance_context.get('gmgn_last_seen_ts'),
+        'signal_ts_sec': resonance_context.get('signal_ts_sec'),
+        'last_seen_age_sec': resonance_context.get('last_seen_age_sec'),
+        'timestamp_valid': resonance_context.get('timestamp_valid'),
+        'timestamp_anomaly_reason': resonance_context.get('timestamp_anomaly_reason'),
+        'quote_clean_seen': resonance_context.get('quote_clean_seen'),
     }
     thresholds = {
         'size_sol': HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
         'max_per_hour': HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR,
+        'cohort_hourly_capacity': _hard_gate_hourly_capacity_for_cohort(
+            resonance_context.get('resonance_cohort')
+        ),
         'cooldown_sec': HARD_GATE_PASS_TINY_PROBE_COOLDOWN_SEC,
         'min_mc': HARD_GATE_PASS_TINY_PROBE_MIN_MC,
         'max_mc': HARD_GATE_PASS_TINY_PROBE_MAX_MC,
         'max_top1_pct': HARD_GATE_PASS_TINY_PROBE_MAX_TOP1_PCT,
         'max_top10_pct': HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT,
+        'require_gmgn_pre_seen': HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN,
+        'allow_telegram_only': HARD_GATE_PASS_ALLOW_TELEGRAM_ONLY,
+        'min_gmgn_lead_sec': HARD_GATE_PASS_MIN_GMGN_LEAD_SEC,
+        'max_gmgn_lead_sec': HARD_GATE_PASS_MAX_GMGN_LEAD_SEC,
+        'max_alpha_age_sec': HARD_GATE_PASS_MAX_ALPHA_AGE_SEC,
     }
 
     def _result(passed, reason):
@@ -5757,9 +5953,16 @@ def evaluate_hard_gate_pass_tiny_probe(
             'execution_scope': 'paper_only',
             'probe': True,
             'probe_source': 'hard_gate_pass_baseline',
-            'resonance_cohort': 'hard_gate_pass',
+            'resonance_cohort': resonance_context.get('resonance_cohort') or 'telegram_only',
+            'cohort_priority': resonance_context.get('cohort_priority') or 0,
+            'gmgn_pre_seen': bool(resonance_context.get('gmgn_pre_seen')),
+            'gmgn_lead_time_sec': resonance_context.get('gmgn_lead_time_sec'),
+            'source_resonance_score': resonance_context.get('source_resonance_score'),
+            'source_resonance_level': resonance_context.get('source_resonance_level'),
             'source_component': 'hard_gate_pass_probe',
             'timing_passed': True,
+            'resonance_context': resonance_context,
+            'external_alpha': resonance_context.get('external_alpha') or external_alpha,
             'observed': observed,
             'thresholds': thresholds,
         }
@@ -5768,6 +5971,16 @@ def evaluate_hard_gate_pass_tiny_probe(
         return _result(False, 'hard_gate_pass_probe_disabled')
     if gate != 'PASS':
         return _result(False, 'hard_gate_not_pass')
+    if HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN and not resonance_context.get('gmgn_pre_seen'):
+        return _result(
+            False,
+            resonance_context.get('timestamp_anomaly_reason') or 'gmgn_pre_seen_required',
+        )
+    if (
+        not HARD_GATE_PASS_ALLOW_TELEGRAM_ONLY
+        and resonance_context.get('resonance_cohort') == 'telegram_only'
+    ):
+        return _result(False, 'telegram_only_baseline_disabled')
     if not observed['quote_executable']:
         return _result(False, 'quote_not_executable')
 
@@ -5784,10 +5997,13 @@ def evaluate_hard_gate_pass_tiny_probe(
     # Hourly rate limit
     cutoff = now_ts - 3600
     _hard_gate_pass_probe_arm_ts[:] = [
-        ts for ts in _hard_gate_pass_probe_arm_ts if ts > cutoff
+        event for event in _hard_gate_pass_probe_arm_ts if _hard_gate_arm_event_ts(event) > cutoff
     ]
+    cohort_capacity = _hard_gate_hourly_capacity_for_cohort(resonance_context.get('resonance_cohort'))
     if len(_hard_gate_pass_probe_arm_ts) >= HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR:
         return _result(False, 'hourly_rate_limit')
+    if len(_hard_gate_pass_probe_arm_ts) >= cohort_capacity:
+        return _result(False, 'hourly_rate_limit_reserved_for_higher_priority_cohort')
 
     # MC range
     if current_mc > 0 and current_mc < HARD_GATE_PASS_TINY_PROBE_MIN_MC:
@@ -5819,6 +6035,13 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
     pending['stage_outcome'] = stage_outcome or 'hard_gate_pass_tiny_probe_armed'
     pending['source_component'] = 'hard_gate_pass_probe'
     pending['hard_gate_pass_probe'] = detail
+    pending['resonance_cohort'] = detail.get('resonance_cohort')
+    pending['cohort_priority'] = detail.get('cohort_priority')
+    pending['gmgn_pre_seen'] = bool(detail.get('gmgn_pre_seen'))
+    pending['gmgn_lead_time_sec'] = detail.get('gmgn_lead_time_sec')
+    pending['source_resonance_score'] = detail.get('source_resonance_score')
+    pending['source_resonance_level'] = detail.get('source_resonance_level')
+    pending['external_alpha'] = detail.get('external_alpha')
     if route_name:
         pending['signal_route'] = route_name
     if not pending.get('trigger_price'):
@@ -5835,6 +6058,10 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
         lotto_state['executionScope'] = 'paper_only'
         lotto_state['positionSizeSol'] = HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
         lotto_state['hardGatePassProbe'] = detail
+        lotto_state['resonanceCohort'] = detail.get('resonance_cohort')
+        lotto_state['cohortPriority'] = detail.get('cohort_priority')
+        lotto_state['gmgnPreSeen'] = bool(detail.get('gmgn_pre_seen'))
+        lotto_state['gmgnLeadTimeSec'] = detail.get('gmgn_lead_time_sec')
     return pending
 
 
@@ -5849,6 +6076,7 @@ def _schedule_hard_gate_pass_quote_retry(
     hard_gate_status,
     route,
     now_ts,
+    resonance_context=None,
 ):
     if not HARD_GATE_PASS_QUOTE_RETRY_ENABLED:
         return False
@@ -5866,6 +6094,7 @@ def _schedule_hard_gate_pass_quote_retry(
         'signal_audit_payload': signal_audit_payload or {},
         'hard_gate_status': hard_gate_status,
         'route': route,
+        'resonance_context': resonance_context or {},
         'first_seen_ts': first_seen_ts,
         'next_attempt_ts': now_ts,
         'attempts': attempts,
@@ -5907,6 +6136,7 @@ def _record_hard_gate_quote_retry_event(
                 'window_sec': HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC,
                 'poll_sec': HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC,
             },
+            'resonance_context': candidate.get('resonance_context') or {},
             **(payload or {}),
         },
         event_ts=event_ts,
@@ -6029,6 +6259,7 @@ def process_hard_gate_pass_quote_retries(
             now_ts=now_ts,
             route=route,
             allow_quote_retry=False,
+            resonance_context=candidate.get('resonance_context') or None,
         ):
             armed += 1
         _hard_gate_pass_quote_retry.pop(lifecycle_id, None)
@@ -6050,6 +6281,7 @@ def arm_hard_gate_pass_tiny_probe(
     now_ts,
     route=None,
     allow_quote_retry=True,
+    resonance_context=None,
 ):
     """Try to arm a baseline hard_gate_pass paper probe for a PASS token.
 
@@ -6096,6 +6328,33 @@ def arm_hard_gate_pass_tiny_probe(
         live_concentration = helius_token_concentration(token_ca)
     except Exception:
         live_concentration = None
+    if resonance_context is None:
+        external_alpha = safe_external_alpha_lookup(
+            db,
+            token_ca,
+            now=now_ts,
+            signal_ts=sig.get('timestamp') or registered_entry.get('signal_ts'),
+        )
+        resonance_context = build_hard_gate_resonance_context(
+            external_alpha,
+            quote_context={
+                'quote_executable': bool(
+                    _source_resonance_first_number(
+                        sig.get('signal_price'),
+                        registered_entry.get('signal_price'),
+                        positive=True,
+                        default=0.0,
+                    )
+                ),
+                'quote_clean_seen': bool(
+                    sig.get('quote_clean')
+                    or registered_entry.get('quote_clean')
+                    or registered_entry.get('quote_executable_clean')
+                ),
+            },
+        )
+    else:
+        external_alpha = (resonance_context or {}).get('external_alpha') or {}
 
     detail = evaluate_hard_gate_pass_tiny_probe(
         token_ca,
@@ -6105,6 +6364,8 @@ def arm_hard_gate_pass_tiny_probe(
         hard_gate_status=hard_gate_status,
         dex_snapshot=realtime_dex,
         live_concentration=live_concentration,
+        external_alpha=external_alpha,
+        resonance_context=resonance_context,
         pending_entries=pending_entries,
         positions=positions,
         now_ts=now_ts,
@@ -6126,6 +6387,7 @@ def arm_hard_gate_pass_tiny_probe(
             hard_gate_status=hard_gate_status,
             route=route_name,
             now_ts=now_ts,
+            resonance_context=resonance_context,
         ):
             record_decision_event(
                 db,
@@ -6144,6 +6406,7 @@ def arm_hard_gate_pass_tiny_probe(
                     **detail,
                     'retry_window_sec': HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC,
                     'retry_poll_sec': HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC,
+                    'resonance_context': resonance_context or {},
                 }, signal_lifecycle),
                 event_ts=now_ts,
             )
@@ -6203,7 +6466,11 @@ def arm_hard_gate_pass_tiny_probe(
     pending_entries[lifecycle_id] = pending
 
     # Record rate-limit state
-    _hard_gate_pass_probe_arm_ts.append(now_ts)
+    _hard_gate_pass_probe_arm_ts.append({
+        'ts': now_ts,
+        'cohort': detail.get('resonance_cohort'),
+        'priority': detail.get('cohort_priority'),
+    })
     _hard_gate_pass_probe_cooldown[token_ca] = now_ts
     # Prune cooldown map (keep last 200 entries)
     if len(_hard_gate_pass_probe_cooldown) > 200:
@@ -15595,7 +15862,11 @@ def run_monitor(db):
                             "smart_entry_reclaim_watch_ok",
                             _lotto_detail,
                         )
-                    if not _lotto_decision.allow and not _lotto_decision.expire:
+                    if (
+                        SOURCE_RESONANCE_DIRECT_PROBE_ENABLED
+                        and not _lotto_decision.allow
+                        and not _lotto_decision.expire
+                    ):
                         _source_probe = evaluate_source_resonance_tiny_probe(
                             _external_alpha,
                             watchlist_entry=w_entry,
@@ -15745,7 +16016,10 @@ def run_monitor(db):
                                 _lotto_lc_id,
                                 detail=_lotto_detail,
                             )
-                            if _lotto_detail.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE:
+                            if (
+                                SOURCE_RESONANCE_DIRECT_PROBE_ENABLED
+                                and _lotto_detail.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE
+                            ):
                                 _apply_source_resonance_probe_to_pending(
                                     pending_entries[_lotto_lc_id],
                                     _lotto_detail,
@@ -16262,15 +16536,17 @@ def run_monitor(db):
                         signal_price=w_entry.get('signal_price'),
                         now=now,
                     )
-                    _source_probe = evaluate_source_resonance_tiny_probe(
-                        _external_alpha,
-                        watchlist_entry=w_entry,
-                        route=w_entry.get('type'),
-                        hard_gate_status=eval_res.get('action_reason'),
-                        dex_snapshot=_fire_dex,
-                        lifecycle=_preflight_lifecycle,
-                        now_ts=now,
-                    )
+                    _source_probe = {}
+                    if SOURCE_RESONANCE_DIRECT_PROBE_ENABLED:
+                        _source_probe = evaluate_source_resonance_tiny_probe(
+                            _external_alpha,
+                            watchlist_entry=w_entry,
+                            route=w_entry.get('type'),
+                            hard_gate_status=eval_res.get('action_reason'),
+                            dex_snapshot=_fire_dex,
+                            lifecycle=_preflight_lifecycle,
+                            now_ts=now,
+                        )
                     if _source_probe.get('pass'):
                         _source_probe = {
                             **_source_probe,
@@ -17852,6 +18128,15 @@ def run_monitor(db):
                     }
                     if _pending_signal_route:
                         _monitor_state['signalRoute'] = _pending_signal_route
+                    if pending.get('resonance_cohort'):
+                        _monitor_state['resonanceCohort'] = pending.get('resonance_cohort')
+                        _monitor_state['cohortPriority'] = pending.get('cohort_priority')
+                    if pending.get('gmgn_pre_seen') is not None:
+                        _monitor_state['gmgnPreSeen'] = bool(pending.get('gmgn_pre_seen'))
+                    if pending.get('gmgn_lead_time_sec') is not None:
+                        _monitor_state['gmgnLeadTimeSec'] = pending.get('gmgn_lead_time_sec')
+                    if pending.get('source_resonance_score') is not None:
+                        _monitor_state['sourceResonanceScore'] = pending.get('source_resonance_score')
                     if pending.get('ath_recovery_family'):
                         _monitor_state['athRecoveryFamily'] = pending.get('ath_recovery_family')
                         _monitor_state['parentBlockReason'] = pending.get('parent_block_reason')

@@ -90,7 +90,59 @@ test('premium signal audit counts pass-to-max dogs outside missed attribution', 
   assert.equal(audit.uncovered_pass_dogs[0].tradable_peak_pnl_pct, 145);
   assert.equal(audit.uncovered_pass_dogs[0].source_resonance_cohort, 'telegram_gmgn');
   assert.equal(audit.uncovered_pass_dogs[0].gmgn_pre_seen, true);
+  assert.equal(audit.cohort_scoreboard.find((row) => row.cohort === 'telegram_gmgn').gold, 1);
+  assert.equal(audit.cohort_scoreboard.find((row) => row.cohort === 'unknown').paper_filled_unique, 1);
   assert.equal(audit.unclassified_tokens.length, 0);
+});
+
+test('premium signal audit reads cohort from paper trade monitor state', () => {
+  const audit = buildPremiumSignalOutcomeAudit({
+    signals: [
+      {
+        id: 1,
+        token_ca: 'C',
+        symbol: 'COHORT',
+        timestamp: 1_000_000,
+        signal_type: 'ATH',
+        market_cap: 50_000,
+        hard_gate_status: 'PASS',
+      },
+      {
+        id: 2,
+        token_ca: 'C',
+        symbol: 'COHORT',
+        timestamp: 1_060_000,
+        signal_type: 'ATH',
+        market_cap: 80_000,
+        hard_gate_status: 'PASS',
+      },
+    ],
+    paperTrades: [
+      {
+        id: 10,
+        token_ca: 'C',
+        entry_ts: 1000,
+        exit_ts: 1060,
+        entry_mode: 'hard_gate_pass_tiny_probe',
+        pnl_pct: 0.12,
+        peak_pnl: 0.32,
+        monitor_state_json: JSON.stringify({
+          resonanceCohort: 'telegram_gmgn_quote_clean',
+          gmgnPreSeen: true,
+          gmgnLeadTimeSec: 180,
+        }),
+      },
+    ],
+    missedAttributions: [],
+    sinceTs: 1000,
+  });
+
+  const cohort = audit.cohort_scoreboard.find((row) => row.cohort === 'telegram_gmgn_quote_clean');
+  assert.equal(audit.top_pass_movers[0].source_resonance_cohort, 'telegram_gmgn_quote_clean');
+  assert.equal(cohort.paper_filled_unique, 1);
+  assert.equal(cohort.realized_win_rate, 1);
+  assert.equal(cohort.avg_realized_pnl_pct, 12);
+  assert.equal(cohort.avg_peak_pnl_pct, 32);
 });
 
 test('premium signal audit keeps hard-gate pass gaps classified and visible', () => {

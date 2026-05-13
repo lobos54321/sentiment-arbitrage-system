@@ -150,7 +150,53 @@ function isoFromSec(sec) {
   return n == null ? null : new Date(n * 1000).toISOString();
 }
 
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function boolOrNull(value) {
+  if (value == null) return null;
+  if (typeof value === 'boolean') return value;
+  const s = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(s)) return true;
+  if (['0', 'false', 'no', 'off'].includes(s)) return false;
+  return Boolean(Number(value));
+}
+
+function tradeResonanceContext(row) {
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  return {
+    source_resonance_cohort:
+      row.source_resonance_cohort ||
+      monitorState.resonance_cohort ||
+      monitorState.resonanceCohort ||
+      monitorState.source_resonance_cohort ||
+      entryAudit.resonance_cohort ||
+      null,
+    gmgn_pre_seen:
+      row.gmgn_pre_seen ??
+      monitorState.gmgn_pre_seen ??
+      monitorState.gmgnPreSeen ??
+      entryAudit.gmgn_pre_seen ??
+      null,
+    gmgn_lead_time_sec:
+      row.gmgn_lead_time_sec ??
+      monitorState.gmgn_lead_time_sec ??
+      monitorState.gmgnLeadTimeSec ??
+      entryAudit.gmgn_lead_time_sec ??
+      null,
+  };
+}
+
 function serializeTrade(row) {
+  const resonance = tradeResonanceContext(row);
   return {
     id: row.id,
     symbol: row.symbol || null,
@@ -163,6 +209,9 @@ function serializeTrade(row) {
     pnl_pct: row.pnl_pct == null ? null : roundNumber(Number(row.pnl_pct) * 100, 2),
     peak_pnl_pct: row.peak_pnl == null ? null : roundNumber(Number(row.peak_pnl) * 100, 2),
     position_size_sol: row.position_size_sol == null ? null : Number(row.position_size_sol),
+    source_resonance_cohort: resonance.source_resonance_cohort,
+    gmgn_pre_seen: boolOrNull(resonance.gmgn_pre_seen),
+    gmgn_lead_time_sec: resonance.gmgn_lead_time_sec ?? null,
   };
 }
 
@@ -251,6 +300,9 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
   const paperTrades = tokenCa ? (paperTradesByToken.get(tokenCa) || []) : [];
   const missed = tokenCa ? missedByToken.get(tokenCa) : null;
   const missedDetail = missed?.detail || null;
+  const serializedPaperTrades = paperTrades.map(serializeTrade);
+  const firstTradeCohort = serializedPaperTrades.find((trade) => trade.source_resonance_cohort)?.source_resonance_cohort || null;
+  const firstTradeGmgnPreSeen = serializedPaperTrades.find((trade) => trade.gmgn_pre_seen != null)?.gmgn_pre_seen ?? null;
 
   return {
     token_ca: tokenCa,
@@ -280,7 +332,7 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
     pass_to_max_pct: roundNumber(passToMaxPct, 2),
     pass_to_max_tier: tierForPct(passToMaxPct),
     paper_trade_count: paperTrades.length,
-    paper_trades: paperTrades.map(serializeTrade),
+    paper_trades: serializedPaperTrades,
     missed_attribution_count: missed?.n || 0,
     missed_attribution_max_pnl_pct: missed?.max_pnl_pct ?? null,
     missed_attribution: missedDetail,
@@ -290,9 +342,99 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
     final_blocker: missedDetail?.final_blocker || null,
     quote_clean: missedDetail?.quote_clean ?? null,
     tradable_peak_pnl_pct: missedDetail?.tradable_peak_pnl_pct ?? null,
-    source_resonance_cohort: missedDetail?.source_resonance_cohort || null,
-    gmgn_pre_seen: missedDetail?.gmgn_pre_seen ?? null,
+    source_resonance_cohort: missedDetail?.source_resonance_cohort || firstTradeCohort || null,
+    gmgn_pre_seen: missedDetail?.gmgn_pre_seen ?? firstTradeGmgnPreSeen ?? null,
   };
+}
+
+function buildCohortScoreboard(tokens) {
+  const groups = new Map();
+  const ensure = (cohort) => {
+    const key = cohort || 'unknown';
+    if (!groups.has(key)) {
+      groups.set(key, {
+        cohort: key,
+        unique_tokens: 0,
+        hard_gate_pass_unique: 0,
+        paper_filled_unique: 0,
+        missed_unique: 0,
+        gold: 0,
+        silver: 0,
+        bronze: 0,
+        quote_clean_dog: 0,
+        realized_trades: 0,
+        realized_wins: 0,
+        realized_pnl_sum: 0,
+        peak_pnl_sum: 0,
+        final_blockers: new Map(),
+      });
+    }
+    return groups.get(key);
+  };
+  for (const item of tokens) {
+    const cohort = item.source_resonance_cohort || 'unknown';
+    const group = ensure(cohort);
+    group.unique_tokens += 1;
+    if (item.hard_gate_pass) group.hard_gate_pass_unique += 1;
+    if (item.paper_trade_count > 0) group.paper_filled_unique += 1;
+    if (item.missed_attribution_count > 0 || item.coverage_gap) group.missed_unique += 1;
+    if (item.pass_to_max_tier === 'gold') group.gold += 1;
+    if (item.pass_to_max_tier === 'silver') group.silver += 1;
+    if (item.pass_to_max_tier === 'bronze') group.bronze += 1;
+    if (
+      item.quote_clean === true
+      && ['gold', 'silver', 'bronze'].includes(item.pass_to_max_tier)
+    ) {
+      group.quote_clean_dog += 1;
+    }
+    for (const trade of item.paper_trades || []) {
+      if (trade.pnl_pct == null) continue;
+      group.realized_trades += 1;
+      if (Number(trade.pnl_pct) > 0) group.realized_wins += 1;
+      group.realized_pnl_sum += Number(trade.pnl_pct);
+      if (trade.peak_pnl_pct != null) group.peak_pnl_sum += Number(trade.peak_pnl_pct);
+    }
+    const blocker = item.final_blocker
+      ? `${item.final_blocker.component || 'unknown'}:${item.final_blocker.reason || 'unknown'}`
+      : null;
+    if (blocker) group.final_blockers.set(blocker, (group.final_blockers.get(blocker) || 0) + 1);
+  }
+  return Array.from(groups.values())
+    .map((group) => ({
+      cohort: group.cohort,
+      unique_tokens: group.unique_tokens,
+      hard_gate_pass_unique: group.hard_gate_pass_unique,
+      paper_filled_unique: group.paper_filled_unique,
+      missed_unique: group.missed_unique,
+      gold: group.gold,
+      silver: group.silver,
+      bronze: group.bronze,
+      quote_clean_dog: group.quote_clean_dog,
+      realized_win_rate: group.realized_trades > 0
+        ? roundNumber(group.realized_wins / group.realized_trades, 4)
+        : null,
+      avg_realized_pnl_pct: group.realized_trades > 0
+        ? roundNumber(group.realized_pnl_sum / group.realized_trades, 2)
+        : null,
+      avg_peak_pnl_pct: group.realized_trades > 0
+        ? roundNumber(group.peak_pnl_sum / group.realized_trades, 2)
+        : null,
+      final_blockers_top: Array.from(group.final_blockers.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([blocker, count]) => ({ blocker, count })),
+    }))
+    .sort((a, b) => {
+      const priority = {
+        telegram_gmgn_quote_clean: 4,
+        telegram_gmgn: 3,
+        telegram_quote_clean: 2,
+        telegram_only: 1,
+      };
+      return (priority[b.cohort] || 0) - (priority[a.cohort] || 0)
+        || b.hard_gate_pass_unique - a.hard_gate_pass_unique
+        || b.unique_tokens - a.unique_tokens;
+    });
 }
 
 export function buildPremiumSignalOutcomeAudit({
@@ -371,6 +513,7 @@ export function buildPremiumSignalOutcomeAudit({
   const coverageGaps = tokens
     .filter((item) => item.coverage_gap)
     .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
+  const cohortScoreboard = buildCohortScoreboard(tokens);
 
   return {
     generated_at: generatedAt,
@@ -402,6 +545,7 @@ export function buildPremiumSignalOutcomeAudit({
     coverage_gap_tokens: coverageGaps.slice(0, 30),
     unclassified_tokens: unclassified.slice(0, 30),
     top_stream_movers: topStreamMovers.slice(0, 30),
+    cohort_scoreboard: cohortScoreboard,
   };
 }
 
