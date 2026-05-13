@@ -575,7 +575,14 @@ function buildClosedLoopSignalSummary(signalDb, sinceTs) {
   const signalCols = getTableColumns(signalDb, 'premium_signals');
   if (!signalCols.has('token_ca')) return { ...empty, available: true, note: 'premium_signals.token_ca missing' };
   const tsExpr = closedLoopTimestampExpr(signalCols);
-  const whereSql = sinceTs ? `WHERE ${tsExpr} >= @since` : '';
+  const whereSql = sinceTs
+    ? (signalCols.has('timestamp')
+      ? `WHERE ((timestamp > 1000000000000 AND timestamp >= @sinceMs) OR (timestamp <= 1000000000000 AND timestamp >= @since))`
+      : `WHERE ${tsExpr} >= @since`)
+    : '';
+  const params = sinceTs
+    ? (signalCols.has('timestamp') ? { since: sinceTs, sinceMs: sinceTs * 1000 } : { since: sinceTs })
+    : {};
   const hardGateExpr = signalCols.has('hard_gate_status') ? 'hard_gate_status' : "''";
   const legacyStatusSql = sqlInList(LOTTO_OBSERVE_UPSTREAM_STATUSES);
   return {
@@ -590,7 +597,7 @@ function buildClosedLoopSignalSummary(signalDb, sinceTs) {
         COUNT(DISTINCT CASE WHEN ${hardGateExpr} IN (${legacyStatusSql}) THEN token_ca END) AS legacy_observe_unique
       FROM premium_signals
       ${whereSql}
-    `).get(sinceTs ? { since: sinceTs } : {}),
+    `).get(params),
   };
 }
 
@@ -708,6 +715,9 @@ function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
     missedCols.has('baseline_ts') ? 'm.baseline_ts' : null,
     '0',
   ].filter(Boolean).join(', ')})`;
+  const missedWhereTsExpr = missedCols.has('created_event_ts')
+    ? 'm.created_event_ts'
+    : (missedCols.has('signal_ts') ? 'm.signal_ts' : eventTsExpr);
   const maxPnlExpr = `COALESCE(${[
     missedCols.has('tradable_peak_pnl') ? 'm.tradable_peak_pnl' : null,
     missedCols.has('max_pnl_recorded') ? 'm.max_pnl_recorded' : null,
@@ -746,8 +756,7 @@ function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
         ELSE NULL
       END AS entry_mode_candidate
     FROM paper_missed_signal_attribution m
-    ${sinceTs ? `WHERE ${eventTsExpr} >= @since` : ''}
-    ORDER BY ${maxPnlExpr} DESC, ${eventTsExpr} DESC
+    ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
     LIMIT @rowLimit
   `).all(sinceTs ? { since: sinceTs, rowLimit: 20000 } : { rowLimit: 20000 });
 
@@ -3341,6 +3350,9 @@ const server = http.createServer(async (req, res) => {
             missedCols.has('baseline_ts') ? 'm.baseline_ts' : null,
             '0',
           ].filter(Boolean).join(', ')})`;
+          const missedWhereTsExpr = missedCols.has('created_event_ts')
+            ? 'm.created_event_ts'
+            : (missedCols.has('signal_ts') ? 'm.signal_ts' : missedEventTsExpr);
           const maxPnlExpr = `COALESCE(${[
             missedCols.has('tradable_peak_pnl') ? 'm.tradable_peak_pnl' : null,
             missedCols.has('max_pnl_recorded') ? 'm.max_pnl_recorded' : null,
@@ -3425,7 +3437,7 @@ const server = http.createServer(async (req, res) => {
                 ) AS rn
               FROM paper_missed_signal_attribution m
               ${sourceResonanceJoin}
-              ${sinceTs ? `WHERE ${missedEventTsExpr} >= @since` : ''}
+              ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
             ),
             counts AS (
               SELECT token_ca, COUNT(*) AS n, MAX(row_max_pnl) AS max_pnl
