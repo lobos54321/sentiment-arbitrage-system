@@ -2439,7 +2439,7 @@ def test_hard_gate_pass_tiny_probe_uses_tiny_scout_spread_budget():
     decision = evaluate_entry_edge_budget(
         route="ATH",
         trigger_price=1.0,
-        quote_price=1.029,
+        quote_price=1.079,
         pending={
             "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
             "paper_only_scout": True,
@@ -2449,8 +2449,9 @@ def test_hard_gate_pass_tiny_probe_uses_tiny_scout_spread_budget():
     )
 
     assert decision["pass"] is True
-    assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT
+    assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT
     assert decision["spread_pct"] > monitor.ENTRY_EDGE_ATH_MAX_SPREAD_PCT
+    assert decision["spread_pct"] > monitor.ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):

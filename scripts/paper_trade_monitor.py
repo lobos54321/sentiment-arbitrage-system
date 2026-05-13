@@ -118,6 +118,7 @@ ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_R
 ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '2.0'))
 ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT', '5.0'))
 ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT', str(ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT)))
+ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT', '12.0'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
 ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(3 * 60)))
 ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '2.0'))
@@ -3945,8 +3946,11 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
     tiny_scout_spread_cap_pct = None
     if is_tiny_scout:
         tiny_scout_spread_cap_pct = ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT
-        if entry_mode == SOURCE_RESONANCE_TINY_PROBE_MODE or entry_mode == HARD_GATE_PASS_TINY_PROBE_MODE:
+        if entry_mode == SOURCE_RESONANCE_TINY_PROBE_MODE:
             max_spread_pct = max(max_spread_pct, ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT)
+            tiny_scout_spread_cap_pct = max_spread_pct
+        elif entry_mode == HARD_GATE_PASS_TINY_PROBE_MODE:
+            max_spread_pct = max(max_spread_pct, ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT)
             tiny_scout_spread_cap_pct = max_spread_pct
         elif entry_mode in {
             LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
