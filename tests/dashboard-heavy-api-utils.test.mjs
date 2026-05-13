@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import {
+  buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   boundedIntParam,
   boundedWindowedSinceTs,
@@ -221,5 +222,55 @@ test('closed loop missed dog summary ranks one blocker per token in SQL', () => 
   assert.equal(summaryOnly.silver_unique, 1);
   assert.deepEqual(summaryOnly.top_missed_dogs, []);
   assert.deepEqual(summaryOnly.by_final_blocker, []);
+  db.close();
+});
+
+test('closed loop probe summary uses recent trade window with exit fallback', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE paper_decision_events (
+      event_ts REAL,
+      token_ca TEXT,
+      component TEXT,
+      event_type TEXT,
+      decision TEXT,
+      reason TEXT
+    );
+    CREATE TABLE paper_trades (
+      entry_ts REAL,
+      exit_ts REAL,
+      entry_mode TEXT,
+      token_ca TEXT,
+      pnl_pct REAL,
+      peak_pnl REAL
+    );
+  `);
+  db.prepare(`
+    INSERT INTO paper_decision_events (
+      event_ts, token_ca, component, event_type, decision, reason
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(1001, 'token-a', 'hard_gate_pass_probe', 'pending_entry', 'accept', 'armed');
+  const insertTrade = db.prepare(`
+    INSERT INTO paper_trades (
+      entry_ts, exit_ts, entry_mode, token_ca, pnl_pct, peak_pnl
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  insertTrade.run(1001, 1010, 'hard_gate_pass_tiny_probe', 'token-a', 0.2, 0.5);
+  insertTrade.run(null, 1002, 'hard_gate_pass_tiny_probe', 'token-b', -0.1, 0.1);
+  insertTrade.run(900, 950, 'hard_gate_pass_tiny_probe', 'old-token', 4.0, 4.0);
+
+  const summary = buildClosedLoopProbeSummary(
+    db,
+    new Set(['paper_decision_events', 'paper_trades']),
+    1000
+  );
+
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.armed_events, 1);
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.armed_unique, 1);
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.fills, 2);
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.fill_unique, 2);
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.wins, 1);
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.avg_pnl_pct, 5);
+  assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.max_peak_pnl_pct, 50);
   db.close();
 });

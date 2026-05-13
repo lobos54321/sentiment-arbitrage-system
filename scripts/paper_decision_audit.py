@@ -49,6 +49,8 @@ CREATE_DECISION_AUDIT_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_pde_trade ON paper_decision_events(trade_id)",
     "CREATE INDEX IF NOT EXISTS idx_pde_component ON paper_decision_events(component, decision)",
     "CREATE INDEX IF NOT EXISTS idx_pde_event_ts ON paper_decision_events(event_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pde_component_event_ts ON paper_decision_events(component, event_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pde_component_event_type_ts ON paper_decision_events(component, event_type, event_ts)",
     "CREATE INDEX IF NOT EXISTS idx_pde_token_component_reason_ts ON paper_decision_events(token_ca, component, reason, event_ts)",
 ]
 

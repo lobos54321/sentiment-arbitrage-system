@@ -11095,6 +11095,7 @@ def init_paper_db(db_path=None):
         db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_token ON paper_trades(token_ca)")
         db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit ON paper_trades(exit_reason)")
         db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_ts ON paper_trades(entry_ts)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_exit_ts ON paper_trades(exit_ts)")
         db_conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_trade_path_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -11182,6 +11183,8 @@ def init_paper_db(db_path=None):
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_stage ON paper_trades(token_ca, signal_ts, strategy_stage)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_signal_route ON paper_trades(signal_route)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_state ON paper_trades(lifecycle_state)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_mode_entry_ts ON paper_trades(entry_mode, entry_ts)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_mode_exit_ts ON paper_trades(entry_mode, exit_ts)")
         except sqlite3.OperationalError:
             pass
         init_decision_audit(db_conn)

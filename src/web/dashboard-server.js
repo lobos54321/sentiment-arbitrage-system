@@ -647,7 +647,7 @@ function buildClosedLoopSignalSummary(signalDb, sinceTs) {
   };
 }
 
-function buildClosedLoopProbeSummary(
+export function buildClosedLoopProbeSummary(
   paperDb,
   tableNames,
   sinceTs,
@@ -744,7 +744,23 @@ function buildClosedLoopProbeSummary(
     const modeFilterSql = includePaperPnlDetails
       ? ''
       : `AND COALESCE(entry_mode, 'unknown') IN (${sqlInList(CLOSED_LOOP_PROBE_MODES)})`;
+    const tradeSourceSql = sinceTs
+      ? `
+      WITH recent_trades AS (
+        SELECT entry_mode, token_ca, pnl_pct, peak_pnl
+        FROM paper_trades
+        WHERE entry_ts >= @since ${modeFilterSql}
+        UNION ALL
+        SELECT entry_mode, token_ca, pnl_pct, peak_pnl
+        FROM paper_trades
+        WHERE entry_ts IS NULL AND exit_ts >= @since ${modeFilterSql}
+      )
+      `
+      : '';
+    const tradeTableSql = sinceTs ? 'recent_trades' : 'paper_trades';
+    const tradeWhereSql = !sinceTs && modeFilterSql ? `WHERE 1=1 ${modeFilterSql}` : '';
     const tradeRows = paperDb.prepare(`
+      ${tradeSourceSql}
       SELECT
         COALESCE(entry_mode, 'unknown') AS entry_mode,
         COUNT(*) AS fills,
@@ -753,8 +769,8 @@ function buildClosedLoopProbeSummary(
         AVG(pnl_pct) AS avg_pnl,
         SUM(pnl_pct) AS total_pnl,
         MAX(peak_pnl) AS max_peak_pnl
-      FROM paper_trades
-      ${sinceTs ? `WHERE COALESCE(entry_ts, exit_ts, 0) >= @since ${modeFilterSql}` : (modeFilterSql ? `WHERE 1=1 ${modeFilterSql}` : '')}
+      FROM ${tradeTableSql}
+      ${tradeWhereSql}
       GROUP BY COALESCE(entry_mode, 'unknown')
       ORDER BY fills DESC, total_pnl DESC
     `).all(sinceTs ? { since: sinceTs } : {});
