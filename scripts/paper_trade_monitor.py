@@ -6446,12 +6446,14 @@ def arm_lotto_upstream_realtime_tiny_scout(
     pending_entries[lifecycle_id]['entry_mode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
     pending_entries[lifecycle_id]['scout_mode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
     pending_entries[lifecycle_id]['paper_only_scout'] = True
+    pending_entries[lifecycle_id]['execution_scope'] = 'paper_only'
     pending_entries[lifecycle_id]['replay_source'] = 'live_monitor_lotto_upstream_realtime'
     pending_entries[lifecycle_id]['stage_outcome'] = 'lotto_upstream_realtime_tiny_scout_armed'
     pending_entries[lifecycle_id]['lotto_state']['probe'] = True
     pending_entries[lifecycle_id]['lotto_state']['probeSource'] = 'upstream_realtime'
     pending_entries[lifecycle_id]['lotto_state']['probeEntryMode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
     pending_entries[lifecycle_id]['lotto_state']['paper_only_scout'] = True
+    pending_entries[lifecycle_id]['lotto_state']['executionScope'] = 'paper_only'
     record_decision_event(
         db,
         component='lotto_upstream_realtime_scout',
@@ -12948,6 +12950,7 @@ def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
 
 LOTTO_OBSERVE_UPSTREAM_STATUSES = {
     'LOTTO_OBSERVE_LOW_MC_VOL',
+    'NOT_ATH_PREBUY_KLINE_BLOCK',
     'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
     'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
     'NOT_ATH_V17',

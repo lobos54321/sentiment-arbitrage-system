@@ -2437,6 +2437,7 @@ def test_legacy_new_trending_statuses_are_observable_but_not_pass_probes():
         "NOT_ATH_V16",
         "INSUFFICIENT_KLINE",
         "NO_MC_DATA",
+        "NOT_ATH_PREBUY_KLINE_BLOCK",
     }:
         assert status in monitor.LOTTO_OBSERVE_UPSTREAM_STATUSES
         assert monitor._is_paper_trade_signal({
@@ -2592,6 +2593,7 @@ def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
     assert pending_entries["TokenCA:1000"]["signal_route"] == "ATH"
     assert pending_entries["TokenCA:1000"]["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
     assert pending_entries["TokenCA:1000"]["paper_only_scout"] is True
+    assert pending_entries["TokenCA:1000"]["execution_scope"] == "paper_only"
     assert pending_entries["TokenCA:1000"]["timing_passed"] is True
 
 

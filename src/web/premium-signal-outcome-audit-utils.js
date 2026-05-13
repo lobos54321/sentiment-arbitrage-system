@@ -66,9 +66,9 @@ function compactTypeCounts(rows) {
   return counts;
 }
 
-const OBSERVE_ONLY_STATUSES = new Set([
-  'RISK_BLOCKED',
+const LOTTO_OBSERVE_UPSTREAM_STATUSES = [
   'LOTTO_OBSERVE_LOW_MC_VOL',
+  'NOT_ATH_PREBUY_KLINE_BLOCK',
   'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
   'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
   'NOT_ATH_V17',
@@ -78,9 +78,16 @@ const OBSERVE_ONLY_STATUSES = new Set([
   'NOT_ATH_V16',
   'INSUFFICIENT_KLINE',
   'NO_MC_DATA',
-]);
+];
 
-const SAFETY_REJECT_STATUSES = new Set([
+const OBSERVE_ONLY_STATUS_LIST = [
+  'RISK_BLOCKED',
+  ...LOTTO_OBSERVE_UPSTREAM_STATUSES,
+];
+
+const OBSERVE_ONLY_STATUSES = new Set(OBSERVE_ONLY_STATUS_LIST);
+
+const SAFETY_REJECT_STATUS_LIST = [
   'GREYLIST',
   'WASH_HIGH',
   'GREYLIST_LOW_CONF',
@@ -90,19 +97,52 @@ const SAFETY_REJECT_STATUSES = new Set([
   '5M_OVERHEAT',
   'HONEYPOT',
   'RUG_PULL_RISK',
-]);
+];
 
-function coverageClassForToken(outcome) {
-  if (outcome.paper_trade_count > 0) return 'paper_trade';
+const SAFETY_REJECT_STATUSES = new Set(SAFETY_REJECT_STATUS_LIST);
+
+function coverageForToken(outcome) {
+  if (outcome.paper_trade_count > 0) {
+    return {
+      class: 'paper_trade',
+      reason: 'paper_trade_present',
+      coverage_gap: false,
+    };
+  }
   const statuses = new Set(Object.keys(outcome.gate_statuses || {}).map((status) => String(status || '').toUpperCase()));
-  if ([...statuses].some((status) => SAFETY_REJECT_STATUSES.has(status))) return 'safety_reject';
+  if ([...statuses].some((status) => SAFETY_REJECT_STATUSES.has(status))) {
+    return {
+      class: 'safety_reject',
+      reason: 'hard_safety_status',
+      coverage_gap: false,
+    };
+  }
   if (
     outcome.missed_attribution_count > 0
     || [...statuses].some((status) => OBSERVE_ONLY_STATUSES.has(status))
   ) {
-    return 'observe_only';
+    return {
+      class: 'observe_only',
+      reason: outcome.missed_attribution_count > 0 ? 'missed_attribution_present' : 'observe_only_status',
+      coverage_gap: false,
+    };
   }
-  return 'unclassified';
+  if (outcome.hard_gate_pass) {
+    return {
+      class: 'observe_only',
+      reason: 'hard_gate_pass_without_paper_trade_or_missed_attribution',
+      coverage_gap: true,
+    };
+  }
+  return {
+    class: 'observe_only',
+    reason: 'unmapped_status_observe_only',
+    coverage_gap: true,
+  };
+}
+
+function coverageClassForToken(outcome) {
+  return coverageForToken(outcome).class;
 }
 
 function isoFromSec(sec) {
@@ -124,6 +164,65 @@ function serializeTrade(row) {
     peak_pnl_pct: row.peak_pnl == null ? null : roundNumber(Number(row.peak_pnl) * 100, 2),
     position_size_sol: row.position_size_sol == null ? null : Number(row.position_size_sol),
   };
+}
+
+function serializeMissed(row) {
+  if (!row) return null;
+  const maxPnl = numeric(row.max_pnl ?? row.max_pnl_recorded ?? row.tradable_peak_pnl ?? row.pnl_24h ?? row.pnl_60m ?? row.pnl_15m ?? row.pnl_5m);
+  const tradablePeakPnl = numeric(row.tradable_peak_pnl);
+  const firstTradablePnl = numeric(row.first_tradable_pnl);
+  const quoteClean = row.quote_clean ?? (
+    row.tradable_missed != null
+      ? (Number(row.tradable_missed || 0) === 1 && Number(row.would_stop_before_peak || 0) !== 1 ? 1 : 0)
+      : null
+  );
+  return {
+    count: Number(row.n || row.count || 0),
+    signal_id: row.signal_id ?? null,
+    signal_ts: row.signal_ts ?? null,
+    route: row.route || null,
+    entry_mode_candidate: row.entry_mode_candidate || row.entry_mode || null,
+    final_component: row.component || row.final_component || null,
+    final_reason: row.reject_reason || row.final_reason || null,
+    final_decision: row.decision || null,
+    final_blocker: {
+      component: row.component || row.final_component || null,
+      reason: row.reject_reason || row.final_reason || null,
+      route: row.route || null,
+      decision: row.decision || null,
+    },
+    quote_clean: quoteClean == null ? null : Number(quoteClean) === 1,
+    tradability_status: row.tradability_status || null,
+    tradability_reason: row.tradability_reason || null,
+    tradable_missed: row.tradable_missed == null ? null : Number(row.tradable_missed) === 1,
+    would_stop_before_peak: row.would_stop_before_peak == null ? null : Number(row.would_stop_before_peak) === 1,
+    first_tradable_pnl_pct: firstTradablePnl == null ? null : roundNumber(firstTradablePnl * 100, 2),
+    tradable_peak_pnl_pct: tradablePeakPnl == null ? null : roundNumber(tradablePeakPnl * 100, 2),
+    max_pnl_pct: maxPnl == null ? null : roundNumber(maxPnl * 100, 2),
+    source_resonance_cohort: row.source_resonance_cohort || row.cohort || null,
+    source_resonance_level: row.source_resonance_level ?? row.resonance_level ?? null,
+    source_resonance_score: row.source_resonance_score ?? row.resonance_score ?? null,
+    gmgn_pre_seen: row.gmgn_pre_seen == null ? null : Number(row.gmgn_pre_seen) === 1,
+    gmgn_lead_time_sec: row.gmgn_lead_time_sec ?? null,
+  };
+}
+
+function mergeMissedAttribution(existing, row) {
+  const serialized = serializeMissed(row);
+  if (!serialized) return existing;
+  const current = existing || {
+    n: 0,
+    max_pnl_pct: null,
+    detail: null,
+  };
+  current.n += serialized.count || 1;
+  if (serialized.max_pnl_pct != null && (current.max_pnl_pct == null || serialized.max_pnl_pct > current.max_pnl_pct)) {
+    current.max_pnl_pct = serialized.max_pnl_pct;
+    current.detail = serialized;
+  } else if (!current.detail) {
+    current.detail = serialized;
+  }
+  return current;
 }
 
 function tokenOutcome(rows, paperTradesByToken, missedByToken) {
@@ -151,6 +250,7 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
   const tokenCa = sorted[0]?.token_ca || null;
   const paperTrades = tokenCa ? (paperTradesByToken.get(tokenCa) || []) : [];
   const missed = tokenCa ? missedByToken.get(tokenCa) : null;
+  const missedDetail = missed?.detail || null;
 
   return {
     token_ca: tokenCa,
@@ -183,6 +283,15 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
     paper_trades: paperTrades.map(serializeTrade),
     missed_attribution_count: missed?.n || 0,
     missed_attribution_max_pnl_pct: missed?.max_pnl_pct ?? null,
+    missed_attribution: missedDetail,
+    entry_mode_candidate: missedDetail?.entry_mode_candidate || (paperTrades[0]?.entry_mode ?? null),
+    final_component: missedDetail?.final_component || null,
+    final_reason: missedDetail?.final_reason || null,
+    final_blocker: missedDetail?.final_blocker || null,
+    quote_clean: missedDetail?.quote_clean ?? null,
+    tradable_peak_pnl_pct: missedDetail?.tradable_peak_pnl_pct ?? null,
+    source_resonance_cohort: missedDetail?.source_resonance_cohort || null,
+    gmgn_pre_seen: missedDetail?.gmgn_pre_seen ?? null,
   };
 }
 
@@ -206,11 +315,7 @@ export function buildPremiumSignalOutcomeAudit({
   const missedByToken = new Map();
   for (const row of missedAttributions) {
     if (!row.token_ca) continue;
-    const maxPnl = numeric(row.max_pnl);
-    missedByToken.set(row.token_ca, {
-      n: Number(row.n || 0),
-      max_pnl_pct: maxPnl == null ? null : roundNumber(maxPnl * 100, 2),
-    });
+    missedByToken.set(row.token_ca, mergeMissedAttribution(missedByToken.get(row.token_ca), row));
   }
 
   const signalGroups = new Map();
@@ -244,11 +349,27 @@ export function buildPremiumSignalOutcomeAudit({
     unclassified: 0,
   };
   for (const item of tokens) {
-    item.coverage_class = coverageClassForToken(item);
+    const coverage = coverageForToken(item);
+    item.coverage_class = coverage.class;
+    item.coverage_reason = coverage.reason;
+    item.coverage_gap = coverage.coverage_gap;
+    if (coverage.coverage_gap && !item.final_blocker) {
+      item.final_component = 'coverage_audit';
+      item.final_reason = coverage.reason;
+      item.final_blocker = {
+        component: 'coverage_audit',
+        reason: coverage.reason,
+        route: item.hard_gate_pass ? 'PASS' : null,
+        decision: 'observe_only',
+      };
+    }
     coverageCounts[item.coverage_class] = (coverageCounts[item.coverage_class] || 0) + 1;
   }
   const unclassified = tokens
     .filter((item) => item.coverage_class === 'unclassified')
+    .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
+  const coverageGaps = tokens
+    .filter((item) => item.coverage_gap)
     .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
 
   return {
@@ -274,12 +395,20 @@ export function buildPremiumSignalOutcomeAudit({
       paper_traded_pass_unique: passTokens.filter((item) => item.paper_trade_count > 0).length,
       coverage_classes: coverageCounts,
       unclassified_unique: coverageCounts.unclassified,
+      coverage_gap_unique: coverageGaps.length,
     },
     top_pass_movers: topPassMovers.slice(0, 30),
     uncovered_pass_dogs: uncoveredPassDogs.slice(0, 30),
+    coverage_gap_tokens: coverageGaps.slice(0, 30),
     unclassified_tokens: unclassified.slice(0, 30),
     top_stream_movers: topStreamMovers.slice(0, 30),
   };
 }
 
-export { tierForPct };
+export {
+  coverageClassForToken,
+  LOTTO_OBSERVE_UPSTREAM_STATUSES,
+  OBSERVE_ONLY_STATUS_LIST,
+  SAFETY_REJECT_STATUS_LIST,
+  tierForPct,
+};
