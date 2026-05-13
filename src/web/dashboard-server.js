@@ -687,7 +687,19 @@ function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs) {
   return { by_mode: byMode, paper_pnl_by_entry_mode: paperPnlByEntryMode };
 }
 
-function missedDogBaseCte(paperDb, tableNames, sinceTs) {
+function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
+  const empty = {
+    available: false,
+    unique_tokens: 0,
+    quote_clean_unique: 0,
+    quote_clean_dog_unique: 0,
+    gold_unique: 0,
+    silver_unique: 0,
+    bronze_unique: 0,
+    top_missed_dogs: [],
+    by_final_blocker: [],
+  };
+  if (!paperDb || !tableNames.has('paper_missed_signal_attribution')) return empty;
   const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
   const missedColumn = (name, fallback = 'NULL') => missedCols.has(name) ? `m.${name}` : fallback;
   const eventTsExpr = `COALESCE(${[
@@ -712,150 +724,138 @@ function missedDogBaseCte(paperDb, tableNames, sinceTs) {
         THEN 1 ELSE 0
       END`
     : '0';
-  const hasSourceResonance = tableNames.has('source_resonance_candidates');
-  const sourceCols = hasSourceResonance ? getTableColumns(paperDb, 'source_resonance_candidates') : new Set();
-  const sourceColumn = (name, fallback = 'NULL') => sourceCols.has(name) ? name : `${fallback} AS ${name}`;
-  const sourceOrderTs = sourceCols.has('signal_ts') ? 'COALESCE(signal_ts, 0)' : '0';
-  const sourceOrderUpdated = sourceCols.has('updated_at') ? 'COALESCE(updated_at, 0)' : '0';
-  const sourceResonanceCte = hasSourceResonance ? `
-    sr_latest AS (
+  const rows = paperDb.prepare(`
+    SELECT
+      m.token_ca,
+      COALESCE(${missedColumn('symbol')}, substr(m.token_ca, 1, 8), '?') AS symbol,
+      ${missedColumn('signal_id')} AS signal_id,
+      ${missedColumn('signal_ts')} AS signal_ts,
+      COALESCE(${missedColumn('route')}, '-') AS route,
+      COALESCE(${missedColumn('component')}, '-') AS final_component,
+      COALESCE(${missedColumn('reject_reason')}, '-') AS final_reason,
+      ${missedColumn('tradability_status')} AS tradability_status,
+      ${missedColumn('tradability_reason')} AS tradability_reason,
+      ${missedColumn('tradable_peak_pnl')} AS tradable_peak_pnl,
+      ${quoteCleanExpr} AS quote_clean,
+      ${maxPnlExpr} AS max_pnl,
+      ${eventTsExpr} AS event_ts,
+      CASE
+        WHEN m.component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
+        WHEN m.component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
+        WHEN m.component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
+        ELSE NULL
+      END AS entry_mode_candidate
+    FROM paper_missed_signal_attribution m
+    ${sinceTs ? `WHERE ${eventTsExpr} >= @since` : ''}
+    ORDER BY ${maxPnlExpr} DESC, ${eventTsExpr} DESC
+    LIMIT @rowLimit
+  `).all(sinceTs ? { since: sinceTs, rowLimit: 20000 } : { rowLimit: 20000 });
+
+  const bestByToken = new Map();
+  for (const row of rows) {
+    if (!row.token_ca) continue;
+    const existing = bestByToken.get(row.token_ca);
+    if (!existing || Number(row.max_pnl || 0) > Number(existing.max_pnl || 0)) {
+      bestByToken.set(row.token_ca, row);
+    }
+  }
+
+  const sourceByToken = new Map();
+  if (tableNames.has('source_resonance_candidates') && bestByToken.size > 0) {
+    const sourceCols = getTableColumns(paperDb, 'source_resonance_candidates');
+    const sourceColumn = (name, fallback = 'NULL') => sourceCols.has(name) ? name : `${fallback} AS ${name}`;
+    const sourceOrderTs = sourceCols.has('signal_ts') ? 'COALESCE(signal_ts, 0)' : '0';
+    const sourceOrderUpdated = sourceCols.has('updated_at') ? 'COALESCE(updated_at, 0)' : '0';
+    const tokens = Array.from(bestByToken.keys()).slice(0, 5000);
+    const tokenSql = sqlInList(tokens);
+    const sourceRows = paperDb.prepare(`
       SELECT
         token_ca,
         ${sourceColumn('cohort')},
         ${sourceColumn('gmgn_pre_seen', '0')},
         ${sourceColumn('gmgn_lead_time_sec')},
-        ROW_NUMBER() OVER (
-          PARTITION BY token_ca
-          ORDER BY ${sourceOrderTs} DESC, ${sourceOrderUpdated} DESC
-        ) AS rn
+        ${sourceOrderTs} AS source_signal_ts,
+        ${sourceOrderUpdated} AS source_updated_at
       FROM source_resonance_candidates
-    ),` : '';
-  const sourceResonanceJoin = hasSourceResonance
-    ? 'LEFT JOIN sr_latest sr ON sr.token_ca = m.token_ca AND sr.rn = 1'
-    : '';
-  const sourceResonanceSelect = hasSourceResonance ? `
-        sr.cohort AS source_resonance_cohort,
-        sr.gmgn_pre_seen AS gmgn_pre_seen,
-        sr.gmgn_lead_time_sec AS gmgn_lead_time_sec,` : `
-        NULL AS source_resonance_cohort,
-        NULL AS gmgn_pre_seen,
-        NULL AS gmgn_lead_time_sec,`;
-  return `
-    WITH ${sourceResonanceCte}
-    base AS (
-      SELECT
-        m.token_ca,
-        COALESCE(${missedColumn('symbol')}, substr(m.token_ca, 1, 8), '?') AS symbol,
-        ${missedColumn('signal_id')} AS signal_id,
-        ${missedColumn('signal_ts')} AS signal_ts,
-        COALESCE(${missedColumn('route')}, '-') AS route,
-        COALESCE(${missedColumn('component')}, '-') AS component,
-        COALESCE(${missedColumn('reject_reason')}, '-') AS reject_reason,
-        ${missedColumn('tradability_status')} AS tradability_status,
-        ${missedColumn('tradability_reason')} AS tradability_reason,
-        ${missedColumn('tradable_peak_pnl')} AS tradable_peak_pnl,
-        ${quoteCleanExpr} AS quote_clean,
-        ${maxPnlExpr} AS max_pnl,
-        ${eventTsExpr} AS event_ts,
-        CASE
-          WHEN m.component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
-          WHEN m.component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
-          WHEN m.component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
-          ELSE NULL
-        END AS entry_mode_candidate,
-        ${sourceResonanceSelect}
-        ROW_NUMBER() OVER (
-          PARTITION BY m.token_ca
-          ORDER BY ${maxPnlExpr} DESC, ${eventTsExpr} DESC
-        ) AS rn
-      FROM paper_missed_signal_attribution m
-      ${sourceResonanceJoin}
-      ${sinceTs ? `WHERE ${eventTsExpr} >= @since` : ''}
-    ),
-    one AS (
-      SELECT * FROM base WHERE rn = 1
-    )`;
-}
+      WHERE token_ca IN (${tokenSql})
+      ORDER BY token_ca, ${sourceOrderTs} DESC, ${sourceOrderUpdated} DESC
+    `).all();
+    for (const row of sourceRows) {
+      if (!sourceByToken.has(row.token_ca)) sourceByToken.set(row.token_ca, row);
+    }
+  }
 
-function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
-  const empty = {
-    available: false,
-    unique_tokens: 0,
+  const one = Array.from(bestByToken.values()).map((row) => {
+    const source = sourceByToken.get(row.token_ca) || {};
+    return {
+      ...row,
+      source_resonance_cohort: source.cohort || null,
+      gmgn_pre_seen: source.gmgn_pre_seen == null ? null : Number(source.gmgn_pre_seen) === 1,
+      gmgn_lead_time_sec: source.gmgn_lead_time_sec ?? null,
+      quote_clean: Number(row.quote_clean || 0) === 1,
+      max_pnl: Number(row.max_pnl || 0),
+      tradable_peak_pnl: row.tradable_peak_pnl == null ? null : Number(row.tradable_peak_pnl),
+      final_blocker_key: `${row.route}:${row.final_component}:${row.final_reason}`,
+    };
+  });
+
+  const summary = {
+    unique_tokens: one.length,
     quote_clean_unique: 0,
     quote_clean_dog_unique: 0,
     gold_unique: 0,
     silver_unique: 0,
     bronze_unique: 0,
-    top_missed_dogs: [],
-    by_final_blocker: [],
   };
-  if (!paperDb || !tableNames.has('paper_missed_signal_attribution')) return empty;
-  const baseCte = missedDogBaseCte(paperDb, tableNames, sinceTs);
-  const params = sinceTs ? { since: sinceTs, limit } : { limit };
-  const summary = paperDb.prepare(`
-    ${baseCte}
-    SELECT
-      COUNT(*) AS unique_tokens,
-      SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END) AS quote_clean_unique,
-      SUM(CASE WHEN quote_clean = 1 AND max_pnl >= 0.25 THEN 1 ELSE 0 END) AS quote_clean_dog_unique,
-      SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_unique,
-      SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_unique,
-      SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_unique
-    FROM one
-  `).get(params);
-  const topMissedDogs = paperDb.prepare(`
-    ${baseCte}
-    SELECT
-      symbol,
-      token_ca,
-      signal_id,
-      signal_ts,
-      route,
-      entry_mode_candidate,
-      component AS final_component,
-      reject_reason AS final_reason,
-      route || ':' || component || ':' || reject_reason AS final_blocker_key,
-      quote_clean,
-      max_pnl,
-      tradable_peak_pnl,
-      tradability_status,
-      tradability_reason,
-      source_resonance_cohort,
-      gmgn_pre_seen,
-      gmgn_lead_time_sec,
-      event_ts
-    FROM one
-    WHERE max_pnl >= 0.25
-    ORDER BY max_pnl DESC, event_ts DESC
-    LIMIT @limit
-  `).all(params).map((row) => ({
-    ...row,
-    quote_clean: Number(row.quote_clean || 0) === 1,
-    max_pnl_pct: row.max_pnl == null ? null : roundNumber(Number(row.max_pnl) * 100, 2),
-    tradable_peak_pnl_pct: row.tradable_peak_pnl == null ? null : roundNumber(Number(row.tradable_peak_pnl) * 100, 2),
-    gmgn_pre_seen: row.gmgn_pre_seen == null ? null : Number(row.gmgn_pre_seen) === 1,
-  }));
-  const byFinalBlocker = paperDb.prepare(`
-    ${baseCte}
-    SELECT
-      route,
-      component AS final_component,
-      reject_reason AS final_reason,
-      route || ':' || component || ':' || reject_reason AS final_blocker_key,
-      COUNT(*) AS unique_tokens,
-      SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END) AS quote_clean_unique,
-      SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_unique,
-      SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_unique,
-      SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_unique,
-      MAX(max_pnl) AS max_pnl
-    FROM one
-    GROUP BY route, component, reject_reason
-    ORDER BY gold_unique DESC, silver_unique DESC, bronze_unique DESC, unique_tokens DESC
-    LIMIT @limit
-  `).all(params).map((row) => ({
-    ...row,
-    max_pnl_pct: row.max_pnl == null ? null : roundNumber(Number(row.max_pnl) * 100, 2),
-  }));
+  const blockerMap = new Map();
+  for (const row of one) {
+    if (row.quote_clean) summary.quote_clean_unique += 1;
+    if (row.quote_clean && row.max_pnl >= 0.25) summary.quote_clean_dog_unique += 1;
+    if (row.max_pnl >= 1.0) summary.gold_unique += 1;
+    else if (row.max_pnl >= 0.5) summary.silver_unique += 1;
+    else if (row.max_pnl >= 0.25) summary.bronze_unique += 1;
+    const blocker = blockerMap.get(row.final_blocker_key) || {
+      route: row.route,
+      final_component: row.final_component,
+      final_reason: row.final_reason,
+      final_blocker_key: row.final_blocker_key,
+      unique_tokens: 0,
+      quote_clean_unique: 0,
+      gold_unique: 0,
+      silver_unique: 0,
+      bronze_unique: 0,
+      max_pnl: 0,
+    };
+    blocker.unique_tokens += 1;
+    if (row.quote_clean) blocker.quote_clean_unique += 1;
+    if (row.max_pnl >= 1.0) blocker.gold_unique += 1;
+    else if (row.max_pnl >= 0.5) blocker.silver_unique += 1;
+    else if (row.max_pnl >= 0.25) blocker.bronze_unique += 1;
+    blocker.max_pnl = Math.max(blocker.max_pnl, row.max_pnl);
+    blockerMap.set(row.final_blocker_key, blocker);
+  }
+
+  const topMissedDogs = one
+    .filter((row) => row.max_pnl >= 0.25)
+    .sort((a, b) => Number(b.max_pnl || 0) - Number(a.max_pnl || 0) || Number(b.event_ts || 0) - Number(a.event_ts || 0))
+    .slice(0, limit)
+    .map((row) => ({
+      ...row,
+      max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
+      tradable_peak_pnl_pct: row.tradable_peak_pnl == null ? null : roundNumber(Number(row.tradable_peak_pnl) * 100, 2),
+    }));
+  const byFinalBlocker = Array.from(blockerMap.values())
+    .sort((a, b) => (
+      Number(b.gold_unique || 0) - Number(a.gold_unique || 0)
+      || Number(b.silver_unique || 0) - Number(a.silver_unique || 0)
+      || Number(b.bronze_unique || 0) - Number(a.bronze_unique || 0)
+      || Number(b.unique_tokens || 0) - Number(a.unique_tokens || 0)
+    ))
+    .slice(0, limit)
+    .map((row) => ({
+      ...row,
+      max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
+    }));
   return {
     available: true,
     unique_tokens: Number(summary?.unique_tokens || 0),
