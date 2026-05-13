@@ -548,6 +548,52 @@ function emptyClosedLoopProbeSummary(mode) {
   };
 }
 
+function isSqliteBusyError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('database is locked') || message.includes('sqlite_busy');
+}
+
+function skippedClosedLoopProbeSummary(reason, error = null) {
+  return {
+    skipped: true,
+    skip_reason: reason,
+    error: error ? String(error.message || error) : undefined,
+    by_mode: Object.fromEntries(CLOSED_LOOP_PROBE_MODES.map((mode) => [mode, emptyClosedLoopProbeSummary(mode)])),
+    paper_pnl_by_entry_mode: [],
+  };
+}
+
+function skippedClosedLoopSourceSummary(reason, error = null) {
+  return {
+    available: false,
+    skipped: true,
+    skip_reason: reason,
+    error: error ? String(error.message || error) : undefined,
+    candidate_rows: null,
+    unique_tokens: null,
+    gmgn_pre_seen_unique: null,
+    quote_clean_unique: null,
+    telegram_gmgn_unique: null,
+  };
+}
+
+function skippedClosedLoopMissedDogSummary(reason, error = null) {
+  return {
+    available: false,
+    skipped: true,
+    skip_reason: reason,
+    error: error ? String(error.message || error) : undefined,
+    unique_tokens: null,
+    quote_clean_unique: null,
+    quote_clean_dog_unique: null,
+    gold_unique: null,
+    silver_unique: null,
+    bronze_unique: null,
+    top_missed_dogs: [],
+    by_final_blocker: [],
+  };
+}
+
 function closedLoopTimestampExpr(cols, tableAlias = '') {
   const prefix = tableAlias ? `${tableAlias}.` : '';
   if (cols.has('timestamp')) {
@@ -1079,9 +1125,22 @@ function buildClosedLoopWindowReport({
 }) {
   const timed = (name, fn) => {
     const startedAt = Date.now();
-    const value = fn();
-    if (timings) timings[`${timingPrefix}.${name}`] = Date.now() - startedAt;
-    return value;
+    try {
+      const value = fn();
+      if (timings) timings[`${timingPrefix}.${name}`] = Date.now() - startedAt;
+      return value;
+    } catch (error) {
+      if (!isSqliteBusyError(error)) throw error;
+      if (timings) {
+        timings[`${timingPrefix}.${name}`] = Date.now() - startedAt;
+        timings[`${timingPrefix}.${name}.error`] = 'database_busy';
+      }
+      if (name === 'table_names') return new Set();
+      if (name === 'probes') return skippedClosedLoopProbeSummary('database_busy', error);
+      if (name === 'source_resonance') return skippedClosedLoopSourceSummary('database_busy', error);
+      if (name === 'missed_dogs') return skippedClosedLoopMissedDogSummary('database_busy', error);
+      throw error;
+    }
   };
   const tableNames = timed('table_names', () => (
     paperDb
@@ -1099,10 +1158,7 @@ function buildClosedLoopWindowReport({
           includeDecisionEventDetails,
         })
         : {
-          skipped: true,
-          skip_reason: 'omitted_from_default_72h_decision_path',
-          by_mode: Object.fromEntries(CLOSED_LOOP_PROBE_MODES.map((mode) => [mode, emptyClosedLoopProbeSummary(mode)])),
-          paper_pnl_by_entry_mode: [],
+          ...skippedClosedLoopProbeSummary('omitted_from_default_72h_decision_path'),
         }
     )),
     source_resonance: timed('source_resonance', () => buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
@@ -1113,19 +1169,7 @@ function buildClosedLoopWindowReport({
         ? buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
           includeDetails: includeMissedDetails,
         })
-        : {
-          available: true,
-          skipped: true,
-          skip_reason: 'omitted_from_default_72h_decision_path',
-          unique_tokens: null,
-          quote_clean_unique: null,
-          quote_clean_dog_unique: null,
-          gold_unique: null,
-          silver_unique: null,
-          bronze_unique: null,
-          top_missed_dogs: [],
-          by_final_blocker: [],
-        }
+        : skippedClosedLoopMissedDogSummary('omitted_from_default_72h_decision_path')
     )),
   };
 }
@@ -3673,10 +3717,11 @@ const server = http.createServer(async (req, res) => {
       const includeHeavy72hProbes = includeRaw72h
         || String(url.searchParams.get('include_72h_probes') || '').toLowerCase() === '1';
       const includeTiming = String(url.searchParams.get('include_timing') || '').toLowerCase() === '1';
+      const paperDbTimeoutMs = boundedIntParam(url, 'paper_db_timeout_ms', 750, 0, 5000);
       const timings = includeTiming ? {} : null;
       const windows = [6, 24];
       signalDb = getDb();
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
       const byWindow = {};
       for (const hours of windows) {
         const sinceTs = nowSec - hours * 3600;
@@ -3710,6 +3755,7 @@ const server = http.createServer(async (req, res) => {
         filters: {
           windows: ['6h', '24h'],
           decision_window: '72h',
+          paper_db_timeout_ms: paperDbTimeoutMs,
           tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
           quote_clean_definition: 'tradable_missed=1 and would_stop_before_peak!=1',
         },
