@@ -694,7 +694,7 @@ function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs) {
   return { by_mode: byMode, paper_pnl_by_entry_mode: paperPnlByEntryMode };
 }
 
-function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
+function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, { includeDetails = true } = {}) {
   const empty = {
     available: false,
     unique_tokens: 0,
@@ -769,13 +769,30 @@ function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
     }
   }
 
-  const sourceByToken = new Map();
-  if (tableNames.has('source_resonance_candidates') && bestByToken.size > 0) {
+  const one = Array.from(bestByToken.values()).map((row) => ({
+    ...row,
+    source_resonance_cohort: null,
+    gmgn_pre_seen: null,
+    gmgn_lead_time_sec: null,
+    quote_clean: Number(row.quote_clean || 0) === 1,
+    max_pnl: Number(row.max_pnl || 0),
+    tradable_peak_pnl: row.tradable_peak_pnl == null ? null : Number(row.tradable_peak_pnl),
+    final_blocker_key: `${row.route}:${row.final_component}:${row.final_reason}`,
+  }));
+
+  const topBase = includeDetails
+    ? one
+      .filter((row) => row.max_pnl >= 0.25)
+      .sort((a, b) => Number(b.max_pnl || 0) - Number(a.max_pnl || 0) || Number(b.event_ts || 0) - Number(a.event_ts || 0))
+      .slice(0, limit)
+    : [];
+
+  if (includeDetails && tableNames.has('source_resonance_candidates') && topBase.length > 0) {
     const sourceCols = getTableColumns(paperDb, 'source_resonance_candidates');
     const sourceColumn = (name, fallback = 'NULL') => sourceCols.has(name) ? name : `${fallback} AS ${name}`;
     const sourceOrderTs = sourceCols.has('signal_ts') ? 'COALESCE(signal_ts, 0)' : '0';
     const sourceOrderUpdated = sourceCols.has('updated_at') ? 'COALESCE(updated_at, 0)' : '0';
-    const tokens = Array.from(bestByToken.keys()).slice(0, 5000);
+    const tokens = topBase.map((row) => row.token_ca);
     const tokenSql = sqlInList(tokens);
     const sourceRows = paperDb.prepare(`
       SELECT
@@ -789,24 +806,17 @@ function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
       WHERE token_ca IN (${tokenSql})
       ORDER BY token_ca, ${sourceOrderTs} DESC, ${sourceOrderUpdated} DESC
     `).all();
+    const sourceByToken = new Map();
     for (const row of sourceRows) {
       if (!sourceByToken.has(row.token_ca)) sourceByToken.set(row.token_ca, row);
     }
+    for (const row of topBase) {
+      const source = sourceByToken.get(row.token_ca) || {};
+      row.source_resonance_cohort = source.cohort || null;
+      row.gmgn_pre_seen = source.gmgn_pre_seen == null ? null : Number(source.gmgn_pre_seen) === 1;
+      row.gmgn_lead_time_sec = source.gmgn_lead_time_sec ?? null;
+    }
   }
-
-  const one = Array.from(bestByToken.values()).map((row) => {
-    const source = sourceByToken.get(row.token_ca) || {};
-    return {
-      ...row,
-      source_resonance_cohort: source.cohort || null,
-      gmgn_pre_seen: source.gmgn_pre_seen == null ? null : Number(source.gmgn_pre_seen) === 1,
-      gmgn_lead_time_sec: source.gmgn_lead_time_sec ?? null,
-      quote_clean: Number(row.quote_clean || 0) === 1,
-      max_pnl: Number(row.max_pnl || 0),
-      tradable_peak_pnl: row.tradable_peak_pnl == null ? null : Number(row.tradable_peak_pnl),
-      final_blocker_key: `${row.route}:${row.final_component}:${row.final_reason}`,
-    };
-  });
 
   const summary = {
     unique_tokens: one.length,
@@ -844,27 +854,26 @@ function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit) {
     blockerMap.set(row.final_blocker_key, blocker);
   }
 
-  const topMissedDogs = one
-    .filter((row) => row.max_pnl >= 0.25)
-    .sort((a, b) => Number(b.max_pnl || 0) - Number(a.max_pnl || 0) || Number(b.event_ts || 0) - Number(a.event_ts || 0))
-    .slice(0, limit)
+  const topMissedDogs = topBase
     .map((row) => ({
       ...row,
       max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
       tradable_peak_pnl_pct: row.tradable_peak_pnl == null ? null : roundNumber(Number(row.tradable_peak_pnl) * 100, 2),
     }));
-  const byFinalBlocker = Array.from(blockerMap.values())
-    .sort((a, b) => (
-      Number(b.gold_unique || 0) - Number(a.gold_unique || 0)
-      || Number(b.silver_unique || 0) - Number(a.silver_unique || 0)
-      || Number(b.bronze_unique || 0) - Number(a.bronze_unique || 0)
-      || Number(b.unique_tokens || 0) - Number(a.unique_tokens || 0)
-    ))
-    .slice(0, limit)
-    .map((row) => ({
-      ...row,
-      max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
-    }));
+  const byFinalBlocker = includeDetails
+    ? Array.from(blockerMap.values())
+      .sort((a, b) => (
+        Number(b.gold_unique || 0) - Number(a.gold_unique || 0)
+        || Number(b.silver_unique || 0) - Number(a.silver_unique || 0)
+        || Number(b.bronze_unique || 0) - Number(a.bronze_unique || 0)
+        || Number(b.unique_tokens || 0) - Number(a.unique_tokens || 0)
+      ))
+      .slice(0, limit)
+      .map((row) => ({
+        ...row,
+        max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
+      }))
+    : [];
   return {
     available: true,
     unique_tokens: Number(summary?.unique_tokens || 0),
@@ -946,7 +955,7 @@ function buildClosedLoopDecision(report72h) {
   };
 }
 
-function buildClosedLoopWindowReport({ signalDb, paperDb, sinceTs, limit }) {
+function buildClosedLoopWindowReport({ signalDb, paperDb, sinceTs, limit, includeMissedDetails = true }) {
   const tableNames = paperDb
     ? new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name))
     : new Set();
@@ -956,7 +965,9 @@ function buildClosedLoopWindowReport({ signalDb, paperDb, sinceTs, limit }) {
     premium_signals: buildClosedLoopSignalSummary(signalDb, sinceTs),
     probes: buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs),
     source_resonance: buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs),
-    missed_dogs: buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit),
+    missed_dogs: buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
+      includeDetails: includeMissedDetails,
+    }),
   };
 }
 
@@ -3497,6 +3508,7 @@ const server = http.createServer(async (req, res) => {
       const queryStartedAt = Date.now();
       const nowSec = Math.floor(Date.now() / 1000);
       const limit = boundedIntParam(url, 'limit', 30, 1, 200);
+      const includeRaw72h = String(url.searchParams.get('include_raw_72h') || '').toLowerCase() === '1';
       const windows = [6, 24];
       signalDb = getDb();
       paperDb = new Database(paperDbPath, { readonly: true });
@@ -3515,9 +3527,9 @@ const server = http.createServer(async (req, res) => {
         paperDb,
         sinceTs: nowSec - 72 * 3600,
         limit,
+        includeMissedDetails: includeRaw72h,
       });
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
+      const responseBody = {
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
         query_ms: Date.now() - queryStartedAt,
@@ -3534,12 +3546,15 @@ const server = http.createServer(async (req, res) => {
         },
         windows: byWindow,
         decision_72h: buildClosedLoopDecision(report72h),
-        raw_72h: report72h,
         notes: {
           endpoint_goal: '6h/24h closed-loop report for premium signal coverage, paper probe fills/rejects, missed dog blockers, and 72h paper-only decision rules.',
           final_blocker_rule: 'top_missed_dogs exposes exactly one route/component/reason blocker per unique token, chosen by highest observed missed PnL in the window.',
+          raw_72h: includeRaw72h ? 'included' : 'omitted by default; pass include_raw_72h=1 for the heavier 72h detail payload',
         },
-      }, null, 2));
+      };
+      if (includeRaw72h) responseBody.raw_72h = report72h;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(responseBody, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
