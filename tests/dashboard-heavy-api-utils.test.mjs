@@ -206,5 +206,20 @@ test('closed loop missed dog summary ranks one blocker per token in SQL', () => 
   assert.equal(summary.top_missed_dogs[1].quote_clean, false);
   assert.equal(summary.by_final_blocker[0].final_blocker_key, 'ATH:source_resonance_probe:scout_quality_buy_pressure_weak');
   assert.equal(summary.by_final_blocker[0].gold_unique, 1);
+
+  const summaryOnly = buildClosedLoopMissedDogSummary(
+    db,
+    new Set(['paper_missed_signal_attribution']),
+    1000,
+    5,
+    { includeDetails: false }
+  );
+  assert.equal(summaryOnly.unique_tokens, 3);
+  assert.equal(summaryOnly.quote_clean_unique, 2);
+  assert.equal(summaryOnly.quote_clean_dog_unique, 1);
+  assert.equal(summaryOnly.gold_unique, 1);
+  assert.equal(summaryOnly.silver_unique, 1);
+  assert.deepEqual(summaryOnly.top_missed_dogs, []);
+  assert.deepEqual(summaryOnly.by_final_blocker, []);
   db.close();
 });

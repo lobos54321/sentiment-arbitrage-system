@@ -863,8 +863,36 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
       }));
   } else {
+    const summaryOnlyCte = `
+      WITH base AS (
+        SELECT
+          m.token_ca,
+          ${quoteCleanExpr} AS quote_clean,
+          ${maxPnlExpr} AS max_pnl
+        FROM paper_missed_signal_attribution m
+        ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
+      ),
+      per_token_max AS (
+        SELECT
+          token_ca,
+          MAX(COALESCE(max_pnl, 0)) AS max_pnl
+        FROM base
+        WHERE token_ca IS NOT NULL AND token_ca != ''
+        GROUP BY token_ca
+      ),
+      per_token AS (
+        SELECT
+          b.token_ca,
+          MAX(CASE WHEN COALESCE(b.quote_clean, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean,
+          p.max_pnl
+        FROM base b
+        JOIN per_token_max p
+          ON p.token_ca = b.token_ca
+         AND p.max_pnl = COALESCE(b.max_pnl, 0)
+        GROUP BY b.token_ca
+      )`;
     summary = paperDb.prepare(`
-      ${missedBaseCte}
+      ${summaryOnlyCte}
       SELECT
         COUNT(*) AS unique_tokens,
         COALESCE(SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_unique,
@@ -872,8 +900,7 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 1.0 THEN 1 ELSE 0 END), 0) AS gold_unique,
         COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.5 AND COALESCE(max_pnl, 0) < 1.0 THEN 1 ELSE 0 END), 0) AS silver_unique,
         COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.25 AND COALESCE(max_pnl, 0) < 0.5 THEN 1 ELSE 0 END), 0) AS bronze_unique
-      FROM ranked
-      WHERE rn = 1
+      FROM per_token
     `).get(sinceTs ? { since: sinceTs } : {});
   }
 
@@ -1004,21 +1031,31 @@ function buildClosedLoopWindowReport({
   includeMissedDetails = true,
   includeSourceSummary = true,
   includePaperPnlDetails = true,
+  timings = null,
+  timingPrefix = 'window',
 }) {
-  const tableNames = paperDb
-    ? new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name))
-    : new Set();
+  const timed = (name, fn) => {
+    const startedAt = Date.now();
+    const value = fn();
+    if (timings) timings[`${timingPrefix}.${name}`] = Date.now() - startedAt;
+    return value;
+  };
+  const tableNames = timed('table_names', () => (
+    paperDb
+      ? new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name))
+      : new Set()
+  ));
   return {
     since_ts: sinceTs,
     since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
-    premium_signals: buildClosedLoopSignalSummary(signalDb, sinceTs),
-    probes: buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePaperPnlDetails }),
-    source_resonance: buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
+    premium_signals: timed('premium_signals', () => buildClosedLoopSignalSummary(signalDb, sinceTs)),
+    probes: timed('probes', () => buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePaperPnlDetails })),
+    source_resonance: timed('source_resonance', () => buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
       includeSummary: includeSourceSummary,
-    }),
-    missed_dogs: buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
+    })),
+    missed_dogs: timed('missed_dogs', () => buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
       includeDetails: includeMissedDetails,
-    }),
+    })),
   };
 }
 
@@ -3560,6 +3597,8 @@ const server = http.createServer(async (req, res) => {
       const nowSec = Math.floor(Date.now() / 1000);
       const limit = boundedIntParam(url, 'limit', 30, 1, 200);
       const includeRaw72h = String(url.searchParams.get('include_raw_72h') || '').toLowerCase() === '1';
+      const includeTiming = String(url.searchParams.get('include_timing') || '').toLowerCase() === '1';
+      const timings = includeTiming ? {} : null;
       const windows = [6, 24];
       signalDb = getDb();
       paperDb = new Database(paperDbPath, { readonly: true });
@@ -3571,6 +3610,8 @@ const server = http.createServer(async (req, res) => {
           paperDb,
           sinceTs,
           limit,
+          timings,
+          timingPrefix: `${hours}h`,
         });
       }
       const report72h = buildClosedLoopWindowReport({
@@ -3581,6 +3622,8 @@ const server = http.createServer(async (req, res) => {
         includeMissedDetails: includeRaw72h,
         includeSourceSummary: includeRaw72h,
         includePaperPnlDetails: includeRaw72h,
+        timings,
+        timingPrefix: '72h',
       });
       const responseBody = {
         generated_at: new Date().toISOString(),
@@ -3606,6 +3649,7 @@ const server = http.createServer(async (req, res) => {
         },
       };
       if (includeRaw72h) responseBody.raw_72h = report72h;
+      if (includeTiming) responseBody.timings_ms = timings;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(responseBody, null, 2));
     } catch (e) {
