@@ -1022,18 +1022,20 @@ function buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, { i
 }
 
 function buildClosedLoopDecision(report72h) {
+  const probesSkipped = Boolean(report72h?.probes?.skipped);
   const hard = report72h?.probes?.by_mode?.hard_gate_pass_tiny_probe || emptyClosedLoopProbeSummary('hard_gate_pass_tiny_probe');
   const source = report72h?.probes?.by_mode?.source_resonance_tiny_probe || emptyClosedLoopProbeSummary('source_resonance_tiny_probe');
   const passUnique = Number(report72h?.premium_signals?.hard_gate_pass_unique || 0);
   const cleanMissedDogsRaw = report72h?.missed_dogs?.quote_clean_dog_unique;
   const cleanMissedDogs = cleanMissedDogsRaw == null ? null : Number(cleanMissedDogsRaw || 0);
-  const hardCoverage = passUnique > 0 ? hard.armed_unique / passUnique : null;
+  const hardCoverage = !probesSkipped && passUnique > 0 ? hard.armed_unique / passUnique : null;
   const actions = [];
   if (cleanMissedDogs == null) actions.push('run_include_raw_72h_for_clean_quote_missed_dog_count');
   else if (cleanMissedDogs > 0) actions.push('inspect_top_clean_quote_missed_dog_blockers');
-  if (passUnique > 0 && (hardCoverage == null || hardCoverage < 0.5)) actions.push('continue_hard_gate_pass_tiny_probe_until_pass_coverage_improves');
-  if ((hard.fills || 0) < 50) actions.push('collect_more_hard_gate_baseline_samples_before_tightening');
-  if ((source.fills || 0) < 50) actions.push('collect_more_source_resonance_samples_before_upgrade');
+  if (probesSkipped) actions.push('run_include_72h_probes_for_probe_coverage');
+  else if (passUnique > 0 && (hardCoverage == null || hardCoverage < 0.5)) actions.push('continue_hard_gate_pass_tiny_probe_until_pass_coverage_improves');
+  if (!probesSkipped && (hard.fills || 0) < 50) actions.push('collect_more_hard_gate_baseline_samples_before_tightening');
+  if (!probesSkipped && (source.fills || 0) < 50) actions.push('collect_more_source_resonance_samples_before_upgrade');
   if ((hard.fills || 0) >= 50 && hard.avg_pnl_pct != null && hard.avg_pnl_pct < 0) actions.push('tighten_or_lower_hard_gate_baseline_rate_limit');
   if (
     (source.fills || 0) >= 50
@@ -1067,6 +1069,7 @@ function buildClosedLoopWindowReport({
   includeMissedSummary = true,
   includeMissedDetails = true,
   includeSourceSummary = true,
+  includeProbeSummary = true,
   includePaperPnlDetails = true,
   includeDecisionEventDetails = true,
   timings = null,
@@ -1087,10 +1090,19 @@ function buildClosedLoopWindowReport({
     since_ts: sinceTs,
     since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
     premium_signals: timed('premium_signals', () => buildClosedLoopSignalSummary(signalDb, sinceTs)),
-    probes: timed('probes', () => buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, {
-      includePaperPnlDetails,
-      includeDecisionEventDetails,
-    })),
+    probes: timed('probes', () => (
+      includeProbeSummary
+        ? buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, {
+          includePaperPnlDetails,
+          includeDecisionEventDetails,
+        })
+        : {
+          skipped: true,
+          skip_reason: 'omitted_from_default_72h_decision_path',
+          by_mode: Object.fromEntries(CLOSED_LOOP_PROBE_MODES.map((mode) => [mode, emptyClosedLoopProbeSummary(mode)])),
+          paper_pnl_by_entry_mode: [],
+        }
+    )),
     source_resonance: timed('source_resonance', () => buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
       includeSummary: includeSourceSummary,
     })),
@@ -3656,6 +3668,8 @@ const server = http.createServer(async (req, res) => {
       const includeRaw72h = String(url.searchParams.get('include_raw_72h') || '').toLowerCase() === '1';
       const includeHeavy72hMissed = includeRaw72h
         || String(url.searchParams.get('include_72h_missed') || '').toLowerCase() === '1';
+      const includeHeavy72hProbes = includeRaw72h
+        || String(url.searchParams.get('include_72h_probes') || '').toLowerCase() === '1';
       const includeTiming = String(url.searchParams.get('include_timing') || '').toLowerCase() === '1';
       const timings = includeTiming ? {} : null;
       const windows = [6, 24];
@@ -3681,6 +3695,7 @@ const server = http.createServer(async (req, res) => {
         includeMissedSummary: includeHeavy72hMissed,
         includeMissedDetails: includeRaw72h,
         includeSourceSummary: includeRaw72h,
+        includeProbeSummary: includeHeavy72hProbes,
         includePaperPnlDetails: includeRaw72h,
         includeDecisionEventDetails: includeRaw72h,
         timings,
@@ -3708,6 +3723,7 @@ const server = http.createServer(async (req, res) => {
           final_blocker_rule: 'top_missed_dogs exposes exactly one route/component/reason blocker per unique token, chosen by highest observed missed PnL in the window.',
           raw_72h: includeRaw72h ? 'included' : 'omitted by default; pass include_raw_72h=1 for the heavier 72h detail payload',
           missed_72h: includeHeavy72hMissed ? 'included' : 'omitted by default; pass include_72h_missed=1 for the heavier 72h missed-dog count',
+          probes_72h: includeHeavy72hProbes ? 'included' : 'omitted by default; pass include_72h_probes=1 for the heavier 72h probe coverage count',
         },
       };
       if (includeRaw72h) responseBody.raw_72h = report72h;
