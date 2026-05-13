@@ -985,10 +985,12 @@ function buildClosedLoopDecision(report72h) {
   const hard = report72h?.probes?.by_mode?.hard_gate_pass_tiny_probe || emptyClosedLoopProbeSummary('hard_gate_pass_tiny_probe');
   const source = report72h?.probes?.by_mode?.source_resonance_tiny_probe || emptyClosedLoopProbeSummary('source_resonance_tiny_probe');
   const passUnique = Number(report72h?.premium_signals?.hard_gate_pass_unique || 0);
-  const cleanMissedDogs = Number(report72h?.missed_dogs?.quote_clean_dog_unique || 0);
+  const cleanMissedDogsRaw = report72h?.missed_dogs?.quote_clean_dog_unique;
+  const cleanMissedDogs = cleanMissedDogsRaw == null ? null : Number(cleanMissedDogsRaw || 0);
   const hardCoverage = passUnique > 0 ? hard.armed_unique / passUnique : null;
   const actions = [];
-  if (cleanMissedDogs > 0) actions.push('inspect_top_clean_quote_missed_dog_blockers');
+  if (cleanMissedDogs == null) actions.push('run_include_raw_72h_for_clean_quote_missed_dog_count');
+  else if (cleanMissedDogs > 0) actions.push('inspect_top_clean_quote_missed_dog_blockers');
   if (passUnique > 0 && (hardCoverage == null || hardCoverage < 0.5)) actions.push('continue_hard_gate_pass_tiny_probe_until_pass_coverage_improves');
   if ((hard.fills || 0) < 50) actions.push('collect_more_hard_gate_baseline_samples_before_tightening');
   if ((source.fills || 0) < 50) actions.push('collect_more_source_resonance_samples_before_upgrade');
@@ -1022,6 +1024,7 @@ function buildClosedLoopWindowReport({
   paperDb,
   sinceTs,
   limit,
+  includeMissedSummary = true,
   includeMissedDetails = true,
   includeSourceSummary = true,
   includePaperPnlDetails = true,
@@ -1047,9 +1050,25 @@ function buildClosedLoopWindowReport({
     source_resonance: timed('source_resonance', () => buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
       includeSummary: includeSourceSummary,
     })),
-    missed_dogs: timed('missed_dogs', () => buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
-      includeDetails: includeMissedDetails,
-    })),
+    missed_dogs: timed('missed_dogs', () => (
+      includeMissedSummary
+        ? buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
+          includeDetails: includeMissedDetails,
+        })
+        : {
+          available: true,
+          skipped: true,
+          skip_reason: 'omitted_from_default_72h_decision_path',
+          unique_tokens: null,
+          quote_clean_unique: null,
+          quote_clean_dog_unique: null,
+          gold_unique: null,
+          silver_unique: null,
+          bronze_unique: null,
+          top_missed_dogs: [],
+          by_final_blocker: [],
+        }
+    )),
   };
 }
 
@@ -3591,6 +3610,8 @@ const server = http.createServer(async (req, res) => {
       const nowSec = Math.floor(Date.now() / 1000);
       const limit = boundedIntParam(url, 'limit', 30, 1, 200);
       const includeRaw72h = String(url.searchParams.get('include_raw_72h') || '').toLowerCase() === '1';
+      const includeHeavy72hMissed = includeRaw72h
+        || String(url.searchParams.get('include_72h_missed') || '').toLowerCase() === '1';
       const includeTiming = String(url.searchParams.get('include_timing') || '').toLowerCase() === '1';
       const timings = includeTiming ? {} : null;
       const windows = [6, 24];
@@ -3613,6 +3634,7 @@ const server = http.createServer(async (req, res) => {
         paperDb,
         sinceTs: nowSec - 72 * 3600,
         limit,
+        includeMissedSummary: includeHeavy72hMissed,
         includeMissedDetails: includeRaw72h,
         includeSourceSummary: includeRaw72h,
         includePaperPnlDetails: includeRaw72h,
@@ -3640,6 +3662,7 @@ const server = http.createServer(async (req, res) => {
           endpoint_goal: '6h/24h closed-loop report for premium signal coverage, paper probe fills/rejects, missed dog blockers, and 72h paper-only decision rules.',
           final_blocker_rule: 'top_missed_dogs exposes exactly one route/component/reason blocker per unique token, chosen by highest observed missed PnL in the window.',
           raw_72h: includeRaw72h ? 'included' : 'omitted by default; pass include_raw_72h=1 for the heavier 72h detail payload',
+          missed_72h: includeHeavy72hMissed ? 'included' : 'omitted by default; pass include_72h_missed=1 for the heavier 72h missed-dog count',
         },
       };
       if (includeRaw72h) responseBody.raw_72h = report72h;
