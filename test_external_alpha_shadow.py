@@ -72,6 +72,35 @@ def test_record_and_lookup_external_alpha_state():
     assert lookup["gmgn_momentum_rounds"] == 3
     assert lookup["gmgn_lead_time_sec"] == 180
     assert lookup["last_seen_age_sec"] == 10
+    assert lookup["timestamp_valid"] is True
+
+
+def test_lookup_external_alpha_normalizes_millisecond_signal_timestamp():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_external_alpha_shadow(db)
+
+    first_seen = 1_778_000_000
+    record_external_alpha_candidates(db, [candidate(10000, captured_at=first_seen)], captured_at=first_seen)
+    record_external_alpha_candidates(db, [candidate(10600, buys=62, captured_at=first_seen + 60)], captured_at=first_seen + 60)
+    record_external_alpha_candidates(db, [candidate(11200, buys=64, captured_at=first_seen + 120)], captured_at=first_seen + 120)
+
+    lookup = lookup_external_alpha(
+        db,
+        "TokenCA",
+        chain="sol",
+        now=(first_seen + 130) * 1000,
+        signal_ts=(first_seen + 180) * 1000,
+    )
+
+    assert lookup["available"] is True
+    assert lookup["signal_ts_sec"] == first_seen + 180
+    assert lookup["gmgn_first_seen_ts"] == first_seen
+    assert lookup["gmgn_last_seen_ts"] == first_seen + 120
+    assert lookup["gmgn_lead_time_sec"] == 180
+    assert lookup["last_seen_age_sec"] == 10
+    assert lookup["timestamp_valid"] is True
+    assert lookup["timestamp_anomaly_reason"] is None
 
 
 def test_lookup_external_alpha_handles_missing_and_stale():

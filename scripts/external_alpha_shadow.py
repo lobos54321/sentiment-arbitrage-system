@@ -126,6 +126,13 @@ def _i(value, default=0):
         return default
 
 
+def _timestamp_sec(value, default=None):
+    ts = _i(value, default)
+    if ts is None:
+        return None
+    return ts // 1000 if ts > 1_000_000_000_000 else ts
+
+
 def init_external_alpha_shadow(db):
     db.execute(CREATE_EXTERNAL_ALPHA_SNAPSHOTS_SQL)
     db.execute(CREATE_EXTERNAL_ALPHA_STATE_SQL)
@@ -400,7 +407,7 @@ def record_external_alpha_health(
 def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None, lookback_sec=None):
     if not EXTERNAL_ALPHA_SHADOW_ENABLED or not token_ca:
         return {"available": False, "reason": "external_alpha_disabled_or_missing_token"}
-    now = int(now or time.time())
+    now = _timestamp_sec(now, int(time.time()))
     lookback_sec = EXTERNAL_ALPHA_LOOKBACK_SEC if lookback_sec is None else int(lookback_sec)
     params = [token_ca]
     chain_clause = ""
@@ -420,15 +427,34 @@ def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None,
     if not row:
         return {"available": False, "reason": "external_alpha_not_seen"}
     state = _row_to_dict(row)
-    age_sec = now - _i(state.get("last_seen_ts"))
-    if age_sec > lookback_sec:
+    first_seen = _timestamp_sec(state.get("first_seen_ts"))
+    last_seen = _timestamp_sec(state.get("last_seen_ts"))
+    signal_ts_sec = _timestamp_sec(signal_ts, now)
+    age_sec = now - last_seen if last_seen is not None else None
+    lead_sec = signal_ts_sec - first_seen if first_seen is not None and signal_ts_sec is not None else None
+    anomaly_reasons = []
+    if first_seen is None:
+        anomaly_reasons.append("gmgn_first_seen_missing")
+    if last_seen is None:
+        anomaly_reasons.append("gmgn_last_seen_missing")
+    if lead_sec is not None and lead_sec < 0:
+        anomaly_reasons.append("gmgn_seen_after_signal")
+    if lead_sec is not None and lead_sec > 24 * 60 * 60:
+        anomaly_reasons.append("gmgn_lead_time_unreasonable")
+    if age_sec is not None and age_sec < -120:
+        anomaly_reasons.append("external_alpha_future_seen")
+    if age_sec is None or age_sec > lookback_sec:
         return {
             "available": False,
-            "reason": "external_alpha_stale",
+            "reason": "external_alpha_timestamp_missing" if age_sec is None else "external_alpha_stale",
             "last_seen_age_sec": age_sec,
+            "gmgn_first_seen_ts": first_seen,
+            "gmgn_last_seen_ts": last_seen,
+            "signal_ts_sec": signal_ts_sec,
+            "gmgn_lead_time_sec": lead_sec,
+            "timestamp_valid": not anomaly_reasons,
+            "timestamp_anomaly_reason": ",".join(anomaly_reasons) if anomaly_reasons else None,
         }
-    first_seen = _i(state.get("first_seen_ts"))
-    lead_reference = _i(signal_ts, now)
     return {
         "available": True,
         "source": "external_alpha_shadow",
@@ -441,9 +467,12 @@ def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None,
         "gmgn_seen_count": _i(state.get("seen_count")),
         "gmgn_changed_count": _i(state.get("changed_count")),
         "gmgn_first_seen_ts": first_seen,
-        "gmgn_last_seen_ts": _i(state.get("last_seen_ts")),
-        "gmgn_lead_time_sec": lead_reference - first_seen if first_seen else None,
+        "gmgn_last_seen_ts": last_seen,
+        "signal_ts_sec": signal_ts_sec,
+        "gmgn_lead_time_sec": lead_sec,
         "last_seen_age_sec": age_sec,
+        "timestamp_valid": not anomaly_reasons,
+        "timestamp_anomaly_reason": ",".join(anomaly_reasons) if anomaly_reasons else None,
         "source_last": state.get("source_last"),
         "category_last": state.get("category_last"),
         "last_market_cap": _f(state.get("last_market_cap")),

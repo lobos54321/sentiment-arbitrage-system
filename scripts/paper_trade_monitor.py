@@ -291,6 +291,8 @@ SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL = float(os.environ.get('SOURCE_RESONANCE_TI
 SOURCE_RESONANCE_TINY_PROBE_MAX_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_MC', '250000'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_MC', '0'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC', '60'))
+SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC', str(24 * 60 * 60)))
+SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC', '120'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC', '900'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS', '2'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
@@ -2051,6 +2053,22 @@ def normalize_signal_ts_seconds(value):
     if ts > 1_000_000_000_000:
         return ts // 1000
     return ts
+
+
+def normalize_pending_entry(pending, lifecycle_id):
+    if not isinstance(pending, dict):
+        return pending
+    pending.setdefault('lifecycle_id', lifecycle_id)
+    route = str(
+        pending.get('signal_route')
+        or pending.get('signal_type')
+        or ((pending.get('w_entry') or {}).get('type') if isinstance(pending.get('w_entry'), dict) else '')
+        or ''
+    ).upper()
+    pending.setdefault('is_lotto', route == 'LOTTO' or isinstance(pending.get('lotto_state'), dict))
+    if pending.get('paper_only_scout'):
+        pending.setdefault('execution_scope', 'paper_only')
+    return pending
 
 
 def calculate_entry_spread_pct(trigger_price, quote_price):
@@ -5077,6 +5095,9 @@ def evaluate_source_resonance_tiny_probe(
     )
     alpha_age_sec = _source_resonance_number(external_alpha.get('last_seen_age_sec'), 10**9)
     lead_sec = _source_resonance_number(external_alpha.get('gmgn_lead_time_sec'), None)
+    timestamp_valid = external_alpha.get('timestamp_valid')
+    timestamp_valid = True if timestamp_valid is None else bool(timestamp_valid)
+    timestamp_anomaly_reason = external_alpha.get('timestamp_anomaly_reason')
     rounds = _source_resonance_number(external_alpha.get('gmgn_momentum_rounds'), 0.0) or 0.0
     gain_pct = _source_resonance_number(external_alpha.get('gmgn_momentum_gain_pct'), 0.0) or 0.0
     momentum_confirmed = bool(external_alpha.get('gmgn_momentum_confirmed'))
@@ -5087,8 +5108,13 @@ def evaluate_source_resonance_tiny_probe(
         'current_mc': current_mc,
         'top1_pct': top1_pct,
         'top10_pct': top10_pct,
+        'gmgn_first_seen_ts': external_alpha.get('gmgn_first_seen_ts'),
+        'gmgn_last_seen_ts': external_alpha.get('gmgn_last_seen_ts'),
+        'signal_ts_sec': external_alpha.get('signal_ts_sec'),
         'gmgn_lead_time_sec': lead_sec,
         'last_seen_age_sec': alpha_age_sec,
+        'timestamp_valid': timestamp_valid,
+        'timestamp_anomaly_reason': timestamp_anomaly_reason,
         'gmgn_momentum_rounds': rounds,
         'gmgn_momentum_gain_pct': gain_pct,
         'gmgn_momentum_confirmed': momentum_confirmed,
@@ -5099,6 +5125,8 @@ def evaluate_source_resonance_tiny_probe(
     thresholds = {
         'size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
         'min_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC,
+        'max_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC,
+        'max_negative_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC,
         'max_alpha_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC,
         'min_rounds': SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS,
         'min_gain_pct': SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT,
@@ -5142,10 +5170,16 @@ def evaluate_source_resonance_tiny_probe(
         return _result(False, external_alpha.get('reason') or 'source_resonance_external_alpha_missing')
     if not external_alpha.get('gmgn_pre_seen'):
         return _result(False, 'source_resonance_gmgn_not_pre_seen')
+    if not timestamp_valid:
+        return _result(False, timestamp_anomaly_reason or 'source_resonance_timestamp_invalid')
+    if alpha_age_sec < -SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC:
+        return _result(False, 'source_resonance_external_alpha_future_seen')
     if alpha_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC:
         return _result(False, 'source_resonance_external_alpha_stale')
     if lead_sec is None or lead_sec < SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC:
         return _result(False, 'source_resonance_lead_time_too_short')
+    if lead_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC:
+        return _result(False, 'source_resonance_lead_time_unreasonable')
     if SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM and not momentum_confirmed:
         return _result(False, 'source_resonance_momentum_not_confirmed')
     if not (
@@ -12502,14 +12536,23 @@ def _read_remote_export(limit=REMOTE_SIGNAL_LOOKBACK, before_id=None):
     return _normalize_signal_rows(rows)
 
 
-OBSERVABLE_NEW_TRENDING_STATUSES = {
-    'PASS',
-    'RISK_BLOCKED',
+LOTTO_OBSERVE_UPSTREAM_STATUSES = {
     'LOTTO_OBSERVE_LOW_MC_VOL',
     'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
     'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
     'NOT_ATH_V17',
     'ILLIQUID_JUNK',
+    'NOT_ATH_V14',
+    'NOT_ATH_V13',
+    'NOT_ATH_V16',
+    'INSUFFICIENT_KLINE',
+    'NO_MC_DATA',
+}
+
+OBSERVABLE_NEW_TRENDING_STATUSES = {
+    'PASS',
+    'RISK_BLOCKED',
+    *LOTTO_OBSERVE_UPSTREAM_STATUSES,
 }
 
 
@@ -14259,13 +14302,7 @@ def run_monitor(db):
                         payload=with_lifecycle_payload(signal_audit_payload, signal_lifecycle),
                     )
 
-                    if signal_type == 'NEW_TRENDING' and hard_gate_status in {
-                        'LOTTO_OBSERVE_LOW_MC_VOL',
-                        'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
-                        'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
-                        'NOT_ATH_V17',
-                        'ILLIQUID_JUNK',
-                    }:
+                    if signal_type == 'NEW_TRENDING' and hard_gate_status in LOTTO_OBSERVE_UPSTREAM_STATUSES:
                         record_decision_event(
                             db,
                             component='upstream_gate',
@@ -15921,6 +15958,7 @@ def run_monitor(db):
         if pending_entries:
             for lifecycle_id, pending in list(pending_entries.items()):
                 try:
+                    normalize_pending_entry(pending, lifecycle_id)
                     pending['attempts'] = int(pending.get('attempts') or 0) + 1
                     
                     # Phase 1c: Last-mile pre-buy price recheck

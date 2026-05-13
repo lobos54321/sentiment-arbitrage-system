@@ -2839,7 +2839,9 @@ const server = http.createServer(async (req, res) => {
       const timestampExpr = signalCols.has('timestamp')
         ? "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE CAST(timestamp AS INTEGER) END"
         : "0";
-      const signalWhere = sinceTs ? `WHERE ${timestampExpr} >= @since` : '';
+      const signalWhere = sinceTs && signalCols.has('timestamp')
+        ? `WHERE ((timestamp > 1000000000000 AND timestamp >= @sinceMs) OR (timestamp <= 1000000000000 AND timestamp >= @since))`
+        : (sinceTs ? `WHERE ${timestampExpr} >= @since` : '');
       const signalRows = signalDb.prepare(`
         SELECT
           id,
@@ -2859,7 +2861,7 @@ const server = http.createServer(async (req, res) => {
         ${signalWhere}
         ORDER BY ${timestampExpr} DESC, id DESC
         LIMIT @limit
-      `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+      `).all(sinceTs ? { since: sinceTs, sinceMs: sinceTs * 1000, limit } : { limit });
 
       const paperDbPath = getPaperDbPath();
       let paperTrades = [];

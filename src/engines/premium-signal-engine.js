@@ -267,6 +267,9 @@ export class PremiumSignalEngine {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_premium_signals_timestamp ON premium_signals(timestamp)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_premium_signals_token_ts ON premium_signals(token_ca, timestamp)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_premium_signals_status_ts ON premium_signals(hard_gate_status, timestamp)`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tokens (
         token_ca TEXT PRIMARY KEY,

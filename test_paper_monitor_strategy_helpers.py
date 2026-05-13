@@ -2144,6 +2144,28 @@ def test_source_resonance_tiny_probe_blocks_late_gmgn_seen():
     assert decision["reason"] == "source_resonance_lead_time_too_short"
 
 
+def test_source_resonance_tiny_probe_rejects_timestamp_anomalies():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": 1_776_857_007_527,
+            "last_seen_age_sec": -48,
+            "timestamp_valid": False,
+            "timestamp_anomaly_reason": "gmgn_lead_time_unreasonable,external_alpha_future_seen",
+            "gmgn_momentum_rounds": 3,
+            "gmgn_momentum_gain_pct": 10,
+        },
+        route="LOTTO",
+        hard_gate_status="NOT_ATH_V17",
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "gmgn_lead_time_unreasonable,external_alpha_future_seen"
+    assert decision["observed"]["timestamp_valid"] is False
+
+
 def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
     pending = {
         "token_ca": "TokenCA",
@@ -2247,6 +2269,45 @@ def test_apply_hard_gate_pass_probe_to_pending_marks_paper_only():
     assert pending["kelly_position_sol"] == monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_hard_gate_pass_probe"
     assert pending["lotto_state"]["executionScope"] == "paper_only"
+
+
+def test_legacy_new_trending_statuses_are_observable_but_not_pass_probes():
+    for status in {
+        "NOT_ATH_V14",
+        "NOT_ATH_V13",
+        "NOT_ATH_V16",
+        "INSUFFICIENT_KLINE",
+        "NO_MC_DATA",
+    }:
+        assert status in monitor.LOTTO_OBSERVE_UPSTREAM_STATUSES
+        assert monitor._is_paper_trade_signal({
+            "signal_type": "NEW_TRENDING",
+            "description": "New Trending token",
+            "hard_gate_status": status,
+        }) is True
+        decision = evaluate_hard_gate_pass_tiny_probe(
+            "TokenCA",
+            watchlist_entry={"type": "LOTTO", "signal_price": 0.000001, "signal_mc": 48000},
+            hard_gate_status=status,
+            now_ts=1000,
+        )
+        assert decision["pass"] is False
+        assert decision["reason"] == "hard_gate_not_pass"
+
+
+def test_normalize_pending_entry_adds_identity_without_changing_route():
+    pending = {
+        "token_ca": "TokenCA",
+        "signal_type": "ATH",
+        "paper_only_scout": True,
+    }
+
+    normalized = monitor.normalize_pending_entry(pending, "TokenCA:1000")
+
+    assert normalized is pending
+    assert pending["lifecycle_id"] == "TokenCA:1000"
+    assert pending["is_lotto"] is False
+    assert pending["execution_scope"] == "paper_only"
 
 
 def test_hard_gate_pass_probe_soft_quality_blocks_become_warnings():
