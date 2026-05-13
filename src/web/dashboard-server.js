@@ -872,31 +872,25 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         FROM paper_missed_signal_attribution m
         ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
       ),
-      per_token_max AS (
-        SELECT
-          token_ca,
-          MAX(COALESCE(max_pnl, 0)) AS max_pnl
-        FROM base
-        WHERE token_ca IS NOT NULL AND token_ca != ''
-        GROUP BY token_ca
-      ),
       per_token AS (
         SELECT
-          b.token_ca,
-          MAX(CASE WHEN COALESCE(b.quote_clean, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean,
-          p.max_pnl
+          token_ca,
+          MAX(CASE WHEN COALESCE(quote_clean, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean,
+          MAX(COALESCE(max_pnl, 0)) AS max_pnl,
+          MAX(CASE
+            WHEN COALESCE(quote_clean, 0) = 1 AND COALESCE(max_pnl, 0) >= 0.25
+            THEN 1 ELSE 0
+          END) AS quote_clean_dog
         FROM base b
-        JOIN per_token_max p
-          ON p.token_ca = b.token_ca
-         AND p.max_pnl = COALESCE(b.max_pnl, 0)
-        GROUP BY b.token_ca
+        WHERE token_ca IS NOT NULL AND token_ca != ''
+        GROUP BY token_ca
       )`;
     summary = paperDb.prepare(`
       ${summaryOnlyCte}
       SELECT
         COUNT(*) AS unique_tokens,
         COALESCE(SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_unique,
-        COALESCE(SUM(CASE WHEN quote_clean = 1 AND COALESCE(max_pnl, 0) >= 0.25 THEN 1 ELSE 0 END), 0) AS quote_clean_dog_unique,
+        COALESCE(SUM(CASE WHEN quote_clean_dog = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_dog_unique,
         COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 1.0 THEN 1 ELSE 0 END), 0) AS gold_unique,
         COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.5 AND COALESCE(max_pnl, 0) < 1.0 THEN 1 ELSE 0 END), 0) AS silver_unique,
         COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.25 AND COALESCE(max_pnl, 0) < 0.5 THEN 1 ELSE 0 END), 0) AS bronze_unique
