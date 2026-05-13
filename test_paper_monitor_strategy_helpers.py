@@ -33,6 +33,7 @@ from paper_trade_monitor import (  # noqa: E402
     _ath_no_kline_followthrough_guard,
     _ath_no_kline_reentry_guard,
     _ath_no_kline_scout_quality_soft_override,
+    _hard_gate_pass_probe_scout_quality_soft_override,
     _ath_dynamic_ttl_extension_detail,
     _ath_recovery_eligibility,
     _ath_recovery_mode_for_candidate,
@@ -2246,6 +2247,43 @@ def test_apply_hard_gate_pass_probe_to_pending_marks_paper_only():
     assert pending["kelly_position_sol"] == monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_hard_gate_pass_probe"
     assert pending["lotto_state"]["executionScope"] == "paper_only"
+
+
+def test_hard_gate_pass_probe_soft_quality_blocks_become_warnings():
+    pending = {
+        "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+    }
+    scout_quality = {
+        "pass": False,
+        "reason": "scout_quality_buy_pressure_weak",
+        "observed": {"buy_sell_ratio": 0.8},
+    }
+
+    decision = _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality)
+
+    assert decision["pass"] is True
+    assert decision["decision"] == "warn"
+    assert decision["reason"] == "hard_gate_pass_baseline_quality_warn"
+    assert decision["original_reason"] == "scout_quality_buy_pressure_weak"
+
+
+def test_hard_gate_pass_probe_keeps_hard_quality_blocks():
+    pending = {
+        "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+    }
+    scout_quality = {
+        "pass": False,
+        "reason": "scout_quality_top1_high",
+        "observed": {"top1_pct": 80},
+    }
+
+    decision = _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality)
+
+    assert decision is scout_quality
+    assert decision["pass"] is False
+    assert decision["reason"] == "scout_quality_top1_high"
 
 
 def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):

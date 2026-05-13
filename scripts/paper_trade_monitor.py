@@ -2767,6 +2767,41 @@ def _ath_no_kline_scout_quality_soft_override(pending, scout_quality, *, route=N
     return override
 
 
+HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS = {
+    'scout_quality_liquidity_low',
+    'scout_quality_buy_pressure_weak',
+    'scout_quality_volume_low',
+    'scout_quality_tx_low',
+    'scout_quality_negative_trend',
+}
+
+
+def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
+    """Let hard-gate PASS baseline probes sample soft-quality failures.
+
+    The baseline is meant to answer whether hard-gate PASS + quote-executable
+    tokens should have been bought. Soft activity checks are telemetry, not
+    blockers, for this specific paper-only probe.
+    """
+    if not isinstance(pending, dict) or not isinstance(scout_quality, dict):
+        return scout_quality
+    mode = pending.get('entry_mode') or pending.get('scout_mode')
+    if mode != HARD_GATE_PASS_TINY_PROBE_MODE:
+        return scout_quality
+    if scout_quality.get('pass') or scout_quality.get('reason') not in HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS:
+        return scout_quality
+    override = dict(scout_quality)
+    override.update({
+        'pass': True,
+        'decision': 'warn',
+        'reason': 'hard_gate_pass_baseline_quality_warn',
+        'original_reason': scout_quality.get('reason'),
+        'override_scope': HARD_GATE_PASS_TINY_PROBE_MODE,
+        'baseline_soft_quality_override': True,
+    })
+    return override
+
+
 ATH_RECOVERY_TINY_PROBE_MODES = {
     ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
     ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
@@ -16499,6 +16534,10 @@ def run_monitor(db):
                             _scout_quality,
                             route=_pending_signal_route or pending.get('signal_type'),
                             scout_size=_scout_size_detail,
+                        )
+                        _scout_quality = _hard_gate_pass_probe_scout_quality_soft_override(
+                            pending,
+                            _scout_quality,
                         )
                         pending['scout_quality'] = _scout_quality
                         record_scout_quality_decision(
