@@ -3599,7 +3599,7 @@ const server = http.createServer(async (req, res) => {
           const missedSignalTs = missedCols.has('signal_ts') ? 'COALESCE(m.signal_ts, 0)' : '0';
           const sourceSignalTs = sourceCols.has('signal_ts') ? 'COALESCE(sr.signal_ts, 0)' : '0';
           const sourceUpdatedTs = sourceCols.has('updated_at') ? 'COALESCE(sr.updated_at, 0)' : '0';
-          const sourceOrder = `
+          const sourceMatchOrder = `
             CASE
               WHEN ${sourceSignalTs} = ${missedSignalTs} THEN 0
               WHEN ${sourceSignalTs} <= ${missedSignalTs} THEN 1
@@ -3608,17 +3608,31 @@ const server = http.createServer(async (req, res) => {
             ABS(${sourceSignalTs} - ${missedSignalTs}) ASC,
             ${sourceUpdatedTs} DESC
           `;
-          const sourceExpr = (name, alias = name, fallback = 'NULL') => (
+          const sourceColumn = (name, alias = name, fallback = 'NULL') => (
             hasSourceResonance && sourceCols.has(name)
-              ? `(SELECT sr.${name} FROM source_resonance_candidates sr WHERE sr.token_ca = m.token_ca ORDER BY ${sourceOrder} LIMIT 1) AS ${alias}`
+              ? `sr.${name} AS ${alias}`
               : `${fallback} AS ${alias}`
           );
+          const sourceResonanceJoin = hasSourceResonance
+            ? 'LEFT JOIN source_resonance_candidates sr ON sr.token_ca = m.token_ca'
+            : '';
+          const sourceMatchRank = hasSourceResonance ? `
+              ROW_NUMBER() OVER (
+                PARTITION BY
+                  m.token_ca,
+                  ${missedColumn('signal_id')},
+                  ${missedColumn('signal_ts')},
+                  ${missedEventTsExpr},
+                  ${missedColumn('component')},
+                  ${missedColumn('reject_reason')}
+                ORDER BY ${sourceMatchOrder}
+              ) AS source_match_rn` : '1 AS source_match_rn';
           const sourceResonanceSelect = `
-              ${sourceExpr('cohort', 'source_resonance_cohort')},
-              ${sourceExpr('resonance_level', 'source_resonance_level')},
-              ${sourceExpr('resonance_score', 'source_resonance_score')},
-              ${sourceExpr('gmgn_pre_seen', 'gmgn_pre_seen', '0')},
-              ${sourceExpr('gmgn_lead_time_sec', 'gmgn_lead_time_sec')},`;
+              ${sourceColumn('cohort', 'source_resonance_cohort')},
+              ${sourceColumn('resonance_level', 'source_resonance_level')},
+              ${sourceColumn('resonance_score', 'source_resonance_score')},
+              ${sourceColumn('gmgn_pre_seen', 'gmgn_pre_seen', '0')},
+              ${sourceColumn('gmgn_lead_time_sec', 'gmgn_lead_time_sec')},`;
           const quoteCleanExpr = missedCols.has('tradable_missed')
             ? `CASE
                 WHEN COALESCE(m.tradable_missed, 0) = 1
@@ -3628,7 +3642,7 @@ const server = http.createServer(async (req, res) => {
             : 'NULL';
           missedAttributions = paperDb.prepare(`
             WITH
-            base AS (
+            raw AS (
               SELECT
                 m.token_ca,
                 ${missedColumn('symbol')} AS symbol,
@@ -3654,12 +3668,20 @@ const server = http.createServer(async (req, res) => {
                   ELSE NULL
                 END AS entry_mode_candidate,
                 ${sourceResonanceSelect}
-                ROW_NUMBER() OVER (
-                  PARTITION BY m.token_ca
-                  ORDER BY ${maxPnlExpr} DESC, ${missedEventTsExpr} DESC
-                ) AS rn
+                ${sourceMatchRank}
               FROM paper_missed_signal_attribution m
+              ${sourceResonanceJoin}
               ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
+            ),
+            base AS (
+              SELECT
+                raw.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY raw.token_ca
+                  ORDER BY raw.row_max_pnl DESC, raw.event_ts DESC
+                ) AS rn
+              FROM raw
+              WHERE raw.source_match_rn = 1
             ),
             counts AS (
               SELECT token_ca, COUNT(*) AS n, MAX(row_max_pnl) AS max_pnl
