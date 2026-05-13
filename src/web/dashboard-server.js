@@ -612,6 +612,13 @@ function buildClosedLoopProbeSummary(
   if (!paperDb) return { by_mode: byMode, paper_pnl_by_entry_mode: paperPnlByEntryMode };
 
   if (tableNames.has('paper_decision_events')) {
+    const probeComponentFilterSql = `
+          component IN (
+            'hard_gate_pass_probe',
+            'source_resonance_probe',
+            'lotto_upstream_realtime_scout',
+            'lotto_upstream_realtime_probe'
+          )`;
     const rows = includeDecisionEventDetails
       ? paperDb.prepare(`
       WITH events AS (
@@ -627,7 +634,7 @@ function buildClosedLoopProbeSummary(
           reason,
           token_ca
         FROM paper_decision_events
-        ${sinceTs ? 'WHERE event_ts >= @since' : ''}
+        ${sinceTs ? `WHERE event_ts >= @since AND ${probeComponentFilterSql}` : `WHERE ${probeComponentFilterSql}`}
       )
       SELECT
         mode,
@@ -656,12 +663,7 @@ function buildClosedLoopProbeSummary(
         FROM paper_decision_events
         ${sinceTs ? 'WHERE event_ts >= @since AND' : 'WHERE'}
           event_type = 'pending_entry'
-          AND component IN (
-            'hard_gate_pass_probe',
-            'source_resonance_probe',
-            'lotto_upstream_realtime_scout',
-            'lotto_upstream_realtime_probe'
-          )
+          AND ${probeComponentFilterSql}
       )
       SELECT
         mode,
