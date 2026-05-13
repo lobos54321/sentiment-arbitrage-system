@@ -601,13 +601,19 @@ function buildClosedLoopSignalSummary(signalDb, sinceTs) {
   };
 }
 
-function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePaperPnlDetails = true } = {}) {
+function buildClosedLoopProbeSummary(
+  paperDb,
+  tableNames,
+  sinceTs,
+  { includePaperPnlDetails = true, includeDecisionEventDetails = true } = {}
+) {
   const byMode = Object.fromEntries(CLOSED_LOOP_PROBE_MODES.map((mode) => [mode, emptyClosedLoopProbeSummary(mode)]));
   const paperPnlByEntryMode = [];
   if (!paperDb) return { by_mode: byMode, paper_pnl_by_entry_mode: paperPnlByEntryMode };
 
   if (tableNames.has('paper_decision_events')) {
-    const rows = paperDb.prepare(`
+    const rows = includeDecisionEventDetails
+      ? paperDb.prepare(`
       WITH events AS (
         SELECT
           CASE
@@ -633,6 +639,40 @@ function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePape
         COUNT(DISTINCT CASE WHEN decision = 'wait' THEN token_ca END) AS wait_unique,
         COUNT(DISTINCT CASE WHEN reason = 'probe_deduped_existing_mode' THEN token_ca END) AS deduped_unique,
         COUNT(DISTINCT CASE WHEN reason LIKE 'quote_%' THEN token_ca END) AS quote_issue_unique
+      FROM events
+      WHERE mode IS NOT NULL
+      GROUP BY mode
+    `).all(sinceTs ? { since: sinceTs } : {})
+      : paperDb.prepare(`
+      WITH events AS (
+        SELECT
+          CASE
+            WHEN component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
+            WHEN component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
+            WHEN component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
+            ELSE NULL
+          END AS mode,
+          token_ca
+        FROM paper_decision_events
+        ${sinceTs ? 'WHERE event_ts >= @since AND' : 'WHERE'}
+          event_type = 'pending_entry'
+          AND component IN (
+            'hard_gate_pass_probe',
+            'source_resonance_probe',
+            'lotto_upstream_realtime_scout',
+            'lotto_upstream_realtime_probe'
+          )
+      )
+      SELECT
+        mode,
+        COUNT(*) AS armed_events,
+        COUNT(DISTINCT token_ca) AS armed_unique,
+        0 AS reject_events,
+        0 AS reject_unique,
+        0 AS wait_events,
+        0 AS wait_unique,
+        0 AS deduped_unique,
+        0 AS quote_issue_unique
       FROM events
       WHERE mode IS NOT NULL
       GROUP BY mode
@@ -1028,6 +1068,7 @@ function buildClosedLoopWindowReport({
   includeMissedDetails = true,
   includeSourceSummary = true,
   includePaperPnlDetails = true,
+  includeDecisionEventDetails = true,
   timings = null,
   timingPrefix = 'window',
 }) {
@@ -1046,7 +1087,10 @@ function buildClosedLoopWindowReport({
     since_ts: sinceTs,
     since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
     premium_signals: timed('premium_signals', () => buildClosedLoopSignalSummary(signalDb, sinceTs)),
-    probes: timed('probes', () => buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePaperPnlDetails })),
+    probes: timed('probes', () => buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, {
+      includePaperPnlDetails,
+      includeDecisionEventDetails,
+    })),
     source_resonance: timed('source_resonance', () => buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
       includeSummary: includeSourceSummary,
     })),
@@ -3638,6 +3682,7 @@ const server = http.createServer(async (req, res) => {
         includeMissedDetails: includeRaw72h,
         includeSourceSummary: includeRaw72h,
         includePaperPnlDetails: includeRaw72h,
+        includeDecisionEventDetails: includeRaw72h,
         timings,
         timingPrefix: '72h',
       });
