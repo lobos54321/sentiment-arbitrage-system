@@ -34,6 +34,7 @@ from paper_trade_monitor import (  # noqa: E402
     _ath_no_kline_reentry_guard,
     _ath_no_kline_scout_quality_soft_override,
     _hard_gate_pass_probe_scout_quality_soft_override,
+    _hard_gate_pass_probe_entry_mode_quality_soft_override,
     _ath_dynamic_ttl_extension_detail,
     _ath_recovery_eligibility,
     _ath_recovery_mode_for_candidate,
@@ -2596,6 +2597,40 @@ def test_hard_gate_pass_probe_keeps_hard_quality_blocks():
     assert decision is scout_quality
     assert decision["pass"] is False
     assert decision["reason"] == "scout_quality_top1_high"
+
+
+def test_hard_gate_pass_probe_entry_mode_quality_degraded_becomes_warning():
+    decision = {
+        "decision": "shadow",
+        "reason": "entry_mode_quality_degraded",
+        "remaining_sec": 7200,
+    }
+
+    override = _hard_gate_pass_probe_entry_mode_quality_soft_override(
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        decision,
+    )
+
+    assert override["decision"] == "warn"
+    assert override["reason"] == "hard_gate_pass_baseline_entry_mode_quality_warn"
+    assert override["original_reason"] == "entry_mode_quality_degraded"
+    assert override["paper_only_baseline_override"] is True
+    assert override["execution_scope"] == "paper_only"
+
+
+def test_hard_gate_pass_probe_keeps_shadow_only_entry_mode_quality_block():
+    decision = {
+        "decision": "shadow",
+        "reason": "entry_mode_quality_shadow_only_mode",
+        "shadow_only_mode": True,
+    }
+
+    override = _hard_gate_pass_probe_entry_mode_quality_soft_override(
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        decision,
+    )
+
+    assert override is None
 
 
 def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):

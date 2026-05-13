@@ -2858,6 +2858,10 @@ HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS = {
     'scout_quality_tx_low',
     'scout_quality_negative_trend',
 }
+HARD_GATE_PASS_BASELINE_SOFT_ENTRY_MODE_QUALITY_REASONS = {
+    'entry_mode_quality_degraded',
+    'entry_mode_shadow_cooldown',
+}
 
 
 def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
@@ -2882,6 +2886,23 @@ def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
         'original_reason': scout_quality.get('reason'),
         'override_scope': HARD_GATE_PASS_TINY_PROBE_MODE,
         'baseline_soft_quality_override': True,
+    })
+    return override
+
+
+def _hard_gate_pass_probe_entry_mode_quality_soft_override(entry_mode, decision):
+    if str(entry_mode or '') != HARD_GATE_PASS_TINY_PROBE_MODE or not isinstance(decision, dict):
+        return None
+    if decision.get('reason') not in HARD_GATE_PASS_BASELINE_SOFT_ENTRY_MODE_QUALITY_REASONS:
+        return None
+    override = dict(decision)
+    override.update({
+        'decision': 'warn',
+        'reason': 'hard_gate_pass_baseline_entry_mode_quality_warn',
+        'original_reason': decision.get('reason'),
+        'paper_only_baseline_override': True,
+        'paper_only_scout': True,
+        'execution_scope': 'paper_only',
     })
     return override
 
@@ -9532,6 +9553,27 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
         now_ts=event_ts or time.time(),
         force_live=force_live,
     )
+    hard_gate_quality_override = _hard_gate_pass_probe_entry_mode_quality_soft_override(entry_mode, decision)
+    if hard_gate_quality_override:
+        _record_entry_mode_quality_decision(
+            db,
+            decision=hard_gate_quality_override,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            event_type='live_gate',
+            data_source=data_source,
+            event_ts=event_ts,
+        )
+        log.info(
+            f"  [ENTRY_MODE_QUALITY] ⚠️ {symbol or token_ca} WARN: "
+            f"mode={entry_mode} original={decision.get('reason')} "
+            f"paper_only_baseline=true"
+        )
+        return True, hard_gate_quality_override
     if decision.get('decision') == 'shadow':
         _record_entry_mode_quality_decision(
             db,
