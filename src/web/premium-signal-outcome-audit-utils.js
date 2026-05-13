@@ -66,6 +66,45 @@ function compactTypeCounts(rows) {
   return counts;
 }
 
+const OBSERVE_ONLY_STATUSES = new Set([
+  'RISK_BLOCKED',
+  'LOTTO_OBSERVE_LOW_MC_VOL',
+  'NOT_ATH_PREBUY_KLINE_UNKNOWN_DATA_BLOCKED',
+  'NOT_ATH_PREBUY_KLINE_RETRY_EXPIRED',
+  'NOT_ATH_V17',
+  'ILLIQUID_JUNK',
+  'NOT_ATH_V14',
+  'NOT_ATH_V13',
+  'NOT_ATH_V16',
+  'INSUFFICIENT_KLINE',
+  'NO_MC_DATA',
+]);
+
+const SAFETY_REJECT_STATUSES = new Set([
+  'GREYLIST',
+  'WASH_HIGH',
+  'GREYLIST_LOW_CONF',
+  'REJECT',
+  'RED_K_FAIL',
+  '5M_DUMP',
+  '5M_OVERHEAT',
+  'HONEYPOT',
+  'RUG_PULL_RISK',
+]);
+
+function coverageClassForToken(outcome) {
+  if (outcome.paper_trade_count > 0) return 'paper_trade';
+  const statuses = new Set(Object.keys(outcome.gate_statuses || {}).map((status) => String(status || '').toUpperCase()));
+  if ([...statuses].some((status) => SAFETY_REJECT_STATUSES.has(status))) return 'safety_reject';
+  if (
+    outcome.missed_attribution_count > 0
+    || [...statuses].some((status) => OBSERVE_ONLY_STATUSES.has(status))
+  ) {
+    return 'observe_only';
+  }
+  return 'unclassified';
+}
+
 function isoFromSec(sec) {
   const n = numeric(sec);
   return n == null ? null : new Date(n * 1000).toISOString();
@@ -198,6 +237,19 @@ export function buildPremiumSignalOutcomeAudit({
   const uncoveredPassDogs = passDogTokens
     .filter((item) => item.paper_trade_count <= 0)
     .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
+  const coverageCounts = {
+    paper_trade: 0,
+    observe_only: 0,
+    safety_reject: 0,
+    unclassified: 0,
+  };
+  for (const item of tokens) {
+    item.coverage_class = coverageClassForToken(item);
+    coverageCounts[item.coverage_class] = (coverageCounts[item.coverage_class] || 0) + 1;
+  }
+  const unclassified = tokens
+    .filter((item) => item.coverage_class === 'unclassified')
+    .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
 
   return {
     generated_at: generatedAt,
@@ -220,9 +272,12 @@ export function buildPremiumSignalOutcomeAudit({
       pass_dog_in_missed_attribution_unique: passDogTokens.filter((item) => item.missed_attribution_count > 0).length,
       paper_traded_unique: tokens.filter((item) => item.paper_trade_count > 0).length,
       paper_traded_pass_unique: passTokens.filter((item) => item.paper_trade_count > 0).length,
+      coverage_classes: coverageCounts,
+      unclassified_unique: coverageCounts.unclassified,
     },
     top_pass_movers: topPassMovers.slice(0, 30),
     uncovered_pass_dogs: uncoveredPassDogs.slice(0, 30),
+    unclassified_tokens: unclassified.slice(0, 30),
     top_stream_movers: topStreamMovers.slice(0, 30),
   };
 }

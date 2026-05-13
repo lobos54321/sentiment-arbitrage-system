@@ -71,6 +71,7 @@ def test_record_and_lookup_external_alpha_state():
     assert lookup["gmgn_momentum_confirmed"] is True
     assert lookup["gmgn_momentum_rounds"] == 3
     assert lookup["gmgn_lead_time_sec"] == 180
+    assert lookup["lead_time_sec"] == 180
     assert lookup["last_seen_age_sec"] == 10
     assert lookup["timestamp_valid"] is True
 
@@ -98,6 +99,7 @@ def test_lookup_external_alpha_normalizes_millisecond_signal_timestamp():
     assert lookup["gmgn_first_seen_ts"] == first_seen
     assert lookup["gmgn_last_seen_ts"] == first_seen + 120
     assert lookup["gmgn_lead_time_sec"] == 180
+    assert lookup["lead_time_sec"] == 180
     assert lookup["last_seen_age_sec"] == 10
     assert lookup["timestamp_valid"] is True
     assert lookup["timestamp_anomaly_reason"] is None

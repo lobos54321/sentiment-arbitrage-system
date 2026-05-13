@@ -2188,6 +2188,7 @@ def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
     assert pending["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
     assert pending["scout_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
     assert pending["paper_only_scout"] is True
+    assert pending["execution_scope"] == "paper_only"
     assert pending["timing_passed"] is True
     assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_source_resonance_probe"
@@ -2244,6 +2245,32 @@ def test_hard_gate_pass_tiny_probe_requires_pass_and_quote(monkeypatch):
     assert blocked_gate["reason"] == "hard_gate_not_pass"
 
 
+def test_hard_gate_pass_tiny_probe_dedupes_existing_token_probe(monkeypatch):
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+
+    decision = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "ATH", "market_cap": 48000},
+        watchlist_entry={"type": "ATH", "signal_price": 0.000001, "signal_mc": 48000},
+        hard_gate_status="PASS",
+        pending_entries={
+            "OtherLifecycle": {
+                "token_ca": "TokenCA",
+                "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+                "paper_only_scout": True,
+                "execution_scope": "paper_only",
+            }
+        },
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "probe_deduped_existing_mode"
+    assert decision["observed"]["existing_probe"]["existing_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+
+
 def test_apply_hard_gate_pass_probe_to_pending_marks_paper_only():
     pending = {
         "token_ca": "TokenCA",
@@ -2269,6 +2296,138 @@ def test_apply_hard_gate_pass_probe_to_pending_marks_paper_only():
     assert pending["kelly_position_sol"] == monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_hard_gate_pass_probe"
     assert pending["lotto_state"]["executionScope"] == "paper_only"
+
+
+def test_hard_gate_pass_quote_retry_schedules_and_arms(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "_hard_gate_pass_quote_retry", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_QUOTE_RETRY_ENABLED", True)
+    monkeypatch.setattr(
+        monitor,
+        "fetch_dexscreener_trend_snapshot",
+        lambda _token_ca: {"market_cap": 48000, "price_change_m5": 12},
+    )
+    monkeypatch.setattr(
+        monitor,
+        "helius_token_concentration",
+        lambda _token_ca: {"top1_pct": 18, "top10_pct": 32},
+    )
+
+    registered_entry = {
+        "id": 7,
+        "ca": "TokenCA",
+        "symbol": "DOG",
+        "type": "ATH",
+        "pool_address": "Pool",
+        "signal_ts": 1000,
+        "premium_signal_id": 11,
+        "signal_price": None,
+        "signal_mc": 48000,
+        "signal_top10": 32,
+    }
+    sig = {
+        "id": 11,
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "timestamp": 1000,
+        "signal_type": "ATH",
+        "market_cap": 48000,
+    }
+    pending_entries = {}
+
+    armed = arm_hard_gate_pass_tiny_probe(
+        db,
+        pending_entries,
+        {},
+        sig=sig,
+        registered_entry=registered_entry,
+        pool="Pool",
+        lifecycle_id="TokenCA:1000",
+        signal_lifecycle={},
+        signal_audit_payload={},
+        hard_gate_status="PASS",
+        now_ts=1200,
+        route="ATH",
+    )
+
+    assert armed is False
+    assert "TokenCA:1000" in monitor._hard_gate_pass_quote_retry
+    first_event = db.execute(
+        "SELECT event_type, decision, reason FROM paper_decision_events ORDER BY id LIMIT 1"
+    ).fetchone()
+    assert first_event["event_type"] == "quote_retry_scheduled"
+    assert first_event["decision"] == "wait"
+
+    monkeypatch.setattr(
+        monitor,
+        "fetch_realtime_price",
+        lambda _token_ca, _pool, max_age_ms=15000: (0.000001, None, None),
+    )
+
+    retry_armed = monitor.process_hard_gate_pass_quote_retries(
+        db,
+        None,
+        pending_entries,
+        {},
+        now_ts=1210,
+        max_positions=10,
+    )
+
+    assert retry_armed == 1
+    assert "TokenCA:1000" not in monitor._hard_gate_pass_quote_retry
+    assert pending_entries["TokenCA:1000"]["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
+    assert pending_entries["TokenCA:1000"]["paper_only_scout"] is True
+    assert pending_entries["TokenCA:1000"]["execution_scope"] == "paper_only"
+    reasons = [
+        row["reason"]
+        for row in db.execute("SELECT reason FROM paper_decision_events ORDER BY id").fetchall()
+    ]
+    assert "quote_executable_after_retry" in reasons
+    assert "hard_gate_pass_baseline_probe" in reasons
+
+
+def test_hard_gate_pass_quote_retry_records_final_failure(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "_hard_gate_pass_quote_retry", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC", 60)
+    monitor._hard_gate_pass_quote_retry["TokenCA:1000"] = {
+        "sig": {"id": 11, "token_ca": "TokenCA", "symbol": "DOG", "timestamp": 1000},
+        "registered_entry": {"id": 7, "type": "ATH"},
+        "pool": "Pool",
+        "lifecycle_id": "TokenCA:1000",
+        "signal_lifecycle": {},
+        "signal_audit_payload": {},
+        "hard_gate_status": "PASS",
+        "route": "ATH",
+        "first_seen_ts": 1200,
+        "next_attempt_ts": 1261,
+        "attempts": 2,
+    }
+
+    retry_armed = monitor.process_hard_gate_pass_quote_retries(
+        db,
+        None,
+        {},
+        {},
+        now_ts=1261,
+        max_positions=10,
+    )
+
+    assert retry_armed == 0
+    assert "TokenCA:1000" not in monitor._hard_gate_pass_quote_retry
+    event = db.execute(
+        "SELECT event_type, decision, reason FROM paper_decision_events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert event["event_type"] == "probe_reject"
+    assert event["decision"] == "reject"
+    assert event["reason"] == "quote_not_executable_after_retry"
 
 
 def test_legacy_new_trending_statuses_are_observable_but_not_pass_probes():
@@ -2308,6 +2467,35 @@ def test_normalize_pending_entry_adds_identity_without_changing_route():
     assert pending["lifecycle_id"] == "TokenCA:1000"
     assert pending["is_lotto"] is False
     assert pending["execution_scope"] == "paper_only"
+
+
+def test_normalize_pending_entry_backfills_defaults_and_watchlist_identity():
+    pending = {
+        "w_entry": {
+            "ca": "TokenCA",
+            "signal_ts": 1000,
+            "premium_signal_id": 11,
+            "type": "LOTTO",
+        },
+        "scout_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+    }
+
+    normalized = monitor.normalize_pending_entry(
+        pending,
+        "TokenCA:1000",
+        defaults={"signal_type": "LOTTO"},
+    )
+
+    assert normalized["token_ca"] == "TokenCA"
+    assert normalized["signal_ts"] == 1000
+    assert normalized["premium_signal_id"] == 11
+    assert normalized["signal_type"] == "LOTTO"
+    assert normalized["signal_route"] == "LOTTO"
+    assert normalized["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+    assert normalized["paper_only_scout"] is True
+    assert normalized["execution_scope"] == "paper_only"
+    assert normalized["is_lotto"] is True
 
 
 def test_hard_gate_pass_probe_soft_quality_blocks_become_warnings():

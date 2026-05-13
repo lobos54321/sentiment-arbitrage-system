@@ -331,11 +331,22 @@ HARD_GATE_PASS_TINY_PROBE_MAX_TOP1_PCT = float(
 HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT = float(
     os.environ.get('HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT', '85')
 )
+HARD_GATE_PASS_QUOTE_RETRY_ENABLED = os.environ.get(
+    'HARD_GATE_PASS_QUOTE_RETRY_ENABLED', 'true'
+).lower() != 'false'
+HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC = int(
+    os.environ.get('HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC', '90')
+)
+HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC = int(
+    os.environ.get('HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC', '15')
+)
 PAPER_TINY_SCOUT_ENTRY_MODES.add(HARD_GATE_PASS_TINY_PROBE_MODE)
 # Rate-limit state: list of arm timestamps for sliding-window enforcement
 _hard_gate_pass_probe_arm_ts = []  # type: list[float]
 # Per-token cooldown: {token_ca: last_arm_ts}
 _hard_gate_pass_probe_cooldown = {}  # type: dict[str, float]
+# Quote retry candidates for PASS signals that could not get a signal price yet.
+_hard_gate_pass_quote_retry = {}  # type: dict[str, dict]
 
 LOTTO_RECOVERY_TINY_PROBES_ENABLED = os.environ.get('LOTTO_RECOVERY_TINY_PROBES_ENABLED', 'true').lower() != 'false'
 LOTTO_RECLAIM_MAX_MC = float(os.environ.get('LOTTO_RECLAIM_MAX_MC', '250000'))
@@ -2055,19 +2066,47 @@ def normalize_signal_ts_seconds(value):
     return ts
 
 
-def normalize_pending_entry(pending, lifecycle_id):
+def normalize_pending_entry(pending, lifecycle_id, defaults=None):
     if not isinstance(pending, dict):
         return pending
+    defaults = defaults or {}
     pending.setdefault('lifecycle_id', lifecycle_id)
+    for key in (
+        'token_ca',
+        'signal_ts',
+        'premium_signal_id',
+        'signal_type',
+        'signal_route',
+        'entry_mode',
+        'paper_only_scout',
+        'execution_scope',
+    ):
+        if key in defaults:
+            pending.setdefault(key, defaults.get(key))
+    w_entry = pending.get('w_entry') if isinstance(pending.get('w_entry'), dict) else {}
+    if pending.get('token_ca') is None and w_entry.get('ca') is not None:
+        pending['token_ca'] = w_entry.get('ca')
+    if pending.get('signal_ts') is None and w_entry.get('signal_ts') is not None:
+        pending['signal_ts'] = w_entry.get('signal_ts')
+    if pending.get('premium_signal_id') is None and w_entry.get('premium_signal_id') is not None:
+        pending['premium_signal_id'] = w_entry.get('premium_signal_id')
+    if pending.get('entry_mode') is None and pending.get('scout_mode') is not None:
+        pending['entry_mode'] = pending.get('scout_mode')
     route = str(
         pending.get('signal_route')
         or pending.get('signal_type')
         or ((pending.get('w_entry') or {}).get('type') if isinstance(pending.get('w_entry'), dict) else '')
         or ''
     ).upper()
+    if route:
+        pending.setdefault('signal_route', route)
+        pending.setdefault('signal_type', route)
     pending.setdefault('is_lotto', route == 'LOTTO' or isinstance(pending.get('lotto_state'), dict))
+    pending.setdefault('paper_only_scout', False)
     if pending.get('paper_only_scout'):
         pending.setdefault('execution_scope', 'paper_only')
+    else:
+        pending.setdefault('execution_scope', 'paper')
     return pending
 
 
@@ -3858,6 +3897,86 @@ def _pending_entry_exists_for_token(pending_entries, token_ca):
     return False
 
 
+def _iter_position_values(positions):
+    if not positions:
+        return []
+    return positions.values() if isinstance(positions, dict) else positions
+
+
+def probe_token_mutex_detail(pending_entries, positions, token_ca):
+    """Return the active same-token paper probe/position, if any.
+
+    The probe families are intentionally paper-only, so token-level de-dupe
+    prevents source resonance, hard-gate baseline, and upstream realtime from
+    opening multiple paper scouts for the same CA.  Attribution can still be
+    attached to the existing lifecycle via the recorded dedupe event.
+    """
+    if not token_ca:
+        return None
+    for lifecycle_id, pending in (pending_entries or {}).items():
+        if not isinstance(pending, dict) or pending.get('token_ca') != token_ca:
+            continue
+        return {
+            'active': True,
+            'active_kind': 'pending',
+            'lifecycle_id': lifecycle_id,
+            'existing_mode': pending.get('entry_mode') or pending.get('scout_mode'),
+            'paper_only_scout': bool(pending.get('paper_only_scout')),
+            'execution_scope': pending.get('execution_scope'),
+        }
+    for pos in _iter_position_values(positions):
+        if getattr(pos, 'token_ca', None) != token_ca:
+            continue
+        state = getattr(pos, 'monitor_state', None) or {}
+        return {
+            'active': True,
+            'active_kind': 'position',
+            'lifecycle_id': getattr(pos, 'lifecycle_id', None),
+            'trade_id': getattr(pos, 'trade_id', None),
+            'existing_mode': state.get('entryMode') or getattr(pos, 'entry_mode', None),
+            'paper_only_scout': position_is_observation_probe(pos),
+            'execution_scope': state.get('executionScope'),
+        }
+    return None
+
+
+def record_probe_token_dedupe(
+    db,
+    *,
+    component,
+    token_ca,
+    symbol=None,
+    lifecycle_id=None,
+    signal_ts=None,
+    signal_id=None,
+    route=None,
+    requested_mode=None,
+    existing=None,
+    payload=None,
+    event_ts=None,
+):
+    detail = {
+        **(payload or {}),
+        'requested_mode': requested_mode,
+        'existing_probe': existing or {},
+    }
+    record_decision_event(
+        db,
+        component=component,
+        event_type='probe_dedupe',
+        decision='skip',
+        reason='probe_deduped_existing_mode',
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts,
+        signal_id=signal_id,
+        route=route,
+        payload=detail,
+        event_ts=event_ts,
+    )
+
+
 def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=None,
                                lifecycle=None, pending=None, token_risk=None):
     """Last-mile entry contract: the fill cannot consume the trade's edge budget."""
@@ -4303,22 +4422,39 @@ def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_ent
         lifecycle_id = build_lifecycle_id(token_ca, row['signal_ts'] or int(row['created_event_ts']))
         if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
             break
-        if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
-            record_decision_event(
-                db,
-                component='lotto_upstream_probe_live',
-                event_type='skip',
-                decision='skip',
-                reason='already_pending_or_holding',
-                token_ca=token_ca,
-                symbol=symbol,
-                lifecycle_id=lifecycle_id,
-                signal_ts=row['signal_ts'],
-                signal_id=row['signal_id'],
-                route='LOTTO',
-                payload={'missed_attribution_id': row['id']},
-                event_ts=now_ts,
-            )
+        existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
+        if lifecycle_id in pending_entries or existing_probe:
+            if existing_probe:
+                record_probe_token_dedupe(
+                    db,
+                    component='lotto_upstream_probe_live',
+                    token_ca=token_ca,
+                    symbol=symbol,
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=row['signal_ts'],
+                    signal_id=row['signal_id'],
+                    route='LOTTO',
+                    requested_mode=LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE,
+                    existing=existing_probe,
+                    payload={'missed_attribution_id': row['id']},
+                    event_ts=now_ts,
+                )
+            else:
+                record_decision_event(
+                    db,
+                    component='lotto_upstream_probe_live',
+                    event_type='skip',
+                    decision='skip',
+                    reason='already_pending_or_holding',
+                    token_ca=token_ca,
+                    symbol=symbol,
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=row['signal_ts'],
+                    signal_id=row['signal_id'],
+                    route='LOTTO',
+                    payload={'missed_attribution_id': row['id']},
+                    event_ts=now_ts,
+                )
             continue
 
         recent_wait = db.execute(
@@ -4571,6 +4707,7 @@ def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_ent
         detail = {
             'probe': True,
             'paper_only_scout': True,
+            'execution_scope': 'paper_only',
             'probe_source': 'missed_attribution',
             'timing_passed': False,
             'timing_gate': 'lotto_upstream_miss_probe',
@@ -4598,12 +4735,14 @@ def enqueue_lotto_upstream_miss_tiny_scout_candidates(db, watchlist, pending_ent
         pending_entries[lifecycle_id]['entry_mode'] = LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
         pending_entries[lifecycle_id]['scout_mode'] = LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
         pending_entries[lifecycle_id]['paper_only_scout'] = True
+        pending_entries[lifecycle_id]['execution_scope'] = 'paper_only'
         pending_entries[lifecycle_id]['replay_source'] = 'live_monitor_lotto_upstream_probe'
         pending_entries[lifecycle_id]['stage_outcome'] = 'lotto_upstream_miss_tiny_scout_armed'
         pending_entries[lifecycle_id]['lotto_state']['probe'] = True
         pending_entries[lifecycle_id]['lotto_state']['probeSource'] = 'upstream_miss_attribution'
         pending_entries[lifecycle_id]['lotto_state']['probeEntryMode'] = LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
         pending_entries[lifecycle_id]['lotto_state']['paper_only_scout'] = True
+        pending_entries[lifecycle_id]['lotto_state']['executionScope'] = 'paper_only'
         record_decision_event(
             db,
             component='lotto_upstream_probe_live',
@@ -5112,6 +5251,7 @@ def evaluate_source_resonance_tiny_probe(
         'gmgn_last_seen_ts': external_alpha.get('gmgn_last_seen_ts'),
         'signal_ts_sec': external_alpha.get('signal_ts_sec'),
         'gmgn_lead_time_sec': lead_sec,
+        'lead_time_sec': lead_sec,
         'last_seen_age_sec': alpha_age_sec,
         'timestamp_valid': timestamp_valid,
         'timestamp_anomaly_reason': timestamp_anomaly_reason,
@@ -5207,6 +5347,7 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
     pending['entry_mode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
     pending['scout_mode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
     pending['paper_only_scout'] = True
+    pending['execution_scope'] = 'paper_only'
     pending['kelly_position_sol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
     pending['timing_passed'] = bool(detail.get('timing_passed'))
     pending['replay_source'] = 'live_monitor_source_resonance_probe'
@@ -5231,6 +5372,7 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
         lotto_state['probeSource'] = 'source_resonance'
         lotto_state['probeEntryMode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
         lotto_state['paper_only_scout'] = True
+        lotto_state['executionScope'] = 'paper_only'
         lotto_state['positionSizeSol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
         lotto_state['sourceResonanceProbe'] = detail
         entry_decision = lotto_state.get('entryDecision')
@@ -5239,6 +5381,7 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
                 'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
                 'position_size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
                 'paper_only_scout': True,
+                'execution_scope': 'paper_only',
                 'source_resonance_probe': detail,
                 'timing_passed': bool(detail.get('timing_passed')),
             })
@@ -5380,7 +5523,22 @@ def arm_source_resonance_lotto_probe(
         return False
     token_ca = sig['token_ca']
     symbol = sig.get('symbol') or token_ca[:8]
-    if any(pos.token_ca == token_ca for pos in positions.values()):
+    existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
+    if existing_probe:
+        record_probe_token_dedupe(
+            db,
+            component='source_resonance_probe',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=sig.get('timestamp'),
+            signal_id=sig.get('id'),
+            route='LOTTO',
+            requested_mode=SOURCE_RESONANCE_TINY_PROBE_MODE,
+            existing=existing_probe,
+            payload=signal_audit_payload,
+            event_ts=now_ts,
+        )
         return False
     if not registered_entry or not pool:
         return False
@@ -5613,20 +5771,10 @@ def evaluate_hard_gate_pass_tiny_probe(
     if not observed['quote_executable']:
         return _result(False, 'quote_not_executable')
 
-    # Mutual exclusion: skip if source_resonance already armed for this token
-    if any(
-        p.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE
-        and p.get('token_ca') == token_ca
-        for p in pending_entries.values()
-    ):
-        return _result(False, 'source_resonance_already_armed')
-
-    # Check if already in positions
-    if any(
-        getattr(pos, 'token_ca', None) == token_ca
-        for pos in (positions.values() if isinstance(positions, dict) else [])
-    ):
-        return _result(False, 'already_in_position')
+    existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
+    if existing_probe:
+        observed['existing_probe'] = existing_probe
+        return _result(False, 'probe_deduped_existing_mode')
 
     # Per-token cooldown
     last_armed = _hard_gate_pass_probe_cooldown.get(token_ca, 0)
@@ -5690,6 +5838,203 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
     return pending
 
 
+def _schedule_hard_gate_pass_quote_retry(
+    *,
+    sig,
+    registered_entry,
+    pool,
+    lifecycle_id,
+    signal_lifecycle,
+    signal_audit_payload,
+    hard_gate_status,
+    route,
+    now_ts,
+):
+    if not HARD_GATE_PASS_QUOTE_RETRY_ENABLED:
+        return False
+    if not sig or not registered_entry or not pool or not lifecycle_id:
+        return False
+    candidate = _hard_gate_pass_quote_retry.get(lifecycle_id) or {}
+    first_seen_ts = candidate.get('first_seen_ts') or now_ts
+    attempts = int(candidate.get('attempts') or 0)
+    _hard_gate_pass_quote_retry[lifecycle_id] = {
+        'sig': dict(sig),
+        'registered_entry': dict(registered_entry),
+        'pool': pool,
+        'lifecycle_id': lifecycle_id,
+        'signal_lifecycle': signal_lifecycle or {},
+        'signal_audit_payload': signal_audit_payload or {},
+        'hard_gate_status': hard_gate_status,
+        'route': route,
+        'first_seen_ts': first_seen_ts,
+        'next_attempt_ts': now_ts,
+        'attempts': attempts,
+    }
+    return True
+
+
+def _record_hard_gate_quote_retry_event(
+    db,
+    candidate,
+    *,
+    event_type,
+    decision,
+    reason,
+    payload=None,
+    event_ts=None,
+):
+    sig = candidate.get('sig') or {}
+    route = candidate.get('route') or ((candidate.get('registered_entry') or {}).get('type'))
+    record_decision_event(
+        db,
+        component='hard_gate_pass_probe',
+        event_type=event_type,
+        decision=decision,
+        reason=reason,
+        token_ca=sig.get('token_ca'),
+        symbol=sig.get('symbol') or (sig.get('token_ca') or '')[:8],
+        lifecycle_id=candidate.get('lifecycle_id'),
+        signal_ts=sig.get('timestamp'),
+        signal_id=sig.get('id'),
+        route=route,
+        data_source='premium_signals+realtime_price',
+        payload={
+            **(candidate.get('signal_audit_payload') or {}),
+            'retry': {
+                'attempts': candidate.get('attempts') or 0,
+                'first_seen_ts': candidate.get('first_seen_ts'),
+                'next_attempt_ts': candidate.get('next_attempt_ts'),
+                'window_sec': HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC,
+                'poll_sec': HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC,
+            },
+            **(payload or {}),
+        },
+        event_ts=event_ts,
+    )
+
+
+def process_hard_gate_pass_quote_retries(
+    db,
+    watchlist,
+    pending_entries,
+    positions,
+    *,
+    now_ts=None,
+    max_positions=None,
+):
+    """Retry short-window quote discovery for hard-gate PASS baseline probes.
+
+    This is deliberately non-blocking: the main signal loop schedules no-price
+    PASS tokens here, then each monitor cycle takes another quick quote attempt.
+    """
+    now_ts = now_ts or time.time()
+    armed = 0
+    for lifecycle_id, candidate in list(_hard_gate_pass_quote_retry.items()):
+        if now_ts < float(candidate.get('next_attempt_ts') or 0):
+            continue
+        sig = candidate.get('sig') or {}
+        token_ca = sig.get('token_ca')
+        route = candidate.get('route') or ((candidate.get('registered_entry') or {}).get('type'))
+        symbol = sig.get('symbol') or (token_ca or '')[:8]
+        existing = probe_token_mutex_detail(pending_entries, positions, token_ca)
+        if existing:
+            record_probe_token_dedupe(
+                db,
+                component='hard_gate_pass_probe',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=sig.get('timestamp'),
+                signal_id=sig.get('id'),
+                route=route,
+                requested_mode=HARD_GATE_PASS_TINY_PROBE_MODE,
+                existing=existing,
+                payload={'quote_retry': candidate},
+                event_ts=now_ts,
+            )
+            _hard_gate_pass_quote_retry.pop(lifecycle_id, None)
+            continue
+        if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+            candidate['next_attempt_ts'] = now_ts + HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC
+            _record_hard_gate_quote_retry_event(
+                db,
+                candidate,
+                event_type='quote_retry_wait',
+                decision='wait',
+                reason='max_positions_reached',
+                event_ts=now_ts,
+            )
+            continue
+        elapsed = now_ts - float(candidate.get('first_seen_ts') or now_ts)
+        if elapsed > HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC:
+            _record_hard_gate_quote_retry_event(
+                db,
+                candidate,
+                event_type='probe_reject',
+                decision='reject',
+                reason='quote_not_executable_after_retry',
+                payload={'elapsed_sec': elapsed},
+                event_ts=now_ts,
+            )
+            _hard_gate_pass_quote_retry.pop(lifecycle_id, None)
+            continue
+        price = None
+        try:
+            price_val, _, _ = fetch_realtime_price(token_ca, candidate.get('pool'), max_age_ms=15000)
+            price = price_val if price_val and price_val > 0 else None
+        except Exception as exc:
+            candidate['last_error'] = str(exc)
+        candidate['attempts'] = int(candidate.get('attempts') or 0) + 1
+        candidate['next_attempt_ts'] = now_ts + HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC
+        if not price:
+            _record_hard_gate_quote_retry_event(
+                db,
+                candidate,
+                event_type='quote_retry_attempt',
+                decision='wait',
+                reason='quote_not_executable_retrying',
+                payload={'elapsed_sec': elapsed, 'last_error': candidate.get('last_error')},
+                event_ts=now_ts,
+            )
+            continue
+        registered_entry = dict(candidate.get('registered_entry') or {})
+        registered_entry['signal_price'] = price
+        sig_with_price = dict(sig)
+        sig_with_price['signal_price'] = price
+        if watchlist and registered_entry.get('id'):
+            try:
+                watchlist.update_position_state(registered_entry['id'], signal_price=price)
+            except Exception:
+                pass
+        _record_hard_gate_quote_retry_event(
+            db,
+            candidate,
+            event_type='quote_retry_attempt',
+            decision='pass',
+            reason='quote_executable_after_retry',
+            payload={'elapsed_sec': elapsed, 'signal_price': price},
+            event_ts=now_ts,
+        )
+        if arm_hard_gate_pass_tiny_probe(
+            db,
+            pending_entries,
+            positions,
+            sig=sig_with_price,
+            registered_entry=registered_entry,
+            pool=candidate.get('pool'),
+            lifecycle_id=lifecycle_id,
+            signal_lifecycle=candidate.get('signal_lifecycle') or {},
+            signal_audit_payload=candidate.get('signal_audit_payload') or {},
+            hard_gate_status=candidate.get('hard_gate_status'),
+            now_ts=now_ts,
+            route=route,
+            allow_quote_retry=False,
+        ):
+            armed += 1
+        _hard_gate_pass_quote_retry.pop(lifecycle_id, None)
+    return armed
+
+
 def arm_hard_gate_pass_tiny_probe(
     db,
     pending_entries,
@@ -5704,6 +6049,7 @@ def arm_hard_gate_pass_tiny_probe(
     hard_gate_status,
     now_ts,
     route=None,
+    allow_quote_retry=True,
 ):
     """Try to arm a baseline hard_gate_pass paper probe for a PASS token.
 
@@ -5716,7 +6062,22 @@ def arm_hard_gate_pass_tiny_probe(
         return False
     token_ca = sig['token_ca']
     symbol = sig.get('symbol') or token_ca[:8]
-    if any(getattr(pos, 'token_ca', None) == token_ca for pos in positions.values()):
+    existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
+    if existing_probe:
+        record_probe_token_dedupe(
+            db,
+            component='hard_gate_pass_probe',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=sig.get('timestamp'),
+            signal_id=sig.get('id'),
+            route=route,
+            requested_mode=HARD_GATE_PASS_TINY_PROBE_MODE,
+            existing=existing_probe,
+            payload=signal_audit_payload,
+            event_ts=now_ts,
+        )
         return False
     if not registered_entry or not pool:
         return False
@@ -5755,6 +6116,38 @@ def arm_hard_gate_pass_tiny_probe(
         'watchlist_id': registered_entry.get('id'),
     }
     if not detail.get('pass'):
+        if detail.get('reason') == 'quote_not_executable' and allow_quote_retry and _schedule_hard_gate_pass_quote_retry(
+            sig=sig,
+            registered_entry=registered_entry,
+            pool=pool,
+            lifecycle_id=lifecycle_id,
+            signal_lifecycle=signal_lifecycle,
+            signal_audit_payload=signal_audit_payload,
+            hard_gate_status=hard_gate_status,
+            route=route_name,
+            now_ts=now_ts,
+        ):
+            record_decision_event(
+                db,
+                component='hard_gate_pass_probe',
+                event_type='quote_retry_scheduled',
+                decision='wait',
+                reason='quote_not_executable_retry_scheduled',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=sig.get('timestamp'),
+                signal_id=sig.get('id'),
+                route=route_name,
+                data_source='premium_signals+realtime_price',
+                payload=with_lifecycle_payload({
+                    **detail,
+                    'retry_window_sec': HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC,
+                    'retry_poll_sec': HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC,
+                }, signal_lifecycle),
+                event_ts=now_ts,
+            )
+            return False
         record_decision_event(
             db,
             component='hard_gate_pass_probe',
@@ -5863,7 +6256,24 @@ def arm_lotto_upstream_realtime_tiny_scout(
     symbol = sig.get('symbol') or token_ca[:8]
     signal_ts = sig.get('timestamp')
     premium_signal_id = sig.get('id')
-    if lifecycle_id in pending_entries or any(pos.token_ca == token_ca for pos in positions.values()):
+    if lifecycle_id in pending_entries:
+        return False
+    existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
+    if existing_probe:
+        record_probe_token_dedupe(
+            db,
+            component='lotto_upstream_realtime_probe',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=premium_signal_id,
+            route='LOTTO',
+            requested_mode=LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+            existing=existing_probe,
+            payload=signal_audit_payload,
+            event_ts=now_ts,
+        )
         return False
     if not registered_entry or not pool:
         return False
@@ -13808,6 +14218,7 @@ def run_monitor(db):
     last_missed_attribution_update = 0.0
     last_scout_telemetry = 0.0
     last_discovery_tracking = 0.0
+    last_hard_gate_quote_retry = 0.0
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
@@ -14050,6 +14461,32 @@ def run_monitor(db):
             except Exception as _discovery_err:
                 log.debug(f"  [DISCOVERY_TRACKING] scan failed: {_discovery_err}")
             last_discovery_tracking = now
+
+        if (
+            HARD_GATE_PASS_QUOTE_RETRY_ENABLED
+            and _hard_gate_pass_quote_retry
+            and not pending_priority
+            and now - last_hard_gate_quote_retry >= max(1, min(HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC, 5))
+        ):
+            try:
+                with positions_lock:
+                    _hard_gate_retry_armed = process_hard_gate_pass_quote_retries(
+                        db,
+                        watchlist,
+                        pending_entries,
+                        dict(positions),
+                        now_ts=now,
+                        max_positions=max_positions,
+                    )
+                if _hard_gate_retry_armed:
+                    log.info(
+                        f"  [PAPER_HARD_GATE_PASS_PROBE] quote_retry_armed={_hard_gate_retry_armed} "
+                        f"active_retries={len(_hard_gate_pass_quote_retry)}"
+                    )
+                    last_progress = time.time()
+            except Exception as _hard_gate_retry_err:
+                log.debug(f"  [PAPER_HARD_GATE_PASS_PROBE] quote retry scan failed: {_hard_gate_retry_err}")
+            last_hard_gate_quote_retry = now
 
         if not pending_priority and now - last_missed_attribution_update >= 60:
             try:

@@ -63,8 +63,44 @@ test('premium signal audit counts pass-to-max dogs outside missed attribution', 
   assert.equal(audit.summary.pass_dog_unique, 2);
   assert.equal(audit.summary.pass_dog_without_paper_trade_unique, 1);
   assert.equal(audit.summary.pass_dog_in_missed_attribution_unique, 0);
+  assert.equal(audit.summary.coverage_classes.paper_trade, 1);
+  assert.equal(audit.summary.coverage_classes.unclassified, 1);
+  assert.equal(audit.summary.unclassified_unique, 1);
   assert.equal(audit.uncovered_pass_dogs[0].token_ca, 'A');
   assert.equal(audit.uncovered_pass_dogs[0].pass_to_max_pct, 260);
+  assert.equal(audit.unclassified_tokens[0].token_ca, 'A');
+});
+
+test('premium signal audit classifies observe-only and safety rejects', () => {
+  const audit = buildPremiumSignalOutcomeAudit({
+    signals: [
+      {
+        id: 1,
+        token_ca: 'OBS',
+        symbol: 'OBS',
+        timestamp: 1_000_000,
+        signal_type: 'NEW_TRENDING',
+        market_cap: 50_000,
+        hard_gate_status: 'NOT_ATH_V17',
+      },
+      {
+        id: 2,
+        token_ca: 'SAFE',
+        symbol: 'SAFE',
+        timestamp: 1_000_000,
+        signal_type: 'NEW_TRENDING',
+        market_cap: 50_000,
+        hard_gate_status: 'GREYLIST',
+      },
+    ],
+    paperTrades: [],
+    missedAttributions: [],
+    sinceTs: 1000,
+  });
+
+  assert.equal(audit.summary.coverage_classes.observe_only, 1);
+  assert.equal(audit.summary.coverage_classes.safety_reject, 1);
+  assert.equal(audit.summary.coverage_classes.unclassified, 0);
 });
 
 test('premium signal audit tiers percentage gains', () => {
