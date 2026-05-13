@@ -601,7 +601,7 @@ function buildClosedLoopSignalSummary(signalDb, sinceTs) {
   };
 }
 
-function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs) {
+function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePaperPnlDetails = true } = {}) {
   const byMode = Object.fromEntries(CLOSED_LOOP_PROBE_MODES.map((mode) => [mode, emptyClosedLoopProbeSummary(mode)]));
   const paperPnlByEntryMode = [];
   if (!paperDb) return { by_mode: byMode, paper_pnl_by_entry_mode: paperPnlByEntryMode };
@@ -653,6 +653,9 @@ function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs) {
   }
 
   if (tableNames.has('paper_trades')) {
+    const modeFilterSql = includePaperPnlDetails
+      ? ''
+      : `AND COALESCE(entry_mode, 'unknown') IN (${sqlInList(CLOSED_LOOP_PROBE_MODES)})`;
     const tradeRows = paperDb.prepare(`
       SELECT
         COALESCE(entry_mode, 'unknown') AS entry_mode,
@@ -663,7 +666,7 @@ function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs) {
         SUM(pnl_pct) AS total_pnl,
         MAX(peak_pnl) AS max_peak_pnl
       FROM paper_trades
-      ${sinceTs ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since' : ''}
+      ${sinceTs ? `WHERE COALESCE(entry_ts, exit_ts, 0) >= @since ${modeFilterSql}` : (modeFilterSql ? `WHERE 1=1 ${modeFilterSql}` : '')}
       GROUP BY COALESCE(entry_mode, 'unknown')
       ORDER BY fills DESC, total_pnl DESC
     `).all(sinceTs ? { since: sinceTs } : {});
@@ -678,7 +681,7 @@ function buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs) {
         total_pnl_pct: row.total_pnl == null ? null : roundNumber(Number(row.total_pnl) * 100, 2),
         max_peak_pnl_pct: row.max_peak_pnl == null ? null : roundNumber(Number(row.max_peak_pnl) * 100, 2),
       };
-      paperPnlByEntryMode.push(entry);
+      if (includePaperPnlDetails) paperPnlByEntryMode.push(entry);
       if (byMode[row.entry_mode]) {
         Object.assign(byMode[row.entry_mode], {
           fills: entry.fills,
@@ -887,7 +890,7 @@ function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, { 
   };
 }
 
-function buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs) {
+function buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, { includeSummary = true } = {}) {
   const empty = {
     available: false,
     candidate_rows: 0,
@@ -897,6 +900,7 @@ function buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs) {
     telegram_gmgn_unique: 0,
   };
   if (!paperDb || !tableNames.has('source_resonance_candidates')) return empty;
+  if (!includeSummary) return { ...empty, available: true, skipped: true };
   const cols = getTableColumns(paperDb, 'source_resonance_candidates');
   const tsExpr = cols.has('signal_ts') ? 'COALESCE(signal_ts, 0)' : '0';
   const gmgnPreSeenExpr = cols.has('gmgn_pre_seen') ? 'COALESCE(gmgn_pre_seen, 0)' : '0';
@@ -955,7 +959,15 @@ function buildClosedLoopDecision(report72h) {
   };
 }
 
-function buildClosedLoopWindowReport({ signalDb, paperDb, sinceTs, limit, includeMissedDetails = true }) {
+function buildClosedLoopWindowReport({
+  signalDb,
+  paperDb,
+  sinceTs,
+  limit,
+  includeMissedDetails = true,
+  includeSourceSummary = true,
+  includePaperPnlDetails = true,
+}) {
   const tableNames = paperDb
     ? new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name))
     : new Set();
@@ -963,8 +975,10 @@ function buildClosedLoopWindowReport({ signalDb, paperDb, sinceTs, limit, includ
     since_ts: sinceTs,
     since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
     premium_signals: buildClosedLoopSignalSummary(signalDb, sinceTs),
-    probes: buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs),
-    source_resonance: buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs),
+    probes: buildClosedLoopProbeSummary(paperDb, tableNames, sinceTs, { includePaperPnlDetails }),
+    source_resonance: buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, {
+      includeSummary: includeSourceSummary,
+    }),
     missed_dogs: buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, limit, {
       includeDetails: includeMissedDetails,
     }),
@@ -3528,6 +3542,8 @@ const server = http.createServer(async (req, res) => {
         sinceTs: nowSec - 72 * 3600,
         limit,
         includeMissedDetails: includeRaw72h,
+        includeSourceSummary: includeRaw72h,
+        includePaperPnlDetails: includeRaw72h,
       });
       const responseBody = {
         generated_at: new Date().toISOString(),
