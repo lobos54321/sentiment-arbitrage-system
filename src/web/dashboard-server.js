@@ -32,6 +32,7 @@ import {
   summarizeEntryModeRegistry,
 } from './mode-registry-utils.js';
 import { buildNotAthRelaxedShadowCohorts } from './not-ath-watch-shadow-utils.js';
+import { buildPremiumSignalOutcomeAudit } from './premium-signal-outcome-audit-utils.js';
 
 dotenv.config();
 
@@ -2811,6 +2812,119 @@ const server = http.createServer(async (req, res) => {
       try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
       try { if (signalDb) signalDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/premium-signal-outcome-audit') {
+    if (!checkAuth(req, url, res)) return;
+    let signalDb;
+    let paperDb;
+    try {
+      const sinceTs = reportSinceTs(url, '6h');
+      const limit = boundedIntParam(url, 'limit', 5000, 1, 20000);
+      signalDb = getDb();
+      if (!signalDb) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'sentiment database unavailable' }));
+        return;
+      }
+      const signalTables = new Set(
+        signalDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      if (!signalTables.has('premium_signals')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'premium_signals table not found' }));
+        return;
+      }
+      const signalCols = getTableColumns(signalDb, 'premium_signals');
+      const timestampExpr = signalCols.has('timestamp')
+        ? "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE CAST(timestamp AS INTEGER) END"
+        : "0";
+      const signalWhere = sinceTs ? `WHERE ${timestampExpr} >= @since` : '';
+      const signalRows = signalDb.prepare(`
+        SELECT
+          id,
+          symbol,
+          token_ca,
+          ${signalCols.has('timestamp') ? 'timestamp' : 'NULL AS timestamp'},
+          ${timestampExpr} AS timestamp_sec,
+          ${signalCols.has('created_at') ? 'created_at' : 'NULL AS created_at'},
+          ${signalCols.has('signal_type') ? 'signal_type' : 'NULL AS signal_type'},
+          ${signalCols.has('market_cap') ? 'market_cap' : 'NULL AS market_cap'},
+          ${signalCols.has('hard_gate_status') ? 'hard_gate_status' : 'NULL AS hard_gate_status'},
+          ${signalCols.has('gate_result') ? 'gate_result' : 'NULL AS gate_result'},
+          ${signalCols.has('ai_action') ? 'ai_action' : 'NULL AS ai_action'},
+          ${signalCols.has('downstream_trade_id') ? 'downstream_trade_id' : 'NULL AS downstream_trade_id'},
+          ${signalCols.has('downstream_lifecycle_id') ? 'downstream_lifecycle_id' : 'NULL AS downstream_lifecycle_id'}
+        FROM premium_signals
+        ${signalWhere}
+        ORDER BY ${timestampExpr} DESC, id DESC
+        LIMIT @limit
+      `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+
+      const paperDbPath = getPaperDbPath();
+      let paperTrades = [];
+      let missedAttributions = [];
+      if (fs.existsSync(paperDbPath)) {
+        paperDb = new Database(paperDbPath, { readonly: true });
+        const paperTables = new Set(
+          paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+        );
+        if (paperTables.has('paper_trades')) {
+          const tradeCols = getTableColumns(paperDb, 'paper_trades');
+          const tradeWhere = sinceTs ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since OR COALESCE(exit_ts, 0) >= @since' : '';
+          paperTrades = paperDb.prepare(`
+            SELECT
+              id,
+              token_ca,
+              symbol,
+              entry_ts,
+              exit_ts,
+              pnl_pct,
+              peak_pnl,
+              position_size_sol,
+              signal_route,
+              ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'}
+            FROM paper_trades
+            ${tradeWhere}
+            ORDER BY entry_ts DESC, id DESC
+            LIMIT @limit
+          `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+        }
+        if (paperTables.has('paper_missed_signal_attribution')) {
+          missedAttributions = paperDb.prepare(`
+            SELECT
+              token_ca,
+              COUNT(*) AS n,
+              MAX(COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, NULL)) AS max_pnl
+            FROM paper_missed_signal_attribution
+            ${sinceTs ? 'WHERE COALESCE(created_event_ts, signal_ts, baseline_ts, 0) >= @since' : ''}
+            GROUP BY token_ca
+            LIMIT @limit
+          `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+        }
+      }
+
+      const audit = buildPremiumSignalOutcomeAudit({
+        signals: signalRows,
+        paperTrades,
+        missedAttributions,
+        sinceTs,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        ...audit,
+        db_path: paperDbPath,
+        premium_signal_query_limit: limit,
+        notes: {
+          audit_goal: 'Compare upstream premium signal market-cap outcomes with paper trade coverage.',
+          missed_recovery_difference: 'missed-recovery-summary only covers paper_missed_signal_attribution; this endpoint starts from premium_signals and therefore exposes coverage gaps.',
+        },
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/mode-ev') {
