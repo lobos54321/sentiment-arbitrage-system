@@ -10,11 +10,11 @@ NOT_ATH Strategy:
   - Stage 2A: after stage1 stop-loss, wait 3 bars and re-enter on +18% rebound from post-stop rolling low
   - Stage 3: event-driven re-entry after qualifying stage1/stage2A close and later same-token awakening signal
 
-Monitors premium_signals for new entries, enters at live price via GeckoTerminal,
-tracks staged lifecycle positions, records results to paper_trades.db.
+Monitors premium_signals for new entries, uses realtime market quotes to simulate
+paper entries, tracks staged lifecycle positions, records results to paper_trades.db.
 
 Usage:
-    Live monitor:
+    Paper realtime monitor:
       python3 scripts/paper_trade_monitor.py
     Dry run from recent signals:
       python3 scripts/paper_trade_monitor.py --dry-run
@@ -297,6 +297,43 @@ SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_
 SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
 SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED', 'true').lower() != 'false'
 PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
+
+# --- hard_gate_pass_tiny_probe: baseline paper-only probe for every hard-gate
+# PASS + quote-executable unique token.  Unlike source_resonance it does NOT
+# require GMGN pre-seen or momentum confirmation.  It lets us answer "of the
+# hard-gate PASS tokens, which should we have bought?" without opening 26
+# historically-negative blocked modes.
+HARD_GATE_PASS_TINY_PROBE_MODE = 'hard_gate_pass_tiny_probe'
+HARD_GATE_PASS_TINY_PROBE_ENABLED = os.environ.get(
+    'HARD_GATE_PASS_TINY_PROBE_ENABLED', 'true'
+).lower() != 'false'
+HARD_GATE_PASS_TINY_PROBE_SIZE_SOL = float(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_SIZE_SOL', '0.002')
+)
+HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR = int(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR', '8')
+)
+HARD_GATE_PASS_TINY_PROBE_COOLDOWN_SEC = int(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_COOLDOWN_SEC', '300')
+)
+HARD_GATE_PASS_TINY_PROBE_MAX_MC = float(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_MAX_MC', '300000')
+)
+HARD_GATE_PASS_TINY_PROBE_MIN_MC = float(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_MIN_MC', '0')
+)
+HARD_GATE_PASS_TINY_PROBE_MAX_TOP1_PCT = float(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_MAX_TOP1_PCT', '62')
+)
+HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT = float(
+    os.environ.get('HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT', '85')
+)
+PAPER_TINY_SCOUT_ENTRY_MODES.add(HARD_GATE_PASS_TINY_PROBE_MODE)
+# Rate-limit state: list of arm timestamps for sliding-window enforcement
+_hard_gate_pass_probe_arm_ts = []  # type: list[float]
+# Per-token cooldown: {token_ca: last_arm_ts}
+_hard_gate_pass_probe_cooldown = {}  # type: dict[str, float]
+
 LOTTO_RECOVERY_TINY_PROBES_ENABLED = os.environ.get('LOTTO_RECOVERY_TINY_PROBES_ENABLED', 'true').lower() != 'false'
 LOTTO_RECLAIM_MAX_MC = float(os.environ.get('LOTTO_RECLAIM_MAX_MC', '250000'))
 LOTTO_RECLAIM_MIN_LIQ_USD = float(os.environ.get('LOTTO_RECLAIM_MIN_LIQ_USD', '5000'))
@@ -3784,10 +3821,12 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         or pending.get('replay_source') == 'live_monitor_ath_uncertainty'
         or pending.get('replay_source') == 'live_monitor_discovery_probe'
         or pending.get('replay_source') == 'live_monitor_source_resonance_probe'
+        or pending.get('replay_source') == 'live_monitor_hard_gate_pass_probe'
         or pending.get('entry_mode') == 'lotto_real_probe_reentry_arm'
         or pending.get('entry_mode') == LOTTO_UPSTREAM_MISS_TINY_SCOUT_MODE
         or pending.get('entry_mode') == LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
         or pending.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE
+        or pending.get('entry_mode') == HARD_GATE_PASS_TINY_PROBE_MODE
         or pending.get('entry_mode') in LOTTO_RECOVERY_TINY_PROBE_MODES
         or pending.get('entry_mode') == ATH_UNCERTAINTY_TINY_SCOUT_MODE
         or pending.get('entry_mode') in {
@@ -3871,7 +3910,7 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
     tiny_scout_spread_cap_pct = None
     if is_tiny_scout:
         tiny_scout_spread_cap_pct = ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT
-        if entry_mode == SOURCE_RESONANCE_TINY_PROBE_MODE:
+        if entry_mode == SOURCE_RESONANCE_TINY_PROBE_MODE or entry_mode == HARD_GATE_PASS_TINY_PROBE_MODE:
             max_spread_pct = max(max_spread_pct, ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT)
             tiny_scout_spread_cap_pct = max_spread_pct
         elif entry_mode in {
@@ -5385,6 +5424,341 @@ def arm_source_resonance_lotto_probe(
         route='LOTTO',
         data_source='premium_signals+external_alpha+dexscreener+helius',
         payload=with_lifecycle_payload(detail, probe_lifecycle or signal_lifecycle),
+        event_ts=now_ts,
+    )
+    return True
+
+
+def evaluate_hard_gate_pass_tiny_probe(
+    token_ca,
+    *,
+    signal=None,
+    watchlist_entry=None,
+    route=None,
+    hard_gate_status=None,
+    dex_snapshot=None,
+    live_concentration=None,
+    pending_entries=None,
+    positions=None,
+    now_ts=None,
+):
+    """Evaluate whether a hard-gate PASS token qualifies for a baseline paper probe.
+
+    This is intentionally simpler than source_resonance — it only checks:
+    - feature flag enabled
+    - hard_gate == PASS
+    - basic safety (MC range, concentration caps)
+    - rate limit (max N probes per hour)
+    - per-token cooldown (no duplicate probes within 5 min)
+    - mutual exclusion with source_resonance_tiny_probe
+    """
+    global _hard_gate_pass_probe_arm_ts, _hard_gate_pass_probe_cooldown
+
+    signal = signal or {}
+    watchlist_entry = watchlist_entry or {}
+    dex_snapshot = dex_snapshot or {}
+    live_concentration = live_concentration or {}
+    pending_entries = pending_entries or {}
+    positions = positions or {}
+    now_ts = now_ts or time.time()
+
+    gate = str(hard_gate_status or '').upper()
+    route_name = str(
+        route
+        or signal.get('signal_type')
+        or watchlist_entry.get('type')
+        or ''
+    ).upper()
+
+    current_mc = _source_resonance_first_number(
+        signal.get('market_cap'),
+        watchlist_entry.get('signal_mc'),
+        dex_snapshot.get('market_cap'),
+        dex_snapshot.get('fdv'),
+        positive=True,
+        default=0.0,
+    )
+    top1_pct = _source_resonance_first_number(
+        live_concentration.get('top1_pct'),
+        dex_snapshot.get('top1_pct'),
+        default=None,
+    )
+    top10_pct = _source_resonance_first_number(
+        live_concentration.get('top10_pct'),
+        watchlist_entry.get('signal_top10'),
+        dex_snapshot.get('top10_pct'),
+        dex_snapshot.get('top10_holder_pct'),
+        default=None,
+    )
+
+    observed = {
+        'route': route_name,
+        'hard_gate_status': gate,
+        'current_mc': current_mc,
+        'top1_pct': top1_pct,
+        'top10_pct': top10_pct,
+        'quote_executable': bool(
+            _source_resonance_first_number(
+                signal.get('signal_price'),
+                watchlist_entry.get('signal_price'),
+                positive=True,
+                default=0.0,
+            )
+        ),
+    }
+    thresholds = {
+        'size_sol': HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
+        'max_per_hour': HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR,
+        'cooldown_sec': HARD_GATE_PASS_TINY_PROBE_COOLDOWN_SEC,
+        'min_mc': HARD_GATE_PASS_TINY_PROBE_MIN_MC,
+        'max_mc': HARD_GATE_PASS_TINY_PROBE_MAX_MC,
+        'max_top1_pct': HARD_GATE_PASS_TINY_PROBE_MAX_TOP1_PCT,
+        'max_top10_pct': HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT,
+    }
+
+    def _result(passed, reason):
+        return {
+            'pass': bool(passed),
+            'reason': reason,
+            'entry_mode': HARD_GATE_PASS_TINY_PROBE_MODE,
+            'position_size_sol': HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
+            'paper_only_scout': True,
+            'execution_scope': 'paper_only',
+            'probe': True,
+            'probe_source': 'hard_gate_pass_baseline',
+            'resonance_cohort': 'hard_gate_pass',
+            'source_component': 'hard_gate_pass_probe',
+            'timing_passed': True,
+            'observed': observed,
+            'thresholds': thresholds,
+        }
+
+    if not HARD_GATE_PASS_TINY_PROBE_ENABLED:
+        return _result(False, 'hard_gate_pass_probe_disabled')
+    if gate != 'PASS':
+        return _result(False, 'hard_gate_not_pass')
+    if not observed['quote_executable']:
+        return _result(False, 'quote_not_executable')
+
+    # Mutual exclusion: skip if source_resonance already armed for this token
+    if any(
+        p.get('entry_mode') == SOURCE_RESONANCE_TINY_PROBE_MODE
+        and p.get('token_ca') == token_ca
+        for p in pending_entries.values()
+    ):
+        return _result(False, 'source_resonance_already_armed')
+
+    # Check if already in positions
+    if any(
+        getattr(pos, 'token_ca', None) == token_ca
+        for pos in (positions.values() if isinstance(positions, dict) else [])
+    ):
+        return _result(False, 'already_in_position')
+
+    # Per-token cooldown
+    last_armed = _hard_gate_pass_probe_cooldown.get(token_ca, 0)
+    if now_ts - last_armed < HARD_GATE_PASS_TINY_PROBE_COOLDOWN_SEC:
+        return _result(False, 'per_token_cooldown')
+
+    # Hourly rate limit
+    cutoff = now_ts - 3600
+    _hard_gate_pass_probe_arm_ts[:] = [
+        ts for ts in _hard_gate_pass_probe_arm_ts if ts > cutoff
+    ]
+    if len(_hard_gate_pass_probe_arm_ts) >= HARD_GATE_PASS_TINY_PROBE_MAX_PER_HOUR:
+        return _result(False, 'hourly_rate_limit')
+
+    # MC range
+    if current_mc > 0 and current_mc < HARD_GATE_PASS_TINY_PROBE_MIN_MC:
+        return _result(False, 'mc_too_low')
+    if current_mc > HARD_GATE_PASS_TINY_PROBE_MAX_MC:
+        return _result(False, 'mc_too_high')
+
+    # Concentration caps
+    if top1_pct is not None and top1_pct > HARD_GATE_PASS_TINY_PROBE_MAX_TOP1_PCT:
+        return _result(False, 'top1_too_high')
+    if top10_pct is not None and top10_pct > HARD_GATE_PASS_TINY_PROBE_MAX_TOP10_PCT:
+        return _result(False, 'top10_too_high')
+
+    return _result(True, 'hard_gate_pass_baseline_probe')
+
+
+def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage_outcome=None):
+    """Stamp a pending entry as a hard_gate_pass baseline probe."""
+    if not pending or not detail or not detail.get('pass'):
+        return pending
+    route_name = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    pending['entry_mode'] = HARD_GATE_PASS_TINY_PROBE_MODE
+    pending['scout_mode'] = HARD_GATE_PASS_TINY_PROBE_MODE
+    pending['paper_only_scout'] = True
+    pending['execution_scope'] = 'paper_only'
+    pending['kelly_position_sol'] = HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
+    pending['timing_passed'] = True
+    pending['replay_source'] = 'live_monitor_hard_gate_pass_probe'
+    pending['stage_outcome'] = stage_outcome or 'hard_gate_pass_tiny_probe_armed'
+    pending['source_component'] = 'hard_gate_pass_probe'
+    pending['hard_gate_pass_probe'] = detail
+    if route_name:
+        pending['signal_route'] = route_name
+    if not pending.get('trigger_price'):
+        pending['trigger_price'] = (
+            pending.get('signal_price')
+            or pending.get('entry_price')
+        )
+    lotto_state = pending.get('lotto_state')
+    if isinstance(lotto_state, dict):
+        lotto_state['probe'] = True
+        lotto_state['probeSource'] = 'hard_gate_pass'
+        lotto_state['probeEntryMode'] = HARD_GATE_PASS_TINY_PROBE_MODE
+        lotto_state['paper_only_scout'] = True
+        lotto_state['executionScope'] = 'paper_only'
+        lotto_state['positionSizeSol'] = HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
+        lotto_state['hardGatePassProbe'] = detail
+    return pending
+
+
+def arm_hard_gate_pass_tiny_probe(
+    db,
+    pending_entries,
+    positions,
+    *,
+    sig,
+    registered_entry,
+    pool,
+    lifecycle_id,
+    signal_lifecycle,
+    signal_audit_payload,
+    hard_gate_status,
+    now_ts,
+    route=None,
+):
+    """Try to arm a baseline hard_gate_pass paper probe for a PASS token.
+
+    Returns True if armed, False otherwise.  Respects rate limits and mutual
+    exclusion with source_resonance_tiny_probe.
+    """
+    global _hard_gate_pass_probe_arm_ts, _hard_gate_pass_probe_cooldown
+
+    if lifecycle_id in pending_entries:
+        return False
+    token_ca = sig['token_ca']
+    symbol = sig.get('symbol') or token_ca[:8]
+    if any(getattr(pos, 'token_ca', None) == token_ca for pos in positions.values()):
+        return False
+    if not registered_entry or not pool:
+        return False
+    route_name = str(
+        route
+        or registered_entry.get('type')
+        or sig.get('signal_type')
+        or 'MIXED'
+    ).upper()
+
+    try:
+        realtime_dex = fetch_dexscreener_trend_snapshot(token_ca)
+    except Exception:
+        realtime_dex = None
+    try:
+        live_concentration = helius_token_concentration(token_ca)
+    except Exception:
+        live_concentration = None
+
+    detail = evaluate_hard_gate_pass_tiny_probe(
+        token_ca,
+        signal=sig,
+        watchlist_entry=registered_entry,
+        route=route_name,
+        hard_gate_status=hard_gate_status,
+        dex_snapshot=realtime_dex,
+        live_concentration=live_concentration,
+        pending_entries=pending_entries,
+        positions=positions,
+        now_ts=now_ts,
+    )
+    detail = {
+        **(signal_audit_payload or {}),
+        **detail,
+        'pool': pool,
+        'watchlist_id': registered_entry.get('id'),
+    }
+    if not detail.get('pass'):
+        record_decision_event(
+            db,
+            component='hard_gate_pass_probe',
+            event_type='probe_reject',
+            decision='reject',
+            reason=detail.get('reason') or 'hard_gate_pass_probe_reject',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=sig.get('timestamp'),
+            signal_id=sig.get('id'),
+            route=route_name,
+            data_source='premium_signals+dexscreener+helius',
+            payload=with_lifecycle_payload(detail, signal_lifecycle),
+            event_ts=now_ts,
+        )
+        return False
+
+    if route_name == 'LOTTO' or str(registered_entry.get('type') or '').upper() == 'LOTTO':
+        pending = build_lotto_pending(registered_entry, lifecycle_id, detail=detail)
+        pending['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
+    else:
+        pending = {
+            'token_ca': token_ca,
+            'symbol': symbol,
+            'signal_ts': sig.get('timestamp') or registered_entry.get('signal_ts'),
+            'premium_signal_id': sig.get('id') or registered_entry.get('premium_signal_id'),
+            'signal_type': route_name,
+            'signal_route': route_name,
+            'signal_price': registered_entry.get('signal_price'),
+            'market_cap': sig.get('market_cap') or registered_entry.get('signal_mc') or 0,
+            'pool': pool,
+            'staged_at': time.time(),
+            'trigger_price': registered_entry.get('signal_price'),
+            'watchlist_id': registered_entry.get('id'),
+            'kelly_position_sol': HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
+            'matrix_scores': {},
+            'smart_entry_retries': 0,
+            'w_entry': registered_entry,
+            'momentum_snapshots': [],
+            'momentum_pct': 0,
+            'first_fire_pc_m5': (realtime_dex or {}).get('price_change_m5'),
+            'spread_abort_count': 0,
+            'exit_strategy': 'NOT_ATH',
+        }
+    pending['trigger_price'] = registered_entry.get('signal_price')
+    _apply_hard_gate_pass_probe_to_pending(
+        pending,
+        detail,
+        route=route_name,
+        stage_outcome='hard_gate_pass_tiny_probe_armed',
+    )
+    pending_entries[lifecycle_id] = pending
+
+    # Record rate-limit state
+    _hard_gate_pass_probe_arm_ts.append(now_ts)
+    _hard_gate_pass_probe_cooldown[token_ca] = now_ts
+    # Prune cooldown map (keep last 200 entries)
+    if len(_hard_gate_pass_probe_cooldown) > 200:
+        oldest_keys = sorted(_hard_gate_pass_probe_cooldown, key=_hard_gate_pass_probe_cooldown.get)[:100]
+        for k in oldest_keys:
+            _hard_gate_pass_probe_cooldown.pop(k, None)
+
+    record_decision_event(
+        db,
+        component='hard_gate_pass_probe',
+        event_type='pending_entry',
+        decision='pending',
+        reason=detail.get('reason') or HARD_GATE_PASS_TINY_PROBE_MODE,
+        token_ca=token_ca,
+        symbol=symbol,
+        lifecycle_id=lifecycle_id,
+        signal_ts=sig.get('timestamp'),
+        signal_id=sig.get('id'),
+        route=route_name,
+        data_source='premium_signals+dexscreener+helius',
+        payload=with_lifecycle_payload(detail, signal_lifecycle),
         event_ts=now_ts,
     )
     return True
@@ -14373,6 +14747,28 @@ def run_monitor(db):
                             'top10_pct': top10_pct,
                         }, watch_lifecycle),
                     )
+                    if HARD_GATE_PASS_TINY_PROBE_ENABLED and hard_gate_status == 'PASS':
+                        _registered_entry_latest = watchlist.get_by_id(registered_entry['id']) if registered_entry else None
+                        _hard_gate_pass_armed = arm_hard_gate_pass_tiny_probe(
+                            db,
+                            pending_entries,
+                            dict(positions),
+                            sig=sig,
+                            registered_entry=_registered_entry_latest,
+                            pool=pool,
+                            lifecycle_id=lifecycle_id,
+                            signal_lifecycle=watch_lifecycle,
+                            signal_audit_payload=signal_audit_payload,
+                            hard_gate_status=hard_gate_status,
+                            now_ts=now,
+                            route='LOTTO' if _is_lotto_signal else _wl_type,
+                        )
+                        if _hard_gate_pass_armed:
+                            log.info(
+                                f"  [PAPER_HARD_GATE_PASS_PROBE] {symbol} pending "
+                                f"route={'LOTTO' if _is_lotto_signal else _wl_type} "
+                                f"size={HARD_GATE_PASS_TINY_PROBE_SIZE_SOL:.3f}SOL paper_only=true"
+                            )
                     last_progress = time.time()
             except Exception as e:
                 log.error(f"Signal check error: {e}")

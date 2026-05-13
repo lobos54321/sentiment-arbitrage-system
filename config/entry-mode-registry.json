@@ -1,10 +1,10 @@
 {
   "version": 1,
   "updated_at": "2026-05-12T00:00:00.000Z",
-  "notes": "MVP governance registry. It classifies entry modes and keeps all non-live tiny paths blocked until NOT_ATH quote-clean shadow evidence justifies isolated paper work.",
+  "notes": "MVP governance registry. It classifies paper entry modes. The live tier means paper-live/realtime paper entries, not wallet execution.",
   "tiers": {
     "live": {
-      "description": "Paper-live modes currently allowed to open entries.",
+      "description": "Realtime paper modes currently allowed to open simulated entries; this tier is not wallet/live execution.",
       "paper_enabled": true
     },
     "isolated_paper_capped": {
@@ -110,6 +110,14 @@
       "paper_enabled": true,
       "size_class": "tiny",
       "reason": "Tiny paper-only probe for Telegram + GMGN pre-seen resonance; explicitly registered for attribution."
+    },
+    "hard_gate_pass_tiny_probe": {
+      "tier": "live",
+      "route": "MIXED",
+      "family": "paper_baseline_probe",
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Baseline paper-only probe for every hard-gate PASS + quote-executable unique token; used for coverage attribution without opening blocked modes."
     },
     "ath_micro_reclaim_tiny_probe": {
       "tier": "hard_shadow",

@@ -15,6 +15,7 @@ from paper_trade_monitor import (  # noqa: E402
     ATH_NO_KLINE_TINY_PROBE_MODE,
     ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
     ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+    HARD_GATE_PASS_TINY_PROBE_MODE,
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
@@ -24,6 +25,7 @@ from paper_trade_monitor import (  # noqa: E402
     SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL,
     SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL,
     SOURCE_RESONANCE_TINY_PROBE_MODE,
+    _apply_hard_gate_pass_probe_to_pending,
     _apply_actual_tiny_trigger_mode,
     _apply_primary_proving_cap,
     _apply_source_resonance_probe_to_pending,
@@ -55,9 +57,11 @@ from paper_trade_monitor import (  # noqa: E402
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
+    arm_hard_gate_pass_tiny_probe,
     build_paper_observation_probe_synthetic_exit_execution,
     build_paper_tiny_scout_dex_fallback_entry_execution,
     evaluate_entry_edge_budget,
+    evaluate_hard_gate_pass_tiny_probe,
     evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
@@ -2166,6 +2170,144 @@ def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
     assert pending["replay_source"] == "live_monitor_source_resonance_probe"
 
 
+def test_hard_gate_pass_tiny_probe_allows_pass_quote_executable(monkeypatch):
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+
+    decision = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "LOTTO", "market_cap": 48000},
+        watchlist_entry={
+            "type": "LOTTO",
+            "signal_price": 0.000001,
+            "signal_mc": 48000,
+            "signal_top10": 32,
+        },
+        hard_gate_status="PASS",
+        live_concentration={"top1_pct": 18, "top10_pct": 32},
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is True
+    assert decision["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
+    assert decision["paper_only_scout"] is True
+    assert decision["execution_scope"] == "paper_only"
+    assert decision["observed"]["quote_executable"] is True
+
+
+def test_hard_gate_pass_tiny_probe_requires_pass_and_quote(monkeypatch):
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+
+    no_quote = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        watchlist_entry={"type": "ATH", "signal_mc": 48000, "signal_top10": 32},
+        hard_gate_status="PASS",
+        live_concentration={"top1_pct": 18, "top10_pct": 32},
+        now_ts=1000,
+    )
+    blocked_gate = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        watchlist_entry={"type": "ATH", "signal_price": 0.000001, "signal_mc": 48000},
+        hard_gate_status="NOT_ATH_V17",
+        now_ts=1000,
+    )
+
+    assert no_quote["pass"] is False
+    assert no_quote["reason"] == "quote_not_executable"
+    assert blocked_gate["pass"] is False
+    assert blocked_gate["reason"] == "hard_gate_not_pass"
+
+
+def test_apply_hard_gate_pass_probe_to_pending_marks_paper_only():
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_type": "ATH",
+        "kelly_position_sol": 0.08,
+        "signal_price": 0.00001,
+        "lotto_state": {},
+    }
+    detail = {
+        "pass": True,
+        "reason": "hard_gate_pass_baseline_probe",
+        "timing_passed": True,
+    }
+
+    _apply_hard_gate_pass_probe_to_pending(pending, detail, route="ATH")
+
+    assert pending["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
+    assert pending["paper_only_scout"] is True
+    assert pending["execution_scope"] == "paper_only"
+    assert pending["timing_passed"] is True
+    assert pending["kelly_position_sol"] == monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
+    assert pending["replay_source"] == "live_monitor_hard_gate_pass_probe"
+    assert pending["lotto_state"]["executionScope"] == "paper_only"
+
+
+def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(
+        monitor,
+        "fetch_dexscreener_trend_snapshot",
+        lambda _token_ca: {"market_cap": 48000, "price_change_m5": 12},
+    )
+    monkeypatch.setattr(
+        monitor,
+        "helius_token_concentration",
+        lambda _token_ca: {"top1_pct": 18, "top10_pct": 32},
+    )
+    pending_entries = {}
+    registered_entry = {
+        "id": 7,
+        "ca": "TokenCA",
+        "symbol": "DOG",
+        "type": "ATH",
+        "pool_address": "Pool",
+        "signal_ts": 1000,
+        "premium_signal_id": 11,
+        "signal_price": 0.000001,
+        "signal_mc": 48000,
+        "signal_top10": 32,
+    }
+
+    armed = arm_hard_gate_pass_tiny_probe(
+        db,
+        pending_entries,
+        {},
+        sig={
+            "id": 11,
+            "token_ca": "TokenCA",
+            "symbol": "DOG",
+            "timestamp": 1000,
+            "signal_type": "ATH",
+            "market_cap": 48000,
+        },
+        registered_entry=registered_entry,
+        pool="Pool",
+        lifecycle_id="TokenCA:1000",
+        signal_lifecycle={},
+        signal_audit_payload={},
+        hard_gate_status="PASS",
+        now_ts=1200,
+        route="ATH",
+    )
+
+    assert armed is True
+    assert pending_entries["TokenCA:1000"]["signal_route"] == "ATH"
+    assert pending_entries["TokenCA:1000"]["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
+    assert pending_entries["TokenCA:1000"]["paper_only_scout"] is True
+    assert pending_entries["TokenCA:1000"]["timing_passed"] is True
+
+
 def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
@@ -2253,6 +2395,24 @@ def test_source_resonance_tiny_probe_uses_tiny_scout_spread_budget():
     assert decision["profile"] == "lotto_probe"
     assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT
     assert decision["spread_pct"] > monitor.ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT
+
+
+def test_hard_gate_pass_tiny_probe_uses_tiny_scout_spread_budget():
+    decision = evaluate_entry_edge_budget(
+        route="ATH",
+        trigger_price=1.0,
+        quote_price=1.029,
+        pending={
+            "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
+            "replay_source": "live_monitor_hard_gate_pass_probe",
+        },
+    )
+
+    assert decision["pass"] is True
+    assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT
+    assert decision["spread_pct"] > monitor.ENTRY_EDGE_ATH_MAX_SPREAD_PCT
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):
