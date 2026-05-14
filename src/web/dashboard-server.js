@@ -3994,11 +3994,12 @@ const server = http.createServer(async (req, res) => {
       const limit = boundedIntParam(url, 'limit', 120, 1, 500);
       const tradeLimit = boundedIntParam(url, 'trade_limit', 2000, 1, 20000);
       const includeDetails = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_details') || '1').toLowerCase());
+      const includeSignals = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_signals') || '0').toLowerCase());
       const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
       const paperDbTimeoutMs = boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000);
       const timings = {};
 
-      signalDb = getDb();
+      signalDb = includeSignals ? getDb() : null;
       paperDb = new Database(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
@@ -4051,6 +4052,9 @@ const server = http.createServer(async (req, res) => {
           'This snapshot is persisted so review windows can be compared across commits and policy fingerprints.',
           'All execution metrics in this endpoint are paper-trader metrics; live execution remains out of scope.',
           'Missed dog counts use quote-clean fields when available, and should not be mixed with theoretical mark-only peaks.',
+          includeSignals
+            ? 'Premium signal table scan was enabled for this snapshot.'
+            : 'Premium signal table scan is skipped by default for live safety; pass include_signals=1 for an explicit heavy scan.',
         ],
       });
 
