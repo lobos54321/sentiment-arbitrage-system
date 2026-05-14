@@ -76,8 +76,13 @@ test('premium signal audit counts pass-to-max dogs outside missed attribution', 
   assert.equal(audit.summary.hard_gate_pass_unique, 2);
   assert.equal(audit.summary.pass_to_max_tiers.gold, 1);
   assert.equal(audit.summary.pass_to_max_tiers.bronze, 1);
+  assert.equal(audit.summary.stream_dog_unique, 2);
+  assert.equal(audit.summary.stream_dog_with_paper_trade_unique, 1);
+  assert.equal(audit.summary.stream_dog_without_paper_trade_unique, 1);
+  assert.equal(audit.summary.stream_dog_coverage_pct, 50);
   assert.equal(audit.summary.pass_dog_unique, 2);
   assert.equal(audit.summary.pass_dog_without_paper_trade_unique, 1);
+  assert.equal(audit.summary.pass_dog_coverage_pct, 50);
   assert.equal(audit.summary.pass_dog_in_missed_attribution_unique, 1);
   assert.equal(audit.summary.coverage_classes.paper_trade, 1);
   assert.equal(audit.summary.coverage_classes.unclassified, 0);
@@ -90,6 +95,7 @@ test('premium signal audit counts pass-to-max dogs outside missed attribution', 
   assert.equal(audit.uncovered_pass_dogs[0].tradable_peak_pnl_pct, 145);
   assert.equal(audit.uncovered_pass_dogs[0].source_resonance_cohort, 'telegram_gmgn');
   assert.equal(audit.uncovered_pass_dogs[0].gmgn_pre_seen, true);
+  assert.equal(audit.uncovered_stream_dogs[0].token_ca, 'A');
   assert.equal(audit.cohort_scoreboard.find((row) => row.cohort === 'telegram_gmgn').gold, 1);
   assert.equal(audit.cohort_scoreboard.find((row) => row.cohort === 'unknown').paper_filled_unique, 1);
   assert.equal(audit.unclassified_tokens.length, 0);

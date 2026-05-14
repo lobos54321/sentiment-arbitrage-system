@@ -250,6 +250,11 @@ test('closed loop probe summary uses recent trade window with exit fallback', ()
       event_ts, token_ca, component, event_type, decision, reason
     ) VALUES (?, ?, ?, ?, ?, ?)
   `).run(1001, 'token-a', 'hard_gate_pass_probe', 'pending_entry', 'accept', 'armed');
+  db.prepare(`
+    INSERT INTO paper_decision_events (
+      event_ts, token_ca, component, event_type, decision, reason
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(1003, 'token-pre', 'pre_pass_resonance_probe', 'pending_entry', 'accept', 'armed');
   const insertTrade = db.prepare(`
     INSERT INTO paper_trades (
       entry_ts, exit_ts, entry_mode, token_ca, pnl_pct, peak_pnl
@@ -257,6 +262,7 @@ test('closed loop probe summary uses recent trade window with exit fallback', ()
   `);
   insertTrade.run(1001, 1010, 'hard_gate_pass_tiny_probe', 'token-a', 0.2, 0.5);
   insertTrade.run(null, 1002, 'hard_gate_pass_tiny_probe', 'token-b', -0.1, 0.1);
+  insertTrade.run(1003, 1009, 'pre_pass_resonance_tiny_probe', 'token-pre', 0.4, 0.6);
   insertTrade.run(900, 950, 'hard_gate_pass_tiny_probe', 'old-token', 4.0, 4.0);
 
   const summary = buildClosedLoopProbeSummary(
@@ -272,5 +278,8 @@ test('closed loop probe summary uses recent trade window with exit fallback', ()
   assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.wins, 1);
   assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.avg_pnl_pct, 5);
   assert.equal(summary.by_mode.hard_gate_pass_tiny_probe.max_peak_pnl_pct, 50);
+  assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.armed_unique, 1);
+  assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.fills, 1);
+  assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.avg_pnl_pct, 40);
   db.close();
 });

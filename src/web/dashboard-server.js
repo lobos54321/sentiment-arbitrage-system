@@ -524,6 +524,7 @@ function getTableColumns(database, tableName) {
 
 const CLOSED_LOOP_PROBE_MODES = [
   'hard_gate_pass_tiny_probe',
+  'pre_pass_resonance_tiny_probe',
   'source_resonance_tiny_probe',
   'lotto_upstream_realtime_tiny_scout',
 ];
@@ -661,6 +662,7 @@ export function buildClosedLoopProbeSummary(
     const probeComponentFilterSql = `
           component IN (
             'hard_gate_pass_probe',
+            'pre_pass_resonance_probe',
             'source_resonance_probe',
             'lotto_upstream_realtime_scout',
             'lotto_upstream_realtime_probe'
@@ -671,6 +673,7 @@ export function buildClosedLoopProbeSummary(
         SELECT
           CASE
             WHEN component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
+            WHEN component = 'pre_pass_resonance_probe' THEN 'pre_pass_resonance_tiny_probe'
             WHEN component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
             WHEN component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
             ELSE NULL
@@ -701,6 +704,7 @@ export function buildClosedLoopProbeSummary(
         SELECT
           CASE
             WHEN component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
+            WHEN component = 'pre_pass_resonance_probe' THEN 'pre_pass_resonance_tiny_probe'
             WHEN component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
             WHEN component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
             ELSE NULL
@@ -860,6 +864,7 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         CASE
           WHEN m.component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
           WHEN m.component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
+          WHEN m.component = 'pre_pass_resonance_probe' THEN 'pre_pass_resonance_tiny_probe'
           WHEN m.component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
           ELSE NULL
         END AS entry_mode_candidate
@@ -1088,6 +1093,7 @@ function buildClosedLoopSourceResonanceSummary(paperDb, tableNames, sinceTs, { i
 function buildClosedLoopDecision(report72h) {
   const probesSkipped = Boolean(report72h?.probes?.skipped);
   const hard = report72h?.probes?.by_mode?.hard_gate_pass_tiny_probe || emptyClosedLoopProbeSummary('hard_gate_pass_tiny_probe');
+  const prePass = report72h?.probes?.by_mode?.pre_pass_resonance_tiny_probe || emptyClosedLoopProbeSummary('pre_pass_resonance_tiny_probe');
   const source = report72h?.probes?.by_mode?.source_resonance_tiny_probe || emptyClosedLoopProbeSummary('source_resonance_tiny_probe');
   const passUnique = Number(report72h?.premium_signals?.hard_gate_pass_unique || 0);
   const cleanMissedDogsRaw = report72h?.missed_dogs?.quote_clean_dog_unique;
@@ -1099,6 +1105,7 @@ function buildClosedLoopDecision(report72h) {
   if (probesSkipped) actions.push('run_include_72h_probes_for_probe_coverage');
   else if (passUnique > 0 && (hardCoverage == null || hardCoverage < 0.5)) actions.push('continue_hard_gate_pass_tiny_probe_until_pass_coverage_improves');
   if (!probesSkipped && (hard.fills || 0) < 50) actions.push('collect_more_hard_gate_baseline_samples_before_tightening');
+  if (!probesSkipped && (prePass.fills || 0) < 50) actions.push('collect_more_pre_pass_resonance_samples_before_tightening');
   if (!probesSkipped && (source.fills || 0) < 50) actions.push('collect_more_source_resonance_samples_before_upgrade');
   if ((hard.fills || 0) >= 50 && hard.avg_pnl_pct != null && hard.avg_pnl_pct < 0) actions.push('tighten_or_lower_hard_gate_baseline_rate_limit');
   if (
@@ -3664,6 +3671,7 @@ const server = http.createServer(async (req, res) => {
                 CASE
                   WHEN m.component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
                   WHEN m.component = 'hard_gate_pass_probe' THEN 'hard_gate_pass_tiny_probe'
+                  WHEN m.component = 'pre_pass_resonance_probe' THEN 'pre_pass_resonance_tiny_probe'
                   WHEN m.component IN ('lotto_upstream_realtime_scout', 'lotto_upstream_realtime_probe') THEN 'lotto_upstream_realtime_tiny_scout'
                   ELSE NULL
                 END AS entry_mode_candidate,

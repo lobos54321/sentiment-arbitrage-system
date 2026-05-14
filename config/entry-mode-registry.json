@@ -119,6 +119,14 @@
       "size_class": "tiny",
       "reason": "Baseline paper-only probe for every hard-gate PASS + quote-executable unique token; used for coverage attribution without opening blocked modes."
     },
+    "pre_pass_resonance_tiny_probe": {
+      "tier": "live",
+      "route": "LOTTO",
+      "family": "paper_baseline_probe",
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Strict paper-only probe for pre-PASS Telegram + GMGN pre-seen LOTTO tokens; used to measure early-gold recall before hard-gate PASS."
+    },
     "ath_micro_reclaim_tiny_probe": {
       "tier": "hard_shadow",
       "route": "ATH",

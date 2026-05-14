@@ -472,6 +472,7 @@ export function buildPremiumSignalOutcomeAudit({
     .map((rows) => tokenOutcome(rows, paperTradesByToken, missedByToken));
   const passTokens = tokens.filter((item) => item.hard_gate_pass);
   const passDogTokens = passTokens.filter((item) => ['gold', 'silver', 'bronze'].includes(item.pass_to_max_tier));
+  const streamDogTokens = tokens.filter((item) => ['gold', 'silver', 'bronze'].includes(item.stream_tier));
   const streamTierCounts = emptyTierCounts();
   const passTierCounts = emptyTierCounts();
   for (const item of tokens) incrementTier(streamTierCounts, item.stream_tier);
@@ -484,6 +485,10 @@ export function buildPremiumSignalOutcomeAudit({
   const uncoveredPassDogs = passDogTokens
     .filter((item) => item.paper_trade_count <= 0)
     .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
+  const uncoveredStreamDogs = streamDogTokens
+    .filter((item) => item.paper_trade_count <= 0)
+    .sort((a, b) => Number(b.stream_to_max_pct ?? -Infinity) - Number(a.stream_to_max_pct ?? -Infinity));
+  const coveragePct = (covered, total) => total > 0 ? roundNumber((covered / total) * 100, 2) : null;
   const coverageCounts = {
     paper_trade: 0,
     observe_only: 0,
@@ -530,9 +535,20 @@ export function buildPremiumSignalOutcomeAudit({
       hard_gate_pass_unique: passTokens.length,
       stream_to_max_tiers: streamTierCounts,
       pass_to_max_tiers: passTierCounts,
+      stream_dog_unique: streamDogTokens.length,
+      stream_dog_with_paper_trade_unique: streamDogTokens.filter((item) => item.paper_trade_count > 0).length,
+      stream_dog_without_paper_trade_unique: uncoveredStreamDogs.length,
+      stream_dog_coverage_pct: coveragePct(
+        streamDogTokens.filter((item) => item.paper_trade_count > 0).length,
+        streamDogTokens.length
+      ),
       pass_dog_unique: passDogTokens.length,
       pass_dog_with_paper_trade_unique: passDogTokens.filter((item) => item.paper_trade_count > 0).length,
       pass_dog_without_paper_trade_unique: uncoveredPassDogs.length,
+      pass_dog_coverage_pct: coveragePct(
+        passDogTokens.filter((item) => item.paper_trade_count > 0).length,
+        passDogTokens.length
+      ),
       pass_dog_in_missed_attribution_unique: passDogTokens.filter((item) => item.missed_attribution_count > 0).length,
       paper_traded_unique: tokens.filter((item) => item.paper_trade_count > 0).length,
       paper_traded_pass_unique: passTokens.filter((item) => item.paper_trade_count > 0).length,
@@ -542,6 +558,7 @@ export function buildPremiumSignalOutcomeAudit({
     },
     top_pass_movers: topPassMovers.slice(0, 30),
     uncovered_pass_dogs: uncoveredPassDogs.slice(0, 30),
+    uncovered_stream_dogs: uncoveredStreamDogs.slice(0, 30),
     coverage_gap_tokens: coverageGaps.slice(0, 30),
     unclassified_tokens: unclassified.slice(0, 30),
     top_stream_movers: topStreamMovers.slice(0, 30),
