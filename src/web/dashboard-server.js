@@ -36,6 +36,11 @@ import {
   buildPremiumSignalOutcomeAudit,
   LOTTO_OBSERVE_UPSTREAM_STATUSES,
 } from './premium-signal-outcome-audit-utils.js';
+import {
+  buildPaperReviewSnapshot,
+  buildTradeReviewSummary,
+  writePaperReviewSnapshotFiles,
+} from './paper-review-snapshot-utils.js';
 
 dotenv.config();
 
@@ -520,6 +525,149 @@ function getPaperDbPath() {
 
 function getTableColumns(database, tableName) {
   return new Set(database.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
+}
+
+function getPaperReviewDir() {
+  const raw = process.env.PAPER_REVIEW_DIR || join(dirname(getPaperDbPath()), 'reviews');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function runtimeCommitFingerprint() {
+  const envCommit = firstValue(
+    process.env.GIT_COMMIT,
+    process.env.COMMIT_SHA,
+    process.env.SOURCE_VERSION,
+    process.env.RAILWAY_GIT_COMMIT_SHA,
+    process.env.ZEABUR_GIT_COMMIT_SHA,
+    process.env.ZEABUR_GIT_COMMIT,
+    process.env.ZEABUR_COMMIT_SHA,
+    process.env.VERCEL_GIT_COMMIT_SHA,
+    process.env.GITHUB_SHA,
+    process.env.RENDER_GIT_COMMIT
+  );
+  if (envCommit) return String(envCommit);
+  try {
+    const head = fs.readFileSync(join(projectRoot, '.git', 'HEAD'), 'utf8').trim();
+    if (head.startsWith('ref:')) {
+      const refPath = head.replace(/^ref:\s*/, '');
+      return fs.readFileSync(join(projectRoot, '.git', refPath), 'utf8').trim();
+    }
+    return head;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function reviewPolicyFingerprint(registrySummary = null) {
+  const envKeys = [
+    'HARD_GATE_PASS_TINY_PROBE_ENABLED',
+    'PRE_PASS_RESONANCE_TINY_PROBE_ENABLED',
+    'SOURCE_RESONANCE_TINY_PROBE_ENABLED',
+    'REVIVAL_CANARY_POLICY_VERSION',
+    'ENTRY_MODE_POLICY_VERSION',
+    'PREMIUM_LIVE_EXECUTION_ENABLED',
+  ];
+  const env = {};
+  for (const key of envKeys) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return {
+    registry_summary: registrySummary,
+    env,
+    live_execution_enabled: String(process.env.PREMIUM_LIVE_EXECUTION_ENABLED || '').toLowerCase() === 'true',
+    review_rule: 'paper-only closed-loop snapshot; strategy changes should compare fixed-window snapshots by commit and policy fingerprint',
+  };
+}
+
+function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit) {
+  if (!tableNames.has('paper_trades')) return [];
+  const cols = getTableColumns(paperDb, 'paper_trades');
+  const col = (name, fallback = `NULL AS ${name}`) => cols.has(name) ? name : fallback;
+  const selectCols = [
+    'id',
+    col('symbol'),
+    col('token_ca'),
+    col('lifecycle_id'),
+    col('entry_ts'),
+    col('exit_ts'),
+    col('exit_reason'),
+    col('pnl_pct'),
+    col('peak_pnl'),
+    col('position_size_sol'),
+    col('signal_route'),
+    col('strategy_stage'),
+    col('entry_mode'),
+    col('monitor_state_json'),
+    col('lotto_state_json'),
+    col('entry_execution_audit_json'),
+    col('exit_execution_audit_json'),
+  ];
+  const tsWhere = sinceTs
+    ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since OR COALESCE(exit_ts, 0) >= @since'
+    : '';
+  return paperDb.prepare(`
+    SELECT ${selectCols.join(', ')}
+    FROM paper_trades
+    ${tsWhere}
+    ORDER BY COALESCE(entry_ts, exit_ts, 0) DESC, id DESC
+    LIMIT @limit
+  `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+}
+
+function buildReviewLatencySummary(paperDb, tableNames, sinceTs) {
+  if (!tableNames.has('latency_audit_events')) return [];
+  const whereSql = sinceTs ? 'WHERE COALESCE(event_ts, signal_ts, 0) >= @since' : '';
+  return paperDb.prepare(`
+    SELECT
+      stage,
+      COUNT(*) AS n,
+      AVG(lag_from_source_ms) AS avg_lag_from_source_ms,
+      MAX(lag_from_source_ms) AS max_lag_from_source_ms,
+      AVG(lag_from_receive_ms) AS avg_lag_from_receive_ms,
+      MAX(lag_from_receive_ms) AS max_lag_from_receive_ms
+    FROM latency_audit_events
+    ${whereSql}
+    GROUP BY stage
+    ORDER BY stage
+  `).all(sinceTs ? { since: sinceTs } : {});
+}
+
+function buildReviewTableCoverage(paperDb, tableNames) {
+  const tables = [
+    { table: 'paper_trades', ts: 'COALESCE(entry_ts, exit_ts, 0)' },
+    { table: 'paper_decision_events', ts: 'event_ts' },
+    { table: 'paper_missed_signal_attribution', ts: 'COALESCE(signal_ts, created_event_ts, baseline_ts, 0)' },
+    { table: 'source_resonance_candidates', ts: 'signal_ts' },
+    { table: 'latency_audit_events', ts: 'COALESCE(event_ts, signal_ts, 0)' },
+    { table: 'external_alpha_health', ts: 'last_run_ts' },
+  ];
+  return tables.map((item) => {
+    if (!tableNames.has(item.table)) {
+      return { table: item.table, available: false, rows: 0, min_ts: null, max_ts: null };
+    }
+    try {
+      const row = paperDb.prepare(`
+        SELECT COUNT(*) AS rows, MIN(${item.ts}) AS min_ts, MAX(${item.ts}) AS max_ts
+        FROM ${item.table}
+      `).get();
+      return {
+        table: item.table,
+        available: true,
+        rows: Number(row.rows || 0),
+        min_ts: row.min_ts ?? null,
+        min_iso: row.min_ts ? new Date(Number(row.min_ts) * 1000).toISOString() : null,
+        max_ts: row.max_ts ?? null,
+        max_iso: row.max_ts ? new Date(Number(row.max_ts) * 1000).toISOString() : null,
+      };
+    } catch (error) {
+      return { table: item.table, available: true, error: error.message };
+    }
+  });
+}
+
+function buildReviewHealthRows(paperDb, tableNames, tableName) {
+  if (!tableNames.has(tableName)) return [];
+  return paperDb.prepare(`SELECT * FROM ${tableName} ORDER BY updated_at DESC`).all();
 }
 
 const CLOSED_LOOP_PROBE_MODES = [
@@ -3816,6 +3964,108 @@ const server = http.createServer(async (req, res) => {
       if (includeTiming) responseBody.timings_ms = timings;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(responseBody, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/review-snapshot') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let signalDb;
+    let paperDb;
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const generatedAt = new Date().toISOString();
+      const untilTs = Math.floor(Date.now() / 1000);
+      const sinceTs = reportSinceTs(url, '8h');
+      const windowLabel = String(url.searchParams.get('window') || url.searchParams.get('hours') || '8h');
+      const limit = boundedIntParam(url, 'limit', 120, 1, 500);
+      const tradeLimit = boundedIntParam(url, 'trade_limit', 2000, 1, 20000);
+      const includeDetails = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_details') || '1').toLowerCase());
+      const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
+      const paperDbTimeoutMs = boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000);
+      const timings = {};
+
+      signalDb = getDb();
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+
+      const closedLoop = buildClosedLoopWindowReport({
+        signalDb,
+        paperDb,
+        sinceTs,
+        limit,
+        includeMissedSummary: true,
+        includeMissedDetails: includeDetails,
+        includeSourceSummary: true,
+        includeProbeSummary: true,
+        includePaperPnlDetails: true,
+        includeDecisionEventDetails: includeDetails,
+        timings,
+        timingPrefix: 'review',
+      });
+
+      let registrySummary = null;
+      try {
+        registrySummary = summarizeEntryModeRegistry(loadEntryModeRegistry());
+      } catch (error) {
+        registrySummary = { error: error.message };
+      }
+
+      const tradeRows = loadReviewTradeRows(paperDb, tableNames, sinceTs, tradeLimit);
+      const tradeReview = buildTradeReviewSummary(tradeRows);
+      const snapshot = buildPaperReviewSnapshot({
+        generatedAt,
+        commit: runtimeCommitFingerprint(),
+        policyFingerprint: reviewPolicyFingerprint(registrySummary),
+        window: {
+          label: windowLabel,
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          until_ts: untilTs,
+          until_iso: new Date(untilTs * 1000).toISOString(),
+        },
+        dbPath: paperDbPath,
+        closedLoop,
+        tradeReview,
+        latencySummary: buildReviewLatencySummary(paperDb, tableNames, sinceTs),
+        tableCoverage: buildReviewTableCoverage(paperDb, tableNames),
+        sourceHealth: buildReviewHealthRows(paperDb, tableNames, 'source_resonance_health'),
+        externalAlphaHealth: buildReviewHealthRows(paperDb, tableNames, 'external_alpha_health'),
+        registrySummary,
+        notes: [
+          'This snapshot is persisted so review windows can be compared across commits and policy fingerprints.',
+          'All execution metrics in this endpoint are paper-trader metrics; live execution remains out of scope.',
+          'Missed dog counts use quote-clean fields when available, and should not be mixed with theoretical mark-only peaks.',
+        ],
+      });
+
+      let persistedFiles = null;
+      if (persist) {
+        persistedFiles = writePaperReviewSnapshotFiles(snapshot, { dir: getPaperReviewDir() });
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        ...snapshot,
+        persisted_files: persistedFiles,
+        query_ms: Date.now() - startedAt,
+        timings_ms: timings,
+      }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
