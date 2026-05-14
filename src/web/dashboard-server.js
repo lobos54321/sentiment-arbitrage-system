@@ -610,7 +610,7 @@ function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit, options = {}) 
     SELECT ${selectCols.join(', ')}
     FROM paper_trades
     ${fastRecent ? '' : tsWhere}
-    ORDER BY COALESCE(entry_ts, exit_ts, 0) DESC, id DESC
+    ORDER BY ${fastRecent ? 'id DESC' : 'COALESCE(entry_ts, exit_ts, 0) DESC, id DESC'}
     LIMIT @limit
   `).all(!fastRecent && sinceTs ? { since: sinceTs, limit } : { limit });
   if (!fastRecent || !sinceTs) return rows;

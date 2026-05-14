@@ -62,9 +62,9 @@ export function capitalTierForTrade(row = {}) {
   const mode = inferReviewEntryMode(row).toLowerCase();
   const stage = String(row.strategy_stage || '').toLowerCase();
   const size = finiteNumber(row.position_size_sol) || 0;
-  if (stage.includes('stage1') || mode === 'stage1' || size >= 0.02) return 'stage1_main';
   if (mode.includes('source_resonance') || mode.includes('hard_gate_pass') || mode.includes('pre_pass')) return 'tiny_probe';
   if (mode.includes('tiny') || mode.includes('probe') || mode.includes('scout') || (size > 0 && size <= 0.005)) return 'tiny_probe';
+  if (stage.includes('stage1') || mode === 'stage1' || size >= 0.02) return 'stage1_main';
   if (mode.includes('lotto')) return 'lotto';
   if (size > 0 && size < 0.02) return 'small_probe';
   return 'unknown';

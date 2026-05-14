@@ -16,6 +16,7 @@ import {
 test('capitalTierForTrade separates tiny probes from stage1 size', () => {
   assert.equal(capitalTierForTrade({
     entry_mode: 'hard_gate_pass_tiny_probe',
+    strategy_stage: 'stage1',
     position_size_sol: 0.002,
   }), 'tiny_probe');
   assert.equal(capitalTierForTrade({
