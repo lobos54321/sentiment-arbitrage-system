@@ -52,6 +52,7 @@ from paper_trade_monitor import (  # noqa: E402
     _entry_mode_quality_high_quality_tiny_override,
     _exit_stop_quote_gap_protection,
     _phase_policy_live_exit_detail,
+    _probe_hold_quote_monitor_exit_detail,
     _probe_quote_primary_profit_exit_confirmation,
     _matrix_micro_momentum_reason,
     _maybe_upgrade_pending_to_source_resonance_probe,
@@ -1332,8 +1333,8 @@ def test_probe_quote_primary_cancels_mark_profit_when_quote_cannot_confirm():
     )
 
     assert detail["cancel"] is True
-    assert detail["reason"] == "quote_primary_profit_not_confirmed"
-    assert round(detail["quote_floor"], 2) == monitor.PROBE_QUOTE_PRIMARY_MIN_CONFIRMED_PROFIT
+    assert detail["reason"] == "quote_primary_negative_quote_gap"
+    assert detail["quote_mark_gap"] < -0.80
 
 
 def test_probe_quote_primary_confirms_when_real_quote_keeps_profit_floor():
@@ -1354,6 +1355,43 @@ def test_probe_quote_primary_confirms_when_real_quote_keeps_profit_floor():
 
     assert detail["cancel"] is False
     assert detail["reason"] == "quote_primary_profit_confirmed"
+
+
+def test_probe_quote_primary_cancels_small_mark_profit_with_negative_quote_gap():
+    pos = _DummyPos(entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    pos.peak_pnl = 0.052
+    exit_matrix = {
+        "action": "exit",
+        "reason": "hard_gate_baseline_peak20_floor",
+        "current_pnl": 0.014,
+    }
+
+    detail = _probe_quote_primary_profit_exit_confirmation(
+        pos,
+        exit_matrix,
+        quote_pnl=-0.5685,
+        trigger_pnl=0.014,
+    )
+
+    assert detail["cancel"] is True
+    assert detail["reason"] == "quote_primary_negative_quote_gap"
+    assert detail["quote_mark_gap"] < -0.50
+
+
+def test_probe_hold_quote_monitor_exits_when_quote_collapses():
+    pos = _DummyPos(entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    pos.peak_pnl = 0.12
+
+    detail = _probe_hold_quote_monitor_exit_detail(
+        pos,
+        quote_pnl=-0.42,
+        trigger_pnl=0.03,
+        held_sec=90,
+    )
+
+    assert detail["exit"] is True
+    assert detail["reason"] == "probe_quote_guard_stop"
+    assert detail["quote_mark_gap_abs"] > monitor.PROBE_HOLD_QUOTE_GAP_STOP_PCT
 
 
 def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():
@@ -2380,7 +2418,7 @@ def test_pre_pass_resonance_tiny_probe_allows_upstream_gmgn_quote(monkeypatch):
 
     decision = evaluate_pre_pass_resonance_tiny_probe(
         "TokenCA",
-        signal={"signal_type": "NEW_TRENDING", "market_cap": 48000},
+        signal={"signal_type": "NEW_TRENDING", "market_cap": 48000, "timestamp": 820},
         watchlist_entry={
             "type": "LOTTO",
             "signal_price": 0.000001,
@@ -2388,6 +2426,7 @@ def test_pre_pass_resonance_tiny_probe_allows_upstream_gmgn_quote(monkeypatch):
             "signal_top10": 32,
         },
         hard_gate_status="NOT_ATH_PREBUY_KLINE_BLOCK",
+        dex_snapshot={"price_change_m5": 4.0, "buys_m5": 18, "sells_m5": 8, "tx_m5": 26},
         live_concentration={"top1_pct": 18, "top10_pct": 32},
         resonance_context=_gmgn_resonance_context(lead=180),
         gmgn_policy={"action": "observe", "reason": "test"},
@@ -2400,6 +2439,29 @@ def test_pre_pass_resonance_tiny_probe_allows_upstream_gmgn_quote(monkeypatch):
     assert decision["execution_scope"] == "paper_only"
     assert decision["source_reject_reason"] == "not_ath_prebuy_kline_block"
     assert decision["gmgn_pre_seen"] is True
+    assert decision["followthrough"]["reason"] == "pre_pass_followthrough_confirmed"
+
+
+def test_pre_pass_resonance_tiny_probe_blocks_missing_followthrough(monkeypatch):
+    monkeypatch.setattr(monitor, "_pre_pass_resonance_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_pre_pass_resonance_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "PRE_PASS_RESONANCE_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "PRE_PASS_RESONANCE_REQUIRE_QUOTE_CLEAN", False)
+
+    decision = evaluate_pre_pass_resonance_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "NEW_TRENDING", "market_cap": 48000, "timestamp": 820},
+        watchlist_entry={"type": "LOTTO", "signal_price": 0.000001, "signal_mc": 48000},
+        hard_gate_status="NOT_ATH_PREBUY_KLINE_BLOCK",
+        dex_snapshot={"price_change_m5": 0.5, "buys_m5": 4, "sells_m5": 10, "tx_m5": 14},
+        live_concentration={"top1_pct": 18, "top10_pct": 32},
+        resonance_context=_gmgn_resonance_context(lead=180),
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "pre_pass_followthrough_m5_too_low"
+    assert decision["followthrough"]["pass"] is False
 
 
 def test_pre_pass_resonance_tiny_probe_keeps_pass_and_safety_owned_elsewhere(monkeypatch):
@@ -2423,16 +2485,20 @@ def test_pre_pass_resonance_tiny_probe_keeps_pass_and_safety_owned_elsewhere(mon
     )
     top_heavy = evaluate_pre_pass_resonance_tiny_probe(
         "TokenCA",
+        signal={"timestamp": 820},
         watchlist_entry={"type": "LOTTO", "signal_price": 0.000001, "signal_mc": 48000},
         hard_gate_status="NOT_ATH_PREBUY_KLINE_BLOCK",
+        dex_snapshot={"price_change_m5": 4, "buys_m5": 18, "sells_m5": 8, "tx_m5": 26},
         live_concentration={"top1_pct": 88, "top10_pct": 92},
         resonance_context=_gmgn_resonance_context(),
         now_ts=1000,
     )
     gmgn_reject = evaluate_pre_pass_resonance_tiny_probe(
         "TokenCA",
+        signal={"timestamp": 820},
         watchlist_entry={"type": "LOTTO", "signal_price": 0.000001, "signal_mc": 48000},
         hard_gate_status="NOT_ATH_PREBUY_KLINE_BLOCK",
+        dex_snapshot={"price_change_m5": 4, "buys_m5": 18, "sells_m5": 8, "tx_m5": 26},
         live_concentration={"top1_pct": 18, "top10_pct": 32},
         resonance_context=_gmgn_resonance_context(),
         gmgn_policy={"action": "shadow_reject", "reason": "gmgn_bundler_too_high"},
@@ -2460,7 +2526,7 @@ def test_arm_pre_pass_resonance_tiny_probe_builds_paper_only_pending(monkeypatch
     monkeypatch.setattr(
         monitor,
         "fetch_dexscreener_trend_snapshot",
-        lambda _token_ca: {"market_cap": 48000, "price_change_m5": 12},
+        lambda _token_ca: {"market_cap": 48000, "price_change_m5": 12, "buys_m5": 25, "sells_m5": 10, "tx_m5": 35},
     )
     monkeypatch.setattr(
         monitor,
@@ -3031,7 +3097,7 @@ def test_hard_gate_pass_tiny_probe_uses_tiny_scout_spread_budget():
     decision = evaluate_entry_edge_budget(
         route="ATH",
         trigger_price=1.0,
-        quote_price=1.079,
+        quote_price=1.049,
         pending={
             "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
             "paper_only_scout": True,
@@ -3043,14 +3109,28 @@ def test_hard_gate_pass_tiny_probe_uses_tiny_scout_spread_budget():
     assert decision["pass"] is True
     assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT
     assert decision["spread_pct"] > monitor.ENTRY_EDGE_ATH_MAX_SPREAD_PCT
-    assert decision["spread_pct"] > monitor.ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT
+
+    rejected = evaluate_entry_edge_budget(
+        route="ATH",
+        trigger_price=1.0,
+        quote_price=1.061,
+        pending={
+            "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
+            "replay_source": "live_monitor_hard_gate_pass_probe",
+        },
+    )
+
+    assert rejected["pass"] is False
+    assert rejected["reason"] == "entry_edge_spread_too_high"
 
 
 def test_pre_pass_resonance_tiny_probe_uses_probe_spread_budget():
     decision = evaluate_entry_edge_budget(
         route="LOTTO",
         trigger_price=1.0,
-        quote_price=1.069,
+        quote_price=1.044,
         pending={
             "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
             "paper_only_scout": True,
@@ -3063,6 +3143,38 @@ def test_pre_pass_resonance_tiny_probe_uses_probe_spread_budget():
     assert decision["profile"] == "lotto_probe"
     assert decision["max_spread_pct"] == monitor.ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT
     assert decision["spread_pct"] > monitor.ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT
+
+    rejected = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=1.0,
+        quote_price=1.052,
+        pending={
+            "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
+            "replay_source": "live_monitor_pre_pass_resonance_probe",
+        },
+    )
+
+    assert rejected["pass"] is False
+    assert rejected["reason"] == "entry_edge_spread_too_high"
+
+
+def test_entry_edge_blocks_probe_when_trigger_missing():
+    decision = evaluate_entry_edge_budget(
+        route="LOTTO",
+        trigger_price=None,
+        quote_price=1.0,
+        pending={
+            "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
+            "replay_source": "live_monitor_hard_gate_pass_probe",
+        },
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "entry_edge_probe_missing_trigger_or_quote"
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):

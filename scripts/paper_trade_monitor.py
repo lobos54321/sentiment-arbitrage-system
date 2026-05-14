@@ -118,8 +118,8 @@ ENTRY_EDGE_LOTTO_RISKY_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_R
 ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_LOTTO_PROBE_MAX_SPREAD_PCT', '2.0'))
 ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT', '5.0'))
 ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT', str(ENTRY_EDGE_TINY_SCOUT_MAX_SPREAD_PCT)))
-ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT', '12.0'))
-ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT', '8.0'))
+ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT', '5.0'))
+ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT', '4.5'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
 ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(3 * 60)))
 ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '2.0'))
@@ -149,12 +149,17 @@ LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_M
 LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_BS', '1.20'))
 DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
 TINY_EXIT_QUOTE_SANITY_ENABLED = os.environ.get('TINY_EXIT_QUOTE_SANITY_ENABLED', 'true').lower() != 'false'
-TINY_EXIT_QUOTE_SANITY_MIN_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MIN_PEAK', '0.06'))
+TINY_EXIT_QUOTE_SANITY_MIN_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MIN_PEAK', '0.02'))
 TINY_EXIT_QUOTE_SANITY_MAX_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MAX_PEAK', '0.10'))
 TINY_EXIT_QUOTE_SANITY_NEG_GAP = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_NEG_GAP', '0.10'))
 PROBE_QUOTE_PRIMARY_PROFIT_EXIT_ENABLED = os.environ.get('PROBE_QUOTE_PRIMARY_PROFIT_EXIT_ENABLED', 'true').lower() != 'false'
 PROBE_QUOTE_PRIMARY_MIN_CONFIRMED_PROFIT = float(os.environ.get('PROBE_QUOTE_PRIMARY_MIN_CONFIRMED_PROFIT', '0.10'))
 PROBE_QUOTE_PRIMARY_MIN_MARK_TRIGGER = float(os.environ.get('PROBE_QUOTE_PRIMARY_MIN_MARK_TRIGGER', '0.20'))
+PROBE_HOLD_QUOTE_MONITOR_ENABLED = os.environ.get('PROBE_HOLD_QUOTE_MONITOR_ENABLED', 'true').lower() != 'false'
+PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC = float(os.environ.get('PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC', '20'))
+PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK = float(os.environ.get('PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK', '0.02'))
+PROBE_HOLD_QUOTE_GAP_STOP_PCT = float(os.environ.get('PROBE_HOLD_QUOTE_GAP_STOP_PCT', '0.15'))
+PROBE_HOLD_QUOTE_STOP_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_STOP_PNL', '-0.18'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -415,6 +420,21 @@ PRE_PASS_RESONANCE_MAX_ALPHA_AGE_SEC = int(
 PRE_PASS_RESONANCE_REQUIRE_QUOTE_CLEAN = os.environ.get(
     'PRE_PASS_RESONANCE_REQUIRE_QUOTE_CLEAN', 'false'
 ).lower() == 'true'
+PRE_PASS_RESONANCE_MIN_SIGNAL_AGE_SEC = float(
+    os.environ.get('PRE_PASS_RESONANCE_MIN_SIGNAL_AGE_SEC', '20')
+)
+PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC = float(
+    os.environ.get('PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC', '240')
+)
+PRE_PASS_RESONANCE_MIN_PRICE_CHANGE_M5 = float(
+    os.environ.get('PRE_PASS_RESONANCE_MIN_PRICE_CHANGE_M5', '2.0')
+)
+PRE_PASS_RESONANCE_MIN_BUY_SELL_RATIO = float(
+    os.environ.get('PRE_PASS_RESONANCE_MIN_BUY_SELL_RATIO', '1.10')
+)
+PRE_PASS_RESONANCE_MIN_TX_M5 = float(
+    os.environ.get('PRE_PASS_RESONANCE_MIN_TX_M5', '20')
+)
 PRE_PASS_RESONANCE_ALLOWED_REASONS = {
     'lotto_observe_low_mc_vol',
     'not_ath_prebuy_kline_block',
@@ -3769,6 +3789,21 @@ def _probe_quote_primary_profit_exit_confirmation(pos, exit_matrix, *, quote_pnl
     quote_pnl = _safe_float(quote_pnl, None)
     if trigger_pnl is None:
         return {'cancel': False, 'reason': 'missing_trigger_pnl'}
+    if (
+        quote_pnl is not None
+        and trigger_pnl >= 0
+        and quote_pnl < 0
+        and (trigger_pnl - quote_pnl) >= TINY_EXIT_QUOTE_SANITY_NEG_GAP
+    ):
+        return {
+            'cancel': True,
+            'reason': 'quote_primary_negative_quote_gap',
+            'trigger_pnl': trigger_pnl,
+            'quote_pnl': quote_pnl,
+            'quote_mark_gap': quote_pnl - trigger_pnl,
+            'min_negative_gap': TINY_EXIT_QUOTE_SANITY_NEG_GAP,
+            'entry_mode': str((getattr(pos, 'monitor_state', None) or {}).get('entryMode') or getattr(pos, 'entry_mode', '') or ''),
+        }
     if trigger_pnl < PROBE_QUOTE_PRIMARY_MIN_MARK_TRIGGER:
         return {
             'cancel': False,
@@ -3801,6 +3836,54 @@ def _probe_quote_primary_profit_exit_confirmation(pos, exit_matrix, *, quote_pnl
         'quote_floor': quote_floor,
         'trail_floor': trail_floor,
         'entry_mode': str((getattr(pos, 'monitor_state', None) or {}).get('entryMode') or getattr(pos, 'entry_mode', '') or ''),
+    }
+
+
+def _probe_hold_quote_monitor_exit_detail(pos, *, quote_pnl=None, trigger_pnl=None, held_sec=None):
+    """Exit paper-only probes when executable quote collapses far below mark while held."""
+    if not PROBE_HOLD_QUOTE_MONITOR_ENABLED:
+        return {'exit': False, 'reason': 'disabled'}
+    if not position_is_probe_profit_capture_candidate(pos):
+        return {'exit': False, 'reason': 'not_probe_profit_capture_candidate'}
+    quote_pnl = _safe_float(quote_pnl, None)
+    trigger_pnl = _safe_float(trigger_pnl, None)
+    held_sec = _safe_float(held_sec, 0.0) or 0.0
+    peak_pnl = _safe_float(getattr(pos, 'peak_pnl', None), 0.0) or 0.0
+    if held_sec < PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC:
+        return {
+            'exit': False,
+            'reason': 'held_time_below_quote_monitor',
+            'held_sec': held_sec,
+            'min_held_sec': PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC,
+        }
+    if quote_pnl is None or trigger_pnl is None:
+        return {'exit': False, 'reason': 'missing_quote_or_trigger'}
+    quote_mark_gap = trigger_pnl - quote_pnl
+    if peak_pnl < PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK and quote_pnl > PROBE_HOLD_QUOTE_STOP_PNL:
+        return {
+            'exit': False,
+            'reason': 'peak_below_quote_monitor',
+            'peak_pnl': peak_pnl,
+            'min_peak': PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK,
+            'quote_pnl': quote_pnl,
+            'trigger_pnl': trigger_pnl,
+            'quote_mark_gap': quote_pnl - trigger_pnl,
+        }
+    should_exit = (
+        quote_pnl <= PROBE_HOLD_QUOTE_STOP_PNL
+        and quote_mark_gap >= PROBE_HOLD_QUOTE_GAP_STOP_PCT
+    )
+    return {
+        'exit': bool(should_exit),
+        'reason': 'probe_quote_guard_stop' if should_exit else 'quote_monitor_hold',
+        'quote_pnl': quote_pnl,
+        'trigger_pnl': trigger_pnl,
+        'quote_mark_gap': quote_pnl - trigger_pnl,
+        'quote_mark_gap_abs': quote_mark_gap,
+        'peak_pnl': peak_pnl,
+        'held_sec': held_sec,
+        'stop_quote_pnl': PROBE_HOLD_QUOTE_STOP_PNL,
+        'min_gap': PROBE_HOLD_QUOTE_GAP_STOP_PCT,
     }
 
 
@@ -4350,7 +4433,11 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         'reason': 'entry_edge_budget_ok',
     }
     if spread_pct is None:
-        detail['reason'] = 'entry_edge_no_trigger_or_quote'
+        if entry_mode in {HARD_GATE_PASS_TINY_PROBE_MODE, PRE_PASS_RESONANCE_TINY_PROBE_MODE}:
+            detail['pass'] = False
+            detail['reason'] = 'entry_edge_probe_missing_trigger_or_quote'
+        else:
+            detail['reason'] = 'entry_edge_no_trigger_or_quote'
         return detail
     if spread_pct > effective_max_spread_pct:
         detail['pass'] = False
@@ -5925,9 +6012,18 @@ def arm_source_resonance_lotto_probe(
         )
         return False
 
+    signal_price = _source_resonance_first_number(
+        registered_entry.get('signal_price'),
+        sig.get('signal_price'),
+        registered_entry.get('entry_price'),
+        positive=True,
+        default=None,
+    )
     pending = build_lotto_pending(registered_entry, lifecycle_id, detail=detail)
     pending['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
-    pending['trigger_price'] = registered_entry.get('signal_price')
+    if signal_price is not None:
+        pending['signal_price'] = signal_price
+    pending['trigger_price'] = signal_price or pending.get('trigger_price') or pending.get('signal_price')
     _apply_source_resonance_probe_to_pending(
         pending,
         detail,
@@ -6404,6 +6500,96 @@ def process_hard_gate_pass_quote_retries(
     return armed
 
 
+def _pre_pass_followthrough_detail(dex_snapshot=None, signal=None, watchlist_entry=None, *, now_ts=None):
+    dex_snapshot = dex_snapshot or {}
+    signal = signal or {}
+    watchlist_entry = watchlist_entry or {}
+    now_ts = float(now_ts or time.time())
+    signal_ts = _source_resonance_first_number(
+        signal.get('timestamp'),
+        signal.get('signal_ts'),
+        watchlist_entry.get('signal_ts'),
+        watchlist_entry.get('timestamp'),
+        default=None,
+    )
+    signal_ts_sec = signal_ts / 1000.0 if signal_ts is not None and signal_ts > 1e12 else signal_ts
+    signal_age_sec = None if signal_ts_sec is None else now_ts - signal_ts_sec
+    price_change_m5 = _source_resonance_first_number(
+        dex_snapshot.get('price_change_m5'),
+        dex_snapshot.get('priceChangeM5'),
+        dex_snapshot.get('price_change_5m'),
+        dex_snapshot.get('priceChange5m'),
+        default=None,
+    )
+    buys_m5 = _source_resonance_first_number(
+        dex_snapshot.get('buys_m5'),
+        dex_snapshot.get('buysM5'),
+        dex_snapshot.get('buy_count_m5'),
+        dex_snapshot.get('buyCountM5'),
+        default=None,
+    )
+    sells_m5 = _source_resonance_first_number(
+        dex_snapshot.get('sells_m5'),
+        dex_snapshot.get('sellsM5'),
+        dex_snapshot.get('sell_count_m5'),
+        dex_snapshot.get('sellCountM5'),
+        default=None,
+    )
+    tx_m5 = _source_resonance_first_number(
+        dex_snapshot.get('tx_m5'),
+        dex_snapshot.get('txM5'),
+        dex_snapshot.get('txns_m5'),
+        dex_snapshot.get('transactions_m5'),
+        default=None,
+    )
+    if tx_m5 is None and buys_m5 is not None and sells_m5 is not None:
+        tx_m5 = buys_m5 + sells_m5
+    buy_sell_ratio = _source_resonance_first_number(
+        dex_snapshot.get('buy_sell_ratio'),
+        dex_snapshot.get('buySellRatio'),
+        default=None,
+    )
+    if buy_sell_ratio is None and buys_m5 is not None:
+        buy_sell_ratio = buys_m5 / max(sells_m5 or 0.0, 1.0)
+    detail = {
+        'pass': True,
+        'reason': 'pre_pass_followthrough_confirmed',
+        'signal_ts_sec': signal_ts_sec,
+        'signal_age_sec': signal_age_sec,
+        'price_change_m5': price_change_m5,
+        'buy_sell_ratio': buy_sell_ratio,
+        'buys_m5': buys_m5,
+        'sells_m5': sells_m5,
+        'tx_m5': tx_m5,
+        'thresholds': {
+            'min_signal_age_sec': PRE_PASS_RESONANCE_MIN_SIGNAL_AGE_SEC,
+            'max_signal_age_sec': PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC,
+            'min_price_change_m5': PRE_PASS_RESONANCE_MIN_PRICE_CHANGE_M5,
+            'min_buy_sell_ratio': PRE_PASS_RESONANCE_MIN_BUY_SELL_RATIO,
+            'min_tx_m5': PRE_PASS_RESONANCE_MIN_TX_M5,
+        },
+    }
+    if signal_age_sec is None:
+        detail['pass'] = False
+        detail['reason'] = 'pre_pass_followthrough_missing_signal_ts'
+    elif signal_age_sec < PRE_PASS_RESONANCE_MIN_SIGNAL_AGE_SEC:
+        detail['pass'] = False
+        detail['reason'] = 'pre_pass_followthrough_wait'
+    elif signal_age_sec > PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC:
+        detail['pass'] = False
+        detail['reason'] = 'pre_pass_signal_too_stale'
+    elif price_change_m5 is None or price_change_m5 < PRE_PASS_RESONANCE_MIN_PRICE_CHANGE_M5:
+        detail['pass'] = False
+        detail['reason'] = 'pre_pass_followthrough_m5_too_low'
+    elif buy_sell_ratio is None or buy_sell_ratio < PRE_PASS_RESONANCE_MIN_BUY_SELL_RATIO:
+        detail['pass'] = False
+        detail['reason'] = 'pre_pass_followthrough_buy_sell_too_low'
+    elif tx_m5 is None or tx_m5 < PRE_PASS_RESONANCE_MIN_TX_M5:
+        detail['pass'] = False
+        detail['reason'] = 'pre_pass_followthrough_tx_too_low'
+    return detail
+
+
 def arm_hard_gate_pass_tiny_probe(
     db,
     pending_entries,
@@ -6567,9 +6753,19 @@ def arm_hard_gate_pass_tiny_probe(
         )
         return False
 
+    signal_price = _source_resonance_first_number(
+        registered_entry.get('signal_price'),
+        sig.get('signal_price'),
+        registered_entry.get('entry_price'),
+        positive=True,
+        default=None,
+    )
     if route_name == 'LOTTO' or str(registered_entry.get('type') or '').upper() == 'LOTTO':
         pending = build_lotto_pending(registered_entry, lifecycle_id, detail=detail)
         pending['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
+        if signal_price is not None:
+            pending['signal_price'] = signal_price
+            pending['trigger_price'] = signal_price
     else:
         pending = {
             'token_ca': token_ca,
@@ -6578,11 +6774,11 @@ def arm_hard_gate_pass_tiny_probe(
             'premium_signal_id': sig.get('id') or registered_entry.get('premium_signal_id'),
             'signal_type': route_name,
             'signal_route': route_name,
-            'signal_price': registered_entry.get('signal_price'),
+            'signal_price': signal_price,
             'market_cap': sig.get('market_cap') or registered_entry.get('signal_mc') or 0,
             'pool': pool,
             'staged_at': time.time(),
-            'trigger_price': registered_entry.get('signal_price'),
+            'trigger_price': signal_price,
             'watchlist_id': registered_entry.get('id'),
             'kelly_position_sol': HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
             'matrix_scores': {},
@@ -6594,7 +6790,7 @@ def arm_hard_gate_pass_tiny_probe(
             'spread_abort_count': 0,
             'exit_strategy': 'NOT_ATH',
         }
-    pending['trigger_price'] = registered_entry.get('signal_price')
+    pending['trigger_price'] = signal_price or pending.get('trigger_price') or pending.get('signal_price')
     _apply_hard_gate_pass_probe_to_pending(
         pending,
         detail,
@@ -6749,6 +6945,13 @@ def evaluate_pre_pass_resonance_tiny_probe(
         'gmgn_policy_action': gmgn_policy.get('action'),
         'gmgn_policy_reason': gmgn_policy.get('reason'),
     }
+    followthrough = _pre_pass_followthrough_detail(
+        dex_snapshot,
+        signal,
+        watchlist_entry,
+        now_ts=now_ts,
+    )
+    observed['followthrough'] = followthrough
     thresholds = {
         'size_sol': PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
         'max_per_hour': PRE_PASS_RESONANCE_TINY_PROBE_MAX_PER_HOUR,
@@ -6762,6 +6965,11 @@ def evaluate_pre_pass_resonance_tiny_probe(
         'max_alpha_age_sec': PRE_PASS_RESONANCE_MAX_ALPHA_AGE_SEC,
         'require_quote_clean': PRE_PASS_RESONANCE_REQUIRE_QUOTE_CLEAN,
         'allowed_reasons': sorted(PRE_PASS_RESONANCE_ALLOWED_REASONS),
+        'min_signal_age_sec': PRE_PASS_RESONANCE_MIN_SIGNAL_AGE_SEC,
+        'max_signal_age_sec': PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC,
+        'min_price_change_m5': PRE_PASS_RESONANCE_MIN_PRICE_CHANGE_M5,
+        'min_buy_sell_ratio': PRE_PASS_RESONANCE_MIN_BUY_SELL_RATIO,
+        'min_tx_m5': PRE_PASS_RESONANCE_MIN_TX_M5,
     }
 
     def _result(passed, reason):
@@ -6789,6 +6997,7 @@ def evaluate_pre_pass_resonance_tiny_probe(
             'gmgn_policy': gmgn_policy,
             'observed': observed,
             'thresholds': thresholds,
+            'followthrough': followthrough,
         }
 
     if not PRE_PASS_RESONANCE_TINY_PROBE_ENABLED:
@@ -6818,6 +7027,8 @@ def evaluate_pre_pass_resonance_tiny_probe(
         return _result(False, 'gmgn_last_seen_in_future')
     if last_seen_age_sec is not None and last_seen_age_sec > PRE_PASS_RESONANCE_MAX_ALPHA_AGE_SEC:
         return _result(False, 'gmgn_alpha_stale')
+    if not followthrough.get('pass'):
+        return _result(False, followthrough.get('reason') or 'pre_pass_followthrough_failed')
 
     existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
     if existing_probe:
@@ -19720,6 +19931,95 @@ def run_monitor(db):
                                 f"  [PHASE_POLICY_LIVE] {pos.symbol}/{pos.strategy_stage} EXIT "
                                 f"reason={_live_reason} mark={trigger_pnl:+.1%} quote=na"
                             )
+                    hold_quote_execution = None
+                    if (
+                        PROBE_HOLD_QUOTE_MONITOR_ENABLED
+                        and action not in ('partial_sell', 'exit')
+                        and not should_exit
+                        and position_is_probe_profit_capture_candidate(pos)
+                    ):
+                        _held_sec = max(0.0, time.time() - float(pos.entry_ts or time.time()))
+                        if _held_sec >= PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC:
+                            try:
+                                _sell_amount_raw = int(float(pos.token_amount_raw)) if pos.token_amount_raw else 0
+                                _hold_quote_execution = simulate_exit_execution(
+                                    pos.token_ca,
+                                    str(_sell_amount_raw),
+                                    getattr(pos, 'token_decimals', 0) or 0,
+                                    pos.strategy_stage,
+                                    strategy_id=strategy_id,
+                                    lifecycle_id=pos.lifecycle_id,
+                                )
+                                hold_quote_execution = _hold_quote_execution if _hold_quote_execution.get('success') else None
+                                _hold_quote_pnl = quote_pnl_from_execution(_hold_quote_execution, pos.entry_price)
+                                _hold_detail = _probe_hold_quote_monitor_exit_detail(
+                                    pos,
+                                    quote_pnl=_hold_quote_pnl,
+                                    trigger_pnl=trigger_pnl,
+                                    held_sec=_held_sec,
+                                )
+                                _hold_gap = (
+                                    _hold_quote_pnl - trigger_pnl
+                                    if _hold_quote_pnl is not None and trigger_pnl is not None else None
+                                )
+                                if (
+                                    _hold_detail.get('exit')
+                                    or (_hold_quote_pnl is not None and _hold_quote_pnl <= PROBE_HOLD_QUOTE_STOP_PNL)
+                                    or (_hold_gap is not None and abs(_hold_gap) >= PROBE_HOLD_QUOTE_GAP_STOP_PCT)
+                                ):
+                                    record_decision_event(
+                                        db,
+                                        component='probe_quote_monitor',
+                                        event_type='hold_quote_check',
+                                        decision='exit' if _hold_detail.get('exit') else 'hold',
+                                        reason=_hold_detail.get('reason'),
+                                        token_ca=pos.token_ca,
+                                        symbol=pos.symbol,
+                                        lifecycle_id=pos.lifecycle_id,
+                                        trade_id=pos.trade_id,
+                                        signal_ts=pos.signal_ts,
+                                        signal_id=getattr(pos, 'premium_signal_id', None),
+                                        strategy_stage=pos.strategy_stage,
+                                        route=(w_entry or {}).get('signal_route') or (pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                                        data_source='probe_quote_monitor',
+                                        payload={
+                                            **_hold_detail,
+                                            'current_pnl': trigger_pnl,
+                                            'execution_success': bool(_hold_quote_execution.get('success')),
+                                            'failure_reason': _hold_quote_execution.get('failureReason'),
+                                        },
+                                    )
+                                if _hold_detail.get('exit') and _hold_quote_execution.get('success'):
+                                    _hold_quote_price = _safe_float(_hold_quote_execution.get('effectivePrice'), None)
+                                    exit_eval.update({
+                                        'shouldExit': True,
+                                        'action': 'exit',
+                                        'exitReason': _hold_detail.get('reason') or 'probe_quote_guard_stop',
+                                        'execution': _hold_quote_execution,
+                                        'sellPct': 1.0,
+                                        'realizedPnl': _safe_float(_hold_quote_pnl, trigger_pnl),
+                                        'quotePnl': _safe_float(_hold_quote_pnl, None),
+                                        'quoteMarkGap': _safe_float(_hold_gap, None),
+                                        'quoteSanityStatus': 'probe_hold_quote_guard_stop',
+                                        'markSource': 'probe_quote_monitor',
+                                    })
+                                    action = 'exit'
+                                    should_exit = True
+                                    reason = exit_eval['exitReason']
+                                    pnl = _safe_float(_hold_quote_pnl, pnl)
+                                    price = _hold_quote_price or price
+                                    mark_source = 'probe_quote_monitor'
+                                    mark_execution = _hold_quote_execution
+                                    mark_quote_reason = _hold_quote_execution.get('failureReason')
+                                    mark_quote_route = _hold_quote_execution.get('routeAvailable')
+                                    mark_quote_price = _hold_quote_price
+                                    mark_quote_out = _hold_quote_execution.get('quotedOutAmount', exit_eval.get('quotedOutAmount'))
+                                    log.warning(
+                                        f"  [PROBE_QUOTE_MONITOR] {pos.symbol}/{pos.strategy_stage} EXIT "
+                                        f"reason={reason} mark={trigger_pnl:+.1%} quote={_hold_quote_pnl:+.1%}"
+                                    )
+                            except Exception as _quote_monitor_err:
+                                log.debug(f"  [PROBE_QUOTE_MONITOR] failed for {pos.symbol}: {_quote_monitor_err}")
                     record_trade_path_sample(
                         db,
                         pos,
@@ -19729,7 +20029,7 @@ def run_monitor(db):
                         mark_price=price,
                         mark_pnl=trigger_pnl,
                         mark_source=mark_source,
-                        quote_execution=mark_execution if action in ('partial_sell', 'exit', 'close') or should_exit else None,
+                        quote_execution=mark_execution if action in ('partial_sell', 'exit', 'close') or should_exit else hold_quote_execution,
                         peak_pnl=pos.peak_pnl,
                         phase_policy=phase_policy_payload,
                     )
