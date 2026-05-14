@@ -579,8 +579,9 @@ function reviewPolicyFingerprint(registrySummary = null) {
   };
 }
 
-function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit) {
+function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit, options = {}) {
   if (!tableNames.has('paper_trades')) return [];
+  const fastRecent = options.fastRecent !== false;
   const cols = getTableColumns(paperDb, 'paper_trades');
   const col = (name, fallback = `NULL AS ${name}`) => cols.has(name) ? name : fallback;
   const selectCols = [
@@ -605,13 +606,15 @@ function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit) {
   const tsWhere = sinceTs
     ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since OR COALESCE(exit_ts, 0) >= @since'
     : '';
-  return paperDb.prepare(`
+  const rows = paperDb.prepare(`
     SELECT ${selectCols.join(', ')}
     FROM paper_trades
-    ${tsWhere}
+    ${fastRecent ? '' : tsWhere}
     ORDER BY COALESCE(entry_ts, exit_ts, 0) DESC, id DESC
     LIMIT @limit
-  `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+  `).all(!fastRecent && sinceTs ? { since: sinceTs, limit } : { limit });
+  if (!fastRecent || !sinceTs) return rows;
+  return rows.filter((row) => Number(firstValue(row.entry_ts, row.exit_ts, 0) || 0) >= sinceTs);
 }
 
 function buildReviewLatencySummary(paperDb, tableNames, sinceTs) {
@@ -632,7 +635,8 @@ function buildReviewLatencySummary(paperDb, tableNames, sinceTs) {
   `).all(sinceTs ? { since: sinceTs } : {});
 }
 
-function buildReviewTableCoverage(paperDb, tableNames) {
+function buildReviewTableCoverage(paperDb, tableNames, options = {}) {
+  const includeStats = options.includeStats === true;
   const tables = [
     { table: 'paper_trades', ts: 'COALESCE(entry_ts, exit_ts, 0)' },
     { table: 'paper_decision_events', ts: 'event_ts' },
@@ -644,6 +648,9 @@ function buildReviewTableCoverage(paperDb, tableNames) {
   return tables.map((item) => {
     if (!tableNames.has(item.table)) {
       return { table: item.table, available: false, rows: 0, min_ts: null, max_ts: null };
+    }
+    if (!includeStats) {
+      return { table: item.table, available: true, stats_skipped: true };
     }
     try {
       const row = paperDb.prepare(`
@@ -3995,30 +4002,42 @@ const server = http.createServer(async (req, res) => {
       const tradeLimit = boundedIntParam(url, 'trade_limit', 2000, 1, 20000);
       const includeDetails = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_details') || '1').toLowerCase());
       const includeSignals = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_signals') || '0').toLowerCase());
+      const includeClosedLoop = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_closed_loop') || '0').toLowerCase());
+      const includeTableStats = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_table_stats') || '0').toLowerCase());
+      const includeLatency = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_latency') || '0').toLowerCase());
       const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
       const paperDbTimeoutMs = boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000);
       const timings = {};
 
-      signalDb = includeSignals ? getDb() : null;
+      signalDb = includeSignals && includeClosedLoop ? getDb() : null;
       paperDb = new Database(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
 
-      const closedLoop = buildClosedLoopWindowReport({
-        signalDb,
-        paperDb,
-        sinceTs,
-        limit,
-        includeMissedSummary: true,
-        includeMissedDetails: includeDetails,
-        includeSourceSummary: true,
-        includeProbeSummary: true,
-        includePaperPnlDetails: true,
-        includeDecisionEventDetails: includeDetails,
-        timings,
-        timingPrefix: 'review',
-      });
+      const closedLoop = includeClosedLoop
+        ? buildClosedLoopWindowReport({
+          signalDb,
+          paperDb,
+          sinceTs,
+          limit,
+          includeMissedSummary: true,
+          includeMissedDetails: includeDetails,
+          includeSourceSummary: true,
+          includeProbeSummary: true,
+          includePaperPnlDetails: true,
+          includeDecisionEventDetails: includeDetails,
+          timings,
+          timingPrefix: 'review',
+        })
+        : {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          premium_signals: { available: false, skipped: true, skip_reason: 'live_fast_snapshot' },
+          probes: skippedClosedLoopProbeSummary('live_fast_snapshot'),
+          source_resonance: skippedClosedLoopSourceSummary('live_fast_snapshot'),
+          missed_dogs: skippedClosedLoopMissedDogSummary('live_fast_snapshot'),
+        };
 
       let registrySummary = null;
       try {
@@ -4027,7 +4046,9 @@ const server = http.createServer(async (req, res) => {
         registrySummary = { error: error.message };
       }
 
-      const tradeRows = loadReviewTradeRows(paperDb, tableNames, sinceTs, tradeLimit);
+      const tradeRows = loadReviewTradeRows(paperDb, tableNames, sinceTs, tradeLimit, {
+        fastRecent: !includeClosedLoop,
+      });
       const tradeReview = buildTradeReviewSummary(tradeRows);
       const snapshot = buildPaperReviewSnapshot({
         generatedAt,
@@ -4043,8 +4064,8 @@ const server = http.createServer(async (req, res) => {
         dbPath: paperDbPath,
         closedLoop,
         tradeReview,
-        latencySummary: buildReviewLatencySummary(paperDb, tableNames, sinceTs),
-        tableCoverage: buildReviewTableCoverage(paperDb, tableNames),
+        latencySummary: includeLatency ? buildReviewLatencySummary(paperDb, tableNames, sinceTs) : [],
+        tableCoverage: buildReviewTableCoverage(paperDb, tableNames, { includeStats: includeTableStats }),
         sourceHealth: buildReviewHealthRows(paperDb, tableNames, 'source_resonance_health'),
         externalAlphaHealth: buildReviewHealthRows(paperDb, tableNames, 'external_alpha_health'),
         registrySummary,
@@ -4052,8 +4073,14 @@ const server = http.createServer(async (req, res) => {
           'This snapshot is persisted so review windows can be compared across commits and policy fingerprints.',
           'All execution metrics in this endpoint are paper-trader metrics; live execution remains out of scope.',
           'Missed dog counts use quote-clean fields when available, and should not be mixed with theoretical mark-only peaks.',
+          includeClosedLoop
+            ? 'Heavy closed-loop scans were enabled for this snapshot.'
+            : 'Heavy closed-loop scans are skipped by default for live safety; pass include_closed_loop=1 for explicit heavy review.',
+          includeTableStats
+            ? 'Full table coverage stats were enabled for this snapshot.'
+            : 'Full table coverage stats are skipped by default for live safety; pass include_table_stats=1 for explicit table scans.',
           includeSignals
-            ? 'Premium signal table scan was enabled for this snapshot.'
+            ? 'Premium signal table scan was requested; it only runs with include_closed_loop=1.'
             : 'Premium signal table scan is skipped by default for live safety; pass include_signals=1 for an explicit heavy scan.',
         ],
       });
