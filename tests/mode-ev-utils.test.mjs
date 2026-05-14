@@ -78,3 +78,47 @@ test('quote-clean mode report evaluates only clean rows', () => {
   assert.equal(mode.total, 1);
   assert.equal(mode.total_pnl_sol, -0.00015);
 });
+
+test('mode EV report filters revival canary rows by policy version', () => {
+  const rows = [
+    {
+      id: 1,
+      token_ca: 'A',
+      entry_mode: 'ath_no_kline_tiny_probe',
+      pnl_pct: 0.1,
+      position_size_sol: 0.003,
+      exit_ts: 10,
+      monitor_state_json: JSON.stringify({
+        revivalCanary: true,
+        policyVersion: 'post_d162c067_quote_guard',
+        quoteGuardVersion: 'd162c067',
+      }),
+    },
+    {
+      id: 2,
+      token_ca: 'B',
+      entry_mode: 'ath_no_kline_tiny_probe',
+      pnl_pct: -0.2,
+      position_size_sol: 0.003,
+      exit_ts: 11,
+      monitor_state_json: JSON.stringify({ policyVersion: 'pre_quote_guard' }),
+    },
+  ];
+
+  const report = buildModeEvReport(rows, {
+    revivalCanary: true,
+    policyVersion: 'post_d162c067_quote_guard',
+    bootstrapIterations: 500,
+  });
+  const mode = report.by_entry_mode[0];
+
+  assert.equal(report.input_rows, 2);
+  assert.equal(report.evaluated_rows, 1);
+  assert.equal(report.revival_canary_rows, 1);
+  assert.equal(report.policy_version_rows.post_d162c067_quote_guard, 1);
+  assert.equal(report.policy_version_rows.pre_quote_guard, 1);
+  assert.equal(mode.total, 1);
+  assert.equal(mode.revival_canary_n, 1);
+  assert.deepEqual(mode.policy_versions, ['post_d162c067_quote_guard']);
+  assert.deepEqual(mode.quote_guard_versions, ['d162c067']);
+});

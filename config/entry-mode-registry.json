@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-12T00:00:00.000Z",
+  "updated_at": "2026-05-14T00:00:00.000Z",
   "notes": "MVP governance registry. It classifies paper entry modes. The live tier means paper-live/realtime paper entries, not wallet execution.",
   "tiers": {
     "live": {
@@ -10,6 +10,10 @@
     "isolated_paper_capped": {
       "description": "Candidate modes that may deserve capped paper later, but remain blocked until cap/loss/cooldown isolation is implemented.",
       "paper_enabled": false
+    },
+    "revival_canary": {
+      "description": "Paper-only tiny forward-sampling tier for selected modes after d162c067 quote guards; capped, independently tagged, and auto-killed on poor post-policy evidence.",
+      "paper_enabled": true
     },
     "shadow_watch_only": {
       "description": "Raw and quote-clean signal validation only; no pending entry or paper fill.",
@@ -135,11 +139,12 @@
       "reason": "Observed quote-clean paper EV is strongly negative."
     },
     "ath_no_kline_tiny_probe": {
-      "tier": "hard_shadow",
+      "tier": "revival_canary",
       "route": "ATH",
       "family": "no_kline_tiny",
-      "paper_enabled": false,
-      "reason": "Observed paper win rate and robust EV are poor."
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Controlled post-d162c067 paper-only forward sample; lifetime EV is policy-mixed, so collect clean canary data with quote guards and auto-kill caps."
     },
     "lotto_micro_reclaim_tiny_probe": {
       "tier": "hard_shadow",
@@ -170,11 +175,12 @@
       "reason": "High-risk fallback probe; stopped until isolated paper caps exist."
     },
     "lotto_not_ath_reclaim_tiny_probe": {
-      "tier": "shadow_watch_only",
+      "tier": "revival_canary",
       "route": "LOTTO",
       "family": "not_ath_reclaim",
-      "paper_enabled": false,
-      "reason": "Old paper path is hindsight-contaminated; use lotto_not_ath_watch_shadow first."
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Controlled post-d162c067 paper-only forward sample for NOT_ATH reclaim; lifetime EV is policy-mixed, so collect clean canary data with quote guards and auto-kill caps."
     },
     "lotto_upstream_miss_tiny_scout": {
       "tier": "shadow_watch_only",
@@ -226,11 +232,12 @@
       "reason": "Grey-zone ATH tiny scout; requires isolated caps before more paper."
     },
     "ath_uncertainty_tiny_scout": {
-      "tier": "isolated_paper_capped",
+      "tier": "revival_canary",
       "route": "ATH",
       "family": "uncertainty",
-      "paper_enabled": false,
-      "reason": "Grey-zone ATH tiny scout; requires isolated caps before more paper."
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Controlled post-d162c067 paper-only forward sample; prior data is policy-mixed but broad enough to justify a capped canary."
     },
     "gmgn_concentration_tiny_scout": {
       "tier": "isolated_paper_capped",
@@ -268,11 +275,12 @@
       "reason": "Low sample GMGN path; collect shadow evidence before capped paper."
     },
     "lotto_low_liquidity_reclaim_tiny_probe": {
-      "tier": "isolated_paper_capped",
+      "tier": "revival_canary",
       "route": "LOTTO",
       "family": "low_liquidity_reclaim",
-      "paper_enabled": false,
-      "reason": "Near flat but under-sampled; do not restore until isolated caps exist."
+      "paper_enabled": true,
+      "size_class": "tiny",
+      "reason": "Controlled post-d162c067 paper-only forward sample for low-liquidity reclaim; capped canary only, not normal live."
     },
     "matrix_micro_momentum_tiny_probe": {
       "tier": "isolated_paper_capped",

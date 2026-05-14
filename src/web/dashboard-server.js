@@ -3845,6 +3845,11 @@ const server = http.createServer(async (req, res) => {
       const extraCostPctRaw = Number(url.searchParams.get('extra_cost_pct') || '0');
       const quoteGapMaxPct = Number.isFinite(quoteGapMaxPctRaw) ? quoteGapMaxPctRaw : 8;
       const extraCostPct = Number.isFinite(extraCostPctRaw) ? extraCostPctRaw : 0;
+      const policyVersion = String(url.searchParams.get('policy_version') || '').trim();
+      const revivalCanaryRaw = String(url.searchParams.get('revival_canary') || '').trim().toLowerCase();
+      const revivalCanary = ['1', 'true', 'yes'].includes(revivalCanaryRaw)
+        ? true
+        : (['0', 'false', 'no'].includes(revivalCanaryRaw) ? false : null);
       const bootstrapIterations = Math.max(250, Math.min(parseInt(url.searchParams.get('bootstrap_iterations') || '3000', 10) || 3000, 10000));
       paperDb = new Database(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
@@ -3894,6 +3899,8 @@ const server = http.createServer(async (req, res) => {
         quoteGapMaxPct,
         extraCostPct,
         bootstrapIterations,
+        policyVersion,
+        revivalCanary,
       });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
@@ -3904,6 +3911,8 @@ const server = http.createServer(async (req, res) => {
           since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
           window: url.searchParams.get('window') || null,
           clean,
+          policy_version: policyVersion || null,
+          revival_canary: revivalCanary,
           limit,
           quote_gap_max_pct: quoteGapMaxPct,
           extra_cost_pct: extraCostPct,

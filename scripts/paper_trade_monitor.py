@@ -160,6 +160,7 @@ PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC = float(os.environ.get('PROBE_HOLD_QUOTE_M
 PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK = float(os.environ.get('PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK', '0.02'))
 PROBE_HOLD_QUOTE_GAP_STOP_PCT = float(os.environ.get('PROBE_HOLD_QUOTE_GAP_STOP_PCT', '0.15'))
 PROBE_HOLD_QUOTE_STOP_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_STOP_PNL', '-0.18'))
+QUOTE_GUARD_POLICY_VERSION = os.environ.get('QUOTE_GUARD_POLICY_VERSION', 'd162c067')
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -500,6 +501,8 @@ ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE = 'ath_reclaim_after_failure_tiny_prob
 ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE = 'ath_matrix_dissonance_tiny_probe'
 ATH_MICRO_RECLAIM_TINY_PROBE_MODE = 'ath_micro_reclaim_tiny_probe'
 PAPER_TINY_SCOUT_ENTRY_MODES.update({
+    ATH_NO_KLINE_TINY_PROBE_MODE,
+    ATH_UNCERTAINTY_TINY_SCOUT_MODE,
     ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE,
     ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
     ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
@@ -507,6 +510,29 @@ PAPER_TINY_SCOUT_ENTRY_MODES.update({
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
 })
+REVIVAL_CANARY_ENABLED = os.environ.get('REVIVAL_CANARY_ENABLED', 'true').lower() != 'false'
+REVIVAL_CANARY_POLICY_VERSION = os.environ.get('REVIVAL_CANARY_POLICY_VERSION', 'post_d162c067_quote_guard')
+REVIVAL_CANARY_MODES = {
+    item.strip()
+    for item in os.environ.get(
+        'REVIVAL_CANARY_MODES',
+        ','.join([
+            ATH_NO_KLINE_TINY_PROBE_MODE,
+            LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+            LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        ]),
+    ).split(',')
+    if item.strip()
+}
+REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR = max(0, int(os.environ.get('REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR', '2')))
+REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR = max(0, int(os.environ.get('REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR', '5')))
+REVIVAL_CANARY_MAX_LOSS_SOL = max(0.0, float(os.environ.get('REVIVAL_CANARY_MAX_LOSS_SOL', '0.002')))
+REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES = max(1, int(os.environ.get('REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES', '5')))
+REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS = max(1, int(os.environ.get('REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS', '3')))
+REVIVAL_CANARY_GAP_ALERT_PCT = max(0.0, float(os.environ.get('REVIVAL_CANARY_GAP_ALERT_PCT', '30.0')))
+REVIVAL_CANARY_MAX_GAP_ALERTS = max(1, int(os.environ.get('REVIVAL_CANARY_MAX_GAP_ALERTS', '2')))
+_REVIVAL_CANARY_ARM_TS = deque(maxlen=500)
 ATH_HIGH_MC_TINY_PROBE_ENABLED = os.environ.get('ATH_HIGH_MC_TINY_PROBE_ENABLED', 'true').lower() != 'false'
 ATH_HIGH_MC_TINY_PROBE_MAX_MC = float(os.environ.get('ATH_HIGH_MC_TINY_PROBE_MAX_MC', str(ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC)))
 ATH_RECOVERY_TINY_PROBES_ENABLED = os.environ.get('ATH_RECOVERY_TINY_PROBES_ENABLED', 'true').lower() != 'false'
@@ -2284,6 +2310,316 @@ def apply_paper_tiny_scout_size_cap(pending):
         'capped': actual_size < requested_size,
         'cap_sol': cap_sol,
     }
+
+
+def is_revival_canary_mode(entry_mode):
+    return str(entry_mode or '') in REVIVAL_CANARY_MODES
+
+
+def _revival_canary_entry_mode(pending):
+    pending = pending or {}
+    lotto_state = pending.get('lotto_state') or {}
+    entry_decision = lotto_state.get('entryDecision') if isinstance(lotto_state, dict) else {}
+    if not isinstance(entry_decision, dict):
+        entry_decision = {}
+    return str(
+        pending.get('entry_mode')
+        or pending.get('scout_mode')
+        or entry_decision.get('entry_mode')
+        or ''
+    )
+
+
+def apply_revival_canary_to_pending(pending, registry_entry=None, now_ts=None):
+    pending = pending or {}
+    entry_mode = _revival_canary_entry_mode(pending)
+    if not is_revival_canary_mode(entry_mode):
+        return {'pass': False, 'reason': 'not_revival_canary_mode', 'entry_mode': entry_mode or None}
+    if not REVIVAL_CANARY_ENABLED:
+        return {'pass': False, 'reason': 'revival_canary_disabled', 'entry_mode': entry_mode}
+
+    registry_entry = registry_entry or entry_mode_registry_entry(entry_mode) or {}
+    parent_mode = (
+        pending.get('parent_entry_mode')
+        or pending.get('parent_scout_mode')
+        or pending.get('scout_mode')
+        or entry_mode
+    )
+    pending['entry_mode'] = entry_mode
+    pending.setdefault('scout_mode', entry_mode)
+    pending['parent_entry_mode'] = parent_mode
+    pending.setdefault('parent_scout_mode', parent_mode)
+    pending['revival_canary'] = True
+    pending['paper_only_scout'] = True
+    pending['execution_scope'] = 'paper_only'
+    pending['policy_version'] = REVIVAL_CANARY_POLICY_VERSION
+    pending['quote_guard_version'] = QUOTE_GUARD_POLICY_VERSION
+    pending['registry_tier_at_entry'] = registry_entry.get('tier') or 'revival_canary'
+    pending['registry_reason_at_entry'] = registry_entry.get('reason')
+    pending['revival_canary_started_at'] = now_ts or time.time()
+    if pending.get('kelly_position_sol') is not None:
+        pending['kelly_position_sol'] = min(
+            _safe_float(pending.get('kelly_position_sol'), PAPER_TINY_SCOUT_SIZE_SOL),
+            PAPER_TINY_SCOUT_SIZE_SOL,
+        )
+    else:
+        pending['kelly_position_sol'] = PAPER_TINY_SCOUT_SIZE_SOL
+
+    lotto_state = pending.get('lotto_state')
+    if isinstance(lotto_state, dict):
+        lotto_state['revivalCanary'] = True
+        lotto_state['paper_only_scout'] = True
+        lotto_state['executionScope'] = 'paper_only'
+        lotto_state['policyVersion'] = REVIVAL_CANARY_POLICY_VERSION
+        lotto_state['quoteGuardVersion'] = QUOTE_GUARD_POLICY_VERSION
+        lotto_state['registryTierAtEntry'] = pending['registry_tier_at_entry']
+        lotto_state['parentEntryMode'] = parent_mode
+        lotto_state['positionSizeSol'] = min(
+            _safe_float(lotto_state.get('positionSizeSol'), PAPER_TINY_SCOUT_SIZE_SOL),
+            PAPER_TINY_SCOUT_SIZE_SOL,
+        )
+        entry_decision = lotto_state.setdefault('entryDecision', {})
+        if isinstance(entry_decision, dict):
+            entry_decision['revival_canary'] = True
+            entry_decision['paper_only_scout'] = True
+            entry_decision['execution_scope'] = 'paper_only'
+            entry_decision['policy_version'] = REVIVAL_CANARY_POLICY_VERSION
+            entry_decision['quote_guard_version'] = QUOTE_GUARD_POLICY_VERSION
+            entry_decision['registry_tier_at_entry'] = pending['registry_tier_at_entry']
+            entry_decision['parent_entry_mode'] = parent_mode
+            entry_decision['position_size_sol'] = min(
+                _safe_float(entry_decision.get('position_size_sol'), PAPER_TINY_SCOUT_SIZE_SOL),
+                PAPER_TINY_SCOUT_SIZE_SOL,
+            )
+
+    return {
+        'pass': True,
+        'reason': 'revival_canary_tagged',
+        'entry_mode': entry_mode,
+        'parent_entry_mode': parent_mode,
+        'policy_version': REVIVAL_CANARY_POLICY_VERSION,
+        'quote_guard_version': QUOTE_GUARD_POLICY_VERSION,
+        'registry_tier_at_entry': pending['registry_tier_at_entry'],
+        'size_sol': pending.get('kelly_position_sol'),
+    }
+
+
+def _revival_canary_gap_pct(value):
+    gap = _safe_float(value, None)
+    if gap is None:
+        return None
+    gap = abs(gap)
+    if gap <= 2.0:
+        return gap * 100.0
+    return gap
+
+
+def _revival_canary_trade_payload(row):
+    monitor_state = _safe_json_loads(_row_value(row, 'monitor_state_json'))
+    audit = _safe_json_loads(_row_value(row, 'entry_execution_audit_json'))
+    return monitor_state if monitor_state else audit
+
+
+def _revival_canary_trade_rows(db, entry_mode, *, limit=200):
+    columns = _paper_trade_columns(db)
+    if not columns or 'entry_mode' not in columns:
+        return []
+    wanted = [
+        'id',
+        'entry_ts',
+        'exit_ts',
+        'pnl_pct',
+        'position_size_sol',
+        'exit_reason',
+        'loss_attribution',
+        'monitor_state_json',
+        'entry_execution_audit_json',
+        'exit_quote_mark_gap_pct',
+        'max_path_quote_gap_pct',
+    ]
+    select_cols = [col for col in wanted if col in columns]
+    if not select_cols:
+        return []
+    try:
+        rows = db.execute(
+            f"""
+            SELECT {', '.join(select_cols)}
+            FROM paper_trades
+            WHERE entry_mode = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (entry_mode, int(limit)),
+        ).fetchall()
+    except Exception:
+        return []
+    tagged = []
+    for row in rows:
+        payload = _revival_canary_trade_payload(row)
+        if (
+            payload.get('revivalCanary')
+            or payload.get('revival_canary')
+            or payload.get('policyVersion') == REVIVAL_CANARY_POLICY_VERSION
+            or payload.get('policy_version') == REVIVAL_CANARY_POLICY_VERSION
+        ):
+            tagged.append(row)
+    return tagged
+
+
+def _revival_canary_policy_health(db, entry_mode):
+    rows = _revival_canary_trade_rows(db, entry_mode)
+    total_loss_sol = 0.0
+    consecutive_losses = 0
+    quote_guard_stops = 0
+    gap_alerts = 0
+    closed = 0
+    wins = 0
+    losses = 0
+    for row in rows:
+        pnl = _safe_float(_row_value(row, 'pnl_pct'), None)
+        if pnl is None:
+            continue
+        if abs(pnl) > 2.0:
+            pnl = pnl / 100.0
+        size_sol = _safe_float(_row_value(row, 'position_size_sol'), PAPER_TINY_SCOUT_SIZE_SOL)
+        closed += 1
+        if pnl > 0:
+            wins += 1
+        else:
+            losses += 1
+            total_loss_sol += abs(pnl) * size_sol
+
+        if closed == 1:
+            consecutive_losses = 0
+        if consecutive_losses == closed - 1:
+            if pnl <= 0:
+                consecutive_losses += 1
+            else:
+                consecutive_losses = -1
+
+        exit_reason = str(_row_value(row, 'exit_reason') or '')
+        loss_attr = str(_row_value(row, 'loss_attribution') or '')
+        if 'probe_quote_guard_stop' in exit_reason or 'probe_quote_guard_stop' in loss_attr:
+            quote_guard_stops += 1
+        row_gap = max([
+            value for value in (
+                _revival_canary_gap_pct(_row_value(row, 'exit_quote_mark_gap_pct')),
+                _revival_canary_gap_pct(_row_value(row, 'max_path_quote_gap_pct')),
+            )
+            if value is not None
+        ] or [0.0])
+        if row_gap >= REVIVAL_CANARY_GAP_ALERT_PCT:
+            gap_alerts += 1
+
+    if consecutive_losses < 0:
+        consecutive_losses = 0
+
+    detail = {
+        'entry_mode': entry_mode,
+        'policy_version': REVIVAL_CANARY_POLICY_VERSION,
+        'closed_trades': closed,
+        'wins': wins,
+        'losses': losses,
+        'total_loss_sol': total_loss_sol,
+        'consecutive_losses': consecutive_losses,
+        'quote_guard_stops': quote_guard_stops,
+        'gap_alerts': gap_alerts,
+        'max_loss_sol': REVIVAL_CANARY_MAX_LOSS_SOL,
+        'max_consecutive_losses': REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES,
+        'max_quote_guard_stops': REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS,
+        'max_gap_alerts': REVIVAL_CANARY_MAX_GAP_ALERTS,
+        'pass': True,
+        'reason': 'revival_canary_policy_health_ok',
+    }
+    if REVIVAL_CANARY_MAX_LOSS_SOL and total_loss_sol >= REVIVAL_CANARY_MAX_LOSS_SOL:
+        detail.update({'pass': False, 'reason': 'revival_canary_loss_budget_hit'})
+    elif consecutive_losses >= REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES:
+        detail.update({'pass': False, 'reason': 'revival_canary_loss_streak_hit'})
+    elif quote_guard_stops >= REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS:
+        detail.update({'pass': False, 'reason': 'revival_canary_quote_guard_stop_limit'})
+    elif gap_alerts >= REVIVAL_CANARY_MAX_GAP_ALERTS:
+        detail.update({'pass': False, 'reason': 'revival_canary_quote_gap_limit'})
+    return detail
+
+
+def _revival_canary_recent_counts(db, now_ts):
+    now_ts = float(now_ts or time.time())
+    cutoff = now_ts - 3600.0
+    global_count = 0
+    by_mode = Counter()
+    try:
+        rows = db.execute(
+            """
+            SELECT event_ts, payload_json
+            FROM paper_decision_events
+            WHERE component = 'revival_canary'
+              AND event_type = 'entry_allow'
+              AND event_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+    except Exception:
+        rows = None
+    if rows is None:
+        for armed_ts, mode in list(_REVIVAL_CANARY_ARM_TS):
+            if armed_ts >= cutoff:
+                global_count += 1
+                by_mode[mode] += 1
+    else:
+        for row in rows:
+            payload = _safe_json_loads(_row_value(row, 'payload_json'))
+            if payload.get('policy_version') != REVIVAL_CANARY_POLICY_VERSION:
+                continue
+            mode = str(payload.get('entry_mode') or '')
+            if not mode:
+                continue
+            global_count += 1
+            by_mode[mode] += 1
+    return {
+        'global_count_1h': global_count,
+        'by_mode_1h': dict(by_mode),
+        'window_sec': 3600,
+    }
+
+
+def evaluate_revival_canary_gate(db, entry_mode, *, token_ca=None, now_ts=None):
+    entry_mode = str(entry_mode or '')
+    eligible = is_revival_canary_mode(entry_mode)
+    detail = {
+        'eligible': eligible,
+        'entry_mode': entry_mode or None,
+        'policy_version': REVIVAL_CANARY_POLICY_VERSION,
+        'quote_guard_version': QUOTE_GUARD_POLICY_VERSION,
+        'paper_only': True,
+    }
+    if not eligible:
+        detail.update({'pass': False, 'reason': 'not_revival_canary_mode'})
+        return detail
+    if not REVIVAL_CANARY_ENABLED:
+        detail.update({'pass': False, 'reason': 'revival_canary_disabled'})
+        return detail
+
+    now_ts = float(now_ts or time.time())
+    counts = _revival_canary_recent_counts(db, now_ts)
+    mode_count = int(counts.get('by_mode_1h', {}).get(entry_mode, 0))
+    health = _revival_canary_policy_health(db, entry_mode)
+    detail.update({
+        'rate_counts': counts,
+        'mode_count_1h': mode_count,
+        'max_per_mode_per_hour': REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR,
+        'max_global_per_hour': REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR,
+        'policy_health': health,
+        'token_ca': token_ca,
+    })
+    if REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR and counts.get('global_count_1h', 0) >= REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR:
+        detail.update({'pass': False, 'reason': 'revival_canary_global_rate_limited'})
+    elif REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR and mode_count >= REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR:
+        detail.update({'pass': False, 'reason': 'revival_canary_mode_rate_limited'})
+    elif not health.get('pass'):
+        detail.update({'pass': False, 'reason': health.get('reason') or 'revival_canary_policy_health_block'})
+    else:
+        detail.update({'pass': True, 'reason': 'revival_canary_policy_sampling'})
+    return detail
 
 
 def build_paper_tiny_scout_dex_fallback_entry_execution(pending, amount_sol, failed_execution=None, sol_price=None):
@@ -10379,6 +10715,74 @@ def _record_entry_mode_quality_decision(
 def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=None, lifecycle_id=None,
                                     signal_ts=None, signal_id=None, route=None, event_ts=None,
                                     data_source='paper_trades', force_live=False):
+    canary_gate = evaluate_revival_canary_gate(
+        db,
+        entry_mode,
+        token_ca=token_ca,
+        now_ts=event_ts or time.time(),
+    )
+    if canary_gate.get('eligible'):
+        allowed = bool(canary_gate.get('pass'))
+        decision = {
+            'decision': 'allow_live' if allowed else 'shadow',
+            'reason': canary_gate.get('reason') or (
+                'revival_canary_policy_sampling' if allowed else 'revival_canary_blocked'
+            ),
+            'entry_mode': entry_mode,
+            'revival_canary': canary_gate,
+            'registry': entry_mode_registry_entry(entry_mode) or {},
+            'policy_version': REVIVAL_CANARY_POLICY_VERSION,
+            'quote_guard_version': QUOTE_GUARD_POLICY_VERSION,
+            'paper_only': True,
+        }
+        _record_entry_mode_quality_decision(
+            db,
+            decision=decision,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            event_type='live_gate',
+            data_source=data_source,
+            event_ts=event_ts,
+        )
+        should_count = str(data_source or '').startswith('pending_entry')
+        try:
+            record_decision_event(
+                db,
+                component='revival_canary',
+                event_type='entry_allow' if allowed and should_count else ('entry_preview' if allowed else 'entry_block'),
+                decision='allow' if allowed else 'block',
+                reason=decision.get('reason'),
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=signal_ts,
+                signal_id=signal_id,
+                route=route,
+                data_source=data_source,
+                payload=decision,
+                event_ts=event_ts,
+            )
+            if allowed and should_count:
+                _REVIVAL_CANARY_ARM_TS.append((float(event_ts or time.time()), str(entry_mode or '')))
+        except Exception as exc:
+            log.debug(f"  [REVIVAL_CANARY] record failed: {exc}")
+        if allowed:
+            log.info(
+                f"  [REVIVAL_CANARY] allow {symbol or token_ca}: "
+                f"mode={entry_mode} policy={REVIVAL_CANARY_POLICY_VERSION} "
+                f"rate={canary_gate.get('mode_count_1h')}/{REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR}"
+            )
+            return True, decision
+        log.info(
+            f"  [REVIVAL_CANARY] shadow {symbol or token_ca}: "
+            f"mode={entry_mode} reason={decision.get('reason')}"
+        )
+        return False, decision
+
     decision = evaluate_entry_mode_quality(
         db,
         entry_mode,
@@ -17573,6 +17977,16 @@ def run_monitor(db):
             for lifecycle_id, pending in list(pending_entries.items()):
                 try:
                     normalize_pending_entry(pending, lifecycle_id)
+                    _initial_canary_registry = entry_mode_registry_entry(
+                        pending.get('entry_mode') or pending.get('scout_mode')
+                    ) or {}
+                    _initial_canary_detail = apply_revival_canary_to_pending(
+                        pending,
+                        _initial_canary_registry,
+                        now_ts=now,
+                    )
+                    if _initial_canary_detail.get('pass'):
+                        pending['revival_canary_detail'] = _initial_canary_detail
                     pending['attempts'] = int(pending.get('attempts') or 0) + 1
                     
                     # Phase 1c: Last-mile pre-buy price recheck
@@ -17900,6 +18314,13 @@ def run_monitor(db):
                         if _scout_mode in PAPER_TINY_SCOUT_ENTRY_MODES:
                             pending['timing_entry_mode'] = timing_reason
                             _apply_actual_tiny_trigger_mode(pending, timing_reason)
+                            _post_timing_canary_detail = apply_revival_canary_to_pending(
+                                pending,
+                                entry_mode_registry_entry(pending.get('entry_mode') or pending.get('scout_mode')) or {},
+                                now_ts=now,
+                            )
+                            if _post_timing_canary_detail.get('pass'):
+                                pending['revival_canary_detail'] = _post_timing_canary_detail
                         else:
                             pending['entry_mode'] = timing_reason
                             pending['entry_trigger_mode'] = timing_reason
@@ -19032,6 +19453,16 @@ def run_monitor(db):
                         _monitor_state['gmgnLeadTimeSec'] = pending.get('gmgn_lead_time_sec')
                     if pending.get('source_resonance_score') is not None:
                         _monitor_state['sourceResonanceScore'] = pending.get('source_resonance_score')
+                    if pending.get('revival_canary'):
+                        _monitor_state['revivalCanary'] = True
+                        _monitor_state['policyVersion'] = pending.get('policy_version') or REVIVAL_CANARY_POLICY_VERSION
+                        _monitor_state['quoteGuardVersion'] = pending.get('quote_guard_version') or QUOTE_GUARD_POLICY_VERSION
+                        _monitor_state['registryTierAtEntry'] = pending.get('registry_tier_at_entry')
+                        _monitor_state['registryReasonAtEntry'] = pending.get('registry_reason_at_entry')
+                        _monitor_state['parentEntryMode'] = pending.get('parent_entry_mode')
+                        _monitor_state['executionScope'] = pending.get('execution_scope') or 'paper_only'
+                        _monitor_state['paperOnlyScout'] = bool(pending.get('paper_only_scout'))
+                        _monitor_state['revivalCanaryDetail'] = pending.get('revival_canary_detail')
                     if pending.get('ath_recovery_family'):
                         _monitor_state['athRecoveryFamily'] = pending.get('ath_recovery_family')
                         _monitor_state['parentBlockReason'] = pending.get('parent_block_reason')
@@ -19086,6 +19517,14 @@ def run_monitor(db):
                                 'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                                 'entryDecisionContract': _entry_decision_contract.to_dict(),
                                 'positionSizeSol': actual_position_size_sol,
+                                'revivalCanary': bool(pending.get('revival_canary')),
+                                'policyVersion': pending.get('policy_version'),
+                                'quoteGuardVersion': pending.get('quote_guard_version'),
+                                'registryTierAtEntry': pending.get('registry_tier_at_entry'),
+                                'registryReasonAtEntry': pending.get('registry_reason_at_entry'),
+                                'parentEntryMode': pending.get('parent_entry_mode'),
+                                'executionScope': pending.get('execution_scope'),
+                                'paperOnlyScout': bool(pending.get('paper_only_scout')),
                                 'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
                                 'syntheticEntryReason': execution.get('syntheticEntryReason'),
                                 'syntheticEntrySource': execution.get('syntheticEntrySource'),
@@ -19135,6 +19574,14 @@ def run_monitor(db):
                             'entry_edge_budget': _entry_edge_budget,
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             'entry_decision_contract': _entry_decision_contract.to_dict(),
+                            'revival_canary': bool(pending.get('revival_canary')),
+                            'policy_version': pending.get('policy_version'),
+                            'quote_guard_version': pending.get('quote_guard_version'),
+                            'registry_tier_at_entry': pending.get('registry_tier_at_entry'),
+                            'registry_reason_at_entry': pending.get('registry_reason_at_entry'),
+                            'parent_entry_mode': pending.get('parent_entry_mode'),
+                            'execution_scope': pending.get('execution_scope'),
+                            'paper_only_scout': bool(pending.get('paper_only_scout')),
                             'execution': build_execution_audit(execution, {
                                 'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
                                 'syntheticEntryReason': execution.get('syntheticEntryReason'),

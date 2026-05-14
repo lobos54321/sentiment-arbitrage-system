@@ -43,6 +43,41 @@ export function inferModeEvEntryMode(row) {
   ));
 }
 
+export function inferModeEvPolicyVersion(row) {
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  return firstValue(
+    monitorState.policyVersion,
+    monitorState.policy_version,
+    entryAudit.policyVersion,
+    entryAudit.policy_version,
+    null,
+  );
+}
+
+export function inferModeEvQuoteGuardVersion(row) {
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  return firstValue(
+    monitorState.quoteGuardVersion,
+    monitorState.quote_guard_version,
+    entryAudit.quoteGuardVersion,
+    entryAudit.quote_guard_version,
+    null,
+  );
+}
+
+export function inferModeEvRevivalCanary(row) {
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  return Boolean(
+    monitorState.revivalCanary
+    || monitorState.revival_canary
+    || entryAudit.revivalCanary
+    || entryAudit.revival_canary
+  );
+}
+
 export function modeEvBucket(entryMode, positionSizeSol) {
   const mode = String(entryMode || '').toLowerCase();
   const size = Number(positionSizeSol || 0);
@@ -161,6 +196,9 @@ function summarizeRows(entryMode, bucket, rows, options = {}) {
     unique_tokens: new Set(rows.map((row) => row.token_ca || row.lifecycle_id || row.id)).size,
     quote_clean_n: quoteCleanRows.length,
     quote_dirty_n: rows.length - quoteCleanRows.length,
+    revival_canary_n: rows.filter((row) => row.revival_canary).length,
+    policy_versions: [...new Set(rows.map((row) => row.policy_version).filter(Boolean))].sort(),
+    quote_guard_versions: [...new Set(rows.map((row) => row.quote_guard_version).filter(Boolean))].sort(),
     wins: pnlPctValues.filter((value) => value > 0).length,
     losses: pnlPctValues.filter((value) => value <= 0).length,
     win_rate_pct: rows.length ? roundNumber((pnlPctValues.filter((value) => value > 0).length / rows.length) * 100, 2) : null,
@@ -180,17 +218,33 @@ function summarizeRows(entryMode, bucket, rows, options = {}) {
 
 export function buildModeEvReport(rows, options = {}) {
   const cleanMode = String(options.clean || 'all').toLowerCase();
+  const policyVersionFilter = String(options.policyVersion || '').trim();
+  const revivalCanaryFilter = options.revivalCanary === true
+    ? true
+    : (options.revivalCanary === false ? false : null);
   const prepared = rows.map((row) => {
     const entryMode = inferModeEvEntryMode(row);
+    const policyVersion = inferModeEvPolicyVersion(row);
+    const quoteGuardVersion = inferModeEvQuoteGuardVersion(row);
+    const revivalCanary = inferModeEvRevivalCanary(row);
     return {
       ...row,
       entry_mode: entryMode,
       bucket: modeEvBucket(entryMode, row.position_size_sol),
+      policy_version: policyVersion,
+      quote_guard_version: quoteGuardVersion,
+      revival_canary: revivalCanary,
     };
   });
-  const filtered = cleanMode === 'quote'
+  let filtered = cleanMode === 'quote'
     ? prepared.filter((row) => isModeEvQuoteClean(row, options))
     : prepared;
+  if (policyVersionFilter) {
+    filtered = filtered.filter((row) => String(row.policy_version || '') === policyVersionFilter);
+  }
+  if (revivalCanaryFilter !== null) {
+    filtered = filtered.filter((row) => row.revival_canary === revivalCanaryFilter);
+  }
   const groups = new Map();
   for (const row of filtered) {
     const key = `${row.bucket}:${row.entry_mode}`;
@@ -232,6 +286,12 @@ export function buildModeEvReport(rows, options = {}) {
     evaluated_rows: filtered.length,
     quote_clean_rows: prepared.filter((row) => isModeEvQuoteClean(row, options)).length,
     quote_dirty_rows: prepared.filter((row) => !isModeEvQuoteClean(row, options)).length,
+    revival_canary_rows: prepared.filter((row) => row.revival_canary).length,
+    policy_version_rows: prepared.reduce((acc, row) => {
+      const key = row.policy_version || 'unversioned';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {}),
     bucket_summary: bucketSummary,
     by_entry_mode: byEntryMode,
   };

@@ -23,6 +23,8 @@ from paper_trade_monitor import (  # noqa: E402
     PAPER_TINY_SCOUT_SIZE_SOL,
     PRE_PASS_RESONANCE_TINY_PROBE_MODE,
     PRIMARY_PROVING_CAP_SIZE_SOL,
+    QUOTE_GUARD_POLICY_VERSION,
+    REVIVAL_CANARY_POLICY_VERSION,
     SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL,
     SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL,
     SOURCE_RESONANCE_TINY_PROBE_MODE,
@@ -50,6 +52,7 @@ from paper_trade_monitor import (  # noqa: E402
     _build_discovery_pending,
     _entry_mode_for_ath_uncertainty_reason,
     _entry_mode_quality_high_quality_tiny_override,
+    _entry_mode_quality_allows_live,
     _exit_stop_quote_gap_protection,
     _phase_policy_live_exit_detail,
     _probe_hold_quote_monitor_exit_detail,
@@ -64,11 +67,13 @@ from paper_trade_monitor import (  # noqa: E402
     _watchlist_hard_loss_reentry_bypass_detail,
     arm_hard_gate_pass_tiny_probe,
     arm_pre_pass_resonance_tiny_probe,
+    apply_revival_canary_to_pending,
     build_paper_observation_probe_synthetic_exit_execution,
     build_paper_tiny_scout_dex_fallback_entry_execution,
     evaluate_entry_edge_budget,
     evaluate_hard_gate_pass_tiny_probe,
     evaluate_pre_pass_resonance_tiny_probe,
+    evaluate_revival_canary_gate,
     evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
     _update_candidate_quote_confirmation,
@@ -2830,6 +2835,149 @@ def test_normalize_pending_entry_backfills_defaults_and_watchlist_identity():
     assert normalized["paper_only_scout"] is True
     assert normalized["execution_scope"] == "paper_only"
     assert normalized["is_lotto"] is True
+
+
+def _revival_canary_db():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_ca TEXT,
+            entry_mode TEXT,
+            entry_ts INTEGER,
+            exit_ts INTEGER,
+            exit_reason TEXT,
+            loss_attribution TEXT,
+            pnl_pct REAL,
+            position_size_sol REAL,
+            monitor_state_json TEXT,
+            entry_execution_audit_json TEXT,
+            exit_quote_mark_gap_pct REAL,
+            max_path_quote_gap_pct REAL
+        )
+        """
+    )
+    return db
+
+
+def test_revival_canary_pending_tags_policy_and_caps_size():
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "CANARY",
+        "signal_type": "ATH",
+        "entry_mode": ATH_NO_KLINE_TINY_PROBE_MODE,
+        "kelly_position_sol": 0.05,
+    }
+
+    detail = apply_revival_canary_to_pending(
+        pending,
+        {"tier": "revival_canary", "reason": "test"},
+        now_ts=1000,
+    )
+
+    assert detail["pass"] is True
+    assert ATH_NO_KLINE_TINY_PROBE_MODE in monitor.PAPER_TINY_SCOUT_ENTRY_MODES
+    assert pending["revival_canary"] is True
+    assert pending["paper_only_scout"] is True
+    assert pending["execution_scope"] == "paper_only"
+    assert pending["policy_version"] == REVIVAL_CANARY_POLICY_VERSION
+    assert pending["quote_guard_version"] == QUOTE_GUARD_POLICY_VERSION
+    assert pending["registry_tier_at_entry"] == "revival_canary"
+    assert pending["parent_entry_mode"] == ATH_NO_KLINE_TINY_PROBE_MODE
+    assert pending["kelly_position_sol"] == PAPER_TINY_SCOUT_SIZE_SOL
+
+
+def test_revival_canary_gate_ignores_mixed_policy_history_and_kills_tagged_loss_budget():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    db.execute(
+        """
+        INSERT INTO paper_trades(
+            token_ca, entry_mode, entry_ts, exit_ts, exit_reason, pnl_pct,
+            position_size_sol, monitor_state_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "OldToken",
+            ATH_NO_KLINE_TINY_PROBE_MODE,
+            900,
+            960,
+            "old_policy_loss",
+            -0.99,
+            0.5,
+            json.dumps({"policyVersion": "pre_quote_guard"}),
+        ),
+    )
+
+    first = evaluate_revival_canary_gate(db, ATH_NO_KLINE_TINY_PROBE_MODE, now_ts=1000)
+    assert first["pass"] is True
+    assert first["policy_health"]["closed_trades"] == 0
+
+    db.execute(
+        """
+        INSERT INTO paper_trades(
+            token_ca, entry_mode, entry_ts, exit_ts, exit_reason, pnl_pct,
+            position_size_sol, monitor_state_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "NewToken",
+            ATH_NO_KLINE_TINY_PROBE_MODE,
+            1001,
+            1060,
+            "guardian_hard_sl",
+            -0.90,
+            PAPER_TINY_SCOUT_SIZE_SOL,
+            json.dumps({
+                "revivalCanary": True,
+                "policyVersion": REVIVAL_CANARY_POLICY_VERSION,
+            }),
+        ),
+    )
+    second = evaluate_revival_canary_gate(db, ATH_NO_KLINE_TINY_PROBE_MODE, now_ts=1100)
+    assert second["pass"] is False
+    assert second["reason"] == "revival_canary_loss_budget_hit"
+    assert second["policy_health"]["closed_trades"] == 1
+
+
+def test_entry_mode_quality_uses_revival_canary_policy_gate_for_selected_modes():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+
+    allowed, decision = _entry_mode_quality_allows_live(
+        db,
+        entry_mode=ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        token_ca="TokenCA",
+        symbol="CANARY",
+        lifecycle_id="TokenCA:1000",
+        signal_ts=1000,
+        signal_id=7,
+        route="ATH",
+        event_ts=1200,
+        data_source="pending_entry+paper_trades",
+    )
+
+    assert allowed is True
+    assert decision["reason"] == "revival_canary_policy_sampling"
+    assert decision["paper_only"] is True
+    assert decision["revival_canary"]["policy_version"] == REVIVAL_CANARY_POLICY_VERSION
+    row = db.execute(
+        """
+        SELECT component, event_type, decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE component = 'revival_canary'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert row["event_type"] == "entry_allow"
+    assert row["decision"] == "allow"
+    assert payload["entry_mode"] == ATH_UNCERTAINTY_TINY_SCOUT_MODE
+    assert payload["paper_only"] is True
 
 
 def test_hard_gate_pass_probe_soft_quality_blocks_become_warnings():

@@ -82,7 +82,11 @@ def test_entry_mode_registry_drives_shadow_only_defaults():
     assert "hard_shadow" in summary["by_tier"]
     assert "shadow_watch_only" in summary["by_tier"]
     assert "isolated_paper_capped" in summary["by_tier"]
-    assert "lotto_low_liquidity_reclaim_tiny_probe" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "revival_canary" in summary["by_tier"]
+    assert "lotto_low_liquidity_reclaim_tiny_probe" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "ath_no_kline_tiny_probe" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "ath_uncertainty_tiny_scout" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
+    assert "lotto_not_ath_reclaim_tiny_probe" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
     assert "momentum_direct_entry" in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
     assert "lotto_fast_lane" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
     assert "source_resonance_tiny_probe" not in ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES
@@ -91,13 +95,29 @@ def test_entry_mode_registry_drives_shadow_only_defaults():
 def test_grey_zone_modes_are_registered_but_still_blocked_until_caps_exist():
     db = _db()
 
-    decision = evaluate_entry_mode_quality(db, "lotto_low_liquidity_reclaim_tiny_probe", now_ts=1000)
-    registry_entry = entry_mode_registry_entry("lotto_low_liquidity_reclaim_tiny_probe")
+    decision = evaluate_entry_mode_quality(db, "ath_high_mc_tiny_probe", now_ts=1000)
+    registry_entry = entry_mode_registry_entry("ath_high_mc_tiny_probe")
 
     assert registry_entry["tier"] == "isolated_paper_capped"
     assert registry_entry["paper_enabled"] is False
     assert decision["decision"] == "shadow"
     assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+
+
+def test_revival_canary_modes_are_registry_enabled_for_forward_sampling():
+    db = _db()
+
+    for mode in (
+        "ath_no_kline_tiny_probe",
+        "ath_uncertainty_tiny_scout",
+        "lotto_not_ath_reclaim_tiny_probe",
+        "lotto_low_liquidity_reclaim_tiny_probe",
+    ):
+        registry_entry = entry_mode_registry_entry(mode)
+        decision = evaluate_entry_mode_quality(db, mode, now_ts=1000)
+        assert registry_entry["tier"] == "revival_canary"
+        assert registry_entry["paper_enabled"] is True
+        assert decision["decision"] == "allow_live", mode
 
 
 def test_momentum_direct_entry_is_registry_hard_shadow():
@@ -123,13 +143,9 @@ def test_observed_tiny_modes_are_shadow_only_by_default():
     db = _db()
 
     for mode in (
-        "ath_no_kline_tiny_probe",
-        "ath_uncertainty_tiny_scout",
         "ath_high_mc_tiny_probe",
         "ath_matrix_dissonance_tiny_probe",
         "ath_reclaim_after_failure_tiny_probe",
-        "lotto_not_ath_reclaim_tiny_probe",
-        "lotto_low_liquidity_reclaim_tiny_probe",
         "lotto_upstream_realtime_tiny_scout",
         "matrix_reclaim_tiny_probe",
         "matrix_micro_momentum_tiny_probe",

@@ -2287,7 +2287,7 @@ def test_discovery_tracking_keeps_lotto_high_risk_probe_shadow_only(monkeypatch)
     assert row["reason"] == "entry_mode_quality_shadow"
 
 
-def test_discovery_tracking_keeps_lotto_low_liquidity_reclaim_shadow_after_quote(monkeypatch):
+def test_discovery_tracking_allows_lotto_low_liquidity_reclaim_revival_canary_after_quote(monkeypatch):
     import paper_trade_monitor as monitor_module
 
     class FakeWatchlist:
@@ -2394,28 +2394,30 @@ def test_discovery_tracking_keeps_lotto_low_liquidity_reclaim_shadow_after_quote
         now_ts=1512,
         max_positions=10,
     )
-    assert armed == 0
-    assert pending_entries == {}
-    candidate = next(iter(discovery_candidates.values()))
-    assert candidate["last_wait_reason"] == "entry_mode_quality_shadow_only_mode"
+    assert armed == 1
+    assert len(pending_entries) == 1
+    pending = next(iter(pending_entries.values()))
+    assert pending["entry_mode"] == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
+    assert pending["paper_only_scout"] is True
+    assert discovery_candidates == {}
 
     row = db.execute(
         "SELECT decision, reason FROM paper_decision_events WHERE component = 'lotto_recovery'"
     ).fetchone()
     assert row["decision"] == "pass"
     assert row["reason"] == "lotto_low_liquidity_reclaim_live_reclaim_pass"
-    shadow_row = db.execute(
+    arm_row = db.execute(
         """
         SELECT decision, reason
         FROM paper_decision_events
         WHERE component = 'discovery_tracking'
-          AND event_type = 'candidate_recheck'
+          AND event_type = 'pending_entry'
         ORDER BY id DESC
         LIMIT 1
         """
     ).fetchone()
-    assert shadow_row["decision"] == "shadow"
-    assert shadow_row["reason"] == "entry_mode_quality_shadow"
+    assert arm_row["decision"] == "pending"
+    assert arm_row["reason"] == LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE
 
 
 def test_ath_tracking_ttl_expiry_gets_final_micro_reclaim_watch(monkeypatch):
