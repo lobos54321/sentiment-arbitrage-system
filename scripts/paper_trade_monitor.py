@@ -54,7 +54,15 @@ from entry_engine import (
     SMART_ENTRY_MAX_WAIT_SEC, SMART_ENTRY_POLL_INTERVAL_SEC,
 )
 from exit_engine import ExitGuardianThread, process_guardian_exits
-from profit_protect_policy import probe_runner_floor
+from profit_protect_policy import cohort_aware_probe_runner_floor, probe_runner_floor
+from paper_learning_policy import (
+    build_entry_execution_latency_audit,
+    capital_tier_for_entry,
+    history_discounted_size,
+    is_retryable_entry_quote_failure,
+    position_size_class,
+    regime_tag_from_market_regime,
+)
 from paper_decision_audit import (
     init_decision_audit,
     missed_attribution_coverage,
@@ -255,6 +263,10 @@ REENTRY_HARD_LOSS_BYPASS_MIN_M = int(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MI
 REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT = float(os.environ.get('REENTRY_HARD_LOSS_BYPASS_MIN_RECOVERY_PCT', '0.02'))
 REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_RECOVERY_PCT = float(os.environ.get('REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_RECOVERY_PCT', '0.20'))
 REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_M = int(os.environ.get('REENTRY_HARD_LOSS_FLAT_RECLAIM_MIN_M', '60'))
+SIGNAL_TRIGGERED_REENTRY_ENABLED = os.environ.get('SIGNAL_TRIGGERED_REENTRY_ENABLED', 'true').lower() != 'false'
+SIGNAL_TRIGGERED_REENTRY_MAX_ENTRIES_PER_TOKEN = max(1, int(os.environ.get('SIGNAL_TRIGGERED_REENTRY_MAX_ENTRIES_PER_TOKEN', '3')))
+SIGNAL_TRIGGERED_REENTRY_DISCOUNT_FACTOR = float(os.environ.get('SIGNAL_TRIGGERED_REENTRY_DISCOUNT_FACTOR', '0.85'))
+SIGNAL_TRIGGERED_REENTRY_MIN_SIZE_SOL = float(os.environ.get('SIGNAL_TRIGGERED_REENTRY_MIN_SIZE_SOL', '0.001'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -2271,6 +2283,97 @@ def pending_is_paper_tiny_scout(pending):
             and pending_size_sol <= 0.005
         )
     )
+
+
+def paper_entry_capital_tier(pending, size_sol, strategy_stage=None):
+    pending = pending or {}
+    return capital_tier_for_entry(
+        entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+        strategy_stage=strategy_stage or pending.get('strategy_stage'),
+        size_sol=size_sol,
+        paper_only=bool(pending.get('paper_only_scout')),
+        is_lotto=bool(pending.get('is_lotto')),
+    )
+
+
+def prior_fast_fail_entry_history(db, token_ca, *, now_ts=None):
+    if not token_ca:
+        return {'prior_entries': 0, 'prior_fast_fail_count': 0, 'latest_exit_ts': None}
+    now_ts = float(now_ts or time.time())
+    cutoff = now_ts - TOKEN_RISK_FAILURE_WINDOW_SEC
+    try:
+        row = db.execute(
+            """
+            SELECT
+              COUNT(*) AS prior_entries,
+              SUM(CASE
+                    WHEN LOWER(COALESCE(exit_reason, '')) LIKE '%fast_fail%'
+                      OR LOWER(COALESCE(exit_reason, '')) LIKE '%no_follow%'
+                      OR LOWER(COALESCE(exit_reason, '')) LIKE '%doa%'
+                    THEN 1 ELSE 0
+                  END) AS prior_fast_fail_count,
+              MAX(exit_ts) AS latest_exit_ts
+            FROM paper_trades
+            WHERE token_ca = ?
+              AND COALESCE(entry_ts, exit_ts, 0) >= ?
+            """,
+            (token_ca, cutoff),
+        ).fetchone()
+    except Exception:
+        return {'prior_entries': 0, 'prior_fast_fail_count': 0, 'latest_exit_ts': None}
+    return {
+        'prior_entries': int(_row_value(row, 'prior_entries', 0) or 0),
+        'prior_fast_fail_count': int(_row_value(row, 'prior_fast_fail_count', 0) or 0),
+        'latest_exit_ts': _row_value(row, 'latest_exit_ts'),
+        'lookback_sec': TOKEN_RISK_FAILURE_WINDOW_SEC,
+    }
+
+
+def apply_signal_triggered_reentry_discount(pending, size_sol, history):
+    pending = pending or {}
+    history = history or {}
+    if not SIGNAL_TRIGGERED_REENTRY_ENABLED:
+        return size_sol, {'enabled': False, 'reason': 'signal_triggered_reentry_disabled'}
+    prior_fast_fails = int(history.get('prior_fast_fail_count') or 0)
+    prior_entries = int(history.get('prior_entries') or 0)
+    if prior_entries >= SIGNAL_TRIGGERED_REENTRY_MAX_ENTRIES_PER_TOKEN:
+        return size_sol, {
+            'enabled': True,
+            'pass': False,
+            'reason': 'signal_triggered_reentry_max_entries_reached',
+            'prior_entries': prior_entries,
+            'max_entries': SIGNAL_TRIGGERED_REENTRY_MAX_ENTRIES_PER_TOKEN,
+            'prior_fast_fail_count': prior_fast_fails,
+        }
+    if prior_fast_fails <= 0:
+        return size_sol, {
+            'enabled': True,
+            'pass': True,
+            'reason': 'no_prior_fast_fail_history',
+            'prior_entries': prior_entries,
+            'prior_fast_fail_count': prior_fast_fails,
+        }
+    new_size = history_discounted_size(
+        size_sol,
+        prior_fast_fails,
+        factor=SIGNAL_TRIGGERED_REENTRY_DISCOUNT_FACTOR,
+        min_size_sol=SIGNAL_TRIGGERED_REENTRY_MIN_SIZE_SOL,
+    )
+    pending['signal_triggered_reentry'] = True
+    pending['reentry_history_discount'] = {
+        'old_size_sol': size_sol,
+        'new_size_sol': new_size,
+        'prior_fast_fail_count': prior_fast_fails,
+        'prior_entries': prior_entries,
+        'discount_factor': SIGNAL_TRIGGERED_REENTRY_DISCOUNT_FACTOR,
+        'min_size_sol': SIGNAL_TRIGGERED_REENTRY_MIN_SIZE_SOL,
+    }
+    return new_size, {
+        'enabled': True,
+        'pass': True,
+        'reason': 'signal_triggered_reentry_history_discount',
+        **pending['reentry_history_discount'],
+    }
 
 
 def apply_paper_tiny_scout_size_cap(pending):
@@ -4328,6 +4431,8 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
         current_pnl,
     )
     entry_mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    resonance_cohort = str(state.get('resonanceCohort') or state.get('sourceResonanceCohort') or '')
+    capital_tier = str(state.get('capitalTier') or '')
     sold_pct = max(0.0, min(1.0, _safe_float(state.get('soldPct'), 0.0)))
     already_locked = bool((w_entry or {}).get('has_locked_profit')) or sold_pct > 0
     held_sec = max(0.0, float(now_ts or time.time()) - float(getattr(pos, 'entry_ts', now_ts or time.time()) or now_ts or time.time()))
@@ -4355,6 +4460,12 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
                     'peak10_floor': PROBE_PROFIT_CAPTURE_10_PEAK_FLOOR,
                     'peak15_floor': PROBE_PROFIT_CAPTURE_15_PEAK_FLOOR,
                     'runner_floor': probe_runner_floor(peak_pnl),
+                    'cohort_runner_floor': cohort_aware_probe_runner_floor(
+                        peak_pnl,
+                        entry_mode=entry_mode,
+                        resonance_cohort=resonance_cohort,
+                        capital_tier=capital_tier,
+                    ),
                 },
             },
         })
@@ -4418,7 +4529,12 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
             ),
             sell_pct=PROBE_PROFIT_CAPTURE_LOCK_SELL_PCT,
         )
-    runner_floor = probe_runner_floor(peak_pnl) if already_locked else None
+    runner_floor = cohort_aware_probe_runner_floor(
+        peak_pnl,
+        entry_mode=entry_mode,
+        resonance_cohort=resonance_cohort,
+        capital_tier=capital_tier,
+    ) if already_locked else None
     if runner_floor is not None and current_pnl <= runner_floor:
         return _override(
             'exit',
@@ -12634,6 +12750,13 @@ def init_paper_db(db_path=None):
                 execution_availability TEXT,
                 accounting_outcome TEXT,
                 synthetic_close INTEGER DEFAULT 0,
+                capital_tier TEXT,
+                position_size_class TEXT,
+                paper_only INTEGER DEFAULT 1,
+                regime_tag TEXT,
+                signal_to_quote_latency_ms INTEGER,
+                signal_to_quote_drift_pct REAL,
+                quote_spread_pct REAL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -12709,6 +12832,13 @@ def init_paper_db(db_path=None):
             "ALTER TABLE paper_trades ADD COLUMN execution_availability TEXT",
             "ALTER TABLE paper_trades ADD COLUMN accounting_outcome TEXT",
             "ALTER TABLE paper_trades ADD COLUMN synthetic_close INTEGER DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN capital_tier TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN position_size_class TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN paper_only INTEGER DEFAULT 1",
+            "ALTER TABLE paper_trades ADD COLUMN regime_tag TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN signal_to_quote_latency_ms INTEGER",
+            "ALTER TABLE paper_trades ADD COLUMN signal_to_quote_drift_pct REAL",
+            "ALTER TABLE paper_trades ADD COLUMN quote_spread_pct REAL",
             "ALTER TABLE paper_trades ADD COLUMN signal_route TEXT",
             "ALTER TABLE paper_trades ADD COLUMN entry_mode TEXT",
             "ALTER TABLE paper_trades ADD COLUMN lotto_state_json TEXT",
@@ -12730,6 +12860,8 @@ def init_paper_db(db_path=None):
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_lifecycle_state ON paper_trades(lifecycle_state)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_mode_entry_ts ON paper_trades(entry_mode, entry_ts)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_mode_exit_ts ON paper_trades(entry_mode, exit_ts)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_capital_tier_entry_ts ON paper_trades(capital_tier, entry_ts)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_regime_tag_entry_ts ON paper_trades(regime_tag, entry_ts)")
         except sqlite3.OperationalError:
             pass
         init_decision_audit(db_conn)
@@ -17977,6 +18109,7 @@ def run_monitor(db):
             for lifecycle_id, pending in list(pending_entries.items()):
                 try:
                     normalize_pending_entry(pending, lifecycle_id)
+                    _entry_decision_start_ts_ms = int(time.time() * 1000)
                     _initial_canary_registry = entry_mode_registry_entry(
                         pending.get('entry_mode') or pending.get('scout_mode')
                     ) or {}
@@ -18972,6 +19105,56 @@ def run_monitor(db):
                             f"{_primary_cap_detail.get('new_size_sol'):.3f} SOL "
                             f"mode={pending.get('entry_mode')}"
                         )
+                    _reentry_history = prior_fast_fail_entry_history(db, pending.get('token_ca'), now_ts=now)
+                    _signal_reentry_detail = {
+                        'enabled': SIGNAL_TRIGGERED_REENTRY_ENABLED,
+                        'pass': True,
+                        'reason': 'not_paper_tiny_scout',
+                        **_reentry_history,
+                    }
+                    if pending_is_paper_tiny_scout(pending):
+                        actual_position_size_sol, _signal_reentry_detail = apply_signal_triggered_reentry_discount(
+                            pending,
+                            actual_position_size_sol,
+                            _reentry_history,
+                        )
+                        if not _signal_reentry_detail.get('pass', True):
+                            record_decision_event(
+                                db,
+                                component='signal_triggered_reentry',
+                                event_type='entry_block',
+                                decision='block',
+                                reason=_signal_reentry_detail.get('reason') or 'signal_triggered_reentry_block',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='paper_trade_history',
+                                payload=_signal_reentry_detail,
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        if _signal_reentry_detail.get('reason') == 'signal_triggered_reentry_history_discount':
+                            record_decision_event(
+                                db,
+                                component='signal_triggered_reentry',
+                                event_type='entry_size',
+                                decision='cap',
+                                reason='signal_triggered_reentry_history_discount',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending['signal_ts'],
+                                signal_id=pending.get('premium_signal_id'),
+                                strategy_stage=_pending_strategy_stage,
+                                route=_pending_signal_route or pending.get('signal_type'),
+                                data_source='paper_trade_history',
+                                payload=_signal_reentry_detail,
+                            )
+                    _quote_request_ts_ms = int(time.time() * 1000)
                     execution = simulate_entry_execution(
                         pending['token_ca'],
                         actual_position_size_sol,
@@ -18979,8 +19162,18 @@ def run_monitor(db):
                         strategy_id=_pending_strategy_id,
                         lifecycle_id=lifecycle_id,
                     )
+                    _quote_response_ts_ms = int(time.time() * 1000)
                     if not execution.get('success'):
                         failure_reason = execution.get('failureReason') or 'entry_quote_failed'
+                        _failure_latency_audit = build_entry_execution_latency_audit(
+                            pending,
+                            decision_start_ts_ms=_entry_decision_start_ts_ms,
+                            quote_request_ts_ms=_quote_request_ts_ms,
+                            quote_response_ts_ms=_quote_response_ts_ms,
+                            entry_executed_ts_ms=_quote_response_ts_ms,
+                            signal_price=pending.get('signal_price') or pending.get('entry_price'),
+                            decision_price=pending.get('trigger_price') or pending.get('entry_price') or pending.get('signal_price'),
+                        )
                         fallback_execution = build_paper_tiny_scout_dex_fallback_entry_execution(
                             pending,
                             actual_position_size_sol,
@@ -18989,6 +19182,7 @@ def run_monitor(db):
                         )
                         if fallback_execution:
                             execution = fallback_execution
+                            _quote_response_ts_ms = int(time.time() * 1000)
                             record_decision_event(
                                 db,
                                 component='execution_api',
@@ -19003,7 +19197,11 @@ def run_monitor(db):
                                 strategy_stage=_pending_strategy_stage,
                                 route=_pending_signal_route or pending.get('signal_type'),
                                 data_source='dexscreener_synthetic_quote+jupiter_quote',
-                                payload=execution,
+                                payload={
+                                    **execution,
+                                    'entry_latency_audit': _failure_latency_audit,
+                                    'retryable_quote_failure': is_retryable_entry_quote_failure(failure_reason),
+                                },
                             )
                             log.info(
                                 f"  [PAPER_SYNTHETIC_ENTRY] {pending['symbol']} "
@@ -19025,7 +19223,11 @@ def run_monitor(db):
                                 strategy_stage=_pending_strategy_stage,
                                 route=_pending_signal_route or pending.get('signal_type'),
                                 data_source='jupiter_quote',
-                                payload=execution,
+                                payload={
+                                    **execution,
+                                    'entry_latency_audit': _failure_latency_audit,
+                                    'retryable_quote_failure': is_retryable_entry_quote_failure(failure_reason),
+                                },
                             )
                             log_pending_entry_issue(
                                 pending,
@@ -19033,7 +19235,7 @@ def run_monitor(db):
                                 level='warning'
                             )
                             staged_age_sec = int(max(0, time.time() - (pending.get('staged_at') or time.time())))
-                            if failure_reason in {'rate_limited_429', 'quote_failed', 'no_route', 'missing_taker', 'unknown'} \
+                            if is_retryable_entry_quote_failure(failure_reason) \
                                     and pending['attempts'] < paper_execution['quoteRetries'] \
                                     and staged_age_sec < paper_execution['maxQuoteAgeSec']:
                                 continue
@@ -19044,6 +19246,17 @@ def run_monitor(db):
                     token_amount_raw = execution.get('quotedOutAmountRaw')
                     token_decimals = execution.get('outputDecimals')
                     if quote_price_sol is None or quote_price_sol <= 0 or not token_amount_raw:
+                        _invalid_latency_audit = build_entry_execution_latency_audit(
+                            pending,
+                            decision_start_ts_ms=_entry_decision_start_ts_ms,
+                            quote_request_ts_ms=_quote_request_ts_ms,
+                            quote_response_ts_ms=_quote_response_ts_ms,
+                            entry_executed_ts_ms=int(time.time() * 1000),
+                            signal_price=pending.get('signal_price') or pending.get('entry_price'),
+                            decision_price=pending.get('trigger_price') or pending.get('entry_price') or pending.get('signal_price'),
+                            quote_price=quote_price_sol,
+                            entry_fill_price=quote_price_sol,
+                        )
                         record_decision_event(
                             db,
                             component='execution_api',
@@ -19058,7 +19271,7 @@ def run_monitor(db):
                             strategy_stage=_pending_strategy_stage,
                             route=_pending_signal_route or pending.get('signal_type'),
                             data_source='jupiter_quote',
-                            payload=execution,
+                            payload={**execution, 'entry_latency_audit': _invalid_latency_audit},
                         )
                         log_pending_entry_issue(
                             pending,
@@ -19088,6 +19301,18 @@ def run_monitor(db):
                     price = quote_price
                     trigger_price_val = pending.get('trigger_price')
                     _spread = ((quote_price - trigger_price_val) / trigger_price_val * 100) if trigger_price_val and trigger_price_val > 0 else 0
+                    _entry_latency_audit = build_entry_execution_latency_audit(
+                        pending,
+                        decision_start_ts_ms=_entry_decision_start_ts_ms,
+                        quote_request_ts_ms=_quote_request_ts_ms,
+                        quote_response_ts_ms=_quote_response_ts_ms,
+                        entry_executed_ts_ms=int(entry_ts) * 1000,
+                        signal_price=pending.get('signal_price') or pending.get('entry_price'),
+                        decision_price=trigger_price_val or pending.get('entry_price') or pending.get('signal_price'),
+                        quote_price=quote_price,
+                        entry_fill_price=price,
+                        quote_spread_pct=_spread,
+                    )
                     _trigger_str = f"{trigger_price_val:.12f}" if trigger_price_val else "N/A"
                     log.info(
                         f"  [ENTRY_PRICE] {pending['symbol']} entry_price={price:.12f} "
@@ -19416,6 +19641,13 @@ def run_monitor(db):
                         now=now,
                     )
                     regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                    _regime_tag = regime_tag_from_market_regime(regime)
+                    _capital_tier = paper_entry_capital_tier(
+                        pending,
+                        actual_position_size_sol,
+                        strategy_stage=_pending_strategy_stage,
+                    )
+                    _position_size_class = position_size_class(actual_position_size_sol)
                     _monitor_state = {
                         'tokenCA': pending['token_ca'],
                         'symbol': pending['symbol'],
@@ -19434,6 +19666,13 @@ def run_monitor(db):
                         'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                         'entryDecisionContract': _entry_decision_contract.to_dict(),
                         'entrySol': actual_position_size_sol,
+                        'capitalTier': _capital_tier,
+                        'positionSizeClass': _position_size_class,
+                        'paperOnly': True,
+                        'regimeTag': _regime_tag,
+                        'entryLatencyAudit': _entry_latency_audit,
+                        'signalTriggeredReentry': pending.get('signal_triggered_reentry'),
+                        'reentryHistoryDiscount': pending.get('reentry_history_discount'),
                         'tokenAmount': int(token_amount_raw),
                         'tokenDecimals': int(token_decimals or 0),
                         'entryTime': int(entry_ts) * 1000,
@@ -19496,8 +19735,10 @@ def run_monitor(db):
                                  entry_execution_json, entry_execution_audit_json, monitor_state_json,
                                  premium_signal_id, signal_type, signal_route, entry_mode, lotto_state_json,
                                  lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
-                                 strategy_outcome, execution_availability, accounting_outcome, synthetic_close)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                                 strategy_outcome, execution_availability, accounting_outcome, synthetic_close,
+                                 capital_tier, position_size_class, paper_only, regime_tag,
+                                 signal_to_quote_latency_ms, signal_to_quote_drift_pct, quote_spread_pct)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?, ?, ?, ?)
                         """, (
                             _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
                             pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts,
@@ -19516,7 +19757,13 @@ def run_monitor(db):
                                 'entryEdgeBudget': _entry_edge_budget,
                                 'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                                 'entryDecisionContract': _entry_decision_contract.to_dict(),
+                                'entryLatencyAudit': _entry_latency_audit,
                                 'positionSizeSol': actual_position_size_sol,
+                                'capitalTier': _capital_tier,
+                                'positionSizeClass': _position_size_class,
+                                'regimeTag': _regime_tag,
+                                'signalTriggeredReentry': bool(pending.get('signal_triggered_reentry')),
+                                'reentryHistoryDiscount': pending.get('reentry_history_discount'),
                                 'revivalCanary': bool(pending.get('revival_canary')),
                                 'policyVersion': pending.get('policy_version'),
                                 'quoteGuardVersion': pending.get('quote_guard_version'),
@@ -19535,7 +19782,11 @@ def run_monitor(db):
                             json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
                             _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
                             _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
-                            'entered', _entry_execution_availability, 'open'
+                            'entered', _entry_execution_availability, 'open',
+                            _capital_tier, _position_size_class, _regime_tag,
+                            _entry_latency_audit.get('signal_to_quote_latency_ms'),
+                            _entry_latency_audit.get('signal_to_quote_drift_pct'),
+                            _entry_latency_audit.get('quote_spread_pct')
                         ))
                         new_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                         db.commit()
@@ -19569,6 +19820,13 @@ def run_monitor(db):
                             'trigger_price_unit': PRICE_UNIT_SOL_PER_TOKEN,
                             'spread_pct': _spread,
                             'position_size_sol': actual_position_size_sol,
+                            'capital_tier': _capital_tier,
+                            'position_size_class': _position_size_class,
+                            'paper_only': True,
+                            'regime_tag': _regime_tag,
+                            'entry_latency_audit': _entry_latency_audit,
+                            'signal_triggered_reentry': bool(pending.get('signal_triggered_reentry')),
+                            'reentry_history_discount': pending.get('reentry_history_discount'),
                             'accounting_unit': AMOUNT_UNIT_SOL,
                             'pnl_unit': PNL_UNIT_RATIO_DECIMAL,
                             'entry_edge_budget': _entry_edge_budget,
@@ -20720,6 +20978,7 @@ def run_monitor(db):
                 with positions_lock:
                     positions.pop(trade_id, None)
                 regime = determine_market_regime(sol_price) if sol_price else 'unknown'
+                _exit_regime_tag = regime_tag_from_market_regime(regime)
                 stage_outcome = f"{pos.strategy_stage}_{reason}"
                 quoted_exit_price = exit_execution.get('effectivePrice')
                 # SOL pricing: quoted_exit_price is already SOL/token from Jupiter
@@ -20817,6 +21076,7 @@ def run_monitor(db):
                 pos.monitor_state['exitQuotePnl'] = _safe_float(exit_quote_pnl, None)
                 pos.monitor_state['exitQuoteMarkGap'] = _safe_float(exit_quote_mark_gap, None)
                 pos.monitor_state['exitQuoteSanity'] = exit_eval.get('quoteSanityStatus')
+                pos.monitor_state['exitRegimeTag'] = _exit_regime_tag
                 if total_realized_sol is not None:
                     pos.monitor_state['totalSolReceived'] = _safe_float(total_realized_sol, None)
                 synthetic_exit = bool(exit_execution.get('syntheticPaperExit'))
@@ -20834,7 +21094,7 @@ def run_monitor(db):
                         peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
                         exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
                         strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?,
-                        monitor_state_json = ?
+                        monitor_state_json = ?, regime_tag = ?
                     WHERE id = ?
                 """, (
                     effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
@@ -20876,6 +21136,7 @@ def run_monitor(db):
                     'closed_synthetic_mark' if synthetic_exit else ('closed_force_timeout' if is_force_timeout else 'closed_real'),
                     1 if synthetic_exit else 0,
                     json.dumps(pos.monitor_state),
+                    _exit_regime_tag,
                     pos.trade_id,
                 ))
                 db.commit()

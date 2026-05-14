@@ -20,6 +20,13 @@ PROBE_RUNNER_FLOOR_HIGH_MIN = float(os.environ.get("PROBE_RUNNER_FLOOR_HIGH_MIN"
 PROBE_RUNNER_FLOOR_FACTOR = float(os.environ.get("PROBE_RUNNER_FLOOR_FACTOR", "0.35"))
 PROBE_RUNNER_FULL_MOON_MARGIN = float(os.environ.get("PROBE_RUNNER_FULL_MOON_MARGIN", "0.25"))
 PROBE_RUNNER_FULL_MOON_FACTOR = float(os.environ.get("PROBE_RUNNER_FULL_MOON_FACTOR", "0.65"))
+COHORT_AWARE_TRAIL_FLOOR_ENABLED = os.environ.get("COHORT_AWARE_TRAIL_FLOOR_ENABLED", "true").lower() != "false"
+COHORT_TRAIL_TINY_WEAK_FACTOR = float(os.environ.get("COHORT_TRAIL_TINY_WEAK_FACTOR", "0.80"))
+COHORT_TRAIL_TINY_DEFAULT_FACTOR = float(os.environ.get("COHORT_TRAIL_TINY_DEFAULT_FACTOR", "0.75"))
+COHORT_TRAIL_RESONANCE_RUNNER_FACTOR = float(os.environ.get("COHORT_TRAIL_RESONANCE_RUNNER_FACTOR", "0.60"))
+COHORT_TRAIL_SOURCE_RUNNER_FACTOR = float(os.environ.get("COHORT_TRAIL_SOURCE_RUNNER_FACTOR", "0.55"))
+COHORT_TRAIL_MIN_PEAK = float(os.environ.get("COHORT_TRAIL_MIN_PEAK", "0.10"))
+COHORT_TRAIL_MIN_FLOOR = float(os.environ.get("COHORT_TRAIL_MIN_FLOOR", "0.04"))
 
 
 def profit_protect_floor(peak_pnl, *, slip_buffer=None):
@@ -95,3 +102,32 @@ def probe_runner_floor(peak_pnl):
     if peak >= PROBE_RUNNER_FLOOR_MID_PEAK:
         return max(PROBE_RUNNER_FLOOR_MID_MIN, peak * PROBE_RUNNER_FLOOR_FACTOR)
     return max(PROBE_RUNNER_FLOOR_LOW_MIN, peak * PROBE_RUNNER_FLOOR_FACTOR)
+
+
+def cohort_aware_probe_runner_floor(peak_pnl, *, entry_mode=None, resonance_cohort=None, capital_tier=None):
+    """Return a paper-only cohort-aware runner floor.
+
+    This is intentionally conservative for weak tiny probes and looser for
+    Telegram+GMGN/source-resonance runners. It is used after the trade has a
+    material peak; it does not create new entries.
+    """
+    if not COHORT_AWARE_TRAIL_FLOOR_ENABLED:
+        return probe_runner_floor(peak_pnl)
+    try:
+        peak = float(peak_pnl or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if peak < COHORT_TRAIL_MIN_PEAK:
+        return probe_runner_floor(peak)
+    mode = str(entry_mode or "").lower()
+    cohort = str(resonance_cohort or "").lower()
+    tier = str(capital_tier or "").lower()
+    if "source_resonance" in mode or "telegram_gmgn_quote_clean" in cohort:
+        factor = COHORT_TRAIL_SOURCE_RUNNER_FACTOR
+    elif "gmgn" in cohort or "hard_gate_pass" in mode:
+        factor = COHORT_TRAIL_RESONANCE_RUNNER_FACTOR
+    elif tier == "tiny_probe" or "tiny" in mode or "probe" in mode or "scout" in mode:
+        factor = COHORT_TRAIL_TINY_DEFAULT_FACTOR
+    else:
+        factor = COHORT_TRAIL_TINY_WEAK_FACTOR
+    return max(COHORT_TRAIL_MIN_FLOOR, peak * factor)

@@ -59,6 +59,7 @@ export function inferReviewEntryMode(row = {}) {
 }
 
 export function capitalTierForTrade(row = {}) {
+  if (row.capital_tier) return String(row.capital_tier);
   const mode = inferReviewEntryMode(row).toLowerCase();
   const stage = String(row.strategy_stage || '').toLowerCase();
   const size = finiteNumber(row.position_size_sol) || 0;
@@ -87,6 +88,10 @@ function emptyGroup(key, extra = {}) {
     total_giveback_pct: 0,
     total_position_size_sol: 0,
     est_pnl_sol: 0,
+    latency_n: 0,
+    total_signal_to_quote_latency_ms: 0,
+    drift_n: 0,
+    total_signal_to_quote_drift_pct: 0,
   };
 }
 
@@ -97,6 +102,8 @@ function finalizeGroup(group) {
     avg_pnl_pct: group.pnl_n ? roundNumber(group.total_pnl_pct / group.pnl_n, 2) : null,
     avg_peak_pnl_pct: group.peak_n ? roundNumber(group.total_peak_pct / group.peak_n, 2) : null,
     avg_giveback_pct: group.giveback_n ? roundNumber(group.total_giveback_pct / group.giveback_n, 2) : null,
+    avg_signal_to_quote_latency_ms: group.latency_n ? Math.round(group.total_signal_to_quote_latency_ms / group.latency_n) : null,
+    avg_signal_to_quote_drift_pct: group.drift_n ? roundNumber(group.total_signal_to_quote_drift_pct / group.drift_n, 2) : null,
     est_pnl_sol: roundNumber(group.est_pnl_sol, 6),
     total_position_size_sol: roundNumber(group.total_position_size_sol, 6),
   };
@@ -123,6 +130,16 @@ function applyTrade(group, row, pnlPct, peakPct, givebackPct) {
   if (givebackPct != null) {
     group.giveback_n += 1;
     group.total_giveback_pct += givebackPct;
+  }
+  const latencyMs = finiteNumber(row.signal_to_quote_latency_ms);
+  if (latencyMs != null) {
+    group.latency_n += 1;
+    group.total_signal_to_quote_latency_ms += latencyMs;
+  }
+  const driftPct = finiteNumber(row.signal_to_quote_drift_pct);
+  if (driftPct != null) {
+    group.drift_n += 1;
+    group.total_signal_to_quote_drift_pct += driftPct;
   }
 }
 

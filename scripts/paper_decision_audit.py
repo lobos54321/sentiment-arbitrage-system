@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS paper_missed_signal_attribution (
     component TEXT NOT NULL,
     decision TEXT NOT NULL,
     reject_reason TEXT,
+    rejection_hardness TEXT,
     baseline_price REAL,
     baseline_source TEXT,
     baseline_ts INTEGER,
@@ -85,6 +86,12 @@ CREATE TABLE IF NOT EXISTS paper_missed_signal_attribution (
     tradability_version TEXT,
     tradability_status TEXT,
     tradability_reason TEXT,
+    theoretical_peak_pnl REAL,
+    quote_clean_peak_pnl REAL,
+    executable_peak_pnl REAL,
+    executable_peak_source TEXT,
+    quote_sample_n INTEGER DEFAULT 0,
+    executable_peak_horizon TEXT,
     tradable_missed INTEGER,
     tradable_peak_pnl REAL,
     tradable_peak_horizon TEXT,
@@ -180,6 +187,8 @@ MISSED_TRADABLE_MAX_PEAK_SEC = int(os.environ.get("MISSED_TRADABLE_MAX_PEAK_SEC"
 MISSED_TRADABLE_STOP_DEFAULT = float(os.environ.get("MISSED_TRADABLE_STOP_DEFAULT", "-0.08"))
 MISSED_TRADABLE_STOP_LOTTO = float(os.environ.get("MISSED_TRADABLE_STOP_LOTTO", "-0.08"))
 MISSED_TRADABLE_STOP_MATRIX = float(os.environ.get("MISSED_TRADABLE_STOP_MATRIX", "-0.075"))
+MISSED_HARD_REJECTION_MARKERS = ("top1", "top10", "creator", "dev_hold", "developer", "honeypot", "rug", "gmgn_reject", "blacklist")
+MISSED_SOFT_REJECTION_MARKERS = ("buy_pressure_weak", "volume_low", "tx_low", "negative_trend", "unknown_data", "missing_trigger", "missing_quote", "rate_limited")
 
 
 def init_decision_audit(db):
@@ -196,8 +205,8 @@ def init_decision_audit(db):
         for column_sql in [
             f"ALTER TABLE {table_name} ADD COLUMN lifecycle_state TEXT",
             f"ALTER TABLE {table_name} ADD COLUMN vitality_score REAL",
-            f"ALTER TABLE {table_name} ADD COLUMN entry_bias TEXT",
-            f"ALTER TABLE {table_name} ADD COLUMN lifecycle_features_json TEXT",
+        f"ALTER TABLE {table_name} ADD COLUMN entry_bias TEXT",
+        f"ALTER TABLE {table_name} ADD COLUMN lifecycle_features_json TEXT",
         ]:
             try:
                 db.execute(column_sql)
@@ -212,6 +221,13 @@ def init_decision_audit(db):
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradability_version TEXT",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradability_status TEXT",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradability_reason TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN rejection_hardness TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN theoretical_peak_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN quote_clean_peak_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN executable_peak_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN executable_peak_source TEXT",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN quote_sample_n INTEGER DEFAULT 0",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN executable_peak_horizon TEXT",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradable_missed INTEGER",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradable_peak_pnl REAL",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN tradable_peak_horizon TEXT",
@@ -229,6 +245,7 @@ def init_decision_audit(db):
             pass
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_pmsa_tradable ON paper_missed_signal_attribution(tradable_missed, tradability_status)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pmsa_rejection_hardness ON paper_missed_signal_attribution(rejection_hardness)")
     except Exception:
         pass
     db.commit()
@@ -375,6 +392,15 @@ def _extract_lifecycle_payload(payload):
     }
 
 
+def _classify_rejection_hardness(reason):
+    text = str(reason or "").lower()
+    if any(marker in text for marker in MISSED_HARD_REJECTION_MARKERS):
+        return "hard_reject"
+    if any(marker in text for marker in MISSED_SOFT_REJECTION_MARKERS):
+        return "soft_reject"
+    return "unknown"
+
+
 def _float_or_none(value):
     try:
         if value is None:
@@ -423,6 +449,12 @@ def evaluate_missed_tradability(route, points, *, base_ts=None):
         "tradability_version": MISSED_TRADABILITY_VERSION,
         "tradability_status": "pending_insufficient_path",
         "tradability_reason": "no_horizon_pnl_yet",
+        "theoretical_peak_pnl": None,
+        "quote_clean_peak_pnl": None,
+        "executable_peak_pnl": None,
+        "executable_peak_source": None,
+        "quote_sample_n": 0,
+        "executable_peak_horizon": None,
         "tradable_missed": 0,
         "tradable_peak_pnl": None,
         "tradable_peak_horizon": None,
@@ -454,11 +486,13 @@ def evaluate_missed_tradability(route, points, *, base_ts=None):
             break
 
     result.update({
+        "theoretical_peak_pnl": peak["pnl"],
         "tradable_peak_pnl": peak["pnl"],
         "tradable_peak_horizon": peak["horizon"],
         "time_to_peak_sec": peak["offset"],
         "mae_before_peak_pnl": mae_before_peak,
         "would_stop_before_peak": 1 if would_stop else 0,
+        "quote_sample_n": len(points),
     })
     if first_tradable:
         result.update({
@@ -494,6 +528,10 @@ def evaluate_missed_tradability(route, points, *, base_ts=None):
                 f"first_{first_tradable['horizon']}_{first_tradable['pnl']:.1%}_"
                 f"peak_{peak['horizon']}_{peak['pnl']:.1%}"
             ),
+            "quote_clean_peak_pnl": peak["pnl"],
+            "executable_peak_pnl": peak["pnl"],
+            "executable_peak_source": "horizon_quote_clean_proxy",
+            "executable_peak_horizon": peak["horizon"],
             "tradable_missed": 1,
         })
     return result
@@ -575,9 +613,9 @@ def _maybe_record_missed_attribution(
         INSERT OR IGNORE INTO paper_missed_signal_attribution
             (decision_event_id, created_event_ts, token_ca, symbol, lifecycle_id,
              signal_id, signal_ts, route, component, decision, reject_reason,
-             baseline_price, baseline_source, baseline_ts, lifecycle_state,
+             rejection_hardness, baseline_price, baseline_source, baseline_ts, lifecycle_state,
              vitality_score, entry_bias, lifecycle_features_json, payload_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             decision_event_id,
@@ -591,6 +629,7 @@ def _maybe_record_missed_attribution(
             component,
             decision,
             reason,
+            _classify_rejection_hardness(reason),
             baseline_price,
             baseline_source,
             baseline_ts,

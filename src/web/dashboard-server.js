@@ -41,6 +41,11 @@ import {
   buildTradeReviewSummary,
   writePaperReviewSnapshotFiles,
 } from './paper-review-snapshot-utils.js';
+import {
+  buildFastFailCounterfactualAudit,
+  buildSampleGovernance,
+  buildShadowTrailAudit,
+} from './paper-learning-audit-utils.js';
 
 dotenv.config();
 
@@ -595,6 +600,13 @@ function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit, options = {}) 
     col('pnl_pct'),
     col('peak_pnl'),
     col('position_size_sol'),
+    col('capital_tier'),
+    col('position_size_class'),
+    col('paper_only'),
+    col('regime_tag'),
+    col('signal_to_quote_latency_ms'),
+    col('signal_to_quote_drift_pct'),
+    col('quote_spread_pct'),
     col('signal_route'),
     col('strategy_stage'),
     col('entry_mode'),
@@ -617,10 +629,62 @@ function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit, options = {}) 
   return rows.filter((row) => Number(firstValue(row.entry_ts, row.exit_ts, 0) || 0) >= sinceTs);
 }
 
+function loadPathSamplesByTrade(paperDb, tableNames, tradeIds = [], limitPerTrade = 500) {
+  const byTrade = new Map();
+  if (!tableNames.has('paper_trade_path_samples') || !tradeIds.length) return byTrade;
+  const ids = Array.from(new Set(tradeIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)));
+  if (!ids.length) return byTrade;
+  const idSql = sqlInList(ids);
+  const rows = paperDb.prepare(`
+    SELECT *
+    FROM paper_trade_path_samples
+    WHERE trade_id IN (${idSql})
+    ORDER BY trade_id, sample_ts ASC, id ASC
+  `).all();
+  const counts = new Map();
+  for (const row of rows) {
+    const tradeId = Number(row.trade_id);
+    const count = counts.get(tradeId) || 0;
+    if (count >= limitPerTrade) continue;
+    counts.set(tradeId, count + 1);
+    if (!byTrade.has(tradeId)) byTrade.set(tradeId, []);
+    byTrade.get(tradeId).push(row);
+  }
+  return byTrade;
+}
+
 function buildReviewLatencySummary(paperDb, tableNames, sinceTs) {
-  if (!tableNames.has('latency_audit_events')) return [];
+  const summaries = [];
+  if (tableNames.has('paper_trades')) {
+    const cols = getTableColumns(paperDb, 'paper_trades');
+    if (cols.has('signal_to_quote_latency_ms')) {
+      const whereSql = sinceTs ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since' : '';
+      const tierExpr = cols.has('capital_tier') ? "COALESCE(capital_tier, 'unknown')" : "'unknown'";
+      const modeExpr = cols.has('entry_mode') ? "COALESCE(entry_mode, 'unknown')" : "'unknown'";
+      const driftExpr = cols.has('signal_to_quote_drift_pct') ? 'signal_to_quote_drift_pct' : 'NULL';
+      const rows = paperDb.prepare(`
+        SELECT
+          ${tierExpr} || ':' || ${modeExpr} AS stage,
+          COUNT(*) AS n,
+          AVG(signal_to_quote_latency_ms) AS avg_lag_from_source_ms,
+          MAX(signal_to_quote_latency_ms) AS max_lag_from_source_ms,
+          AVG(${driftExpr}) AS avg_signal_to_quote_drift_pct,
+          MAX(${driftExpr}) AS max_signal_to_quote_drift_pct
+        FROM paper_trades
+        ${whereSql}
+        GROUP BY ${tierExpr}, ${modeExpr}
+        HAVING n > 0
+        ORDER BY n DESC
+      `).all(sinceTs ? { since: sinceTs } : {});
+      summaries.push(...rows.map((row) => ({
+        ...row,
+        source: 'paper_trades.entry_execution_audit',
+      })));
+    }
+  }
+  if (!tableNames.has('latency_audit_events')) return summaries;
   const whereSql = sinceTs ? 'WHERE COALESCE(event_ts, signal_ts, 0) >= @since' : '';
-  return paperDb.prepare(`
+  summaries.push(...paperDb.prepare(`
     SELECT
       stage,
       COUNT(*) AS n,
@@ -632,7 +696,11 @@ function buildReviewLatencySummary(paperDb, tableNames, sinceTs) {
     ${whereSql}
     GROUP BY stage
     ORDER BY stage
-  `).all(sinceTs ? { since: sinceTs } : {});
+  `).all(sinceTs ? { since: sinceTs } : {}).map((row) => ({
+    ...row,
+    source: 'latency_audit_events',
+  })));
+  return summaries;
 }
 
 function buildReviewTableCoverage(paperDb, tableNames, options = {}) {
@@ -985,7 +1053,10 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
     ? 'm.created_event_ts'
     : (missedCols.has('signal_ts') ? 'm.signal_ts' : eventTsExpr);
   const maxPnlExpr = `COALESCE(${[
+    missedCols.has('executable_peak_pnl') ? 'm.executable_peak_pnl' : null,
+    missedCols.has('quote_clean_peak_pnl') ? 'm.quote_clean_peak_pnl' : null,
     missedCols.has('tradable_peak_pnl') ? 'm.tradable_peak_pnl' : null,
+    missedCols.has('theoretical_peak_pnl') ? 'm.theoretical_peak_pnl' : null,
     missedCols.has('max_pnl_recorded') ? 'm.max_pnl_recorded' : null,
     missedCols.has('pnl_24h') ? 'm.pnl_24h' : null,
     missedCols.has('pnl_60m') ? 'm.pnl_60m' : null,
@@ -1010,8 +1081,14 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         COALESCE(${missedColumn('route')}, '-') AS route,
         COALESCE(${missedColumn('component')}, '-') AS final_component,
         COALESCE(${missedColumn('reject_reason')}, '-') AS final_reason,
+        ${missedColumn('rejection_hardness')} AS rejection_hardness,
         ${missedColumn('tradability_status')} AS tradability_status,
         ${missedColumn('tradability_reason')} AS tradability_reason,
+        ${missedColumn('theoretical_peak_pnl')} AS theoretical_peak_pnl,
+        ${missedColumn('quote_clean_peak_pnl')} AS quote_clean_peak_pnl,
+        ${missedColumn('executable_peak_pnl')} AS executable_peak_pnl,
+        ${missedColumn('executable_peak_source')} AS executable_peak_source,
+        ${missedColumn('quote_sample_n', '0')} AS quote_sample_n,
         ${missedColumn('tradable_peak_pnl')} AS tradable_peak_pnl,
         ${quoteCleanExpr} AS quote_clean,
         ${maxPnlExpr} AS max_pnl,
@@ -1052,8 +1129,14 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         route,
         final_component,
         final_reason,
+        rejection_hardness,
         tradability_status,
         tradability_reason,
+        theoretical_peak_pnl,
+        quote_clean_peak_pnl,
+        executable_peak_pnl,
+        executable_peak_source,
+        quote_sample_n,
         tradable_peak_pnl,
         quote_clean,
         max_pnl,
@@ -1069,6 +1152,12 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
       quote_clean: Number(row.quote_clean || 0) === 1,
       max_pnl: Number(row.max_pnl || 0),
       tradable_peak_pnl: row.tradable_peak_pnl == null ? null : Number(row.tradable_peak_pnl),
+      rejection_hardness: row.rejection_hardness || null,
+      theoretical_peak_pnl: row.theoretical_peak_pnl == null ? null : Number(row.theoretical_peak_pnl),
+      quote_clean_peak_pnl: row.quote_clean_peak_pnl == null ? null : Number(row.quote_clean_peak_pnl),
+      executable_peak_pnl: row.executable_peak_pnl == null ? null : Number(row.executable_peak_pnl),
+      executable_peak_source: row.executable_peak_source || null,
+      quote_sample_n: row.quote_sample_n == null ? null : Number(row.quote_sample_n),
       final_blocker_key: `${row.route}:${row.final_component}:${row.final_reason}`,
     }));
 
@@ -1197,6 +1286,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
     .map((row) => ({
       ...row,
       max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
+      theoretical_peak_pnl_pct: row.theoretical_peak_pnl == null ? null : roundNumber(Number(row.theoretical_peak_pnl) * 100, 2),
+      quote_clean_peak_pnl_pct: row.quote_clean_peak_pnl == null ? null : roundNumber(Number(row.quote_clean_peak_pnl) * 100, 2),
+      executable_peak_pnl_pct: row.executable_peak_pnl == null ? null : roundNumber(Number(row.executable_peak_pnl) * 100, 2),
       tradable_peak_pnl_pct: row.tradable_peak_pnl == null ? null : roundNumber(Number(row.tradable_peak_pnl) * 100, 2),
     }));
   return {
@@ -4096,6 +4188,161 @@ const server = http.createServer(async (req, res) => {
         persisted_files: persistedFiles,
         query_ms: Date.now() - startedAt,
         timings_ms: timings,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/learning-audit') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const sinceTs = reportSinceTs(url, '24h');
+      const tradeLimit = boundedIntParam(url, 'trade_limit', 5000, 1, 20000);
+      const limit = boundedIntParam(url, 'limit', 50, 1, 200);
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      const trades = loadReviewTradeRows(paperDb, tableNames, sinceTs, tradeLimit, { fastRecent: false });
+      const pathSamplesByTrade = loadPathSamplesByTrade(paperDb, tableNames, trades.map((row) => row.id));
+      const tradeCols = tableNames.has('paper_trades') ? getTableColumns(paperDb, 'paper_trades') : new Set();
+      const tierExpr = tradeCols.has('capital_tier')
+        ? "COALESCE(capital_tier, 'unknown')"
+        : `CASE
+            WHEN COALESCE(position_size_sol, 0) > 0 AND COALESCE(position_size_sol, 0) <= 0.005 THEN 'tiny_probe'
+            WHEN COALESCE(position_size_sol, 0) >= 0.02 THEN 'stage1_main'
+            ELSE 'unknown'
+          END`;
+      const regimeExpr = tradeCols.has('regime_tag') ? "COALESCE(regime_tag, 'unknown')" : "COALESCE(market_regime, 'unknown')";
+      const capitalLifecycle = tableNames.has('paper_trades') ? paperDb.prepare(`
+        SELECT
+          ${tierExpr} AS capital_tier,
+          COALESCE(entry_mode, strategy_stage, 'unknown') AS entry_mode,
+          ${regimeExpr} AS regime_tag,
+          COUNT(*) AS trades,
+          SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+          AVG(pnl_pct) AS avg_pnl,
+          AVG(peak_pnl) AS avg_peak,
+          AVG(CASE WHEN pnl_pct IS NOT NULL AND peak_pnl IS NOT NULL THEN MAX(peak_pnl - pnl_pct, 0) ELSE NULL END) AS avg_giveback
+        FROM paper_trades
+        WHERE COALESCE(entry_ts, exit_ts, 0) >= @since
+        GROUP BY capital_tier, entry_mode, regime_tag
+        ORDER BY trades DESC, avg_giveback DESC
+        LIMIT @limit
+      `).all({ since: sinceTs || 0, limit }) : [];
+      const modeRows = tableNames.has('paper_trades') ? paperDb.prepare(`
+        SELECT
+          COALESCE(entry_mode, 'unknown') AS entry_mode,
+          COUNT(*) AS fills,
+          SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+          AVG(pnl_pct) AS avg_pnl
+        FROM paper_trades
+        WHERE COALESCE(entry_ts, exit_ts, 0) >= @since
+        GROUP BY COALESCE(entry_mode, 'unknown')
+        ORDER BY fills DESC
+      `).all({ since: sinceTs || 0 }) : [];
+      let executableMissed = { available: false };
+      if (tableNames.has('paper_missed_signal_attribution')) {
+        const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
+        const peakExpr = `COALESCE(${[
+          missedCols.has('executable_peak_pnl') ? 'executable_peak_pnl' : null,
+          missedCols.has('quote_clean_peak_pnl') ? 'quote_clean_peak_pnl' : null,
+          missedCols.has('tradable_peak_pnl') ? 'tradable_peak_pnl' : null,
+          missedCols.has('theoretical_peak_pnl') ? 'theoretical_peak_pnl' : null,
+          missedCols.has('max_pnl_recorded') ? 'max_pnl_recorded' : null,
+          '0',
+        ].filter(Boolean).join(', ')})`;
+        const executableExpr = missedCols.has('executable_peak_pnl') ? 'executable_peak_pnl IS NOT NULL' : '0';
+        const quoteCleanExpr = missedCols.has('quote_clean_peak_pnl') ? 'quote_clean_peak_pnl IS NOT NULL' : '0';
+        executableMissed = {
+          available: true,
+          summary: paperDb.prepare(`
+            SELECT
+              COUNT(DISTINCT token_ca) AS unique_tokens,
+              COUNT(DISTINCT CASE WHEN ${executableExpr} THEN token_ca ELSE NULL END) AS executable_unique,
+              COUNT(DISTINCT CASE WHEN ${quoteCleanExpr} THEN token_ca ELSE NULL END) AS quote_clean_unique,
+              MAX(${peakExpr}) AS max_peak
+            FROM paper_missed_signal_attribution
+            WHERE COALESCE(created_event_ts, signal_ts, baseline_ts, 0) >= @since
+          `).get({ since: sinceTs || 0 }),
+          top: paperDb.prepare(`
+            SELECT token_ca, symbol, route, component, reject_reason,
+                   ${peakExpr} AS ranked_peak,
+                   ${missedCols.has('theoretical_peak_pnl') ? 'theoretical_peak_pnl' : 'NULL AS theoretical_peak_pnl'},
+                   ${missedCols.has('quote_clean_peak_pnl') ? 'quote_clean_peak_pnl' : 'NULL AS quote_clean_peak_pnl'},
+                   ${missedCols.has('executable_peak_pnl') ? 'executable_peak_pnl' : 'NULL AS executable_peak_pnl'},
+                   ${missedCols.has('executable_peak_source') ? 'executable_peak_source' : 'NULL AS executable_peak_source'}
+            FROM paper_missed_signal_attribution
+            WHERE COALESCE(created_event_ts, signal_ts, baseline_ts, 0) >= @since
+            ORDER BY ranked_peak DESC
+            LIMIT @limit
+          `).all({ since: sinceTs || 0, limit }).map((row) => ({
+            ...row,
+            ranked_peak_pct: roundNumber(Number(row.ranked_peak || 0) * 100, 2),
+            theoretical_peak_pct: row.theoretical_peak_pnl == null ? null : roundNumber(Number(row.theoretical_peak_pnl) * 100, 2),
+            quote_clean_peak_pct: row.quote_clean_peak_pnl == null ? null : roundNumber(Number(row.quote_clean_peak_pnl) * 100, 2),
+            executable_peak_pct: row.executable_peak_pnl == null ? null : roundNumber(Number(row.executable_peak_pnl) * 100, 2),
+          })),
+        };
+      }
+      const oldTs = Math.floor(Date.now() / 1000) - 30 * 24 * 3600;
+      const missedArchiveTs = Math.floor(Date.now() / 1000) - 24 * 3600;
+      const aging = {
+        decision_events_older_30d: tableNames.has('paper_decision_events')
+          ? paperDb.prepare('SELECT COUNT(*) AS n FROM paper_decision_events WHERE event_ts < @oldTs').get({ oldTs }).n
+          : null,
+        complete_missed_attribution_older_24h: tableNames.has('paper_missed_signal_attribution')
+          ? paperDb.prepare("SELECT COUNT(*) AS n FROM paper_missed_signal_attribution WHERE COALESCE(created_event_ts, signal_ts, baseline_ts, 0) < @missedArchiveTs AND COALESCE(status, '') = 'complete'").get({ missedArchiveTs }).n
+          : null,
+        cleanup_policy: {
+          quarantine_hard_loss_gate_ttl_days: 7,
+          missed_attribution_archive_after_hours: 24,
+          decision_event_cold_storage_after_days: 30,
+          live_action: 'report_only',
+        },
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        window: {
+          since_ts: sinceTs,
+          since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+        },
+        time_to_quote: buildReviewLatencySummary(paperDb, tableNames, sinceTs),
+        shadow_trail_audit: buildShadowTrailAudit({ trades, pathSamplesByTrade }),
+        fast_fail_counterfactual: buildFastFailCounterfactualAudit({ trades, pathSamplesByTrade }),
+        executable_missed_dog_audit: executableMissed,
+        sample_governance: buildSampleGovernance(modeRows),
+        capital_tier_lifecycle: capitalLifecycle.map((row) => ({
+          ...row,
+          win_rate_pct: row.trades ? roundNumber(Number(row.wins || 0) / Number(row.trades) * 100, 1) : null,
+          avg_pnl_pct: row.avg_pnl == null ? null : roundNumber(Number(row.avg_pnl) * 100, 2),
+          avg_peak_pct: row.avg_peak == null ? null : roundNumber(Number(row.avg_peak) * 100, 2),
+          avg_giveback_pct: row.avg_giveback == null ? null : roundNumber(Number(row.avg_giveback) * 100, 2),
+        })),
+        table_aging: aging,
+        notes: {
+          paper_only: true,
+          scope: 'learning audit: latency/drift, shadow trail, fast-fail counterfactual, executable missed dogs, sample governance, capital tier lifecycle, table aging',
+          fast_fail_counterfactual: 'post-exit regret requires post-exit path samples; missing samples are reported explicitly instead of guessed',
+        },
+        query_ms: Date.now() - startedAt,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
