@@ -2257,6 +2257,32 @@ def test_source_resonance_tiny_probe_blocks_late_gmgn_seen():
     assert decision["reason"] == "source_resonance_lead_time_too_short"
 
 
+def test_source_resonance_tiny_probe_soft_override_allows_canary_on_soft_quality_noise():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": 10,
+            "last_seen_age_sec": 30,
+            "gmgn_momentum_rounds": 0,
+            "gmgn_momentum_gain_pct": 0,
+            "gmgn_momentum_confirmed": False,
+            "gmgn_volume_confirmed": False,
+            "last_market_cap": 42000,
+        },
+        route="LOTTO",
+        hard_gate_status="scout_quality_buy_pressure_weak",
+        dex_snapshot={"vol_m5": 300, "tx_m5": 4, "buy_sell_ratio": 0.7},
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "source_resonance_soft_override"
+    assert decision["entry_branch"] == "source_resonance_soft_override"
+    assert decision["source_resonance_soft_override_used"] is True
+    assert decision["observed"]["soft_override"]["parent_reason"] == "scout_quality_buy_pressure_weak"
+
+
 def test_source_resonance_tiny_probe_rejects_timestamp_anomalies():
     decision = evaluate_source_resonance_tiny_probe(
         {
@@ -2447,7 +2473,7 @@ def test_pre_pass_resonance_tiny_probe_allows_upstream_gmgn_quote(monkeypatch):
     assert decision["followthrough"]["reason"] == "pre_pass_followthrough_confirmed"
 
 
-def test_pre_pass_resonance_tiny_probe_blocks_missing_followthrough(monkeypatch):
+def test_pre_pass_resonance_tiny_probe_relaxes_missing_followthrough_to_canary(monkeypatch):
     monkeypatch.setattr(monitor, "_pre_pass_resonance_probe_arm_ts", [])
     monkeypatch.setattr(monitor, "_pre_pass_resonance_probe_cooldown", {})
     monkeypatch.setattr(monitor, "PRE_PASS_RESONANCE_TINY_PROBE_ENABLED", True)
@@ -2464,9 +2490,13 @@ def test_pre_pass_resonance_tiny_probe_blocks_missing_followthrough(monkeypatch)
         now_ts=1000,
     )
 
-    assert decision["pass"] is False
-    assert decision["reason"] == "pre_pass_followthrough_m5_too_low"
+    assert decision["pass"] is True
+    assert decision["reason"] == "pre_pass_relaxed_canary"
+    assert decision["entry_branch"] == "pre_pass_relaxed_canary"
+    assert decision["pre_pass_relaxed_used"] is True
+    assert decision["position_size_sol"] == monitor.PRE_PASS_RELAXED_CANARY_SIZE_SOL
     assert decision["followthrough"]["pass"] is False
+    assert decision["relaxed_canary"]["parent_reason"] == "pre_pass_followthrough_m5_too_low"
 
 
 def test_pre_pass_resonance_tiny_probe_keeps_pass_and_safety_owned_elsewhere(monkeypatch):

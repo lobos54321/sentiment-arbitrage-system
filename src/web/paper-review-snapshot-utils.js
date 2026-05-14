@@ -35,6 +35,13 @@ function firstValue(...values) {
   return null;
 }
 
+function snapshotIdFor({ generatedAt, commit, window }) {
+  const generated = String(generatedAt || new Date().toISOString()).replace(/[^0-9TZ]+/g, '').replace('T', 'T');
+  const windowLabel = String(window?.label || 'window').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  const shortCommit = String(commit || 'unknown').slice(0, 12).replace(/[^a-zA-Z0-9_-]+/g, '') || 'unknown';
+  return `review_${generated}_${windowLabel}_${shortCommit}`;
+}
+
 export function inferReviewEntryMode(row = {}) {
   const monitorState = parseJsonObject(row.monitor_state_json);
   const lottoState = parseJsonObject(row.lotto_state_json);
@@ -55,6 +62,19 @@ export function inferReviewEntryMode(row = {}) {
     row.signal_route ? `${String(row.signal_route).toLowerCase()}_unknown` : null,
     row.strategy_stage,
     'unknown'
+  ));
+}
+
+export function inferReviewEntryBranch(row = {}) {
+  if (row.entry_branch) return String(row.entry_branch);
+  const monitorState = parseJsonObject(row.monitor_state_json);
+  const entryAudit = parseJsonObject(row.entry_execution_audit_json);
+  return String(firstValue(
+    monitorState.entryBranch,
+    monitorState.entry_branch,
+    entryAudit.entryBranch,
+    entryAudit.entry_branch,
+    'unbranched'
   ));
 }
 
@@ -146,22 +166,30 @@ function applyTrade(group, row, pnlPct, peakPct, givebackPct) {
 export function buildTradeReviewSummary(rows = []) {
   const byTier = new Map();
   const byEntryMode = new Map();
+  const byEntryBranch = new Map();
+  const uniqueTokens = new Set();
+  const uniqueLifecycles = new Set();
   const topGivebackTrades = [];
   const totals = emptyGroup('all');
 
   for (const row of rows) {
     const entryMode = inferReviewEntryMode(row);
+    const entryBranch = inferReviewEntryBranch(row);
     const capitalTier = capitalTierForTrade(row);
     const pnlPct = pctFromRatio(row.pnl_pct);
     const peakPct = pctFromRatio(row.peak_pnl);
     const givebackPct = pnlPct != null && peakPct != null ? roundNumber(Math.max(0, peakPct - pnlPct), 2) : null;
 
+    if (row.token_ca) uniqueTokens.add(String(row.token_ca));
+    if (row.lifecycle_id) uniqueLifecycles.add(String(row.lifecycle_id));
     if (!byTier.has(capitalTier)) byTier.set(capitalTier, emptyGroup(capitalTier, { capital_tier: capitalTier }));
     if (!byEntryMode.has(entryMode)) byEntryMode.set(entryMode, emptyGroup(entryMode, { entry_mode: entryMode, capital_tier: capitalTier }));
+    if (!byEntryBranch.has(entryBranch)) byEntryBranch.set(entryBranch, emptyGroup(entryBranch, { entry_branch: entryBranch, capital_tier: capitalTier }));
 
     applyTrade(totals, row, pnlPct, peakPct, givebackPct);
     applyTrade(byTier.get(capitalTier), row, pnlPct, peakPct, givebackPct);
     applyTrade(byEntryMode.get(entryMode), row, pnlPct, peakPct, givebackPct);
+    applyTrade(byEntryBranch.get(entryBranch), row, pnlPct, peakPct, givebackPct);
 
     if (givebackPct != null && givebackPct > 0) {
       topGivebackTrades.push({
@@ -189,8 +217,15 @@ export function buildTradeReviewSummary(rows = []) {
 
   return {
     totals: finalizeGroup(totals),
+    counting_units: {
+      paper_trade_rows: rows.length,
+      unique_tokens_with_trade: uniqueTokens.size,
+      unique_lifecycles_with_trade: uniqueLifecycles.size,
+      lifecycle_with_trade: uniqueLifecycles.size,
+    },
     by_capital_tier: Array.from(byTier.values()).map(finalizeGroup).sort(sortByImpact),
     by_entry_mode: Array.from(byEntryMode.values()).map(finalizeGroup).sort(sortByImpact),
+    by_entry_branch: Array.from(byEntryBranch.values()).map(finalizeGroup).sort(sortByImpact),
     top_giveback_trades: topGivebackTrades
       .sort((a, b) => Number(b.giveback_pct || 0) - Number(a.giveback_pct || 0))
       .slice(0, 20),
@@ -230,9 +265,11 @@ export function buildPaperReviewSnapshot({
   const hardGateProbe = byMode.hard_gate_pass_tiny_probe || null;
   const sourceProbe = byMode.source_resonance_tiny_probe || null;
   const prePassProbe = byMode.pre_pass_resonance_tiny_probe || null;
+  const snapshotId = snapshotIdFor({ generatedAt, commit, window });
 
   return {
     schema_version: 1,
+    snapshot_id: snapshotId,
     generated_at: generatedAt,
     commit: commit || 'unknown',
     policy_fingerprint: policyFingerprint,
@@ -251,6 +288,10 @@ export function buildPaperReviewSnapshot({
       missed_silver_unique: closedLoop?.missed_dogs?.silver_unique ?? null,
       missed_bronze_unique: closedLoop?.missed_dogs?.bronze_unique ?? null,
       paper_trades_total: tradeReview?.totals?.total ?? null,
+      paper_trade_rows: tradeReview?.counting_units?.paper_trade_rows ?? tradeReview?.totals?.total ?? null,
+      unique_tokens_with_trade: tradeReview?.counting_units?.unique_tokens_with_trade ?? null,
+      unique_lifecycles_with_trade: tradeReview?.counting_units?.unique_lifecycles_with_trade ?? null,
+      lifecycle_with_trade: tradeReview?.counting_units?.lifecycle_with_trade ?? null,
       paper_trades_closed: tradeReview?.totals?.closed ?? null,
       paper_win_rate_pct: tradeReview?.totals?.win_rate_pct ?? null,
       paper_avg_pnl_pct: tradeReview?.totals?.avg_pnl_pct ?? null,
@@ -280,6 +321,7 @@ export function buildPaperReviewSnapshot({
       },
     },
     trade_review: tradeReview,
+    counting_units: tradeReview?.counting_units || null,
     latency_summary: latencySummary,
     table_coverage: tableCoverage,
     source_health: sourceHealth,
@@ -326,10 +368,19 @@ export function buildPaperReviewMarkdown(snapshot) {
     giveback: row.giveback_pct,
     reason: row.exit_reason,
   }));
+  const branchRows = (snapshot.trade_review?.by_entry_branch || []).slice(0, 12).map((row) => ({
+    branch: row.entry_branch,
+    total: row.total,
+    closed: row.closed,
+    win_rate_pct: row.win_rate_pct,
+    avg_pnl_pct: row.avg_pnl_pct,
+    avg_giveback_pct: row.avg_giveback_pct,
+  }));
 
   const lines = [
     `# Paper Review Snapshot`,
     '',
+    `- snapshot_id: ${snapshot.snapshot_id || ''}`,
     `- generated_at: ${snapshot.generated_at}`,
     `- commit: ${snapshot.commit}`,
     `- window: ${snapshot.window?.label || ''} (${snapshot.window?.since_iso || 'all'} -> ${snapshot.window?.until_iso || ''})`,
@@ -342,6 +393,7 @@ export function buildPaperReviewMarkdown(snapshot) {
     `- source_resonance_unique: ${summary.source_resonance_unique ?? ''}, gmgn_pre_seen_unique: ${summary.gmgn_pre_seen_unique ?? ''}`,
     `- missed dogs: gold=${summary.missed_gold_unique ?? ''}, silver=${summary.missed_silver_unique ?? ''}, bronze=${summary.missed_bronze_unique ?? ''}, quote_clean=${summary.quote_clean_missed_dog_unique ?? ''}`,
     `- paper trades: total=${summary.paper_trades_total ?? ''}, closed=${summary.paper_trades_closed ?? ''}, win_rate_pct=${summary.paper_win_rate_pct ?? ''}, avg_pnl_pct=${summary.paper_avg_pnl_pct ?? ''}, avg_giveback_pct=${summary.paper_avg_giveback_pct ?? ''}`,
+    `- counting_units: rows=${summary.paper_trade_rows ?? ''}, unique_tokens=${summary.unique_tokens_with_trade ?? ''}, unique_lifecycles=${summary.unique_lifecycles_with_trade ?? ''}`,
     '',
     `## Capital Tiers`,
     '',
@@ -354,6 +406,10 @@ export function buildPaperReviewMarkdown(snapshot) {
     `## Top Giveback Trades`,
     '',
     givebackRows.length ? tableRows(givebackRows, ['symbol', 'mode', 'tier', 'peak', 'exit', 'giveback', 'reason']) : '_No giveback rows._',
+    '',
+    `## Entry Branches`,
+    '',
+    branchRows.length ? tableRows(branchRows, ['branch', 'total', 'closed', 'win_rate_pct', 'avg_pnl_pct', 'avg_giveback_pct']) : '_No branch rows._',
     '',
     `## Notes`,
     '',

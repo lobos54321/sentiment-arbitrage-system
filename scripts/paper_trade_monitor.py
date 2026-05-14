@@ -58,6 +58,7 @@ from profit_protect_policy import cohort_aware_probe_runner_floor, probe_runner_
 from paper_learning_policy import (
     build_entry_execution_latency_audit,
     capital_tier_for_entry,
+    classify_rejection_hardness,
     history_discounted_size,
     is_retryable_entry_quote_failure,
     position_size_class,
@@ -267,6 +268,22 @@ SIGNAL_TRIGGERED_REENTRY_ENABLED = os.environ.get('SIGNAL_TRIGGERED_REENTRY_ENAB
 SIGNAL_TRIGGERED_REENTRY_MAX_ENTRIES_PER_TOKEN = max(1, int(os.environ.get('SIGNAL_TRIGGERED_REENTRY_MAX_ENTRIES_PER_TOKEN', '3')))
 SIGNAL_TRIGGERED_REENTRY_DISCOUNT_FACTOR = float(os.environ.get('SIGNAL_TRIGGERED_REENTRY_DISCOUNT_FACTOR', '0.85'))
 SIGNAL_TRIGGERED_REENTRY_MIN_SIZE_SOL = float(os.environ.get('SIGNAL_TRIGGERED_REENTRY_MIN_SIZE_SOL', '0.001'))
+DOG_CATCHER_V1_ENABLED = os.environ.get('DOG_CATCHER_V1_ENABLED', 'true').lower() != 'false'
+DOG_CATCHER_POLICY_VERSION = os.environ.get('DOG_CATCHER_POLICY_VERSION', 'dog_catcher_v1')
+DOG_CATCHER_PAPER_ONLY = os.environ.get('DOG_CATCHER_PAPER_ONLY', 'true').lower() != 'false'
+DOG_CATCHER_TOKEN_COOLDOWN_SEC = int(os.environ.get('DOG_CATCHER_TOKEN_COOLDOWN_SEC', '300'))
+DOG_CATCHER_RETRY_WATCH_SEC = int(os.environ.get('DOG_CATCHER_RETRY_WATCH_SEC', '90'))
+DOG_CATCHER_HARD_GATE_LOCK_PEAK = float(os.environ.get('DOG_CATCHER_HARD_GATE_LOCK_PEAK', '0.10'))
+DOG_CATCHER_HARD_GATE_LOCK_SELL_PCT = float(os.environ.get('DOG_CATCHER_HARD_GATE_LOCK_SELL_PCT', '0.70'))
+DOG_CATCHER_HARD_GATE_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK10_FACTOR', '0.80'))
+DOG_CATCHER_HARD_GATE_PEAK25_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK25_FACTOR', '0.70'))
+DOG_CATCHER_HARD_GATE_PEAK60_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK60_FACTOR', '0.60'))
+DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR', '0.80'))
+DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT', '0.12'))
+SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED = os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED', 'true').lower() != 'false'
+SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC', str(24 * 60 * 60)))
+PRE_PASS_RELAXED_CANARY_ENABLED = os.environ.get('PRE_PASS_RELAXED_CANARY_ENABLED', 'true').lower() != 'false'
+PRE_PASS_RELAXED_CANARY_SIZE_SOL = float(os.environ.get('PRE_PASS_RELAXED_CANARY_SIZE_SOL', '0.001'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -321,7 +338,7 @@ SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANC
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
 SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
 SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED', 'true').lower() != 'false'
-SOURCE_RESONANCE_DIRECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_DIRECT_PROBE_ENABLED', 'false').lower() == 'true'
+SOURCE_RESONANCE_DIRECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_DIRECT_PROBE_ENABLED', 'true').lower() != 'false'
 PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
 
 # --- hard_gate_pass_tiny_probe: baseline paper-only probe for Telegram premium
@@ -2374,6 +2391,89 @@ def apply_signal_triggered_reentry_discount(pending, size_sol, history):
         'reason': 'signal_triggered_reentry_history_discount',
         **pending['reentry_history_discount'],
     }
+
+
+def _dog_catcher_policy_version(pending=None):
+    pending = pending or {}
+    if pending.get('policy_version'):
+        return pending.get('policy_version')
+    return DOG_CATCHER_POLICY_VERSION if DOG_CATCHER_V1_ENABLED else None
+
+
+def _normalize_intervention_flags(flags):
+    out = []
+    for flag in flags or []:
+        text = str(flag or '').strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _pending_entry_mode(pending):
+    pending = pending or {}
+    lotto_state = pending.get('lotto_state') if isinstance(pending.get('lotto_state'), dict) else {}
+    entry_decision = lotto_state.get('entryDecision') if isinstance(lotto_state.get('entryDecision'), dict) else {}
+    return str(
+        pending.get('entry_mode')
+        or pending.get('scout_mode')
+        or entry_decision.get('entry_mode')
+        or ''
+    )
+
+
+def _dog_catcher_branch_for_pending(pending):
+    pending = pending or {}
+    if pending.get('entry_branch'):
+        return str(pending.get('entry_branch'))
+    if pending.get('signal_triggered_reentry'):
+        return 'signal_triggered_reentry'
+    if pending.get('retry_watch_used') or pending.get('dog_catcher_retry_watch'):
+        return 'retry_watch_recovered'
+    source_reason = str(pending.get('source_reject_reason') or '').lower()
+    source_component = str(pending.get('source_component') or '').lower()
+    mode = _pending_entry_mode(pending)
+    if pending.get('ttl_rescue_used') or source_reason == 'tracking_ttl_expired':
+        return 'ttl_rescue_canary'
+    if pending.get('pre_pass_relaxed_used'):
+        return 'pre_pass_relaxed_canary'
+    if pending.get('source_resonance_soft_override_used'):
+        return 'source_resonance_soft_override'
+    if mode == SOURCE_RESONANCE_TINY_PROBE_MODE and classify_rejection_hardness(source_reason) == 'soft_reject':
+        return 'source_resonance_soft_override'
+    if source_reason in {'entry_edge_spread_too_high', 'post_spread_abort', 'post_spread_abort_memory', 'missing_trigger_or_quote'}:
+        return 'retry_watch_recovered'
+    if source_component == 'discovery_tracking':
+        return 'ttl_rescue_canary' if pending.get('final_reclaim_attempted') else 'discovery_reclaim_canary'
+    if mode == HARD_GATE_PASS_TINY_PROBE_MODE:
+        return 'hard_gate_pass_baseline'
+    if mode == PRE_PASS_RESONANCE_TINY_PROBE_MODE:
+        return 'pre_pass_resonance'
+    if mode == SOURCE_RESONANCE_TINY_PROBE_MODE:
+        return 'source_resonance_tiny_probe'
+    return 'normal_existing_policy'
+
+
+def stamp_dog_catcher_pending(pending, *, branch=None, flags=None, detail=None):
+    if not isinstance(pending, dict) or not DOG_CATCHER_V1_ENABLED:
+        return pending
+    pending['policy_version'] = _dog_catcher_policy_version(pending)
+    if branch:
+        pending['entry_branch'] = branch
+    pending['entry_branch'] = _dog_catcher_branch_for_pending(pending)
+    existing_flags = pending.get('intervention_flags')
+    if not isinstance(existing_flags, list):
+        existing_flags = []
+    flags = _normalize_intervention_flags([*existing_flags, pending.get('entry_branch'), *(flags or [])])
+    if pending.get('paper_only_scout'):
+        flags.append('paper_only_tiny')
+    if pending.get('gmgn_pre_seen'):
+        flags.append('gmgn_pre_seen')
+    if pending.get('resonance_cohort'):
+        flags.append(str(pending.get('resonance_cohort')))
+    pending['intervention_flags'] = _normalize_intervention_flags(flags)
+    if detail:
+        pending['dog_catcher_detail'] = detail
+    return pending
 
 
 def apply_paper_tiny_scout_size_cap(pending):
@@ -4474,35 +4574,32 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
         return updated
 
     if entry_mode == HARD_GATE_PASS_TINY_PROBE_MODE:
-        if not already_locked and current_pnl >= HARD_GATE_PASS_BASELINE_LOCK_PNL:
+        floor_factor = (
+            DOG_CATCHER_HARD_GATE_PEAK60_FACTOR if peak_pnl >= 0.60
+            else DOG_CATCHER_HARD_GATE_PEAK25_FACTOR if peak_pnl >= 0.25
+            else DOG_CATCHER_HARD_GATE_PEAK10_FACTOR if peak_pnl >= DOG_CATCHER_HARD_GATE_LOCK_PEAK
+            else None
+        )
+        floor = peak_pnl * floor_factor if floor_factor is not None else None
+        if not already_locked and peak_pnl >= DOG_CATCHER_HARD_GATE_LOCK_PEAK and current_pnl > 0:
             return _override(
                 'lock_profit',
                 (
-                    f"hard_gate_baseline_profit_lock "
-                    f"(pnl={current_pnl:.1%} >= {HARD_GATE_PASS_BASELINE_LOCK_PNL:.1%}, "
-                    f"sell={HARD_GATE_PASS_BASELINE_LOCK_SELL_PCT:.0%})"
+                    f"dog_catcher_hard_gate_profit_lock "
+                    f"(peak={peak_pnl:.1%} >= {DOG_CATCHER_HARD_GATE_LOCK_PEAK:.1%}, "
+                    f"pnl={current_pnl:.1%}, sell={DOG_CATCHER_HARD_GATE_LOCK_SELL_PCT:.0%})"
                 ),
-                sell_pct=HARD_GATE_PASS_BASELINE_LOCK_SELL_PCT,
+                sell_pct=DOG_CATCHER_HARD_GATE_LOCK_SELL_PCT,
             )
-        if peak_pnl >= 0.50 and current_pnl <= HARD_GATE_PASS_BASELINE_PEAK50_FLOOR:
+        if floor is not None and current_pnl <= floor:
             return _override(
                 'exit',
                 (
-                    f"hard_gate_baseline_peak50_floor "
-                    f"(pnl={current_pnl:.1%} <= floor={HARD_GATE_PASS_BASELINE_PEAK50_FLOOR:.1%}, "
-                    f"peak={peak_pnl:.1%})"
+                    f"dog_catcher_hard_gate_trail_floor "
+                    f"(pnl={current_pnl:.1%} <= floor={floor:.1%}, "
+                    f"peak={peak_pnl:.1%}, factor={floor_factor:.0%})"
                 ),
-                trail_floor=HARD_GATE_PASS_BASELINE_PEAK50_FLOOR,
-            )
-        if peak_pnl >= 0.35 and current_pnl <= HARD_GATE_PASS_BASELINE_PEAK35_FLOOR:
-            return _override(
-                'exit',
-                (
-                    f"hard_gate_baseline_peak35_floor "
-                    f"(pnl={current_pnl:.1%} <= floor={HARD_GATE_PASS_BASELINE_PEAK35_FLOOR:.1%}, "
-                    f"peak={peak_pnl:.1%})"
-                ),
-                trail_floor=HARD_GATE_PASS_BASELINE_PEAK35_FLOOR,
+                trail_floor=floor,
             )
         if (
             held_sec >= HARD_GATE_PASS_BASELINE_NO_FOLLOW_EXIT_SEC
@@ -4518,6 +4615,29 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
                 ),
             )
         return exit_matrix
+
+    if entry_mode in {LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE, 'smart_entry_pullback_bounce'}:
+        low_liq_floor = peak_pnl * DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR if peak_pnl >= 0.10 else None
+        if low_liq_floor is not None and current_pnl <= low_liq_floor:
+            return _override(
+                'exit',
+                (
+                    f"dog_catcher_low_liq_tight_floor "
+                    f"(pnl={current_pnl:.1%} <= floor={low_liq_floor:.1%}, "
+                    f"peak={peak_pnl:.1%})"
+                ),
+                trail_floor=low_liq_floor,
+            )
+        if peak_pnl >= 0.10 and (peak_pnl - current_pnl) >= DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT:
+            return _override(
+                'exit',
+                (
+                    f"dog_catcher_low_liq_gap_crash "
+                    f"(giveback={(peak_pnl - current_pnl):.1%} >= {DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT:.1%}, "
+                    f"peak={peak_pnl:.1%})"
+                ),
+                trail_floor=low_liq_floor,
+            )
 
     if not already_locked and current_pnl >= PROBE_PROFIT_CAPTURE_LOCK_PNL:
         return _override(
@@ -6006,6 +6126,40 @@ def _hard_gate_hourly_capacity_for_cohort(cohort):
     return max(0, max_hourly - 4)
 
 
+def _source_resonance_soft_override_detail(reason, external_alpha=None, *, alpha_age_sec=None, timestamp_valid=True):
+    if not SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED:
+        return {'pass': False, 'reason': 'source_resonance_soft_override_disabled'}
+    text = str(reason or '').strip().lower()
+    if not text:
+        return {'pass': False, 'reason': 'missing_parent_reason'}
+    if classify_rejection_hardness(text) == 'hard_reject':
+        return {'pass': False, 'reason': 'parent_reason_hard_reject', 'parent_reason': text}
+    if classify_rejection_hardness(text) != 'soft_reject' and text not in {
+        'matrices not yet aligned',
+        'not_ath_prebuy_kline_block',
+        'not_ath_prebuy_kline_unknown_data_blocked',
+        'pre_pass_followthrough_wait',
+        'gmgn_lead_time_too_short',
+        'gmgn_alpha_stale',
+    }:
+        return {'pass': False, 'reason': 'parent_reason_not_soft_overrideable', 'parent_reason': text}
+    external_alpha = external_alpha or {}
+    if not external_alpha.get('available') or not external_alpha.get('gmgn_pre_seen'):
+        return {'pass': False, 'reason': 'source_resonance_soft_override_missing_gmgn_pre_seen', 'parent_reason': text}
+    if not timestamp_valid:
+        return {'pass': False, 'reason': 'source_resonance_soft_override_timestamp_invalid', 'parent_reason': text}
+    age = _source_resonance_number(alpha_age_sec, None)
+    if age is not None and age > SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC:
+        return {'pass': False, 'reason': 'source_resonance_soft_override_alpha_too_stale', 'parent_reason': text, 'age_sec': age}
+    return {
+        'pass': True,
+        'reason': 'source_resonance_soft_override',
+        'parent_reason': text,
+        'alpha_age_sec': age,
+        'max_alpha_age_sec': SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC,
+    }
+
+
 def evaluate_source_resonance_tiny_probe(
     external_alpha,
     *,
@@ -6083,6 +6237,13 @@ def evaluate_source_resonance_tiny_probe(
         'lifecycle_state': lifecycle.get('lifecycle_state'),
         'entry_bias': lifecycle.get('entry_bias'),
     }
+    soft_override = _source_resonance_soft_override_detail(
+        hard_gate_status,
+        external_alpha,
+        alpha_age_sec=alpha_age_sec,
+        timestamp_valid=timestamp_valid,
+    )
+    observed['soft_override'] = soft_override
     thresholds = {
         'size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
         'min_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC,
@@ -6110,6 +6271,14 @@ def evaluate_source_resonance_tiny_probe(
             'source_component': 'source_resonance_probe',
             'source_reject_reason': str(hard_gate_status or '').lower(),
             'timing_passed': bool(SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY),
+            'policy_version': DOG_CATCHER_POLICY_VERSION if DOG_CATCHER_V1_ENABLED else None,
+            'entry_branch': 'source_resonance_soft_override' if soft_override.get('pass') else 'source_resonance_tiny_probe',
+            'source_resonance_soft_override_used': bool(soft_override.get('pass')),
+            'intervention_flags': _normalize_intervention_flags([
+                'source_resonance_soft_override' if soft_override.get('pass') else 'source_resonance_tiny_probe',
+                'paper_only_tiny',
+                'gmgn_pre_seen' if external_alpha.get('gmgn_pre_seen') else '',
+            ]),
             'external_alpha': external_alpha,
             'gmgn_policy': {
                 'action': 'observe',
@@ -6135,9 +6304,9 @@ def evaluate_source_resonance_tiny_probe(
         return _result(False, timestamp_anomaly_reason or 'source_resonance_timestamp_invalid')
     if alpha_age_sec < -SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC:
         return _result(False, 'source_resonance_external_alpha_future_seen')
-    if alpha_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC:
+    if alpha_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC and not soft_override.get('pass'):
         return _result(False, 'source_resonance_external_alpha_stale')
-    if lead_sec is None or lead_sec < SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC:
+    if (lead_sec is None or lead_sec < SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC) and not soft_override.get('pass'):
         return _result(False, 'source_resonance_lead_time_too_short')
     if lead_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC:
         return _result(False, 'source_resonance_lead_time_unreasonable')
@@ -6148,7 +6317,7 @@ def evaluate_source_resonance_tiny_probe(
         or volume_confirmed
         or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
         or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
-    ):
+    ) and not soft_override.get('pass'):
         return _result(False, 'source_resonance_gmgn_activity_not_confirmed')
     if current_mc > 0 and current_mc < SOURCE_RESONANCE_TINY_PROBE_MIN_MC:
         return _result(False, 'source_resonance_mc_too_low')
@@ -6158,7 +6327,7 @@ def evaluate_source_resonance_tiny_probe(
         return _result(False, 'source_resonance_top1_too_high')
     if top10_pct is not None and top10_pct > thresholds['max_top10_pct']:
         return _result(False, 'source_resonance_top10_too_high')
-    return _result(True, 'source_resonance_telegram_gmgn_probe')
+    return _result(True, soft_override.get('reason') if soft_override.get('pass') else 'source_resonance_telegram_gmgn_probe')
 
 
 def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, stage_outcome=None):
@@ -6177,6 +6346,18 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
     pending['source_reject_reason'] = detail.get('source_reject_reason')
     pending['source_resonance_probe'] = detail
     pending['external_alpha'] = detail.get('external_alpha')
+    pending['resonance_cohort'] = detail.get('resonance_cohort')
+    pending['gmgn_pre_seen'] = bool((detail.get('external_alpha') or {}).get('gmgn_pre_seen'))
+    pending['gmgn_lead_time_sec'] = (detail.get('observed') or {}).get('gmgn_lead_time_sec')
+    pending['source_resonance_score'] = (detail.get('external_alpha') or {}).get('source_resonance_score') or (detail.get('external_alpha') or {}).get('resonance_score')
+    pending['source_resonance_level'] = (detail.get('external_alpha') or {}).get('source_resonance_level') or (detail.get('external_alpha') or {}).get('resonance_level')
+    pending['source_resonance_soft_override_used'] = bool(detail.get('source_resonance_soft_override_used'))
+    stamp_dog_catcher_pending(
+        pending,
+        branch=detail.get('entry_branch'),
+        flags=detail.get('intervention_flags'),
+        detail={'source_resonance_probe': detail.get('reason')},
+    )
     if route_name:
         pending['signal_route'] = route_name
     if not pending.get('trigger_price'):
@@ -6196,6 +6377,9 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
         lotto_state['executionScope'] = 'paper_only'
         lotto_state['positionSizeSol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
         lotto_state['sourceResonanceProbe'] = detail
+        lotto_state['policyVersion'] = pending.get('policy_version')
+        lotto_state['entryBranch'] = pending.get('entry_branch')
+        lotto_state['interventionFlags'] = pending.get('intervention_flags')
         entry_decision = lotto_state.get('entryDecision')
         if isinstance(entry_decision, dict):
             entry_decision.update({
@@ -6204,6 +6388,9 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
                 'paper_only_scout': True,
                 'execution_scope': 'paper_only',
                 'timing_passed': bool(detail.get('timing_passed')),
+                'policy_version': pending.get('policy_version'),
+                'entry_branch': pending.get('entry_branch'),
+                'intervention_flags': pending.get('intervention_flags'),
             })
             if entry_decision is not detail:
                 entry_decision['source_resonance_probe'] = detail
@@ -6728,6 +6915,15 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
     pending['source_resonance_score'] = detail.get('source_resonance_score')
     pending['source_resonance_level'] = detail.get('source_resonance_level')
     pending['external_alpha'] = detail.get('external_alpha')
+    if detail.get('retry_watch_used') or detail.get('dog_catcher_retry_watch'):
+        pending['retry_watch_used'] = True
+        pending['dog_catcher_retry_watch'] = detail.get('dog_catcher_retry_watch') or {'reason': 'hard_gate_quote_retry'}
+    stamp_dog_catcher_pending(
+        pending,
+        branch='retry_watch_recovered' if pending.get('retry_watch_used') else 'hard_gate_pass_baseline',
+        flags=['hard_gate_pass', detail.get('resonance_cohort'), 'retry_watch' if pending.get('retry_watch_used') else ''],
+        detail={'hard_gate_pass_probe': detail.get('reason')},
+    )
     if route_name:
         pending['signal_route'] = route_name
     if not pending.get('trigger_price'):
@@ -6748,6 +6944,9 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
         lotto_state['cohortPriority'] = detail.get('cohort_priority')
         lotto_state['gmgnPreSeen'] = bool(detail.get('gmgn_pre_seen'))
         lotto_state['gmgnLeadTimeSec'] = detail.get('gmgn_lead_time_sec')
+        lotto_state['policyVersion'] = pending.get('policy_version')
+        lotto_state['entryBranch'] = pending.get('entry_branch')
+        lotto_state['interventionFlags'] = pending.get('intervention_flags')
     return pending
 
 
@@ -6940,7 +7139,16 @@ def process_hard_gate_pass_quote_retries(
             pool=candidate.get('pool'),
             lifecycle_id=lifecycle_id,
             signal_lifecycle=candidate.get('signal_lifecycle') or {},
-            signal_audit_payload=candidate.get('signal_audit_payload') or {},
+            signal_audit_payload={
+                **(candidate.get('signal_audit_payload') or {}),
+                'retry_watch_used': True,
+                'dog_catcher_retry_watch': {
+                    'reason': 'quote_executable_after_retry',
+                    'first_seen_ts': candidate.get('first_seen_ts'),
+                    'attempts': candidate.get('attempts'),
+                    'window_sec': HARD_GATE_PASS_QUOTE_RETRY_WINDOW_SEC,
+                },
+            },
             hard_gate_status=candidate.get('hard_gate_status'),
             now_ts=now_ts,
             route=route,
@@ -7040,6 +7248,38 @@ def _pre_pass_followthrough_detail(dex_snapshot=None, signal=None, watchlist_ent
         detail['pass'] = False
         detail['reason'] = 'pre_pass_followthrough_tx_too_low'
     return detail
+
+
+PRE_PASS_RELAXED_REASONS = {
+    'pre_pass_followthrough_wait',
+    'pre_pass_followthrough_m5_too_low',
+    'pre_pass_followthrough_buy_sell_too_low',
+    'pre_pass_followthrough_tx_too_low',
+    'gmgn_lead_time_too_short',
+    'gmgn_alpha_stale',
+}
+
+
+def _pre_pass_relaxed_canary_detail(reason, *, resonance_context=None, quote_executable=False, gmgn_policy=None):
+    if not PRE_PASS_RELAXED_CANARY_ENABLED:
+        return {'pass': False, 'reason': 'pre_pass_relaxed_canary_disabled'}
+    text = str(reason or '').strip()
+    if text not in PRE_PASS_RELAXED_REASONS:
+        return {'pass': False, 'reason': 'pre_pass_relaxed_reason_not_allowed', 'parent_reason': text}
+    resonance_context = resonance_context or {}
+    gmgn_policy = gmgn_policy or {}
+    if not quote_executable:
+        return {'pass': False, 'reason': 'pre_pass_relaxed_quote_not_executable', 'parent_reason': text}
+    if not resonance_context.get('gmgn_pre_seen'):
+        return {'pass': False, 'reason': 'pre_pass_relaxed_missing_gmgn_pre_seen', 'parent_reason': text}
+    if gmgn_policy.get('action') in {'reject', 'shadow_reject'}:
+        return {'pass': False, 'reason': gmgn_policy.get('reason') or 'gmgn_policy_reject', 'parent_reason': text}
+    return {
+        'pass': True,
+        'reason': 'pre_pass_relaxed_canary',
+        'parent_reason': text,
+        'size_sol': PRE_PASS_RELAXED_CANARY_SIZE_SOL,
+    }
 
 
 def arm_hard_gate_pass_tiny_probe(
@@ -7404,6 +7644,7 @@ def evaluate_pre_pass_resonance_tiny_probe(
         now_ts=now_ts,
     )
     observed['followthrough'] = followthrough
+    relaxed_canary = {'pass': False, 'reason': 'pre_pass_relaxed_not_needed'}
     thresholds = {
         'size_sol': PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
         'max_per_hour': PRE_PASS_RESONANCE_TINY_PROBE_MAX_PER_HOUR,
@@ -7430,7 +7671,7 @@ def evaluate_pre_pass_resonance_tiny_probe(
             'pass': bool(passed),
             'reason': reason,
             'entry_mode': PRE_PASS_RESONANCE_TINY_PROBE_MODE,
-            'position_size_sol': PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
+            'position_size_sol': PRE_PASS_RELAXED_CANARY_SIZE_SOL if relaxed_canary.get('pass') else PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
             'paper_only_scout': True,
             'execution_scope': 'paper_only',
             'probe': True,
@@ -7447,9 +7688,19 @@ def evaluate_pre_pass_resonance_tiny_probe(
             'resonance_context': resonance_context,
             'external_alpha': resonance_context.get('external_alpha') or external_alpha,
             'gmgn_policy': gmgn_policy,
+            'policy_version': DOG_CATCHER_POLICY_VERSION if DOG_CATCHER_V1_ENABLED else None,
+            'entry_branch': 'pre_pass_relaxed_canary' if relaxed_canary.get('pass') else 'pre_pass_resonance',
+            'pre_pass_relaxed_used': bool(relaxed_canary.get('pass')),
+            'intervention_flags': _normalize_intervention_flags([
+                'pre_pass_relaxed_canary' if relaxed_canary.get('pass') else 'pre_pass_resonance',
+                'paper_only_tiny',
+                'gmgn_pre_seen' if resonance_context.get('gmgn_pre_seen') else '',
+                relaxed_canary.get('parent_reason') if relaxed_canary.get('pass') else '',
+            ]),
             'observed': observed,
             'thresholds': thresholds,
             'followthrough': followthrough,
+            'relaxed_canary': relaxed_canary,
         }
 
     if not PRE_PASS_RESONANCE_TINY_PROBE_ENABLED:
@@ -7472,15 +7723,36 @@ def evaluate_pre_pass_resonance_tiny_probe(
     if not timestamp_valid:
         return _result(False, resonance_context.get('timestamp_anomaly_reason') or 'gmgn_timestamp_invalid')
     if lead_sec is None or lead_sec < PRE_PASS_RESONANCE_MIN_GMGN_LEAD_SEC:
-        return _result(False, 'gmgn_lead_time_too_short')
+        relaxed_canary = _pre_pass_relaxed_canary_detail(
+            'gmgn_lead_time_too_short',
+            resonance_context=resonance_context,
+            quote_executable=quote_executable,
+            gmgn_policy=gmgn_policy,
+        )
+        if not relaxed_canary.get('pass'):
+            return _result(False, 'gmgn_lead_time_too_short')
     if lead_sec > PRE_PASS_RESONANCE_MAX_GMGN_LEAD_SEC:
         return _result(False, 'gmgn_lead_time_unreasonable')
     if last_seen_age_sec is not None and last_seen_age_sec < -SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC:
         return _result(False, 'gmgn_last_seen_in_future')
     if last_seen_age_sec is not None and last_seen_age_sec > PRE_PASS_RESONANCE_MAX_ALPHA_AGE_SEC:
-        return _result(False, 'gmgn_alpha_stale')
+        relaxed_canary = _pre_pass_relaxed_canary_detail(
+            'gmgn_alpha_stale',
+            resonance_context=resonance_context,
+            quote_executable=quote_executable,
+            gmgn_policy=gmgn_policy,
+        )
+        if not relaxed_canary.get('pass'):
+            return _result(False, 'gmgn_alpha_stale')
     if not followthrough.get('pass'):
-        return _result(False, followthrough.get('reason') or 'pre_pass_followthrough_failed')
+        relaxed_canary = _pre_pass_relaxed_canary_detail(
+            followthrough.get('reason') or 'pre_pass_followthrough_failed',
+            resonance_context=resonance_context,
+            quote_executable=quote_executable,
+            gmgn_policy=gmgn_policy,
+        )
+        if not relaxed_canary.get('pass'):
+            return _result(False, followthrough.get('reason') or 'pre_pass_followthrough_failed')
 
     existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
     if existing_probe:
@@ -7506,7 +7778,7 @@ def evaluate_pre_pass_resonance_tiny_probe(
         return _result(False, 'top10_too_high')
     if gmgn_policy.get('action') in {'reject', 'shadow_reject'}:
         return _result(False, gmgn_policy.get('reason') or 'gmgn_policy_reject')
-    return _result(True, 'pre_pass_resonance_probe')
+    return _result(True, relaxed_canary.get('reason') if relaxed_canary.get('pass') else 'pre_pass_resonance_probe')
 
 
 def _apply_pre_pass_resonance_probe_to_pending(pending, detail, *, route=None, stage_outcome=None):
@@ -7517,7 +7789,7 @@ def _apply_pre_pass_resonance_probe_to_pending(pending, detail, *, route=None, s
     pending['scout_mode'] = PRE_PASS_RESONANCE_TINY_PROBE_MODE
     pending['paper_only_scout'] = True
     pending['execution_scope'] = 'paper_only'
-    pending['kelly_position_sol'] = PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL
+    pending['kelly_position_sol'] = detail.get('position_size_sol') or PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL
     pending['timing_passed'] = True
     pending['replay_source'] = 'live_monitor_pre_pass_resonance_probe'
     pending['stage_outcome'] = stage_outcome or 'pre_pass_resonance_tiny_probe_armed'
@@ -7532,6 +7804,13 @@ def _apply_pre_pass_resonance_probe_to_pending(pending, detail, *, route=None, s
     pending['source_resonance_level'] = detail.get('source_resonance_level')
     pending['external_alpha'] = detail.get('external_alpha')
     pending['gmgn_policy'] = detail.get('gmgn_policy')
+    pending['pre_pass_relaxed_used'] = bool(detail.get('pre_pass_relaxed_used'))
+    stamp_dog_catcher_pending(
+        pending,
+        branch=detail.get('entry_branch'),
+        flags=detail.get('intervention_flags'),
+        detail={'pre_pass_probe': detail.get('reason')},
+    )
     if route_name:
         pending['signal_route'] = route_name
         pending['signal_type'] = route_name
@@ -7544,19 +7823,25 @@ def _apply_pre_pass_resonance_probe_to_pending(pending, detail, *, route=None, s
         lotto_state['probeEntryMode'] = PRE_PASS_RESONANCE_TINY_PROBE_MODE
         lotto_state['paper_only_scout'] = True
         lotto_state['executionScope'] = 'paper_only'
-        lotto_state['positionSizeSol'] = PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL
+        lotto_state['positionSizeSol'] = pending['kelly_position_sol']
         lotto_state['prePassResonanceProbe'] = detail
         lotto_state['resonanceCohort'] = detail.get('resonance_cohort')
         lotto_state['gmgnPreSeen'] = bool(detail.get('gmgn_pre_seen'))
         lotto_state['gmgnLeadTimeSec'] = detail.get('gmgn_lead_time_sec')
+        lotto_state['policyVersion'] = pending.get('policy_version')
+        lotto_state['entryBranch'] = pending.get('entry_branch')
+        lotto_state['interventionFlags'] = pending.get('intervention_flags')
         entry_decision = lotto_state.get('entryDecision')
         if isinstance(entry_decision, dict):
             entry_decision.update({
                 'entry_mode': PRE_PASS_RESONANCE_TINY_PROBE_MODE,
-                'position_size_sol': PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
+                'position_size_sol': pending['kelly_position_sol'],
                 'paper_only_scout': True,
                 'execution_scope': 'paper_only',
                 'timing_passed': True,
+                'policy_version': pending.get('policy_version'),
+                'entry_branch': pending.get('entry_branch'),
+                'intervention_flags': pending.get('intervention_flags'),
             })
             if entry_decision is not detail:
                 entry_decision['pre_pass_resonance_probe'] = detail
@@ -11179,6 +11464,16 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
         pending['stage_outcome'] = 'discovery_probe_entered'
         pending['source_component'] = candidate.get('source_component')
         pending['source_reject_reason'] = candidate.get('source_reject_reason')
+        pending['final_reclaim_attempted'] = bool(candidate.get('final_reclaim_attempted'))
+        if pending['final_reclaim_attempted'] or candidate.get('last_wait_reason') == 'tracking_ttl_expired':
+            pending['ttl_rescue_used'] = True
+        if str(candidate.get('source_reject_reason') or '').lower() in {
+            'entry_edge_spread_too_high',
+            'post_spread_abort',
+            'post_spread_abort_memory',
+            'missing_trigger_or_quote',
+        }:
+            pending['retry_watch_used'] = True
         pending['lotto_recovery_family'] = lotto_recovery_family
         pending['parent_block_reason'] = parent_reason
         pending['recovery_probe_reason'] = lotto_probe_reason
@@ -11200,9 +11495,14 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
             'parent_block_reason': parent_reason,
             'recovery_probe_reason': lotto_probe_reason,
         }
+        stamp_dog_catcher_pending(
+            pending,
+            flags=['discovery_tracking', 'ttl_rescue' if pending.get('ttl_rescue_used') else '', 'retry_watch' if pending.get('retry_watch_used') else ''],
+            detail={'discovery_candidate': pending['lotto_state']['discoveryCandidate']},
+        )
         return pending
 
-    return {
+    pending = {
         'token_ca': w_entry['ca'],
         'symbol': w_entry['symbol'],
         'signal_ts': w_entry.get('signal_ts') or candidate.get('signal_ts'),
@@ -11246,6 +11546,22 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
         'first_fire_pc_m5': (detail.get('current_reclaim') or {}).get('price_change_m5'),
         'spread_abort_count': 0,
     }
+    pending['final_reclaim_attempted'] = bool(candidate.get('final_reclaim_attempted'))
+    if pending['final_reclaim_attempted'] or candidate.get('last_wait_reason') == 'tracking_ttl_expired':
+        pending['ttl_rescue_used'] = True
+    if str(candidate.get('source_reject_reason') or '').lower() in {
+        'entry_edge_spread_too_high',
+        'post_spread_abort',
+        'post_spread_abort_memory',
+        'missing_trigger_or_quote',
+    }:
+        pending['retry_watch_used'] = True
+    stamp_dog_catcher_pending(
+        pending,
+        flags=['discovery_tracking', 'ttl_rescue' if pending.get('ttl_rescue_used') else '', 'retry_watch' if pending.get('retry_watch_used') else ''],
+        detail={'discovery_candidate': pending.get('discovery_candidate')},
+    )
+    return pending
 
 
 def process_discovery_tracking_candidates(
@@ -12757,6 +13073,9 @@ def init_paper_db(db_path=None):
                 signal_to_quote_latency_ms INTEGER,
                 signal_to_quote_drift_pct REAL,
                 quote_spread_pct REAL,
+                policy_version TEXT,
+                entry_branch TEXT,
+                intervention_flags_json TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -12839,6 +13158,9 @@ def init_paper_db(db_path=None):
             "ALTER TABLE paper_trades ADD COLUMN signal_to_quote_latency_ms INTEGER",
             "ALTER TABLE paper_trades ADD COLUMN signal_to_quote_drift_pct REAL",
             "ALTER TABLE paper_trades ADD COLUMN quote_spread_pct REAL",
+            "ALTER TABLE paper_trades ADD COLUMN policy_version TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN entry_branch TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN intervention_flags_json TEXT",
             "ALTER TABLE paper_trades ADD COLUMN signal_route TEXT",
             "ALTER TABLE paper_trades ADD COLUMN entry_mode TEXT",
             "ALTER TABLE paper_trades ADD COLUMN lotto_state_json TEXT",
@@ -12862,6 +13184,7 @@ def init_paper_db(db_path=None):
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_mode_exit_ts ON paper_trades(entry_mode, exit_ts)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_capital_tier_entry_ts ON paper_trades(capital_tier, entry_ts)")
             db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_regime_tag_entry_ts ON paper_trades(regime_tag, entry_ts)")
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_entry_branch_entry_ts ON paper_trades(entry_branch, entry_ts)")
         except sqlite3.OperationalError:
             pass
         init_decision_audit(db_conn)
@@ -19648,6 +19971,11 @@ def run_monitor(db):
                         strategy_stage=_pending_strategy_stage,
                     )
                     _position_size_class = position_size_class(actual_position_size_sol)
+                    stamp_dog_catcher_pending(pending)
+                    _policy_version = pending.get('policy_version')
+                    _entry_branch = pending.get('entry_branch') or _dog_catcher_branch_for_pending(pending)
+                    _intervention_flags = _normalize_intervention_flags(pending.get('intervention_flags') or [])
+                    _intervention_flags_json = json.dumps(_intervention_flags) if _intervention_flags else None
                     _monitor_state = {
                         'tokenCA': pending['token_ca'],
                         'symbol': pending['symbol'],
@@ -19670,6 +19998,9 @@ def run_monitor(db):
                         'positionSizeClass': _position_size_class,
                         'paperOnly': True,
                         'regimeTag': _regime_tag,
+                        'policyVersion': _policy_version,
+                        'entryBranch': _entry_branch,
+                        'interventionFlags': _intervention_flags,
                         'entryLatencyAudit': _entry_latency_audit,
                         'signalTriggeredReentry': pending.get('signal_triggered_reentry'),
                         'reentryHistoryDiscount': pending.get('reentry_history_discount'),
@@ -19737,8 +20068,9 @@ def run_monitor(db):
                                  lifecycle_state, vitality_score, entry_bias, lifecycle_features_json,
                                  strategy_outcome, execution_availability, accounting_outcome, synthetic_close,
                                  capital_tier, position_size_class, paper_only, regime_tag,
-                                 signal_to_quote_latency_ms, signal_to_quote_drift_pct, quote_spread_pct)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?, ?, ?, ?)
+                                 signal_to_quote_latency_ms, signal_to_quote_drift_pct, quote_spread_pct,
+                                 policy_version, entry_branch, intervention_flags_json)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             _pending_strategy_id, strategy_role, _pending_strategy_stage, _pending_stage_outcome,
                             pending['token_ca'], pending['symbol'], _signal_ts_store, price, entry_ts,
@@ -19762,10 +20094,12 @@ def run_monitor(db):
                                 'capitalTier': _capital_tier,
                                 'positionSizeClass': _position_size_class,
                                 'regimeTag': _regime_tag,
+                                'policyVersion': _policy_version,
+                                'entryBranch': _entry_branch,
+                                'interventionFlags': _intervention_flags,
                                 'signalTriggeredReentry': bool(pending.get('signal_triggered_reentry')),
                                 'reentryHistoryDiscount': pending.get('reentry_history_discount'),
                                 'revivalCanary': bool(pending.get('revival_canary')),
-                                'policyVersion': pending.get('policy_version'),
                                 'quoteGuardVersion': pending.get('quote_guard_version'),
                                 'registryTierAtEntry': pending.get('registry_tier_at_entry'),
                                 'registryReasonAtEntry': pending.get('registry_reason_at_entry'),
@@ -19786,7 +20120,8 @@ def run_monitor(db):
                             _capital_tier, _position_size_class, _regime_tag,
                             _entry_latency_audit.get('signal_to_quote_latency_ms'),
                             _entry_latency_audit.get('signal_to_quote_drift_pct'),
-                            _entry_latency_audit.get('quote_spread_pct')
+                            _entry_latency_audit.get('quote_spread_pct'),
+                            _policy_version, _entry_branch, _intervention_flags_json,
                         ))
                         new_trade_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                         db.commit()
@@ -19833,7 +20168,9 @@ def run_monitor(db):
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             'entry_decision_contract': _entry_decision_contract.to_dict(),
                             'revival_canary': bool(pending.get('revival_canary')),
-                            'policy_version': pending.get('policy_version'),
+                            'policy_version': _policy_version,
+                            'entry_branch': _entry_branch,
+                            'intervention_flags': _intervention_flags,
                             'quote_guard_version': pending.get('quote_guard_version'),
                             'registry_tier_at_entry': pending.get('registry_tier_at_entry'),
                             'registry_reason_at_entry': pending.get('registry_reason_at_entry'),

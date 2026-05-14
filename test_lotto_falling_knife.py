@@ -452,7 +452,7 @@ def test_probe_profit_capture_locks_small_scout_at_ten_percent():
     assert exit_matrix["reason"].startswith("probe_profit_lock")
 
 
-def test_hard_gate_baseline_profit_capture_waits_for_twenty_percent():
+def test_hard_gate_baseline_profit_capture_locks_at_ten_percent():
     class Pos:
         position_size_sol = 0.002
         peak_pnl = 0.12
@@ -474,10 +474,11 @@ def test_hard_gate_baseline_profit_capture_waits_for_twenty_percent():
         {"action": "hold", "reason": "hold", "current_pnl": 0.22, "peak_pnl": 0.22},
     )
 
-    assert early["action"] == "hold"
+    assert early["action"] == "lock_profit"
+    assert early["sell_pct"] == 0.70
     assert locked["action"] == "lock_profit"
-    assert locked["sell_pct"] == 0.50
-    assert locked["reason"].startswith("hard_gate_baseline_profit_lock")
+    assert locked["sell_pct"] == 0.70
+    assert locked["reason"].startswith("dog_catcher_hard_gate_profit_lock")
 
 
 def test_hard_gate_baseline_profit_capture_exits_peak35_giveback():
@@ -499,8 +500,8 @@ def test_hard_gate_baseline_profit_capture_exits_peak35_giveback():
     )
 
     assert exit_matrix["action"] == "exit"
-    assert exit_matrix["trail_floor"] == 0.18
-    assert exit_matrix["reason"].startswith("hard_gate_baseline_peak35_floor")
+    assert round(exit_matrix["trail_floor"], 3) == 0.259
+    assert exit_matrix["reason"].startswith("dog_catcher_hard_gate_trail_floor")
 
 
 def test_observation_probe_late_locks_when_ten_percent_peak_gives_back_to_three():

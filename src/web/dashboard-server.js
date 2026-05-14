@@ -533,7 +533,7 @@ function getTableColumns(database, tableName) {
 }
 
 function getPaperReviewDir() {
-  const raw = process.env.PAPER_REVIEW_DIR || join(dirname(getPaperDbPath()), 'reviews');
+  const raw = process.env.PAPER_REVIEW_DIR || join(dirname(getPaperDbPath()), 'review-artifacts');
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
 }
 
@@ -571,6 +571,11 @@ function reviewPolicyFingerprint(registrySummary = null) {
     'REVIVAL_CANARY_POLICY_VERSION',
     'ENTRY_MODE_POLICY_VERSION',
     'PREMIUM_LIVE_EXECUTION_ENABLED',
+    'DOG_CATCHER_V1_ENABLED',
+    'DOG_CATCHER_POLICY_VERSION',
+    'SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED',
+    'PRE_PASS_RELAXED_CANARY_ENABLED',
+    'DOG_CATCHER_HARD_GATE_PEAK10_FACTOR',
   ];
   const env = {};
   for (const key of envKeys) {
@@ -610,6 +615,9 @@ function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit, options = {}) 
     col('signal_route'),
     col('strategy_stage'),
     col('entry_mode'),
+    col('policy_version'),
+    col('entry_branch'),
+    col('intervention_flags_json'),
     col('monitor_state_json'),
     col('lotto_state_json'),
     col('entry_execution_audit_json'),
@@ -4097,7 +4105,8 @@ const server = http.createServer(async (req, res) => {
       const includeClosedLoop = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_closed_loop') || '0').toLowerCase());
       const includeTableStats = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_table_stats') || '0').toLowerCase());
       const includeLatency = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_latency') || '0').toLowerCase());
-      const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
+      const freeze = ['1', 'true', 'yes'].includes(String(url.searchParams.get('freeze') || '0').toLowerCase());
+      const persist = freeze || !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
       const paperDbTimeoutMs = boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000);
       const timings = {};
 
@@ -4163,6 +4172,9 @@ const server = http.createServer(async (req, res) => {
         registrySummary,
         notes: [
           'This snapshot is persisted so review windows can be compared across commits and policy fingerprints.',
+          freeze
+            ? 'freeze=1 requested: this artifact is the immutable review source for follow-up discussion.'
+            : 'Pass freeze=1 when starting a review so every number has a stable snapshot_id.',
           'All execution metrics in this endpoint are paper-trader metrics; live execution remains out of scope.',
           'Missed dog counts use quote-clean fields when available, and should not be mixed with theoretical mark-only peaks.',
           includeClosedLoop
@@ -4185,6 +4197,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         ...snapshot,
+        freeze,
         persisted_files: persistedFiles,
         query_ms: Date.now() - startedAt,
         timings_ms: timings,
@@ -4269,6 +4282,11 @@ const server = http.createServer(async (req, res) => {
         ].filter(Boolean).join(', ')})`;
         const executableExpr = missedCols.has('executable_peak_pnl') ? 'executable_peak_pnl IS NOT NULL' : '0';
         const quoteCleanExpr = missedCols.has('quote_clean_peak_pnl') ? 'quote_clean_peak_pnl IS NOT NULL' : '0';
+        const executableSortExpr = missedCols.has('executable_peak_pnl') && missedCols.has('quote_clean_peak_pnl')
+          ? 'CASE WHEN executable_peak_pnl IS NOT NULL THEN 0 WHEN quote_clean_peak_pnl IS NOT NULL THEN 1 ELSE 2 END'
+          : missedCols.has('executable_peak_pnl')
+            ? 'CASE WHEN executable_peak_pnl IS NOT NULL THEN 0 ELSE 2 END'
+            : (missedCols.has('quote_clean_peak_pnl') ? 'CASE WHEN quote_clean_peak_pnl IS NOT NULL THEN 1 ELSE 2 END' : '2');
         executableMissed = {
           available: true,
           summary: paperDb.prepare(`
@@ -4289,7 +4307,7 @@ const server = http.createServer(async (req, res) => {
                    ${missedCols.has('executable_peak_source') ? 'executable_peak_source' : 'NULL AS executable_peak_source'}
             FROM paper_missed_signal_attribution
             WHERE COALESCE(created_event_ts, signal_ts, baseline_ts, 0) >= @since
-            ORDER BY ranked_peak DESC
+            ORDER BY ${executableSortExpr} ASC, ranked_peak DESC
             LIMIT @limit
           `).all({ since: sinceTs || 0, limit }).map((row) => ({
             ...row,
@@ -4316,6 +4334,25 @@ const server = http.createServer(async (req, res) => {
           live_action: 'report_only',
         },
       };
+      const stage1Rows = capitalLifecycle.filter((row) => String(row.capital_tier || '') === 'stage1_main');
+      const stage1Trades = stage1Rows.reduce((sum, row) => sum + Number(row.trades || 0), 0);
+      const stage1AvgPnl = stage1Trades
+        ? stage1Rows.reduce((sum, row) => sum + Number(row.avg_pnl || 0) * Number(row.trades || 0), 0) / stage1Trades
+        : null;
+      const stage1Governance = {
+        scope: 'report_only',
+        capital_tier: 'stage1_main',
+        trades: stage1Trades,
+        avg_pnl_pct: stage1AvgPnl == null ? null : roundNumber(stage1AvgPnl * 100, 2),
+        warnings: [
+          stage1Trades > 0 && stage1AvgPnl != null && stage1AvgPnl < 0 ? 'stage1_negative_window_pnl' : null,
+          stage1Trades === 0 ? 'stage1_no_samples_in_window' : null,
+        ].filter(Boolean),
+        next_actions: [
+          'compare_24h_7d_14d_stage1_by_commit_before_size_changes',
+          'do_not_apply_tiny_trail_parameters_to_stage1_without_stage1_counterfactual',
+        ],
+      };
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
@@ -4336,6 +4373,7 @@ const server = http.createServer(async (req, res) => {
           avg_peak_pct: row.avg_peak == null ? null : roundNumber(Number(row.avg_peak) * 100, 2),
           avg_giveback_pct: row.avg_giveback == null ? null : roundNumber(Number(row.avg_giveback) * 100, 2),
         })),
+        stage1_governance: stage1Governance,
         table_aging: aging,
         notes: {
           paper_only: true,
