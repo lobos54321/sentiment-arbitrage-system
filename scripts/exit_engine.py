@@ -12,7 +12,12 @@ import threading
 import os
 import re
 
-from profit_protect_policy import ath_moon_bag_floor, probe_runner_floor, profit_protect_floor
+from profit_protect_policy import (
+    ath_moon_bag_floor,
+    cohort_aware_probe_runner_floor,
+    probe_runner_floor,
+    profit_protect_floor,
+)
 
 log = logging.getLogger('paper_trade_monitor')
 
@@ -92,6 +97,33 @@ def _is_observation_probe_position(pos):
 def _entry_mode_for_position(pos):
     state = getattr(pos, "monitor_state", None) or {}
     return str(state.get("entryMode") or state.get("entry_mode") or getattr(pos, "entry_mode", "") or "")
+
+
+def _capital_tier_for_position(pos):
+    state = getattr(pos, "monitor_state", None) or {}
+    return str(state.get("capitalTier") or state.get("capital_tier") or "")
+
+
+def _resonance_cohort_for_position(pos):
+    state = getattr(pos, "monitor_state", None) or {}
+    return str(
+        state.get("sourceResonanceCohort")
+        or state.get("source_resonance_cohort")
+        or state.get("resonanceCohort")
+        or state.get("resonance_cohort")
+        or ""
+    )
+
+
+def _cohort_probe_floor_for_position(pos, peak_pnl):
+    if not _is_observation_probe_position(pos):
+        return None
+    return cohort_aware_probe_runner_floor(
+        peak_pnl,
+        entry_mode=_entry_mode_for_position(pos),
+        resonance_cohort=_resonance_cohort_for_position(pos),
+        capital_tier=_capital_tier_for_position(pos) or "tiny_probe",
+    )
 
 
 def _ath_no_kline_fast_fail_detail(pos, pnl, held_sec):
@@ -924,6 +956,9 @@ class ExitGuardianThread(threading.Thread):
                         continue
 
                     _phase0_protect_floor = profit_protect_floor(pos.peak_pnl)
+                    _phase0_probe_floor = _cohort_probe_floor_for_position(pos, pos.peak_pnl)
+                    if _phase0_probe_floor is not None:
+                        _phase0_protect_floor = max(_phase0_protect_floor or 0.0, _phase0_probe_floor)
                     if _phase0_protect_floor is not None and pnl < _phase0_protect_floor:
                         log.info(
                             f"[ExitGuardian] 🛡️ {pos.symbol} PHASE0 PROFIT PROTECT: "
@@ -1060,6 +1095,9 @@ class ExitGuardianThread(threading.Thread):
                         continue
 
                     _lotto_protect_floor = profit_protect_floor(pos.peak_pnl)
+                    _lotto_probe_floor = _cohort_probe_floor_for_position(pos, pos.peak_pnl)
+                    if _lotto_probe_floor is not None:
+                        _lotto_protect_floor = max(_lotto_protect_floor or 0.0, _lotto_probe_floor)
                     if _lotto_protect_floor is not None and pnl < _lotto_protect_floor:
                         log.info(
                             f"[ExitGuardian] 🛡️ {pos.symbol} LOTTO PROFIT PROTECT: "
@@ -1138,10 +1176,15 @@ class ExitGuardianThread(threading.Thread):
                 elif _is_ath_entry and is_moon:
                     # === ATH Phase 3 Moon Bag: shared dynamic floor ===
                     moon_peak = pos.peak_pnl
+                    probe_moon_floor = _cohort_probe_floor_for_position(pos, moon_peak)
                     moon_floor = (
-                        probe_runner_floor(moon_peak)
-                        if self._is_probe_runner(pos)
-                        else ath_moon_bag_floor(moon_peak)
+                        probe_moon_floor
+                        if probe_moon_floor is not None
+                        else (
+                            probe_runner_floor(moon_peak)
+                            if self._is_probe_runner(pos)
+                            else ath_moon_bag_floor(moon_peak)
+                        )
                     )
                     if moon_floor is not None and moon_floor > 0 and pnl < moon_floor:
                         log.info(
@@ -1312,7 +1355,12 @@ class ExitGuardianThread(threading.Thread):
                     # Guardian doing a full exit. Without this, Guardian fires trail_stop at peak=25%
                     # before ExitMatrix can create the moon bag → we sell 100% instead of 50%.
                     _has_locked = w_entry.get('_profit_locked', False) if w_entry else False
-                    if pos.peak_pnl >= 0.25 and not is_moon and not _has_locked:
+                    if (
+                        pos.peak_pnl >= 0.25
+                        and not is_moon
+                        and not _has_locked
+                        and not _is_observation_probe_position(pos)
+                    ):
                         # Defer to ExitMatrix lock_profit — but still fire on CRASH velocity
                         if raw_vel_30s < -8.0 and pnl <= 0:
                             log.info(
@@ -1353,6 +1401,9 @@ class ExitGuardianThread(threading.Thread):
 
                         trail_factor = max(base_factor, vel_factor)
                         trail_floor = pos.peak_pnl * trail_factor + _threat_tighten
+                        _probe_trail_floor = _cohort_probe_floor_for_position(pos, pos.peak_pnl)
+                        if _probe_trail_floor is not None:
+                            trail_floor = max(trail_floor, _probe_trail_floor + _threat_tighten)
 
                         if pnl < trail_floor:
                             log.info(
@@ -1414,7 +1465,9 @@ class ExitGuardianThread(threading.Thread):
                         self.store.update_position_state(w_entry['id'], moon_peak_pnl=pnl)
 
                     trail_factor = w_entry.get('moon_trail_factor', 0.2) or 0.2
-                    runner_floor = probe_runner_floor(moon_peak) if self._is_probe_runner(pos) else None
+                    runner_floor = _cohort_probe_floor_for_position(pos, moon_peak)
+                    if runner_floor is None and self._is_probe_runner(pos):
+                        runner_floor = probe_runner_floor(moon_peak)
                     moon_floor = runner_floor if runner_floor is not None else moon_peak * trail_factor
                     if moon_peak > 0 and pnl < moon_floor:
                         floor_reason = 'probe_runner_floor' if runner_floor is not None else 'moon_trail'

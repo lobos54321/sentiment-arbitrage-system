@@ -346,6 +346,7 @@ LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE = 'lotto_micro_reclaim_tiny_probe'
 SOURCE_RESONANCE_TINY_PROBE_MODE = 'source_resonance_tiny_probe'
 SOURCE_RESONANCE_TINY_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_ENABLED', 'true').lower() != 'false'
 SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
+SOURCE_RESONANCE_WEAK_PROBE_SIZE_SOL = float(os.environ.get('SOURCE_RESONANCE_WEAK_PROBE_SIZE_SOL', '0.001'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_MC', '250000'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_MC', '0'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC', '60'))
@@ -2265,6 +2266,11 @@ def normalize_pending_entry(pending, lifecycle_id, defaults=None):
         pending['token_ca'] = w_entry.get('ca')
     if pending.get('signal_ts') is None and w_entry.get('signal_ts') is not None:
         pending['signal_ts'] = w_entry.get('signal_ts')
+    normalized_signal_ts = normalize_signal_ts_seconds(pending.get('signal_ts'))
+    if normalized_signal_ts is not None:
+        pending['signal_ts'] = normalized_signal_ts
+        if isinstance(w_entry, dict):
+            w_entry['signal_ts'] = normalized_signal_ts
     if pending.get('premium_signal_id') is None and w_entry.get('premium_signal_id') is not None:
         pending['premium_signal_id'] = w_entry.get('premium_signal_id')
     if pending.get('entry_mode') is None and pending.get('scout_mode') is not None:
@@ -6636,6 +6642,7 @@ def evaluate_source_resonance_tiny_probe(
     observed['soft_override'] = soft_override
     thresholds = {
         'size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+        'weak_size_sol': SOURCE_RESONANCE_WEAK_PROBE_SIZE_SOL,
         'min_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC,
         'max_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC,
         'max_negative_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC,
@@ -6649,12 +6656,26 @@ def evaluate_source_resonance_tiny_probe(
         'max_top10_pct': 85.0,
     }
 
+    strong_source_confirm = bool(
+        momentum_confirmed
+        or volume_confirmed
+        or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
+        or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
+        or external_alpha.get('quote_clean')
+        or external_alpha.get('quote_executable')
+    )
+    probe_size_sol = (
+        SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+        if strong_source_confirm and not soft_override.get('pass')
+        else min(SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL, SOURCE_RESONANCE_WEAK_PROBE_SIZE_SOL)
+    )
+
     def _result(passed, reason):
         return {
             'pass': bool(passed),
             'reason': reason,
             'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
-            'position_size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            'position_size_sol': probe_size_sol,
             'paper_only_scout': True,
             'probe': True,
             'probe_source': 'source_resonance',
@@ -6678,6 +6699,7 @@ def evaluate_source_resonance_tiny_probe(
             },
             'observed': observed,
             'thresholds': thresholds,
+            'strong_source_confirm': strong_source_confirm,
             'lifecycle': lifecycle,
         }
 
@@ -6731,7 +6753,8 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
     pending['scout_mode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
     pending['paper_only_scout'] = True
     pending['execution_scope'] = 'paper_only'
-    pending['kelly_position_sol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+    source_probe_size_sol = float(detail.get('position_size_sol') or SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL)
+    pending['kelly_position_sol'] = source_probe_size_sol
     pending['timing_passed'] = bool(detail.get('timing_passed'))
     pending['replay_source'] = 'live_monitor_source_resonance_probe'
     pending['stage_outcome'] = stage_outcome or 'source_resonance_tiny_probe_armed'
@@ -6768,7 +6791,7 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
         lotto_state['probeEntryMode'] = SOURCE_RESONANCE_TINY_PROBE_MODE
         lotto_state['paper_only_scout'] = True
         lotto_state['executionScope'] = 'paper_only'
-        lotto_state['positionSizeSol'] = SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
+        lotto_state['positionSizeSol'] = source_probe_size_sol
         lotto_state['sourceResonanceProbe'] = detail
         lotto_state['policyVersion'] = pending.get('policy_version')
         lotto_state['entryBranch'] = pending.get('entry_branch')
@@ -6777,7 +6800,7 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
         if isinstance(entry_decision, dict):
             entry_decision.update({
                 'entry_mode': SOURCE_RESONANCE_TINY_PROBE_MODE,
-                'position_size_sol': SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+                'position_size_sol': source_probe_size_sol,
                 'paper_only_scout': True,
                 'execution_scope': 'paper_only',
                 'timing_passed': bool(detail.get('timing_passed')),

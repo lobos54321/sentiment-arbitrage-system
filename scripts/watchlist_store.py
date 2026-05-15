@@ -33,6 +33,18 @@ def _usable_symbol(symbol):
     return value
 
 
+def _normalize_signal_ts_sec(value):
+    if value is None:
+        return None
+    try:
+        ts = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if ts > 1_000_000_000_000:
+        return ts // 1000
+    return ts
+
+
 # ─── Schema ────────────────────────────────────────────────────────────────
 
 CREATE_TABLE_SQL = """
@@ -196,6 +208,7 @@ class WatchlistStore:
         Returns the watchlist entry dict.
         """
         now = time.time()
+        signal_ts = _normalize_signal_ts_sec(signal_ts)
 
         # Check if already watching/holding this token
         existing = self.get_by_ca(ca)
@@ -299,15 +312,19 @@ class WatchlistStore:
                      signal_ts, premium_signal_id,
                      signal_price, signal_mc, signal_super,
                      signal_holders, signal_vol24h, signal_tx24h, signal_top10,
-                     added_at, latest_super, has_ath,
+                     added_at, latest_super, has_ath, ath_count, last_ath_ts, last_ath_mc, latest_ath_price,
                      lowest_price, highest_price, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'watching')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'watching')
             """, (
                 ca, symbol, signal_type, pool_address,
                 signal_ts, premium_signal_id,
                 signal_price, signal_mc, signal_super,
                 signal_holders, signal_vol24h, signal_tx24h, signal_top10,
                 now, signal_super, 1 if signal_type == 'ATH' else 0,
+                1 if signal_type == 'ATH' else 0,
+                signal_ts if signal_type == 'ATH' else 0,
+                signal_mc if signal_type == 'ATH' else 0,
+                signal_price if signal_type == 'ATH' else None,
                 signal_price, signal_price,
             ))
             self.db.commit()

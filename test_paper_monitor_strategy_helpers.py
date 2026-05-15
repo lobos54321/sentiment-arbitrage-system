@@ -3113,6 +3113,22 @@ def test_normalize_pending_entry_backfills_defaults_and_watchlist_identity():
     assert normalized["is_lotto"] is True
 
 
+def test_normalize_pending_entry_normalizes_millisecond_signal_ts():
+    pending = {
+        "w_entry": {
+            "ca": "TokenCA",
+            "signal_ts": 1778842042123,
+            "type": "ATH",
+        },
+        "paper_only_scout": True,
+    }
+
+    normalized = monitor.normalize_pending_entry(pending, "TokenCA:1778842042")
+
+    assert normalized["signal_ts"] == 1778842042
+    assert normalized["w_entry"]["signal_ts"] == 1778842042
+
+
 def _revival_canary_db():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

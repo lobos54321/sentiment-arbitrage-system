@@ -51,6 +51,26 @@ def test_register_refreshes_existing_watchlist_entry_for_fresh_ath(tmp_path):
         store.close()
 
 
+def test_register_normalizes_millisecond_signal_timestamps(tmp_path):
+    store = WatchlistStore(str(tmp_path / "watchlist.db"))
+    try:
+        entry = store.register(
+            ca="TokenCA",
+            symbol="DOG",
+            signal_type="ATH",
+            pool_address="Pool1",
+            signal_ts=1778842042123,
+            premium_signal_id=1,
+            signal_price=0.000001,
+            signal_mc=12000,
+        )
+
+        assert entry["signal_ts"] == 1778842042
+        assert entry["last_ath_ts"] == 1778842042
+    finally:
+        store.close()
+
+
 def test_register_fresh_ath_preserves_real_symbol_when_parser_returns_unknown(tmp_path):
     store = WatchlistStore(str(tmp_path / "watchlist.db"))
     try:

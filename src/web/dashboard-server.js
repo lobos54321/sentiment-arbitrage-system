@@ -321,6 +321,11 @@ function normalizeUnixishMs(value) {
   return numeric > 1_000_000_000_000 ? Math.floor(numeric) : Math.floor(numeric * 1000);
 }
 
+function normalizeUnixishSec(value) {
+  const ms = normalizeUnixishMs(value);
+  return ms == null ? null : Math.floor(ms / 1000);
+}
+
 function inferEntryMode(row) {
   const monitorState = parseJsonObject(row.monitor_state_json);
   const lottoState = parseJsonObject(row.lotto_state_json);
@@ -366,7 +371,8 @@ function athRecoveryFamilyFor(entryMode, monitorState = {}) {
 }
 
 function lifecycleSummaryKey(row) {
-  return row.lifecycle_id || `${row.token_ca || 'unknown'}:${row.signal_ts || ''}`;
+  const normalizedSignalTs = normalizeUnixishSec(row.signal_ts);
+  return row.lifecycle_id || `${row.token_ca || 'unknown'}:${normalizedSignalTs ?? ''}`;
 }
 
 function decisionStatus(row) {
@@ -4948,6 +4954,16 @@ const server = http.createServer(async (req, res) => {
           });
         }
         const summary = summaries.get(key);
+        if (routeLabel === 'ATH' && signalTsMs) {
+          const summarySignalTsMs = normalizeUnixishMs(summary.signal_ts);
+          if (!summarySignalTsMs || signalTsMs >= summarySignalTsMs) {
+            summary.signal_ts = event.signal_ts;
+            summary.signal_id = event.signal_id || summary.signal_id;
+            summary.route = 'ATH';
+            summary.lifecycle_id = event.lifecycle_id || summary.lifecycle_id;
+            if (usableSymbol(event.symbol)) summary.symbol = usableSymbol(event.symbol);
+          }
+        }
         summary.final_blocker = chooseFinalBlocker(
           summary.final_blocker,
           finalBlockerFromEvent(event, payload)

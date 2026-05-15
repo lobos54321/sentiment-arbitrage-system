@@ -1728,7 +1728,11 @@ export class PremiumSignalEngine {
       if (unknownDataBlocked) {
         this.stats.not_ath_prebuy_kline_block++;
         console.log(logParts);
-        const retryable = proxyDetail.strong && this._isRetryablePrebuyUnknown(normalizedUnknownReason);
+        const rateLimitedUnknown = /rate_limited|429|cooldown|provider_rate_limited|backfill_rate_limited/i.test(
+          String(normalizedUnknownReason || '')
+        );
+        const retryable = this._isRetryablePrebuyUnknown(normalizedUnknownReason)
+          && (proxyDetail.strong || rateLimitedUnknown);
         if (retryable && retryAttempt === 0) {
           const retryWatch = this._queueNotAthPrebuyRetry(ca, signal, prebuyGateResult);
           prebuyGateResult.retryWatch = retryWatch;
