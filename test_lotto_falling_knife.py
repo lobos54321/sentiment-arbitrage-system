@@ -507,6 +507,28 @@ def test_hard_gate_baseline_profit_capture_exits_peak35_giveback():
     assert exit_matrix["reason"].startswith("dog_catcher_hard_gate_trail_floor")
 
 
+def test_hard_gate_baseline_profit_capture_exits_fast_gap_before_floor():
+    class Pos:
+        position_size_sol = 0.002
+        peak_pnl = 0.37
+        signal_type = "ATH"
+        monitor_state = {
+            "entryMode": HARD_GATE_PASS_TINY_PROBE_MODE,
+            "signalRoute": "ATH",
+            "entrySol": 0.002,
+            "soldPct": 0.50,
+        }
+
+    exit_matrix = apply_probe_profit_capture(
+        Pos(),
+        {"has_locked_profit": True},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.27, "peak_pnl": 0.37},
+    )
+
+    assert exit_matrix["action"] == "exit"
+    assert exit_matrix["reason"].startswith("dog_catcher_hard_gate_gap_crash")
+
+
 def test_resonance_probe_profit_capture_exits_peak_giveback_before_late_lock():
     class Pos:
         position_size_sol = 0.001

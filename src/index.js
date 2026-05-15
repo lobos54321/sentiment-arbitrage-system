@@ -122,7 +122,7 @@ function startShadowDataSidecars(config) {
       args: [
         'scripts/gmgn_candidate_scout.py',
         '--loop',
-        '--interval', process.env.GMGN_SCOUT_INTERVAL_SEC || '60',
+        '--interval', process.env.GMGN_SCOUT_INTERVAL_SEC || '30',
         '--limit', process.env.GMGN_SCOUT_LIMIT || '50',
         '--state-db', paperDb,
         '--out', process.env.GMGN_CANDIDATES_OUT || './data/gmgn_candidates.jsonl',
@@ -139,7 +139,7 @@ function startShadowDataSidecars(config) {
       args: [
         'scripts/source_resonance_shadow.py',
         '--loop',
-        '--interval', process.env.SOURCE_RESONANCE_INTERVAL_SEC || '60',
+        '--interval', process.env.SOURCE_RESONANCE_INTERVAL_SEC || '20',
         '--lookback-hours', process.env.SOURCE_RESONANCE_LOOKBACK_HOURS || '24',
         '--limit', process.env.SOURCE_RESONANCE_LIMIT || '500',
         '--initial-delay', process.env.SOURCE_RESONANCE_INITIAL_DELAY_SEC || '20',

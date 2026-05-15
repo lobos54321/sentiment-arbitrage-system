@@ -247,3 +247,63 @@ test('strong NOT_ATH unknown data enters retry watch instead of final block', as
   }
   engine._notAthPrebuyRetryWatch.clear();
 });
+
+test('weak NOT_ATH retryable unknown data still enters retry watch', async () => {
+  const tokenCa = 'TokenWeakRetryWatch111111111111111111111111111';
+  const signalTsSec = 1_777_891_568;
+  const saved = [];
+  const engine = Object.create(PremiumSignalEngine.prototype);
+  engine.shadowMode = false;
+  engine.livePositionMonitor = null;
+  engine.stats = {
+    not_ath_prebuy_kline_pass: 0,
+    not_ath_prebuy_kline_unknown_data: 0,
+    not_ath_prebuy_kline_block: 0,
+  };
+  engine._notAthPrebuyUnknownDataFailClosed = true;
+  engine._notAthPrebuyRetryEnabled = true;
+  engine._notAthPrebuyRetryDelayMs = 60_000;
+  engine._notAthPrebuyRetryMaxAttempts = 3;
+  engine._notAthPrebuyRetryWatch = new Map();
+  engine._backfillPrebuyKlines = async () => ({
+    enough: false,
+    provider: 'shared_market_data',
+    reason: 'provider_no_bars',
+    providerAttempts: [
+      { provider: 'shared_market_data', ok: false, reason: 'provider_no_bars' },
+    ],
+  });
+  engine._checkKline = async () => ({
+    gateStatus: 'UNKNOWN_DATA',
+    reason: 'no_bars',
+    provider: 'shared_market_data',
+    failOpenPrevented: true,
+  });
+  engine.saveSignalRecord = (signal, status, ai, executed, linkage) => {
+    saved.push({ status, linkage });
+  };
+
+  const result = await engine._executeNotAth(tokenCa, {
+    token_ca: tokenCa,
+    symbol: 'WEAKRETRY',
+    timestamp: signalTsSec,
+    market_cap: 12_000,
+    volume_24h: 10_000,
+    indices: {
+      super_index: { current: 30 },
+      trade_index: { current: 0 },
+      address_index: { current: 0 },
+      security_index: { current: 0 },
+    },
+  });
+
+  assert.equal(result.action, 'SKIP');
+  assert.match(result.reason, /^prebuy_retry_watch:/);
+  assert.equal(saved[0].status, 'NOT_ATH_PREBUY_KLINE_RETRY_QUEUED');
+  assert.equal(saved[0].linkage.gateResult.dataConfidence, 'none');
+  assert.equal(saved[0].linkage.gateResult.retryWatch.queued, true);
+  for (const retry of engine._notAthPrebuyRetryWatch.values()) {
+    clearTimeout(retry.timer);
+  }
+  engine._notAthPrebuyRetryWatch.clear();
+});

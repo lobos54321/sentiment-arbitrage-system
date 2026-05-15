@@ -158,7 +158,9 @@ LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_M
 LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_BS', '1.20'))
 DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
 DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED', 'true').lower() != 'false'
-DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '90'))
+DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '30'))
+DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC', '60'))
+DISCOVERY_FINAL_RECLAIM_MAX_RETRIES = max(0, int(os.environ.get('DISCOVERY_FINAL_RECLAIM_MAX_RETRIES', '3')))
 TINY_EXIT_QUOTE_SANITY_ENABLED = os.environ.get('TINY_EXIT_QUOTE_SANITY_ENABLED', 'true').lower() != 'false'
 TINY_EXIT_QUOTE_SANITY_MIN_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MIN_PEAK', '0.02'))
 TINY_EXIT_QUOTE_SANITY_MAX_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MAX_PEAK', '0.10'))
@@ -169,8 +171,8 @@ PROBE_QUOTE_PRIMARY_MIN_MARK_TRIGGER = float(os.environ.get('PROBE_QUOTE_PRIMARY
 PROBE_HOLD_QUOTE_MONITOR_ENABLED = os.environ.get('PROBE_HOLD_QUOTE_MONITOR_ENABLED', 'true').lower() != 'false'
 PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC = float(os.environ.get('PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC', '20'))
 PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK = float(os.environ.get('PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK', '0.02'))
-PROBE_HOLD_QUOTE_GAP_STOP_PCT = float(os.environ.get('PROBE_HOLD_QUOTE_GAP_STOP_PCT', '0.15'))
-PROBE_HOLD_QUOTE_STOP_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_STOP_PNL', '-0.18'))
+PROBE_HOLD_QUOTE_GAP_STOP_PCT = float(os.environ.get('PROBE_HOLD_QUOTE_GAP_STOP_PCT', '0.08'))
+PROBE_HOLD_QUOTE_STOP_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_STOP_PNL', '-0.08'))
 QUOTE_GUARD_POLICY_VERSION = os.environ.get('QUOTE_GUARD_POLICY_VERSION', 'd162c067')
 
 DEFAULT_PAPER_EXECUTION = {
@@ -288,6 +290,7 @@ DOG_CATCHER_RESONANCE_PEAK60_FACTOR = float(os.environ.get('DOG_CATCHER_RESONANC
 DOG_CATCHER_RESONANCE_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_RESONANCE_GAP_CRASH_PCT', '0.12'))
 DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR', '0.80'))
 DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT', '0.12'))
+DOG_CATCHER_HARD_GATE_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_HARD_GATE_GAP_CRASH_PCT', '0.10'))
 DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED = os.environ.get(
     'DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED', 'true'
 ).lower() != 'false'
@@ -351,9 +354,9 @@ SOURCE_RESONANCE_TINY_PROBE_MAX_MC = float(os.environ.get('SOURCE_RESONANCE_TINY
 SOURCE_RESONANCE_TINY_PROBE_MIN_MC = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_MC', '0'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC', '60'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC', str(24 * 60 * 60)))
-SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC', '120'))
+SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC', '600'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC', '900'))
-SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC', '600'))
+SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC', '300'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS', '2'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
@@ -729,7 +732,7 @@ DISCOVERY_LOW_LIQ_EXTREME_MIN_BS = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTRE
 DISCOVERY_LOW_LIQ_EXTREME_MIN_VOL_M5 = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MIN_VOL_M5', '20000'))
 DISCOVERY_LOW_LIQ_EXTREME_MIN_TX_M5 = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MIN_TX_M5', '200'))
 DISCOVERY_LOW_LIQ_EXTREME_MAX_NEG_M5 = float(os.environ.get('DISCOVERY_LOW_LIQ_EXTREME_MAX_NEG_M5', '0'))
-EXIT_QUOTE_REPRICE_DIVERGENCE_PCT = float(os.environ.get('EXIT_QUOTE_REPRICE_DIVERGENCE_PCT', '0.20'))
+EXIT_QUOTE_REPRICE_DIVERGENCE_PCT = float(os.environ.get('EXIT_QUOTE_REPRICE_DIVERGENCE_PCT', '0.08'))
 LIVE_PRICE_MAX_FUTURE_MS = int(os.environ.get('LIVE_PRICE_MAX_FUTURE_MS', '1500'))
 LOTTO_FALLING_KNIFE_LIQ_USD = float(os.environ.get('LOTTO_FALLING_KNIFE_LIQ_USD', '15000'))
 LOTTO_FALLING_KNIFE_M5_PCT = float(os.environ.get('LOTTO_FALLING_KNIFE_M5_PCT', '-20'))
@@ -4841,6 +4844,16 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
                     f"dog_catcher_hard_gate_trail_floor "
                     f"(pnl={current_pnl:.1%} <= floor={floor:.1%}, "
                     f"peak={peak_pnl:.1%}, factor={floor_factor:.0%})"
+                ),
+                trail_floor=floor,
+            )
+        if peak_pnl >= DOG_CATCHER_HARD_GATE_LOCK_PEAK and (peak_pnl - current_pnl) + 1e-9 >= DOG_CATCHER_HARD_GATE_GAP_CRASH_PCT:
+            return _override(
+                'exit',
+                (
+                    f"dog_catcher_hard_gate_gap_crash "
+                    f"(giveback={(peak_pnl - current_pnl):.1%} >= {DOG_CATCHER_HARD_GATE_GAP_CRASH_PCT:.1%}, "
+                    f"peak={peak_pnl:.1%})"
                 ),
                 trail_floor=floor,
             )
@@ -12443,6 +12456,62 @@ def process_discovery_tracking_candidates(
                     },
                     event_ts=now_ts,
                 )
+            elif (
+                DISCOVERY_FINAL_RECLAIM_ENABLED
+                and candidate.get('final_reclaim_attempted')
+                and int(candidate.get('final_reclaim_retry_count') or 0) < DISCOVERY_FINAL_RECLAIM_MAX_RETRIES
+                and mode in PAPER_TINY_SCOUT_ENTRY_MODES
+            ):
+                final_reclaim_quote_probe = _discovery_quote_probe(
+                    token_ca,
+                    lifecycle_id=lifecycle_id,
+                    mode=mode,
+                    stage_name='tracking_ttl_final_reclaim_retry_quote_probe',
+                )
+                final_reclaim_quote_executable = bool(final_reclaim_quote_probe.get('success'))
+                candidate['final_reclaim_retry_count'] = int(candidate.get('final_reclaim_retry_count') or 0) + 1
+                candidate['final_reclaim_quote_probe'] = final_reclaim_quote_probe
+                candidate['final_reclaim_quote_executable'] = final_reclaim_quote_executable
+                candidate['expires_at'] = now_ts + (
+                    DISCOVERY_TRACKING_POLL_SEC
+                    if final_reclaim_quote_executable
+                    else DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC
+                )
+                if final_reclaim_quote_executable:
+                    candidate['last_check_ts'] = 0.0
+                    candidate['ttl_rescue_used'] = True
+                    candidate['ttl_rescue_force_canary'] = True
+                record_decision_event(
+                    db,
+                    component='discovery_tracking',
+                    event_type='candidate_recheck',
+                    decision='wait',
+                    reason=(
+                        'tracking_ttl_final_reclaim_retry_quote_executable'
+                        if final_reclaim_quote_executable
+                        else 'tracking_ttl_final_reclaim_retry_wait'
+                    ),
+                    token_ca=token_ca,
+                    symbol=candidate.get('symbol'),
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=candidate.get('signal_ts'),
+                    signal_id=candidate.get('signal_id'),
+                    route=route,
+                    payload={
+                        'entry_mode': mode,
+                        'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                        'attempts': candidate.get('attempts'),
+                        'last_wait_reason': candidate.get('last_wait_reason'),
+                        'final_reclaim_retry_count': candidate.get('final_reclaim_retry_count'),
+                        'final_reclaim_max_retries': DISCOVERY_FINAL_RECLAIM_MAX_RETRIES,
+                        'retry_extend_sec': DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC,
+                        'final_reclaim_quote_probe': final_reclaim_quote_probe,
+                        'final_reclaim_quote_executable': final_reclaim_quote_executable,
+                    },
+                    event_ts=now_ts,
+                )
+                if not final_reclaim_quote_executable:
+                    continue
             else:
                 discovery_candidates.pop(key, None)
                 record_decision_event(

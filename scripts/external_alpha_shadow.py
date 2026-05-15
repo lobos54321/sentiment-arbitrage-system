@@ -19,6 +19,7 @@ DEFAULT_EXTERNAL_ALPHA_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 EXTERNAL_ALPHA_SHADOW_ENABLED = os.environ.get("EXTERNAL_ALPHA_SHADOW_ENABLED", "true").strip().lower() != "false"
 GMGN_MOMENTUM_SHADOW_ENABLED = os.environ.get("GMGN_MOMENTUM_SHADOW_ENABLED", "true").strip().lower() != "false"
 EXTERNAL_ALPHA_LOOKBACK_SEC = int(os.environ.get("EXTERNAL_ALPHA_LOOKBACK_SEC", "600"))
+EXTERNAL_ALPHA_FUTURE_TOLERANCE_SEC = int(os.environ.get("EXTERNAL_ALPHA_FUTURE_TOLERANCE_SEC", "600"))
 GMGN_MOMENTUM_MIN_ROUNDS = int(os.environ.get("GMGN_MOMENTUM_MIN_ROUNDS", "3"))
 GMGN_MOMENTUM_MIN_GAIN_PCT = float(os.environ.get("GMGN_MOMENTUM_MIN_GAIN_PCT", "5.0"))
 GMGN_MOMENTUM_BUY_DECAY_TOLERANCE = float(os.environ.get("GMGN_MOMENTUM_BUY_DECAY_TOLERANCE", "0.80"))
@@ -431,7 +432,17 @@ def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None,
     last_seen = _timestamp_sec(state.get("last_seen_ts"))
     signal_ts_sec = _timestamp_sec(signal_ts, now)
     age_sec = now - last_seen if last_seen is not None else None
+    future_skew_sec = None
+    if age_sec is not None and age_sec < 0 and abs(age_sec) <= EXTERNAL_ALPHA_FUTURE_TOLERANCE_SEC:
+        future_skew_sec = abs(age_sec)
+        last_seen = now
+        age_sec = 0
     lead_sec = signal_ts_sec - first_seen if first_seen is not None and signal_ts_sec is not None else None
+    lead_skew_sec = None
+    if lead_sec is not None and lead_sec < 0 and abs(lead_sec) <= EXTERNAL_ALPHA_FUTURE_TOLERANCE_SEC:
+        lead_skew_sec = abs(lead_sec)
+        first_seen = signal_ts_sec
+        lead_sec = 0
     anomaly_reasons = []
     if first_seen is None:
         anomaly_reasons.append("gmgn_first_seen_missing")
@@ -441,7 +452,7 @@ def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None,
         anomaly_reasons.append("gmgn_seen_after_signal")
     if lead_sec is not None and lead_sec > 24 * 60 * 60:
         anomaly_reasons.append("gmgn_lead_time_unreasonable")
-    if age_sec is not None and age_sec < -120:
+    if age_sec is not None and age_sec < -EXTERNAL_ALPHA_FUTURE_TOLERANCE_SEC:
         anomaly_reasons.append("external_alpha_future_seen")
     if age_sec is None or age_sec > lookback_sec:
         return {
@@ -455,6 +466,8 @@ def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None,
             "lead_time_sec": lead_sec,
             "timestamp_valid": not anomaly_reasons,
             "timestamp_anomaly_reason": ",".join(anomaly_reasons) if anomaly_reasons else None,
+            "timestamp_adjusted_future_skew_sec": future_skew_sec,
+            "timestamp_adjusted_lead_skew_sec": lead_skew_sec,
         }
     return {
         "available": True,
@@ -475,6 +488,8 @@ def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None,
         "last_seen_age_sec": age_sec,
         "timestamp_valid": not anomaly_reasons,
         "timestamp_anomaly_reason": ",".join(anomaly_reasons) if anomaly_reasons else None,
+        "timestamp_adjusted_future_skew_sec": future_skew_sec,
+        "timestamp_adjusted_lead_skew_sec": lead_skew_sec,
         "source_last": state.get("source_last"),
         "category_last": state.get("category_last"),
         "last_market_cap": _f(state.get("last_market_cap")),

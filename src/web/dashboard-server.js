@@ -5116,7 +5116,12 @@ const server = http.createServer(async (req, res) => {
       if (statusFilter !== 'all') {
         list = list.filter((item) => String(item.final_status || '').toLowerCase() === statusFilter);
       }
-      const anchorMismatchCount = list.filter((item) => item.anchor_is_latest_ath === false).length;
+      const staleAthAnchorCount = list.filter((item) => item.anchor_is_latest_ath === false).length;
+      const anchorMismatchCount = list.filter((item) => (
+        item.anchor_is_latest_ath === false
+        && !item.has_trade
+        && !['closed', 'entered'].includes(String(item.final_status || '').toLowerCase())
+      )).length;
       const counts = {};
       const byFinalGate = {};
       const byFinalBlocker = {};
@@ -5185,6 +5190,8 @@ const server = http.createServer(async (req, res) => {
         },
         status_counts: counts,
         anchor_mismatch_count: anchorMismatchCount,
+        stale_ath_anchor_count: staleAthAnchorCount,
+        anchor_mismatch_definition: 'active/unfilled ATH lifecycles whose anchor is older than the latest ATH signal for the same token; closed or filled older ATH lifecycles are counted only in stale_ath_anchor_count',
         by_final_blocker: Object.values(byFinalBlocker).sort((a, b) => b.n - a.n).slice(0, 100),
         by_final_gate: Object.values(byFinalGate).sort((a, b) => b.n - a.n).slice(0, 100),
         lifecycles: list.slice(0, limit),

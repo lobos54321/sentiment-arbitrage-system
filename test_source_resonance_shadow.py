@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
-from external_alpha_shadow import init_external_alpha_shadow, record_external_alpha_candidates  # noqa: E402
+from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha, record_external_alpha_candidates  # noqa: E402
 from source_resonance_shadow import lookup_entry_quote_audit, lookup_quote_shadow, run_once  # noqa: E402
 
 
@@ -132,6 +132,39 @@ def test_source_resonance_builds_gmgn_quote_clean_cohort(tmp_path):
         for row in db.execute("SELECT stage FROM latency_audit_events WHERE token_ca = 'TokenCA'")
     }
     assert {"source_event", "telegram_receive", "premium_signal_recorded", "paper_first_decision"} <= stages
+    db.close()
+
+
+def test_external_alpha_lookup_tolerates_small_clock_skew(tmp_path):
+    paper_db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(paper_db_path)
+    db.row_factory = sqlite3.Row
+    init_external_alpha_shadow(db)
+    record_external_alpha_candidates(
+        db,
+        [{
+            "source": "gmgn_trending_1m",
+            "chain": "sol",
+            "ca": "TokenSkew",
+            "symbol": "SKEW",
+            "market_cap": 12000,
+            "liquidity": 6000,
+            "volume": 20000,
+            "swaps": 100,
+            "buys": 60,
+            "sells": 40,
+        }],
+        captured_at=1060,
+    )
+    db.commit()
+
+    alpha = lookup_external_alpha(db, "TokenSkew", now=1000, signal_ts=1000, lookback_sec=600)
+
+    assert alpha["available"] is True
+    assert alpha["timestamp_valid"] is True
+    assert alpha["last_seen_age_sec"] == 0
+    assert alpha["timestamp_adjusted_future_skew_sec"] == 60
+    assert alpha["timestamp_adjusted_lead_skew_sec"] == 60
     db.close()
 
 

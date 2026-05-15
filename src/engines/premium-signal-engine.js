@@ -87,8 +87,8 @@ export class PremiumSignalEngine {
     this._klineProviderFreshnessSec = parseInt(process.env.KLINE_PROVIDER_FRESHNESS_SEC || '120', 10);
     this._notAthPrebuyUnknownDataFailClosed = process.env.NOT_ATH_PREBUY_UNKNOWN_DATA_FAIL_OPEN !== 'true';
     this._notAthPrebuyRetryEnabled = process.env.NOT_ATH_PREBUY_RETRY_ENABLED !== 'false';
-    this._notAthPrebuyRetryDelayMs = parseInt(process.env.NOT_ATH_PREBUY_RETRY_DELAY_MS || String(3 * 60_000), 10);
-    this._notAthPrebuyRetryMaxAttempts = parseInt(process.env.NOT_ATH_PREBUY_RETRY_MAX_ATTEMPTS || '1', 10);
+    this._notAthPrebuyRetryDelayMs = parseInt(process.env.NOT_ATH_PREBUY_RETRY_DELAY_MS || String(60_000), 10);
+    this._notAthPrebuyRetryMaxAttempts = parseInt(process.env.NOT_ATH_PREBUY_RETRY_MAX_ATTEMPTS || '3', 10);
     this._notAthPrebuyRetryWatch = new Map();
 
     // 去重（短期 5 分钟）
@@ -1732,8 +1732,11 @@ export class PremiumSignalEngine {
           String(normalizedUnknownReason || '')
         );
         const retryable = this._isRetryablePrebuyUnknown(normalizedUnknownReason)
-          && (proxyDetail.strong || rateLimitedUnknown);
-        if (retryable && retryAttempt === 0) {
+          || rateLimitedUnknown;
+        const maxRetryAttempts = Number.isFinite(this._notAthPrebuyRetryMaxAttempts)
+          ? this._notAthPrebuyRetryMaxAttempts
+          : 3;
+        if (retryable && retryAttempt < maxRetryAttempts) {
           const retryWatch = this._queueNotAthPrebuyRetry(ca, signal, prebuyGateResult);
           prebuyGateResult.retryWatch = retryWatch;
           if (retryWatch.queued) {
