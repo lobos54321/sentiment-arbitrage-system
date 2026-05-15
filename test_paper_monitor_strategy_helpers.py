@@ -68,6 +68,7 @@ from paper_trade_monitor import (  # noqa: E402
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
+    arm_ath_uncertainty_tiny_scout,
     arm_hard_gate_pass_tiny_probe,
     arm_pre_pass_resonance_tiny_probe,
     apply_revival_canary_to_pending,
@@ -1456,6 +1457,93 @@ def test_dog_catcher_quote_anchor_allows_missing_trigger_for_retry_canary():
 
     assert detail["pass"] is True
     assert detail["reason"] == "dog_catcher_quote_anchored_entry"
+
+
+def test_ath_uncertainty_soft_quality_arms_dog_catcher_canary(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "ATH_UNCERTAINTY_TINY_SCOUT_ENABLED", True)
+    monkeypatch.setattr(
+        monitor,
+        "fetch_dexscreener_trend_snapshot",
+        lambda _token_ca: {
+            "market_cap": 48000,
+            "fdv": 48000,
+            "liquidity_usd": 25000,
+            "price_usd": 0.000001,
+            "price_change_m5": -4,
+            "buys_m5": 4,
+            "sells_m5": 10,
+            "tx_m5": 14,
+        },
+    )
+    monkeypatch.setattr(
+        monitor,
+        "evaluate_token_reclaim",
+        lambda **_kwargs: {"status": "test_reclaim"},
+    )
+    monkeypatch.setattr(
+        monitor,
+        "token_quarantine_state",
+        lambda *_args, **_kwargs: {"blocked": False, "reason": "ok"},
+    )
+    monkeypatch.setattr(
+        monitor,
+        "evaluate_scout_quality",
+        lambda **_kwargs: {
+            "pass": False,
+            "decision": "block",
+            "reason": "scout_quality_volume_low",
+        },
+    )
+    monkeypatch.setattr(
+        monitor,
+        "_maybe_upgrade_pending_to_source_resonance_probe",
+        lambda *_args, **_kwargs: {"pass": False, "reason": "test_disabled"},
+    )
+
+    pending_entries = {}
+    w_entry = {
+        "id": 7,
+        "ca": "TokenCA",
+        "symbol": "DOG",
+        "type": "ATH",
+        "pool_address": "Pool",
+        "signal_ts": 1000,
+        "premium_signal_id": 11,
+        "signal_price": 0.000001,
+        "signal_mc": 48000,
+        "signal_top10": 20,
+    }
+
+    armed = arm_ath_uncertainty_tiny_scout(
+        db,
+        pending_entries,
+        {},
+        w_entry=w_entry,
+        lifecycle_id="TokenCA:1000",
+        eval_res={
+            "action_reason": "matrices not yet aligned",
+            "current_price": 0.000001,
+            "scores": {"trend": 55, "volume": 30},
+            "reasons": ["matrices not yet aligned"],
+        },
+        now_ts=1200,
+        discovery_candidates={},
+    )
+
+    assert armed is True
+    pending = pending_entries["TokenCA:1000"]
+    assert pending["paper_only_scout"] is True
+    assert pending["entry_branch"] == "ath_recovery_soft_quality_canary"
+    assert pending["ath_recovery_soft_quality_override_used"] is True
+    assert "soft_quality_canary" in pending["intervention_flags"]
+    events = db.execute(
+        "SELECT component, event_type, decision, reason FROM paper_decision_events ORDER BY id"
+    ).fetchall()
+    assert any(row["component"] == "ath_uncertainty_scout" and row["event_type"] == "pending_entry" for row in events)
+    assert not any(row["component"] == "ath_recovery" and row["event_type"] == "candidate_block" for row in events)
 
 
 def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():

@@ -3496,6 +3496,7 @@ DOG_CATCHER_BRANCH_ENTRY_MODE_QUALITY_REASONS = {
 DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES = {
     'source_resonance_soft_override',
     'pre_pass_relaxed_canary',
+    'ath_recovery_soft_quality_canary',
     'ttl_rescue_canary',
     'retry_watch',
     'retry_watch_recovered',
@@ -3575,6 +3576,7 @@ def _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality):
         PRE_PASS_RESONANCE_TINY_PROBE_MODE,
         LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
         LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        ATH_UNCERTAINTY_TINY_SCOUT_MODE,
         ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
         ATH_NO_KLINE_TINY_PROBE_MODE,
     } and mode not in LOTTO_RECOVERY_TINY_PROBE_MODES and mode not in ATH_RECOVERY_TINY_PROBE_MODES:
@@ -3621,6 +3623,7 @@ def _dog_catcher_branch_entry_mode_quality_override(pending=None, *, entry_mode=
         PRE_PASS_RESONANCE_TINY_PROBE_MODE,
         LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
         LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        ATH_UNCERTAINTY_TINY_SCOUT_MODE,
         ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
         ATH_NO_KLINE_TINY_PROBE_MODE,
     } and entry_mode not in LOTTO_RECOVERY_TINY_PROBE_MODES and entry_mode not in ATH_RECOVERY_TINY_PROBE_MODES:
@@ -8683,7 +8686,30 @@ def arm_ath_uncertainty_tiny_scout(
         liquidity_usd=liquidity_usd,
         top10_pct=top10_pct,
     )
+    ath_recovery_soft_quality_pending = {
+        'entry_mode': entry_mode,
+        'scout_mode': entry_mode,
+        'paper_only_scout': True,
+        'kelly_position_sol': ATH_UNCERTAINTY_TINY_SCOUT_SIZE_SOL,
+        'entry_branch': 'ath_recovery_soft_quality_canary',
+        'source_component': 'ath_uncertainty_scout',
+        'source_reject_reason': reason,
+        'intervention_flags': ['ath_recovery', 'soft_quality_canary'],
+    }
+    scout_quality = _dog_catcher_branch_scout_quality_soft_override(
+        ath_recovery_soft_quality_pending,
+        scout_quality,
+    )
+    ath_recovery_soft_quality_override_used = bool(
+        scout_quality.get('dog_catcher_soft_quality_override')
+    )
     detail['scout_quality'] = scout_quality
+    if ath_recovery_soft_quality_override_used:
+        detail['ath_recovery_soft_quality_override'] = {
+            'entry_branch': 'ath_recovery_soft_quality_canary',
+            'entry_mode': entry_mode,
+            'original_reason': scout_quality.get('original_reason'),
+        }
     record_scout_quality_decision(
         db,
         scout_quality=scout_quality,
@@ -8803,6 +8829,18 @@ def arm_ath_uncertainty_tiny_scout(
         'ath_uncertainty_tiny_scout': True,
         'source_reject_reason': reason,
     }
+    if ath_recovery_soft_quality_override_used:
+        pending_entries[lifecycle_id]['ath_recovery_soft_quality_override_used'] = True
+        stamp_dog_catcher_pending(
+            pending_entries[lifecycle_id],
+            branch='ath_recovery_soft_quality_canary',
+            flags=['ath_recovery', 'soft_quality_canary'],
+            detail={
+                'source_component': 'ath_uncertainty_scout',
+                'source_reject_reason': reason,
+                'soft_quality_original_reason': scout_quality.get('original_reason'),
+            },
+        )
     _source_resonance_ath_probe = _maybe_upgrade_pending_to_source_resonance_probe(
         db,
         pending_entries[lifecycle_id],
