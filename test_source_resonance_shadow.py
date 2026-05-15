@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 from external_alpha_shadow import init_external_alpha_shadow, record_external_alpha_candidates  # noqa: E402
-from source_resonance_shadow import lookup_entry_quote_audit, run_once  # noqa: E402
+from source_resonance_shadow import lookup_entry_quote_audit, lookup_quote_shadow, run_once  # noqa: E402
 
 
 def test_source_resonance_builds_gmgn_quote_clean_cohort(tmp_path):
@@ -165,4 +165,50 @@ def test_entry_quote_audit_excludes_synthetic_fallback_from_quote_clean(tmp_path
     assert audit["entry_quote_success_seen"] == 0
     assert audit["entry_quote_fail_seen"] == 0
     assert audit["first_decision_ts"] == 1001
+    db.close()
+
+
+def test_quote_clean_lookup_matches_nearby_signal_ts(tmp_path):
+    paper_db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(paper_db_path)
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE lotto_not_ath_watch_shadow_snapshots (
+            token_ca TEXT,
+            signal_ts INTEGER,
+            quote_clean INTEGER,
+            snapshot_pass INTEGER
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO lotto_not_ath_watch_shadow_snapshots VALUES (?, ?, ?, ?)",
+        ("TokenCA", 1300, 1, 1),
+    )
+    db.execute(
+        """
+        CREATE TABLE paper_decision_events (
+            event_ts REAL,
+            token_ca TEXT,
+            signal_ts INTEGER,
+            component TEXT,
+            event_type TEXT,
+            decision TEXT
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO paper_decision_events VALUES (?, ?, ?, ?, ?, ?)",
+        (1302, "TokenCA", 1300, "execution_api", "entry_quote", "pass"),
+    )
+    db.commit()
+
+    quote_shadow = lookup_quote_shadow(db, "TokenCA", 1000)
+    quote_audit = lookup_entry_quote_audit(db, "TokenCA", 1000)
+
+    assert quote_shadow["quote_clean_seen"] == 1
+    assert quote_shadow["snapshot_pass_seen"] == 1
+    assert quote_audit["entry_quote_success_seen"] == 1
+    assert quote_audit["first_decision_ts"] == 1302
     db.close()

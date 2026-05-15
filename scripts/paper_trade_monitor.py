@@ -280,6 +280,14 @@ DOG_CATCHER_HARD_GATE_PEAK25_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GAT
 DOG_CATCHER_HARD_GATE_PEAK60_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK60_FACTOR', '0.60'))
 DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR', '0.80'))
 DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT', '0.12'))
+DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED = os.environ.get(
+    'DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED', 'true'
+).lower() != 'false'
+DOG_CATCHER_ENTRY_EDGE_RETRY_SEC = int(os.environ.get('DOG_CATCHER_ENTRY_EDGE_RETRY_SEC', str(DOG_CATCHER_RETRY_WATCH_SEC)))
+DOG_CATCHER_ENTRY_EDGE_RETRY_POLL_SEC = int(os.environ.get('DOG_CATCHER_ENTRY_EDGE_RETRY_POLL_SEC', '12'))
+DOG_CATCHER_QUOTE_ANCHORED_ENTRY_ENABLED = os.environ.get(
+    'DOG_CATCHER_QUOTE_ANCHORED_ENTRY_ENABLED', 'true'
+).lower() != 'false'
 SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED = os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED', 'true').lower() != 'false'
 SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC', str(24 * 60 * 60)))
 PRE_PASS_RELAXED_CANARY_ENABLED = os.environ.get('PRE_PASS_RELAXED_CANARY_ENABLED', 'true').lower() != 'false'
@@ -3469,10 +3477,42 @@ HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS = {
     'scout_quality_tx_low',
     'scout_quality_negative_trend',
 }
+DOG_CATCHER_SOFT_QUALITY_REASONS = {
+    *HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS,
+    'no_kline_low_volume',
+    'weak_buying_pressure',
+    'volume_low',
+    'tx_low',
+    'negative_trend',
+}
 HARD_GATE_PASS_BASELINE_SOFT_ENTRY_MODE_QUALITY_REASONS = {
     'entry_mode_quality_degraded',
     'entry_mode_shadow_cooldown',
 }
+DOG_CATCHER_BRANCH_ENTRY_MODE_QUALITY_REASONS = {
+    'entry_mode_quality_degraded',
+    'entry_mode_shadow_cooldown',
+}
+DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES = {
+    'source_resonance_soft_override',
+    'pre_pass_relaxed_canary',
+    'ttl_rescue_canary',
+    'retry_watch',
+    'retry_watch_recovered',
+}
+
+
+def _pending_intervention_flag_set(pending):
+    flags = (pending or {}).get('intervention_flags') or []
+    if isinstance(flags, str):
+        try:
+            parsed = json.loads(flags)
+            flags = parsed if isinstance(parsed, list) else [flags]
+        except Exception:
+            flags = [flags]
+    if not isinstance(flags, (list, tuple, set)):
+        return set()
+    return {str(item) for item in flags if item}
 
 
 def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
@@ -3501,6 +3541,58 @@ def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
     return override
 
 
+def _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality):
+    """Let dog-catcher branch canaries sample soft activity noise.
+
+    These branches are paper-only tiny probes created specifically to measure
+    whether source resonance, TTL rescue, or retry-watch should have been
+    tradable. Hard safety rejects still stay hard rejects.
+    """
+    if not isinstance(pending, dict) or not isinstance(scout_quality, dict):
+        return scout_quality
+    if scout_quality.get('pass'):
+        return scout_quality
+    reason = str(scout_quality.get('reason') or '').strip()
+    reason_l = reason.lower()
+    branch = str(pending.get('entry_branch') or '').strip()
+    flags = _pending_intervention_flag_set(pending)
+    mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '')
+    dog_branch = (
+        branch in DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES
+        or bool(pending.get('source_resonance_soft_override_used'))
+        or bool(pending.get('pre_pass_relaxed_used'))
+        or bool(pending.get('ttl_rescue_used'))
+        or bool(pending.get('retry_watch_used'))
+        or 'source_resonance_soft_override' in flags
+        or 'pre_pass_relaxed_canary' in flags
+        or 'ttl_rescue' in flags
+        or 'retry_watch' in flags
+    )
+    if not dog_branch:
+        return scout_quality
+    if mode not in {
+        SOURCE_RESONANCE_TINY_PROBE_MODE,
+        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+        ATH_NO_KLINE_TINY_PROBE_MODE,
+    } and mode not in LOTTO_RECOVERY_TINY_PROBE_MODES and mode not in ATH_RECOVERY_TINY_PROBE_MODES:
+        return scout_quality
+    if classify_rejection_hardness(reason_l) == 'hard_reject' or reason_l not in DOG_CATCHER_SOFT_QUALITY_REASONS:
+        return scout_quality
+    override = dict(scout_quality)
+    override.update({
+        'pass': True,
+        'decision': 'warn',
+        'reason': 'dog_catcher_soft_quality_warn',
+        'original_reason': scout_quality.get('reason'),
+        'override_scope': branch or mode,
+        'dog_catcher_soft_quality_override': True,
+    })
+    return override
+
+
 def _hard_gate_pass_probe_entry_mode_quality_soft_override(entry_mode, decision):
     if str(entry_mode or '') != HARD_GATE_PASS_TINY_PROBE_MODE or not isinstance(decision, dict):
         return None
@@ -3516,6 +3608,49 @@ def _hard_gate_pass_probe_entry_mode_quality_soft_override(entry_mode, decision)
         'execution_scope': 'paper_only',
     })
     return override
+
+
+def _dog_catcher_branch_entry_mode_quality_override(pending=None, *, entry_mode=None):
+    """Force only branch-attributed paper canaries through mode-level cooldown."""
+    pending = pending or {}
+    entry_mode = str(entry_mode or pending.get('entry_mode') or pending.get('scout_mode') or '')
+    if not pending_is_paper_tiny_scout(pending):
+        return {'pass': False, 'reason': 'not_tiny_scout'}
+    if entry_mode not in {
+        SOURCE_RESONANCE_TINY_PROBE_MODE,
+        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        ATH_MICRO_RECLAIM_TINY_PROBE_MODE,
+        ATH_NO_KLINE_TINY_PROBE_MODE,
+    } and entry_mode not in LOTTO_RECOVERY_TINY_PROBE_MODES and entry_mode not in ATH_RECOVERY_TINY_PROBE_MODES:
+        return {'pass': False, 'reason': 'mode_not_dog_catcher_branch_overrideable', 'entry_mode': entry_mode}
+    branch = str(pending.get('entry_branch') or '').strip()
+    flags = _pending_intervention_flag_set(pending)
+    branch_ok = (
+        branch in DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES
+        or bool(pending.get('source_resonance_soft_override_used'))
+        or bool(pending.get('pre_pass_relaxed_used'))
+        or bool(pending.get('ttl_rescue_used'))
+        or bool(pending.get('retry_watch_used'))
+        or 'source_resonance_soft_override' in flags
+        or 'pre_pass_relaxed_canary' in flags
+        or 'ttl_rescue' in flags
+        or 'retry_watch' in flags
+    )
+    if not branch_ok:
+        return {'pass': False, 'reason': 'branch_not_overrideable', 'entry_mode': entry_mode, 'entry_branch': branch}
+    parent_reason = str(pending.get('source_reject_reason') or '').lower()
+    if parent_reason and classify_rejection_hardness(parent_reason) == 'hard_reject':
+        return {'pass': False, 'reason': 'parent_reason_hard_reject', 'parent_reason': parent_reason}
+    return {
+        'pass': True,
+        'reason': 'dog_catcher_branch_entry_mode_quality_override',
+        'entry_mode': entry_mode,
+        'entry_branch': branch,
+        'paper_only': True,
+        'execution_scope': 'paper_only',
+    }
 
 
 ATH_RECOVERY_TINY_PROBE_MODES = {
@@ -5015,6 +5150,100 @@ def evaluate_entry_edge_budget(*, route=None, trigger_price=None, quote_price=No
         detail['pass'] = False
         detail['reason'] = 'entry_edge_spread_too_high'
     return detail
+
+
+def _dog_catcher_quote_anchor_detail(pending, *, trigger_price=None, quote_price=None):
+    if not DOG_CATCHER_QUOTE_ANCHORED_ENTRY_ENABLED:
+        return {'pass': False, 'reason': 'quote_anchor_disabled'}
+    if not pending_is_paper_tiny_scout(pending):
+        return {'pass': False, 'reason': 'not_tiny_scout'}
+    if _safe_float(trigger_price, 0.0) > 0:
+        return {'pass': False, 'reason': 'trigger_already_present'}
+    quote = _safe_float(quote_price, 0.0)
+    if quote <= 0:
+        return {'pass': False, 'reason': 'quote_missing'}
+    mode = str((pending or {}).get('entry_mode') or (pending or {}).get('scout_mode') or '')
+    branch = str((pending or {}).get('entry_branch') or '')
+    if mode not in {
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        SOURCE_RESONANCE_TINY_PROBE_MODE,
+        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        ATH_NO_KLINE_TINY_PROBE_MODE,
+    } and mode not in LOTTO_RECOVERY_TINY_PROBE_MODES:
+        return {'pass': False, 'reason': 'mode_not_quote_anchorable', 'entry_mode': mode}
+    return {
+        'pass': True,
+        'reason': 'dog_catcher_quote_anchored_entry',
+        'entry_mode': mode,
+        'entry_branch': branch,
+        'quote_price': quote,
+    }
+
+
+def _schedule_entry_edge_retry_watch(db, pending, lifecycle_id, *, reason, entry_edge_budget=None,
+                                     spread_pct=None, max_spread_pct=None, quote_price=None,
+                                     trigger_price=None, now_ts=None, route=None):
+    if not DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED:
+        return {'scheduled': False, 'reason': 'entry_edge_retry_disabled'}
+    if not pending_is_paper_tiny_scout(pending):
+        return {'scheduled': False, 'reason': 'not_tiny_scout'}
+    retryable = str(reason or '') in {
+        'entry_edge_spread_too_high',
+        'entry_edge_probe_missing_trigger_or_quote',
+        'entry_edge_no_trigger_or_quote',
+        'post_spread_abort_memory',
+    }
+    if not retryable:
+        return {'scheduled': False, 'reason': 'not_retryable_entry_edge_reason'}
+    now_ts = float(now_ts or time.time())
+    retry = pending.get('entry_edge_retry_watch') or {}
+    first_seen = float(retry.get('first_seen_ts') or now_ts)
+    until_ts = float(retry.get('until_ts') or (first_seen + DOG_CATCHER_ENTRY_EDGE_RETRY_SEC))
+    if now_ts > until_ts:
+        return {'scheduled': False, 'reason': 'entry_edge_retry_window_expired', 'until_ts': until_ts}
+    retry.update({
+        'first_seen_ts': first_seen,
+        'until_ts': until_ts,
+        'next_attempt_ts': now_ts + DOG_CATCHER_ENTRY_EDGE_RETRY_POLL_SEC,
+        'poll_sec': DOG_CATCHER_ENTRY_EDGE_RETRY_POLL_SEC,
+        'window_sec': DOG_CATCHER_ENTRY_EDGE_RETRY_SEC,
+        'reason': reason,
+        'spread_pct': spread_pct,
+        'max_spread_pct': max_spread_pct,
+        'quote_price': quote_price,
+        'trigger_price': trigger_price,
+        'entry_edge_budget': entry_edge_budget or {},
+    })
+    pending['entry_edge_retry_watch'] = retry
+    pending['retry_watch_used'] = True
+    stamp_dog_catcher_pending(
+        pending,
+        branch=pending.get('entry_branch') or 'retry_watch',
+        flags=['retry_watch'],
+        detail={'entry_edge_retry_watch': retry},
+    )
+    try:
+        record_decision_event(
+            db,
+            component='execution_guard',
+            event_type='entry_defer',
+            decision='wait',
+            reason='entry_edge_retry_watch_scheduled',
+            token_ca=pending.get('token_ca'),
+            symbol=pending.get('symbol'),
+            lifecycle_id=lifecycle_id,
+            signal_ts=pending.get('signal_ts'),
+            signal_id=pending.get('premium_signal_id'),
+            route=route or pending.get('signal_route') or pending.get('signal_type'),
+            data_source='entry_edge_retry_watch',
+            payload=retry,
+            event_ts=now_ts,
+        )
+    except Exception:
+        pass
+    return {'scheduled': True, **retry}
 
 
 def _safe_json_loads(value):
@@ -12439,6 +12668,28 @@ def process_discovery_tracking_candidates(
             top1_pct=top1_pct,
             top10_pct=top10_pct,
         )
+        _candidate_pending_context = {
+            'entry_mode': mode,
+            'scout_mode': mode,
+            'paper_only_scout': True,
+            'kelly_position_sol': PAPER_TINY_SCOUT_SIZE_SOL,
+            'signal_type': route,
+            'signal_route': route,
+            'source_component': candidate.get('source_component') or 'discovery_tracking',
+            'source_reject_reason': candidate.get('source_reject_reason') or candidate.get('last_wait_reason'),
+            'final_reclaim_attempted': bool(candidate.get('final_reclaim_attempted')),
+            'ttl_rescue_used': bool(candidate.get('final_reclaim_attempted') or candidate.get('last_wait_reason') == 'tracking_ttl_expired'),
+            'retry_watch_used': bool(candidate.get('retry_watch_used')),
+            'intervention_flags': [
+                'discovery_tracking',
+                'ttl_rescue' if candidate.get('final_reclaim_attempted') else '',
+                'retry_watch' if candidate.get('retry_watch_used') else '',
+            ],
+        }
+        scout_quality = _dog_catcher_branch_scout_quality_soft_override(
+            _candidate_pending_context,
+            scout_quality,
+        )
         detail['scout_quality'] = scout_quality
         record_scout_quality_decision(
             db,
@@ -12529,6 +12780,11 @@ def process_discovery_tracking_candidates(
             continue
 
         post_exit_reclaim_force_live = _post_exit_reclaim_entry_mode_force_live(candidate, detail, mode)
+        if not post_exit_reclaim_force_live.get('pass'):
+            post_exit_reclaim_force_live = _dog_catcher_branch_entry_mode_quality_override(
+                _candidate_pending_context,
+                entry_mode=mode,
+            )
         detail['post_exit_reclaim_entry_mode_force_live'] = post_exit_reclaim_force_live
         live_allowed, entry_mode_quality = _entry_mode_quality_allows_live(
             db,
@@ -18433,6 +18689,33 @@ def run_monitor(db):
                 try:
                     normalize_pending_entry(pending, lifecycle_id)
                     _entry_decision_start_ts_ms = int(time.time() * 1000)
+                    _edge_retry = pending.get('entry_edge_retry_watch') or {}
+                    if _edge_retry:
+                        _retry_until = float(_edge_retry.get('until_ts') or 0)
+                        _retry_next = float(_edge_retry.get('next_attempt_ts') or 0)
+                        if now > _retry_until:
+                            record_decision_event(
+                                db,
+                                component='execution_guard',
+                                event_type='entry_abort',
+                                decision='abort',
+                                reason='entry_edge_retry_watch_expired',
+                                token_ca=pending['token_ca'],
+                                symbol=pending['symbol'],
+                                lifecycle_id=lifecycle_id,
+                                signal_ts=pending.get('signal_ts'),
+                                signal_id=pending.get('premium_signal_id'),
+                                route=pending.get('signal_route') or pending.get('signal_type'),
+                                data_source='entry_edge_retry_watch',
+                                payload=_edge_retry,
+                                event_ts=now,
+                            )
+                            pending_entries.pop(lifecycle_id, None)
+                            continue
+                        if now < _retry_next:
+                            continue
+                        _edge_retry['attempts'] = int(_edge_retry.get('attempts') or 0) + 1
+                        pending['entry_edge_retry_watch'] = _edge_retry
                     _initial_canary_registry = entry_mode_registry_entry(
                         pending.get('entry_mode') or pending.get('scout_mode')
                     ) or {}
@@ -19072,6 +19355,10 @@ def run_monitor(db):
                             pending,
                             _scout_quality,
                         )
+                        _scout_quality = _dog_catcher_branch_scout_quality_soft_override(
+                            pending,
+                            _scout_quality,
+                        )
                         pending['scout_quality'] = _scout_quality
                         record_scout_quality_decision(
                             db,
@@ -19194,6 +19481,19 @@ def run_monitor(db):
                                 f"mode={pending.get('entry_mode')} reason={_entry_mode_force_live.get('reason')} "
                                 f"scores={_entry_mode_force_live.get('scores')}"
                             )
+                        else:
+                            _branch_entry_mode_force_live = _dog_catcher_branch_entry_mode_quality_override(
+                                pending,
+                                entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                            )
+                            if _branch_entry_mode_force_live.get('pass'):
+                                _entry_mode_force_live = _branch_entry_mode_force_live
+                                pending['entry_mode_quality_force_live'] = _entry_mode_force_live
+                                log.info(
+                                    f"  [ENTRY_MODE_QUALITY] force-live {pending['symbol']}: "
+                                    f"mode={pending.get('entry_mode')} reason={_entry_mode_force_live.get('reason')} "
+                                    f"branch={_entry_mode_force_live.get('entry_branch')}"
+                                )
                         _entry_mode_live_allowed, _entry_mode_quality = _entry_mode_quality_allows_live(
                             db,
                             entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
@@ -19623,6 +19923,38 @@ def run_monitor(db):
                     # trigger_price is preserved in the DB 'trigger_price' column for analysis.
                     price = quote_price
                     trigger_price_val = pending.get('trigger_price')
+                    _quote_anchor = _dog_catcher_quote_anchor_detail(
+                        pending,
+                        trigger_price=trigger_price_val,
+                        quote_price=price,
+                    )
+                    if _quote_anchor.get('pass'):
+                        trigger_price_val = price
+                        pending['trigger_price'] = price
+                        pending['quote_anchored_entry'] = _quote_anchor
+                        pending['entry_confidence'] = 'quote_anchored_low_confidence'
+                        stamp_dog_catcher_pending(
+                            pending,
+                            flags=['quote_anchored_entry'],
+                            detail={'quote_anchored_entry': _quote_anchor},
+                        )
+                        record_decision_event(
+                            db,
+                            component='execution_guard',
+                            event_type='entry_trigger_fallback',
+                            decision='warn',
+                            reason='dog_catcher_quote_anchored_entry',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='jupiter_quote+entry_edge',
+                            payload=_quote_anchor,
+                            event_ts=now,
+                        )
                     _spread = ((quote_price - trigger_price_val) / trigger_price_val * 100) if trigger_price_val and trigger_price_val > 0 else 0
                     _entry_latency_audit = build_entry_execution_latency_audit(
                         pending,
@@ -19788,6 +20120,26 @@ def run_monitor(db):
                                 'entry_edge_budget': _entry_edge_budget,
                             },
                         )
+                        _retry_watch = _schedule_entry_edge_retry_watch(
+                            db,
+                            pending,
+                            lifecycle_id,
+                            reason=_entry_edge_budget.get('reason') or 'entry_edge_budget',
+                            entry_edge_budget=_entry_edge_budget,
+                            spread_pct=_spread,
+                            max_spread_pct=_SPREAD_GUARD_MAX_PCT,
+                            quote_price=price,
+                            trigger_price=trigger_price_val,
+                            now_ts=now,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                        )
+                        if _retry_watch.get('scheduled'):
+                            log.info(
+                                f"  [ENTRY_EDGE_RETRY] {pending['symbol']} scheduled retry-watch "
+                                f"reason={_entry_edge_budget.get('reason')} "
+                                f"next={_retry_watch.get('next_attempt_ts')}"
+                            )
+                            continue
                         # Track budget aborts on watchlist entry so subsequent FIRE→
                         # SmartEntry cycles know the fill was past the usable edge.
                         if pending_w_entry:

@@ -225,6 +225,65 @@ test('closed loop missed dog summary ranks one blocker per token in SQL', () => 
   db.close();
 });
 
+test('closed loop missed dog summary excludes tokens already caught by paper trades', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE paper_missed_signal_attribution (
+      token_ca TEXT,
+      symbol TEXT,
+      signal_ts REAL,
+      route TEXT,
+      component TEXT,
+      reject_reason TEXT,
+      tradable_peak_pnl REAL,
+      tradable_missed INTEGER,
+      would_stop_before_peak INTEGER,
+      max_pnl_recorded REAL,
+      created_event_ts REAL,
+      baseline_ts REAL
+    );
+    CREATE TABLE paper_trades (
+      token_ca TEXT,
+      entry_ts REAL
+    );
+  `);
+  const insertMissed = db.prepare(`
+    INSERT INTO paper_missed_signal_attribution (
+      token_ca, symbol, signal_ts, route, component, reject_reason,
+      tradable_peak_pnl, tradable_missed, would_stop_before_peak,
+      max_pnl_recorded, created_event_ts, baseline_ts
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertMissed.run('caught-token', 'CAUGHT', 1001, 'ATH', 'source_resonance_probe', 'scout_quality_buy_pressure_weak', 1.2, 1, 0, 1.2, 1001, 1001);
+  insertMissed.run('missed-token', 'MISSED', 1002, 'LOTTO', 'discovery_tracking', 'tracking_ttl_expired', 0.7, 1, 0, 0.7, 1002, 1002);
+  db.prepare('INSERT INTO paper_trades (token_ca, entry_ts) VALUES (?, ?)').run('caught-token', 1005);
+
+  const summary = buildClosedLoopMissedDogSummary(
+    db,
+    new Set(['paper_missed_signal_attribution', 'paper_trades']),
+    1000,
+    5,
+    { includeDetails: true }
+  );
+
+  assert.equal(summary.unique_tokens, 1);
+  assert.equal(summary.gold_unique, 0);
+  assert.equal(summary.silver_unique, 1);
+  assert.equal(summary.top_missed_dogs.length, 1);
+  assert.equal(summary.top_missed_dogs[0].token_ca, 'missed-token');
+
+  const summaryOnly = buildClosedLoopMissedDogSummary(
+    db,
+    new Set(['paper_missed_signal_attribution', 'paper_trades']),
+    1000,
+    5,
+    { includeDetails: false }
+  );
+  assert.equal(summaryOnly.unique_tokens, 1);
+  assert.equal(summaryOnly.silver_unique, 1);
+  db.close();
+});
+
 test('closed loop probe summary uses recent trade window with exit fallback', () => {
   const db = new Database(':memory:');
   db.exec(`

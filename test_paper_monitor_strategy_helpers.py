@@ -38,6 +38,9 @@ from paper_trade_monitor import (  # noqa: E402
     _ath_no_kline_scout_quality_soft_override,
     _hard_gate_pass_probe_scout_quality_soft_override,
     _hard_gate_pass_probe_entry_mode_quality_soft_override,
+    _dog_catcher_branch_scout_quality_soft_override,
+    _dog_catcher_branch_entry_mode_quality_override,
+    _dog_catcher_quote_anchor_detail,
     _ath_dynamic_ttl_extension_detail,
     _ath_recovery_eligibility,
     _ath_recovery_mode_for_candidate,
@@ -1397,6 +1400,62 @@ def test_probe_hold_quote_monitor_exits_when_quote_collapses():
     assert detail["exit"] is True
     assert detail["reason"] == "probe_quote_guard_stop"
     assert detail["quote_mark_gap_abs"] > monitor.PROBE_HOLD_QUOTE_GAP_STOP_PCT
+
+
+def test_dog_catcher_branch_quality_override_allows_soft_source_resonance():
+    pending = {
+        "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "entry_branch": "source_resonance_soft_override",
+        "source_reject_reason": "scout_quality_buy_pressure_weak",
+    }
+    scout_quality = {
+        "pass": False,
+        "decision": "block",
+        "reason": "scout_quality_buy_pressure_weak",
+    }
+
+    override = _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality)
+
+    assert override["pass"] is True
+    assert override["decision"] == "warn"
+    assert override["reason"] == "dog_catcher_soft_quality_warn"
+    assert override["original_reason"] == "scout_quality_buy_pressure_weak"
+
+
+def test_dog_catcher_branch_entry_mode_override_allows_ttl_rescue_canary():
+    pending = {
+        "entry_mode": LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "ttl_rescue_used": True,
+        "source_reject_reason": "tracking_ttl_expired",
+        "intervention_flags": ["discovery_tracking", "ttl_rescue"],
+    }
+
+    decision = _dog_catcher_branch_entry_mode_quality_override(pending)
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "dog_catcher_branch_entry_mode_quality_override"
+
+
+def test_dog_catcher_quote_anchor_allows_missing_trigger_for_retry_canary():
+    pending = {
+        "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "retry_watch_used": True,
+    }
+
+    detail = _dog_catcher_quote_anchor_detail(
+        pending,
+        trigger_price=None,
+        quote_price=0.000001,
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "dog_catcher_quote_anchored_entry"
 
 
 def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():

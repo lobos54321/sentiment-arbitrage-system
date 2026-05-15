@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_SIGNAL_DB = PROJECT_ROOT / "data" / "sentiment_arb.db"
 SOURCE_NAME = "source_resonance_shadow"
+SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC = int(os.environ.get("SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC", "3600"))
 
 
 CREATE_SOURCE_RESONANCE_CANDIDATES_SQL = """
@@ -108,7 +109,7 @@ RESONANCE_INDEXES = [
 
 def connect_db(path, *, readonly=False):
     db_path = Path(path)
-    timeout_sec = float(os.environ.get("SOURCE_RESONANCE_SQLITE_TIMEOUT_SEC", "30"))
+    timeout_sec = float(os.environ.get("SOURCE_RESONANCE_SQLITE_TIMEOUT_SEC", "60"))
     if readonly:
         uri = f"file:{db_path}?mode=ro"
         db = sqlite3.connect(uri, uri=True, timeout=timeout_sec)
@@ -306,7 +307,11 @@ def lookup_quote_shadow(paper_db, token_ca, signal_ts):
     }
     if not token_ca or not table_exists(paper_db, "lotto_not_ath_watch_shadow_snapshots"):
         return empty
-    params = {"token_ca": token_ca, "signal_ts": int(signal_ts or 0)}
+    params = {
+        "token_ca": token_ca,
+        "signal_ts": int(signal_ts or 0),
+        "lookback_sec": int(SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC),
+    }
     row = paper_db.execute(
         """
         SELECT
@@ -315,7 +320,11 @@ def lookup_quote_shadow(paper_db, token_ca, signal_ts):
             MAX(CASE WHEN snapshot_pass = 1 THEN 1 ELSE 0 END) AS snapshot_pass_seen
         FROM lotto_not_ath_watch_shadow_snapshots
         WHERE token_ca = @token_ca
-          AND (@signal_ts = 0 OR COALESCE(signal_ts, 0) = @signal_ts)
+          AND (
+            @signal_ts = 0
+            OR COALESCE(signal_ts, 0) = @signal_ts
+            OR ABS(COALESCE(signal_ts, 0) - @signal_ts) <= @lookback_sec
+          )
         """,
         params,
     ).fetchone()
@@ -347,9 +356,19 @@ def lookup_entry_quote_audit(paper_db, token_ca, signal_ts):
             MAX(CASE WHEN component = 'execution_api' AND event_type = 'entry_quote' AND decision = 'fail' THEN 1 ELSE 0 END) AS entry_quote_fail_seen
         FROM paper_decision_events
         WHERE token_ca = ?
-          AND (? = 0 OR COALESCE(signal_ts, 0) = ?)
+          AND (
+            ? = 0
+            OR COALESCE(signal_ts, 0) = ?
+            OR ABS(COALESCE(signal_ts, 0) - ?) <= ?
+          )
         """,
-        (token_ca, int(signal_ts or 0), int(signal_ts or 0)),
+        (
+            token_ca,
+            int(signal_ts or 0),
+            int(signal_ts or 0),
+            int(signal_ts or 0),
+            int(SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC),
+        ),
     ).fetchone()
     if not row:
         return empty

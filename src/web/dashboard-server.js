@@ -1079,6 +1079,25 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         THEN 1 ELSE 0
       END`
     : '0';
+  const hasPaperTrades = tableNames.has('paper_trades');
+  const tradeCols = hasPaperTrades ? getTableColumns(paperDb, 'paper_trades') : new Set();
+  const tradeWindowPredicates = [
+    tradeCols.has('entry_ts') ? 'COALESCE(pt.entry_ts, 0) >= @since' : null,
+    tradeCols.has('exit_ts') ? 'COALESCE(pt.exit_ts, 0) >= @since' : null,
+    tradeCols.has('accounting_outcome') ? "COALESCE(pt.accounting_outcome, '') = 'open'" : null,
+    tradeCols.has('created_at') ? 'COALESCE(strftime(\'%s\', pt.created_at), 0) >= @since' : null,
+  ].filter(Boolean);
+  const tradeWindowFilter = sinceTs && tradeWindowPredicates.length > 0
+    ? `AND (${tradeWindowPredicates.join(' OR ')})`
+    : '';
+  const caughtTokenFilter = hasPaperTrades && tradeCols.has('token_ca')
+    ? `AND NOT EXISTS (
+        SELECT 1
+        FROM paper_trades pt
+        WHERE pt.token_ca = m.token_ca
+          ${tradeWindowFilter}
+      )`
+    : '';
   const missedBaseCte = `
     WITH base AS (
       SELECT
@@ -1109,7 +1128,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
           ELSE NULL
         END AS entry_mode_candidate
       FROM paper_missed_signal_attribution m
-      ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
+      WHERE 1 = 1
+        ${sinceTs ? `AND ${missedWhereTsExpr} >= @since` : ''}
+        ${caughtTokenFilter}
     ),
     ranked AS (
       SELECT
@@ -1231,7 +1252,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
           ${quoteCleanExpr} AS quote_clean,
           ${maxPnlExpr} AS max_pnl
         FROM paper_missed_signal_attribution m
-        ${sinceTs ? `WHERE ${missedWhereTsExpr} >= @since` : ''}
+        WHERE 1 = 1
+          ${sinceTs ? `AND ${missedWhereTsExpr} >= @since` : ''}
+          ${caughtTokenFilter}
       ),
       per_token AS (
         SELECT
@@ -5480,7 +5503,6 @@ const server = http.createServer(async (req, res) => {
       const queryStartedAt = Date.now();
       const includeRecoveryActions = String(url.searchParams.get('include_actions') || '').toLowerCase() === '1';
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
-      const whereSql = sinceTs ? 'WHERE m.created_event_ts >= @since' : '';
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
@@ -5494,6 +5516,31 @@ const server = http.createServer(async (req, res) => {
       const missedCols = new Set(
         paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
       );
+      const tradeCols = tableNames.has('paper_trades')
+        ? new Set(paperDb.prepare("PRAGMA table_info(paper_trades)").all().map((row) => row.name))
+        : new Set();
+      const tradeWindowPredicates = [
+        tradeCols.has('entry_ts') ? 'COALESCE(pt.entry_ts, 0) >= @since' : null,
+        tradeCols.has('exit_ts') ? 'COALESCE(pt.exit_ts, 0) >= @since' : null,
+        tradeCols.has('accounting_outcome') ? "COALESCE(pt.accounting_outcome, '') = 'open'" : null,
+        tradeCols.has('created_at') ? 'COALESCE(strftime(\'%s\', pt.created_at), 0) >= @since' : null,
+      ].filter(Boolean);
+      const tradeWindowFilter = sinceTs && tradeWindowPredicates.length > 0
+        ? `AND (${tradeWindowPredicates.join(' OR ')})`
+        : '';
+      const caughtTokenFilter = tableNames.has('paper_trades') && tradeCols.has('token_ca')
+        ? `AND NOT EXISTS (
+            SELECT 1
+            FROM paper_trades pt
+            WHERE pt.token_ca = m.token_ca
+              ${tradeWindowFilter}
+          )`
+        : '';
+      const whereSql = `
+        WHERE 1 = 1
+          ${sinceTs ? 'AND m.created_event_ts >= @since' : ''}
+          ${caughtTokenFilter}
+      `;
       const hasTradability = missedCols.has('tradable_missed');
       const hasDecisionEvents = tableNames.has('paper_decision_events');
       const quoteExecExpr = hasTradability ? `

@@ -145,7 +145,7 @@ def init_external_alpha_shadow(db):
 def connect_external_alpha_db(db_path=None):
     path = Path(db_path or os.environ.get("EXTERNAL_ALPHA_DB") or os.environ.get("PAPER_DB") or DEFAULT_EXTERNAL_ALPHA_DB)
     path.parent.mkdir(parents=True, exist_ok=True)
-    timeout_sec = float(os.environ.get("EXTERNAL_ALPHA_SQLITE_TIMEOUT_SEC", "30"))
+    timeout_sec = float(os.environ.get("EXTERNAL_ALPHA_SQLITE_TIMEOUT_SEC", "60"))
     db = sqlite3.connect(path, timeout=timeout_sec)
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
     try:
