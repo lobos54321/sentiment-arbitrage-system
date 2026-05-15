@@ -30,8 +30,10 @@ from paper_trade_monitor import (  # noqa: E402
     SOURCE_RESONANCE_TINY_PROBE_MODE,
     _apply_hard_gate_pass_probe_to_pending,
     _apply_actual_tiny_trigger_mode,
+    _apply_ath_soft_reject_canary_to_pending,
     _apply_primary_proving_cap,
     _apply_source_resonance_probe_to_pending,
+    _ath_soft_reject_canary_detail,
     _ath_reentry_block_cooldown_sec,
     _ath_no_kline_followthrough_guard,
     _ath_no_kline_reentry_guard,
@@ -74,6 +76,7 @@ from paper_trade_monitor import (  # noqa: E402
     arm_pre_pass_resonance_tiny_probe,
     apply_revival_canary_to_pending,
     build_paper_observation_probe_synthetic_exit_execution,
+    build_lifecycle_id,
     build_paper_tiny_scout_dex_fallback_entry_execution,
     evaluate_entry_edge_budget,
     evaluate_hard_gate_pass_tiny_probe,
@@ -1460,6 +1463,33 @@ def test_dog_catcher_branch_entry_mode_override_allows_source_and_prepass_branch
         assert decision["reason"] == "dog_catcher_branch_entry_mode_quality_override"
 
 
+def test_ath_soft_reject_canary_converts_ath_weak_buying_pressure_to_tiny_probe():
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "ALGOAT",
+        "signal_route": "ATH",
+        "market_cap": 84000,
+        "entry_mode": ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+    }
+
+    detail = _ath_soft_reject_canary_detail(
+        pending,
+        "weak_buying_pressure",
+        route="ATH",
+        dex_snapshot={"market_cap": 84000},
+    )
+    _apply_ath_soft_reject_canary_to_pending(pending, detail)
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "ath_soft_reject_canary"
+    assert pending["entry_mode"] == ATH_UNCERTAINTY_TINY_SCOUT_MODE
+    assert pending["ath_soft_reject_canary_used"] is True
+    assert pending["entry_branch"] == "ath_soft_reject_canary"
+    assert "ath_soft_reject_canary" in pending["intervention_flags"]
+
+
 def test_dog_catcher_quote_anchor_allows_missing_trigger_for_retry_canary():
     pending = {
         "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
@@ -1476,6 +1506,11 @@ def test_dog_catcher_quote_anchor_allows_missing_trigger_for_retry_canary():
 
     assert detail["pass"] is True
     assert detail["reason"] == "dog_catcher_quote_anchored_entry"
+
+
+def test_build_lifecycle_id_normalizes_millisecond_signal_timestamps():
+    assert build_lifecycle_id("TokenCA", 1_778_834_470_421) == "TokenCA:1778834470"
+    assert build_lifecycle_id("TokenCA", 1_778_834_470) == "TokenCA:1778834470"
 
 
 def test_ath_uncertainty_soft_quality_arms_dog_catcher_canary(monkeypatch):

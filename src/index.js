@@ -178,7 +178,7 @@ class SentimentArbitrageSystem {
 
     // System state
     this.isRunning = false;
-    this.processedSignals = new Set();
+    this.processedSignals = new Map();
     this.stats = {
       signals_received: 0,
       hard_gate_passed: 0,

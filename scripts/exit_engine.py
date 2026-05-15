@@ -293,7 +293,23 @@ def _quote_stop_exit_confirmation(reason, *, quote_pnl=None, trigger_pnl=None):
     }
 
 
-def _quote_primary_exit_confirmation(reason, *, quote_pnl=None):
+def _guardian_position_is_probe(pos):
+    state = getattr(pos, 'monitor_state', None)
+    if not isinstance(state, dict):
+        state = {}
+    mode = str(state.get('entryMode') or getattr(pos, 'entry_mode', '') or '').lower()
+    size = _pct(state.get('entrySol'), None)
+    if size is None:
+        size = _pct(getattr(pos, 'position_size_sol', None), None)
+    return (
+        'tiny_probe' in mode
+        or 'tiny_scout' in mode
+        or 'reclaim' in mode
+        or (size is not None and size <= OBSERVATION_PROBE_MAX_SIZE_SOL)
+    )
+
+
+def _quote_primary_exit_confirmation(reason, *, quote_pnl=None, trigger_pnl=None, probe_position=False):
     if not QUOTE_PRIMARY_GUARDIAN_EXITS:
         return {"pass": True, "reason": "quote_primary_disabled"}
     reason_text = str(reason or "")
@@ -302,6 +318,13 @@ def _quote_primary_exit_confirmation(reason, *, quote_pnl=None):
         return {"pass": True, "reason": "not_quote_primary_exit"}
     if quote_pnl is None:
         return {"pass": False, "reason": "quote_primary_missing_quote"}
+    if probe_position and trigger_pnl is not None and trigger_pnl > 0 and quote_pnl < 0:
+        return {
+            "pass": False,
+            "reason": "quote_primary_probe_profit_exit_quote_negative",
+            "quote_pnl": quote_pnl,
+            "trigger_pnl": trigger_pnl,
+        }
     floor = None
     match = re.search(r"floor=([+-]?\d+(?:\.\d+)?)%", reason_text)
     if match:
@@ -1683,7 +1706,12 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 f"reason={gx_quote_stop.get('reason')} trigger={gx_trigger_pnl:+.1%} quote=na"
             )
             continue
-        gx_quote_primary = _quote_primary_exit_confirmation(gx.get('reason'), quote_pnl=gx_quote_pnl)
+        gx_quote_primary = _quote_primary_exit_confirmation(
+            gx.get('reason'),
+            quote_pnl=gx_quote_pnl,
+            trigger_pnl=gx_trigger_pnl,
+            probe_position=_guardian_position_is_probe(gx_pos),
+        )
         if not gx_quote_primary.get('pass'):
             log.warning(
                 f"  [GUARDIAN_EXIT] quote-primary skipped {gx['symbol']}: "

@@ -545,6 +545,9 @@ ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY
 ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_SHADOW_MAX_MC', '3000000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD = float(os.environ.get('ATH_UNCERTAINTY_TINY_SCOUT_MIN_LIQ_USD', '5000'))
 ATH_UNCERTAINTY_TINY_SCOUT_MODE = 'ath_uncertainty_tiny_scout'
+ATH_SOFT_REJECT_CANARY_ENABLED = os.environ.get('ATH_SOFT_REJECT_CANARY_ENABLED', 'true').lower() != 'false'
+ATH_SOFT_REJECT_CANARY_SIZE_SOL = float(os.environ.get('ATH_SOFT_REJECT_CANARY_SIZE_SOL', '0.001'))
+ATH_SOFT_REJECT_CANARY_MAX_MC = float(os.environ.get('ATH_SOFT_REJECT_CANARY_MAX_MC', str(ATH_UNCERTAINTY_TINY_SCOUT_MAX_MC)))
 ATH_NO_KLINE_TINY_PROBE_MODE = 'ath_no_kline_tiny_probe'
 ATH_HIGH_MC_TINY_PROBE_MODE = 'ath_high_mc_tiny_probe'
 ATH_RECLAIM_AFTER_FAILURE_TINY_PROBE_MODE = 'ath_reclaim_after_failure_tiny_probe'
@@ -3511,6 +3514,7 @@ DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES = {
     'source_resonance_soft_override',
     'pre_pass_resonance',
     'pre_pass_relaxed_canary',
+    'ath_soft_reject_canary',
     'ath_recovery_soft_quality_canary',
     'ttl_rescue_canary',
     'ttl_final_reclaim_quote_executable_canary',
@@ -3670,6 +3674,85 @@ def _dog_catcher_branch_entry_mode_quality_override(pending=None, *, entry_mode=
         'paper_only': True,
         'execution_scope': 'paper_only',
     }
+
+
+def _ath_soft_reject_canary_detail(pending, reason, *, route=None, dex_snapshot=None, lifecycle=None):
+    """Allow ATH soft smart-entry rejects to become isolated paper tiny canaries.
+
+    This catches the ALgoat class: an ATH signal is quote-tradable but early
+    smart-entry telemetry says weak_buying_pressure / negative_trend. Hard
+    safety rejects still stay blocked.
+    """
+    pending = pending or {}
+    reason_l = str(reason or '').strip().lower()
+    route_name = str(route or pending.get('signal_route') or pending.get('signal_type') or '').upper()
+    if not ATH_SOFT_REJECT_CANARY_ENABLED:
+        return {'pass': False, 'reason': 'ath_soft_reject_canary_disabled'}
+    if route_name != 'ATH':
+        return {'pass': False, 'reason': 'ath_soft_reject_canary_route_not_ath', 'route': route_name}
+    if classify_rejection_hardness(reason_l) == 'hard_reject':
+        return {'pass': False, 'reason': 'ath_soft_reject_canary_hard_reject', 'parent_reason': reason_l}
+    if (
+        classify_rejection_hardness(reason_l) != 'soft_reject'
+        and reason_l not in DOG_CATCHER_SOFT_QUALITY_REASONS
+        and reason_l not in {'matrices not yet aligned', 'no_kline_low_volume', 'weak_buying_pressure', 'negative_trend'}
+        and not _matrix_micro_momentum_reason(reason_l)
+    ):
+        return {'pass': False, 'reason': 'ath_soft_reject_canary_reason_not_soft', 'parent_reason': reason_l}
+    current_mc = _source_resonance_first_number(
+        pending.get('market_cap'),
+        pending.get('signal_mc'),
+        (dex_snapshot or {}).get('market_cap') if isinstance(dex_snapshot, dict) else None,
+        (dex_snapshot or {}).get('fdv') if isinstance(dex_snapshot, dict) else None,
+        positive=True,
+        default=0.0,
+    )
+    if current_mc > ATH_SOFT_REJECT_CANARY_MAX_MC:
+        return {
+            'pass': False,
+            'reason': 'ath_soft_reject_canary_mc_too_high',
+            'current_mc': current_mc,
+            'max_mc': ATH_SOFT_REJECT_CANARY_MAX_MC,
+        }
+    return {
+        'pass': True,
+        'reason': 'ath_soft_reject_canary',
+        'entry_mode': ATH_UNCERTAINTY_TINY_SCOUT_MODE,
+        'entry_branch': 'ath_soft_reject_canary',
+        'position_size_sol': ATH_SOFT_REJECT_CANARY_SIZE_SOL,
+        'paper_only_scout': True,
+        'execution_scope': 'paper_only',
+        'parent_reason': reason_l,
+        'current_mc': current_mc,
+        'max_mc': ATH_SOFT_REJECT_CANARY_MAX_MC,
+        'lifecycle': lifecycle or {},
+    }
+
+
+def _apply_ath_soft_reject_canary_to_pending(pending, detail):
+    if not pending or not detail or not detail.get('pass'):
+        return pending
+    pending['entry_mode'] = ATH_UNCERTAINTY_TINY_SCOUT_MODE
+    pending['scout_mode'] = ATH_UNCERTAINTY_TINY_SCOUT_MODE
+    pending['paper_only_scout'] = True
+    pending['execution_scope'] = 'paper_only'
+    pending['kelly_position_sol'] = min(
+        ATH_SOFT_REJECT_CANARY_SIZE_SOL,
+        _safe_float(pending.get('kelly_position_sol'), ATH_SOFT_REJECT_CANARY_SIZE_SOL) or ATH_SOFT_REJECT_CANARY_SIZE_SOL,
+    )
+    pending['timing_passed'] = True
+    pending['source_component'] = 'smart_entry'
+    pending['source_reject_reason'] = detail.get('parent_reason')
+    pending['ath_soft_reject_canary_used'] = True
+    pending['stage_outcome'] = 'ath_soft_reject_canary_armed'
+    pending['replay_source'] = 'live_monitor_ath_soft_reject_canary'
+    stamp_dog_catcher_pending(
+        pending,
+        branch=detail.get('entry_branch') or 'ath_soft_reject_canary',
+        flags=['ath_soft_reject_canary', 'paper_only_tiny'],
+        detail={'ath_soft_reject_canary': detail.get('parent_reason')},
+    )
+    return pending
 
 
 ATH_RECOVERY_TINY_PROBE_MODES = {
@@ -12304,6 +12387,10 @@ def process_discovery_tracking_candidates(
                     if final_reclaim_quote_executable
                     else DISCOVERY_TRACKING_POLL_SEC
                 )
+                if final_reclaim_quote_executable:
+                    candidate['last_check_ts'] = 0.0
+                    candidate['ttl_rescue_used'] = True
+                    candidate['ttl_rescue_force_canary'] = True
                 record_decision_event(
                     db,
                     component='discovery_tracking',
@@ -15865,7 +15952,13 @@ class Position:
 
 
 def build_lifecycle_id(token_ca, signal_ts):
-    return f"{token_ca}:{int(signal_ts)}"
+    ts_sec = normalize_signal_ts_seconds(signal_ts)
+    if ts_sec is None:
+        try:
+            ts_sec = int(float(signal_ts))
+        except (TypeError, ValueError):
+            ts_sec = int(time.time())
+    return f"{token_ca}:{int(ts_sec)}"
 
 
 def stage_seq(stage_name):
@@ -19332,6 +19425,39 @@ def run_monitor(db):
                                     event_type='pending_upgrade',
                                     data_source='smart_entry+external_alpha+dexscreener+helius',
                                 )
+                            _ath_soft_reject_canary = None
+                            if (
+                                (not _source_resonance_smart_entry_probe or not _source_resonance_smart_entry_probe.get('pass'))
+                                and _source_resonance_soft_probe_allowed
+                            ):
+                                _ath_soft_reject_canary = _ath_soft_reject_canary_detail(
+                                    pending,
+                                    timing_reason,
+                                    route=pending.get('signal_route') or pending.get('signal_type'),
+                                    dex_snapshot=(timing_detail or {}).get('trend') if isinstance(timing_detail, dict) else None,
+                                    lifecycle=pending.get('entry_readiness_lifecycle'),
+                                )
+                                if _ath_soft_reject_canary.get('pass'):
+                                    _apply_ath_soft_reject_canary_to_pending(pending, _ath_soft_reject_canary)
+                                    record_decision_event(
+                                        db,
+                                        component='ath_soft_reject_canary',
+                                        event_type='pending_upgrade',
+                                        decision='pending',
+                                        reason=_ath_soft_reject_canary.get('reason'),
+                                        token_ca=pending['token_ca'],
+                                        symbol=pending['symbol'],
+                                        lifecycle_id=lifecycle_id,
+                                        signal_ts=pending['signal_ts'],
+                                        signal_id=pending.get('premium_signal_id'),
+                                        route=pending.get('signal_route') or pending.get('signal_type'),
+                                        data_source='smart_entry+dog_catcher',
+                                        payload=with_lifecycle_payload({
+                                            'original_timing_reason': _timing_reason_l,
+                                            'original_timing_detail': timing_detail,
+                                            'ath_soft_reject_canary': _ath_soft_reject_canary,
+                                        }, pending.get('entry_readiness_lifecycle')),
+                                    )
                             if _source_resonance_smart_entry_probe and _source_resonance_smart_entry_probe.get('pass'):
                                 _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
                                 pending.pop('_smart_entry_future', None)
@@ -19350,6 +19476,21 @@ def run_monitor(db):
                                 log.info(
                                     f"  [SOURCE_RESONANCE_PROBE] {pending['symbol']} SmartEntry {timing_detail['original_timing_reason']} "
                                     f"upgraded to tiny paper probe size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL"
+                                )
+                            elif _ath_soft_reject_canary and _ath_soft_reject_canary.get('pass'):
+                                _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
+                                pending.pop('_smart_entry_future', None)
+                                should_enter = True
+                                timing_reason = 'ath_soft_reject_canary'
+                                timing_detail = {
+                                    'original_timing_reason': _timing_reason_l,
+                                    'original_timing_detail': timing_detail,
+                                    'ath_soft_reject_canary': _ath_soft_reject_canary,
+                                }
+                                timing_trigger_price = pending.get('trigger_price') or timing_trigger_price
+                                log.info(
+                                    f"  [ATH_SOFT_REJECT_CANARY] {pending['symbol']} SmartEntry {timing_detail['original_timing_reason']} "
+                                    f"upgraded to tiny paper canary size={ATH_SOFT_REJECT_CANARY_SIZE_SOL:.3f}SOL"
                                 )
                             else:
                                 if retry_count >= max_retries:

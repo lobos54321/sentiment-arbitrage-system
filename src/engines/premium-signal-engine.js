@@ -92,7 +92,7 @@ export class PremiumSignalEngine {
     this._notAthPrebuyRetryWatch = new Map();
 
     // 去重（短期 5 分钟）
-    this.recentSignals = new Map(); // token_ca → timestamp
+    this.recentSignals = new Map(); // token_ca → { ts, priority, signalType, gainPct, marketCap }
     // 🔧 Symbol级去重（15分钟窗口）— 防止同名不同CA的仿盘
     this.recentSymbols = new Map(); // symbol → timestamp
     // 🔧 退出后冷却（10分钟）— 防止退出后立即再买同名代币
@@ -430,16 +430,16 @@ export class PremiumSignalEngine {
         });
       }
 
-      if (this.isDuplicate(ca)) {
+      if (this.isDuplicate(ca, signal)) {
         this.stats.duplicates_skipped++;
         console.log(`⏭️  [去重] ${shortCA}... 5分钟内已处理，跳过`);
         return { action: 'SKIP', reason: 'duplicate' };
       }
-      this.markProcessed(ca);
+      this.markProcessed(ca, signal);
 
       const symbol = signal.symbol;
       const lastSymbolSeen = this.recentSymbols.get(symbol);
-      if (lastSymbolSeen && (Date.now() - lastSymbolSeen) < 15 * 60 * 1000) {
+      if (!this.isPriorityUpgradeSignal(signal) && lastSymbolSeen && (Date.now() - lastSymbolSeen) < 15 * 60 * 1000) {
         this.stats.duplicates_skipped++;
         console.log(`⏭️  [Symbol去重] $${symbol} 15分钟内已处理过同名代币，跳过`);
         return { action: 'SKIP', reason: 'symbol_duplicate' };
@@ -721,17 +721,57 @@ export class PremiumSignalEngine {
   /**
    * 去重检查 (5分钟窗口)
    */
-  isDuplicate(tokenCA) {
-    const lastSeen = this.recentSignals.get(tokenCA);
-    if (!lastSeen) return false;
-    return (Date.now() - lastSeen) < 5 * 60 * 1000;
+  signalPriority(signal = {}) {
+    const type = String(signal.signal_type || signal.type || '').toUpperCase();
+    if (signal.is_ath === true || type === 'ATH') return 3;
+    if (type === 'NEW_TRENDING' || type === 'NOT_ATH') return 1;
+    return 0;
   }
 
-  markProcessed(tokenCA) {
-    this.recentSignals.set(tokenCA, Date.now());
+  isPriorityUpgradeSignal(signal = {}) {
+    return this.signalPriority(signal) >= 3;
+  }
+
+  isDuplicate(tokenCA, signal = {}) {
+    const lastSeen = this.recentSignals.get(tokenCA);
+    if (!lastSeen) return false;
+    const now = Date.now();
+    const lastTs = typeof lastSeen === 'number' ? lastSeen : Number(lastSeen.ts || 0);
+    if (!lastTs || (now - lastTs) >= 5 * 60 * 1000) return false;
+
+    const currentPriority = this.signalPriority(signal);
+    const lastPriority = typeof lastSeen === 'number' ? 0 : Number(lastSeen.priority || 0);
+    if (currentPriority > lastPriority) {
+      console.log(`🔁 [信号升级] ${String(tokenCA).slice(0, 8)}... ${lastSeen.signalType || 'UNKNOWN'} → ${signal.signal_type || signal.type || 'UNKNOWN'}，允许重新处理`);
+      return false;
+    }
+
+    if (currentPriority >= 3 && lastPriority >= 3) {
+      const currentGain = Number(signal.gain_pct || 0);
+      const lastGain = typeof lastSeen === 'number' ? 0 : Number(lastSeen.gainPct || 0);
+      const currentMc = Number(signal.market_cap || 0);
+      const lastMc = typeof lastSeen === 'number' ? 0 : Number(lastSeen.marketCap || 0);
+      if ((currentGain > lastGain + 25) || (lastMc > 0 && currentMc > lastMc * 1.25)) {
+        console.log(`🔁 [ATH升级] ${String(tokenCA).slice(0, 8)}... gain/mc 更新，允许重新处理`);
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  markProcessed(tokenCA, signal = {}) {
+    this.recentSignals.set(tokenCA, {
+      ts: Date.now(),
+      priority: this.signalPriority(signal),
+      signalType: signal.signal_type || signal.type || (signal.is_ath ? 'ATH' : 'UNKNOWN'),
+      gainPct: Number(signal.gain_pct || 0),
+      marketCap: Number(signal.market_cap || 0),
+    });
     // 清理过期记录
     const cutoff = Date.now() - 10 * 60 * 1000;
-    for (const [ca, ts] of this.recentSignals) {
+    for (const [ca, data] of this.recentSignals) {
+      const ts = typeof data === 'number' ? data : Number(data.ts || 0);
       if (ts < cutoff) this.recentSignals.delete(ca);
     }
   }

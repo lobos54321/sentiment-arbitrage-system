@@ -9,6 +9,7 @@ from lotto_engine import build_lotto_pending, evaluate_lotto_entry, evaluate_lot
 from exit_engine import (  # noqa: E402
     _partial_delta_from_command,
     _raw_amount_for_absolute_partial,
+    _quote_primary_exit_confirmation,
 )
 from matrix_evaluator import (  # noqa: E402
     ExitMatrixEvaluator,
@@ -629,6 +630,26 @@ def test_probe_profit_capture_does_not_touch_main_size_position():
     exit_matrix = apply_probe_profit_capture(Pos(), {}, original)
 
     assert exit_matrix == original
+
+
+def test_guardian_probe_profit_exit_requires_non_negative_quote():
+    decision = _quote_primary_exit_confirmation(
+        "guardian_lotto_profit_protect (pnl=6.5% < floor=7.5%, peak=9.3%)",
+        quote_pnl=-0.29,
+        trigger_pnl=0.065,
+        probe_position=True,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "quote_primary_probe_profit_exit_quote_negative"
+
+    main_decision = _quote_primary_exit_confirmation(
+        "guardian_lotto_profit_protect (pnl=6.5% < floor=7.5%, peak=9.3%)",
+        quote_pnl=-0.29,
+        trigger_pnl=0.065,
+        probe_position=False,
+    )
+    assert main_decision["pass"] is True
 
 
 def test_shared_scout_quality_blocks_weak_midcap_near_miss():
