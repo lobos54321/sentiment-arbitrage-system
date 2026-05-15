@@ -65,6 +65,7 @@ from paper_trade_monitor import (  # noqa: E402
     _pending_entry_exists_for_token,
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
+    _ttl_final_reclaim_quote_override_detail,
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
     _watchlist_hard_loss_reentry_bypass_detail,
@@ -107,6 +108,7 @@ def _gmgn_resonance_context(cohort="telegram_gmgn", lead=180, quote_clean=False)
             "gmgn_lead_time_sec": lead,
             "last_seen_age_sec": 30,
             "timestamp_valid": True,
+            "quote_clean_seen": quote_clean,
         },
     }
 
@@ -2430,6 +2432,29 @@ def test_source_resonance_tiny_probe_soft_override_allows_canary_on_soft_quality
     assert decision["observed"]["soft_override"]["parent_reason"] == "scout_quality_buy_pressure_weak"
 
 
+def test_source_resonance_tiny_probe_rejects_stale_signal_anchor():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": 180,
+            "last_seen_age_sec": 30,
+            "gmgn_momentum_rounds": 3,
+            "gmgn_momentum_gain_pct": 10,
+            "last_market_cap": 42000,
+        },
+        signal={"timestamp": 1_000, "signal_type": "LOTTO"},
+        route="LOTTO",
+        hard_gate_status="scout_quality_buy_pressure_weak",
+        now_ts=1_000 + monitor.SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC + 1,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "source_resonance_signal_too_stale"
+    assert decision["observed"]["signal_age_sec"] > monitor.SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC
+
+
 def test_source_resonance_tiny_probe_rejects_timestamp_anomalies():
     decision = evaluate_source_resonance_tiny_probe(
         {
@@ -2633,7 +2658,7 @@ def test_pre_pass_resonance_tiny_probe_relaxes_missing_followthrough_to_canary(m
         hard_gate_status="NOT_ATH_PREBUY_KLINE_BLOCK",
         dex_snapshot={"price_change_m5": 0.5, "buys_m5": 4, "sells_m5": 10, "tx_m5": 14},
         live_concentration={"top1_pct": 18, "top10_pct": 32},
-        resonance_context=_gmgn_resonance_context(lead=180),
+        resonance_context=_gmgn_resonance_context(lead=180, quote_clean=True),
         now_ts=1000,
     )
 
@@ -2644,6 +2669,28 @@ def test_pre_pass_resonance_tiny_probe_relaxes_missing_followthrough_to_canary(m
     assert decision["position_size_sol"] == monitor.PRE_PASS_RELAXED_CANARY_SIZE_SOL
     assert decision["followthrough"]["pass"] is False
     assert decision["relaxed_canary"]["parent_reason"] == "pre_pass_followthrough_m5_too_low"
+    assert decision["relaxed_canary"]["activity"]["quote_clean_seen"] is True
+
+
+def test_pre_pass_relaxed_canary_requires_activity_confirmation(monkeypatch):
+    monkeypatch.setattr(monitor, "_pre_pass_resonance_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_pre_pass_resonance_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "PRE_PASS_RESONANCE_TINY_PROBE_ENABLED", True)
+
+    decision = evaluate_pre_pass_resonance_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "NEW_TRENDING", "market_cap": 48000, "timestamp": 820},
+        watchlist_entry={"type": "LOTTO", "signal_price": 0.000001, "signal_mc": 48000},
+        hard_gate_status="NOT_ATH_PREBUY_KLINE_BLOCK",
+        dex_snapshot={"price_change_m5": 0.5, "buys_m5": 4, "sells_m5": 10, "tx_m5": 14},
+        live_concentration={"top1_pct": 18, "top10_pct": 32},
+        resonance_context=_gmgn_resonance_context(lead=180, quote_clean=False),
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "pre_pass_followthrough_m5_too_low"
+    assert decision["relaxed_canary"]["reason"] == "pre_pass_relaxed_activity_not_confirmed"
 
 
 def test_pre_pass_resonance_tiny_probe_keeps_pass_and_safety_owned_elsewhere(monkeypatch):
@@ -3365,6 +3412,104 @@ def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price(monkey
     assert event["reason"] == "source_resonance_telegram_gmgn_probe"
     assert payload["source_resonance_parent_decision"]["component"] == "smart_entry"
     assert payload["source_resonance_parent_decision"]["reason"] == "no_price"
+
+
+def test_source_resonance_upgrade_allows_smart_entry_soft_reject(monkeypatch):
+    monkeypatch.setattr(monitor, "SOURCE_RESONANCE_DIRECT_PROBE_ENABLED", True)
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "DOG",
+        "signal_ts": 1000,
+        "signal_type": "ATH",
+        "signal_route": "ATH",
+        "kelly_position_sol": 0.05,
+        "trigger_price": 0.000001,
+    }
+    watchlist_entry = {
+        "ca": "TokenCA",
+        "symbol": "DOG",
+        "type": "ATH",
+        "signal_ts": 1000,
+        "signal_mc": 42000,
+        "signal_price": 0.000001,
+        "signal_top10": 20,
+    }
+    external_alpha = {
+        "available": True,
+        "source": "external_alpha_shadow",
+        "gmgn_pre_seen": True,
+        "gmgn_lead_time_sec": 30,
+        "last_seen_age_sec": 30,
+        "gmgn_momentum_rounds": 0,
+        "gmgn_momentum_gain_pct": 0,
+        "gmgn_momentum_confirmed": False,
+        "gmgn_volume_confirmed": False,
+        "last_market_cap": 42000,
+    }
+
+    detail = _maybe_upgrade_pending_to_source_resonance_probe(
+        db,
+        pending,
+        watchlist_entry,
+        lifecycle_id="TokenCA:1000",
+        route="ATH",
+        parent_component="smart_entry",
+        parent_decision="reject",
+        parent_reason="weak_buying_pressure",
+        dex_snapshot={"market_cap": 42000, "liquidity_usd": 15000, "vol_m5": 9000},
+        live_concentration={"top1_pct": 20, "top10_pct": 40},
+        external_alpha=external_alpha,
+        now_ts=1200,
+        data_source="smart_entry+external_alpha+dexscreener+helius",
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "source_resonance_soft_override"
+    assert pending["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
+    assert pending["source_resonance_soft_override_used"] is True
+
+
+def test_ttl_final_reclaim_quote_override_converts_soft_activity_gate():
+    detail = _ttl_final_reclaim_quote_override_detail(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "final_reclaim_attempted": True,
+            "final_reclaim_quote_executable": True,
+        },
+        {
+            "pass": False,
+            "reason": "lotto_recovery_shadow_activity_not_enough",
+            "failures": ["buy_sell_ratio_low", "vol_m5_low"],
+        },
+        quote_probe={"success": True, "reason": "quote_executable"},
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "ttl_final_reclaim_quote_executable_canary"
+
+
+def test_ttl_final_reclaim_quote_override_keeps_hard_failures_blocked():
+    detail = _ttl_final_reclaim_quote_override_detail(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "final_reclaim_attempted": True,
+            "final_reclaim_quote_executable": True,
+        },
+        {
+            "pass": False,
+            "reason": "lotto_recovery_shadow_activity_not_enough",
+            "failures": ["top10_extreme"],
+        },
+        quote_probe={"success": True, "reason": "quote_executable"},
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert detail["pass"] is False
+    assert detail["reason"] == "ttl_final_reclaim_hard_failure"
 
 
 def test_source_resonance_direct_probe_default_disabled(monkeypatch):

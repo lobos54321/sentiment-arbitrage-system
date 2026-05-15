@@ -157,6 +157,8 @@ LOTTO_PULLBACK_STRONG_MIN_TX_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MI
 LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_VOL_M5', '15000'))
 LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_BS', '1.20'))
 DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
+DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED', 'true').lower() != 'false'
+DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '90'))
 TINY_EXIT_QUOTE_SANITY_ENABLED = os.environ.get('TINY_EXIT_QUOTE_SANITY_ENABLED', 'true').lower() != 'false'
 TINY_EXIT_QUOTE_SANITY_MIN_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MIN_PEAK', '0.02'))
 TINY_EXIT_QUOTE_SANITY_MAX_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MAX_PEAK', '0.10'))
@@ -278,6 +280,12 @@ DOG_CATCHER_HARD_GATE_LOCK_SELL_PCT = float(os.environ.get('DOG_CATCHER_HARD_GAT
 DOG_CATCHER_HARD_GATE_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK10_FACTOR', '0.80'))
 DOG_CATCHER_HARD_GATE_PEAK25_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK25_FACTOR', '0.70'))
 DOG_CATCHER_HARD_GATE_PEAK60_FACTOR = float(os.environ.get('DOG_CATCHER_HARD_GATE_PEAK60_FACTOR', '0.60'))
+DOG_CATCHER_RESONANCE_LOCK_PEAK = float(os.environ.get('DOG_CATCHER_RESONANCE_LOCK_PEAK', '0.10'))
+DOG_CATCHER_RESONANCE_LOCK_SELL_PCT = float(os.environ.get('DOG_CATCHER_RESONANCE_LOCK_SELL_PCT', '0.70'))
+DOG_CATCHER_RESONANCE_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_RESONANCE_PEAK10_FACTOR', '0.75'))
+DOG_CATCHER_RESONANCE_PEAK25_FACTOR = float(os.environ.get('DOG_CATCHER_RESONANCE_PEAK25_FACTOR', '0.65'))
+DOG_CATCHER_RESONANCE_PEAK60_FACTOR = float(os.environ.get('DOG_CATCHER_RESONANCE_PEAK60_FACTOR', '0.55'))
+DOG_CATCHER_RESONANCE_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_RESONANCE_GAP_CRASH_PCT', '0.12'))
 DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR', '0.80'))
 DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT', '0.12'))
 DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED = os.environ.get(
@@ -289,9 +297,12 @@ DOG_CATCHER_QUOTE_ANCHORED_ENTRY_ENABLED = os.environ.get(
     'DOG_CATCHER_QUOTE_ANCHORED_ENTRY_ENABLED', 'true'
 ).lower() != 'false'
 SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED = os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_ENABLED', 'true').lower() != 'false'
-SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC', str(24 * 60 * 60)))
+SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC', '900'))
 PRE_PASS_RELAXED_CANARY_ENABLED = os.environ.get('PRE_PASS_RELAXED_CANARY_ENABLED', 'true').lower() != 'false'
 PRE_PASS_RELAXED_CANARY_SIZE_SOL = float(os.environ.get('PRE_PASS_RELAXED_CANARY_SIZE_SOL', '0.001'))
+PRE_PASS_RELAXED_CANARY_REQUIRE_ACTIVITY = os.environ.get('PRE_PASS_RELAXED_CANARY_REQUIRE_ACTIVITY', 'true').lower() != 'false'
+PRE_PASS_RELAXED_CANARY_MIN_ROUNDS = int(os.environ.get('PRE_PASS_RELAXED_CANARY_MIN_ROUNDS', '1'))
+PRE_PASS_RELAXED_CANARY_MIN_GAIN_PCT = float(os.environ.get('PRE_PASS_RELAXED_CANARY_MIN_GAIN_PCT', '2.0'))
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
@@ -341,11 +352,13 @@ SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_
 SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC', str(24 * 60 * 60)))
 SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC', '120'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC', '900'))
+SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC', '600'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS', '2'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
 SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
 SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED', 'true').lower() != 'false'
+SOURCE_RESONANCE_SMART_ENTRY_SOFT_REJECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_SOFT_REJECT_PROBE_ENABLED', 'true').lower() != 'false'
 SOURCE_RESONANCE_DIRECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_DIRECT_PROBE_ENABLED', 'true').lower() != 'false'
 PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
 
@@ -4754,6 +4767,46 @@ def apply_probe_profit_capture(pos, w_entry, exit_matrix, *, now_ts=None):
             )
         return exit_matrix
 
+    if entry_mode in {SOURCE_RESONANCE_TINY_PROBE_MODE, PRE_PASS_RESONANCE_TINY_PROBE_MODE}:
+        floor_factor = (
+            DOG_CATCHER_RESONANCE_PEAK60_FACTOR if peak_pnl >= 0.60
+            else DOG_CATCHER_RESONANCE_PEAK25_FACTOR if peak_pnl >= 0.25
+            else DOG_CATCHER_RESONANCE_PEAK10_FACTOR if peak_pnl >= DOG_CATCHER_RESONANCE_LOCK_PEAK
+            else None
+        )
+        floor = peak_pnl * floor_factor if floor_factor is not None else None
+        if floor is not None and current_pnl <= floor:
+            return _override(
+                'exit',
+                (
+                    f"dog_catcher_resonance_trail_floor "
+                    f"(pnl={current_pnl:.1%} <= floor={floor:.1%}, "
+                    f"peak={peak_pnl:.1%}, factor={floor_factor:.0%})"
+                ),
+                trail_floor=floor,
+            )
+        if peak_pnl >= DOG_CATCHER_RESONANCE_LOCK_PEAK and (peak_pnl - current_pnl) >= DOG_CATCHER_RESONANCE_GAP_CRASH_PCT:
+            return _override(
+                'exit',
+                (
+                    f"dog_catcher_resonance_gap_crash "
+                    f"(giveback={(peak_pnl - current_pnl):.1%} >= {DOG_CATCHER_RESONANCE_GAP_CRASH_PCT:.1%}, "
+                    f"peak={peak_pnl:.1%})"
+                ),
+                trail_floor=floor,
+            )
+        if not already_locked and peak_pnl >= DOG_CATCHER_RESONANCE_LOCK_PEAK and current_pnl > 0:
+            return _override(
+                'lock_profit',
+                (
+                    f"dog_catcher_resonance_profit_lock "
+                    f"(peak={peak_pnl:.1%} >= {DOG_CATCHER_RESONANCE_LOCK_PEAK:.1%}, "
+                    f"pnl={current_pnl:.1%}, sell={DOG_CATCHER_RESONANCE_LOCK_SELL_PCT:.0%})"
+                ),
+                sell_pct=DOG_CATCHER_RESONANCE_LOCK_SELL_PCT,
+            )
+        return exit_matrix
+
     if entry_mode in {LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE, 'smart_entry_pullback_bounce'}:
         low_liq_floor = peak_pnl * DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR if peak_pnl >= 0.10 else None
         if low_liq_floor is not None and current_pnl <= low_liq_floor:
@@ -6335,6 +6388,10 @@ def build_hard_gate_resonance_context(external_alpha=None, *, quote_context=None
         'quote_executable': quote_executable,
         'source_resonance_score': external_alpha.get('source_resonance_score') or external_alpha.get('resonance_score'),
         'source_resonance_level': external_alpha.get('source_resonance_level') or external_alpha.get('resonance_level'),
+        'gmgn_momentum_rounds': external_alpha.get('gmgn_momentum_rounds'),
+        'gmgn_momentum_gain_pct': external_alpha.get('gmgn_momentum_gain_pct'),
+        'gmgn_momentum_confirmed': bool(external_alpha.get('gmgn_momentum_confirmed')),
+        'gmgn_volume_confirmed': bool(external_alpha.get('gmgn_volume_confirmed')),
         'external_alpha_available': bool(external_alpha.get('available')),
         'external_alpha_reason': external_alpha.get('reason'),
         'external_alpha': external_alpha,
@@ -6373,7 +6430,12 @@ def _source_resonance_soft_override_detail(reason, external_alpha=None, *, alpha
         'pre_pass_followthrough_wait',
         'gmgn_lead_time_too_short',
         'gmgn_alpha_stale',
-    }:
+        'weak_buying_pressure',
+        'volume_low',
+        'tx_low',
+        'negative_trend',
+        'no_kline_low_volume',
+    } and not _matrix_micro_momentum_reason(text):
         return {'pass': False, 'reason': 'parent_reason_not_soft_overrideable', 'parent_reason': text}
     external_alpha = external_alpha or {}
     if not external_alpha.get('available') or not external_alpha.get('gmgn_pre_seen'):
@@ -6411,6 +6473,7 @@ def evaluate_source_resonance_tiny_probe(
     live_concentration = live_concentration or {}
     lifecycle = lifecycle or {}
     external_alpha = external_alpha or {}
+    now_ts = float(now_ts or time.time())
     route_name = str(
         route
         or signal.get('signal_type')
@@ -6448,6 +6511,14 @@ def evaluate_source_resonance_tiny_probe(
     gain_pct = _source_resonance_number(external_alpha.get('gmgn_momentum_gain_pct'), 0.0) or 0.0
     momentum_confirmed = bool(external_alpha.get('gmgn_momentum_confirmed'))
     volume_confirmed = bool(external_alpha.get('gmgn_volume_confirmed'))
+    signal_ts_sec = normalize_signal_ts_seconds(
+        signal.get('timestamp')
+        or signal.get('signal_ts')
+        or watchlist_entry.get('signal_ts')
+        or watchlist_entry.get('added_at')
+        or external_alpha.get('signal_ts_sec')
+    )
+    signal_age_sec = None if signal_ts_sec is None else max(0.0, now_ts - float(signal_ts_sec))
     observed = {
         'route': route_name,
         'hard_gate_status': gate,
@@ -6456,7 +6527,8 @@ def evaluate_source_resonance_tiny_probe(
         'top10_pct': top10_pct,
         'gmgn_first_seen_ts': external_alpha.get('gmgn_first_seen_ts'),
         'gmgn_last_seen_ts': external_alpha.get('gmgn_last_seen_ts'),
-        'signal_ts_sec': external_alpha.get('signal_ts_sec'),
+        'signal_ts_sec': signal_ts_sec or external_alpha.get('signal_ts_sec'),
+        'signal_age_sec': signal_age_sec,
         'gmgn_lead_time_sec': lead_sec,
         'lead_time_sec': lead_sec,
         'last_seen_age_sec': alpha_age_sec,
@@ -6482,6 +6554,7 @@ def evaluate_source_resonance_tiny_probe(
         'max_lead_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC,
         'max_negative_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC,
         'max_alpha_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC,
+        'max_signal_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC,
         'min_rounds': SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS,
         'min_gain_pct': SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT,
         'min_mc': SOURCE_RESONANCE_TINY_PROBE_MIN_MC,
@@ -6534,6 +6607,8 @@ def evaluate_source_resonance_tiny_probe(
         return _result(False, 'source_resonance_gmgn_not_pre_seen')
     if not timestamp_valid:
         return _result(False, timestamp_anomaly_reason or 'source_resonance_timestamp_invalid')
+    if signal_age_sec is not None and signal_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC:
+        return _result(False, 'source_resonance_signal_too_stale')
     if alpha_age_sec < -SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC:
         return _result(False, 'source_resonance_external_alpha_future_seen')
     if alpha_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC and not soft_override.get('pass'):
@@ -7492,6 +7567,51 @@ PRE_PASS_RELAXED_REASONS = {
 }
 
 
+def _pre_pass_relaxed_activity_detail(resonance_context):
+    resonance_context = resonance_context or {}
+    external_alpha = resonance_context.get('external_alpha') or {}
+    quote_clean_seen = bool(
+        resonance_context.get('quote_clean_seen')
+        or external_alpha.get('quote_clean_seen')
+    )
+    rounds = max(
+        _source_resonance_number(resonance_context.get('gmgn_momentum_rounds'), 0.0) or 0.0,
+        _source_resonance_number(external_alpha.get('gmgn_momentum_rounds'), 0.0) or 0.0,
+    )
+    gain_pct = max(
+        _source_resonance_number(resonance_context.get('gmgn_momentum_gain_pct'), 0.0) or 0.0,
+        _source_resonance_number(external_alpha.get('gmgn_momentum_gain_pct'), 0.0) or 0.0,
+    )
+    momentum_confirmed = bool(
+        resonance_context.get('gmgn_momentum_confirmed')
+        or external_alpha.get('gmgn_momentum_confirmed')
+    )
+    volume_confirmed = bool(
+        resonance_context.get('gmgn_volume_confirmed')
+        or external_alpha.get('gmgn_volume_confirmed')
+    )
+    passed = bool(
+        quote_clean_seen
+        or momentum_confirmed
+        or volume_confirmed
+        or rounds >= PRE_PASS_RELAXED_CANARY_MIN_ROUNDS
+        or gain_pct >= PRE_PASS_RELAXED_CANARY_MIN_GAIN_PCT
+    )
+    return {
+        'pass': passed,
+        'reason': 'pre_pass_relaxed_activity_confirmed' if passed else 'pre_pass_relaxed_activity_not_confirmed',
+        'quote_clean_seen': quote_clean_seen,
+        'gmgn_momentum_rounds': rounds,
+        'gmgn_momentum_gain_pct': gain_pct,
+        'gmgn_momentum_confirmed': momentum_confirmed,
+        'gmgn_volume_confirmed': volume_confirmed,
+        'thresholds': {
+            'min_rounds': PRE_PASS_RELAXED_CANARY_MIN_ROUNDS,
+            'min_gain_pct': PRE_PASS_RELAXED_CANARY_MIN_GAIN_PCT,
+        },
+    }
+
+
 def _pre_pass_relaxed_canary_detail(reason, *, resonance_context=None, quote_executable=False, gmgn_policy=None):
     if not PRE_PASS_RELAXED_CANARY_ENABLED:
         return {'pass': False, 'reason': 'pre_pass_relaxed_canary_disabled'}
@@ -7506,11 +7626,15 @@ def _pre_pass_relaxed_canary_detail(reason, *, resonance_context=None, quote_exe
         return {'pass': False, 'reason': 'pre_pass_relaxed_missing_gmgn_pre_seen', 'parent_reason': text}
     if gmgn_policy.get('action') in {'reject', 'shadow_reject'}:
         return {'pass': False, 'reason': gmgn_policy.get('reason') or 'gmgn_policy_reject', 'parent_reason': text}
+    activity = _pre_pass_relaxed_activity_detail(resonance_context)
+    if PRE_PASS_RELAXED_CANARY_REQUIRE_ACTIVITY and not activity.get('pass'):
+        return {'pass': False, 'reason': activity.get('reason'), 'parent_reason': text, 'activity': activity}
     return {
         'pass': True,
         'reason': 'pre_pass_relaxed_canary',
         'parent_reason': text,
         'size_sol': PRE_PASS_RELAXED_CANARY_SIZE_SOL,
+        'activity': activity,
     }
 
 
@@ -11118,6 +11242,43 @@ def _update_candidate_quote_confirmation(candidate, quote_probe, *, key='quote',
     }
 
 
+def _ttl_final_reclaim_quote_override_detail(candidate, gate, *, quote_probe=None, mode=None):
+    candidate = candidate or {}
+    gate = gate or {}
+    quote_probe = quote_probe or candidate.get('final_reclaim_quote_probe') or {}
+    if not candidate.get('final_reclaim_attempted'):
+        return {'pass': False, 'reason': 'ttl_final_reclaim_not_attempted'}
+    if not (candidate.get('final_reclaim_quote_executable') or quote_probe.get('success')):
+        return {'pass': False, 'reason': 'ttl_final_reclaim_quote_not_executable'}
+    if str(mode or candidate.get('mode') or '') not in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return {'pass': False, 'reason': 'ttl_final_reclaim_mode_not_tiny'}
+    if gate.get('pass'):
+        return {'pass': False, 'reason': 'ttl_final_reclaim_override_not_needed'}
+    failures = [str(item) for item in (gate.get('failures') or []) if item]
+    hard_failures = {
+        item for item in failures
+        if item in {
+            'top1_extreme',
+            'top10_extreme',
+            'current_mc_gate',
+            'gmgn_policy_reject',
+        } or item.startswith('gmgn_')
+    }
+    if hard_failures:
+        return {
+            'pass': False,
+            'reason': 'ttl_final_reclaim_hard_failure',
+            'hard_failures': sorted(hard_failures),
+            'original_gate': gate,
+        }
+    return {
+        'pass': True,
+        'reason': 'ttl_final_reclaim_quote_executable_canary',
+        'original_gate': gate,
+        'quote_probe': quote_probe,
+    }
+
+
 def _discovery_low_liq_quote_probe(token_ca, *, lifecycle_id=None, mode=None):
     return _discovery_quote_probe(
         token_ca,
@@ -12122,14 +12283,34 @@ def process_discovery_tracking_candidates(
                     )
                     continue
             if DISCOVERY_FINAL_RECLAIM_ENABLED and not candidate.get('final_reclaim_attempted'):
+                final_reclaim_quote_probe = None
+                final_reclaim_quote_executable = False
+                if DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED and mode in PAPER_TINY_SCOUT_ENTRY_MODES:
+                    final_reclaim_quote_probe = _discovery_quote_probe(
+                        token_ca,
+                        lifecycle_id=lifecycle_id,
+                        mode=mode,
+                        stage_name='tracking_ttl_final_reclaim_quote_probe',
+                    )
+                    final_reclaim_quote_executable = bool(final_reclaim_quote_probe.get('success'))
+                    candidate['final_reclaim_quote_probe'] = final_reclaim_quote_probe
+                    candidate['final_reclaim_quote_executable'] = final_reclaim_quote_executable
                 candidate['final_reclaim_attempted'] = True
-                candidate['expires_at'] = now_ts + DISCOVERY_TRACKING_POLL_SEC
+                candidate['expires_at'] = now_ts + (
+                    DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC
+                    if final_reclaim_quote_executable
+                    else DISCOVERY_TRACKING_POLL_SEC
+                )
                 record_decision_event(
                     db,
                     component='discovery_tracking',
                     event_type='candidate_recheck',
                     decision='wait',
-                    reason='tracking_ttl_final_reclaim_check',
+                    reason=(
+                        'tracking_ttl_final_reclaim_quote_executable'
+                        if final_reclaim_quote_executable
+                        else 'tracking_ttl_final_reclaim_check'
+                    ),
                     token_ca=token_ca,
                     symbol=candidate.get('symbol'),
                     lifecycle_id=lifecycle_id,
@@ -12144,6 +12325,8 @@ def process_discovery_tracking_candidates(
                         'ttl_extend_count': candidate.get('ttl_extend_count'),
                         'last_ath_strength_snapshot': candidate.get('last_ath_strength_snapshot'),
                         'last_lotto_strength_snapshot': candidate.get('last_lotto_strength_snapshot'),
+                        'final_reclaim_quote_probe': final_reclaim_quote_probe,
+                        'final_reclaim_quote_executable': final_reclaim_quote_executable,
                     },
                     event_ts=now_ts,
                 )
@@ -12327,6 +12510,8 @@ def process_discovery_tracking_candidates(
             'top10_pct': top10_pct,
             'current_reclaim': current_reclaim,
             'gmgn_readonly': gmgn_enrichment,
+            'final_reclaim_quote_probe': candidate.get('final_reclaim_quote_probe'),
+            'final_reclaim_quote_executable': bool(candidate.get('final_reclaim_quote_executable')),
         }
         if gmgn_enrichment is not None:
             gmgn_policy = evaluate_gmgn_lotto_policy(
@@ -12593,6 +12778,43 @@ def process_discovery_tracking_candidates(
             )
             detail['lotto_recovery_gate'] = lotto_recovery_gate
             if not lotto_recovery_gate.get('pass'):
+                ttl_override = _ttl_final_reclaim_quote_override_detail(
+                    candidate,
+                    lotto_recovery_gate,
+                    quote_probe=lotto_recovery_quote_probe,
+                    mode=mode,
+                )
+                detail['ttl_final_reclaim_quote_override'] = ttl_override
+                if ttl_override.get('pass'):
+                    lotto_recovery_gate = {
+                        **lotto_recovery_gate,
+                        'pass': True,
+                        'reason': ttl_override.get('reason'),
+                        'ttl_final_reclaim_quote_override': ttl_override,
+                    }
+                    detail['lotto_recovery_gate'] = lotto_recovery_gate
+                else:
+                    candidate['last_wait_reason'] = lotto_recovery_gate.get('reason')
+                    record_decision_event(
+                        db,
+                        component='lotto_recovery',
+                        event_type='candidate_recheck',
+                        decision='wait',
+                        reason=lotto_recovery_gate.get('reason') or 'lotto_recovery_wait',
+                        token_ca=token_ca,
+                        symbol=candidate.get('symbol'),
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=candidate.get('signal_ts'),
+                        signal_id=candidate.get('signal_id'),
+                        route=route,
+                        data_source='discovery_tracking+dexscreener+quote_probe+lifecycle',
+                        payload=with_lifecycle_payload(detail, lifecycle),
+                        event_ts=now_ts,
+                    )
+                    continue
+            if lotto_recovery_gate.get('ttl_final_reclaim_quote_override'):
+                detail['ttl_rescue_gate_override'] = lotto_recovery_gate.get('ttl_final_reclaim_quote_override')
+            if not lotto_recovery_gate.get('pass'):
                 candidate['last_wait_reason'] = lotto_recovery_gate.get('reason')
                 record_decision_event(
                     db,
@@ -12657,6 +12879,43 @@ def process_discovery_tracking_candidates(
             )
             detail['ath_recovery_gate'] = ath_recovery_gate
             if not ath_recovery_gate.get('pass'):
+                ttl_override = _ttl_final_reclaim_quote_override_detail(
+                    candidate,
+                    ath_recovery_gate,
+                    quote_probe=ath_recovery_quote_probe,
+                    mode=mode,
+                )
+                detail['ttl_final_reclaim_quote_override'] = ttl_override
+                if ttl_override.get('pass'):
+                    ath_recovery_gate = {
+                        **ath_recovery_gate,
+                        'pass': True,
+                        'reason': ttl_override.get('reason'),
+                        'ttl_final_reclaim_quote_override': ttl_override,
+                    }
+                    detail['ath_recovery_gate'] = ath_recovery_gate
+                else:
+                    candidate['last_wait_reason'] = ath_recovery_gate.get('reason')
+                    record_decision_event(
+                        db,
+                        component='ath_recovery',
+                        event_type='candidate_recheck',
+                        decision='wait',
+                        reason=ath_recovery_gate.get('reason') or 'ath_recovery_wait',
+                        token_ca=token_ca,
+                        symbol=candidate.get('symbol'),
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=candidate.get('signal_ts'),
+                        signal_id=candidate.get('signal_id'),
+                        route=route,
+                        data_source='discovery_tracking+dexscreener+lifecycle+paper_risk',
+                        payload=with_lifecycle_payload(detail, lifecycle),
+                        event_ts=now_ts,
+                    )
+                    continue
+            if ath_recovery_gate.get('ttl_final_reclaim_quote_override'):
+                detail['ttl_rescue_gate_override'] = ath_recovery_gate.get('ttl_final_reclaim_quote_override')
+            if not ath_recovery_gate.get('pass'):
                 candidate['last_wait_reason'] = ath_recovery_gate.get('reason')
                 record_decision_event(
                     db,
@@ -12716,11 +12975,16 @@ def process_discovery_tracking_candidates(
             'source_component': candidate.get('source_component') or 'discovery_tracking',
             'source_reject_reason': candidate.get('source_reject_reason') or candidate.get('last_wait_reason'),
             'final_reclaim_attempted': bool(candidate.get('final_reclaim_attempted')),
-            'ttl_rescue_used': bool(candidate.get('final_reclaim_attempted') or candidate.get('last_wait_reason') == 'tracking_ttl_expired'),
+            'ttl_rescue_used': bool(
+                candidate.get('final_reclaim_attempted')
+                or candidate.get('final_reclaim_quote_executable')
+                or candidate.get('last_wait_reason') == 'tracking_ttl_expired'
+            ),
             'retry_watch_used': bool(candidate.get('retry_watch_used')),
             'intervention_flags': [
                 'discovery_tracking',
                 'ttl_rescue' if candidate.get('final_reclaim_attempted') else '',
+                'ttl_quote_executable' if candidate.get('final_reclaim_quote_executable') else '',
                 'retry_watch' if candidate.get('retry_watch_used') else '',
             ],
         }
@@ -19033,12 +19297,25 @@ def run_monitor(db):
                                 lifecycle=pending.get('entry_readiness_lifecycle'),
                                 now_ts=now,
                             )
-                            _source_resonance_no_price_probe = None
+                            _source_resonance_smart_entry_probe = None
+                            _timing_reason_l = str(timing_reason or '').strip().lower()
+                            _source_resonance_soft_probe_allowed = (
+                                SOURCE_RESONANCE_SMART_ENTRY_SOFT_REJECT_PROBE_ENABLED
+                                and (
+                                    classify_rejection_hardness(_timing_reason_l) == 'soft_reject'
+                                    or _timing_reason_l in DOG_CATCHER_SOFT_QUALITY_REASONS
+                                    or _timing_reason_l == 'matrices not yet aligned'
+                                    or _matrix_micro_momentum_reason(_timing_reason_l)
+                                )
+                            )
                             if (
-                                SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED
-                                and timing_reason == 'no_price'
+                                (
+                                    SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED
+                                    and timing_reason == 'no_price'
+                                )
+                                or _source_resonance_soft_probe_allowed
                             ):
-                                _source_resonance_no_price_probe = _maybe_upgrade_pending_to_source_resonance_probe(
+                                _source_resonance_smart_entry_probe = _maybe_upgrade_pending_to_source_resonance_probe(
                                     db,
                                     pending,
                                     pending_w_entry,
@@ -19052,19 +19329,23 @@ def run_monitor(db):
                                     event_type='pending_upgrade',
                                     data_source='smart_entry+external_alpha+dexscreener+helius',
                                 )
-                            if _source_resonance_no_price_probe and _source_resonance_no_price_probe.get('pass'):
+                            if _source_resonance_smart_entry_probe and _source_resonance_smart_entry_probe.get('pass'):
                                 _LOTTO_TIMING_RETRY_MEMORY.pop(lifecycle_id, None)
                                 pending.pop('_smart_entry_future', None)
                                 should_enter = True
-                                timing_reason = 'source_resonance_smart_entry_no_price_probe'
+                                timing_reason = (
+                                    'source_resonance_smart_entry_no_price_probe'
+                                    if timing_reason == 'no_price'
+                                    else 'source_resonance_smart_entry_soft_reject_probe'
+                                )
                                 timing_detail = {
-                                    'original_timing_reason': 'no_price',
+                                    'original_timing_reason': _timing_reason_l,
                                     'original_timing_detail': timing_detail,
-                                    'source_resonance_probe': _source_resonance_no_price_probe,
+                                    'source_resonance_probe': _source_resonance_smart_entry_probe,
                                 }
                                 timing_trigger_price = pending.get('trigger_price') or timing_trigger_price
                                 log.info(
-                                    f"  [SOURCE_RESONANCE_PROBE] {pending['symbol']} SmartEntry no_price "
+                                    f"  [SOURCE_RESONANCE_PROBE] {pending['symbol']} SmartEntry {timing_detail['original_timing_reason']} "
                                     f"upgraded to tiny paper probe size={SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL:.3f}SOL"
                                 )
                             else:

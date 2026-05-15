@@ -40,6 +40,8 @@ from paper_trade_monitor import (  # noqa: E402
     LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
     LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
     LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+    PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+    SOURCE_RESONANCE_TINY_PROBE_MODE,
     normalize_price_age_ms,
     process_discovery_tracking_candidates,
     record_scout_funnel_summary,
@@ -502,6 +504,50 @@ def test_hard_gate_baseline_profit_capture_exits_peak35_giveback():
     assert exit_matrix["action"] == "exit"
     assert round(exit_matrix["trail_floor"], 3) == 0.259
     assert exit_matrix["reason"].startswith("dog_catcher_hard_gate_trail_floor")
+
+
+def test_resonance_probe_profit_capture_exits_peak_giveback_before_late_lock():
+    class Pos:
+        position_size_sol = 0.001
+        peak_pnl = 0.18
+        signal_type = "ATH"
+        monitor_state = {
+            "entryMode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "signalRoute": "ATH",
+            "entrySol": 0.001,
+        }
+
+    exit_matrix = apply_probe_profit_capture(
+        Pos(),
+        {},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.08, "peak_pnl": 0.18},
+    )
+
+    assert exit_matrix["action"] == "exit"
+    assert round(exit_matrix["trail_floor"], 3) == 0.135
+    assert exit_matrix["reason"].startswith("dog_catcher_resonance_trail_floor")
+
+
+def test_pre_pass_probe_profit_capture_locks_fresh_profit():
+    class Pos:
+        position_size_sol = 0.001
+        peak_pnl = 0.12
+        signal_type = "LOTTO"
+        monitor_state = {
+            "entryMode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+            "signalRoute": "LOTTO",
+            "entrySol": 0.001,
+        }
+
+    exit_matrix = apply_probe_profit_capture(
+        Pos(),
+        {},
+        {"action": "hold", "reason": "hold", "current_pnl": 0.12, "peak_pnl": 0.12},
+    )
+
+    assert exit_matrix["action"] == "lock_profit"
+    assert exit_matrix["sell_pct"] == 0.70
+    assert exit_matrix["reason"].startswith("dog_catcher_resonance_profit_lock")
 
 
 def test_observation_probe_late_locks_when_ten_percent_peak_gives_back_to_three():
