@@ -3507,10 +3507,13 @@ DOG_CATCHER_BRANCH_ENTRY_MODE_QUALITY_REASONS = {
     'entry_mode_shadow_cooldown',
 }
 DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES = {
+    'source_resonance_tiny_probe',
     'source_resonance_soft_override',
+    'pre_pass_resonance',
     'pre_pass_relaxed_canary',
     'ath_recovery_soft_quality_canary',
     'ttl_rescue_canary',
+    'ttl_final_reclaim_quote_executable_canary',
     'retry_watch',
     'retry_watch_recovered',
 }

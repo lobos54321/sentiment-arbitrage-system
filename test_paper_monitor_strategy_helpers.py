@@ -1443,6 +1443,23 @@ def test_dog_catcher_branch_entry_mode_override_allows_ttl_rescue_canary():
     assert decision["reason"] == "dog_catcher_branch_entry_mode_quality_override"
 
 
+def test_dog_catcher_branch_entry_mode_override_allows_source_and_prepass_branches():
+    for entry_mode, branch in [
+        (SOURCE_RESONANCE_TINY_PROBE_MODE, "source_resonance_tiny_probe"),
+        (PRE_PASS_RESONANCE_TINY_PROBE_MODE, "pre_pass_resonance"),
+    ]:
+        decision = _dog_catcher_branch_entry_mode_quality_override({
+            "entry_mode": entry_mode,
+            "paper_only_scout": True,
+            "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+            "entry_branch": branch,
+            "source_reject_reason": "matrices not yet aligned",
+        })
+
+        assert decision["pass"] is True
+        assert decision["reason"] == "dog_catcher_branch_entry_mode_quality_override"
+
+
 def test_dog_catcher_quote_anchor_allows_missing_trigger_for_retry_canary():
     pending = {
         "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
