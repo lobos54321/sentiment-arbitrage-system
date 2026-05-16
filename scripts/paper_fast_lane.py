@@ -77,9 +77,11 @@ FAST_LANE_MISSED_REASONS = {
     "lotto_stale",
 }
 
+SQLITE_WRITE_LOCK = threading.Lock()
+
 
 def connect_db(path):
-    timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "30"))
+    timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "60"))
     db = sqlite3.connect(path, timeout=timeout_sec, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
@@ -110,54 +112,55 @@ def optional_col(cols, name, default="NULL"):
 
 
 def init_fast_lane_schema(db):
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS paper_fast_entry_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at REAL NOT NULL,
-            source_signal_ts INTEGER,
-            signal_receive_ts INTEGER,
-            signal_recorded_ts INTEGER,
-            token_ca TEXT NOT NULL,
-            symbol TEXT,
-            source_type TEXT NOT NULL,
-            entry_mode_hint TEXT,
-            entry_branch TEXT,
-            hard_gate_status TEXT,
-            source_resonance_cohort TEXT,
-            trigger_price REAL,
-            trigger_mc REAL,
-            priority INTEGER DEFAULT 50,
-            status TEXT DEFAULT 'queued',
-            attempt_count INTEGER DEFAULT 0,
-            last_error TEXT,
-            claimed_by TEXT,
-            claimed_at REAL,
-            decision_deadline_ts REAL,
-            quote_deadline_ts REAL,
-            queue_key TEXT NOT NULL UNIQUE,
-            payload_json TEXT,
-            updated_at REAL NOT NULL
+    with SQLITE_WRITE_LOCK:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_fast_entry_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                source_signal_ts INTEGER,
+                signal_receive_ts INTEGER,
+                signal_recorded_ts INTEGER,
+                token_ca TEXT NOT NULL,
+                symbol TEXT,
+                source_type TEXT NOT NULL,
+                entry_mode_hint TEXT,
+                entry_branch TEXT,
+                hard_gate_status TEXT,
+                source_resonance_cohort TEXT,
+                trigger_price REAL,
+                trigger_mc REAL,
+                priority INTEGER DEFAULT 50,
+                status TEXT DEFAULT 'queued',
+                attempt_count INTEGER DEFAULT 0,
+                last_error TEXT,
+                claimed_by TEXT,
+                claimed_at REAL,
+                decision_deadline_ts REAL,
+                quote_deadline_ts REAL,
+                queue_key TEXT NOT NULL UNIQUE,
+                payload_json TEXT,
+                updated_at REAL NOT NULL
+            )
+            """
         )
-        """
-    )
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_status_priority ON paper_fast_entry_queue(status, priority, created_at)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_token_status ON paper_fast_entry_queue(token_ca, status)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_queue_key ON paper_fast_entry_queue(queue_key)")
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS paper_entry_locks (
-            token_ca TEXT PRIMARY KEY,
-            lifecycle_id TEXT,
-            lock_reason TEXT,
-            owner TEXT,
-            expires_at REAL NOT NULL,
-            updated_at REAL NOT NULL
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_status_priority ON paper_fast_entry_queue(status, priority, created_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_token_status ON paper_fast_entry_queue(token_ca, status)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_queue_key ON paper_fast_entry_queue(queue_key)")
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_entry_locks (
+                token_ca TEXT PRIMARY KEY,
+                lifecycle_id TEXT,
+                lock_reason TEXT,
+                owner TEXT,
+                expires_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
         )
-        """
-    )
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pel_expires ON paper_entry_locks(expires_at)")
-    db.commit()
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pel_expires ON paper_entry_locks(expires_at)")
+        db.commit()
 
 
 def normalize_ts_sec(value):
@@ -187,40 +190,41 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
     branch = entry_branch or source_type
     key = queue_key(source_type, token_ca, signal_ts, branch)
     try:
-        db.execute(
-            """
-            INSERT OR IGNORE INTO paper_fast_entry_queue (
-                created_at, source_signal_ts, signal_receive_ts, signal_recorded_ts,
-                token_ca, symbol, source_type, entry_mode_hint, entry_branch,
-                hard_gate_status, source_resonance_cohort, trigger_price, trigger_mc,
-                priority, status, decision_deadline_ts, quote_deadline_ts, queue_key,
-                payload_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
-            """,
-            (
-                now_ts,
-                signal_ts,
-                int(normalize_ts_sec(receive_ts)) if receive_ts else signal_ts,
-                int(normalize_ts_sec(recorded_ts)) if recorded_ts else None,
-                token_ca,
-                symbol,
-                source_type,
-                entry_mode_hint,
-                branch,
-                hard_gate_status,
-                source_resonance_cohort,
-                trigger_price,
-                trigger_mc,
-                int(priority),
-                now_ts + FAST_ENTRY_RETRY_LATENCY_SEC,
-                now_ts + FAST_ENTRY_QUOTE_TIMEOUT_SEC,
-                key,
-                json.dumps(payload or {}, ensure_ascii=False),
-                now_ts,
-            ),
-        )
-        inserted = db.execute("SELECT changes() AS c").fetchone()["c"] > 0
-        db.commit()
+        with SQLITE_WRITE_LOCK:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO paper_fast_entry_queue (
+                    created_at, source_signal_ts, signal_receive_ts, signal_recorded_ts,
+                    token_ca, symbol, source_type, entry_mode_hint, entry_branch,
+                    hard_gate_status, source_resonance_cohort, trigger_price, trigger_mc,
+                    priority, status, decision_deadline_ts, quote_deadline_ts, queue_key,
+                    payload_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_ts,
+                    signal_ts,
+                    int(normalize_ts_sec(receive_ts)) if receive_ts else signal_ts,
+                    int(normalize_ts_sec(recorded_ts)) if recorded_ts else None,
+                    token_ca,
+                    symbol,
+                    source_type,
+                    entry_mode_hint,
+                    branch,
+                    hard_gate_status,
+                    source_resonance_cohort,
+                    trigger_price,
+                    trigger_mc,
+                    int(priority),
+                    now_ts + FAST_ENTRY_RETRY_LATENCY_SEC,
+                    now_ts + FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+                    key,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    now_ts,
+                ),
+            )
+            inserted = db.execute("SELECT changes() AS c").fetchone()["c"] > 0
+            db.commit()
         return inserted
     except sqlite3.OperationalError as exc:
         log.warning("enqueue failed token=%s source=%s: %s", token_ca, source_type, exc)
@@ -276,101 +280,106 @@ def open_or_recent_trade_exists(db, token_ca, now_ts=None):
 
 def acquire_token_lock(db, token_ca, lifecycle_id, owner, now_ts=None):
     now_ts = float(now_ts if now_ts is not None else time.time())
-    db.execute("DELETE FROM paper_entry_locks WHERE expires_at <= ?", (now_ts,))
-    try:
-        db.execute(
-            """
-            INSERT INTO paper_entry_locks(token_ca, lifecycle_id, lock_reason, owner, expires_at, updated_at)
-            VALUES (?, ?, 'fast_entry_attempt', ?, ?, ?)
-            """,
-            (token_ca, lifecycle_id, owner, now_ts + FAST_ENTRY_CLAIM_TTL_SEC, now_ts),
-        )
-        db.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
+    with SQLITE_WRITE_LOCK:
+        db.execute("DELETE FROM paper_entry_locks WHERE expires_at <= ?", (now_ts,))
+        try:
+            db.execute(
+                """
+                INSERT INTO paper_entry_locks(token_ca, lifecycle_id, lock_reason, owner, expires_at, updated_at)
+                VALUES (?, ?, 'fast_entry_attempt', ?, ?, ?)
+                """,
+                (token_ca, lifecycle_id, owner, now_ts + FAST_ENTRY_CLAIM_TTL_SEC, now_ts),
+            )
+            db.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 def release_token_lock(db, token_ca, owner=None):
-    if owner:
-        db.execute("DELETE FROM paper_entry_locks WHERE token_ca = ? AND owner = ?", (token_ca, owner))
-    else:
-        db.execute("DELETE FROM paper_entry_locks WHERE token_ca = ?", (token_ca,))
-    db.commit()
+    with SQLITE_WRITE_LOCK:
+        if owner:
+            db.execute("DELETE FROM paper_entry_locks WHERE token_ca = ? AND owner = ?", (token_ca, owner))
+        else:
+            db.execute("DELETE FROM paper_entry_locks WHERE token_ca = ?", (token_ca,))
+        db.commit()
 
 
 def claim_queue_item(db, owner):
     now_ts = time.time()
     stale_claim_before = now_ts - FAST_ENTRY_CLAIM_TTL_SEC
-    db.execute(
-        """
-        UPDATE paper_fast_entry_queue
-        SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?
-        WHERE status = 'claimed' AND COALESCE(claimed_at, 0) < ?
-        """,
-        (now_ts, stale_claim_before),
-    )
-    row = db.execute(
-        """
-        SELECT *
-        FROM paper_fast_entry_queue
-        WHERE status = 'queued'
-        ORDER BY priority ASC, created_at ASC
-        LIMIT 1
-        """
-    ).fetchone()
-    if row is None:
+    with SQLITE_WRITE_LOCK:
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
+            SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            WHERE status = 'claimed' AND COALESCE(claimed_at, 0) < ?
+            """,
+            (now_ts, stale_claim_before),
+        )
+        row = db.execute(
+            """
+            SELECT *
+            FROM paper_fast_entry_queue
+            WHERE status = 'queued'
+            ORDER BY priority ASC, created_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            db.commit()
+            return None
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
+            SET status = 'claimed', claimed_by = ?, claimed_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+            WHERE id = ? AND status = 'queued'
+            """,
+            (owner, now_ts, now_ts, row["id"]),
+        )
+        claimed = db.execute("SELECT changes() AS c").fetchone()["c"] == 1
         db.commit()
-        return None
-    db.execute(
-        """
-        UPDATE paper_fast_entry_queue
-        SET status = 'claimed', claimed_by = ?, claimed_at = ?, attempt_count = attempt_count + 1, updated_at = ?
-        WHERE id = ? AND status = 'queued'
-        """,
-        (owner, now_ts, now_ts, row["id"]),
-    )
-    claimed = db.execute("SELECT changes() AS c").fetchone()["c"] == 1
-    db.commit()
     if not claimed:
         return None
     return db.execute("SELECT * FROM paper_fast_entry_queue WHERE id = ?", (row["id"],)).fetchone()
 
 
 def mark_queue(db, row_id, status, error=None):
-    db.execute(
-        """
-        UPDATE paper_fast_entry_queue
-        SET status = ?, last_error = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ?
-        WHERE id = ?
-        """,
-        (status, error, time.time(), row_id),
-    )
-    db.commit()
+    with SQLITE_WRITE_LOCK:
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
+            SET status = ?, last_error = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, error, time.time(), row_id),
+        )
+        db.commit()
 
 
 def refresh_retry_watch(db, *, now_ts=None):
     now_ts = float(now_ts if now_ts is not None else time.time())
-    db.execute(
-        """
-        UPDATE paper_fast_entry_queue
-        SET status = 'expired', last_error = 'fast_lane_retry_watch_expired', updated_at = ?
-        WHERE status = 'retry_watch'
-          AND (? - created_at) > ?
-        """,
-        (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
-    )
-    db.execute(
-        """
-        UPDATE paper_fast_entry_queue
-        SET status = 'queued', updated_at = ?
-        WHERE status = 'retry_watch'
-          AND (? - updated_at) >= 10
-          AND (? - created_at) <= ?
-        """,
-        (now_ts, now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
-    )
-    db.commit()
+    with SQLITE_WRITE_LOCK:
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
+            SET status = 'expired', last_error = 'fast_lane_retry_watch_expired', updated_at = ?
+            WHERE status = 'retry_watch'
+              AND (? - created_at) > ?
+            """,
+            (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+        )
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
+            SET status = 'queued', updated_at = ?
+            WHERE status = 'retry_watch'
+              AND (? - updated_at) >= 10
+              AND (? - created_at) <= ?
+            """,
+            (now_ts, now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+        )
+        db.commit()
 
 
 def global_rate_limit_allows(db, now_ts=None):
@@ -514,85 +523,86 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         "fastLane": True,
     })
 
-    db.execute(
-        """
-        INSERT INTO paper_trades (
-            strategy_id, strategy_role, strategy_stage, stage_outcome,
-            token_ca, symbol, signal_ts, entry_price, entry_ts,
-            market_regime, replay_source, peak_pnl, trailing_active,
-            lifecycle_id, stage_seq, trigger_ts, trigger_price,
-            position_size_sol, token_amount_raw, token_decimals,
-            entry_execution_json, entry_execution_audit_json, monitor_state_json,
-            premium_signal_id, signal_type, signal_route, entry_mode,
-            strategy_outcome, execution_availability, accounting_outcome, synthetic_close,
-            capital_tier, position_size_class, paper_only, regime_tag,
-            signal_to_quote_latency_ms, signal_to_quote_drift_pct, quote_spread_pct,
-            policy_version, entry_branch, intervention_flags_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'entered', 'available', 'open', 0, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "paper-fast-lane-v1",
-            "fast_paper_canary",
-            strategy_stage,
-            f"{entry_branch}_fast_lane_entered",
-            token_ca,
-            symbol,
-            signal_ts,
-            quote_price,
-            entry_ts,
-            "unknown",
-            "paper_fast_lane",
-            lifecycle_id,
-            ptm.stage_seq(strategy_stage),
-            entry_ts,
-            trigger_price,
-            size_sol,
-            str(token_amount_raw),
-            token_decimals or 0,
-            json.dumps(execution),
-            json.dumps(audit),
-            json.dumps(monitor_state, ensure_ascii=False),
-            (json.loads(row["payload_json"] or "{}") or {}).get("premium_signal_id"),
-            (json.loads(row["payload_json"] or "{}") or {}).get("signal_type"),
-            row["source_type"],
-            entry_mode,
-            capital_tier,
-            position_size_class,
-            "unknown",
-            latency_audit.get("signal_to_quote_latency_ms"),
-            latency_audit.get("signal_to_quote_drift_pct"),
-            latency_audit.get("quote_spread_pct"),
-            FAST_LANE_POLICY_VERSION,
-            entry_branch,
-            json.dumps(["fast_lane", "quote_primary_required"]),
-        ),
-    )
-    trade_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    ptm.record_decision_event(
-        db,
-        component="paper_fast_lane",
-        event_type="entry_quote",
-        decision="filled_paper",
-        reason=guard.get("reason") or "fast_lane_entry",
-        token_ca=token_ca,
-        symbol=symbol,
-        lifecycle_id=lifecycle_id,
-        trade_id=trade_id,
-        signal_ts=signal_ts,
-        signal_id=(json.loads(row["payload_json"] or "{}") or {}).get("premium_signal_id"),
-        strategy_stage=strategy_stage,
-        route=row["source_type"],
-        data_source="paper_fast_entry_queue+jupiter_quote",
-        payload={
-            "queue_id": row["id"],
-            "entry_mode": entry_mode,
-            "entry_branch": entry_branch,
-            "guard": guard,
-            "entry_latency_audit": latency_audit,
-            "quote_primary_required": True,
-        },
-    )
-    db.commit()
+    with SQLITE_WRITE_LOCK:
+        db.execute(
+            """
+            INSERT INTO paper_trades (
+                strategy_id, strategy_role, strategy_stage, stage_outcome,
+                token_ca, symbol, signal_ts, entry_price, entry_ts,
+                market_regime, replay_source, peak_pnl, trailing_active,
+                lifecycle_id, stage_seq, trigger_ts, trigger_price,
+                position_size_sol, token_amount_raw, token_decimals,
+                entry_execution_json, entry_execution_audit_json, monitor_state_json,
+                premium_signal_id, signal_type, signal_route, entry_mode,
+                strategy_outcome, execution_availability, accounting_outcome, synthetic_close,
+                capital_tier, position_size_class, paper_only, regime_tag,
+                signal_to_quote_latency_ms, signal_to_quote_drift_pct, quote_spread_pct,
+                policy_version, entry_branch, intervention_flags_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'entered', 'available', 'open', 0, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "paper-fast-lane-v1",
+                "fast_paper_canary",
+                strategy_stage,
+                f"{entry_branch}_fast_lane_entered",
+                token_ca,
+                symbol,
+                signal_ts,
+                quote_price,
+                entry_ts,
+                "unknown",
+                "paper_fast_lane",
+                lifecycle_id,
+                ptm.stage_seq(strategy_stage),
+                entry_ts,
+                trigger_price,
+                size_sol,
+                str(token_amount_raw),
+                token_decimals or 0,
+                json.dumps(execution),
+                json.dumps(audit),
+                json.dumps(monitor_state, ensure_ascii=False),
+                (json.loads(row["payload_json"] or "{}") or {}).get("premium_signal_id"),
+                (json.loads(row["payload_json"] or "{}") or {}).get("signal_type"),
+                row["source_type"],
+                entry_mode,
+                capital_tier,
+                position_size_class,
+                "unknown",
+                latency_audit.get("signal_to_quote_latency_ms"),
+                latency_audit.get("signal_to_quote_drift_pct"),
+                latency_audit.get("quote_spread_pct"),
+                FAST_LANE_POLICY_VERSION,
+                entry_branch,
+                json.dumps(["fast_lane", "quote_primary_required"]),
+            ),
+        )
+        trade_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        ptm.record_decision_event(
+            db,
+            component="paper_fast_lane",
+            event_type="entry_quote",
+            decision="filled_paper",
+            reason=guard.get("reason") or "fast_lane_entry",
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            trade_id=trade_id,
+            signal_ts=signal_ts,
+            signal_id=(json.loads(row["payload_json"] or "{}") or {}).get("premium_signal_id"),
+            strategy_stage=strategy_stage,
+            route=row["source_type"],
+            data_source="paper_fast_entry_queue+jupiter_quote",
+            payload={
+                "queue_id": row["id"],
+                "entry_mode": entry_mode,
+                "entry_branch": entry_branch,
+                "guard": guard,
+                "entry_latency_audit": latency_audit,
+                "quote_primary_required": True,
+            },
+        )
+        db.commit()
     return trade_id
 
 
@@ -945,7 +955,8 @@ def worker_loop(paper_db_path, worker_id, stop_event):
     init_fast_lane_schema(db)
     while not stop_event.is_set():
         try:
-            refresh_retry_watch(db)
+            if worker_id == 1:
+                refresh_retry_watch(db)
             row = claim_queue_item(db, owner)
             if row is None:
                 stop_event.wait(0.25)
@@ -1012,7 +1023,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--paper-db", default=os.environ.get("PAPER_DB", str(DEFAULT_PAPER_DB)))
     parser.add_argument("--signal-db", default=os.environ.get("SENTIMENT_DB", os.environ.get("DB_PATH", str(DEFAULT_SIGNAL_DB))))
-    parser.add_argument("--concurrency", type=int, default=int(os.environ.get("FAST_ENTRY_WORKER_CONCURRENCY", "4")))
+    parser.add_argument("--concurrency", type=int, default=int(os.environ.get("FAST_ENTRY_WORKER_CONCURRENCY", "2")))
     parser.add_argument("--lookback-sec", type=int, default=int(os.environ.get("FAST_ENTRY_BOOT_LOOKBACK_SEC", "120")))
     parser.add_argument("--lock-file", default=os.environ.get("PAPER_FAST_LANE_LOCK_FILE", "/tmp/paper_fast_lane.lock"))
     args = parser.parse_args()

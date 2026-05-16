@@ -163,7 +163,7 @@ function startShadowDataSidecars(config) {
         'scripts/paper_fast_lane.py',
         '--paper-db', paperDb,
         '--signal-db', signalDb,
-        '--concurrency', process.env.FAST_ENTRY_WORKER_CONCURRENCY || '4',
+        '--concurrency', process.env.FAST_ENTRY_WORKER_CONCURRENCY || '2',
         '--lock-file', process.env.PAPER_FAST_LANE_LOCK_FILE || '/tmp/paper_fast_lane.lock',
       ],
       env: {
