@@ -291,6 +291,13 @@ DOG_CATCHER_RESONANCE_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_RESONANC
 DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR = float(os.environ.get('DOG_CATCHER_LOW_LIQ_PEAK10_FACTOR', '0.80'))
 DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_LOW_LIQ_GAP_CRASH_PCT', '0.12'))
 DOG_CATCHER_HARD_GATE_GAP_CRASH_PCT = float(os.environ.get('DOG_CATCHER_HARD_GATE_GAP_CRASH_PCT', '0.10'))
+DOG_CATCHER_FAST_LANE_PENDING_ENABLED = os.environ.get(
+    'DOG_CATCHER_FAST_LANE_PENDING_ENABLED', 'true'
+).lower() != 'false'
+DOG_CATCHER_TRAIL_QUOTE_CONFIRM_ENABLED = os.environ.get(
+    'DOG_CATCHER_TRAIL_QUOTE_CONFIRM_ENABLED', 'true'
+).lower() != 'false'
+DOG_CATCHER_TRAIL_QUOTE_CONFIRM_BUFFER = float(os.environ.get('DOG_CATCHER_TRAIL_QUOTE_CONFIRM_BUFFER', '0.02'))
 DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED = os.environ.get(
     'DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED', 'true'
 ).lower() != 'false'
@@ -388,6 +395,7 @@ HARD_GATE_PASS_MAX_GMGN_LEAD_SEC = int(
 HARD_GATE_PASS_MAX_ALPHA_AGE_SEC = int(
     os.environ.get('HARD_GATE_PASS_MAX_ALPHA_AGE_SEC', str(SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC))
 )
+HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC = float(os.environ.get('HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC', '240'))
 HARD_GATE_PASS_TINY_PROBE_SIZE_SOL = float(
     os.environ.get('HARD_GATE_PASS_TINY_PROBE_SIZE_SOL', '0.002')
 )
@@ -4624,6 +4632,67 @@ def _probe_quote_primary_profit_exit_confirmation(pos, exit_matrix, *, quote_pnl
     }
 
 
+def _dog_catcher_trail_quote_confirmation(pos, exit_matrix, *, quote_pnl=None, trigger_pnl=None):
+    """Dog-catcher trail floors are only executable when the real quote holds the floor."""
+    if not DOG_CATCHER_TRAIL_QUOTE_CONFIRM_ENABLED:
+        return {'cancel': False, 'reason': 'disabled'}
+    if not position_is_probe_profit_capture_candidate(pos):
+        return {'cancel': False, 'reason': 'not_probe_profit_capture_candidate'}
+    if not isinstance(exit_matrix, dict) or exit_matrix.get('action') != 'exit':
+        return {'cancel': False, 'reason': 'not_full_exit'}
+    entry_mode = str((getattr(pos, 'monitor_state', None) or {}).get('entryMode') or getattr(pos, 'entry_mode', '') or '')
+    dog_modes = {
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        SOURCE_RESONANCE_TINY_PROBE_MODE,
+        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        'smart_entry_pullback_bounce',
+    }
+    if entry_mode not in dog_modes:
+        return {'cancel': False, 'reason': 'not_dog_catcher_mode', 'entry_mode': entry_mode}
+    reason = str(exit_matrix.get('reason') or '').lower()
+    dog_trail_exit = any(fragment in reason for fragment in (
+        'dog_catcher_hard_gate_trail_floor',
+        'dog_catcher_hard_gate_gap_crash',
+        'dog_catcher_resonance_trail_floor',
+        'dog_catcher_resonance_gap_crash',
+        'dog_catcher_low_liq_tight_floor',
+        'dog_catcher_low_liq_gap_crash',
+    ))
+    if not dog_trail_exit:
+        return {'cancel': False, 'reason': 'not_dog_catcher_trail_exit', 'entry_mode': entry_mode}
+    trail_floor = _safe_float(exit_matrix.get('trail_floor'), None)
+    if trail_floor is None:
+        return {'cancel': False, 'reason': 'missing_trail_floor', 'entry_mode': entry_mode}
+    trigger_pnl = _safe_float(trigger_pnl, None)
+    quote_pnl = _safe_float(quote_pnl, None)
+    required_quote_floor = max(0.0, trail_floor - DOG_CATCHER_TRAIL_QUOTE_CONFIRM_BUFFER)
+    if quote_pnl is None:
+        return {
+            'cancel': True,
+            'reason': 'dog_catcher_trail_quote_missing',
+            'entry_mode': entry_mode,
+            'trigger_pnl': trigger_pnl,
+            'trail_floor': trail_floor,
+            'required_quote_floor': required_quote_floor,
+        }
+    cancel = quote_pnl < required_quote_floor
+    return {
+        'cancel': bool(cancel),
+        'reason': (
+            'dog_catcher_trail_quote_not_confirmed'
+            if cancel else 'dog_catcher_trail_quote_confirmed'
+        ),
+        'entry_mode': entry_mode,
+        'trigger_pnl': trigger_pnl,
+        'quote_pnl': quote_pnl,
+        'quote_mark_gap': quote_pnl - trigger_pnl if trigger_pnl is not None else None,
+        'trail_floor': trail_floor,
+        'required_quote_floor': required_quote_floor,
+        'buffer': DOG_CATCHER_TRAIL_QUOTE_CONFIRM_BUFFER,
+    }
+
+
 def _probe_hold_quote_monitor_exit_detail(pos, *, quote_pnl=None, trigger_pnl=None, held_sec=None):
     """Exit paper-only probes when executable quote collapses far below mark while held."""
     if not PROBE_HOLD_QUOTE_MONITOR_ENABLED:
@@ -6769,6 +6838,7 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
     source_probe_size_sol = float(detail.get('position_size_sol') or SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL)
     pending['kelly_position_sol'] = source_probe_size_sol
     pending['timing_passed'] = bool(detail.get('timing_passed'))
+    pending['dog_catcher_fast_lane'] = True
     pending['replay_source'] = 'live_monitor_source_resonance_probe'
     pending['stage_outcome'] = stage_outcome or 'source_resonance_tiny_probe_armed'
     pending['source_component'] = 'source_resonance_probe'
@@ -7205,6 +7275,13 @@ def evaluate_hard_gate_pass_tiny_probe(
             },
         )
     resonance_context = dict(resonance_context or {})
+    signal_ts_sec = _signal_ts_order_value(
+        signal.get('timestamp')
+        or signal.get('signal_ts')
+        or watchlist_entry.get('signal_ts')
+        or resonance_context.get('signal_ts_sec')
+    )
+    signal_age_sec = (now_ts - signal_ts_sec) if signal_ts_sec > 0 else None
 
     observed = {
         'route': route_name,
@@ -7221,7 +7298,8 @@ def evaluate_hard_gate_pass_tiny_probe(
         'lead_time_sec': resonance_context.get('lead_time_sec'),
         'gmgn_first_seen_ts': resonance_context.get('gmgn_first_seen_ts'),
         'gmgn_last_seen_ts': resonance_context.get('gmgn_last_seen_ts'),
-        'signal_ts_sec': resonance_context.get('signal_ts_sec'),
+        'signal_ts_sec': signal_ts_sec or resonance_context.get('signal_ts_sec'),
+        'signal_age_sec': signal_age_sec,
         'last_seen_age_sec': resonance_context.get('last_seen_age_sec'),
         'timestamp_valid': resonance_context.get('timestamp_valid'),
         'timestamp_anomaly_reason': resonance_context.get('timestamp_anomaly_reason'),
@@ -7243,6 +7321,7 @@ def evaluate_hard_gate_pass_tiny_probe(
         'min_gmgn_lead_sec': HARD_GATE_PASS_MIN_GMGN_LEAD_SEC,
         'max_gmgn_lead_sec': HARD_GATE_PASS_MAX_GMGN_LEAD_SEC,
         'max_alpha_age_sec': HARD_GATE_PASS_MAX_ALPHA_AGE_SEC,
+        'max_signal_age_sec': HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC,
     }
 
     def _result(passed, reason):
@@ -7285,6 +7364,8 @@ def evaluate_hard_gate_pass_tiny_probe(
         return _result(False, 'telegram_only_baseline_disabled')
     if not observed['quote_executable']:
         return _result(False, 'quote_not_executable')
+    if signal_age_sec is not None and signal_age_sec > HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC:
+        return _result(False, 'hard_gate_signal_too_stale')
 
     existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
     if existing_probe:
@@ -7333,6 +7414,7 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
     pending['execution_scope'] = 'paper_only'
     pending['kelly_position_sol'] = HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
     pending['timing_passed'] = True
+    pending['dog_catcher_fast_lane'] = True
     pending['replay_source'] = 'live_monitor_hard_gate_pass_probe'
     pending['stage_outcome'] = stage_outcome or 'hard_gate_pass_tiny_probe_armed'
     pending['source_component'] = 'hard_gate_pass_probe'
@@ -8269,6 +8351,7 @@ def _apply_pre_pass_resonance_probe_to_pending(pending, detail, *, route=None, s
     pending['execution_scope'] = 'paper_only'
     pending['kelly_position_sol'] = detail.get('position_size_sol') or PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL
     pending['timing_passed'] = True
+    pending['dog_catcher_fast_lane'] = True
     pending['replay_source'] = 'live_monitor_pre_pass_resonance_probe'
     pending['stage_outcome'] = stage_outcome or 'pre_pass_resonance_tiny_probe_armed'
     pending['source_component'] = 'pre_pass_resonance_probe'
@@ -13720,6 +13803,26 @@ def smart_entry_result_ready(pending_entries):
     return False
 
 
+def dog_catcher_fast_lane_pending_ready(pending_entries):
+    """Return True when paper dog-catcher entries should preempt slow scans."""
+    if not DOG_CATCHER_FAST_LANE_PENDING_ENABLED:
+        return False
+    fast_lane_modes = {
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        SOURCE_RESONANCE_TINY_PROBE_MODE,
+        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+        LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    }
+    for pending in (pending_entries or {}).values():
+        if not isinstance(pending, dict):
+            continue
+        if _pending_entry_mode(pending) in fast_lane_modes and pending.get('timing_passed'):
+            return True
+    return False
+
+
 
 def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
     trigger_pct = _safe_float(trigger_pnl * 100.0, None)
@@ -17152,7 +17255,10 @@ def run_monitor(db):
       try:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
-        pending_priority = smart_entry_result_ready(pending_entries)
+        pending_priority = (
+            smart_entry_result_ready(pending_entries)
+            or dog_catcher_fast_lane_pending_ready(pending_entries)
+        )
 
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
@@ -17191,7 +17297,7 @@ def run_monitor(db):
             )
             last_heartbeat = now
 
-        if now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC:
+        if not pending_priority and now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC:
             try:
                 with positions_lock:
                     _discovery_armed = process_discovery_tracking_candidates(
@@ -18062,7 +18168,7 @@ def run_monitor(db):
         # --- Evaluate Watchlist Entries ---
         if pending_priority:
             watching_entries = []
-            log.info("  [PENDING_PRIORITY] SmartEntry result ready; skipping housekeeping/watchlist scan for immediate execution")
+            log.info("  [PENDING_PRIORITY] entry ready; skipping housekeeping/watchlist scan for immediate execution")
         else:
             watching_entries = watchlist.get_watching()
         if watching_entries:
@@ -18072,8 +18178,8 @@ def run_monitor(db):
         wl_skip_duplicate = 0
         for w_entry in watching_entries:
             try:
-                if smart_entry_result_ready(pending_entries):
-                    log.info("  [PENDING_PRIORITY] SmartEntry completed during scan; deferring remaining watchlist work")
+                if smart_entry_result_ready(pending_entries) or dog_catcher_fast_lane_pending_ready(pending_entries):
+                    log.info("  [PENDING_PRIORITY] entry completed during scan; deferring remaining watchlist work")
                     break
                 lifecycle_id = build_lifecycle_id(w_entry['ca'], w_entry['signal_ts'])
                 
@@ -21498,9 +21604,31 @@ def run_monitor(db):
                                         sanity_override = True
 
                                 if exit_matrix['action'] == 'exit':
+                                    dog_trail_detail = _dog_catcher_trail_quote_confirmation(
+                                        pos,
+                                        exit_matrix,
+                                        quote_pnl=quote_pnl,
+                                        trigger_pnl=trigger_pnl,
+                                    )
+                                    if dog_trail_detail.get('cancel'):
+                                        _quote_str = f"{quote_pnl:+.1%}" if quote_pnl is not None else "missing"
+                                        _trigger_str = f"{trigger_pnl:+.1%}" if trigger_pnl is not None else "missing"
+                                        _floor = dog_trail_detail.get('trail_floor')
+                                        _required = dog_trail_detail.get('required_quote_floor')
+                                        _floor_str = f"{_floor:+.1%}" if _floor is not None else "n/a"
+                                        _required_str = f"{_required:+.1%}" if _required is not None else "n/a"
+                                        log.warning(
+                                            f"  [DOG_CATCHER_QUOTE] {pos.symbol} trail exit cancelled — "
+                                            f"mark={_trigger_str} quote={_quote_str} "
+                                            f"floor={_floor_str} requiredQuote={_required_str}; "
+                                            f"reason={exit_matrix.get('reason')}"
+                                        )
+                                        quote_sanity_status = dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_not_confirmed'
+                                        quote_primary_detail = dog_trail_detail
+                                        sanity_override = True
                                     if quote_pnl is not None and trigger_pnl is not None:
                                         divergence = abs(quote_pnl - trigger_pnl)
-                                        if divergence > 0.05:  # >5% price source disagreement
+                                        if not sanity_override and divergence > 0.05:  # >5% price source disagreement
                                             reason = exit_matrix.get('reason', '')
                                             cancel = False
 

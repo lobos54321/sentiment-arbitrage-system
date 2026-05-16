@@ -43,6 +43,7 @@ from paper_trade_monitor import (  # noqa: E402
     _dog_catcher_branch_scout_quality_soft_override,
     _dog_catcher_branch_entry_mode_quality_override,
     _dog_catcher_quote_anchor_detail,
+    _dog_catcher_trail_quote_confirmation,
     _ath_dynamic_ttl_extension_detail,
     _ath_recovery_eligibility,
     _ath_recovery_mode_for_candidate,
@@ -62,6 +63,7 @@ from paper_trade_monitor import (  # noqa: E402
     _phase_policy_live_exit_detail,
     _probe_hold_quote_monitor_exit_detail,
     _probe_quote_primary_profit_exit_confirmation,
+    dog_catcher_fast_lane_pending_ready,
     _matrix_micro_momentum_reason,
     _maybe_upgrade_pending_to_source_resonance_probe,
     _pending_entry_exists_for_token,
@@ -1392,6 +1394,47 @@ def test_probe_quote_primary_cancels_small_mark_profit_with_negative_quote_gap()
     assert detail["quote_mark_gap"] < -0.50
 
 
+def test_dog_catcher_trail_quote_cancels_when_quote_below_floor():
+    pos = _DummyPos(entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    exit_matrix = {
+        "action": "exit",
+        "reason": "dog_catcher_hard_gate_trail_floor (pnl=-25.6% <= floor=16.2%)",
+        "current_pnl": -0.256,
+        "trail_floor": 0.162,
+    }
+
+    detail = _dog_catcher_trail_quote_confirmation(
+        pos,
+        exit_matrix,
+        quote_pnl=0.0038,
+        trigger_pnl=-0.256,
+    )
+
+    assert detail["cancel"] is True
+    assert detail["reason"] == "dog_catcher_trail_quote_not_confirmed"
+    assert detail["required_quote_floor"] > 0.13
+
+
+def test_dog_catcher_trail_quote_confirms_when_quote_holds_floor():
+    pos = _DummyPos(entry_mode=SOURCE_RESONANCE_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    exit_matrix = {
+        "action": "exit",
+        "reason": "dog_catcher_resonance_trail_floor",
+        "current_pnl": 0.10,
+        "trail_floor": 0.15,
+    }
+
+    detail = _dog_catcher_trail_quote_confirmation(
+        pos,
+        exit_matrix,
+        quote_pnl=0.135,
+        trigger_pnl=0.10,
+    )
+
+    assert detail["cancel"] is False
+    assert detail["reason"] == "dog_catcher_trail_quote_confirmed"
+
+
 def test_probe_hold_quote_monitor_exits_when_quote_collapses():
     pos = _DummyPos(entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
     pos.peak_pnl = 0.12
@@ -2584,6 +2627,44 @@ def test_hard_gate_pass_tiny_probe_allows_pass_quote_executable(monkeypatch):
     assert decision["observed"]["quote_executable"] is True
     assert decision["resonance_cohort"] == "telegram_gmgn"
     assert decision["gmgn_pre_seen"] is True
+
+
+def test_hard_gate_pass_tiny_probe_rejects_stale_signal(monkeypatch):
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC", 120)
+
+    decision = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "LOTTO", "market_cap": 48000, "timestamp": 800},
+        watchlist_entry={
+            "type": "LOTTO",
+            "signal_price": 0.000001,
+            "signal_mc": 48000,
+            "signal_top10": 32,
+        },
+        hard_gate_status="PASS",
+        live_concentration={"top1_pct": 18, "top10_pct": 32},
+        resonance_context=_gmgn_resonance_context(),
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "hard_gate_signal_too_stale"
+    assert decision["observed"]["signal_age_sec"] == 200
+
+
+def test_dog_catcher_fast_lane_pending_ready_detects_timing_passed_probe():
+    pending_entries = {
+        "TokenCA:1000": {
+            "token_ca": "TokenCA",
+            "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "timing_passed": True,
+        }
+    }
+
+    assert dog_catcher_fast_lane_pending_ready(pending_entries) is True
 
 
 def test_hard_gate_pass_tiny_probe_requires_gmgn_pre_seen(monkeypatch):
