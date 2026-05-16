@@ -168,9 +168,9 @@ LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_M
 LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_BS', '1.20'))
 DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
 DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED', 'true').lower() != 'false'
-DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '30'))
-DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC', '60'))
-DISCOVERY_FINAL_RECLAIM_MAX_RETRIES = max(0, int(os.environ.get('DISCOVERY_FINAL_RECLAIM_MAX_RETRIES', '3')))
+DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '90'))
+DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC', '90'))
+DISCOVERY_FINAL_RECLAIM_MAX_RETRIES = max(0, int(os.environ.get('DISCOVERY_FINAL_RECLAIM_MAX_RETRIES', '6')))
 TINY_EXIT_QUOTE_SANITY_ENABLED = os.environ.get('TINY_EXIT_QUOTE_SANITY_ENABLED', 'true').lower() != 'false'
 TINY_EXIT_QUOTE_SANITY_MIN_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MIN_PEAK', '0.02'))
 TINY_EXIT_QUOTE_SANITY_MAX_PEAK = float(os.environ.get('TINY_EXIT_QUOTE_SANITY_MAX_PEAK', '0.10'))
@@ -183,6 +183,10 @@ PROBE_HOLD_QUOTE_MONITOR_MIN_HELD_SEC = float(os.environ.get('PROBE_HOLD_QUOTE_M
 PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK = float(os.environ.get('PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK', '0.02'))
 PROBE_HOLD_QUOTE_GAP_STOP_PCT = float(os.environ.get('PROBE_HOLD_QUOTE_GAP_STOP_PCT', '0.08'))
 PROBE_HOLD_QUOTE_STOP_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_STOP_PNL', '-0.08'))
+PROBE_HOLD_QUOTE_PROFIT_GAP_LOCK_ENABLED = os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_LOCK_ENABLED', 'true').lower() != 'false'
+PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_PEAK = float(os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_PEAK', '0.10'))
+PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL', '0.04'))
+PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP = float(os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP', '0.08'))
 QUOTE_GUARD_POLICY_VERSION = os.environ.get('QUOTE_GUARD_POLICY_VERSION', 'd162c067')
 
 DEFAULT_PAPER_EXECUTION = {
@@ -397,6 +401,12 @@ HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN = os.environ.get(
 HARD_GATE_PASS_ALLOW_TELEGRAM_ONLY = os.environ.get(
     'HARD_GATE_PASS_ALLOW_TELEGRAM_ONLY', 'false'
 ).lower() == 'true'
+HARD_GATE_PASS_REQUIRE_ACTIVITY_CONFIRMATION = os.environ.get(
+    'HARD_GATE_PASS_REQUIRE_ACTIVITY_CONFIRMATION', 'true'
+).lower() != 'false'
+HARD_GATE_PASS_ACTIVITY_MIN_PRICE_CHANGE_M5 = float(os.environ.get('HARD_GATE_PASS_ACTIVITY_MIN_PRICE_CHANGE_M5', '2.0'))
+HARD_GATE_PASS_ACTIVITY_MIN_BUY_SELL_RATIO = float(os.environ.get('HARD_GATE_PASS_ACTIVITY_MIN_BUY_SELL_RATIO', '1.10'))
+HARD_GATE_PASS_ACTIVITY_MIN_TX_M5 = float(os.environ.get('HARD_GATE_PASS_ACTIVITY_MIN_TX_M5', '20'))
 HARD_GATE_PASS_MIN_GMGN_LEAD_SEC = int(
     os.environ.get('HARD_GATE_PASS_MIN_GMGN_LEAD_SEC', str(SOURCE_RESONANCE_TINY_PROBE_MIN_LEAD_SEC))
 )
@@ -692,7 +702,7 @@ DISCOVERY_TRACKING_ENABLED = os.environ.get('DISCOVERY_TRACKING_ENABLED', 'true'
 DISCOVERY_TRACKING_POLL_SEC = max(1, int(os.environ.get('DISCOVERY_TRACKING_POLL_SEC', '10')))
 DISCOVERY_TRACKING_TTL_SEC = max(30, int(os.environ.get('DISCOVERY_TRACKING_TTL_SEC', '3600')))
 DISCOVERY_TRACKING_MAX_CANDIDATES = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_CANDIDATES', '120')))
-DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE', '2')))
+DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_ARMS_PER_CYCLE', '4')))
 DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE = max(1, int(os.environ.get('DISCOVERY_TRACKING_MAX_EVALS_PER_CYCLE', '12')))
 DISCOVERY_LIQUIDITY_LOW_BACKOFF_SEC = max(
     30,
@@ -4757,6 +4767,25 @@ def _probe_hold_quote_monitor_exit_detail(pos, *, quote_pnl=None, trigger_pnl=No
             'trigger_pnl': trigger_pnl,
             'quote_mark_gap': quote_pnl - trigger_pnl,
         }
+    if (
+        PROBE_HOLD_QUOTE_PROFIT_GAP_LOCK_ENABLED
+        and peak_pnl >= PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_PEAK
+        and quote_pnl >= PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL
+        and quote_mark_gap >= PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP
+    ):
+        return {
+            'exit': True,
+            'reason': 'probe_quote_profit_gap_lock',
+            'quote_pnl': quote_pnl,
+            'trigger_pnl': trigger_pnl,
+            'quote_mark_gap': quote_pnl - trigger_pnl,
+            'quote_mark_gap_abs': quote_mark_gap,
+            'peak_pnl': peak_pnl,
+            'held_sec': held_sec,
+            'min_peak': PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_PEAK,
+            'min_quote_pnl': PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL,
+            'min_gap': PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP,
+        }
     should_exit = (
         quote_pnl <= PROBE_HOLD_QUOTE_STOP_PNL
         and quote_mark_gap >= PROBE_HOLD_QUOTE_GAP_STOP_PCT
@@ -6742,6 +6771,107 @@ def build_hard_gate_resonance_context(external_alpha=None, *, quote_context=None
     }
 
 
+def _hard_gate_pass_activity_confirmation_detail(resonance_context=None, *, observed=None, dex_snapshot=None):
+    """Require hard-gate baseline probes to show executable source activity, not just a PASS label."""
+    if not HARD_GATE_PASS_REQUIRE_ACTIVITY_CONFIRMATION:
+        return {'pass': True, 'reason': 'hard_gate_activity_confirmation_disabled'}
+    resonance_context = resonance_context or {}
+    observed = observed or {}
+    dex_snapshot = dex_snapshot or {}
+    external_alpha = resonance_context.get('external_alpha') if isinstance(resonance_context.get('external_alpha'), dict) else {}
+    contexts = [
+        resonance_context,
+        external_alpha,
+        dex_snapshot if isinstance(dex_snapshot, dict) else None,
+    ]
+    quote_clean_seen = bool(
+        observed.get('quote_clean_seen')
+        or resonance_context.get('quote_clean_seen')
+        or external_alpha.get('quote_clean_seen')
+        or resonance_context.get('resonance_cohort') == 'telegram_gmgn_quote_clean'
+    )
+    if quote_clean_seen:
+        return {'pass': True, 'reason': 'hard_gate_quote_clean_activity_confirmed', 'quote_clean_seen': True}
+
+    for context in contexts:
+        if not isinstance(context, dict):
+            continue
+        rounds = _source_resonance_number(context.get('gmgn_momentum_rounds'), 0.0) or 0.0
+        gain_pct = _source_resonance_number(context.get('gmgn_momentum_gain_pct'), 0.0) or 0.0
+        if (
+            context.get('gmgn_momentum_confirmed')
+            or context.get('gmgn_volume_confirmed')
+            or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
+            or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
+        ):
+            return {
+                'pass': True,
+                'reason': 'hard_gate_gmgn_activity_confirmed',
+                'gmgn_momentum_rounds': rounds,
+                'gmgn_momentum_gain_pct': gain_pct,
+                'gmgn_momentum_confirmed': bool(context.get('gmgn_momentum_confirmed')),
+                'gmgn_volume_confirmed': bool(context.get('gmgn_volume_confirmed')),
+            }
+
+        source_level = str(context.get('source_resonance_level') or context.get('resonance_level') or '').lower()
+        source_score = _source_resonance_number(
+            context.get('source_resonance_score', context.get('resonance_score')),
+            None,
+        )
+        if source_level in {'strong', 'high', 'confirmed'} or (source_score is not None and source_score >= 2.0):
+            return {
+                'pass': True,
+                'reason': 'hard_gate_source_resonance_activity_confirmed',
+                'source_resonance_level': source_level,
+                'source_resonance_score': source_score,
+            }
+
+        price_change_m5 = _source_resonance_first_number(
+            context.get('price_change_m5'),
+            context.get('price_change_m5_pct'),
+            context.get('m5_pct'),
+            default=None,
+        )
+        buy_sell_ratio = _source_resonance_first_number(
+            context.get('buy_sell_ratio'),
+            context.get('buySellRatio'),
+            default=None,
+        )
+        tx_m5 = _source_resonance_first_number(
+            context.get('tx_m5'),
+            context.get('txns_m5'),
+            context.get('tx_count_m5'),
+            default=None,
+        )
+        if (
+            price_change_m5 is not None
+            and price_change_m5 >= HARD_GATE_PASS_ACTIVITY_MIN_PRICE_CHANGE_M5
+            and (buy_sell_ratio is None or buy_sell_ratio >= HARD_GATE_PASS_ACTIVITY_MIN_BUY_SELL_RATIO)
+            and (tx_m5 is None or tx_m5 >= HARD_GATE_PASS_ACTIVITY_MIN_TX_M5)
+        ):
+            return {
+                'pass': True,
+                'reason': 'hard_gate_dex_activity_confirmed',
+                'price_change_m5': price_change_m5,
+                'buy_sell_ratio': buy_sell_ratio,
+                'tx_m5': tx_m5,
+            }
+
+    return {
+        'pass': False,
+        'reason': 'hard_gate_activity_not_confirmed',
+        'quote_clean_seen': quote_clean_seen,
+        'resonance_cohort': resonance_context.get('resonance_cohort'),
+        'thresholds': {
+            'min_price_change_m5': HARD_GATE_PASS_ACTIVITY_MIN_PRICE_CHANGE_M5,
+            'min_buy_sell_ratio': HARD_GATE_PASS_ACTIVITY_MIN_BUY_SELL_RATIO,
+            'min_tx_m5': HARD_GATE_PASS_ACTIVITY_MIN_TX_M5,
+            'min_rounds': SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS,
+            'min_gain_pct': SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT,
+        },
+    }
+
+
 def _hard_gate_arm_event_ts(event):
     if isinstance(event, dict):
         return _source_resonance_number(event.get('ts'), 0.0) or 0.0
@@ -7506,6 +7636,10 @@ def evaluate_hard_gate_pass_tiny_probe(
         'max_gmgn_lead_sec': HARD_GATE_PASS_MAX_GMGN_LEAD_SEC,
         'max_alpha_age_sec': HARD_GATE_PASS_MAX_ALPHA_AGE_SEC,
         'max_signal_age_sec': HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC,
+        'require_activity_confirmation': HARD_GATE_PASS_REQUIRE_ACTIVITY_CONFIRMATION,
+        'activity_min_price_change_m5': HARD_GATE_PASS_ACTIVITY_MIN_PRICE_CHANGE_M5,
+        'activity_min_buy_sell_ratio': HARD_GATE_PASS_ACTIVITY_MIN_BUY_SELL_RATIO,
+        'activity_min_tx_m5': HARD_GATE_PASS_ACTIVITY_MIN_TX_M5,
     }
 
     def _result(passed, reason):
@@ -7550,6 +7684,14 @@ def evaluate_hard_gate_pass_tiny_probe(
         return _result(False, 'quote_not_executable')
     if signal_age_sec is not None and signal_age_sec > HARD_GATE_PASS_MAX_SIGNAL_AGE_SEC:
         return _result(False, 'hard_gate_signal_too_stale')
+    activity_confirmation = _hard_gate_pass_activity_confirmation_detail(
+        resonance_context,
+        observed=observed,
+        dex_snapshot=dex_snapshot,
+    )
+    observed['activity_confirmation'] = activity_confirmation
+    if not activity_confirmation.get('pass'):
+        return _result(False, activity_confirmation.get('reason') or 'hard_gate_activity_not_confirmed')
 
     existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
     if existing_probe:
@@ -12740,7 +12882,7 @@ def process_discovery_tracking_candidates(
                 candidate['final_reclaim_quote_probe'] = final_reclaim_quote_probe
                 candidate['final_reclaim_quote_executable'] = final_reclaim_quote_executable
                 candidate['expires_at'] = now_ts + (
-                    DISCOVERY_TRACKING_POLL_SEC
+                    DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC
                     if final_reclaim_quote_executable
                     else DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC
                 )

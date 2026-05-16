@@ -4754,7 +4754,13 @@ const server = http.createServer(async (req, res) => {
       const limit = boundedIntParam(url, 'limit', tradeId ? 1 : 25, 1, 80);
       const pathLimit = boundedIntParam(url, 'path_limit', 240, 1, 500);
       const eventLimit = boundedIntParam(url, 'event_limit', 240, 1, 500);
-      const lossOnly = !['0', 'false', 'no'].includes(String(url.searchParams.get('loss_only') || (tradeId ? '0' : '1')).toLowerCase());
+      const hasExplicitReplayWindow = (
+        url.searchParams.has('since_ts')
+        || url.searchParams.has('since')
+        || url.searchParams.has('hours')
+      );
+      const defaultLossOnly = tradeId || hasExplicitReplayWindow ? '0' : '1';
+      const lossOnly = !['0', 'false', 'no'].includes(String(url.searchParams.get('loss_only') || defaultLossOnly).toLowerCase());
       const includeTimeline = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_timeline') || (tradeId ? '1' : '0')).toLowerCase());
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));

@@ -1487,6 +1487,23 @@ def test_probe_hold_quote_monitor_exits_when_quote_collapses():
     assert detail["quote_mark_gap_abs"] > monitor.PROBE_HOLD_QUOTE_GAP_STOP_PCT
 
 
+def test_probe_hold_quote_monitor_locks_profit_when_quote_lags_mark():
+    pos = _DummyPos(entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    pos.peak_pnl = 0.14
+
+    detail = _probe_hold_quote_monitor_exit_detail(
+        pos,
+        quote_pnl=0.05,
+        trigger_pnl=0.14,
+        held_sec=90,
+    )
+
+    assert detail["exit"] is True
+    assert detail["reason"] == "probe_quote_profit_gap_lock"
+    assert detail["quote_pnl"] > 0
+    assert detail["quote_mark_gap_abs"] >= monitor.PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP
+
+
 def test_dog_catcher_branch_quality_override_allows_soft_source_resonance():
     pending = {
         "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
@@ -2699,7 +2716,7 @@ def test_hard_gate_pass_tiny_probe_allows_pass_quote_executable(monkeypatch):
         },
         hard_gate_status="PASS",
         live_concentration={"top1_pct": 18, "top10_pct": 32},
-        resonance_context=_gmgn_resonance_context(),
+        resonance_context=_gmgn_resonance_context(quote_clean=True),
         now_ts=1000,
     )
 
@@ -2708,8 +2725,35 @@ def test_hard_gate_pass_tiny_probe_allows_pass_quote_executable(monkeypatch):
     assert decision["paper_only_scout"] is True
     assert decision["execution_scope"] == "paper_only"
     assert decision["observed"]["quote_executable"] is True
-    assert decision["resonance_cohort"] == "telegram_gmgn"
+    assert decision["resonance_cohort"] == "telegram_gmgn_quote_clean"
     assert decision["gmgn_pre_seen"] is True
+    assert decision["observed"]["activity_confirmation"]["pass"] is True
+
+
+def test_hard_gate_pass_tiny_probe_rejects_unconfirmed_activity(monkeypatch):
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
+    monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_REQUIRE_ACTIVITY_CONFIRMATION", True)
+
+    decision = evaluate_hard_gate_pass_tiny_probe(
+        "TokenCA",
+        signal={"signal_type": "LOTTO", "market_cap": 48000},
+        watchlist_entry={
+            "type": "LOTTO",
+            "signal_price": 0.000001,
+            "signal_mc": 48000,
+            "signal_top10": 32,
+        },
+        hard_gate_status="PASS",
+        live_concentration={"top1_pct": 18, "top10_pct": 32},
+        resonance_context=_gmgn_resonance_context(quote_clean=False),
+        now_ts=1000,
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "hard_gate_activity_not_confirmed"
+    assert decision["observed"]["activity_confirmation"]["pass"] is False
 
 
 def test_hard_gate_pass_tiny_probe_rejects_stale_signal(monkeypatch):
@@ -2729,7 +2773,7 @@ def test_hard_gate_pass_tiny_probe_rejects_stale_signal(monkeypatch):
         },
         hard_gate_status="PASS",
         live_concentration={"top1_pct": 18, "top10_pct": 32},
-        resonance_context=_gmgn_resonance_context(),
+        resonance_context=_gmgn_resonance_context(quote_clean=True),
         now_ts=1000,
     )
 
@@ -2785,7 +2829,7 @@ def test_hard_gate_pass_tiny_probe_requires_pass_and_quote(monkeypatch):
         watchlist_entry={"type": "ATH", "signal_mc": 48000, "signal_top10": 32},
         hard_gate_status="PASS",
         live_concentration={"top1_pct": 18, "top10_pct": 32},
-        resonance_context=_gmgn_resonance_context(),
+        resonance_context=_gmgn_resonance_context(quote_clean=True),
         now_ts=1000,
     )
     blocked_gate = evaluate_hard_gate_pass_tiny_probe(
@@ -2820,7 +2864,7 @@ def test_hard_gate_pass_tiny_probe_dedupes_existing_token_probe(monkeypatch):
                 "execution_scope": "paper_only",
             }
         },
-        resonance_context=_gmgn_resonance_context(),
+        resonance_context=_gmgn_resonance_context(quote_clean=True),
         now_ts=1000,
     )
 
