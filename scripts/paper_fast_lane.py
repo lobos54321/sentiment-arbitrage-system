@@ -49,6 +49,13 @@ FAST_ENTRY_DEGRADE_LATENCY_SEC = float(os.environ.get("FAST_ENTRY_DEGRADE_LATENC
 FAST_ENTRY_RETRY_LATENCY_SEC = float(os.environ.get("FAST_ENTRY_RETRY_LATENCY_SEC", "30"))
 FAST_ENTRY_HARD_STALE_SEC = float(os.environ.get("FAST_ENTRY_HARD_STALE_SEC", "120"))
 FAST_ENTRY_SCAN_INTERVAL_SEC = float(os.environ.get("FAST_ENTRY_SCAN_INTERVAL_SEC", "0.75"))
+FAST_ENTRY_QUEUE_DEDUPE_SEC = float(os.environ.get("FAST_ENTRY_QUEUE_DEDUPE_SEC", "90"))
+FAST_ENTRY_MAX_QUEUE_DEPTH = int(os.environ.get("FAST_ENTRY_MAX_QUEUE_DEPTH", "80"))
+FAST_ENTRY_PRESSURE_PRIORITY_CUTOFF = int(os.environ.get("FAST_ENTRY_PRESSURE_PRIORITY_CUTOFF", "15"))
+FAST_ENTRY_PREMIUM_BATCH_LIMIT = int(os.environ.get("FAST_ENTRY_PREMIUM_BATCH_LIMIT", "80"))
+FAST_ENTRY_SOURCE_SCAN_LIMIT = int(os.environ.get("FAST_ENTRY_SOURCE_SCAN_LIMIT", "40"))
+FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_SEC", "30"))
+FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
 
 FAST_LANE_HARD_REJECT_STATUSES = {
     "GMGN_REJECT",
@@ -178,6 +185,43 @@ def queue_key(source_type, token_ca, signal_ts, branch):
     return f"{source_type}:{token_ca}:{int(normalize_ts_sec(signal_ts))}:{branch}"
 
 
+def active_queue_depth(db):
+    row = db.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM paper_fast_entry_queue
+        WHERE status IN ('queued', 'claimed', 'retry_watch')
+        """
+    ).fetchone()
+    return int(row["c"] or 0)
+
+
+def existing_recent_queue_row(db, token_ca, now_ts):
+    return db.execute(
+        """
+        SELECT id, priority, status, entry_branch
+        FROM paper_fast_entry_queue
+        WHERE token_ca = ?
+          AND updated_at >= ?
+          AND status IN ('queued', 'claimed', 'retry_watch', 'entered', 'rejected', 'quote_failed', 'skipped', 'rate_limited')
+        ORDER BY
+          CASE WHEN status IN ('queued', 'claimed', 'retry_watch') THEN 0 ELSE 1 END,
+          priority ASC,
+          updated_at DESC
+        LIMIT 1
+        """,
+        (token_ca, now_ts - FAST_ENTRY_QUEUE_DEDUPE_SEC),
+    ).fetchone()
+
+
+def candidate_is_too_stale(receive_ts, now_ts, source_type):
+    if not receive_ts:
+        return False
+    if any(marker in str(source_type or "") for marker in ("rescue", "reclaim", "recovery", "source_resonance")):
+        return False
+    return (now_ts - int(normalize_ts_sec(receive_ts))) > FAST_ENTRY_RETRY_LATENCY_SEC
+
+
 def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None,
                        receive_ts=None, recorded_ts=None, entry_mode_hint=None,
                        entry_branch=None, hard_gate_status=None,
@@ -187,10 +231,41 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
         return False
     now_ts = float(now_ts if now_ts is not None else time.time())
     signal_ts = int(normalize_ts_sec(signal_ts or now_ts))
+    receive_ts = int(normalize_ts_sec(receive_ts)) if receive_ts else signal_ts
+    if candidate_is_too_stale(receive_ts, now_ts, source_type):
+        return False
     branch = entry_branch or source_type
     key = queue_key(source_type, token_ca, signal_ts, branch)
     try:
         with SQLITE_WRITE_LOCK:
+            if active_queue_depth(db) >= FAST_ENTRY_MAX_QUEUE_DEPTH and int(priority) > FAST_ENTRY_PRESSURE_PRIORITY_CUTOFF:
+                return False
+            existing = existing_recent_queue_row(db, token_ca, now_ts)
+            if existing is not None:
+                if int(priority) < int(existing["priority"] or 999):
+                    db.execute(
+                        """
+                        UPDATE paper_fast_entry_queue
+                        SET priority = ?, source_type = ?, entry_mode_hint = ?, entry_branch = ?,
+                            hard_gate_status = COALESCE(?, hard_gate_status),
+                            source_resonance_cohort = COALESCE(?, source_resonance_cohort),
+                            payload_json = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            int(priority),
+                            source_type,
+                            entry_mode_hint,
+                            branch,
+                            hard_gate_status,
+                            source_resonance_cohort,
+                            json.dumps(payload or {}, ensure_ascii=False),
+                            now_ts,
+                            existing["id"],
+                        ),
+                    )
+                    db.commit()
+                return False
             db.execute(
                 """
                 INSERT OR IGNORE INTO paper_fast_entry_queue (
@@ -312,6 +387,15 @@ def claim_queue_item(db, owner):
         db.execute(
             """
             UPDATE paper_fast_entry_queue
+            SET status = 'expired', last_error = 'fast_lane_queue_age_expired', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            WHERE status IN ('queued', 'claimed')
+              AND (? - created_at) > ?
+            """,
+            (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+        )
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
             SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?
             WHERE status = 'claimed' AND COALESCE(claimed_at, 0) < ?
             """,
@@ -360,6 +444,15 @@ def mark_queue(db, row_id, status, error=None):
 def refresh_retry_watch(db, *, now_ts=None):
     now_ts = float(now_ts if now_ts is not None else time.time())
     with SQLITE_WRITE_LOCK:
+        db.execute(
+            """
+            UPDATE paper_fast_entry_queue
+            SET status = 'expired', last_error = 'fast_lane_queue_age_expired', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            WHERE status IN ('queued', 'claimed')
+              AND (? - created_at) > ?
+            """,
+            (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+        )
         db.execute(
             """
             UPDATE paper_fast_entry_queue
@@ -635,6 +728,8 @@ def process_queue_item(db, row, owner):
             stage,
             strategy_id="paper-fast-lane-v1",
             lifecycle_id=lifecycle_id,
+            timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+            fast_lane_timeout=True,
         )
         quote_response_ts_ms = int(time.time() * 1000)
         if not execution.get("success"):
@@ -681,6 +776,8 @@ def process_queue_item(db, row, owner):
                 stage,
                 strategy_id="paper-fast-lane-v1",
                 lifecycle_id=lifecycle_id,
+                timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+                fast_lane_timeout=True,
             )
             quote_response_ts_ms = int(time.time() * 1000)
             if not execution.get("success"):
@@ -764,9 +861,9 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
                 FROM premium_signals
                 WHERE id > ?
                 ORDER BY id ASC
-                LIMIT 200
+                LIMIT ?
                 """,
-                (last_id,),
+                (last_id, FAST_ENTRY_PREMIUM_BATCH_LIMIT),
             ).fetchall()
             for row in rows:
                 last_id = max(last_id, int(row["id"] or 0))
@@ -827,10 +924,11 @@ def source_resonance_scan(paper_db_path, stop_event):
                            cohort, resonance_level, resonance_score, updated_at
                     FROM source_resonance_candidates
                     WHERE (COALESCE(quote_clean_seen, 0) = 1 OR COALESCE(gmgn_pre_seen, 0) = 1 OR cohort LIKE '%telegram_gmgn%')
-                      AND updated_at >= datetime('now', '-5 minutes')
+                      AND updated_at >= datetime('now', ?)
                     ORDER BY updated_at DESC
-                    LIMIT 200
+                    LIMIT ?
                     """,
+                    (f"-{FAST_ENTRY_SOURCE_LOOKBACK_SEC} seconds", FAST_ENTRY_SOURCE_SCAN_LIMIT),
                 ).fetchall()
                 for row in rows:
                     priority = 12 if int(row["quote_clean_seen"] or 0) else 18
@@ -903,9 +1001,9 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         OR reject_reason LIKE 'lotto_stale_%'
                       )
                     ORDER BY id ASC
-                    LIMIT 100
+                    LIMIT ?
                     """,
-                    (last_seen,),
+                    (last_seen, FAST_ENTRY_MISSED_RESCUE_LIMIT),
                 ).fetchall()
                 for row in rows:
                     last_seen = max(last_seen, int(row["id"] or 0))
@@ -1023,7 +1121,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--paper-db", default=os.environ.get("PAPER_DB", str(DEFAULT_PAPER_DB)))
     parser.add_argument("--signal-db", default=os.environ.get("SENTIMENT_DB", os.environ.get("DB_PATH", str(DEFAULT_SIGNAL_DB))))
-    parser.add_argument("--concurrency", type=int, default=int(os.environ.get("FAST_ENTRY_WORKER_CONCURRENCY", "2")))
+    parser.add_argument("--concurrency", type=int, default=int(os.environ.get("FAST_ENTRY_WORKER_CONCURRENCY", "4")))
     parser.add_argument("--lookback-sec", type=int, default=int(os.environ.get("FAST_ENTRY_BOOT_LOOKBACK_SEC", "120")))
     parser.add_argument("--lock-file", default=os.environ.get("PAPER_FAST_LANE_LOCK_FILE", "/tmp/paper_fast_lane.lock"))
     args = parser.parse_args()

@@ -8,13 +8,15 @@ def test_fast_queue_deduplicates_by_queue_key(tmp_path):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)
     fast.init_fast_lane_schema(db)
+    now = int(time.time())
 
     first = fast.enqueue_fast_entry(
         db,
         source_type="hard_gate_fast",
         token_ca="TokenA",
         symbol="A",
-        signal_ts=1_000,
+        signal_ts=now,
+        receive_ts=now,
         entry_branch="hard_gate_fast_clean",
     )
     second = fast.enqueue_fast_entry(
@@ -22,13 +24,112 @@ def test_fast_queue_deduplicates_by_queue_key(tmp_path):
         source_type="hard_gate_fast",
         token_ca="TokenA",
         symbol="A",
-        signal_ts=1_000,
+        signal_ts=now,
+        receive_ts=now,
         entry_branch="hard_gate_fast_clean",
     )
 
     assert first is True
     assert second is False
     assert db.execute("SELECT COUNT(*) FROM paper_fast_entry_queue").fetchone()[0] == 1
+
+
+def test_fast_queue_deduplicates_recent_token_across_signal_ts(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+
+    first = fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenA",
+        symbol="A",
+        signal_ts=1_000,
+        receive_ts=int(time.time()),
+        entry_branch="hard_gate_fast_clean",
+        priority=10,
+    )
+    second = fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenA",
+        symbol="A",
+        signal_ts=1_030,
+        receive_ts=int(time.time()),
+        entry_branch="hard_gate_fast_clean",
+        priority=10,
+    )
+
+    assert first is True
+    assert second is False
+    assert db.execute("SELECT COUNT(*) FROM paper_fast_entry_queue").fetchone()[0] == 1
+
+
+def test_fast_queue_upgrades_existing_token_priority(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="source_resonance_fast",
+        token_ca="TokenA",
+        signal_ts=1_000,
+        receive_ts=int(time.time()),
+        entry_branch="source_resonance_gmgn_fast",
+        priority=18,
+    )
+    assert not fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenA",
+        signal_ts=1_001,
+        receive_ts=int(time.time()),
+        entry_branch="hard_gate_fast_clean",
+        priority=10,
+    )
+
+    row = db.execute("SELECT priority, source_type, entry_branch FROM paper_fast_entry_queue").fetchone()
+    assert row["priority"] == 10
+    assert row["source_type"] == "hard_gate_fast"
+    assert row["entry_branch"] == "hard_gate_fast_clean"
+
+
+def test_queue_pressure_skips_low_priority_but_keeps_high_priority(tmp_path, monkeypatch):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MAX_QUEUE_DEPTH", 1)
+
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenA",
+        signal_ts=1_000,
+        receive_ts=int(time.time()),
+        entry_branch="hard_gate_fast_clean",
+        priority=10,
+    )
+    assert not fast.enqueue_fast_entry(
+        db,
+        source_type="ttl_rescue_fast",
+        token_ca="TokenB",
+        signal_ts=1_001,
+        receive_ts=int(time.time()),
+        entry_branch="tracking_ttl_expired",
+        priority=35,
+    )
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenC",
+        signal_ts=1_002,
+        receive_ts=int(time.time()),
+        entry_branch="hard_gate_fast_clean",
+        priority=10,
+    )
+
+    assert db.execute("SELECT COUNT(*) FROM paper_fast_entry_queue").fetchone()[0] == 2
 
 
 def test_claim_queue_item_is_single_owner(tmp_path):

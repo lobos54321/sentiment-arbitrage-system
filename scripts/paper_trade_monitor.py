@@ -1100,7 +1100,9 @@ class PersistentExecutionBridge:
         req = {"_command": command, "payload": payload}
         try:
             actual_timeout = timeout
-            if command in ['quote-buy', 'quote-sell', 'simulate-buy', 'simulate-sell']:
+            options = payload.get('options') if isinstance(payload, dict) else None
+            fast_lane_timeout = bool(isinstance(options, dict) and options.get('fastLaneTimeout'))
+            if command in ['quote-buy', 'quote-sell', 'simulate-buy', 'simulate-sell'] and not fast_lane_timeout:
                 actual_timeout = max(timeout, 30)
                 
             _, data = _post_json("http://127.0.0.1:38942", req, actual_timeout)
@@ -1116,7 +1118,7 @@ def call_execution_bridge(command, payload, timeout=10):
     return _daemon_bridge.call(command, payload, timeout)
 
 
-def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None, lifecycle_id=None):
+def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None, lifecycle_id=None, timeout=20, fast_lane_timeout=False):
     return call_execution_bridge('simulate-buy', {
         'mode': 'paper',
         'tokenCA': token_ca,
@@ -1125,8 +1127,9 @@ def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None,
             'stage': stage_name,
             'strategyId': strategy_id,
             'lifecycleId': lifecycle_id,
+            'fastLaneTimeout': bool(fast_lane_timeout),
         }
-    })
+    }, timeout=timeout)
 
 
 def simulate_exit_execution(token_ca, token_amount_raw, token_decimals, stage_name, strategy_id=None, lifecycle_id=None):
