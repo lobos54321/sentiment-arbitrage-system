@@ -131,10 +131,11 @@ ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_HARD
 ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT', '4.5'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
 DOG_CATCHER_LATE_ENTRY_GUARD_ENABLED = os.environ.get('DOG_CATCHER_LATE_ENTRY_GUARD_ENABLED', 'true').lower() != 'false'
-DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS', '120000'))
-DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS', '120000'))
-DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS', '180000'))
-DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS', '300000'))
+DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS', '90000'))
+DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS', '90000'))
+DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS', '120000'))
+DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS', '180000'))
+DOG_CATCHER_LATE_ENTRY_HARD_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_HARD_MAX_LATENCY_MS', '240000'))
 DOG_CATCHER_LATE_ENTRY_SOURCE_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_SOURCE_STRICT_SPREAD_PCT', '2.5'))
 DOG_CATCHER_LATE_ENTRY_HARD_GATE_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_HARD_GATE_STRICT_SPREAD_PCT', '2.5'))
 DOG_CATCHER_LATE_ENTRY_PRE_PASS_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_PRE_PASS_STRICT_SPREAD_PCT', '3.5'))
@@ -4757,6 +4758,23 @@ def _probe_hold_quote_monitor_exit_detail(pos, *, quote_pnl=None, trigger_pnl=No
     if quote_pnl is None or trigger_pnl is None:
         return {'exit': False, 'reason': 'missing_quote_or_trigger'}
     quote_mark_gap = trigger_pnl - quote_pnl
+    if quote_pnl <= PROBE_HOLD_QUOTE_STOP_PNL:
+        return {
+            'exit': True,
+            'reason': (
+                'probe_quote_guard_stop'
+                if quote_mark_gap >= PROBE_HOLD_QUOTE_GAP_STOP_PCT
+                else 'probe_quote_loss_cap_stop'
+            ),
+            'quote_pnl': quote_pnl,
+            'trigger_pnl': trigger_pnl,
+            'quote_mark_gap': quote_pnl - trigger_pnl,
+            'quote_mark_gap_abs': quote_mark_gap,
+            'peak_pnl': peak_pnl,
+            'held_sec': held_sec,
+            'stop_quote_pnl': PROBE_HOLD_QUOTE_STOP_PNL,
+            'min_gap': PROBE_HOLD_QUOTE_GAP_STOP_PCT,
+        }
     if peak_pnl < PROBE_HOLD_QUOTE_MONITOR_MIN_PEAK and quote_pnl > PROBE_HOLD_QUOTE_STOP_PNL:
         return {
             'exit': False,
@@ -6670,7 +6688,9 @@ def dog_catcher_late_entry_guard_detail(pending, entry_latency_audit=None, entry
         'profile': profile,
         'signal_to_quote_latency_ms': latency_ms,
         'max_latency_ms': max_latency_ms,
+        'hard_max_latency_ms': DOG_CATCHER_LATE_ENTRY_HARD_MAX_LATENCY_MS,
         'quote_spread_pct': spread_pct,
+        'quote_spread_abs_pct': abs(spread_pct) if spread_pct is not None else None,
         'strict_spread_pct': strict_spread_pct,
         'source_activity_confirmed': _late_entry_source_activity_confirmed(pending),
         'entry_latency_audit': entry_latency_audit,
@@ -6678,10 +6698,15 @@ def dog_catcher_late_entry_guard_detail(pending, entry_latency_audit=None, entry
     }
     if latency_ms is None or latency_ms <= max_latency_ms:
         return detail
+    if latency_ms > DOG_CATCHER_LATE_ENTRY_HARD_MAX_LATENCY_MS:
+        detail['pass'] = False
+        detail['reason'] = 'dog_catcher_late_entry_hard_latency_cap'
+        detail['decision'] = 'abort_wait_for_fresh_signal'
+        return detail
     if (
         detail['source_activity_confirmed']
         and spread_pct is not None
-        and spread_pct <= strict_spread_pct
+        and abs(spread_pct) <= strict_spread_pct
     ):
         detail['reason'] = 'late_entry_strong_source_confirmed'
         return detail

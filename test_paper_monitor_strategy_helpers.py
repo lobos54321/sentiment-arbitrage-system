@@ -1504,6 +1504,22 @@ def test_probe_hold_quote_monitor_locks_profit_when_quote_lags_mark():
     assert detail["quote_mark_gap_abs"] >= monitor.PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP
 
 
+def test_probe_hold_quote_monitor_exits_on_quote_loss_cap_without_mark_gap():
+    pos = _DummyPos(entry_mode=SOURCE_RESONANCE_TINY_PROBE_MODE, size_sol=0.001, route="LOTTO")
+    pos.peak_pnl = 0.0
+
+    detail = _probe_hold_quote_monitor_exit_detail(
+        pos,
+        quote_pnl=-0.10,
+        trigger_pnl=-0.11,
+        held_sec=90,
+    )
+
+    assert detail["exit"] is True
+    assert detail["reason"] == "probe_quote_loss_cap_stop"
+    assert detail["quote_pnl"] <= monitor.PROBE_HOLD_QUOTE_STOP_PNL
+
+
 def test_dog_catcher_branch_quality_override_allows_soft_source_resonance():
     pending = {
         "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
@@ -3943,7 +3959,7 @@ def test_late_entry_guard_blocks_stale_source_resonance_without_clean_edge():
     )
 
     assert decision["pass"] is False
-    assert decision["reason"] == "dog_catcher_late_entry_latency_edge"
+    assert decision["reason"] == "dog_catcher_late_entry_hard_latency_cap"
 
 
 def test_late_entry_guard_allows_pre_pass_inside_latency_budget():
@@ -3954,7 +3970,7 @@ def test_late_entry_guard_allows_pre_pass_inside_latency_budget():
             "kelly_position_sol": monitor.PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
         },
         entry_latency_audit={
-            "signal_to_quote_latency_ms": 156_263,
+            "signal_to_quote_latency_ms": 96_263,
             "quote_spread_pct": 3.28,
         },
         entry_edge_budget={"pass": True, "spread_pct": 3.28},
@@ -3976,7 +3992,7 @@ def test_late_entry_guard_allows_late_source_only_with_strong_current_edge():
             },
         },
         entry_latency_audit={
-            "signal_to_quote_latency_ms": 300_000,
+            "signal_to_quote_latency_ms": 150_000,
             "quote_spread_pct": 2.0,
         },
         entry_edge_budget={"pass": True, "spread_pct": 2.0},
@@ -3984,6 +4000,52 @@ def test_late_entry_guard_allows_late_source_only_with_strong_current_edge():
 
     assert decision["pass"] is True
     assert decision["reason"] == "late_entry_strong_source_confirmed"
+
+
+def test_late_entry_guard_blocks_strong_source_past_hard_latency_cap():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            "external_alpha": {
+                "gmgn_pre_seen": True,
+                "gmgn_momentum_confirmed": True,
+            },
+        },
+        entry_latency_audit={
+            "signal_to_quote_latency_ms": monitor.DOG_CATCHER_LATE_ENTRY_HARD_MAX_LATENCY_MS + 1,
+            "quote_spread_pct": 0.5,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 0.5},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "dog_catcher_late_entry_hard_latency_cap"
+
+
+def test_late_entry_guard_blocks_negative_spread_when_absolute_edge_is_bad():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
+            "pre_pass_resonance_probe": {
+                "relaxed_canary": {
+                    "activity": {"gmgn_momentum_confirmed": True},
+                },
+            },
+        },
+        entry_latency_audit={
+            "signal_to_quote_latency_ms": 180_000,
+            "quote_spread_pct": -36.4,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": -36.4},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "dog_catcher_late_entry_latency_edge"
+    assert decision["quote_spread_abs_pct"] == 36.4
 
 
 def test_late_entry_guard_blocks_stale_smart_pullback_tiny_probe():
@@ -4001,7 +4063,7 @@ def test_late_entry_guard_blocks_stale_smart_pullback_tiny_probe():
     )
 
     assert decision["pass"] is False
-    assert decision["reason"] == "dog_catcher_late_entry_latency_edge"
+    assert decision["reason"] == "dog_catcher_late_entry_hard_latency_cap"
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):
