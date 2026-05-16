@@ -64,6 +64,7 @@ from paper_trade_monitor import (  # noqa: E402
     _phase_policy_live_exit_detail,
     _probe_hold_quote_monitor_exit_detail,
     _probe_quote_primary_profit_exit_confirmation,
+    dog_catcher_late_entry_guard_detail,
     dog_catcher_fast_lane_pending_ready,
     _matrix_micro_momentum_reason,
     _maybe_upgrade_pending_to_source_resonance_probe,
@@ -3876,6 +3877,87 @@ def test_entry_edge_blocks_probe_when_trigger_missing():
 
     assert decision["pass"] is False
     assert decision["reason"] == "entry_edge_probe_missing_trigger_or_quote"
+
+
+def test_late_entry_guard_blocks_stale_source_resonance_without_clean_edge():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            "external_alpha": {
+                "gmgn_pre_seen": True,
+                "gmgn_momentum_rounds": 0,
+                "gmgn_momentum_gain_pct": 0,
+            },
+        },
+        entry_latency_audit={
+            "signal_to_quote_latency_ms": 386_131,
+            "quote_spread_pct": 3.63,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 3.63},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "dog_catcher_late_entry_latency_edge"
+
+
+def test_late_entry_guard_allows_pre_pass_inside_latency_budget():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
+        },
+        entry_latency_audit={
+            "signal_to_quote_latency_ms": 156_263,
+            "quote_spread_pct": 3.28,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 3.28},
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "late_entry_guard_ok"
+
+
+def test_late_entry_guard_allows_late_source_only_with_strong_current_edge():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            "external_alpha": {
+                "gmgn_pre_seen": True,
+                "gmgn_momentum_confirmed": True,
+            },
+        },
+        entry_latency_audit={
+            "signal_to_quote_latency_ms": 300_000,
+            "quote_spread_pct": 2.0,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 2.0},
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "late_entry_strong_source_confirmed"
+
+
+def test_late_entry_guard_blocks_stale_smart_pullback_tiny_probe():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": "smart_entry_pullback_bounce",
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.PAPER_TINY_SCOUT_SIZE_SOL,
+        },
+        entry_latency_audit={
+            "signal_to_quote_latency_ms": 1_650_344,
+            "quote_spread_pct": 3.7,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 3.7},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "dog_catcher_late_entry_latency_edge"
 
 
 def test_tiny_scout_dex_fallback_builds_synthetic_paper_entry(monkeypatch):

@@ -130,6 +130,15 @@ ENTRY_EDGE_SOURCE_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_SO
 ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_HARD_GATE_PASS_MAX_SPREAD_PCT', '5.0'))
 ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT = float(os.environ.get('ENTRY_EDGE_PRE_PASS_RESONANCE_MAX_SPREAD_PCT', '4.5'))
 ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT = float(os.environ.get('ENTRY_EDGE_MIN_FOLLOW_PEAK_PCT', '5.0'))
+DOG_CATCHER_LATE_ENTRY_GUARD_ENABLED = os.environ.get('DOG_CATCHER_LATE_ENTRY_GUARD_ENABLED', 'true').lower() != 'false'
+DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS', '120000'))
+DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS', '120000'))
+DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS', '180000'))
+DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS = int(os.environ.get('DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS', '300000'))
+DOG_CATCHER_LATE_ENTRY_SOURCE_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_SOURCE_STRICT_SPREAD_PCT', '2.5'))
+DOG_CATCHER_LATE_ENTRY_HARD_GATE_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_HARD_GATE_STRICT_SPREAD_PCT', '2.5'))
+DOG_CATCHER_LATE_ENTRY_PRE_PASS_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_PRE_PASS_STRICT_SPREAD_PCT', '3.5'))
+DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_STRICT_SPREAD_PCT = float(os.environ.get('DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_STRICT_SPREAD_PCT', '2.0'))
 ENTRY_SPREAD_ABORT_MEMORY_SEC = float(os.environ.get('ENTRY_SPREAD_ABORT_MEMORY_SEC', str(3 * 60)))
 ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_M5_PCT', '2.0'))
 ENTRY_SPREAD_ABORT_RECLAIM_BS = float(os.environ.get('ENTRY_SPREAD_ABORT_RECLAIM_BS', '1.15'))
@@ -6547,6 +6556,111 @@ def _late_smart_pullback_abort_detail(pending, *, now_ts=None):
         'signal_age_sec': signal_age_sec,
         'max_signal_age_sec': SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC,
     }
+
+
+def _late_entry_source_activity_confirmed(pending):
+    pending = pending or {}
+    contexts = [
+        pending.get('external_alpha'),
+        pending.get('resonance_context'),
+        pending.get('source_resonance_probe'),
+        pending.get('pre_pass_resonance_probe'),
+    ]
+    if isinstance(pending.get('source_resonance_probe'), dict):
+        contexts.append((pending.get('source_resonance_probe') or {}).get('external_alpha'))
+        contexts.append((pending.get('source_resonance_probe') or {}).get('observed'))
+    if isinstance(pending.get('pre_pass_resonance_probe'), dict):
+        contexts.append((pending.get('pre_pass_resonance_probe') or {}).get('external_alpha'))
+        contexts.append((pending.get('pre_pass_resonance_probe') or {}).get('resonance_context'))
+        contexts.append(((pending.get('pre_pass_resonance_probe') or {}).get('relaxed_canary') or {}).get('activity'))
+        contexts.append((pending.get('pre_pass_resonance_probe') or {}).get('followthrough'))
+    for context in contexts:
+        if not isinstance(context, dict):
+            continue
+        rounds = _source_resonance_number(context.get('gmgn_momentum_rounds'), 0.0) or 0.0
+        gain_pct = _source_resonance_number(context.get('gmgn_momentum_gain_pct'), 0.0) or 0.0
+        price_change_m5 = _source_resonance_number(context.get('price_change_m5'), None)
+        buy_sell_ratio = _source_resonance_number(context.get('buy_sell_ratio'), None)
+        tx_m5 = _source_resonance_number(context.get('tx_m5'), None)
+        if (
+            context.get('gmgn_momentum_confirmed')
+            or context.get('gmgn_volume_confirmed')
+            or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
+            or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
+        ):
+            return True
+        if (
+            price_change_m5 is not None
+            and price_change_m5 >= PRE_PASS_RESONANCE_MIN_PRICE_CHANGE_M5
+            and (buy_sell_ratio is None or buy_sell_ratio >= PRE_PASS_RESONANCE_MIN_BUY_SELL_RATIO)
+            and (tx_m5 is None or tx_m5 >= PRE_PASS_RESONANCE_MIN_TX_M5)
+        ):
+            return True
+    return False
+
+
+def dog_catcher_late_entry_guard_detail(pending, entry_latency_audit=None, entry_edge_budget=None):
+    """Final quote-time guard: do not paper-enter a stale dog-catcher signal without fresh edge."""
+    pending = pending or {}
+    entry_latency_audit = entry_latency_audit or {}
+    entry_edge_budget = entry_edge_budget or {}
+    entry_mode = _pending_entry_mode(pending)
+    if not DOG_CATCHER_LATE_ENTRY_GUARD_ENABLED:
+        return {'pass': True, 'reason': 'late_entry_guard_disabled', 'entry_mode': entry_mode}
+    if not pending_is_paper_tiny_scout(pending):
+        return {'pass': True, 'reason': 'not_paper_tiny_scout', 'entry_mode': entry_mode}
+
+    config = None
+    if entry_mode == SOURCE_RESONANCE_TINY_PROBE_MODE:
+        config = ('source_resonance', DOG_CATCHER_LATE_ENTRY_SOURCE_MAX_LATENCY_MS, DOG_CATCHER_LATE_ENTRY_SOURCE_STRICT_SPREAD_PCT)
+    elif entry_mode == HARD_GATE_PASS_TINY_PROBE_MODE:
+        config = ('hard_gate_pass', DOG_CATCHER_LATE_ENTRY_HARD_GATE_MAX_LATENCY_MS, DOG_CATCHER_LATE_ENTRY_HARD_GATE_STRICT_SPREAD_PCT)
+    elif entry_mode == PRE_PASS_RESONANCE_TINY_PROBE_MODE:
+        config = ('pre_pass_resonance', DOG_CATCHER_LATE_ENTRY_PRE_PASS_MAX_LATENCY_MS, DOG_CATCHER_LATE_ENTRY_PRE_PASS_STRICT_SPREAD_PCT)
+    elif entry_mode == 'smart_entry_pullback_bounce':
+        config = ('smart_entry_pullback_bounce', DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_MAX_LATENCY_MS, DOG_CATCHER_LATE_ENTRY_SMART_PULLBACK_STRICT_SPREAD_PCT)
+    else:
+        return {'pass': True, 'reason': 'mode_not_late_guarded', 'entry_mode': entry_mode}
+
+    profile, max_latency_ms, strict_spread_pct = config
+    latency_ms = _source_resonance_number(
+        entry_latency_audit.get('signal_to_quote_latency_ms')
+        or entry_latency_audit.get('signal_to_entry_latency_ms'),
+        None,
+    )
+    spread_pct = _source_resonance_number(
+        entry_latency_audit.get('quote_spread_pct')
+        if entry_latency_audit.get('quote_spread_pct') is not None
+        else entry_edge_budget.get('spread_pct'),
+        None,
+    )
+    detail = {
+        'pass': True,
+        'reason': 'late_entry_guard_ok',
+        'entry_mode': entry_mode,
+        'profile': profile,
+        'signal_to_quote_latency_ms': latency_ms,
+        'max_latency_ms': max_latency_ms,
+        'quote_spread_pct': spread_pct,
+        'strict_spread_pct': strict_spread_pct,
+        'source_activity_confirmed': _late_entry_source_activity_confirmed(pending),
+        'entry_latency_audit': entry_latency_audit,
+        'entry_edge_budget': entry_edge_budget,
+    }
+    if latency_ms is None or latency_ms <= max_latency_ms:
+        return detail
+    if (
+        detail['source_activity_confirmed']
+        and spread_pct is not None
+        and spread_pct <= strict_spread_pct
+    ):
+        detail['reason'] = 'late_entry_strong_source_confirmed'
+        return detail
+
+    detail['pass'] = False
+    detail['reason'] = 'dog_catcher_late_entry_latency_edge'
+    detail['decision'] = 'abort_wait_for_fresh_signal'
+    return detail
 
 
 def _source_resonance_number(value, default=None):
@@ -20736,6 +20850,38 @@ def run_monitor(db):
                         pending=pending,
                         token_risk=_token_risk,
                     )
+                    _late_entry_guard = dog_catcher_late_entry_guard_detail(
+                        pending,
+                        entry_latency_audit=_entry_latency_audit,
+                        entry_edge_budget=_entry_edge_budget,
+                    )
+                    if not _late_entry_guard.get('pass', True):
+                        log.info(
+                            f"  [LATE_ENTRY_GUARD] 🚫 {pending['symbol']} ABORT: "
+                            f"latency={_late_entry_guard.get('signal_to_quote_latency_ms')}ms "
+                            f"> {_late_entry_guard.get('max_latency_ms')}ms "
+                            f"spread={_late_entry_guard.get('quote_spread_pct')}% "
+                            f"strict={_late_entry_guard.get('strict_spread_pct')}% "
+                            f"reason={_late_entry_guard.get('reason')}"
+                        )
+                        record_decision_event(
+                            db,
+                            component='entry_latency_guard',
+                            event_type='entry_abort',
+                            decision='abort',
+                            reason=_late_entry_guard.get('reason') or 'dog_catcher_late_entry_guard',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='entry_latency_audit+entry_edge_budget',
+                            payload=with_lifecycle_payload(_late_entry_guard, _entry_timing_lifecycle),
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
                     _SPREAD_WARN_PCT = _entry_edge_budget.get('warn_spread_pct', MATRIX_SPREAD_WARN_PCT)
                     _SPREAD_GUARD_MAX_PCT = _entry_edge_budget.get('max_spread_pct', MATRIX_SPREAD_ABORT_PCT)
                     # POST-SPREAD-ABORT GUARD (persistent CA memory + live watchlist memory)
