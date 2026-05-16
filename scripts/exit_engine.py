@@ -126,6 +126,36 @@ def _cohort_probe_floor_for_position(pos, peak_pnl):
     )
 
 
+def _dog_catcher_guardian_floor_detail(pos, pnl, *, w_entry=None):
+    peak = max(
+        float(getattr(pos, "peak_pnl", 0.0) or 0.0),
+        float(pnl or 0.0),
+    )
+    if w_entry:
+        try:
+            peak = max(peak, float(w_entry.get("peak_pnl") or 0.0))
+        except (TypeError, ValueError):
+            pass
+    floor = _cohort_probe_floor_for_position(pos, peak)
+    detail = {
+        "pass": False,
+        "reason": "not_dog_catcher_floor_position",
+        "entry_mode": _entry_mode_for_position(pos),
+        "capital_tier": _capital_tier_for_position(pos),
+        "resonance_cohort": _resonance_cohort_for_position(pos),
+        "peak_pnl": peak,
+        "current_pnl": pnl,
+        "trail_floor": floor,
+    }
+    if floor is None:
+        return detail
+    detail["reason"] = "dog_catcher_guardian_floor_not_breached"
+    if pnl <= floor:
+        detail["pass"] = True
+        detail["reason"] = "dog_catcher_guardian_trail_floor"
+    return detail
+
+
 def _ath_no_kline_fast_fail_detail(pos, pnl, held_sec):
     entry_mode = _entry_mode_for_position(pos)
     peak_pnl = max(float(getattr(pos, "peak_pnl", 0) or 0), float(pnl or 0))
@@ -700,6 +730,32 @@ class ExitGuardianThread(threading.Thread):
                 # Now we require TWO consecutive price checks to confirm SL breach.
                 # If first check triggers SL, wait 1s and re-fetch. Only proceed if both agree.
                 if pnl <= hard_sl:
+                    _dog_floor = _dog_catcher_guardian_floor_detail(pos, pnl, w_entry=w_entry)
+                    if _dog_floor.get("pass"):
+                        _floor = _dog_floor.get("trail_floor")
+                        _peak = _dog_floor.get("peak_pnl")
+                        log.info(
+                            f"[ExitGuardian] 🧲 {pos.symbol} DOG-CATCHER FLOOR BEFORE SL: "
+                            f"pnl={pnl*100:+.1f}% <= floor={_floor*100:.1f}% "
+                            f"peak={_peak*100:.1f}% mode={_dog_floor.get('entry_mode')}"
+                        )
+                        with self.exit_queue_lock:
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'reason': (
+                                    f"dog_catcher_guardian_trail_floor "
+                                    f"(pnl={pnl:.1%} < floor={_floor:.1%}, peak={_peak:.1%})"
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                'trail_floor': _floor,
+                                'guardian_floor_detail': _dog_floor,
+                                '_instant_sim': self._get_instant_quote(pos, ca),
+                            })
+                        self._exit_pending.add(trade_id)
+                        continue
+
                     first_price = price
                     first_pnl = pnl
                     first_src = src
@@ -879,6 +935,18 @@ class ExitGuardianThread(threading.Thread):
                     _pnl_drop = _prev_pnl - pnl  # positive = PnL fell
                     # V3.4: raised gap_crash threshold 8%→15% (was too sensitive, killed TIME at +14%→-4%)
                     if _pnl_drop > 0.15 and _prev_pnl > 0:  # >15pp drop AND was profitable
+                        _dog_floor = _dog_catcher_guardian_floor_detail(pos, pnl, w_entry=w_entry)
+                        if _dog_floor.get("pass"):
+                            _floor = _dog_floor.get("trail_floor")
+                            _peak = _dog_floor.get("peak_pnl")
+                            reason = (
+                                f"dog_catcher_guardian_trail_floor "
+                                f"(gap={_pnl_drop:.1%}, pnl={pnl:.1%} < floor={_floor:.1%}, peak={_peak:.1%})"
+                            )
+                        else:
+                            _floor = None
+                            _peak = None
+                            reason = f'guardian_gap_crash ({_pnl_drop:.1%} drop in 1 tick, {_prev_pnl:.1%}→{pnl:.1%})'
                         log.info(
                             f"[ExitGuardian] 💥 {pos.symbol} GAP CRASH: "
                             f"pnl dropped {_pnl_drop*100:+.1f}pp in 1 tick "
@@ -888,9 +956,11 @@ class ExitGuardianThread(threading.Thread):
                             self.exit_queue.append({
                                 'trade_id': trade_id,
                                 'symbol': pos.symbol,
-                                'reason': f'guardian_gap_crash ({_pnl_drop:.1%} drop in 1 tick, {_prev_pnl:.1%}→{pnl:.1%})',
+                                'reason': reason,
                                 'trigger_price': price,
                                 'trigger_pnl': pnl,
+                                'trail_floor': _floor,
+                                'guardian_floor_detail': _dog_floor,
                                 '_instant_sim': self._get_instant_quote(pos, ca),
                             })
                         self._exit_pending.add(trade_id)

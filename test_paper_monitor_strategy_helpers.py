@@ -60,6 +60,7 @@ from paper_trade_monitor import (  # noqa: E402
     _entry_mode_quality_high_quality_tiny_override,
     _entry_mode_quality_allows_live,
     _exit_stop_quote_gap_protection,
+    _late_smart_pullback_abort_detail,
     _phase_policy_live_exit_detail,
     _probe_hold_quote_monitor_exit_detail,
     _probe_quote_primary_profit_exit_confirmation,
@@ -1435,6 +1436,40 @@ def test_dog_catcher_trail_quote_confirms_when_quote_holds_floor():
     assert detail["reason"] == "dog_catcher_trail_quote_confirmed"
 
 
+def test_dog_catcher_trail_quote_covers_guardian_floor_reason():
+    pos = _DummyPos(entry_mode=SOURCE_RESONANCE_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    exit_matrix = {
+        "action": "exit",
+        "reason": "dog_catcher_guardian_trail_floor (pnl=-58.2% < floor=7.4%, peak=10.6%)",
+        "current_pnl": -0.582,
+        "trail_floor": 0.074,
+    }
+
+    detail = _dog_catcher_trail_quote_confirmation(
+        pos,
+        exit_matrix,
+        quote_pnl=0.081,
+        trigger_pnl=-0.582,
+    )
+
+    assert detail["cancel"] is False
+    assert detail["reason"] == "dog_catcher_trail_quote_confirmed"
+
+
+def test_late_smart_pullback_abort_blocks_chasing_stale_main_entry():
+    detail = _late_smart_pullback_abort_detail(
+        {
+            "entry_mode": "smart_entry_pullback_bounce",
+            "signal_ts": 1_000,
+            "kelly_position_sol": 0.005,
+        },
+        now_ts=1_000 + monitor.SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC + 1,
+    )
+
+    assert detail["abort"] is True
+    assert detail["reason"] == "smart_pullback_signal_too_stale"
+
+
 def test_probe_hold_quote_monitor_exits_when_quote_collapses():
     pos = _DummyPos(entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
     pos.peak_pnl = 0.12
@@ -2548,6 +2583,53 @@ def test_source_resonance_tiny_probe_rejects_stale_signal_anchor():
     assert decision["pass"] is False
     assert decision["reason"] == "source_resonance_signal_too_stale"
     assert decision["observed"]["signal_age_sec"] > monitor.SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC
+
+
+def test_source_resonance_stale_lotto_canary_allows_quote_confirmed_stale_gate():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": 600,
+            "last_seen_age_sec": 30,
+            "quote_clean": True,
+            "quote_executable": True,
+            "gmgn_momentum_rounds": 0,
+            "gmgn_momentum_gain_pct": 0,
+            "last_market_cap": 42000,
+        },
+        signal={"timestamp": 1_000, "signal_type": "LOTTO"},
+        route="LOTTO",
+        hard_gate_status="lotto_stale_2614s",
+        now_ts=1_000 + monitor.SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC + 600,
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "source_resonance_soft_override"
+    assert decision["source_resonance_stale_canary_used"] is True
+    assert "source_resonance_stale_canary" in decision["intervention_flags"]
+
+
+def test_source_resonance_risky_newborn_pullback_soft_override_allows_canary():
+    decision = evaluate_source_resonance_tiny_probe(
+        {
+            "available": True,
+            "source": "external_alpha_shadow",
+            "gmgn_pre_seen": True,
+            "gmgn_lead_time_sec": 90,
+            "last_seen_age_sec": 30,
+            "quote_clean": True,
+            "quote_executable": True,
+            "last_market_cap": 42000,
+        },
+        route="LOTTO",
+        hard_gate_status="risky_newborn_pullback_m9s_zero",
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "source_resonance_soft_override"
+    assert decision["observed"]["soft_override"]["parent_reason"] == "risky_newborn_pullback_m9s_zero"
 
 
 def test_source_resonance_tiny_probe_rejects_timestamp_anomalies():

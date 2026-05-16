@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 import exit_engine  # noqa: E402
 from exit_engine import (  # noqa: E402
     _ath_no_kline_fast_fail_detail,
+    _dog_catcher_guardian_floor_detail,
     _quote_freshness_detail,
     _quote_primary_exit_confirmation,
     _quote_stop_exit_confirmation,
@@ -164,3 +165,21 @@ def test_guardian_hard_sl_discards_stale_quote_and_keeps_when_fresh_quote_above_
 
     assert calls
     assert result == []
+
+
+def test_dog_catcher_guardian_floor_catches_probe_before_hard_sl():
+    pos = SimpleNamespace(
+        peak_pnl=0.1063,
+        monitor_state={
+            "entryMode": "source_resonance_tiny_probe",
+            "entrySol": 0.002,
+            "capitalTier": "tiny_probe",
+            "sourceResonanceCohort": "telegram_gmgn",
+        },
+    )
+
+    detail = _dog_catcher_guardian_floor_detail(pos, -0.5823)
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "dog_catcher_guardian_trail_floor"
+    assert detail["trail_floor"] > 0

@@ -152,6 +152,7 @@ PRIMARY_PROVING_CAP_MODES = {
 SMART_PULLBACK_BOUNCE_PROVING_CAP_ENABLED = os.environ.get('SMART_PULLBACK_BOUNCE_PROVING_CAP_ENABLED', 'true').lower() != 'false'
 SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL = float(os.environ.get('SMART_PULLBACK_BOUNCE_PROVING_CAP_SOL', '0.005'))
 SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL = float(os.environ.get('SMART_PULLBACK_BOUNCE_DEGRADED_CAP_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
+SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC', '600'))
 LOTTO_PULLBACK_SIZE_PROTECT_ENABLED = os.environ.get('LOTTO_PULLBACK_SIZE_PROTECT_ENABLED', 'true').lower() != 'false'
 LOTTO_PULLBACK_STRONG_MIN_TX_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_TX_M5', '150'))
 LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_VOL_M5', '15000'))
@@ -364,6 +365,7 @@ SOURCE_RESONANCE_TINY_PROBE_MAX_LEAD_SEC = int(os.environ.get('SOURCE_RESONANCE_
 SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC', '600'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC', '900'))
 SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC', '300'))
+SOURCE_RESONANCE_STALE_CANARY_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SOURCE_RESONANCE_STALE_CANARY_MAX_SIGNAL_AGE_SEC', '3600'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS', '2'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
@@ -3513,6 +3515,7 @@ HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS = {
 DOG_CATCHER_SOFT_QUALITY_REASONS = {
     *HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS,
     'no_kline_low_volume',
+    'risky_newborn_pullback_m9s_zero',
     'weak_buying_pressure',
     'volume_low',
     'tx_low',
@@ -3551,6 +3554,27 @@ def _pending_intervention_flag_set(pending):
     if not isinstance(flags, (list, tuple, set)):
         return set()
     return {str(item) for item in flags if item}
+
+
+def _dog_catcher_soft_or_stale_reason(reason):
+    reason_l = str(reason or '').strip().lower()
+    if not reason_l:
+        return False
+    return (
+        classify_rejection_hardness(reason_l) == 'soft_reject'
+        or reason_l in DOG_CATCHER_SOFT_QUALITY_REASONS
+        or reason_l in {
+            'matrices not yet aligned',
+            'not_ath_prebuy_kline_block',
+            'not_ath_prebuy_kline_unknown_data_blocked',
+            'pre_pass_followthrough_wait',
+            'gmgn_lead_time_too_short',
+            'gmgn_alpha_stale',
+        }
+        or reason_l.startswith('risky_newborn_pullback_')
+        or reason_l.startswith('lotto_stale_')
+        or _matrix_micro_momentum_reason(reason_l)
+    )
 
 
 def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
@@ -3618,7 +3642,7 @@ def _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality):
         ATH_NO_KLINE_TINY_PROBE_MODE,
     } and mode not in LOTTO_RECOVERY_TINY_PROBE_MODES and mode not in ATH_RECOVERY_TINY_PROBE_MODES:
         return scout_quality
-    if classify_rejection_hardness(reason_l) == 'hard_reject' or reason_l not in DOG_CATCHER_SOFT_QUALITY_REASONS:
+    if classify_rejection_hardness(reason_l) == 'hard_reject' or not _dog_catcher_soft_or_stale_reason(reason_l):
         return scout_quality
     override = dict(scout_quality)
     override.update({
@@ -4658,6 +4682,7 @@ def _dog_catcher_trail_quote_confirmation(pos, exit_matrix, *, quote_pnl=None, t
         'dog_catcher_resonance_gap_crash',
         'dog_catcher_low_liq_tight_floor',
         'dog_catcher_low_liq_gap_crash',
+        'dog_catcher_guardian_trail_floor',
     ))
     if not dog_trail_exit:
         return {'cancel': False, 'reason': 'not_dog_catcher_trail_exit', 'entry_mode': entry_mode}
@@ -6493,6 +6518,37 @@ def _apply_primary_proving_cap(pending, size_sol):
     return capped_size, detail
 
 
+def _late_smart_pullback_abort_detail(pending, *, now_ts=None):
+    """Prevent ordinary smart-pullback entries from chasing stale meme moves."""
+    pending = pending or {}
+    entry_mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '')
+    if entry_mode != 'smart_entry_pullback_bounce':
+        return {'abort': False, 'reason': 'not_smart_pullback_bounce'}
+    if pending_is_paper_tiny_scout(pending):
+        return {'abort': False, 'reason': 'paper_tiny_scout_uses_own_freshness_gate'}
+    if pending.get('source_resonance_soft_override_used') or pending.get('dog_catcher_fast_lane'):
+        return {'abort': False, 'reason': 'dog_catcher_fast_lane_exempt'}
+    signal_ts_sec = normalize_signal_ts_seconds(
+        pending.get('signal_ts')
+        or pending.get('timestamp')
+        or pending.get('added_at')
+        or pending.get('staged_at')
+    )
+    if signal_ts_sec is None:
+        return {'abort': False, 'reason': 'missing_signal_ts'}
+    now_ts = float(now_ts or time.time())
+    signal_age_sec = max(0.0, now_ts - float(signal_ts_sec))
+    abort = signal_age_sec > SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC
+    return {
+        'abort': bool(abort),
+        'reason': 'smart_pullback_signal_too_stale' if abort else 'smart_pullback_signal_fresh',
+        'entry_mode': entry_mode,
+        'signal_ts_sec': signal_ts_sec,
+        'signal_age_sec': signal_age_sec,
+        'max_signal_age_sec': SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC,
+    }
+
+
 def _source_resonance_number(value, default=None):
     try:
         if value is None or value == "":
@@ -6597,19 +6653,7 @@ def _source_resonance_soft_override_detail(reason, external_alpha=None, *, alpha
         return {'pass': False, 'reason': 'missing_parent_reason'}
     if classify_rejection_hardness(text) == 'hard_reject':
         return {'pass': False, 'reason': 'parent_reason_hard_reject', 'parent_reason': text}
-    if classify_rejection_hardness(text) != 'soft_reject' and text not in {
-        'matrices not yet aligned',
-        'not_ath_prebuy_kline_block',
-        'not_ath_prebuy_kline_unknown_data_blocked',
-        'pre_pass_followthrough_wait',
-        'gmgn_lead_time_too_short',
-        'gmgn_alpha_stale',
-        'weak_buying_pressure',
-        'volume_low',
-        'tx_low',
-        'negative_trend',
-        'no_kline_low_volume',
-    } and not _matrix_micro_momentum_reason(text):
+    if not _dog_catcher_soft_or_stale_reason(text):
         return {'pass': False, 'reason': 'parent_reason_not_soft_overrideable', 'parent_reason': text}
     external_alpha = external_alpha or {}
     if not external_alpha.get('available') or not external_alpha.get('gmgn_pre_seen'):
@@ -6623,6 +6667,7 @@ def _source_resonance_soft_override_detail(reason, external_alpha=None, *, alpha
         'pass': True,
         'reason': 'source_resonance_soft_override',
         'parent_reason': text,
+        'stale_parent_reason': text.startswith('lotto_stale_'),
         'alpha_age_sec': age,
         'max_alpha_age_sec': SOURCE_RESONANCE_SOFT_OVERRIDE_MAX_ALPHA_AGE_SEC,
     }
@@ -6730,6 +6775,7 @@ def evaluate_source_resonance_tiny_probe(
         'max_negative_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC,
         'max_alpha_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_ALPHA_AGE_SEC,
         'max_signal_age_sec': SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC,
+        'stale_canary_max_signal_age_sec': SOURCE_RESONANCE_STALE_CANARY_MAX_SIGNAL_AGE_SEC,
         'min_rounds': SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS,
         'min_gain_pct': SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT,
         'min_mc': SOURCE_RESONANCE_TINY_PROBE_MIN_MC,
@@ -6745,6 +6791,21 @@ def evaluate_source_resonance_tiny_probe(
         or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
         or external_alpha.get('quote_clean')
         or external_alpha.get('quote_executable')
+    )
+    stale_soft_override = bool(
+        soft_override.get('pass')
+        and soft_override.get('stale_parent_reason')
+    )
+    stale_canary_confirmed = bool(
+        stale_soft_override
+        and (
+            external_alpha.get('quote_clean')
+            or external_alpha.get('quote_executable')
+            or momentum_confirmed
+            or volume_confirmed
+            or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
+            or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
+        )
     )
     probe_size_sol = (
         SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
@@ -6768,8 +6829,10 @@ def evaluate_source_resonance_tiny_probe(
             'policy_version': DOG_CATCHER_POLICY_VERSION if DOG_CATCHER_V1_ENABLED else None,
             'entry_branch': 'source_resonance_soft_override' if soft_override.get('pass') else 'source_resonance_tiny_probe',
             'source_resonance_soft_override_used': bool(soft_override.get('pass')),
+            'source_resonance_stale_canary_used': stale_canary_confirmed,
             'intervention_flags': _normalize_intervention_flags([
                 'source_resonance_soft_override' if soft_override.get('pass') else 'source_resonance_tiny_probe',
+                'source_resonance_stale_canary' if stale_canary_confirmed else '',
                 'paper_only_tiny',
                 'gmgn_pre_seen' if external_alpha.get('gmgn_pre_seen') else '',
             ]),
@@ -6797,7 +6860,14 @@ def evaluate_source_resonance_tiny_probe(
         return _result(False, 'source_resonance_gmgn_not_pre_seen')
     if not timestamp_valid:
         return _result(False, timestamp_anomaly_reason or 'source_resonance_timestamp_invalid')
-    if signal_age_sec is not None and signal_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC:
+    if (
+        signal_age_sec is not None
+        and signal_age_sec > SOURCE_RESONANCE_TINY_PROBE_MAX_SIGNAL_AGE_SEC
+        and not (
+            stale_canary_confirmed
+            and signal_age_sec <= SOURCE_RESONANCE_STALE_CANARY_MAX_SIGNAL_AGE_SEC
+        )
+    ):
         return _result(False, 'source_resonance_signal_too_stale')
     if alpha_age_sec < -SOURCE_RESONANCE_TINY_PROBE_MAX_NEGATIVE_AGE_SEC:
         return _result(False, 'source_resonance_external_alpha_future_seen')
@@ -19323,6 +19393,33 @@ def run_monitor(db):
                     if _initial_canary_detail.get('pass'):
                         pending['revival_canary_detail'] = _initial_canary_detail
                     pending['attempts'] = int(pending.get('attempts') or 0) + 1
+
+                    _late_pullback = _late_smart_pullback_abort_detail(pending, now_ts=now)
+                    if _late_pullback.get('abort'):
+                        record_decision_event(
+                            db,
+                            component='entry_latency_guard',
+                            event_type='entry_abort',
+                            decision='abort',
+                            reason=_late_pullback.get('reason'),
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending.get('signal_ts'),
+                            signal_id=pending.get('premium_signal_id'),
+                            route=pending.get('signal_route') or pending.get('signal_type'),
+                            data_source='pending_entry_latency',
+                            payload=with_lifecycle_payload(_late_pullback, pending.get('entry_readiness_lifecycle')),
+                            event_ts=now,
+                        )
+                        log.info(
+                            f"  [ENTRY_LATENCY] {pending['symbol']} ABORT: "
+                            f"{_late_pullback.get('reason')} "
+                            f"age={_late_pullback.get('signal_age_sec', 0):.0f}s "
+                            f"max={SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC}s"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
                     
                     # Phase 1c: Last-mile pre-buy price recheck
                     # If this is the first execution attempt and we have a valid trigger price,
@@ -19595,12 +19692,7 @@ def run_monitor(db):
                             _timing_reason_l = str(timing_reason or '').strip().lower()
                             _source_resonance_soft_probe_allowed = (
                                 SOURCE_RESONANCE_SMART_ENTRY_SOFT_REJECT_PROBE_ENABLED
-                                and (
-                                    classify_rejection_hardness(_timing_reason_l) == 'soft_reject'
-                                    or _timing_reason_l in DOG_CATCHER_SOFT_QUALITY_REASONS
-                                    or _timing_reason_l == 'matrices not yet aligned'
-                                    or _matrix_micro_momentum_reason(_timing_reason_l)
-                                )
+                                and _dog_catcher_soft_or_stale_reason(_timing_reason_l)
                             )
                             if (
                                 (
