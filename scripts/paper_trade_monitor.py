@@ -61,6 +61,7 @@ from paper_learning_policy import (
     classify_rejection_hardness,
     history_discounted_size,
     is_retryable_entry_quote_failure,
+    normalize_ts_ms,
     position_size_class,
     regime_tag_from_market_regime,
 )
@@ -242,7 +243,7 @@ TRAIL_FACTOR = 0.90
 TIMEOUT_MIN = 120
 
 # Polling intervals (seconds)
-SIGNAL_POLL_INTERVAL = max(1, int(os.environ.get('SIGNAL_POLL_INTERVAL_SEC', '5')))        # check for new signals
+SIGNAL_POLL_INTERVAL = max(1, int(os.environ.get('SIGNAL_POLL_INTERVAL_SEC', '1')))        # check for new signals
 POSITION_POLL_INTERVAL = max(1, int(os.environ.get('POSITION_POLL_INTERVAL_SEC', '2')))    # update open positions
 MAIN_LOOP_TICK_SEC = max(0.5, float(os.environ.get('MAIN_LOOP_TICK_SEC', '1.0')))
 DAILY_REPORT_HOUR = 0           # UTC hour for daily report
@@ -2536,6 +2537,45 @@ def stamp_dog_catcher_pending(pending, *, branch=None, flags=None, detail=None):
     pending['intervention_flags'] = _normalize_intervention_flags(flags)
     if detail:
         pending['dog_catcher_detail'] = detail
+    return pending
+
+
+def signal_latency_context_payload(sig=None, *, local_seen_ts_ms=None):
+    sig = sig or {}
+    source_message_ts_ms = normalize_ts_ms(sig.get('source_message_ts'))
+    receive_ts_ms = normalize_ts_ms(sig.get('receive_ts'))
+    signal_recorded_ts_ms = normalize_ts_ms(
+        sig.get('signal_recorded_ts')
+        or sig.get('created_at')
+        or sig.get('created_ts')
+    )
+    signal_local_seen_ts_ms = normalize_ts_ms(local_seen_ts_ms or sig.get('signal_local_seen_ts_ms'))
+    signal_arrival_ts_ms = normalize_ts_ms(sig.get('source_message_ts') or sig.get('timestamp'))
+    payload = {}
+    for key in ('source_message_ts', 'receive_ts', 'created_at'):
+        if sig.get(key) is not None:
+            payload[key] = sig.get(key)
+    for key, value in (
+        ('signal_arrival_ts_ms', signal_arrival_ts_ms),
+        ('source_message_ts_ms', source_message_ts_ms),
+        ('receive_ts_ms', receive_ts_ms),
+        ('signal_recorded_ts_ms', signal_recorded_ts_ms),
+        ('signal_local_seen_ts_ms', signal_local_seen_ts_ms),
+    ):
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+def stamp_signal_latency_context(pending, sig=None, *, local_seen_ts_ms=None):
+    if not isinstance(pending, dict):
+        return pending
+    context = signal_latency_context_payload(sig, local_seen_ts_ms=local_seen_ts_ms)
+    pending.update(context)
+    w_entry = pending.get('w_entry')
+    if isinstance(w_entry, dict):
+        for key, value in context.items():
+            w_entry.setdefault(key, value)
     return pending
 
 
@@ -7501,6 +7541,11 @@ def arm_source_resonance_lotto_probe(
     if signal_price is not None:
         pending['signal_price'] = signal_price
     pending['trigger_price'] = signal_price or pending.get('trigger_price') or pending.get('signal_price')
+    stamp_signal_latency_context(
+        pending,
+        sig,
+        local_seen_ts_ms=(signal_audit_payload or {}).get('signal_local_seen_ts_ms'),
+    )
     _apply_source_resonance_probe_to_pending(
         pending,
         detail,
@@ -8394,6 +8439,11 @@ def arm_hard_gate_pass_tiny_probe(
             'exit_strategy': 'NOT_ATH',
         }
     pending['trigger_price'] = signal_price or pending.get('trigger_price') or pending.get('signal_price')
+    stamp_signal_latency_context(
+        pending,
+        sig,
+        local_seen_ts_ms=(signal_audit_payload or {}).get('signal_local_seen_ts_ms'),
+    )
     _apply_hard_gate_pass_probe_to_pending(
         pending,
         detail,
@@ -8963,6 +9013,11 @@ def arm_pre_pass_resonance_tiny_probe(
     pending = build_lotto_pending(registered_entry, lifecycle_id, detail=detail)
     pending['smart_entry_retries'] = _LOTTO_TIMING_RETRY_MEMORY.get(lifecycle_id, 0)
     pending['trigger_price'] = registered_entry.get('signal_price')
+    stamp_signal_latency_context(
+        pending,
+        sig,
+        local_seen_ts_ms=(signal_audit_payload or {}).get('signal_local_seen_ts_ms'),
+    )
     _apply_pre_pass_resonance_probe_to_pending(
         pending,
         detail,
@@ -9223,6 +9278,11 @@ def arm_lotto_upstream_realtime_tiny_scout(
     pending_entries[lifecycle_id]['lotto_state']['probeEntryMode'] = LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE
     pending_entries[lifecycle_id]['lotto_state']['paper_only_scout'] = True
     pending_entries[lifecycle_id]['lotto_state']['executionScope'] = 'paper_only'
+    stamp_signal_latency_context(
+        pending_entries[lifecycle_id],
+        sig,
+        local_seen_ts_ms=(signal_audit_payload or {}).get('signal_local_seen_ts_ms'),
+    )
     record_decision_event(
         db,
         component='lotto_upstream_realtime_scout',
@@ -16192,13 +16252,22 @@ def _premium_signal_has_column(sdb, column_name):
         return False
 
 
+def _premium_signal_column_expr(sdb, column_name):
+    return column_name if _premium_signal_has_column(sdb, column_name) else f'NULL AS {column_name}'
+
+
 def _query_local_new_signals(last_signal_id):
     sdb = sqlite3.connect(SENTIMENT_DB)
     sdb.row_factory = sqlite3.Row
     has_signal_type = _premium_signal_has_column(sdb, 'signal_type')
     signal_type_expr = 'signal_type' if has_signal_type else 'NULL AS signal_type'
+    source_message_ts_expr = _premium_signal_column_expr(sdb, 'source_message_ts')
+    receive_ts_expr = _premium_signal_column_expr(sdb, 'receive_ts')
+    created_at_expr = _premium_signal_column_expr(sdb, 'created_at')
     rows = sdb.execute(f"""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr},
+               market_cap, holders, volume_24h, top10_pct, is_ath,
+               {source_message_ts_expr}, {receive_ts_expr}, {created_at_expr}
         FROM premium_signals
         WHERE id > ?
         ORDER BY id ASC
@@ -16212,8 +16281,13 @@ def _query_local_recent_signals(limit=20):
     sdb.row_factory = sqlite3.Row
     has_signal_type = _premium_signal_has_column(sdb, 'signal_type')
     signal_type_expr = 'signal_type' if has_signal_type else 'NULL AS signal_type'
+    source_message_ts_expr = _premium_signal_column_expr(sdb, 'source_message_ts')
+    receive_ts_expr = _premium_signal_column_expr(sdb, 'receive_ts')
+    created_at_expr = _premium_signal_column_expr(sdb, 'created_at')
     rows = sdb.execute(f"""
-        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr}, market_cap, holders, volume_24h, top10_pct, is_ath
+        SELECT id, token_ca, symbol, timestamp, description, hard_gate_status, {signal_type_expr},
+               market_cap, holders, volume_24h, top10_pct, is_ath,
+               {source_message_ts_expr}, {receive_ts_expr}, {created_at_expr}
         FROM premium_signals
         ORDER BY id DESC
         LIMIT ?
@@ -17610,6 +17684,16 @@ def run_monitor(db):
             smart_entry_result_ready(pending_entries)
             or dog_catcher_fast_lane_pending_ready(pending_entries)
         )
+        prefetched_new_signals = None
+        signal_prefetch_error = None
+        if not pending_priority and now - last_signal_check >= SIGNAL_POLL_INTERVAL:
+            last_signal_check = now
+            try:
+                prefetched_new_signals = get_new_signals(last_signal_id)
+            except Exception as e:
+                signal_prefetch_error = e
+                prefetched_new_signals = []
+        signal_poll_has_work = bool(prefetched_new_signals)
 
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
@@ -17648,7 +17732,7 @@ def run_monitor(db):
             )
             last_heartbeat = now
 
-        if not pending_priority and now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC:
+        if not pending_priority and not signal_poll_has_work and now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC:
             try:
                 with positions_lock:
                     _discovery_armed = process_discovery_tracking_candidates(
@@ -17675,6 +17759,7 @@ def run_monitor(db):
             HARD_GATE_PASS_QUOTE_RETRY_ENABLED
             and _hard_gate_pass_quote_retry
             and not pending_priority
+            and not signal_poll_has_work
             and now - last_hard_gate_quote_retry >= max(1, min(HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC, 5))
         ):
             try:
@@ -17697,7 +17782,7 @@ def run_monitor(db):
                 log.debug(f"  [PAPER_HARD_GATE_PASS_PROBE] quote retry scan failed: {_hard_gate_retry_err}")
             last_hard_gate_quote_retry = now
 
-        if not pending_priority and now - last_missed_attribution_update >= 60:
+        if not pending_priority and not signal_poll_has_work and now - last_missed_attribution_update >= 60:
             try:
                 _missed_updated = update_due_missed_attributions(
                     db,
@@ -17849,7 +17934,7 @@ def run_monitor(db):
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
 
-        if not pending_priority and now - last_scout_telemetry >= SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC:
+        if not pending_priority and not signal_poll_has_work and now - last_scout_telemetry >= SCOUT_FUNNEL_SUMMARY_INTERVAL_SEC:
             try:
                 record_scout_funnel_summary(db, now_ts=now)
                 record_upstream_miss_chain_summary(db, now_ts=now)
@@ -17873,11 +17958,14 @@ def run_monitor(db):
             )
             last_progress = now
 
-        if not pending_priority and now - last_signal_check >= SIGNAL_POLL_INTERVAL:
-            last_signal_check = now
+        if prefetched_new_signals is not None:
             try:
-                new_signals = get_new_signals(last_signal_id)
+                if signal_prefetch_error:
+                    raise signal_prefetch_error
+                new_signals = prefetched_new_signals
                 for sig in new_signals:
+                    signal_local_seen_ts_ms = int(time.time() * 1000)
+                    sig['signal_local_seen_ts_ms'] = signal_local_seen_ts_ms
                     token_ca = sig['token_ca']
                     last_signal_id = sig['id']
                     signal_ts = sig['timestamp']
@@ -17931,7 +18019,16 @@ def run_monitor(db):
                         now=now,
                         signal_ts=signal_ts,
                     )
-                    signal_audit_payload = with_external_alpha_payload(signal_payload(sig), external_alpha)
+                    signal_audit_payload = with_external_alpha_payload(
+                        {
+                            **signal_payload(sig),
+                            **signal_latency_context_payload(
+                                sig,
+                                local_seen_ts_ms=signal_local_seen_ts_ms,
+                            ),
+                        },
+                        external_alpha,
+                    )
 
                     record_decision_event(
                         db,
@@ -18515,6 +18612,11 @@ def run_monitor(db):
                     last_progress = time.time()
             except Exception as e:
                 log.error(f"Signal check error: {e}")
+
+        pending_priority = (
+            smart_entry_result_ready(pending_entries)
+            or dog_catcher_fast_lane_pending_ready(pending_entries)
+        )
 
         # --- Evaluate Watchlist Entries ---
         if pending_priority:

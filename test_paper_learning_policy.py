@@ -31,6 +31,32 @@ def test_entry_latency_audit_records_latency_and_drift():
     assert round(audit["signal_to_quote_drift_pct"], 4) == 10.0
 
 
+def test_entry_latency_audit_splits_upstream_and_local_delay():
+    base_ms = 1_700_000_000_000
+    audit = build_entry_execution_latency_audit(
+        {
+            "signal_ts": base_ms,
+            "source_message_ts": base_ms,
+            "receive_ts": base_ms + 500,
+            "created_at": "2023-11-14 22:13:21",
+            "signal_local_seen_ts_ms": base_ms + 2_000,
+            "trigger_price": 1.0,
+        },
+        decision_start_ts_ms=base_ms + 2_500,
+        quote_request_ts_ms=base_ms + 3_000,
+        quote_response_ts_ms=base_ms + 3_500,
+        entry_executed_ts_ms=base_ms + 3_500,
+        quote_price=1.02,
+    )
+
+    assert audit["source_to_receive_latency_ms"] == 500
+    assert audit["receive_to_recorded_latency_ms"] == 500
+    assert audit["recorded_to_local_seen_latency_ms"] == 1_000
+    assert audit["receive_to_quote_latency_ms"] == 3_000
+    assert audit["recorded_to_quote_latency_ms"] == 2_500
+    assert audit["local_seen_to_quote_latency_ms"] == 1_500
+
+
 def test_capital_tier_prefers_paper_tiny_probe_modes():
     assert capital_tier_for_entry(entry_mode="hard_gate_pass_tiny_probe", size_sol=0.002) == "tiny_probe"
     assert capital_tier_for_entry(entry_mode="stage1", strategy_stage="stage1", size_sol=0.06) == "stage1_main"

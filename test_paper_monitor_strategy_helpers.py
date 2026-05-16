@@ -88,6 +88,8 @@ from paper_trade_monitor import (  # noqa: E402
     evaluate_revival_canary_gate,
     evaluate_source_resonance_tiny_probe,
     position_is_observation_probe,
+    signal_latency_context_payload,
+    stamp_signal_latency_context,
     _update_candidate_quote_confirmation,
     record_trade_path_sample,
     record_lotto_not_ath_watch_shadow_candidates,
@@ -2808,6 +2810,26 @@ def test_dog_catcher_fast_lane_pending_ready_detects_timing_passed_probe():
     }
 
     assert dog_catcher_fast_lane_pending_ready(pending_entries) is True
+
+
+def test_signal_latency_context_payload_and_stamp():
+    base_ms = 1_700_000_000_000
+    sig = {
+        "timestamp": base_ms,
+        "source_message_ts": base_ms,
+        "receive_ts": base_ms + 250,
+        "created_at": "2023-11-14 22:13:21",
+    }
+    payload = signal_latency_context_payload(sig, local_seen_ts_ms=base_ms + 2_000)
+    assert payload["source_message_ts_ms"] == base_ms
+    assert payload["receive_ts_ms"] == base_ms + 250
+    assert payload["signal_recorded_ts_ms"] == base_ms + 1_000
+    assert payload["signal_local_seen_ts_ms"] == base_ms + 2_000
+
+    pending = {"w_entry": {}}
+    stamp_signal_latency_context(pending, sig, local_seen_ts_ms=base_ms + 2_000)
+    assert pending["receive_ts_ms"] == base_ms + 250
+    assert pending["w_entry"]["signal_local_seen_ts_ms"] == base_ms + 2_000
 
 
 def test_hard_gate_pass_tiny_probe_requires_gmgn_pre_seen(monkeypatch):

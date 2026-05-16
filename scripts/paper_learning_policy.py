@@ -7,6 +7,7 @@ They do not place trades or call providers.
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 
 
@@ -71,10 +72,37 @@ def safe_float(value, default=None):
 
 
 def normalize_ts_ms(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        numeric = safe_float(text, None)
+        if numeric is not None:
+            if numeric <= 0:
+                return None
+            return int(numeric if numeric > 1_000_000_000_000 else numeric * 1000)
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = dt.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return int(parsed.timestamp() * 1000)
     number = safe_float(value, None)
     if number is None or number <= 0:
         return None
     return int(number if number > 1_000_000_000_000 else number * 1000)
+
+
+def first_ts_ms(*values):
+    for value in values:
+        ts_ms = normalize_ts_ms(value)
+        if ts_ms:
+            return ts_ms
+    return None
 
 
 def entry_mode_from_pending(pending):
@@ -177,6 +205,27 @@ def build_entry_execution_latency_audit(
 ):
     pending = pending or {}
     signal_ts_ms = signal_arrival_ts_ms(pending)
+    source_message_ts_ms = first_ts_ms(
+        pending.get("source_message_ts_ms"),
+        pending.get("source_message_ts"),
+        pending.get("telegram_source_ts_ms"),
+    )
+    receive_ts_ms = first_ts_ms(
+        pending.get("receive_ts_ms"),
+        pending.get("signal_receive_ts_ms"),
+        pending.get("signal_received_ts_ms"),
+        pending.get("receive_ts"),
+    )
+    signal_recorded_ts_ms = first_ts_ms(
+        pending.get("signal_recorded_ts_ms"),
+        pending.get("signal_recorded_ts"),
+        pending.get("created_ts"),
+        pending.get("created_at"),
+    )
+    signal_local_seen_ts_ms = first_ts_ms(
+        pending.get("signal_local_seen_ts_ms"),
+        pending.get("local_seen_ts_ms"),
+    )
     decision_start_ts_ms = normalize_ts_ms(decision_start_ts_ms)
     quote_request_ts_ms = normalize_ts_ms(quote_request_ts_ms)
     quote_response_ts_ms = normalize_ts_ms(quote_response_ts_ms)
@@ -193,6 +242,10 @@ def build_entry_execution_latency_audit(
     audit = {
         "schema_version": 1,
         "signal_arrival_ts_ms": signal_ts_ms,
+        "source_message_ts_ms": source_message_ts_ms,
+        "receive_ts_ms": receive_ts_ms,
+        "signal_recorded_ts_ms": signal_recorded_ts_ms,
+        "signal_local_seen_ts_ms": signal_local_seen_ts_ms,
         "decision_start_ts_ms": decision_start_ts_ms,
         "decision_complete_ts_ms": quote_response_ts_ms,
         "quote_request_ts_ms": quote_request_ts_ms,
@@ -204,6 +257,27 @@ def build_entry_execution_latency_audit(
         "entry_fill_price": entry_fill_price,
         "signal_to_quote_latency_ms": (
             quote_response_ts_ms - signal_ts_ms if quote_response_ts_ms and signal_ts_ms else None
+        ),
+        "source_to_receive_latency_ms": (
+            receive_ts_ms - source_message_ts_ms if receive_ts_ms and source_message_ts_ms else None
+        ),
+        "receive_to_recorded_latency_ms": (
+            signal_recorded_ts_ms - receive_ts_ms if signal_recorded_ts_ms and receive_ts_ms else None
+        ),
+        "recorded_to_local_seen_latency_ms": (
+            signal_local_seen_ts_ms - signal_recorded_ts_ms
+            if signal_local_seen_ts_ms and signal_recorded_ts_ms else None
+        ),
+        "receive_to_quote_latency_ms": (
+            quote_response_ts_ms - receive_ts_ms if quote_response_ts_ms and receive_ts_ms else None
+        ),
+        "recorded_to_quote_latency_ms": (
+            quote_response_ts_ms - signal_recorded_ts_ms
+            if quote_response_ts_ms and signal_recorded_ts_ms else None
+        ),
+        "local_seen_to_quote_latency_ms": (
+            quote_response_ts_ms - signal_local_seen_ts_ms
+            if quote_response_ts_ms and signal_local_seen_ts_ms else None
         ),
         "decision_to_quote_latency_ms": (
             quote_response_ts_ms - decision_start_ts_ms if quote_response_ts_ms and decision_start_ts_ms else None
