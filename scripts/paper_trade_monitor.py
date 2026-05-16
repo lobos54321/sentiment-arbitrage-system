@@ -190,6 +190,7 @@ PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_PEAK = float(os.environ.get('PROBE_HOLD_QUOTE_PR
 PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL = float(os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL', '0.04'))
 PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP = float(os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP', '0.08'))
 QUOTE_GUARD_POLICY_VERSION = os.environ.get('QUOTE_GUARD_POLICY_VERSION', 'd162c067')
+FAST_EXTERNAL_OPEN_SYNC_SEC = float(os.environ.get('FAST_EXTERNAL_OPEN_SYNC_SEC', '1'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -16571,6 +16572,88 @@ class Position:
         self._guardian_threat_tighten = 0  # Threat score tightening (Guardian → EXIT_MATRIX)
 
 
+def restore_open_position_from_row(db, row, strategy_config):
+    """Build an in-memory Position from an open paper_trades row.
+
+    Fast-lane workers can insert paper-only rows while this monitor is already
+    running. The monitor remains the exit owner, so it periodically adopts those
+    rows into the shared positions map.
+    """
+    pool = get_pool_address(row['token_ca'])
+    raw_monitor_state = parse_monitor_state(row['monitor_state_json'])
+    recovered = recover_position_state(
+        row['position_size_sol'],
+        row['token_amount_raw'],
+        row['token_decimals'],
+        row['entry_execution_json'],
+        raw_monitor_state,
+        get_paper_position_size_sol(strategy_config),
+    )
+    pos = Position(
+        row['id'],
+        row['token_ca'],
+        row['symbol'],
+        row['signal_ts'],
+        row['entry_price'],
+        row['entry_ts'],
+        pool,
+        row['strategy_stage'] or 'stage1',
+        row['lifecycle_id'] or build_lifecycle_id(row['token_ca'], row['signal_ts']),
+        get_exit_rules_for_stage(strategy_config, row['strategy_stage'] or 'stage1'),
+        recovered['position_size_sol'],
+        recovered['token_amount_raw'],
+        recovered['token_decimals'],
+        row['exit_quote_failures'] or 0,
+        row['last_exit_quote_failure'],
+        raw_monitor_state,
+        row['entry_execution_json'],
+    )
+    pos.premium_signal_id = row['premium_signal_id'] if 'premium_signal_id' in row.keys() else None
+    pos.signal_type = row['signal_type'] if 'signal_type' in row.keys() else None
+    if recovered['recovery_source'] == 'entry_execution':
+        db.execute(
+            "UPDATE paper_trades SET position_size_sol = ?, token_amount_raw = ?, token_decimals = ? WHERE id = ?",
+            (recovered['position_size_sol'], str(recovered['token_amount_raw']), recovered['token_decimals'], row['id'])
+        )
+    elif recovered['recovery_source'] == 'monitor_state':
+        db.execute(
+            "UPDATE paper_trades SET token_amount_raw = ?, token_decimals = ? WHERE id = ?",
+            (str(recovered['token_amount_raw']), recovered['token_decimals'], row['id'])
+        )
+    pos.peak_pnl = row['peak_pnl'] or 0
+    pos.trailing_active = bool(row['trailing_active'])
+    pos.bars_held = row['bars_held'] or 0
+    pos.last_bar_ts = int(row['entry_ts']) + max((row['bars_held'] or 0) - 1, 0) * 60
+    pos.last_mark_ts = pos.last_bar_ts
+    if pos.monitor_state:
+        sync_position_from_monitor_state(pos)
+        pos.peak_pnl = monitor_peak_pnl_decimal(pos.monitor_state, pos.peak_pnl)
+        pos.trailing_active = bool(pos.monitor_state.get('breakeven', pos.monitor_state.get('trailingActive', pos.trailing_active)))
+        pos.bars_held = int(pos.monitor_state.get('barsHeld', pos.bars_held) or pos.bars_held)
+        pos.last_mark_ts = int(pos.monitor_state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
+        pos.last_bar_ts = pos.last_mark_ts or pos.last_bar_ts
+    pos.monitor_state = sanitize_monitor_state(
+        pos.monitor_state,
+        token_ca=pos.token_ca,
+        symbol=pos.symbol,
+        entry_price=pos.entry_price,
+        entry_ts=pos.entry_ts,
+        position_size_sol=pos.position_size_sol,
+        token_amount_raw=pos.token_amount_raw,
+        token_decimals=pos.token_decimals,
+        peak_pnl=pos.peak_pnl,
+        trailing_active=pos.trailing_active,
+        bars_held=pos.bars_held,
+        last_mark_ts=pos.last_mark_ts,
+    )
+    if normalize_monitor_state_json(raw_monitor_state) != normalize_monitor_state_json(pos.monitor_state):
+        db.execute(
+            "UPDATE paper_trades SET monitor_state_json = ? WHERE id = ?",
+            (json.dumps(pos.monitor_state, ensure_ascii=False), pos.trade_id)
+        )
+    return pos
+
+
 def build_lifecycle_id(token_ca, signal_ts):
     ts_sec = normalize_signal_ts_seconds(signal_ts)
     if ts_sec is None:
@@ -17499,6 +17582,7 @@ def run_monitor(db):
     last_scout_telemetry = 0.0
     last_discovery_tracking = 0.0
     last_hard_gate_quote_retry = 0.0
+    last_external_open_sync = 0.0
 
     open_rows = db.execute("""
         SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
@@ -17680,6 +17764,49 @@ def run_monitor(db):
       try:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
+        if FAST_EXTERNAL_OPEN_SYNC_SEC > 0 and now - last_external_open_sync >= FAST_EXTERNAL_OPEN_SYNC_SEC:
+            last_external_open_sync = now
+            try:
+                with positions_lock:
+                    known_trade_ids = set(positions.keys())
+                if known_trade_ids:
+                    placeholders = ",".join("?" for _ in known_trade_ids)
+                    query = f"""
+                        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
+                               strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
+                               entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure,
+                               premium_signal_id, signal_type
+                        FROM paper_trades
+                        WHERE exit_reason IS NULL AND id NOT IN ({placeholders})
+                        ORDER BY id ASC
+                        LIMIT 25
+                    """
+                    rows = db.execute(query, tuple(known_trade_ids)).fetchall()
+                else:
+                    rows = db.execute("""
+                        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
+                               strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
+                               entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure,
+                               premium_signal_id, signal_type
+                        FROM paper_trades
+                        WHERE exit_reason IS NULL
+                        ORDER BY id ASC
+                        LIMIT 25
+                    """).fetchall()
+                adopted = 0
+                for row in rows:
+                    if row['id'] in known_trade_ids:
+                        continue
+                    pos = restore_open_position_from_row(db, row, strategy_config)
+                    with positions_lock:
+                        if pos.trade_id not in positions:
+                            positions[pos.trade_id] = pos
+                            adopted += 1
+                if adopted:
+                    db.commit()
+                    log.info(f"  [FAST_LANE_SYNC] adopted {adopted} external open paper positions")
+            except Exception as sync_err:
+                log.warning(f"  [FAST_LANE_SYNC] failed: {sync_err}")
         pending_priority = (
             smart_entry_result_ready(pending_entries)
             or dog_catcher_fast_lane_pending_ready(pending_entries)
@@ -22886,6 +23013,11 @@ def run_monitor(db):
                     realized_pnl = (float(actual_out) - float(pos.position_size_sol)) / float(pos.position_size_sol)
                     accounting_source = 'final_exit_only'
 
+                _sold_pct_at_close = _safe_float((pos.monitor_state or {}).get('soldPct'), 0.0)
+                if exit_quote_pnl is not None and _sold_pct_at_close <= 0:
+                    realized_pnl = exit_quote_pnl
+                    accounting_source = f'quote_primary_exit(was={accounting_source})'
+
                 if exit_quote_pnl is not None and exit_quote_mark_gap is not None:
                     if abs(exit_quote_mark_gap) >= EXIT_QUOTE_REPRICE_DIVERGENCE_PCT:
                         log.warning(
@@ -22898,28 +23030,24 @@ def run_monitor(db):
                         exit_eval['quoteSanityStatus'] = 'exit_repriced_quote_mark_divergence'
 
                 # ─── PnL Sanity Guard ────────────────────────────────────
-                # quotedOutAmount from Jupiter can be wildly wrong for
-                # low-liquidity tokens (e.g. returning token amount instead
-                # of SOL amount). If accounting PnL diverges > 50pp from
-                # the price-based trigger PnL, fall back to trigger PnL
-                # which is derived from real market prices.
+                # Paper accounting is quote-primary. Mark/trigger PnL may
+                # request a quote check, but it must not override executable
+                # quote PnL on close. This avoids the recurring
+                # execution_or_accounting_gap failure mode where Mark showed a
+                # deep loss while the fresh quote was near breakeven.
                 if trigger_pnl is not None and realized_pnl is not None:
                     divergence = abs(realized_pnl - trigger_pnl)
-                    if (
-                        divergence > 0.50
-                        and not (
-                            exit_quote_pnl is not None
-                            and exit_quote_mark_gap is not None
-                            and abs(exit_quote_mark_gap) >= EXIT_QUOTE_REPRICE_DIVERGENCE_PCT
-                        )
-                    ):  # >50 percentage points
+                    if divergence > 0.50:
                         log.warning(
                             f"  [PNL_SANITY] {pos.symbol} accounting PnL={realized_pnl*100:+.1f}% "
                             f"diverges from trigger PnL={trigger_pnl*100:+.1f}% "
-                            f"(gap={divergence*100:.0f}pp). Using trigger PnL."
+                            f"(gap={divergence*100:.0f}pp). Keeping quote-primary accounting."
                         )
-                        realized_pnl = trigger_pnl
-                        accounting_source = f'trigger_pnl_override(was={accounting_source})'
+                        if exit_quote_pnl is not None and _sold_pct_at_close <= 0:
+                            realized_pnl = exit_quote_pnl
+                            accounting_source = f'quote_primary_sanity(was={accounting_source})'
+                        else:
+                            accounting_source = f'accounting_divergence_not_mark_overridden(was={accounting_source})'
 
                 mark_peak_before_close = _safe_float(pos.peak_pnl, 0.0)
                 close_peak_candidates = [

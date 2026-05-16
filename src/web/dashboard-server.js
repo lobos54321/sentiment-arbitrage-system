@@ -6464,6 +6464,97 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/fast-lane') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const hours = boundedIntParam(url, 'hours', 6, 1, 72);
+      const sinceTs = Math.floor(Date.now() / 1000) - hours * 3600;
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      const queueStatus = tableNames.has('paper_fast_entry_queue')
+        ? paperDb.prepare(`
+            SELECT status, COUNT(*) AS n, MAX(updated_at) AS latest_updated_at
+            FROM paper_fast_entry_queue
+            GROUP BY status
+            ORDER BY n DESC
+          `).all()
+        : [];
+      const branchSummary = tableNames.has('paper_fast_entry_queue')
+        ? paperDb.prepare(`
+            SELECT entry_branch, status, COUNT(*) AS n
+            FROM paper_fast_entry_queue
+            WHERE created_at >= @sinceTs
+            GROUP BY entry_branch, status
+            ORDER BY n DESC
+            LIMIT 50
+          `).all({ sinceTs })
+        : [];
+      const fastTrades = tableNames.has('paper_trades')
+        ? paperDb.prepare(`
+            SELECT
+              entry_branch,
+              entry_mode,
+              COUNT(*) AS fills,
+              SUM(CASE WHEN exit_ts IS NOT NULL THEN 1 ELSE 0 END) AS closed,
+              AVG(pnl_pct) * 100.0 AS avg_pnl_pct,
+              AVG(peak_pnl) * 100.0 AS avg_peak_pct,
+              AVG(signal_to_quote_latency_ms) AS avg_signal_to_quote_ms,
+              MAX(signal_to_quote_latency_ms) AS max_signal_to_quote_ms
+            FROM paper_trades
+            WHERE replay_source = 'paper_fast_lane'
+              AND entry_ts >= @sinceTs
+            GROUP BY entry_branch, entry_mode
+            ORDER BY fills DESC
+          `).all({ sinceTs })
+        : [];
+      const latencyRows = tableNames.has('paper_trades')
+        ? paperDb.prepare(`
+            SELECT signal_to_quote_latency_ms AS ms
+            FROM paper_trades
+            WHERE replay_source = 'paper_fast_lane'
+              AND entry_ts >= @sinceTs
+              AND signal_to_quote_latency_ms IS NOT NULL
+            ORDER BY signal_to_quote_latency_ms ASC
+          `).all({ sinceTs }).map((row) => Number(row.ms)).filter((ms) => Number.isFinite(ms))
+        : [];
+      const percentile = (values, p) => {
+        if (!values.length) return null;
+        const idx = Math.min(values.length - 1, Math.max(0, Math.ceil((p / 100) * values.length) - 1));
+        return values[idx];
+      };
+      const latencySummary = {
+        n: latencyRows.length,
+        p50_signal_to_quote_ms: percentile(latencyRows, 50),
+        p90_signal_to_quote_ms: percentile(latencyRows, 90),
+        p99_signal_to_quote_ms: percentile(latencyRows, 99),
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: tableNames.has('paper_fast_entry_queue'),
+        window_hours: hours,
+        queue_status: queueStatus,
+        branch_summary: branchSummary,
+        fast_trades: fastTrades,
+        latency_summary: latencySummary,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/download/paper_trades') {
     // Paper trades数据库下载 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
@@ -6653,11 +6744,14 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: `paper-trader.log not found at ${paperTraderLogPath}` }));
     }
     return;
-  } else if (url.pathname === '/api/logs/gmgn-scout' || url.pathname === '/api/logs/source-resonance') {
+  } else if (url.pathname === '/api/logs/gmgn-scout' || url.pathname === '/api/logs/source-resonance' || url.pathname === '/api/logs/paper-fast-lane') {
     if (!checkAuth(req, url, res)) return;
-    const logPath = url.pathname.endsWith('/gmgn-scout')
-      ? (process.env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log')
-      : (process.env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log');
+    let logPath = process.env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log';
+    if (url.pathname.endsWith('/gmgn-scout')) {
+      logPath = process.env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log';
+    } else if (url.pathname.endsWith('/paper-fast-lane')) {
+      logPath = process.env.PAPER_FAST_LANE_LOG || '/app/data/paper-fast-lane.log';
+    }
     const tailLines = boundedIntParam(url, 'lines', 500, 1, 5000);
     if (fs.existsSync(logPath)) {
       try {

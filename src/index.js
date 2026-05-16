@@ -114,6 +114,7 @@ function startShadowDataSidecars(config) {
   const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || './data/sentiment_arb.db';
   const gmgnLog = process.env.GMGN_SCOUT_LOG || './data/gmgn-scout.log';
   const resonanceLog = process.env.SOURCE_RESONANCE_LOG || './data/source-resonance.log';
+  const fastLaneLog = process.env.PAPER_FAST_LANE_LOG || './data/paper-fast-lane.log';
 
   const workers = [
     startPythonSidecar({
@@ -154,6 +155,25 @@ function startShadowDataSidecars(config) {
       },
     }),
   ];
+  if (envFlag('PAPER_FAST_LANE_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'paper-fast-lane',
+      logPath: fastLaneLog,
+      args: [
+        'scripts/paper_fast_lane.py',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--concurrency', process.env.FAST_ENTRY_WORKER_CONCURRENCY || '4',
+        '--lock-file', process.env.PAPER_FAST_LANE_LOCK_FILE || '/tmp/paper_fast_lane.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        SENTIMENT_DB: signalDb,
+        DB_PATH: signalDb,
+        PAPER_FAST_ENTRY_ENABLED: process.env.PAPER_FAST_ENTRY_ENABLED || 'true',
+      },
+    }));
+  }
   console.log(`[ShadowWorkers] started ${workers.map((w) => w.name).join(', ')}`);
   return workers;
 }
