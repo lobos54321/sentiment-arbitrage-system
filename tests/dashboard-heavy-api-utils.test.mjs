@@ -24,6 +24,13 @@ test('boundedWindowedSinceTs clamps hours for live heavy endpoints', () => {
   assert.equal(since, 10_000 - 2 * 3600);
 });
 
+test('boundedWindowedSinceTs supports explicit 24h review windows', () => {
+  const url = new URL('https://example.test/api?hours=24');
+  const since = boundedWindowedSinceTs(url, 2, 24, { nowSec: 100_000 });
+
+  assert.equal(since, 100_000 - 24 * 3600);
+});
+
 test('paper report gate rejects concurrent and cooldown requests', () => {
   resetPaperReportGateForTest();
   const first = tryBeginPaperReport('/api/paper/lifecycle-summary', 1000);

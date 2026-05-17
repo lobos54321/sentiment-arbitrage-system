@@ -248,7 +248,11 @@ def test_gmgn_only_source_resonance_is_watch_only_by_default():
 def test_quote_clean_source_requires_activity_confirmation(monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_ACTIVITY_REQUIRED", True)
     now = int(time.time())
-    stale_free_payload = {"quote_clean_seen": 1, "source_updated_at": "2099-01-01 00:00:00"}
+    stale_free_payload = {
+        "quote_clean_seen": 1,
+        "source_updated_at": "2099-01-01 00:00:00",
+        "original_signal_ts": now,
+    }
 
     blocked = fast.direct_fill_policy({
         "source_type": "source_resonance_fast",
@@ -264,6 +268,44 @@ def test_quote_clean_source_requires_activity_confirmation(monkeypatch):
     assert blocked["pass"] is False
     assert blocked["reason"] == "source_quote_clean_activity_not_confirmed"
     assert allowed["pass"] is True
+
+
+def test_quote_clean_source_rejects_stale_original_signal(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC", 180)
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_resonance_quote_clean_fast",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "source_updated_at": "2099-01-01 00:00:00",
+            "original_signal_ts": now - 181,
+            "gmgn_momentum_confirmed": 1,
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is False
+    assert detail["status"] == "watch_only"
+    assert detail["reason"] == "source_quote_clean_original_signal_stale_watch_only"
+
+
+def test_ttl_rescue_requires_fresh_tradable_timestamp(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC", 300)
+    now = int(time.time())
+    stale = fast.direct_fill_policy({
+        "source_type": "ttl_rescue_fast",
+        "entry_branch": "tracking_ttl_expired",
+        "payload_json": json.dumps({"first_tradable_ts": now - 301}),
+    }, now_ts=now)
+    fresh = fast.direct_fill_policy({
+        "source_type": "ttl_rescue_fast",
+        "entry_branch": "tracking_ttl_expired",
+        "payload_json": json.dumps({"first_tradable_ts": now - 60}),
+    }, now_ts=now)
+
+    assert stale["pass"] is False
+    assert stale["reason"] == "ttl_rescue_tradable_signal_stale_watch_only"
+    assert fresh["pass"] is True
 
 
 def test_kline_rescue_is_counterfactual_only_by_default():

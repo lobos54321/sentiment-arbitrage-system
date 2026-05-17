@@ -70,10 +70,18 @@ FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_UPDATE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_UPDATE_AGE_SEC",
     "60",
 ))
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC",
+    "180",
+))
 FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED",
     "false",
 ).lower() == "true"
+FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC",
+    "300",
+))
 
 FAST_LANE_HARD_REJECT_STATUSES = {
     "GMGN_REJECT",
@@ -473,6 +481,20 @@ def updated_at_is_fresh(value, *, now_ts=None, max_age_sec=None):
     return (now_ts - ts) <= float(max_age_sec)
 
 
+def payload_ts_age_sec(payload, keys, *, now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    for key in keys:
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        ts = parse_datetime_ts(raw)
+        if ts:
+            return max(0.0, now_ts - ts)
+    return None
+
+
 def direct_fill_policy(row, *, now_ts=None):
     branch = str(row_value(row, "entry_branch", "") or "")
     source_type = str(row_value(row, "source_type", "") or "")
@@ -484,6 +506,17 @@ def direct_fill_policy(row, *, now_ts=None):
             "reason": "source_resonance_gmgn_only_watch_only",
         }
     if branch == "source_resonance_quote_clean_fast":
+        original_age_sec = payload_ts_age_sec(
+            payload,
+            ("original_signal_ts", "original_receive_ts"),
+            now_ts=now_ts,
+        )
+        if original_age_sec is None or original_age_sec > FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC:
+            return {
+                "pass": False,
+                "status": "watch_only",
+                "reason": "source_quote_clean_original_signal_stale_watch_only",
+            }
         source_updated_at = payload.get("source_updated_at")
         if source_updated_at and not updated_at_is_fresh(source_updated_at, now_ts=now_ts):
             return {
@@ -496,6 +529,18 @@ def direct_fill_policy(row, *, now_ts=None):
                 "pass": False,
                 "status": "watch_only",
                 "reason": "source_quote_clean_activity_not_confirmed",
+            }
+    if branch == "tracking_ttl_expired":
+        tradable_age_sec = payload_ts_age_sec(
+            payload,
+            ("first_tradable_ts", "rescue_created_ts"),
+            now_ts=now_ts,
+        )
+        if tradable_age_sec is None or tradable_age_sec > FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC:
+            return {
+                "pass": False,
+                "status": "watch_only",
+                "reason": "ttl_rescue_tradable_signal_stale_watch_only",
             }
     if (
         branch in {
@@ -1325,6 +1370,7 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         "signal_id": row["signal_id"],
                         "original_signal_ts": original_signal_ts,
                         "original_receive_ts": original_signal_ts,
+                        "first_tradable_ts": row["first_tradable_ts"],
                         "rescue_created_ts": rescue_created_ts,
                         "route": row["route"],
                         "component": row["component"],

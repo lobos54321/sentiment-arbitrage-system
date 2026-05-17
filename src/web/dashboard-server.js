@@ -4132,6 +4132,9 @@ const server = http.createServer(async (req, res) => {
       const includeDetails = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_details') || '1').toLowerCase());
       const includeSignals = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_signals') || '0').toLowerCase());
       const includeClosedLoop = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_closed_loop') || '0').toLowerCase());
+      const includeMissedSummary = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_missed_summary') || '1').toLowerCase());
+      const includeSourceSummary = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_source_summary') || '1').toLowerCase());
+      const includeProbeSummary = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_probe_summary') || '1').toLowerCase());
       const includeTableStats = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_table_stats') || '0').toLowerCase());
       const includeLatency = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_latency') || '0').toLowerCase());
       const freeze = ['1', 'true', 'yes'].includes(String(url.searchParams.get('freeze') || '0').toLowerCase());
@@ -4151,10 +4154,10 @@ const server = http.createServer(async (req, res) => {
           paperDb,
           sinceTs,
           limit,
-          includeMissedSummary: true,
+          includeMissedSummary,
           includeMissedDetails: includeDetails,
-          includeSourceSummary: true,
-          includeProbeSummary: true,
+          includeSourceSummary,
+          includeProbeSummary,
           includePaperPnlDetails: true,
           includeDecisionEventDetails: includeDetails,
           timings,
@@ -5232,8 +5235,14 @@ const server = http.createServer(async (req, res) => {
       if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 25, 1, 80);
       const scanLimit = boundedIntParam(url, 'scan_limit', 5000, 100, 50000);
-      const sinceTs = boundedWindowedSinceTs(url, 2, 2);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 24);
       const queryStartedAt = Date.now();
+      const requestedHours = Number.parseInt(url.searchParams.get('hours') || '2', 10);
+      const summaryOnly = ['1', 'true', 'yes'].includes(String(url.searchParams.get('summary_only') || '').toLowerCase())
+        || (Number.isFinite(requestedHours) && requestedHours > 2 && !['1', 'true', 'yes'].includes(String(url.searchParams.get('include_details') || '').toLowerCase()));
+      const completeWindow = ['1', 'true', 'yes'].includes(String(url.searchParams.get('complete') || '').toLowerCase())
+        || (Number.isFinite(requestedHours) && requestedHours > 2)
+        || Boolean(url.searchParams.get('since') || url.searchParams.get('since_ts'));
       const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
@@ -5250,7 +5259,7 @@ const server = http.createServer(async (req, res) => {
       const maxMissedId = Number(paperDb.prepare('SELECT COALESCE(MAX(id), 0) AS max_id FROM paper_missed_signal_attribution').get().max_id || 0);
       const idFloor = Math.max(0, maxMissedId - scanLimit);
       const whereSql = sinceTs
-        ? `WHERE id >= @idFloor AND ${missedEventTsExpr} >= @since`
+        ? `${completeWindow ? 'WHERE' : 'WHERE id >= @idFloor AND'} ${missedEventTsExpr} >= @since`
         : 'WHERE id >= @idFloor';
       const whereParams = sinceTs ? { since: sinceTs, idFloor } : { idFloor };
       const hasTradability = missedCols.has('tradable_missed');
@@ -5299,7 +5308,7 @@ const server = http.createServer(async (req, res) => {
           NULL AS quote_executable_proxy_n,
           NULL AS stop_before_peak_n,`;
       const maxPnlExpr = 'COALESCE(max_pnl_recorded, pnl_24h, pnl_60m, pnl_15m, pnl_5m, -999)';
-      const topDogs = paperDb.prepare(`
+      const topDogs = summaryOnly ? [] : paperDb.prepare(`
         SELECT
           symbol,
           token_ca,
@@ -5444,7 +5453,7 @@ const server = http.createServer(async (req, res) => {
         FROM per_token
       `).get(whereParams);
       let athRecoveryActions = [];
-      if (hasDecisionEvents) {
+      if (hasDecisionEvents && !summaryOnly) {
         const recoveryWhere = sinceTs ? 'AND event_ts >= @since' : '';
         athRecoveryActions = paperDb.prepare(`
           SELECT
@@ -5460,7 +5469,7 @@ const server = http.createServer(async (req, res) => {
           LIMIT @limit
         `).all({ ...whereParams, limit });
       }
-      const topUniqueDogs = paperDb.prepare(`
+      const topUniqueDogs = summaryOnly ? [] : paperDb.prepare(`
         WITH ranked AS (
           SELECT
             *,
@@ -5501,6 +5510,9 @@ const server = http.createServer(async (req, res) => {
         filters: {
           since_ts: sinceTs,
           since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+          complete_window: completeWindow,
+          summary_only: summaryOnly,
+          max_window_hours: 24,
           tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
           quote_executable_proxy_note: 'spread-abort timing is not checked in this endpoint so the summary stays non-blocking; use missed-recovery-summary for token-window spread filtering',
         },
@@ -5539,7 +5551,7 @@ const server = http.createServer(async (req, res) => {
       releasePaperReport = beginLivePaperReport(res, url.pathname);
       if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 50, 1, 80);
-      const sinceTs = boundedWindowedSinceTs(url, 2, 2);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 24);
       const queryStartedAt = Date.now();
       const includeRecoveryActions = String(url.searchParams.get('include_actions') || '').toLowerCase() === '1';
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';

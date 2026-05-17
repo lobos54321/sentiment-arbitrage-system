@@ -315,6 +315,10 @@ DOG_CATCHER_TRAIL_QUOTE_CONFIRM_ENABLED = os.environ.get(
     'DOG_CATCHER_TRAIL_QUOTE_CONFIRM_ENABLED', 'true'
 ).lower() != 'false'
 DOG_CATCHER_TRAIL_QUOTE_CONFIRM_BUFFER = float(os.environ.get('DOG_CATCHER_TRAIL_QUOTE_CONFIRM_BUFFER', '0.02'))
+DOG_CATCHER_TRAIL_QUOTE_MISSING_MAX_RETRIES = max(
+    1,
+    int(os.environ.get('DOG_CATCHER_TRAIL_QUOTE_MISSING_MAX_RETRIES', '5')),
+)
 DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED = os.environ.get(
     'DOG_CATCHER_ENTRY_EDGE_RETRY_ENABLED', 'true'
 ).lower() != 'false'
@@ -21989,7 +21993,7 @@ def run_monitor(db):
                         else:
                             _base_sl = get_adaptive_stop_loss()  # returns -0.15
                         if pending_is_paper_tiny_scout(pending):
-                            _base_sl = -0.35 if pending.get('is_lotto') else -0.30
+                            _base_sl = -0.22 if pending.get('is_lotto') else -0.20
                         _final_sl = _base_sl
                         
                         if _spread > 0:
@@ -22370,11 +22374,13 @@ def run_monitor(db):
                                             pos.monitor_state['dogCatcherTrailQuoteMissingRetryCount'] = retry_count
                                             pos.monitor_state['dogCatcherTrailQuoteMissingLastTs'] = int(time.time())
                                             pos.monitor_state['dogCatcherTrailQuoteMissingReason'] = dog_trail_detail.get('reason')
+                                            pos.exit_quote_failures = retry_count
+                                            pos.last_exit_quote_failure = dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_missing_retry_exit'
                                             db.execute(
                                                 "UPDATE paper_trades SET monitor_state_json = ?, last_exit_quote_failure = ?, exit_quote_failures = COALESCE(exit_quote_failures, 0) + 1 WHERE id = ?",
                                                 (
                                                     json.dumps(pos.monitor_state, ensure_ascii=False),
-                                                    dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_missing_retry_exit',
+                                                    pos.last_exit_quote_failure,
                                                     pos.trade_id,
                                                 ),
                                             )
@@ -22396,6 +22402,27 @@ def run_monitor(db):
                                                 data_source='dog_catcher_trail_quote_confirmation',
                                                 payload=dog_trail_detail,
                                             )
+                                            if retry_count >= DOG_CATCHER_TRAIL_QUOTE_MISSING_MAX_RETRIES:
+                                                with positions_lock:
+                                                    positions.pop(trade_id, None)
+                                                close_position_with_guard_reason(
+                                                    db,
+                                                    pos,
+                                                    lifecycle,
+                                                    reason='dog_catcher_trail_quote_missing_synthetic_close',
+                                                    pnl_pct=TRAPPED_NO_ROUTE_PNL_PCT,
+                                                    decision_type='synthetic_no_route_close',
+                                                    audit_extra={
+                                                        'dogCatcherTrailQuoteMissingRetryCount': retry_count,
+                                                        'dogCatcherTrailQuoteMissingMaxRetries': DOG_CATCHER_TRAIL_QUOTE_MISSING_MAX_RETRIES,
+                                                        'quotePrimary': True,
+                                                        'quotePrimaryReason': 'quote_missing_retry_cap',
+                                                        'dogTrailDetail': dog_trail_detail,
+                                                    },
+                                                    log_prefix='DOG_TRAIL_NO_QUOTE',
+                                                )
+                                                last_progress = time.time()
+                                                continue
                                         quote_sanity_status = dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_not_confirmed'
                                         quote_primary_detail = dog_trail_detail
                                         sanity_override = True
