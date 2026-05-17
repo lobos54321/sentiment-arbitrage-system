@@ -6484,9 +6484,10 @@ const server = http.createServer(async (req, res) => {
         ? paperDb.prepare(`
             SELECT status, COUNT(*) AS n, MAX(updated_at) AS latest_updated_at
             FROM paper_fast_entry_queue
+            WHERE created_at >= @sinceTs
             GROUP BY status
             ORDER BY n DESC
-          `).all()
+          `).all({ sinceTs })
         : [];
       const branchSummary = tableNames.has('paper_fast_entry_queue')
         ? paperDb.prepare(`
@@ -6507,8 +6508,14 @@ const server = http.createServer(async (req, res) => {
               SUM(CASE WHEN exit_ts IS NOT NULL THEN 1 ELSE 0 END) AS closed,
               AVG(pnl_pct) * 100.0 AS avg_pnl_pct,
               AVG(peak_pnl) * 100.0 AS avg_peak_pct,
-              AVG(signal_to_quote_latency_ms) AS avg_signal_to_quote_ms,
-              MAX(signal_to_quote_latency_ms) AS max_signal_to_quote_ms
+              AVG(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS avg_fast_lane_sla_ms,
+              MAX(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS max_fast_lane_sla_ms,
+              AVG(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS avg_signal_to_quote_ms,
+              MAX(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS max_signal_to_quote_ms,
+              AVG(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.original_signal_to_quote_latency_ms')) AS avg_original_signal_to_quote_ms,
+              MAX(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.original_signal_to_quote_latency_ms')) AS max_original_signal_to_quote_ms,
+              AVG(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_queue_to_quote_latency_ms')) AS avg_queue_to_quote_ms,
+              MAX(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_queue_to_quote_latency_ms')) AS max_queue_to_quote_ms
             FROM paper_trades
             WHERE replay_source = 'paper_fast_lane'
               AND entry_ts >= @sinceTs
@@ -6518,12 +6525,22 @@ const server = http.createServer(async (req, res) => {
         : [];
       const latencyRows = tableNames.has('paper_trades')
         ? paperDb.prepare(`
-            SELECT signal_to_quote_latency_ms AS ms
+            SELECT COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms) AS ms
             FROM paper_trades
             WHERE replay_source = 'paper_fast_lane'
               AND entry_ts >= @sinceTs
-              AND signal_to_quote_latency_ms IS NOT NULL
-            ORDER BY signal_to_quote_latency_ms ASC
+              AND COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms) IS NOT NULL
+            ORDER BY ms ASC
+          `).all({ sinceTs }).map((row) => Number(row.ms)).filter((ms) => Number.isFinite(ms))
+        : [];
+      const originalLatencyRows = tableNames.has('paper_trades')
+        ? paperDb.prepare(`
+            SELECT json_extract(entry_execution_audit_json, '$.entryLatencyAudit.original_signal_to_quote_latency_ms') AS ms
+            FROM paper_trades
+            WHERE replay_source = 'paper_fast_lane'
+              AND entry_ts >= @sinceTs
+              AND json_extract(entry_execution_audit_json, '$.entryLatencyAudit.original_signal_to_quote_latency_ms') IS NOT NULL
+            ORDER BY ms ASC
           `).all({ sinceTs }).map((row) => Number(row.ms)).filter((ms) => Number.isFinite(ms))
         : [];
       const percentile = (values, p) => {
@@ -6533,9 +6550,14 @@ const server = http.createServer(async (req, res) => {
       };
       const latencySummary = {
         n: latencyRows.length,
-        p50_signal_to_quote_ms: percentile(latencyRows, 50),
-        p90_signal_to_quote_ms: percentile(latencyRows, 90),
-        p99_signal_to_quote_ms: percentile(latencyRows, 99),
+        p50_fast_lane_sla_ms: percentile(latencyRows, 50),
+        p90_fast_lane_sla_ms: percentile(latencyRows, 90),
+        p99_fast_lane_sla_ms: percentile(latencyRows, 99),
+        original_signal_n: originalLatencyRows.length,
+        p50_original_signal_to_quote_ms: percentile(originalLatencyRows, 50),
+        p90_original_signal_to_quote_ms: percentile(originalLatencyRows, 90),
+        p99_original_signal_to_quote_ms: percentile(originalLatencyRows, 99),
+        note: 'fast_lane_sla_ms is receive/rescue-created to quote; original_signal_to_quote_ms is signal aging and is not the worker SLA.',
       };
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({

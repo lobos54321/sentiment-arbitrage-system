@@ -1,5 +1,6 @@
 import sqlite3
 import time
+import json
 
 from scripts import paper_fast_lane as fast
 
@@ -195,3 +196,68 @@ def test_retry_watch_requeues_until_queue_age_expires(tmp_path):
     fast.refresh_retry_watch(db)
     status = db.execute("SELECT status FROM paper_fast_entry_queue WHERE id = ?", (row["id"],)).fetchone()[0]
     assert status == "queued"
+
+
+def test_gmgn_only_source_resonance_is_watch_only_by_default():
+    detail = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_resonance_gmgn_fast",
+        "payload_json": json.dumps({"gmgn_pre_seen": 1}),
+    })
+
+    assert detail["pass"] is False
+    assert detail["status"] == "watch_only"
+    assert detail["reason"] == "source_resonance_gmgn_only_watch_only"
+
+
+def test_quote_clean_source_requires_activity_confirmation(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_ACTIVITY_REQUIRED", True)
+    now = int(time.time())
+    stale_free_payload = {"quote_clean_seen": 1, "source_updated_at": "2099-01-01 00:00:00"}
+
+    blocked = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_resonance_quote_clean_fast",
+        "payload_json": json.dumps(stale_free_payload),
+    }, now_ts=now)
+    allowed = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_resonance_quote_clean_fast",
+        "payload_json": json.dumps({**stale_free_payload, "gmgn_momentum_confirmed": 1}),
+    }, now_ts=now)
+
+    assert blocked["pass"] is False
+    assert blocked["reason"] == "source_quote_clean_activity_not_confirmed"
+    assert allowed["pass"] is True
+
+
+def test_kline_rescue_is_counterfactual_only_by_default():
+    detail = fast.direct_fill_policy({
+        "source_type": "kline_retry_reclaim_fast",
+        "entry_branch": "not_ath_prebuy_kline_retry_expired",
+        "payload_json": "{}",
+    })
+
+    assert detail["pass"] is False
+    assert detail["status"] == "counterfactual_only"
+    assert detail["reason"] == "kline_rescue_direct_fill_disabled"
+
+
+def test_watch_observation_is_not_claimed(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    assert fast.record_fast_lane_observation(
+        db,
+        source_type="source_resonance_fast",
+        token_ca="TokenWatch",
+        signal_ts=int(time.time()),
+        entry_branch="source_resonance_gmgn_fast",
+        status="watch_only",
+        reason="source_resonance_gmgn_only_watch_only",
+    )
+
+    assert fast.claim_queue_item(db, "worker-1") is None
+    row = db.execute("SELECT status, last_error FROM paper_fast_entry_queue").fetchone()
+    assert row["status"] == "watch_only"
+    assert row["last_error"] == "source_resonance_gmgn_only_watch_only"

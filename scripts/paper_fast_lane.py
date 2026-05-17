@@ -8,6 +8,7 @@ exit lifecycle management.
 """
 
 import argparse
+import datetime as dt
 import fcntl
 import json
 import logging
@@ -56,6 +57,22 @@ FAST_ENTRY_PREMIUM_BATCH_LIMIT = int(os.environ.get("FAST_ENTRY_PREMIUM_BATCH_LI
 FAST_ENTRY_SOURCE_SCAN_LIMIT = int(os.environ.get("FAST_ENTRY_SOURCE_SCAN_LIMIT", "40"))
 FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_SEC", "30"))
 FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
+FAST_ENTRY_SOURCE_GMGN_ONLY_DIRECT_ENABLED = os.environ.get(
+    "FAST_ENTRY_SOURCE_GMGN_ONLY_DIRECT_ENABLED",
+    "false",
+).lower() == "true"
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_ACTIVITY_REQUIRED = os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_ACTIVITY_REQUIRED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_UPDATE_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_UPDATE_AGE_SEC",
+    "60",
+))
+FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED = os.environ.get(
+    "FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED",
+    "false",
+).lower() == "true"
 
 FAST_LANE_HARD_REJECT_STATUSES = {
     "GMGN_REJECT",
@@ -181,6 +198,26 @@ def normalize_ts_sec(value):
     return normalized or int(time.time())
 
 
+def parse_datetime_ts(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return normalize_ts_sec(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            parsed = dt.datetime.strptime(text.replace("Z", "")[:26], fmt)
+            return int(parsed.replace(tzinfo=dt.timezone.utc).timestamp())
+        except ValueError:
+            continue
+    try:
+        return normalize_ts_sec(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
 def queue_key(source_type, token_ca, signal_ts, branch):
     return f"{source_type}:{token_ca}:{int(normalize_ts_sec(signal_ts))}:{branch}"
 
@@ -203,7 +240,7 @@ def existing_recent_queue_row(db, token_ca, now_ts):
         FROM paper_fast_entry_queue
         WHERE token_ca = ?
           AND updated_at >= ?
-          AND status IN ('queued', 'claimed', 'retry_watch', 'entered', 'rejected', 'quote_failed', 'skipped', 'rate_limited')
+          AND status IN ('queued', 'claimed', 'retry_watch', 'entered', 'rejected', 'quote_failed', 'skipped', 'rate_limited', 'watch_only', 'counterfactual_only')
         ORDER BY
           CASE WHEN status IN ('queued', 'claimed', 'retry_watch') THEN 0 ELSE 1 END,
           priority ASC,
@@ -249,7 +286,10 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                         SET priority = ?, source_type = ?, entry_mode_hint = ?, entry_branch = ?,
                             hard_gate_status = COALESCE(?, hard_gate_status),
                             source_resonance_cohort = COALESCE(?, source_resonance_cohort),
-                            payload_json = ?, updated_at = ?
+                            payload_json = ?,
+                            status = CASE WHEN status IN ('watch_only', 'counterfactual_only') THEN 'queued' ELSE status END,
+                            last_error = CASE WHEN status IN ('watch_only', 'counterfactual_only') THEN NULL ELSE last_error END,
+                            updated_at = ?
                         WHERE id = ?
                         """,
                         (
@@ -306,6 +346,78 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
         return False
 
 
+def record_fast_lane_observation(db, *, source_type, token_ca, symbol=None, signal_ts=None,
+                                 receive_ts=None, recorded_ts=None, entry_mode_hint=None,
+                                 entry_branch=None, hard_gate_status=None,
+                                 source_resonance_cohort=None, trigger_price=None,
+                                 trigger_mc=None, priority=50, payload=None,
+                                 status="watch_only", reason=None, now_ts=None):
+    """Persist a non-entry fast-lane observation for review without queueing it."""
+    if not token_ca:
+        return False
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    signal_ts = int(normalize_ts_sec(signal_ts or now_ts))
+    receive_ts = int(normalize_ts_sec(receive_ts)) if receive_ts else signal_ts
+    branch = entry_branch or source_type
+    key = queue_key(source_type, token_ca, signal_ts, branch)
+    payload = {
+        **(payload or {}),
+        "direct_fill_status": status,
+        "direct_fill_reason": reason,
+    }
+    try:
+        with SQLITE_WRITE_LOCK:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO paper_fast_entry_queue (
+                    created_at, source_signal_ts, signal_receive_ts, signal_recorded_ts,
+                    token_ca, symbol, source_type, entry_mode_hint, entry_branch,
+                    hard_gate_status, source_resonance_cohort, trigger_price, trigger_mc,
+                    priority, status, decision_deadline_ts, quote_deadline_ts, queue_key,
+                    payload_json, last_error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_ts,
+                    signal_ts,
+                    receive_ts,
+                    int(normalize_ts_sec(recorded_ts)) if recorded_ts else None,
+                    token_ca,
+                    symbol,
+                    source_type,
+                    entry_mode_hint,
+                    branch,
+                    hard_gate_status,
+                    source_resonance_cohort,
+                    trigger_price,
+                    trigger_mc,
+                    int(priority),
+                    status,
+                    now_ts + FAST_ENTRY_RETRY_LATENCY_SEC,
+                    now_ts + FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+                    key,
+                    json.dumps(payload, ensure_ascii=False),
+                    reason,
+                    now_ts,
+                ),
+            )
+            inserted = db.execute("SELECT changes() AS c").fetchone()["c"] > 0
+            if not inserted:
+                db.execute(
+                    """
+                    UPDATE paper_fast_entry_queue
+                    SET status = ?, last_error = ?, payload_json = ?, updated_at = ?
+                    WHERE queue_key = ? AND status NOT IN ('entered')
+                    """,
+                    (status, reason, json.dumps(payload, ensure_ascii=False), now_ts, key),
+                )
+            db.commit()
+        return inserted
+    except sqlite3.OperationalError as exc:
+        log.warning("observation failed token=%s source=%s: %s", token_ca, source_type, exc)
+        return False
+
+
 def status_is_hard_reject(status):
     status = str(status or "").upper()
     if status in FAST_LANE_HARD_REJECT_STATUSES:
@@ -332,6 +444,76 @@ def source_to_mode_and_stage(row):
     if "ttl" in source_type or "kline" in source_type or "spread" in source_type or "missing_quote" in source_type:
         return "pre_pass_resonance_tiny_probe", "lotto"
     return row_value(row, "entry_mode_hint") or "pre_pass_resonance_tiny_probe", "lotto"
+
+
+def row_payload(row):
+    try:
+        raw = row_value(row, "payload_json")
+        return json.loads(raw or "{}") if raw else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def source_activity_confirmed(payload):
+    return bool(
+        int(payload.get("gmgn_momentum_confirmed") or 0)
+        or int(payload.get("gmgn_volume_confirmed") or 0)
+        or int(payload.get("two_quote_clean_snapshots") or 0)
+        or int(payload.get("resonance_level") or 0) >= 3
+    )
+
+
+def updated_at_is_fresh(value, *, now_ts=None, max_age_sec=None):
+    ts = parse_datetime_ts(value)
+    if ts is None:
+        return False
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    max_age_sec = FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_UPDATE_AGE_SEC if max_age_sec is None else max_age_sec
+    return (now_ts - ts) <= float(max_age_sec)
+
+
+def direct_fill_policy(row, *, now_ts=None):
+    branch = str(row_value(row, "entry_branch", "") or "")
+    source_type = str(row_value(row, "source_type", "") or "")
+    payload = row_payload(row)
+    if branch == "source_resonance_gmgn_fast" and not FAST_ENTRY_SOURCE_GMGN_ONLY_DIRECT_ENABLED:
+        return {
+            "pass": False,
+            "status": "watch_only",
+            "reason": "source_resonance_gmgn_only_watch_only",
+        }
+    if branch == "source_resonance_quote_clean_fast":
+        source_updated_at = payload.get("source_updated_at")
+        if source_updated_at and not updated_at_is_fresh(source_updated_at, now_ts=now_ts):
+            return {
+                "pass": False,
+                "status": "watch_only",
+                "reason": "source_quote_clean_stale_update_watch_only",
+            }
+        if FAST_ENTRY_SOURCE_QUOTE_CLEAN_ACTIVITY_REQUIRED and not source_activity_confirmed(payload):
+            return {
+                "pass": False,
+                "status": "watch_only",
+                "reason": "source_quote_clean_activity_not_confirmed",
+            }
+    if (
+        branch in {
+            "not_ath_prebuy_kline_unknown_data_blocked",
+            "not_ath_prebuy_kline_block",
+            "not_ath_prebuy_kline_retry_expired",
+        }
+        or (
+            "kline" in source_type
+            and "hard_gate" not in source_type
+            and not FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED
+        )
+    ):
+        return {
+            "pass": False,
+            "status": "counterfactual_only",
+            "reason": "kline_rescue_direct_fill_disabled",
+        }
+    return {"pass": True, "status": "queued", "reason": "direct_fill_allowed"}
 
 
 def open_or_recent_trade_exists(db, token_ca, now_ts=None):
@@ -563,6 +745,17 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         entry_fill_price=quote_price,
         quote_spread_pct=guard.get("quote_drift_pct"),
     )
+    original_signal_to_quote_ms = latency_audit.get("signal_to_quote_latency_ms")
+    fast_lane_receive_to_quote_ms = guard.get("signal_to_quote_latency_ms")
+    fast_lane_queue_to_quote_ms = int(max(0, quote_request_ts_ms - float(row["created_at"] or (quote_request_ts_ms / 1000)) * 1000))
+    latency_audit.update({
+        "original_signal_to_quote_latency_ms": original_signal_to_quote_ms,
+        "fast_lane_sla_latency_ms": fast_lane_receive_to_quote_ms,
+        "fast_lane_receive_to_quote_latency_ms": fast_lane_receive_to_quote_ms,
+        "fast_lane_queue_to_quote_latency_ms": fast_lane_queue_to_quote_ms,
+        "fast_lane_claim_to_quote_latency_ms": int(max(0, quote_request_ts_ms - float(row["claimed_at"] or (quote_request_ts_ms / 1000)) * 1000)),
+        "fast_lane_latency_basis": "receive_to_quote_for_execution_sla",
+    })
     capital_tier = "tiny_probe"
     position_size_class = ptm.position_size_class(size_sol)
     monitor_state = {
@@ -662,7 +855,7 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
                 capital_tier,
                 position_size_class,
                 "unknown",
-                latency_audit.get("signal_to_quote_latency_ms"),
+                latency_audit.get("fast_lane_sla_latency_ms"),
                 latency_audit.get("signal_to_quote_drift_pct"),
                 latency_audit.get("quote_spread_pct"),
                 FAST_LANE_POLICY_VERSION,
@@ -704,6 +897,10 @@ def process_queue_item(db, row, owner):
         mark_queue(db, row["id"], "disabled", "fast_entry_disabled")
         return
     now_ts = time.time()
+    policy = direct_fill_policy(row, now_ts=now_ts)
+    if not policy.get("pass"):
+        mark_queue(db, row["id"], policy.get("status") or "watch_only", policy.get("reason"))
+        return
     if now_ts - float(row["created_at"] or now_ts) > FAST_ENTRY_MAX_QUEUE_AGE_SEC:
         mark_queue(db, row["id"], "expired", "fast_lane_queue_age_expired")
         return
@@ -883,6 +1080,38 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
                     priority = 30
                 else:
                     continue
+                payload = {
+                    "premium_signal_id": row["id"],
+                    "signal_type": row["signal_type"],
+                    "description": row["description"],
+                }
+                policy_probe = {
+                    "entry_branch": branch,
+                    "source_type": source_type,
+                    "payload_json": json.dumps(payload),
+                }
+                policy = direct_fill_policy(policy_probe)
+                if not policy.get("pass"):
+                    inserted = record_fast_lane_observation(
+                        pdb,
+                        source_type=source_type,
+                        token_ca=row["token_ca"],
+                        symbol=row["symbol"],
+                        signal_ts=row["timestamp"],
+                        receive_ts=row["receive_ts"],
+                        recorded_ts=row["created_at"],
+                        entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
+                        entry_branch=branch,
+                        hard_gate_status=status,
+                        trigger_mc=row["market_cap"],
+                        priority=priority,
+                        payload=payload,
+                        status=policy.get("status") or "watch_only",
+                        reason=policy.get("reason"),
+                    )
+                    if inserted:
+                        log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=%s", source_type, row["token_ca"], status, policy.get("reason"))
+                    continue
                 inserted = enqueue_fast_entry(
                     pdb,
                     source_type=source_type,
@@ -896,11 +1125,7 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
                     hard_gate_status=status,
                     trigger_mc=row["market_cap"],
                     priority=priority,
-                    payload={
-                        "premium_signal_id": row["id"],
-                        "signal_type": row["signal_type"],
-                        "description": row["description"],
-                    },
+                    payload=payload,
                 )
                 if inserted:
                     log.info("[FAST_QUEUE] premium source=%s token=%s status=%s", source_type, row["token_ca"], status)
@@ -921,6 +1146,8 @@ def source_resonance_scan(paper_db_path, stop_event):
                     """
                     SELECT id, token_ca, symbol, signal_ts, telegram_signal_id, signal_type,
                            receive_ts, signal_recorded_ts, gmgn_pre_seen, quote_clean_seen,
+                           two_quote_clean_snapshots, gmgn_momentum_confirmed,
+                           gmgn_volume_confirmed, gmgn_momentum_rounds,
                            cohort, resonance_level, resonance_score, updated_at
                     FROM source_resonance_candidates
                     WHERE (COALESCE(quote_clean_seen, 0) = 1 OR COALESCE(gmgn_pre_seen, 0) = 1 OR cohort LIKE '%telegram_gmgn%')
@@ -933,6 +1160,45 @@ def source_resonance_scan(paper_db_path, stop_event):
                 for row in rows:
                     priority = 12 if int(row["quote_clean_seen"] or 0) else 18
                     branch = "source_resonance_quote_clean_fast" if int(row["quote_clean_seen"] or 0) else "source_resonance_gmgn_fast"
+                    payload = {
+                        "telegram_signal_id": row["telegram_signal_id"],
+                        "signal_type": row["signal_type"],
+                        "resonance_level": row["resonance_level"],
+                        "resonance_score": row["resonance_score"],
+                        "quote_clean_seen": row["quote_clean_seen"],
+                        "two_quote_clean_snapshots": row["two_quote_clean_snapshots"],
+                        "gmgn_pre_seen": row["gmgn_pre_seen"],
+                        "gmgn_momentum_confirmed": row["gmgn_momentum_confirmed"],
+                        "gmgn_volume_confirmed": row["gmgn_volume_confirmed"],
+                        "gmgn_momentum_rounds": row["gmgn_momentum_rounds"],
+                        "source_updated_at": row["updated_at"],
+                    }
+                    policy_probe = {
+                        "entry_branch": branch,
+                        "source_type": "source_resonance_fast",
+                        "payload_json": json.dumps(payload),
+                    }
+                    policy = direct_fill_policy(policy_probe)
+                    if not policy.get("pass"):
+                        inserted = record_fast_lane_observation(
+                            db,
+                            source_type="source_resonance_fast",
+                            token_ca=row["token_ca"],
+                            symbol=row["symbol"],
+                            signal_ts=row["signal_ts"],
+                            receive_ts=int(time.time()),
+                            recorded_ts=row["signal_recorded_ts"],
+                            entry_mode_hint="source_resonance_tiny_probe",
+                            entry_branch=branch,
+                            source_resonance_cohort=row["cohort"],
+                            priority=priority,
+                            payload=payload,
+                            status=policy.get("status") or "watch_only",
+                            reason=policy.get("reason"),
+                        )
+                        if inserted:
+                            log.info("[FAST_WATCH] source token=%s cohort=%s branch=%s reason=%s", row["token_ca"], row["cohort"], branch, policy.get("reason"))
+                        continue
                     inserted = enqueue_fast_entry(
                         db,
                         source_type="source_resonance_fast",
@@ -945,14 +1211,7 @@ def source_resonance_scan(paper_db_path, stop_event):
                         entry_branch=branch,
                         source_resonance_cohort=row["cohort"],
                         priority=priority,
-                        payload={
-                            "telegram_signal_id": row["telegram_signal_id"],
-                            "signal_type": row["signal_type"],
-                            "resonance_level": row["resonance_level"],
-                            "resonance_score": row["resonance_score"],
-                            "quote_clean_seen": row["quote_clean_seen"],
-                            "gmgn_pre_seen": row["gmgn_pre_seen"],
-                        },
+                        payload=payload,
                     )
                     if inserted:
                         log.info("[FAST_QUEUE] source token=%s cohort=%s branch=%s", row["token_ca"], row["cohort"], branch)
@@ -1018,6 +1277,40 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         source_type = "missing_quote_recovery_fast"
                     else:
                         source_type = "stale_refresh_fast"
+                    payload = {
+                        "missed_attribution_id": row["id"],
+                        "signal_id": row["signal_id"],
+                        "route": row["route"],
+                        "component": row["component"],
+                        "reject_reason": reason,
+                        "executable_peak_pnl": row["executable_peak_pnl"],
+                    }
+                    policy_probe = {
+                        "entry_branch": reason,
+                        "source_type": source_type,
+                        "payload_json": json.dumps(payload),
+                    }
+                    policy = direct_fill_policy(policy_probe)
+                    if not policy.get("pass"):
+                        inserted = record_fast_lane_observation(
+                            db,
+                            source_type=source_type,
+                            token_ca=row["token_ca"],
+                            symbol=row["symbol"],
+                            signal_ts=row["signal_ts"] or row["baseline_ts"],
+                            receive_ts=int(time.time()),
+                            recorded_ts=row["baseline_ts"],
+                            entry_mode_hint="pre_pass_resonance_tiny_probe",
+                            entry_branch=reason,
+                            trigger_price=row["baseline_price"],
+                            priority=35,
+                            payload=payload,
+                            status=policy.get("status") or "counterfactual_only",
+                            reason=policy.get("reason"),
+                        )
+                        if inserted:
+                            log.info("[FAST_COUNTERFACTUAL] missed-rescue token=%s reason=%s policy=%s", row["token_ca"], reason, policy.get("reason"))
+                        continue
                     inserted = enqueue_fast_entry(
                         db,
                         source_type=source_type,
@@ -1030,14 +1323,7 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         entry_branch=reason,
                         trigger_price=row["baseline_price"],
                         priority=35,
-                        payload={
-                            "missed_attribution_id": row["id"],
-                            "signal_id": row["signal_id"],
-                            "route": row["route"],
-                            "component": row["component"],
-                            "reject_reason": reason,
-                            "executable_peak_pnl": row["executable_peak_pnl"],
-                        },
+                        payload=payload,
                     )
                     if inserted:
                         log.info("[FAST_QUEUE] missed-rescue token=%s reason=%s", row["token_ca"], reason)
