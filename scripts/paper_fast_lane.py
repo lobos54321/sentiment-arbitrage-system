@@ -43,6 +43,7 @@ FAST_ENTRY_CLAIM_TTL_SEC = float(os.environ.get("FAST_ENTRY_CLAIM_TTL_SEC", "20"
 FAST_ENTRY_QUOTE_TIMEOUT_SEC = float(os.environ.get("FAST_ENTRY_QUOTE_TIMEOUT_SEC", "5"))
 FAST_ENTRY_PER_TOKEN_COOLDOWN_SEC = float(os.environ.get("FAST_ENTRY_PER_TOKEN_COOLDOWN_SEC", "120"))
 FAST_ENTRY_GLOBAL_MAX_PER_MIN = int(os.environ.get("FAST_ENTRY_GLOBAL_MAX_PER_MIN", "10"))
+FAST_ENTRY_MAX_OPEN_POSITIONS = int(os.environ.get("FAST_ENTRY_MAX_OPEN_POSITIONS", "50"))
 FAST_ENTRY_MAX_DRIFT_PCT = float(os.environ.get("FAST_ENTRY_MAX_DRIFT_PCT", "15"))
 FAST_ENTRY_HARD_DRIFT_PCT = float(os.environ.get("FAST_ENTRY_HARD_DRIFT_PCT", "40"))
 FAST_ENTRY_DEGRADE_DRIFT_PCT = float(os.environ.get("FAST_ENTRY_DEGRADE_DRIFT_PCT", "8"))
@@ -671,6 +672,22 @@ def global_rate_limit_allows(db, now_ts=None):
     return int(row["c"] or 0) < FAST_ENTRY_GLOBAL_MAX_PER_MIN
 
 
+def open_position_cap_allows(db):
+    if FAST_ENTRY_MAX_OPEN_POSITIONS <= 0:
+        return True
+    if not table_exists(db, "paper_trades"):
+        return True
+    row = db.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM paper_trades
+        WHERE replay_source = 'paper_fast_lane'
+          AND exit_reason IS NULL
+        """
+    ).fetchone()
+    return int(row["c"] or 0) < FAST_ENTRY_MAX_OPEN_POSITIONS
+
+
 def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_ts_ms):
     now_ts = time.time()
     source_type = str(row_value(row, "source_type", "") or "")
@@ -681,7 +698,10 @@ def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_
     )
     source_signal_ts = normalize_ts_sec(row_value(row, "source_signal_ts") or row_value(row, "created_at"))
     receive_ts = normalize_ts_sec(row_value(row, "signal_receive_ts") or source_signal_ts)
-    signal_to_quote_ms = int(max(0, quote_request_ts_ms - receive_ts * 1000))
+    created_ts = normalize_ts_sec(row_value(row, "created_at") or now_ts)
+    original_signal_to_quote_ms = int(max(0, quote_request_ts_ms - receive_ts * 1000))
+    fast_lane_sla_ms = int(max(0, quote_request_ts_ms - created_ts * 1000))
+    guard_latency_ms = fast_lane_sla_ms if quote_anchored_reclaim else original_signal_to_quote_ms
     trigger_price = row_value(row, "trigger_price")
     drift_pct = 0.0
     if trigger_price and trigger_price > 0 and quote_price and quote_price > 0:
@@ -689,8 +709,12 @@ def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_
     detail = {
         "pass": True,
         "reason": "fast_lane_quote_guard_pass",
-        "signal_to_quote_latency_ms": signal_to_quote_ms,
+        "signal_to_quote_latency_ms": guard_latency_ms,
+        "original_signal_to_quote_latency_ms": original_signal_to_quote_ms,
+        "fast_lane_sla_latency_ms": fast_lane_sla_ms,
         "signal_age_sec": max(0.0, now_ts - receive_ts),
+        "original_signal_age_sec": max(0.0, now_ts - receive_ts),
+        "fast_lane_queue_age_sec": max(0.0, now_ts - created_ts),
         "quote_drift_pct": drift_pct,
         "position_size_sol": FAST_ENTRY_SIZE_SOL,
     }
@@ -702,9 +726,9 @@ def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_
         detail.update({"pass": False, "reason": "fast_lane_quote_drift_hard_reject"})
     elif abs(drift_pct) > FAST_ENTRY_MAX_DRIFT_PCT:
         detail.update({"pass": False, "reason": "fast_lane_quote_drift_retry_watch"})
-    elif signal_to_quote_ms > int(FAST_ENTRY_RETRY_LATENCY_SEC * 1000) and not quote_anchored_reclaim:
+    elif guard_latency_ms > int(FAST_ENTRY_RETRY_LATENCY_SEC * 1000) and not quote_anchored_reclaim:
         detail.update({"pass": False, "reason": "fast_lane_latency_retry_watch"})
-    elif abs(drift_pct) > FAST_ENTRY_DEGRADE_DRIFT_PCT or signal_to_quote_ms > int(FAST_ENTRY_DEGRADE_LATENCY_SEC * 1000):
+    elif abs(drift_pct) > FAST_ENTRY_DEGRADE_DRIFT_PCT or guard_latency_ms > int(FAST_ENTRY_DEGRADE_LATENCY_SEC * 1000):
         detail["reason"] = "fast_lane_degraded_quote_anchored"
         detail["position_size_sol"] = FAST_ENTRY_DEGRADED_SIZE_SOL
     if quote_anchored_reclaim and detail.get("pass") and detail["signal_age_sec"] > FAST_ENTRY_HARD_STALE_SEC:
@@ -745,8 +769,14 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         entry_fill_price=quote_price,
         quote_spread_pct=guard.get("quote_drift_pct"),
     )
-    original_signal_to_quote_ms = latency_audit.get("signal_to_quote_latency_ms")
-    fast_lane_receive_to_quote_ms = guard.get("signal_to_quote_latency_ms")
+    original_signal_to_quote_ms = (
+        guard.get("original_signal_to_quote_latency_ms")
+        if guard.get("original_signal_to_quote_latency_ms") is not None
+        else latency_audit.get("signal_to_quote_latency_ms")
+    )
+    fast_lane_receive_to_quote_ms = guard.get("fast_lane_sla_latency_ms")
+    if fast_lane_receive_to_quote_ms is None:
+        fast_lane_receive_to_quote_ms = guard.get("signal_to_quote_latency_ms")
     fast_lane_queue_to_quote_ms = int(max(0, quote_request_ts_ms - float(row["created_at"] or (quote_request_ts_ms / 1000)) * 1000))
     latency_audit.update({
         "original_signal_to_quote_latency_ms": original_signal_to_quote_ms,
@@ -907,6 +937,9 @@ def process_queue_item(db, row, owner):
     if not global_rate_limit_allows(db, now_ts=now_ts):
         mark_queue(db, row["id"], "rate_limited", "fast_lane_global_rate_limit")
         return
+    if not open_position_cap_allows(db):
+        mark_queue(db, row["id"], "rate_limited", "fast_lane_open_position_cap")
+        return
     token_ca = row["token_ca"]
     signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
     lifecycle_id = ptm.build_lifecycle_id(token_ca, signal_ts)
@@ -999,6 +1032,9 @@ def process_queue_item(db, row, owner):
                 return
         if open_or_recent_trade_exists(db, token_ca, now_ts=time.time()):
             mark_queue(db, row["id"], "skipped", "open_or_recent_trade_exists_after_quote")
+            return
+        if not open_position_cap_allows(db):
+            mark_queue(db, row["id"], "rate_limited", "fast_lane_open_position_cap_after_quote")
             return
         trade_id = insert_fast_paper_trade(
             db,
@@ -1160,9 +1196,14 @@ def source_resonance_scan(paper_db_path, stop_event):
                 for row in rows:
                     priority = 12 if int(row["quote_clean_seen"] or 0) else 18
                     branch = "source_resonance_quote_clean_fast" if int(row["quote_clean_seen"] or 0) else "source_resonance_gmgn_fast"
+                    detected_ts = int(time.time())
+                    original_receive_ts = row["receive_ts"] or row["signal_ts"] or row["signal_recorded_ts"] or detected_ts
                     payload = {
                         "telegram_signal_id": row["telegram_signal_id"],
                         "signal_type": row["signal_type"],
+                        "original_signal_ts": row["signal_ts"],
+                        "original_receive_ts": original_receive_ts,
+                        "fast_lane_detected_ts": detected_ts,
                         "resonance_level": row["resonance_level"],
                         "resonance_score": row["resonance_score"],
                         "quote_clean_seen": row["quote_clean_seen"],
@@ -1186,7 +1227,7 @@ def source_resonance_scan(paper_db_path, stop_event):
                             token_ca=row["token_ca"],
                             symbol=row["symbol"],
                             signal_ts=row["signal_ts"],
-                            receive_ts=int(time.time()),
+                            receive_ts=original_receive_ts,
                             recorded_ts=row["signal_recorded_ts"],
                             entry_mode_hint="source_resonance_tiny_probe",
                             entry_branch=branch,
@@ -1205,7 +1246,7 @@ def source_resonance_scan(paper_db_path, stop_event):
                         token_ca=row["token_ca"],
                         symbol=row["symbol"],
                         signal_ts=row["signal_ts"],
-                        receive_ts=int(time.time()),
+                        receive_ts=original_receive_ts,
                         recorded_ts=row["signal_recorded_ts"],
                         entry_mode_hint="source_resonance_tiny_probe",
                         entry_branch=branch,
@@ -1267,6 +1308,8 @@ def missed_rescue_scan(paper_db_path, stop_event):
                 for row in rows:
                     last_seen = max(last_seen, int(row["id"] or 0))
                     reason = str(row["reject_reason"] or "missed_rescue")
+                    rescue_created_ts = int(time.time())
+                    original_signal_ts = row["signal_ts"] or row["baseline_ts"] or row["first_tradable_ts"] or rescue_created_ts
                     if reason.startswith("tracking_ttl"):
                         source_type = "ttl_rescue_fast"
                     elif "kline" in reason:
@@ -1280,6 +1323,9 @@ def missed_rescue_scan(paper_db_path, stop_event):
                     payload = {
                         "missed_attribution_id": row["id"],
                         "signal_id": row["signal_id"],
+                        "original_signal_ts": original_signal_ts,
+                        "original_receive_ts": original_signal_ts,
+                        "rescue_created_ts": rescue_created_ts,
                         "route": row["route"],
                         "component": row["component"],
                         "reject_reason": reason,
@@ -1297,8 +1343,8 @@ def missed_rescue_scan(paper_db_path, stop_event):
                             source_type=source_type,
                             token_ca=row["token_ca"],
                             symbol=row["symbol"],
-                            signal_ts=row["signal_ts"] or row["baseline_ts"],
-                            receive_ts=int(time.time()),
+                            signal_ts=original_signal_ts,
+                            receive_ts=original_signal_ts,
                             recorded_ts=row["baseline_ts"],
                             entry_mode_hint="pre_pass_resonance_tiny_probe",
                             entry_branch=reason,
@@ -1316,8 +1362,8 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         source_type=source_type,
                         token_ca=row["token_ca"],
                         symbol=row["symbol"],
-                        signal_ts=row["signal_ts"] or row["baseline_ts"],
-                        receive_ts=int(time.time()),
+                        signal_ts=original_signal_ts,
+                        receive_ts=original_signal_ts,
                         recorded_ts=row["baseline_ts"],
                         entry_mode_hint="pre_pass_resonance_tiny_probe",
                         entry_branch=reason,

@@ -173,6 +173,41 @@ def test_entry_guard_rejects_hard_drift():
     assert detail["reason"] == "fast_lane_quote_drift_hard_reject"
 
 
+def test_entry_guard_keeps_original_signal_age_separate_from_fast_lane_sla():
+    row = {
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_resonance_quote_clean_fast",
+        "source_signal_ts": 1_000,
+        "signal_receive_ts": 1_000,
+        "created_at": 2_000,
+        "trigger_price": 1.0,
+        "hard_gate_status": "PASS",
+    }
+
+    detail = fast.entry_guard_detail(
+        row,
+        1.0,
+        quote_request_ts_ms=2_001_000,
+        quote_response_ts_ms=2_001_200,
+    )
+
+    assert detail["pass"] is True
+    assert detail["signal_to_quote_latency_ms"] == 1_000
+    assert detail["fast_lane_sla_latency_ms"] == 1_000
+    assert detail["original_signal_to_quote_latency_ms"] == 1_001_000
+
+
+def test_open_position_cap_blocks_when_fast_lane_positions_are_full(tmp_path, monkeypatch):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    db.execute("CREATE TABLE paper_trades (replay_source TEXT, exit_reason TEXT)")
+    db.execute("INSERT INTO paper_trades(replay_source, exit_reason) VALUES ('paper_fast_lane', NULL)")
+    db.commit()
+    monkeypatch.setattr(fast, "FAST_ENTRY_MAX_OPEN_POSITIONS", 1)
+
+    assert fast.open_position_cap_allows(db) is False
+
+
 def test_retry_watch_requeues_until_queue_age_expires(tmp_path):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)

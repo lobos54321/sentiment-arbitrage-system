@@ -3605,6 +3605,20 @@ DOG_CATCHER_QUALITY_OVERRIDE_BRANCHES = {
     'retry_watch',
     'retry_watch_recovered',
 }
+DOG_CATCHER_ACTIVITY_REQUIRED_SOFT_REASONS = {
+    'scout_quality_buy_pressure_weak',
+    'scout_quality_negative_trend',
+    'weak_buying_pressure',
+    'negative_trend',
+}
+DOG_CATCHER_QUOTE_AND_ACTIVITY_REQUIRED_SOFT_REASONS = {
+    'scout_quality_liquidity_low',
+    'scout_quality_volume_low',
+    'scout_quality_tx_low',
+    'no_kline_low_volume',
+    'volume_low',
+    'tx_low',
+}
 
 
 def _pending_intervention_flag_set(pending):
@@ -3618,6 +3632,68 @@ def _pending_intervention_flag_set(pending):
     if not isinstance(flags, (list, tuple, set)):
         return set()
     return {str(item) for item in flags if item}
+
+
+def _dog_catcher_quote_confirmation_present(pending):
+    pending = pending or {}
+    if (
+        pending.get('quote_anchored_entry')
+        or pending.get('final_reclaim_quote_executable')
+        or pending.get('retry_watch_recovered')
+        or pending.get('quote_clean_seen')
+        or pending.get('source_quote_clean_seen')
+    ):
+        return True
+    for key in (
+        'source_resonance_probe',
+        'pre_pass_resonance_probe',
+        'resonance_context',
+        'external_alpha',
+        'entry_readiness_policy',
+    ):
+        context = pending.get(key)
+        if isinstance(context, dict) and (
+            context.get('quote_clean_seen')
+            or context.get('quote_clean')
+            or context.get('quote_executable')
+            or context.get('quote_route_available')
+        ):
+            return True
+    return False
+
+
+def _dog_catcher_soft_override_confirmation(pending, reason):
+    reason_l = str(reason or '').strip().lower()
+    activity_confirmed = _late_entry_source_activity_confirmed(pending)
+    quote_confirmed = _dog_catcher_quote_confirmation_present(pending)
+    if reason_l in DOG_CATCHER_QUOTE_AND_ACTIVITY_REQUIRED_SOFT_REASONS:
+        return {
+            'pass': bool(activity_confirmed and quote_confirmed),
+            'reason': (
+                'dog_catcher_soft_override_confirmed'
+                if activity_confirmed and quote_confirmed
+                else 'dog_catcher_soft_override_needs_quote_and_activity'
+            ),
+            'activity_confirmed': bool(activity_confirmed),
+            'quote_confirmed': bool(quote_confirmed),
+        }
+    if reason_l in DOG_CATCHER_ACTIVITY_REQUIRED_SOFT_REASONS:
+        return {
+            'pass': bool(activity_confirmed),
+            'reason': (
+                'dog_catcher_soft_override_confirmed'
+                if activity_confirmed
+                else 'dog_catcher_soft_override_needs_activity'
+            ),
+            'activity_confirmed': bool(activity_confirmed),
+            'quote_confirmed': bool(quote_confirmed),
+        }
+    return {
+        'pass': True,
+        'reason': 'dog_catcher_soft_override_not_confirmation_gated',
+        'activity_confirmed': bool(activity_confirmed),
+        'quote_confirmed': bool(quote_confirmed),
+    }
 
 
 def _dog_catcher_soft_or_stale_reason(reason):
@@ -3708,6 +3784,9 @@ def _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality):
         return scout_quality
     if classify_rejection_hardness(reason_l) == 'hard_reject' or not _dog_catcher_soft_or_stale_reason(reason_l):
         return scout_quality
+    confirmation = _dog_catcher_soft_override_confirmation(pending, reason_l)
+    if not confirmation.get('pass'):
+        return scout_quality
     override = dict(scout_quality)
     override.update({
         'pass': True,
@@ -3716,6 +3795,7 @@ def _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality):
         'original_reason': scout_quality.get('reason'),
         'override_scope': branch or mode,
         'dog_catcher_soft_quality_override': True,
+        'override_confirmation': confirmation,
     })
     return override
 
@@ -3771,6 +3851,15 @@ def _dog_catcher_branch_entry_mode_quality_override(pending=None, *, entry_mode=
     parent_reason = str(pending.get('source_reject_reason') or '').lower()
     if parent_reason and classify_rejection_hardness(parent_reason) == 'hard_reject':
         return {'pass': False, 'reason': 'parent_reason_hard_reject', 'parent_reason': parent_reason}
+    if parent_reason and _dog_catcher_soft_or_stale_reason(parent_reason):
+        confirmation = _dog_catcher_soft_override_confirmation(pending, parent_reason)
+        if not confirmation.get('pass'):
+            return {
+                'pass': False,
+                'reason': confirmation.get('reason') or 'dog_catcher_entry_mode_override_confirmation_missing',
+                'parent_reason': parent_reason,
+                'override_confirmation': confirmation,
+            }
     return {
         'pass': True,
         'reason': 'dog_catcher_branch_entry_mode_quality_override',
@@ -4759,11 +4848,13 @@ def _dog_catcher_trail_quote_confirmation(pos, exit_matrix, *, quote_pnl=None, t
     if quote_pnl is None:
         return {
             'cancel': True,
-            'reason': 'dog_catcher_trail_quote_missing',
+            'reason': 'dog_catcher_trail_quote_missing_retry_exit',
             'entry_mode': entry_mode,
             'trigger_pnl': trigger_pnl,
             'trail_floor': trail_floor,
             'required_quote_floor': required_quote_floor,
+            'urgent_exit_retry': True,
+            'synthetic_no_route_candidate': True,
         }
     cancel = quote_pnl < required_quote_floor
     return {
@@ -6740,7 +6831,20 @@ def dog_catcher_late_entry_guard_detail(pending, entry_latency_audit=None, entry
         'entry_latency_audit': entry_latency_audit,
         'entry_edge_budget': entry_edge_budget,
     }
-    if latency_ms is None or latency_ms <= max_latency_ms:
+    if latency_ms is None:
+        if (
+            detail['source_activity_confirmed']
+            and spread_pct is not None
+            and abs(spread_pct) <= strict_spread_pct
+        ):
+            detail['reason'] = 'late_entry_missing_latency_strong_source_confirmed'
+            detail['decision'] = 'warn_missing_latency'
+            return detail
+        detail['pass'] = False
+        detail['reason'] = 'dog_catcher_late_entry_missing_latency'
+        detail['decision'] = 'abort_wait_for_fresh_signal'
+        return detail
+    if latency_ms <= max_latency_ms:
         return detail
     if latency_ms > DOG_CATCHER_LATE_ENTRY_HARD_MAX_LATENCY_MS:
         detail['pass'] = False
@@ -22260,6 +22364,38 @@ def run_monitor(db):
                                             f"floor={_floor_str} requiredQuote={_required_str}; "
                                             f"reason={exit_matrix.get('reason')}"
                                         )
+                                        if dog_trail_detail.get('urgent_exit_retry'):
+                                            pos.monitor_state = dict(pos.monitor_state or {})
+                                            retry_count = int(pos.monitor_state.get('dogCatcherTrailQuoteMissingRetryCount') or 0) + 1
+                                            pos.monitor_state['dogCatcherTrailQuoteMissingRetryCount'] = retry_count
+                                            pos.monitor_state['dogCatcherTrailQuoteMissingLastTs'] = int(time.time())
+                                            pos.monitor_state['dogCatcherTrailQuoteMissingReason'] = dog_trail_detail.get('reason')
+                                            db.execute(
+                                                "UPDATE paper_trades SET monitor_state_json = ?, last_exit_quote_failure = ?, exit_quote_failures = COALESCE(exit_quote_failures, 0) + 1 WHERE id = ?",
+                                                (
+                                                    json.dumps(pos.monitor_state, ensure_ascii=False),
+                                                    dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_missing_retry_exit',
+                                                    pos.trade_id,
+                                                ),
+                                            )
+                                            db.commit()
+                                            record_decision_event(
+                                                db,
+                                                component='paper_exit_executor',
+                                                event_type='urgent_exit_retry',
+                                                decision='retry_quote',
+                                                reason=dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_missing_retry_exit',
+                                                token_ca=pos.token_ca,
+                                                symbol=pos.symbol,
+                                                lifecycle_id=pos.lifecycle_id,
+                                                trade_id=pos.trade_id,
+                                                signal_ts=pos.signal_ts,
+                                                signal_id=getattr(pos, 'premium_signal_id', None),
+                                                strategy_stage=pos.strategy_stage,
+                                                route=(pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                                                data_source='dog_catcher_trail_quote_confirmation',
+                                                payload=dog_trail_detail,
+                                            )
                                         quote_sanity_status = dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_not_confirmed'
                                         quote_primary_detail = dog_trail_detail
                                         sanity_override = True

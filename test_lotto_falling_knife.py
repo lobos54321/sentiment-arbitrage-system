@@ -2160,7 +2160,7 @@ def test_ath_uncertainty_scout_arms_tiny_pending(monkeypatch):
     assert row["event_type"] == "pending_entry"
 
 
-def test_ath_uncertainty_scout_arms_soft_quality_canary_under_mc_cap(monkeypatch):
+def test_ath_uncertainty_scout_blocks_unconfirmed_soft_quality_canary_under_mc_cap(monkeypatch):
     import paper_trade_monitor as monitor_module
 
     db = sqlite3.connect(":memory:")
@@ -2203,18 +2203,15 @@ def test_ath_uncertainty_scout_arms_soft_quality_canary_under_mc_cap(monkeypatch
         now_ts=1200,
     )
 
-    assert armed is True
-    pending = pending_entries["WeakAthToken:1000"]
-    assert pending["paper_only_scout"] is True
-    assert pending["entry_branch"] == "ath_recovery_soft_quality_canary"
-    assert pending["ath_recovery_soft_quality_override_used"] is True
+    assert armed is False
+    assert "WeakAthToken:1000" not in pending_entries
     row = db.execute(
-        "SELECT reason FROM paper_decision_events WHERE component = 'ath_uncertainty_scout' AND event_type = 'pending_entry'"
+        "SELECT reason FROM paper_decision_events WHERE component = 'ath_recovery' AND event_type = 'candidate_block'"
     ).fetchone()
     assert row is not None
 
 
-def test_ath_uncertainty_soft_quality_canary_replaces_discovery_tracking(monkeypatch):
+def test_ath_uncertainty_soft_quality_canary_uses_discovery_tracking_when_unconfirmed(monkeypatch):
     import paper_trade_monitor as monitor_module
 
     db = sqlite3.connect(":memory:")
@@ -2260,15 +2257,13 @@ def test_ath_uncertainty_soft_quality_canary_replaces_discovery_tracking(monkeyp
         discovery_candidates=discovery_candidates,
     )
 
-    assert armed is True
-    assert discovery_candidates == {}
-    pending = pending_entries["WeakAthToken:1000"]
-    assert pending["entry_branch"] == "ath_recovery_soft_quality_canary"
-    assert "soft_quality_canary" in pending["intervention_flags"]
+    assert armed is False
+    assert pending_entries == {}
+    assert discovery_candidates != {}
     row = db.execute(
         "SELECT component, event_type, reason FROM paper_decision_events WHERE component = 'ath_recovery'"
     ).fetchone()
-    assert row is None
+    assert row is not None
 
 
 def test_discovery_tracking_keeps_lotto_high_risk_probe_shadow_only(monkeypatch):

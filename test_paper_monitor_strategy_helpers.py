@@ -1439,6 +1439,28 @@ def test_dog_catcher_trail_quote_confirms_when_quote_holds_floor():
     assert detail["reason"] == "dog_catcher_trail_quote_confirmed"
 
 
+def test_dog_catcher_trail_quote_missing_marks_urgent_retry():
+    pos = _DummyPos(entry_mode=SOURCE_RESONANCE_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
+    exit_matrix = {
+        "action": "exit",
+        "reason": "dog_catcher_resonance_trail_floor",
+        "current_pnl": -0.10,
+        "trail_floor": 0.12,
+    }
+
+    detail = _dog_catcher_trail_quote_confirmation(
+        pos,
+        exit_matrix,
+        quote_pnl=None,
+        trigger_pnl=-0.10,
+    )
+
+    assert detail["cancel"] is True
+    assert detail["reason"] == "dog_catcher_trail_quote_missing_retry_exit"
+    assert detail["urgent_exit_retry"] is True
+    assert detail["synthetic_no_route_candidate"] is True
+
+
 def test_dog_catcher_trail_quote_covers_guardian_floor_reason():
     pos = _DummyPos(entry_mode=SOURCE_RESONANCE_TINY_PROBE_MODE, size_sol=0.002, route="LOTTO")
     exit_matrix = {
@@ -1529,6 +1551,9 @@ def test_dog_catcher_branch_quality_override_allows_soft_source_resonance():
         "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
         "entry_branch": "source_resonance_soft_override",
         "source_reject_reason": "scout_quality_buy_pressure_weak",
+        "external_alpha": {
+            "gmgn_momentum_confirmed": True,
+        },
     }
     scout_quality = {
         "pass": False,
@@ -1542,6 +1567,26 @@ def test_dog_catcher_branch_quality_override_allows_soft_source_resonance():
     assert override["decision"] == "warn"
     assert override["reason"] == "dog_catcher_soft_quality_warn"
     assert override["original_reason"] == "scout_quality_buy_pressure_weak"
+
+
+def test_dog_catcher_branch_quality_override_blocks_soft_reason_without_confirmation():
+    pending = {
+        "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": PAPER_TINY_SCOUT_SIZE_SOL,
+        "entry_branch": "source_resonance_soft_override",
+        "source_reject_reason": "scout_quality_buy_pressure_weak",
+    }
+    scout_quality = {
+        "pass": False,
+        "decision": "block",
+        "reason": "scout_quality_buy_pressure_weak",
+    }
+
+    override = _dog_catcher_branch_scout_quality_soft_override(pending, scout_quality)
+
+    assert override["pass"] is False
+    assert override["reason"] == "scout_quality_buy_pressure_weak"
 
 
 def test_dog_catcher_branch_entry_mode_override_allows_ttl_rescue_canary():
@@ -1627,7 +1672,7 @@ def test_build_lifecycle_id_normalizes_millisecond_signal_timestamps():
     assert build_lifecycle_id("TokenCA", 1_778_834_470) == "TokenCA:1778834470"
 
 
-def test_ath_uncertainty_soft_quality_arms_dog_catcher_canary(monkeypatch):
+def test_ath_uncertainty_soft_quality_blocks_unconfirmed_volume_low_canary(monkeypatch):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
@@ -1701,17 +1746,12 @@ def test_ath_uncertainty_soft_quality_arms_dog_catcher_canary(monkeypatch):
         discovery_candidates={},
     )
 
-    assert armed is True
-    pending = pending_entries["TokenCA:1000"]
-    assert pending["paper_only_scout"] is True
-    assert pending["entry_branch"] == "ath_recovery_soft_quality_canary"
-    assert pending["ath_recovery_soft_quality_override_used"] is True
-    assert "soft_quality_canary" in pending["intervention_flags"]
+    assert armed is False
+    assert "TokenCA:1000" not in pending_entries
     events = db.execute(
         "SELECT component, event_type, decision, reason FROM paper_decision_events ORDER BY id"
     ).fetchall()
-    assert any(row["component"] == "ath_uncertainty_scout" and row["event_type"] == "pending_entry" for row in events)
-    assert not any(row["component"] == "ath_recovery" and row["event_type"] == "candidate_block" for row in events)
+    assert not any(row["component"] == "ath_uncertainty_scout" and row["event_type"] == "pending_entry" for row in events)
 
 
 def test_lotto_dynamic_ttl_extends_only_strong_quote_executable_recovery():
@@ -4000,6 +4040,44 @@ def test_late_entry_guard_allows_pre_pass_inside_latency_budget():
 
     assert decision["pass"] is True
     assert decision["reason"] == "late_entry_guard_ok"
+
+
+def test_late_entry_guard_blocks_missing_latency_without_activity():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.PRE_PASS_RESONANCE_TINY_PROBE_SIZE_SOL,
+        },
+        entry_latency_audit={
+            "quote_spread_pct": 1.2,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 1.2},
+    )
+
+    assert decision["pass"] is False
+    assert decision["reason"] == "dog_catcher_late_entry_missing_latency"
+
+
+def test_late_entry_guard_allows_missing_latency_only_with_activity_and_tight_spread():
+    decision = dog_catcher_late_entry_guard_detail(
+        {
+            "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+            "paper_only_scout": True,
+            "kelly_position_sol": monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL,
+            "external_alpha": {
+                "gmgn_pre_seen": True,
+                "gmgn_momentum_confirmed": True,
+            },
+        },
+        entry_latency_audit={
+            "quote_spread_pct": 1.2,
+        },
+        entry_edge_budget={"pass": True, "spread_pct": 1.2},
+    )
+
+    assert decision["pass"] is True
+    assert decision["reason"] == "late_entry_missing_latency_strong_source_confirmed"
 
 
 def test_late_entry_guard_allows_late_source_only_with_strong_current_edge():

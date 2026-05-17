@@ -4254,14 +4254,17 @@ const server = http.createServer(async (req, res) => {
       if (!releasePaperReport) return;
       const startedAt = Date.now();
       const sinceTs = reportSinceTs(url, '24h');
-      const tradeLimit = boundedIntParam(url, 'trade_limit', 5000, 1, 20000);
+      const tradeLimit = boundedIntParam(url, 'trade_limit', 500, 1, 5000);
       const limit = boundedIntParam(url, 'limit', 50, 1, 200);
+      const includePathSamples = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_path_samples') || '0').toLowerCase());
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
-      const trades = loadReviewTradeRows(paperDb, tableNames, sinceTs, tradeLimit, { fastRecent: false });
-      const pathSamplesByTrade = loadPathSamplesByTrade(paperDb, tableNames, trades.map((row) => row.id));
+      const trades = loadReviewTradeRows(paperDb, tableNames, sinceTs, tradeLimit, { fastRecent: true });
+      const pathSamplesByTrade = includePathSamples
+        ? loadPathSamplesByTrade(paperDb, tableNames, trades.map((row) => row.id), boundedIntParam(url, 'path_sample_limit', 100, 1, 500))
+        : new Map();
       const tradeCols = tableNames.has('paper_trades') ? getTableColumns(paperDb, 'paper_trades') : new Set();
       const tierExpr = tradeCols.has('capital_tier')
         ? "COALESCE(capital_tier, 'unknown')"
@@ -4408,6 +4411,9 @@ const server = http.createServer(async (req, res) => {
           paper_only: true,
           scope: 'learning audit: latency/drift, shadow trail, fast-fail counterfactual, executable missed dogs, sample governance, capital tier lifecycle, table aging',
           fast_fail_counterfactual: 'post-exit regret requires post-exit path samples; missing samples are reported explicitly instead of guessed',
+          live_safety: includePathSamples
+            ? 'include_path_samples=1 requested; this can be heavier on production.'
+            : 'post-exit path sample scans are skipped by default for live safety; pass include_path_samples=1 for explicit heavy counterfactuals.',
         },
         query_ms: Date.now() - startedAt,
       }, null, 2));
@@ -5225,11 +5231,10 @@ const server = http.createServer(async (req, res) => {
       releasePaperReport = beginLivePaperReport(res, url.pathname);
       if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 25, 1, 80);
+      const scanLimit = boundedIntParam(url, 'scan_limit', 5000, 100, 50000);
       const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       const queryStartedAt = Date.now();
       const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
-      const whereSql = sinceTs ? 'WHERE created_event_ts >= @since' : '';
-      const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
@@ -5242,6 +5247,12 @@ const server = http.createServer(async (req, res) => {
       const missedCols = new Set(
         paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
       );
+      const maxMissedId = Number(paperDb.prepare('SELECT COALESCE(MAX(id), 0) AS max_id FROM paper_missed_signal_attribution').get().max_id || 0);
+      const idFloor = Math.max(0, maxMissedId - scanLimit);
+      const whereSql = sinceTs
+        ? `WHERE id >= @idFloor AND ${missedEventTsExpr} >= @since`
+        : 'WHERE id >= @idFloor';
+      const whereParams = sinceTs ? { since: sinceTs, idFloor } : { idFloor };
       const hasTradability = missedCols.has('tradable_missed');
       const hasDecisionEvents = tableNames.has('paper_decision_events');
       const spreadAbortExistsSql = '0';
@@ -6499,6 +6510,34 @@ const server = http.createServer(async (req, res) => {
             LIMIT 50
           `).all({ sinceTs })
         : [];
+      const recentQueue = tableNames.has('paper_fast_entry_queue')
+        ? paperDb.prepare(`
+            SELECT id, created_at, updated_at, status, last_error,
+                   token_ca, symbol, source_type, entry_mode_hint, entry_branch,
+                   source_signal_ts, signal_receive_ts, signal_recorded_ts,
+                   priority, claimed_by, claimed_at
+            FROM paper_fast_entry_queue
+            WHERE created_at >= @sinceTs
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 40
+          `).all({ sinceTs })
+        : [];
+      const recentFastTrades = tableNames.has('paper_trades')
+        ? paperDb.prepare(`
+            SELECT id, symbol, token_ca, entry_ts, exit_ts, exit_reason,
+                   entry_mode, entry_branch, pnl_pct * 100.0 AS pnl_pct,
+                   peak_pnl * 100.0 AS peak_pct,
+                   position_size_sol,
+                   signal_to_quote_latency_ms,
+                   signal_to_quote_drift_pct,
+                   quote_spread_pct
+            FROM paper_trades
+            WHERE replay_source = 'paper_fast_lane'
+              AND entry_ts >= @sinceTs
+            ORDER BY entry_ts DESC, id DESC
+            LIMIT 30
+          `).all({ sinceTs })
+        : [];
       const fastTrades = tableNames.has('paper_trades')
         ? paperDb.prepare(`
             SELECT
@@ -6568,6 +6607,8 @@ const server = http.createServer(async (req, res) => {
         queue_status: queueStatus,
         branch_summary: branchSummary,
         fast_trades: fastTrades,
+        recent_queue: recentQueue,
+        recent_fast_trades: recentFastTrades,
         latency_summary: latencySummary,
       }, null, 2));
     } catch (e) {
