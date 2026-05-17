@@ -115,6 +115,7 @@ function startShadowDataSidecars(config) {
   const gmgnLog = process.env.GMGN_SCOUT_LOG || './data/gmgn-scout.log';
   const resonanceLog = process.env.SOURCE_RESONANCE_LOG || './data/source-resonance.log';
   const fastLaneLog = process.env.PAPER_FAST_LANE_LOG || './data/paper-fast-lane.log';
+  const reviewSnapshotLog = process.env.PAPER_REVIEW_SNAPSHOT_LOG || './data/paper-review-snapshot.log';
 
   const workers = [
     startPythonSidecar({
@@ -171,6 +172,26 @@ function startShadowDataSidecars(config) {
         SENTIMENT_DB: signalDb,
         DB_PATH: signalDb,
         PAPER_FAST_ENTRY_ENABLED: process.env.PAPER_FAST_ENTRY_ENABLED || 'true',
+      },
+    }));
+  }
+  if (envFlag('PAPER_REVIEW_SNAPSHOT_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'paper-review-snapshot',
+      logPath: reviewSnapshotLog,
+      args: [
+        'scripts/paper_review_snapshot_worker.py',
+        '--loop',
+        '--paper-db', paperDb,
+        '--out-dir', process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
+        '--windows', process.env.PAPER_REVIEW_WINDOWS || '2,8,24',
+        '--interval', process.env.PAPER_REVIEW_SNAPSHOT_INTERVAL_SEC || '300',
+        '--limit', process.env.PAPER_REVIEW_SNAPSHOT_LIMIT || '40',
+        '--lock-file', process.env.PAPER_REVIEW_SNAPSHOT_LOCK_FILE || '/tmp/paper_review_snapshot.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        PAPER_REVIEW_LIVE_DIR: process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
       },
     }));
   }

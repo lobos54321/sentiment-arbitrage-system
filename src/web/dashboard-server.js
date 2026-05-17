@@ -543,6 +543,26 @@ function getPaperReviewDir() {
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
 }
 
+function getLivePaperReviewDir() {
+  const raw = process.env.PAPER_REVIEW_LIVE_DIR || join(getPaperReviewDir(), 'live');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function livePaperReviewPath(hours) {
+  const safeHours = Math.max(1, Math.min(24, Number.parseInt(String(hours || 24), 10) || 24));
+  return join(getLivePaperReviewDir(), `paper_review_${safeHours}h.json`);
+}
+
+function readLivePaperReview(hours) {
+  const path = livePaperReviewPath(hours);
+  if (!fs.existsSync(path)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path, 'utf8'));
+  } catch (error) {
+    return { error: error.message, path };
+  }
+}
+
 function runtimeCommitFingerprint() {
   const envCommit = firstValue(
     process.env.GIT_COMMIT,
@@ -4139,6 +4159,28 @@ const server = http.createServer(async (req, res) => {
       const includeLatency = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_latency') || '0').toLowerCase());
       const freeze = ['1', 'true', 'yes'].includes(String(url.searchParams.get('freeze') || '0').toLowerCase());
       const persist = freeze || !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
+      const materialized = ['1', 'true', 'yes'].includes(String(url.searchParams.get('materialized') || '').toLowerCase())
+        || (includeClosedLoop && !includeDetails && !includeProbeSummary && !includeSourceSummary && String(windowLabel).match(/^(8|24)$/));
+      if (materialized) {
+        const liveSnapshot = readLivePaperReview(windowLabel);
+        if (liveSnapshot && !liveSnapshot.error) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            ...liveSnapshot,
+            materialized: true,
+            materialized_path: livePaperReviewPath(windowLabel),
+          }, null, 2));
+          return;
+        }
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          available: false,
+          materialized: true,
+          reason: liveSnapshot?.error || 'materialized_snapshot_not_ready',
+          path: livePaperReviewPath(windowLabel),
+        }, null, 2));
+        return;
+      }
       const paperDbTimeoutMs = boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000);
       const timings = {};
 
@@ -5243,6 +5285,69 @@ const server = http.createServer(async (req, res) => {
       const completeWindow = ['1', 'true', 'yes'].includes(String(url.searchParams.get('complete') || '').toLowerCase())
         || (Number.isFinite(requestedHours) && requestedHours > 2)
         || Boolean(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      if (summaryOnly && Number.isFinite(requestedHours) && requestedHours > 2) {
+        const liveSnapshot = readLivePaperReview(requestedHours);
+        if (liveSnapshot && !liveSnapshot.error) {
+          const missed = liveSnapshot.missed || {};
+          const overall = missed.overall || {};
+          const byGate = missed.by_gate || [];
+          const topDogs = missed.top_dogs || [];
+          const summary = {
+            total_n: overall.unique_tokens ?? null,
+            gold_n: overall.gold_unique ?? null,
+            silver_n: overall.silver_unique ?? null,
+            bronze_n: overall.bronze_unique ?? null,
+            sub25_n: overall.unique_tokens == null ? null : Math.max(
+              0,
+              Number(overall.unique_tokens || 0)
+                - Number(overall.gold_unique || 0)
+                - Number(overall.silver_unique || 0)
+                - Number(overall.bronze_unique || 0)
+            ),
+            tradable_n: overall.tradable_unique ?? null,
+            clean_tradable_n: overall.quote_executable_unique ?? null,
+            quote_executable_proxy_n: overall.quote_executable_unique ?? null,
+            stop_before_peak_n: overall.stop_before_peak_unique ?? null,
+          };
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            generated_at: new Date().toISOString(),
+            db_path: paperDbPath,
+            materialized: true,
+            materialized_snapshot_id: liveSnapshot.snapshot_id,
+            materialized_generated_at: liveSnapshot.generated_at,
+            materialized_path: livePaperReviewPath(requestedHours),
+            filters: {
+              since_ts: liveSnapshot.window?.since_ts ?? sinceTs,
+              since_iso: liveSnapshot.window?.since_iso ?? (sinceTs ? new Date(sinceTs * 1000).toISOString() : null),
+              complete_window: true,
+              summary_only: true,
+              max_window_hours: 24,
+              tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
+            },
+            query_ms: 0,
+            tier_summary: {
+              event_rows: summary,
+              unique_tokens: summary,
+              ath_event_rows: null,
+              ath_unique_tokens: null,
+            },
+            top_dogs: topDogs,
+            top_unique_dogs: topDogs,
+            by_gate: byGate,
+            ath_recovery_actions: [],
+          }, null, 2));
+          return;
+        }
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          available: false,
+          materialized: true,
+          reason: liveSnapshot?.error || 'materialized_snapshot_not_ready',
+          path: livePaperReviewPath(requestedHours),
+        }, null, 2));
+        return;
+      }
       const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
       paperDb = new Database(paperDbPath, { readonly: true });
       const tableNames = new Set(
