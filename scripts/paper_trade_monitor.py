@@ -170,6 +170,8 @@ LOTTO_PULLBACK_STRONG_MIN_VOL_M5 = float(os.environ.get('LOTTO_PULLBACK_STRONG_M
 LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_BS', '1.20'))
 DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
 DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED', 'true').lower() != 'false'
+DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
+DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC = int(os.environ.get('DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC', '60'))
 DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '90'))
 DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC', '90'))
 DISCOVERY_FINAL_RECLAIM_MAX_RETRIES = max(0, int(os.environ.get('DISCOVERY_FINAL_RECLAIM_MAX_RETRIES', '6')))
@@ -12062,6 +12064,40 @@ def _ttl_final_reclaim_quote_override_detail(candidate, gate, *, quote_probe=Non
     }
 
 
+def _pre_expiry_final_reclaim_due(candidate, *, now_ts=None, window_sec=None, mode=None):
+    candidate = candidate or {}
+    if not DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_ENABLED:
+        return {'pass': False, 'reason': 'pre_expiry_final_reclaim_disabled'}
+    if candidate.get('final_reclaim_attempted') or candidate.get('pre_expiry_final_reclaim_attempted'):
+        return {'pass': False, 'reason': 'pre_expiry_final_reclaim_already_attempted'}
+    mode = str(mode or candidate.get('mode') or '')
+    if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
+        return {'pass': False, 'reason': 'pre_expiry_final_reclaim_mode_not_tiny', 'mode': mode}
+    now_ts = float(now_ts or time.time())
+    try:
+        expires_at = float(candidate.get('expires_at') or 0.0)
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    ttl_remaining_sec = expires_at - now_ts
+    window_sec = DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC if window_sec is None else int(window_sec)
+    if ttl_remaining_sec <= 0:
+        return {'pass': False, 'reason': 'pre_expiry_final_reclaim_already_expired', 'ttl_remaining_sec': ttl_remaining_sec}
+    if ttl_remaining_sec > window_sec:
+        return {
+            'pass': False,
+            'reason': 'pre_expiry_final_reclaim_not_due',
+            'ttl_remaining_sec': ttl_remaining_sec,
+            'window_sec': window_sec,
+        }
+    return {
+        'pass': True,
+        'reason': 'pre_expiry_final_reclaim_due',
+        'ttl_remaining_sec': ttl_remaining_sec,
+        'window_sec': window_sec,
+        'mode': mode,
+    }
+
+
 def _discovery_low_liq_quote_probe(token_ca, *, lifecycle_id=None, mode=None):
     return _discovery_quote_probe(
         token_ca,
@@ -12834,6 +12870,61 @@ def process_discovery_tracking_candidates(
                 event_ts=now_ts,
             )
             continue
+        pre_expiry_reclaim = _pre_expiry_final_reclaim_due(candidate, now_ts=now_ts, mode=mode)
+        if pre_expiry_reclaim.get('pass'):
+            final_reclaim_quote_probe = None
+            final_reclaim_quote_executable = False
+            if DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED:
+                final_reclaim_quote_probe = _discovery_quote_probe(
+                    token_ca,
+                    lifecycle_id=lifecycle_id,
+                    mode=mode,
+                    stage_name='tracking_ttl_pre_expiry_final_reclaim_quote_probe',
+                )
+                final_reclaim_quote_executable = bool(final_reclaim_quote_probe.get('success'))
+                candidate['final_reclaim_quote_probe'] = final_reclaim_quote_probe
+                candidate['final_reclaim_quote_executable'] = final_reclaim_quote_executable
+            candidate['pre_expiry_final_reclaim_attempted'] = True
+            candidate['final_reclaim_attempted'] = True
+            candidate['pre_expiry_final_reclaim_detail'] = pre_expiry_reclaim
+            if final_reclaim_quote_executable:
+                candidate['last_check_ts'] = 0.0
+                candidate['ttl_rescue_used'] = True
+                candidate['ttl_rescue_force_canary'] = True
+                candidate['expires_at'] = max(
+                    float(candidate.get('expires_at') or now_ts),
+                    now_ts + DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC,
+                )
+            record_decision_event(
+                db,
+                component='discovery_tracking',
+                event_type='candidate_recheck',
+                decision='wait',
+                reason=(
+                    'tracking_ttl_pre_expiry_final_reclaim_quote_executable'
+                    if final_reclaim_quote_executable
+                    else 'tracking_ttl_pre_expiry_final_reclaim_check'
+                ),
+                token_ca=token_ca,
+                symbol=candidate.get('symbol'),
+                lifecycle_id=lifecycle_id,
+                signal_ts=candidate.get('signal_ts'),
+                signal_id=candidate.get('signal_id'),
+                route=route,
+                payload={
+                    'entry_mode': mode,
+                    'age_sec': max(0.0, now_ts - float(candidate.get('first_seen_ts') or now_ts)),
+                    'attempts': candidate.get('attempts'),
+                    'last_wait_reason': candidate.get('last_wait_reason'),
+                    'ttl_remaining_sec': pre_expiry_reclaim.get('ttl_remaining_sec'),
+                    'pre_expiry_final_reclaim': pre_expiry_reclaim,
+                    'final_reclaim_quote_probe': final_reclaim_quote_probe,
+                    'final_reclaim_quote_executable': final_reclaim_quote_executable,
+                },
+                event_ts=now_ts,
+            )
+            if final_reclaim_quote_executable:
+                continue
         if now_ts >= float(candidate.get('expires_at') or now_ts):
             if route == 'LOTTO' and not candidate.get('lotto_ttl_retargeted'):
                 retarget_mode = _lotto_recovery_mode_for_blocker(

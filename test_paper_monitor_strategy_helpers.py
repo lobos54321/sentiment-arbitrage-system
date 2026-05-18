@@ -71,6 +71,7 @@ from paper_trade_monitor import (  # noqa: E402
     _pending_entry_exists_for_token,
     _pending_watchlist_fire_block_detail,
     _select_structure_stop_loss,
+    _pre_expiry_final_reclaim_due,
     _ttl_final_reclaim_quote_override_detail,
     _post_exit_runner_watch_detail,
     _post_exit_reclaim_entry_mode_force_live,
@@ -3899,6 +3900,49 @@ def test_ttl_final_reclaim_quote_override_keeps_hard_failures_blocked():
 
     assert detail["pass"] is False
     assert detail["reason"] == "ttl_final_reclaim_hard_failure"
+
+
+def test_pre_expiry_final_reclaim_is_due_inside_window():
+    detail = _pre_expiry_final_reclaim_due(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "expires_at": 1_060,
+        },
+        now_ts=1_000,
+        window_sec=60,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "pre_expiry_final_reclaim_due"
+    assert detail["ttl_remaining_sec"] == 60
+
+
+def test_pre_expiry_final_reclaim_skips_before_window_or_after_attempt():
+    early = _pre_expiry_final_reclaim_due(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "expires_at": 1_061,
+        },
+        now_ts=1_000,
+        window_sec=60,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+    attempted = _pre_expiry_final_reclaim_due(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "expires_at": 1_030,
+            "final_reclaim_attempted": True,
+        },
+        now_ts=1_000,
+        window_sec=60,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert early["pass"] is False
+    assert early["reason"] == "pre_expiry_final_reclaim_not_due"
+    assert attempted["pass"] is False
+    assert attempted["reason"] == "pre_expiry_final_reclaim_already_attempted"
 
 
 def test_source_resonance_direct_probe_default_disabled(monkeypatch):

@@ -377,6 +377,152 @@ def test_kline_rescue_is_counterfactual_only_by_default():
     assert detail["reason"] == "kline_rescue_direct_fill_disabled"
 
 
+def test_gmgn_momentum_canary_allows_confirmed_non_quiet(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_GMGN_MOMENTUM_CANARY_ENABLED", True)
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_gmgn_momentum_canary",
+        "payload_json": json.dumps({
+            "gmgn_pre_seen": 1,
+            "gmgn_momentum_confirmed": 1,
+            "resonance_level": 3,
+            "market_session": "asia",
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "source_gmgn_momentum_canary"
+
+
+def test_gmgn_momentum_canary_blocks_unconfirmed_or_quiet(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_GMGN_MOMENTUM_CANARY_ENABLED", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_GMGN_CANARY_QUIET_ENABLED", False)
+    now = int(time.time())
+    unconfirmed = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_gmgn_momentum_canary",
+        "payload_json": json.dumps({
+            "gmgn_pre_seen": 1,
+            "resonance_level": 3,
+            "market_session": "asia",
+        }),
+    }, now_ts=now)
+    quiet = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_gmgn_momentum_canary",
+        "payload_json": json.dumps({
+            "gmgn_pre_seen": 1,
+            "gmgn_momentum_confirmed": 1,
+            "resonance_level": 3,
+            "market_session": "quiet",
+        }),
+    }, now_ts=now)
+
+    assert unconfirmed["pass"] is False
+    assert unconfirmed["reason"] == "source_gmgn_momentum_canary_unconfirmed"
+    assert quiet["pass"] is False
+    assert quiet["reason"] == "source_gmgn_momentum_canary_quiet_session"
+
+
+def test_stale_quote_clean_refresh_canary_requires_fresh_update_and_activity(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED", True)
+    now = int(time.time())
+    allowed = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_quote_clean_refresh_tiny_probe",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "source_updated_at": "2099-01-01 00:00:00",
+            "gmgn_volume_confirmed": 1,
+            "original_signal_ts": now - 900,
+        }),
+    }, now_ts=now)
+    blocked = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_quote_clean_refresh_tiny_probe",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "source_updated_at": "2099-01-01 00:00:00",
+            "original_signal_ts": now - 900,
+        }),
+    }, now_ts=now)
+
+    assert allowed["pass"] is True
+    assert allowed["reason"] == "source_quote_clean_refresh_tiny_probe"
+    assert blocked["pass"] is False
+    assert blocked["reason"] == "source_quote_clean_refresh_activity_not_confirmed"
+
+
+def test_kline_recovery_canary_requires_fresh_tradable_timestamp(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC", 120)
+    now = int(time.time())
+    stale = fast.direct_fill_policy({
+        "source_type": "kline_recovery_fast",
+        "entry_branch": "kline_recovery_quote_clean_tiny_probe",
+        "payload_json": json.dumps({"tradable_missed": 1, "first_tradable_ts": now - 121}),
+    }, now_ts=now)
+    fresh = fast.direct_fill_policy({
+        "source_type": "kline_recovery_fast",
+        "entry_branch": "kline_recovery_quote_clean_tiny_probe",
+        "payload_json": json.dumps({"tradable_missed": 1, "first_tradable_ts": now - 30}),
+    }, now_ts=now)
+
+    assert stale["pass"] is False
+    assert stale["status"] == "counterfactual_only"
+    assert stale["reason"] == "kline_recovery_tradable_signal_stale_watch_only"
+    assert fresh["pass"] is True
+    assert fresh["reason"] == "kline_recovery_quote_clean_tiny_probe"
+
+
+def test_smart_quality_and_matrix_reclaim_require_fresh_quote_evidence(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MATRIX_TIMEOUT_CANARY_ENABLED", True)
+    now = int(time.time())
+    smart = fast.direct_fill_policy({
+        "source_type": "smart_quality_reclaim_fast",
+        "entry_branch": "smart_quality_reclaim_tiny_probe",
+        "payload_json": json.dumps({"tradable_missed": 1, "first_tradable_ts": now - 30}),
+    }, now_ts=now)
+    matrix = fast.direct_fill_policy({
+        "source_type": "matrix_timeout_reclaim_fast",
+        "entry_branch": "matrix_timeout_final_quote_tiny_probe",
+        "payload_json": json.dumps({"tradable_missed": 1, "first_tradable_ts": now - 30}),
+    }, now_ts=now)
+
+    assert smart["pass"] is True
+    assert smart["reason"] == "smart_quality_reclaim_tiny_probe"
+    assert matrix["pass"] is True
+    assert matrix["reason"] == "matrix_timeout_final_quote_tiny_probe"
+
+
+def test_new_canary_branches_use_degraded_size(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SIZE_SOL", 0.002)
+    monkeypatch.setattr(fast, "FAST_ENTRY_DEGRADED_SIZE_SOL", 0.001)
+    now = int(time.time())
+    row = {
+        "source_type": "smart_quality_reclaim_fast",
+        "entry_branch": "smart_quality_reclaim_tiny_probe",
+        "source_signal_ts": now,
+        "signal_receive_ts": now,
+        "created_at": now,
+        "trigger_price": 1.0,
+        "hard_gate_status": "PASS",
+    }
+
+    detail = fast.entry_guard_detail(
+        row,
+        1.0,
+        quote_request_ts_ms=now * 1000,
+        quote_response_ts_ms=now * 1000,
+    )
+
+    assert detail["pass"] is True
+    assert detail["position_size_sol"] == 0.001
+    assert detail["canary_branch"] == "smart_quality_reclaim_tiny_probe"
+
+
 def test_watch_observation_is_not_claimed(tmp_path):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)

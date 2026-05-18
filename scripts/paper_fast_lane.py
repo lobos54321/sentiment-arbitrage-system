@@ -74,10 +74,42 @@ FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC",
     "180",
 ))
+FAST_ENTRY_SOURCE_GMGN_MOMENTUM_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_SOURCE_GMGN_MOMENTUM_CANARY_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_SOURCE_GMGN_CANARY_MIN_RESONANCE_LEVEL = int(os.environ.get(
+    "FAST_ENTRY_SOURCE_GMGN_CANARY_MIN_RESONANCE_LEVEL",
+    "3",
+))
+FAST_ENTRY_SOURCE_GMGN_CANARY_QUIET_ENABLED = os.environ.get(
+    "FAST_ENTRY_SOURCE_GMGN_CANARY_QUIET_ENABLED",
+    "false",
+).lower() == "true"
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED = os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED",
+    "true",
+).lower() != "false"
 FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED",
     "false",
 ).lower() == "true"
+FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_MATRIX_TIMEOUT_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_MATRIX_TIMEOUT_CANARY_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC",
+    "120",
+))
 FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC",
     "300",
@@ -108,6 +140,36 @@ FAST_LANE_MISSED_REASONS = {
     "missing_trigger_or_quote",
     "entry_edge_probe_missing_trigger_or_quote",
     "lotto_stale",
+}
+
+KLINE_RESCUE_BRANCHES = {
+    "not_ath_prebuy_kline_unknown_data_blocked",
+    "not_ath_prebuy_kline_block",
+    "not_ath_prebuy_kline_retry_expired",
+}
+
+SMART_QUALITY_RECHECK_REASONS = {
+    "weak_buying_pressure",
+    "no_kline_low_volume",
+    "negative_trend",
+    "chasing_top",
+    "scout_quality_buy_pressure_weak",
+    "scout_quality_volume_low",
+    "scout_quality_tx_low",
+    "scout_quality_negative_trend",
+}
+
+MATRIX_TIMEOUT_RECHECK_REASONS = {
+    "matrices not yet aligned",
+}
+
+DEGRADED_CANARY_BRANCHES = {
+    "source_gmgn_momentum_canary",
+    "source_quote_clean_refresh_tiny_probe",
+    "ttl_final_reclaim_quote_clean",
+    "kline_recovery_quote_clean_tiny_probe",
+    "smart_quality_reclaim_tiny_probe",
+    "matrix_timeout_final_quote_tiny_probe",
 }
 
 SQLITE_WRITE_LOCK = threading.Lock()
@@ -543,6 +605,60 @@ def source_activity_confirmed(payload):
     )
 
 
+def _payload_bool(payload, key):
+    value = (payload or {}).get(key)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _payload_int(payload, key, default=0):
+    try:
+        return int(float((payload or {}).get(key) or default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def source_gmgn_momentum_canary_detail(payload, *, now_ts=None):
+    payload = payload or {}
+    if not FAST_ENTRY_SOURCE_GMGN_MOMENTUM_CANARY_ENABLED:
+        return {"pass": False, "reason": "source_gmgn_momentum_canary_disabled"}
+    session = str(payload.get("market_session") or market_session_for_ts(now_ts or time.time()))
+    if session == "quiet" and not FAST_ENTRY_SOURCE_GMGN_CANARY_QUIET_ENABLED:
+        return {"pass": False, "reason": "source_gmgn_momentum_canary_quiet_session", "market_session": session}
+    resonance_level = _payload_int(payload, "resonance_level")
+    if resonance_level < FAST_ENTRY_SOURCE_GMGN_CANARY_MIN_RESONANCE_LEVEL:
+        return {
+            "pass": False,
+            "reason": "source_gmgn_momentum_canary_resonance_low",
+            "resonance_level": resonance_level,
+            "min_resonance_level": FAST_ENTRY_SOURCE_GMGN_CANARY_MIN_RESONANCE_LEVEL,
+        }
+    if not (_payload_bool(payload, "gmgn_momentum_confirmed") or _payload_bool(payload, "gmgn_volume_confirmed")):
+        return {"pass": False, "reason": "source_gmgn_momentum_canary_unconfirmed"}
+    if payload.get("source_updated_at") and not updated_at_is_fresh(payload.get("source_updated_at"), now_ts=now_ts):
+        return {"pass": False, "reason": "source_gmgn_momentum_canary_stale_update"}
+    return {
+        "pass": True,
+        "reason": "source_gmgn_momentum_canary",
+        "market_session": session,
+        "resonance_level": resonance_level,
+    }
+
+
+def source_quote_clean_refresh_detail(payload, *, now_ts=None):
+    payload = payload or {}
+    if not FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED:
+        return {"pass": False, "reason": "source_quote_clean_refresh_disabled"}
+    if not _payload_bool(payload, "quote_clean_seen"):
+        return {"pass": False, "reason": "source_quote_clean_refresh_missing_quote_clean"}
+    if payload.get("source_updated_at") and not updated_at_is_fresh(payload.get("source_updated_at"), now_ts=now_ts):
+        return {"pass": False, "reason": "source_quote_clean_refresh_stale_update"}
+    if not source_activity_confirmed(payload):
+        return {"pass": False, "reason": "source_quote_clean_refresh_activity_not_confirmed"}
+    return {"pass": True, "reason": "source_quote_clean_refresh_tiny_probe"}
+
+
 def updated_at_is_fresh(value, *, now_ts=None, max_age_sec=None):
     ts = parse_datetime_ts(value)
     if ts is None:
@@ -566,10 +682,76 @@ def payload_ts_age_sec(payload, keys, *, now_ts=None):
     return None
 
 
+def recovery_tradable_fresh_detail(payload, *, now_ts=None, max_age_sec=None):
+    payload = payload or {}
+    max_age_sec = FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC if max_age_sec is None else max_age_sec
+    if not (_payload_bool(payload, "tradable_missed") or _payload_bool(payload, "recovery_quote_clean") or _payload_bool(payload, "final_reclaim_quote_executable")):
+        return {"pass": False, "reason": "recovery_quote_clean_missing"}
+    age_sec = payload_ts_age_sec(payload, ("first_tradable_ts", "recovery_created_ts", "rescue_created_ts"), now_ts=now_ts)
+    if age_sec is None:
+        return {"pass": False, "reason": "recovery_tradable_timestamp_missing"}
+    if age_sec > float(max_age_sec):
+        return {
+            "pass": False,
+            "reason": "recovery_tradable_signal_stale_watch_only",
+            "tradable_age_sec": age_sec,
+            "max_tradable_age_sec": float(max_age_sec),
+        }
+    return {
+        "pass": True,
+        "reason": "recovery_quote_clean_fresh",
+        "tradable_age_sec": age_sec,
+        "max_tradable_age_sec": float(max_age_sec),
+    }
+
+
 def direct_fill_policy(row, *, now_ts=None):
     branch = str(row_value(row, "entry_branch", "") or "")
     source_type = str(row_value(row, "source_type", "") or "")
     payload = row_payload(row)
+    if branch == "source_gmgn_momentum_canary":
+        detail = source_gmgn_momentum_canary_detail(payload, now_ts=now_ts)
+        if not detail.get("pass"):
+            return {"pass": False, "status": "watch_only", "reason": detail.get("reason"), "detail": detail}
+        return {"pass": True, "status": "queued", "reason": detail.get("reason"), "detail": detail}
+    if branch == "source_quote_clean_refresh_tiny_probe":
+        detail = source_quote_clean_refresh_detail(payload, now_ts=now_ts)
+        if not detail.get("pass"):
+            return {"pass": False, "status": "watch_only", "reason": detail.get("reason"), "detail": detail}
+        return {"pass": True, "status": "queued", "reason": detail.get("reason"), "detail": detail}
+    if branch == "ttl_final_reclaim_quote_clean":
+        detail = recovery_tradable_fresh_detail(
+            payload,
+            now_ts=now_ts,
+            max_age_sec=FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC,
+        )
+        if not detail.get("pass"):
+            return {"pass": False, "status": "watch_only", "reason": f"ttl_final_reclaim_{detail.get('reason')}", "detail": detail}
+        return {"pass": True, "status": "queued", "reason": "ttl_final_reclaim_quote_clean", "detail": detail}
+    if branch == "kline_recovery_quote_clean_tiny_probe":
+        if not FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED:
+            return {"pass": False, "status": "counterfactual_only", "reason": "kline_recovery_canary_disabled"}
+        detail = recovery_tradable_fresh_detail(payload, now_ts=now_ts)
+        if not detail.get("pass"):
+            reason = detail.get("reason") or "recovery_not_confirmed"
+            if reason.startswith("recovery_"):
+                reason = reason[len("recovery_"):]
+            return {"pass": False, "status": "counterfactual_only", "reason": f"kline_recovery_{reason}", "detail": detail}
+        return {"pass": True, "status": "queued", "reason": "kline_recovery_quote_clean_tiny_probe", "detail": detail}
+    if branch == "smart_quality_reclaim_tiny_probe":
+        if not FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED:
+            return {"pass": False, "status": "watch_only", "reason": "smart_quality_recheck_canary_disabled"}
+        detail = recovery_tradable_fresh_detail(payload, now_ts=now_ts)
+        if not detail.get("pass"):
+            return {"pass": False, "status": "watch_only", "reason": f"smart_quality_reclaim_{detail.get('reason')}", "detail": detail}
+        return {"pass": True, "status": "queued", "reason": "smart_quality_reclaim_tiny_probe", "detail": detail}
+    if branch == "matrix_timeout_final_quote_tiny_probe":
+        if not FAST_ENTRY_MATRIX_TIMEOUT_CANARY_ENABLED:
+            return {"pass": False, "status": "watch_only", "reason": "matrix_timeout_canary_disabled"}
+        detail = recovery_tradable_fresh_detail(payload, now_ts=now_ts)
+        if not detail.get("pass"):
+            return {"pass": False, "status": "watch_only", "reason": f"matrix_timeout_reclaim_{detail.get('reason')}", "detail": detail}
+        return {"pass": True, "status": "queued", "reason": "matrix_timeout_final_quote_tiny_probe", "detail": detail}
     if branch == "source_resonance_gmgn_fast" and not FAST_ENTRY_SOURCE_GMGN_ONLY_DIRECT_ENABLED:
         return {
             "pass": False,
@@ -614,11 +796,7 @@ def direct_fill_policy(row, *, now_ts=None):
                 "reason": "ttl_rescue_tradable_signal_stale_watch_only",
             }
     if (
-        branch in {
-            "not_ath_prebuy_kline_unknown_data_blocked",
-            "not_ath_prebuy_kline_block",
-            "not_ath_prebuy_kline_retry_expired",
-        }
+        branch in KLINE_RESCUE_BRANCHES
         or (
             "kline" in source_type
             and "hard_gate" not in source_type
@@ -875,6 +1053,12 @@ def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_
     if quote_anchored_reclaim and detail.get("pass") and detail["signal_age_sec"] > FAST_ENTRY_HARD_STALE_SEC:
         detail["reason"] = "fast_lane_reclaim_quote_anchored_stale_signal"
         detail["position_size_sol"] = FAST_ENTRY_DEGRADED_SIZE_SOL
+    if detail.get("pass") and branch in DEGRADED_CANARY_BRANCHES:
+        detail["position_size_sol"] = min(
+            float(detail.get("position_size_sol") or FAST_ENTRY_SIZE_SOL),
+            FAST_ENTRY_DEGRADED_SIZE_SOL,
+        )
+        detail["canary_branch"] = branch
     return detail
 
 
@@ -1354,7 +1538,29 @@ def source_resonance_scan(paper_db_path, stop_event):
                         "gmgn_volume_confirmed": row["gmgn_volume_confirmed"],
                         "gmgn_momentum_rounds": row["gmgn_momentum_rounds"],
                         "source_updated_at": row["updated_at"],
+                        "market_session": market_session_for_ts(original_receive_ts or detected_ts),
                     }
+                    if branch == "source_resonance_gmgn_fast":
+                        canary = source_gmgn_momentum_canary_detail(payload, now_ts=detected_ts)
+                        payload["source_gmgn_momentum_canary"] = canary
+                        if canary.get("pass"):
+                            branch = "source_gmgn_momentum_canary"
+                            priority = 16
+                    elif branch == "source_resonance_quote_clean_fast":
+                        original_age_sec = payload_ts_age_sec(
+                            payload,
+                            ("original_signal_ts", "original_receive_ts"),
+                            now_ts=detected_ts,
+                        )
+                        if (
+                            original_age_sec is not None
+                            and original_age_sec > FAST_ENTRY_SOURCE_QUOTE_CLEAN_MAX_ORIGINAL_AGE_SEC
+                        ):
+                            refresh = source_quote_clean_refresh_detail(payload, now_ts=detected_ts)
+                            payload["source_quote_clean_refresh"] = refresh
+                            if refresh.get("pass"):
+                                branch = "source_quote_clean_refresh_tiny_probe"
+                                priority = 14
                     policy_probe = {
                         "entry_branch": branch,
                         "source_type": "source_resonance_fast",
@@ -1422,14 +1628,17 @@ def missed_rescue_scan(paper_db_path, stop_event):
             db = connect_db(paper_db_path)
             init_fast_lane_schema(db)
             if table_exists(db, "paper_missed_signal_attribution"):
+                cols = table_columns(db, "paper_missed_signal_attribution")
                 rows = db.execute(
-                    """
+                    f"""
                     SELECT id, token_ca, symbol, signal_ts, signal_id, route, component,
                            reject_reason, baseline_price, baseline_ts,
-                           first_tradable_ts, tradable_missed, executable_peak_pnl
+                           {optional_col(cols, 'first_tradable_ts')},
+                           {optional_col(cols, 'tradable_missed', '0')},
+                           {optional_col(cols, 'executable_peak_pnl', '0')}
                     FROM paper_missed_signal_attribution
                     WHERE id > ?
-                      AND COALESCE(tradable_missed, 0) = 1
+                      AND COALESCE({ 'tradable_missed' if 'tradable_missed' in cols else '0' }, 0) = 1
                       AND (
                         reject_reason IN (
                           'tracking_ttl_expired',
@@ -1437,9 +1646,20 @@ def missed_rescue_scan(paper_db_path, stop_event):
                           'not_ath_prebuy_kline_block',
                           'entry_edge_spread_too_high',
                           'missing_trigger_or_quote',
-                          'entry_edge_probe_missing_trigger_or_quote'
+                          'entry_edge_probe_missing_trigger_or_quote',
+                          'weak_buying_pressure',
+                          'no_kline_low_volume',
+                          'negative_trend',
+                          'chasing_top',
+                          'scout_quality_buy_pressure_weak',
+                          'scout_quality_volume_low',
+                          'scout_quality_tx_low',
+                          'scout_quality_negative_trend',
+                          'matrices not yet aligned'
                         )
                         OR reject_reason LIKE 'lotto_stale_%'
+                        OR reject_reason LIKE 'timeout (%'
+                        OR reject_reason LIKE 'price_collapse%'
                       )
                     ORDER BY id ASC
                     LIMIT ?
@@ -1451,16 +1671,28 @@ def missed_rescue_scan(paper_db_path, stop_event):
                     reason = str(row["reject_reason"] or "missed_rescue")
                     rescue_created_ts = int(time.time())
                     original_signal_ts = row["signal_ts"] or row["baseline_ts"] or row["first_tradable_ts"] or rescue_created_ts
+                    reason_l = reason.lower()
                     if reason.startswith("tracking_ttl"):
-                        source_type = "ttl_rescue_fast"
-                    elif "kline" in reason:
-                        source_type = "kline_retry_reclaim_fast"
+                        source_type = "ttl_final_reclaim_fast"
+                        branch = "ttl_final_reclaim_quote_clean"
+                    elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
+                        source_type = "kline_recovery_fast"
+                        branch = "kline_recovery_quote_clean_tiny_probe"
                     elif "spread" in reason:
                         source_type = "spread_recovery_fast"
+                        branch = reason
                     elif "quote" in reason:
                         source_type = "missing_quote_recovery_fast"
+                        branch = reason
+                    elif reason in SMART_QUALITY_RECHECK_REASONS:
+                        source_type = "smart_quality_reclaim_fast"
+                        branch = "smart_quality_reclaim_tiny_probe"
+                    elif reason in MATRIX_TIMEOUT_RECHECK_REASONS or reason_l.startswith("timeout (") or reason_l.startswith("price_collapse"):
+                        source_type = "matrix_timeout_reclaim_fast"
+                        branch = "matrix_timeout_final_quote_tiny_probe"
                     else:
                         source_type = "stale_refresh_fast"
+                        branch = reason
                     payload = {
                         "missed_attribution_id": row["id"],
                         "signal_id": row["signal_id"],
@@ -1468,13 +1700,16 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         "original_receive_ts": original_signal_ts,
                         "first_tradable_ts": row["first_tradable_ts"],
                         "rescue_created_ts": rescue_created_ts,
+                        "recovery_created_ts": rescue_created_ts,
+                        "tradable_missed": row["tradable_missed"],
+                        "recovery_quote_clean": bool(row["tradable_missed"]),
                         "route": row["route"],
                         "component": row["component"],
                         "reject_reason": reason,
                         "executable_peak_pnl": row["executable_peak_pnl"],
                     }
                     policy_probe = {
-                        "entry_branch": reason,
+                        "entry_branch": branch,
                         "source_type": source_type,
                         "payload_json": json.dumps(payload),
                     }
@@ -1489,7 +1724,7 @@ def missed_rescue_scan(paper_db_path, stop_event):
                             receive_ts=original_signal_ts,
                             recorded_ts=row["baseline_ts"],
                             entry_mode_hint="pre_pass_resonance_tiny_probe",
-                            entry_branch=reason,
+                            entry_branch=branch,
                             trigger_price=row["baseline_price"],
                             priority=35,
                             payload=payload,
@@ -1508,7 +1743,7 @@ def missed_rescue_scan(paper_db_path, stop_event):
                         receive_ts=original_signal_ts,
                         recorded_ts=row["baseline_ts"],
                         entry_mode_hint="pre_pass_resonance_tiny_probe",
-                        entry_branch=reason,
+                        entry_branch=branch,
                         trigger_price=row["baseline_price"],
                         priority=35,
                         payload=payload,
