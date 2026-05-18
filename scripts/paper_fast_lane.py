@@ -144,6 +144,42 @@ def optional_col(cols, name, default="NULL"):
     return name if name in cols else f"{default} AS {name}"
 
 
+def add_column_if_missing(db, table, column, definition):
+    if column not in table_columns(db, table):
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def market_session_for_ts(value):
+    ts = normalize_ts_sec(value)
+    try:
+        hour = dt.datetime.fromtimestamp(int(ts), dt.timezone.utc).hour
+    except (TypeError, ValueError, OSError, OverflowError):
+        hour = dt.datetime.now(dt.timezone.utc).hour
+    if 0 <= hour < 8:
+        return "asia"
+    if 8 <= hour < 14:
+        return "europe"
+    if 14 <= hour < 22:
+        return "us"
+    return "quiet"
+
+
+def status_history_append(raw, *, status, error=None, now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    try:
+        history = json.loads(raw or "[]")
+        if not isinstance(history, list):
+            history = []
+    except (TypeError, json.JSONDecodeError):
+        history = []
+    history.append({
+        "ts": now_ts,
+        "status": status,
+        "error": error,
+    })
+    return json.dumps(history[-20:], ensure_ascii=False)
+
+
 def init_fast_lane_schema(db):
     with SQLITE_WRITE_LOCK:
         db.execute(
@@ -177,9 +213,15 @@ def init_fast_lane_schema(db):
             )
             """
         )
+        add_column_if_missing(db, "paper_fast_entry_queue", "first_error", "TEXT")
+        add_column_if_missing(db, "paper_fast_entry_queue", "first_error_at", "REAL")
+        add_column_if_missing(db, "paper_fast_entry_queue", "status_history_json", "TEXT")
+        add_column_if_missing(db, "paper_fast_entry_queue", "market_session", "TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_status_priority ON paper_fast_entry_queue(status, priority, created_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_token_status ON paper_fast_entry_queue(token_ca, status)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_queue_key ON paper_fast_entry_queue(queue_key)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_first_error ON paper_fast_entry_queue(first_error)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_market_session ON paper_fast_entry_queue(market_session)")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_entry_locks (
@@ -245,7 +287,7 @@ def active_queue_depth(db):
 def existing_recent_queue_row(db, token_ca, now_ts):
     return db.execute(
         """
-        SELECT id, priority, status, entry_branch
+        SELECT id, priority, status, entry_branch, status_history_json, first_error, first_error_at
         FROM paper_fast_entry_queue
         WHERE token_ca = ?
           AND updated_at >= ?
@@ -282,6 +324,7 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
         return False
     branch = entry_branch or source_type
     key = queue_key(source_type, token_ca, signal_ts, branch)
+    session = market_session_for_ts(receive_ts or signal_ts or now_ts)
     try:
         with SQLITE_WRITE_LOCK:
             if active_queue_depth(db) >= FAST_ENTRY_MAX_QUEUE_DEPTH and int(priority) > FAST_ENTRY_PRESSURE_PRIORITY_CUTOFF:
@@ -289,6 +332,13 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
             existing = existing_recent_queue_row(db, token_ca, now_ts)
             if existing is not None:
                 if int(priority) < int(existing["priority"] or 999):
+                    new_status = "queued" if existing["status"] in ("watch_only", "counterfactual_only") else existing["status"]
+                    history = status_history_append(
+                        existing["status_history_json"],
+                        status=new_status,
+                        error=None,
+                        now_ts=now_ts,
+                    )
                     db.execute(
                         """
                         UPDATE paper_fast_entry_queue
@@ -298,6 +348,8 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                             payload_json = ?,
                             status = CASE WHEN status IN ('watch_only', 'counterfactual_only') THEN 'queued' ELSE status END,
                             last_error = CASE WHEN status IN ('watch_only', 'counterfactual_only') THEN NULL ELSE last_error END,
+                            status_history_json = ?,
+                            market_session = COALESCE(market_session, ?),
                             updated_at = ?
                         WHERE id = ?
                         """,
@@ -309,6 +361,8 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                             hard_gate_status,
                             source_resonance_cohort,
                             json.dumps(payload or {}, ensure_ascii=False),
+                            history,
+                            session,
                             now_ts,
                             existing["id"],
                         ),
@@ -322,8 +376,8 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                     token_ca, symbol, source_type, entry_mode_hint, entry_branch,
                     hard_gate_status, source_resonance_cohort, trigger_price, trigger_mc,
                     priority, status, decision_deadline_ts, quote_deadline_ts, queue_key,
-                    payload_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+                    payload_json, status_history_json, market_session, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now_ts,
@@ -344,6 +398,8 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                     now_ts + FAST_ENTRY_QUOTE_TIMEOUT_SEC,
                     key,
                     json.dumps(payload or {}, ensure_ascii=False),
+                    status_history_append(None, status="queued", now_ts=now_ts),
+                    session,
                     now_ts,
                 ),
             )
@@ -369,6 +425,7 @@ def record_fast_lane_observation(db, *, source_type, token_ca, symbol=None, sign
     receive_ts = int(normalize_ts_sec(receive_ts)) if receive_ts else signal_ts
     branch = entry_branch or source_type
     key = queue_key(source_type, token_ca, signal_ts, branch)
+    session = market_session_for_ts(receive_ts or signal_ts or now_ts)
     payload = {
         **(payload or {}),
         "direct_fill_status": status,
@@ -383,8 +440,9 @@ def record_fast_lane_observation(db, *, source_type, token_ca, symbol=None, sign
                     token_ca, symbol, source_type, entry_mode_hint, entry_branch,
                     hard_gate_status, source_resonance_cohort, trigger_price, trigger_mc,
                     priority, status, decision_deadline_ts, quote_deadline_ts, queue_key,
-                    payload_json, last_error, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_json, last_error, first_error, first_error_at,
+                    status_history_json, market_session, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now_ts,
@@ -407,18 +465,31 @@ def record_fast_lane_observation(db, *, source_type, token_ca, symbol=None, sign
                     key,
                     json.dumps(payload, ensure_ascii=False),
                     reason,
+                    reason,
+                    now_ts if reason else None,
+                    status_history_append(None, status=status, error=reason, now_ts=now_ts),
+                    session,
                     now_ts,
                 ),
             )
             inserted = db.execute("SELECT changes() AS c").fetchone()["c"] > 0
             if not inserted:
+                row = db.execute(
+                    "SELECT first_error, first_error_at, status_history_json FROM paper_fast_entry_queue WHERE queue_key = ?",
+                    (key,),
+                ).fetchone()
+                first_error = (row["first_error"] if row else None) or reason
+                first_error_at = (row["first_error_at"] if row else None) or (now_ts if reason else None)
+                history = status_history_append(row["status_history_json"] if row else None, status=status, error=reason, now_ts=now_ts)
                 db.execute(
                     """
                     UPDATE paper_fast_entry_queue
-                    SET status = ?, last_error = ?, payload_json = ?, updated_at = ?
+                    SET status = ?, last_error = ?, first_error = ?, first_error_at = ?,
+                        payload_json = ?, status_history_json = ?, market_session = COALESCE(market_session, ?),
+                        updated_at = ?
                     WHERE queue_key = ? AND status NOT IN ('entered')
                     """,
-                    (status, reason, json.dumps(payload, ensure_ascii=False), now_ts, key),
+                    (status, reason, first_error, first_error_at, json.dumps(payload, ensure_ascii=False), history, session, now_ts, key),
                 )
             db.commit()
         return inserted
@@ -615,11 +686,17 @@ def claim_queue_item(db, owner):
         db.execute(
             """
             UPDATE paper_fast_entry_queue
-            SET status = 'expired', last_error = 'fast_lane_queue_age_expired', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            SET status = 'expired',
+                last_error = 'fast_lane_queue_age_expired',
+                first_error = COALESCE(first_error, 'fast_lane_queue_age_expired'),
+                first_error_at = COALESCE(first_error_at, ?),
+                claimed_by = NULL,
+                claimed_at = NULL,
+                updated_at = ?
             WHERE status IN ('queued', 'claimed')
               AND (? - created_at) > ?
             """,
-            (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+            (now_ts, now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
         )
         db.execute(
             """
@@ -658,13 +735,22 @@ def claim_queue_item(db, owner):
 
 def mark_queue(db, row_id, status, error=None):
     with SQLITE_WRITE_LOCK:
+        now_ts = time.time()
+        row = db.execute(
+            "SELECT first_error, first_error_at, status_history_json FROM paper_fast_entry_queue WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+        first_error = (row["first_error"] if row else None) or error
+        first_error_at = (row["first_error_at"] if row else None) or (now_ts if error else None)
+        history = status_history_append(row["status_history_json"] if row else None, status=status, error=error, now_ts=now_ts)
         db.execute(
             """
             UPDATE paper_fast_entry_queue
-            SET status = ?, last_error = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            SET status = ?, last_error = ?, first_error = ?, first_error_at = ?,
+                status_history_json = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ?
             WHERE id = ?
             """,
-            (status, error, time.time(), row_id),
+            (status, error, first_error, first_error_at, history, now_ts, row_id),
         )
         db.commit()
 
@@ -675,20 +761,30 @@ def refresh_retry_watch(db, *, now_ts=None):
         db.execute(
             """
             UPDATE paper_fast_entry_queue
-            SET status = 'expired', last_error = 'fast_lane_queue_age_expired', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+            SET status = 'expired',
+                last_error = 'fast_lane_queue_age_expired',
+                first_error = COALESCE(first_error, 'fast_lane_queue_age_expired'),
+                first_error_at = COALESCE(first_error_at, ?),
+                claimed_by = NULL,
+                claimed_at = NULL,
+                updated_at = ?
             WHERE status IN ('queued', 'claimed')
               AND (? - created_at) > ?
             """,
-            (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+            (now_ts, now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
         )
         db.execute(
             """
             UPDATE paper_fast_entry_queue
-            SET status = 'expired', last_error = 'fast_lane_retry_watch_expired', updated_at = ?
+            SET status = 'expired',
+                last_error = 'fast_lane_retry_watch_expired',
+                first_error = COALESCE(first_error, last_error, 'fast_lane_retry_watch_expired'),
+                first_error_at = COALESCE(first_error_at, ?),
+                updated_at = ?
             WHERE status = 'retry_watch'
               AND (? - created_at) > ?
             """,
-            (now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
+            (now_ts, now_ts, now_ts, FAST_ENTRY_MAX_QUEUE_AGE_SEC),
         )
         db.execute(
             """

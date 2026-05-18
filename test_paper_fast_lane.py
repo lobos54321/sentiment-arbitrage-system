@@ -233,6 +233,63 @@ def test_retry_watch_requeues_until_queue_age_expires(tmp_path):
     assert status == "queued"
 
 
+def test_retry_watch_expiry_preserves_first_failure_reason(tmp_path, monkeypatch):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = time.time()
+    monkeypatch.setattr(fast, "FAST_ENTRY_MAX_QUEUE_AGE_SEC", 20)
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenReason",
+        symbol="RSN",
+        signal_ts=int(now),
+        receive_ts=int(now),
+        entry_branch="hard_gate_fast_clean",
+        now_ts=now,
+    )
+    row = fast.claim_queue_item(db, "worker-1")
+    fast.mark_queue(db, row["id"], "retry_watch", "entry_quote_failed_429")
+    db.execute(
+        "UPDATE paper_fast_entry_queue SET created_at = ?, updated_at = ? WHERE id = ?",
+        (now - 25, now - 25, row["id"]),
+    )
+    db.commit()
+
+    fast.refresh_retry_watch(db, now_ts=now)
+    final = db.execute(
+        "SELECT status, last_error, first_error, status_history_json FROM paper_fast_entry_queue WHERE id = ?",
+        (row["id"],),
+    ).fetchone()
+
+    assert final["status"] == "expired"
+    assert final["last_error"] == "fast_lane_retry_watch_expired"
+    assert final["first_error"] == "entry_quote_failed_429"
+    history = json.loads(final["status_history_json"])
+    assert any(event["status"] == "retry_watch" and event["error"] == "entry_quote_failed_429" for event in history)
+
+
+def test_fast_queue_records_market_session(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="hard_gate_fast",
+        token_ca="TokenSession",
+        symbol="SES",
+        signal_ts=now,
+        receive_ts=now,
+        entry_branch="hard_gate_fast_clean",
+    )
+
+    row = db.execute("SELECT market_session FROM paper_fast_entry_queue").fetchone()
+    assert row["market_session"] in {"asia", "europe", "us", "quiet"}
+
+
 def test_gmgn_only_source_resonance_is_watch_only_by_default():
     detail = fast.direct_fill_policy({
         "source_type": "source_resonance_fast",

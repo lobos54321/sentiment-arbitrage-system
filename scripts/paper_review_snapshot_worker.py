@@ -278,6 +278,8 @@ def fast_lane_summary(db, since_ts, limit):
     updated_expr = "updated_at" if "updated_at" in cols else created_expr
     status_expr = "status" if "status" in cols else "'unknown'"
     branch_expr = "entry_branch" if "entry_branch" in cols else "source_type" if "source_type" in cols else "NULL"
+    first_error_expr = coalesce_expr(cols, ["first_error", "last_error"], "'none'")
+    session_expr = "market_session" if "market_session" in cols else "'unknown'"
     params = {"since": since_ts, "limit": limit}
     status = rows_as_dicts(db.execute(
         f"""
@@ -304,7 +306,41 @@ def fast_lane_summary(db, since_ts, limit):
         """,
         params,
     ).fetchall())
-    return {"available": True, "queue_status": status, "branch_summary": branches}
+    reasons = rows_as_dicts(db.execute(
+        f"""
+        SELECT {status_expr} AS status,
+               {first_error_expr} AS reason,
+               COUNT(*) AS n
+        FROM paper_fast_entry_queue
+        WHERE COALESCE({created_expr}, {updated_expr}, 0) >= :since
+           OR COALESCE({updated_expr}, {created_expr}, 0) >= :since
+        GROUP BY {status_expr}, {first_error_expr}
+        ORDER BY n DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
+    sessions = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE({session_expr}, 'unknown') AS market_session,
+               {status_expr} AS status,
+               COUNT(*) AS n
+        FROM paper_fast_entry_queue
+        WHERE COALESCE({created_expr}, {updated_expr}, 0) >= :since
+           OR COALESCE({updated_expr}, {created_expr}, 0) >= :since
+        GROUP BY COALESCE({session_expr}, 'unknown'), {status_expr}
+        ORDER BY n DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
+    return {
+        "available": True,
+        "queue_status": status,
+        "branch_summary": branches,
+        "reason_summary": reasons,
+        "session_summary": sessions,
+    }
 
 
 def build_snapshot(db, hours, limit):

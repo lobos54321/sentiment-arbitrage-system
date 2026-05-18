@@ -6608,34 +6608,69 @@ const server = http.createServer(async (req, res) => {
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
+      const queueColumns = tableNames.has('paper_fast_entry_queue')
+        ? getTableColumns(paperDb, 'paper_fast_entry_queue')
+        : new Set();
+      const queueUpdatedExpr = queueColumns.has('updated_at') ? 'updated_at' : 'created_at';
+      const queueBranchExpr = queueColumns.has('entry_branch') ? 'entry_branch' : (queueColumns.has('source_type') ? 'source_type' : "'unknown'");
+      const firstErrorExpr = queueColumns.has('first_error')
+        ? (queueColumns.has('last_error') ? "COALESCE(first_error, last_error, 'none')" : "COALESCE(first_error, 'none')")
+        : (queueColumns.has('last_error') ? "COALESCE(last_error, 'none')" : "'none'");
+      const marketSessionExpr = queueColumns.has('market_session') ? "COALESCE(market_session, 'unknown')" : "'unknown'";
+      const optionalQueueSelect = (name, fallback = 'NULL') => queueColumns.has(name) ? name : `${fallback} AS ${name}`;
       const queueStatus = tableNames.has('paper_fast_entry_queue')
         ? paperDb.prepare(`
-            SELECT status, COUNT(*) AS n, MAX(updated_at) AS latest_updated_at
+            SELECT status, COUNT(*) AS n, MAX(${queueUpdatedExpr}) AS latest_updated_at
             FROM paper_fast_entry_queue
-            WHERE created_at >= @sinceTs
+            WHERE created_at >= @sinceTs OR ${queueUpdatedExpr} >= @sinceTs
             GROUP BY status
             ORDER BY n DESC
           `).all({ sinceTs })
         : [];
       const branchSummary = tableNames.has('paper_fast_entry_queue')
         ? paperDb.prepare(`
-            SELECT entry_branch, status, COUNT(*) AS n
+            SELECT COALESCE(${queueBranchExpr}, 'unknown') AS entry_branch, status, COUNT(*) AS n
             FROM paper_fast_entry_queue
-            WHERE created_at >= @sinceTs
-            GROUP BY entry_branch, status
+            WHERE created_at >= @sinceTs OR ${queueUpdatedExpr} >= @sinceTs
+            GROUP BY COALESCE(${queueBranchExpr}, 'unknown'), status
+            ORDER BY n DESC
+            LIMIT 50
+          `).all({ sinceTs })
+        : [];
+      const reasonSummary = tableNames.has('paper_fast_entry_queue')
+        ? paperDb.prepare(`
+            SELECT status, ${firstErrorExpr} AS reason, COUNT(*) AS n
+            FROM paper_fast_entry_queue
+            WHERE created_at >= @sinceTs OR ${queueUpdatedExpr} >= @sinceTs
+            GROUP BY status, ${firstErrorExpr}
+            ORDER BY n DESC
+            LIMIT 50
+          `).all({ sinceTs })
+        : [];
+      const sessionSummary = tableNames.has('paper_fast_entry_queue')
+        ? paperDb.prepare(`
+            SELECT ${marketSessionExpr} AS market_session, status, COUNT(*) AS n
+            FROM paper_fast_entry_queue
+            WHERE created_at >= @sinceTs OR ${queueUpdatedExpr} >= @sinceTs
+            GROUP BY ${marketSessionExpr}, status
             ORDER BY n DESC
             LIMIT 50
           `).all({ sinceTs })
         : [];
       const recentQueue = tableNames.has('paper_fast_entry_queue')
         ? paperDb.prepare(`
-            SELECT id, created_at, updated_at, status, last_error,
+            SELECT id, created_at, ${optionalQueueSelect('updated_at', 'created_at')}, status,
+                   ${optionalQueueSelect('last_error')},
+                   ${optionalQueueSelect('first_error')},
+                   ${optionalQueueSelect('first_error_at')},
+                   ${optionalQueueSelect('market_session', "'unknown'")},
+                   ${optionalQueueSelect('status_history_json')},
                    token_ca, symbol, source_type, entry_mode_hint, entry_branch,
                    source_signal_ts, signal_receive_ts, signal_recorded_ts,
                    priority, claimed_by, claimed_at
             FROM paper_fast_entry_queue
-            WHERE created_at >= @sinceTs
-            ORDER BY updated_at DESC, id DESC
+            WHERE created_at >= @sinceTs OR ${queueUpdatedExpr} >= @sinceTs
+            ORDER BY ${queueUpdatedExpr} DESC, id DESC
             LIMIT 40
           `).all({ sinceTs })
         : [];
@@ -6723,6 +6758,8 @@ const server = http.createServer(async (req, res) => {
         window_hours: hours,
         queue_status: queueStatus,
         branch_summary: branchSummary,
+        reason_summary: reasonSummary,
+        session_summary: sessionSummary,
         fast_trades: fastTrades,
         recent_queue: recentQueue,
         recent_fast_trades: recentFastTrades,

@@ -34,6 +34,17 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
           tradable_missed INTEGER,
           would_stop_before_peak INTEGER
         );
+        CREATE TABLE paper_fast_entry_queue (
+          id INTEGER PRIMARY KEY,
+          created_at REAL,
+          updated_at REAL,
+          status TEXT,
+          source_type TEXT,
+          entry_branch TEXT,
+          last_error TEXT,
+          first_error TEXT,
+          market_session TEXT
+        );
         """
     )
     now_ts = int(time.time())
@@ -55,6 +66,15 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
         """,
         (now_ts - 60,),
     )
+    db.execute(
+        """
+        INSERT INTO paper_fast_entry_queue
+          (created_at, updated_at, status, source_type, entry_branch, last_error, first_error, market_session)
+        VALUES
+          (?, ?, 'expired', 'hard_gate_fast', 'hard_gate_fast_clean', 'fast_lane_retry_watch_expired', 'entry_quote_failed_429', 'us')
+        """,
+        (now_ts - 60, now_ts - 30),
+    )
     db.commit()
 
     snapshot = build_snapshot(db, 24, 10)
@@ -65,3 +85,6 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
     assert snapshot["trades"]["available"] is True
     assert snapshot["trades"]["totals"]["total"] == 1
     assert snapshot["trades"]["by_mode"][0]["entry_mode"] == "hard_gate_pass_tiny_probe"
+    assert snapshot["fast_lane"]["available"] is True
+    assert snapshot["fast_lane"]["reason_summary"][0]["reason"] == "entry_quote_failed_429"
+    assert snapshot["fast_lane"]["session_summary"][0]["market_session"] == "us"
