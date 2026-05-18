@@ -66,6 +66,12 @@ def since_predicate(cols, names, param=":since", *, include_null=None):
     return "(" + " OR ".join(parts) + ")"
 
 
+def missed_since_predicate(cols, param=":since"):
+    if "created_event_ts" in cols:
+        return f"created_event_ts >= {param}"
+    return since_predicate(cols, ["signal_ts", "baseline_ts"], param)
+
+
 def rows_as_dicts(rows):
     return [dict(row) for row in rows]
 
@@ -159,7 +165,7 @@ def missed_summary(db, since_ts, limit):
     tradable_expr = "COALESCE(tradable_missed, 0)" if "tradable_missed" in cols else "0"
     stop_before_expr = "COALESCE(would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
     params = {"since": since_ts, "limit": limit}
-    recent_where = since_predicate(cols, ["created_event_ts", "signal_ts", "baseline_ts"])
+    recent_where = missed_since_predicate(cols)
     rows = rows_as_dicts(db.execute(
         """
         SELECT

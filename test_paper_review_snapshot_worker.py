@@ -1,7 +1,7 @@
 import sqlite3
 import time
 
-from scripts.paper_review_snapshot_worker import build_snapshot, since_predicate
+from scripts.paper_review_snapshot_worker import build_snapshot, missed_since_predicate, since_predicate
 
 
 def test_since_predicate_keeps_timestamp_columns_index_friendly():
@@ -20,6 +20,12 @@ def test_since_predicate_can_include_open_rows_without_wrapping_timestamps():
 
     assert predicate == "(entry_ts >= :since OR exit_ts >= :since OR exit_ts IS NULL)"
     assert "COALESCE" not in predicate
+
+
+def test_missed_since_predicate_prefers_created_event_index():
+    cols = {"created_event_ts", "signal_ts", "baseline_ts"}
+
+    assert missed_since_predicate(cols) == "created_event_ts >= :since"
 
 
 def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
