@@ -6749,10 +6749,9 @@ const server = http.createServer(async (req, res) => {
         ? getTableColumns(paperDb, 'paper_trades')
         : new Set();
       const trustedFastPeakExpr = trustedTradePeakSqlExpr(tradeColumns);
-      const tradeFilterTsNames = ['exit_ts', 'entry_ts', 'signal_ts'].filter((name) => tradeColumns.has(name));
-      const tradeSessionTsNames = ['entry_ts', 'signal_ts', 'exit_ts'].filter((name) => tradeColumns.has(name));
-      const tradeFilterTsExpr = tradeFilterTsNames.length ? `COALESCE(${[...tradeFilterTsNames, '0'].join(', ')})` : '0';
-      const tradeSessionTsExpr = tradeSessionTsNames.length ? `COALESCE(${[...tradeSessionTsNames, '0'].join(', ')})` : '0';
+      const tradeTsCol = ['entry_ts', 'signal_ts', 'exit_ts'].find((name) => tradeColumns.has(name));
+      const tradeFilterTsExpr = tradeTsCol || '0';
+      const tradeSessionTsExpr = tradeTsCol || '0';
       const tradeBranchExpr = tradeColumns.has('entry_branch') ? "COALESCE(entry_branch, 'unknown')" : "'unknown'";
       const tradeModeExpr = tradeColumns.has('entry_mode') ? "COALESCE(entry_mode, 'unknown')" : "'unknown'";
       const queueUpdatedExpr = queueColumns.has('updated_at') ? 'updated_at' : 'created_at';

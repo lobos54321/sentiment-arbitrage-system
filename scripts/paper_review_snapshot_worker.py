@@ -437,8 +437,9 @@ def branch_ev_summary(db, since_ts, limit):
     cols = columns(db, "paper_trades")
     if "entry_branch" not in cols or "pnl_pct" not in cols:
         return []
-    filter_ts_expr = coalesce_expr(cols, ["exit_ts", "entry_ts", "signal_ts"], "0")
-    session_ts_expr = coalesce_expr(cols, ["entry_ts", "signal_ts", "exit_ts"], "0")
+    ts_col = next((name for name in ("entry_ts", "signal_ts", "exit_ts") if name in cols), None)
+    filter_ts_expr = ts_col or "0"
+    session_ts_expr = ts_col or "0"
     mode_expr = "entry_mode" if "entry_mode" in cols else "'unknown'"
     peak_expr = "peak_pnl" if "peak_pnl" in cols else "0"
     if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:

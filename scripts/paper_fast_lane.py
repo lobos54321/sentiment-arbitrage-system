@@ -811,10 +811,9 @@ def branch_circuit_detail(db, branch, *, market_session=None, now_ts=None):
     cols = table_columns(db, "paper_trades")
     if "entry_branch" not in cols or "pnl_pct" not in cols:
         return {"pass": True, "reason": "branch_circuit_schema_missing"}
-    filter_ts_cols = [name for name in ("exit_ts", "entry_ts", "signal_ts") if name in cols]
-    session_ts_cols = [name for name in ("entry_ts", "signal_ts", "exit_ts") if name in cols]
-    filter_ts_expr = f"COALESCE({', '.join(filter_ts_cols + ['0'])})" if filter_ts_cols else "0"
-    session_ts_expr = f"COALESCE({', '.join(session_ts_cols + ['0'])})" if session_ts_cols else "0"
+    ts_col = next((name for name in ("entry_ts", "signal_ts", "exit_ts") if name in cols), None)
+    filter_ts_expr = ts_col or "0"
+    session_ts_expr = ts_col or "0"
     now_ts = float(now_ts if now_ts is not None else time.time())
     since_ts = now_ts - FAST_ENTRY_BRANCH_CIRCUIT_LOOKBACK_SEC
     session = str(market_session or "").strip().lower()
