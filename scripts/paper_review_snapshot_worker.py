@@ -74,6 +74,24 @@ def one_as_dict(row):
     return dict(row) if row else {}
 
 
+def as_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def as_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def market_session_for_ts(value):
     try:
         hour = dt.datetime.fromtimestamp(int(float(value or 0)), dt.timezone.utc).hour
@@ -142,8 +160,8 @@ def missed_summary(db, since_ts, limit):
     stop_before_expr = "COALESCE(would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
     params = {"since": since_ts, "limit": limit}
     recent_where = since_predicate(cols, ["created_event_ts", "signal_ts", "baseline_ts"])
-    base = """
-      WITH base AS (
+    rows = rows_as_dicts(db.execute(
+        """
         SELECT
           token_ca,
           COALESCE({symbol_expr}, substr(token_ca, 1, 8), '?') AS symbol,
@@ -155,136 +173,169 @@ def missed_summary(db, since_ts, limit):
           {mark_pnl_expr} AS mark_pnl,
           {quote_exec_expr} AS quote_exec,
           {tradable_expr} AS tradable_missed,
-          {stop_before_expr} AS would_stop_before_peak,
-          CASE
-            WHEN {max_pnl_expr} >= 0.25 THEN 'trusted_peak'
-            WHEN {mark_pnl_expr} >= 0.25 THEN 'mark_only_peak_untrusted'
-            ELSE 'sub25_or_unknown'
-          END AS peak_trust_status
+          {stop_before_expr} AS would_stop_before_peak
         FROM paper_missed_signal_attribution
         WHERE {recent_where}
           AND token_ca IS NOT NULL
           AND token_ca != ''
-      ),
-      per_token AS (
-        SELECT
-          token_ca,
-          MAX(symbol) AS symbol,
-          MAX(route) AS route,
-          MAX(component) AS component,
-          MAX(reject_reason) AS reject_reason,
-          MAX(max_pnl) AS max_pnl,
-          MAX(mark_pnl) AS mark_pnl,
-          MAX(quote_exec) AS quote_exec,
-          MAX(tradable_missed) AS tradable_missed,
-          MAX(would_stop_before_peak) AS would_stop_before_peak,
-          CASE
-            WHEN MAX(max_pnl) >= 0.25 THEN 'trusted_peak'
-            WHEN MAX(mark_pnl) >= 0.25 THEN 'mark_only_peak_untrusted'
-            ELSE 'sub25_or_unknown'
-          END AS peak_trust_status
-        FROM base
-        GROUP BY token_ca
-      ),
-      per_blocker_token AS (
-        SELECT
-          route,
-          component,
-          reject_reason,
-          token_ca,
-          MAX(max_pnl) AS max_pnl,
-          MAX(mark_pnl) AS mark_pnl,
-          MAX(quote_exec) AS quote_exec,
-          MAX(tradable_missed) AS tradable_missed,
-          MAX(would_stop_before_peak) AS would_stop_before_peak,
-          CASE
-            WHEN MAX(max_pnl) >= 0.25 THEN 'trusted_peak'
-            WHEN MAX(mark_pnl) >= 0.25 THEN 'mark_only_peak_untrusted'
-            ELSE 'sub25_or_unknown'
-          END AS peak_trust_status
-        FROM base
-        GROUP BY route, component, reject_reason, token_ca
-      )
-    """.format(
-        symbol_expr="symbol" if "symbol" in cols else "NULL",
-        route_expr="route" if "route" in cols else "NULL",
-        component_expr="component" if "component" in cols else "NULL",
-        reject_reason_expr="reject_reason" if "reject_reason" in cols else "NULL",
-        event_ts_expr=event_ts_expr,
-        recent_where=recent_where,
-        max_pnl_expr=max_pnl_expr,
-        mark_pnl_expr=mark_pnl_expr,
-        quote_exec_expr=quote_exec_expr,
-        tradable_expr=tradable_expr,
-        stop_before_expr=stop_before_expr,
-    )
-    overall = one_as_dict(db.execute(
-        base
-        + """
-        SELECT
-          COUNT(*) AS unique_tokens,
-          SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_unique,
-          SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_unique,
-          SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_unique,
-          SUM(CASE WHEN max_pnl < 1.0 AND mark_pnl >= 1.0 THEN 1 ELSE 0 END) AS mark_only_gold_unique,
-          SUM(CASE WHEN max_pnl < 0.5 AND mark_pnl >= 0.5 AND mark_pnl < 1.0 THEN 1 ELSE 0 END) AS mark_only_silver_unique,
-          SUM(CASE WHEN max_pnl < 0.25 AND mark_pnl >= 0.25 AND mark_pnl < 0.5 THEN 1 ELSE 0 END) AS mark_only_bronze_unique,
-          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
-          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
-          SUM(CASE WHEN would_stop_before_peak = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,
-          MAX(max_pnl) AS max_pnl
-        FROM per_token
-        """,
-        params,
-    ).fetchone())
-    by_gate = rows_as_dicts(db.execute(
-        base
-        + """
-        SELECT
-          route,
-          component,
-          reject_reason,
-          COUNT(*) AS unique_tokens,
-          SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_unique,
-          SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_unique,
-          SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_unique,
-          SUM(CASE WHEN max_pnl < 1.0 AND mark_pnl >= 1.0 THEN 1 ELSE 0 END) AS mark_only_gold_unique,
-          SUM(CASE WHEN max_pnl < 0.5 AND mark_pnl >= 0.5 AND mark_pnl < 1.0 THEN 1 ELSE 0 END) AS mark_only_silver_unique,
-          SUM(CASE WHEN max_pnl < 0.25 AND mark_pnl >= 0.25 AND mark_pnl < 0.5 THEN 1 ELSE 0 END) AS mark_only_bronze_unique,
-          SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
-          SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
-          SUM(CASE WHEN would_stop_before_peak = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,
-          MAX(max_pnl) AS max_pnl
-        FROM per_blocker_token
-        GROUP BY route, component, reject_reason
-        ORDER BY gold_unique DESC, silver_unique DESC, bronze_unique DESC,
-                 quote_executable_unique DESC, unique_tokens DESC, max_pnl DESC
-        LIMIT :limit
-        """,
+        """.format(
+            symbol_expr="symbol" if "symbol" in cols else "NULL",
+            route_expr="route" if "route" in cols else "NULL",
+            component_expr="component" if "component" in cols else "NULL",
+            reject_reason_expr="reject_reason" if "reject_reason" in cols else "NULL",
+            event_ts_expr=event_ts_expr,
+            recent_where=recent_where,
+            max_pnl_expr=max_pnl_expr,
+            mark_pnl_expr=mark_pnl_expr,
+            quote_exec_expr=quote_exec_expr,
+            tradable_expr=tradable_expr,
+            stop_before_expr=stop_before_expr,
+        ),
         params,
     ).fetchall())
-    top = rows_as_dicts(db.execute(
-        base
-        + """
-        SELECT
-          symbol,
-          token_ca,
-          route,
-          component,
-          reject_reason,
-          max_pnl,
-          mark_pnl,
-          peak_trust_status,
-          quote_exec,
-          tradable_missed,
-          would_stop_before_peak
-        FROM per_token
-        WHERE max_pnl >= 0.25 OR mark_pnl >= 0.25
-        ORDER BY quote_exec DESC, max_pnl DESC, mark_pnl DESC
-        LIMIT :limit
-        """,
-        params,
-    ).fetchall())
+
+    def peak_trust_status(rec):
+        if rec["max_pnl"] >= 0.25:
+            return "trusted_peak"
+        if rec["mark_pnl"] >= 0.25:
+            return "mark_only_peak_untrusted"
+        return "sub25_or_unknown"
+
+    def blank_summary(extra=None):
+        data = {
+            "unique_tokens": 0,
+            "gold_unique": 0,
+            "silver_unique": 0,
+            "bronze_unique": 0,
+            "mark_only_gold_unique": 0,
+            "mark_only_silver_unique": 0,
+            "mark_only_bronze_unique": 0,
+            "quote_executable_unique": 0,
+            "tradable_unique": 0,
+            "stop_before_peak_unique": 0,
+            "max_pnl": None,
+        }
+        if extra:
+            data.update(extra)
+        return data
+
+    def update_rollup(summary, rec):
+        max_pnl = rec["max_pnl"]
+        mark_pnl = rec["mark_pnl"]
+        summary["unique_tokens"] += 1
+        if max_pnl >= 1.0:
+            summary["gold_unique"] += 1
+        elif max_pnl >= 0.5:
+            summary["silver_unique"] += 1
+        elif max_pnl >= 0.25:
+            summary["bronze_unique"] += 1
+        if max_pnl < 1.0 and mark_pnl >= 1.0:
+            summary["mark_only_gold_unique"] += 1
+        elif max_pnl < 0.5 and 0.5 <= mark_pnl < 1.0:
+            summary["mark_only_silver_unique"] += 1
+        elif max_pnl < 0.25 and 0.25 <= mark_pnl < 0.5:
+            summary["mark_only_bronze_unique"] += 1
+        if rec["quote_exec"]:
+            summary["quote_executable_unique"] += 1
+        if rec["tradable_missed"]:
+            summary["tradable_unique"] += 1
+        if rec["would_stop_before_peak"]:
+            summary["stop_before_peak_unique"] += 1
+        if summary["max_pnl"] is None:
+            summary["max_pnl"] = max_pnl
+        else:
+            summary["max_pnl"] = max(max_pnl, as_float(summary["max_pnl"]))
+
+    def merge_record(target, row):
+        target["symbol"] = max(str(target.get("symbol") or ""), str(row.get("symbol") or "?")) or "?"
+        target["route"] = max(str(target.get("route") or ""), str(row.get("route") or "-")) or "-"
+        target["component"] = max(str(target.get("component") or ""), str(row.get("component") or "-")) or "-"
+        target["reject_reason"] = max(str(target.get("reject_reason") or ""), str(row.get("reject_reason") or "-")) or "-"
+        target["max_pnl"] = max(as_float(target.get("max_pnl")), as_float(row.get("max_pnl")))
+        target["mark_pnl"] = max(as_float(target.get("mark_pnl")), as_float(row.get("mark_pnl")))
+        target["quote_exec"] = max(as_int(target.get("quote_exec")), as_int(row.get("quote_exec")))
+        target["tradable_missed"] = max(as_int(target.get("tradable_missed")), as_int(row.get("tradable_missed")))
+        target["would_stop_before_peak"] = max(
+            as_int(target.get("would_stop_before_peak")),
+            as_int(row.get("would_stop_before_peak")),
+        )
+        return target
+
+    per_token = {}
+    per_blocker_token = {}
+    for row in rows:
+        token = str(row.get("token_ca") or "")
+        rec = per_token.setdefault(token, {"token_ca": token})
+        merge_record(rec, row)
+        blocker_key = (
+            str(row.get("route") or "-"),
+            str(row.get("component") or "-"),
+            str(row.get("reject_reason") or "-"),
+            token,
+        )
+        blocker_rec = per_blocker_token.setdefault(
+            blocker_key,
+            {
+                "route": blocker_key[0],
+                "component": blocker_key[1],
+                "reject_reason": blocker_key[2],
+                "token_ca": token,
+            },
+        )
+        merge_record(blocker_rec, row)
+
+    overall = blank_summary()
+    for rec in per_token.values():
+        update_rollup(overall, rec)
+    if overall["max_pnl"] is None:
+        overall["max_pnl"] = None
+
+    gate_map = {}
+    for rec in per_blocker_token.values():
+        key = (rec["route"], rec["component"], rec["reject_reason"])
+        gate = gate_map.setdefault(
+            key,
+            blank_summary({"route": key[0], "component": key[1], "reject_reason": key[2]}),
+        )
+        update_rollup(gate, rec)
+    by_gate = sorted(
+        gate_map.values(),
+        key=lambda item: (
+            item["gold_unique"],
+            item["silver_unique"],
+            item["bronze_unique"],
+            item["quote_executable_unique"],
+            item["unique_tokens"],
+            as_float(item["max_pnl"]),
+        ),
+        reverse=True,
+    )[:limit]
+    top = []
+    for rec in per_token.values():
+        rec["peak_trust_status"] = peak_trust_status(rec)
+        if rec["max_pnl"] >= 0.25 or rec["mark_pnl"] >= 0.25:
+            top.append({
+                "symbol": rec.get("symbol"),
+                "token_ca": rec.get("token_ca"),
+                "route": rec.get("route"),
+                "component": rec.get("component"),
+                "reject_reason": rec.get("reject_reason"),
+                "max_pnl": rec.get("max_pnl"),
+                "mark_pnl": rec.get("mark_pnl"),
+                "peak_trust_status": rec.get("peak_trust_status"),
+                "quote_exec": rec.get("quote_exec"),
+                "tradable_missed": rec.get("tradable_missed"),
+                "would_stop_before_peak": rec.get("would_stop_before_peak"),
+            })
+    top = sorted(
+        top,
+        key=lambda item: (
+            as_int(item["quote_exec"]),
+            as_float(item["max_pnl"]),
+            as_float(item["mark_pnl"]),
+        ),
+        reverse=True,
+    )[:limit]
     return {
         "available": True,
         "overall": overall,
