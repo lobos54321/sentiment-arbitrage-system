@@ -1,7 +1,25 @@
 import sqlite3
 import time
 
-from scripts.paper_review_snapshot_worker import build_snapshot
+from scripts.paper_review_snapshot_worker import build_snapshot, since_predicate
+
+
+def test_since_predicate_keeps_timestamp_columns_index_friendly():
+    cols = {"created_event_ts", "signal_ts", "baseline_ts"}
+
+    predicate = since_predicate(cols, ["created_event_ts", "signal_ts", "baseline_ts"])
+
+    assert predicate == "(created_event_ts >= :since OR signal_ts >= :since OR baseline_ts >= :since)"
+    assert "COALESCE" not in predicate
+
+
+def test_since_predicate_can_include_open_rows_without_wrapping_timestamps():
+    cols = {"entry_ts", "exit_ts"}
+
+    predicate = since_predicate(cols, ["entry_ts", "signal_ts", "exit_ts"], include_null="exit_ts")
+
+    assert predicate == "(entry_ts >= :since OR exit_ts >= :since OR exit_ts IS NULL)"
+    assert "COALESCE" not in predicate
 
 
 def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
@@ -79,6 +97,7 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
 
     snapshot = build_snapshot(db, 24, 10)
 
+    assert set(snapshot["section_query_ms"]) == {"missed", "trades", "fast_lane"}
     assert snapshot["missed"]["available"] is True
     assert snapshot["missed"]["overall"]["unique_tokens"] == 1
     assert snapshot["missed"]["overall"]["gold_unique"] == 1

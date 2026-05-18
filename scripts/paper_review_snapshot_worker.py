@@ -51,6 +51,21 @@ def coalesce_expr(cols, names, fallback="0"):
     return f"COALESCE({', '.join(available)})"
 
 
+def since_predicate(cols, names, param=":since", *, include_null=None):
+    """Build an index-friendly recent-window predicate.
+
+    Avoid wrapping timestamp columns in COALESCE in WHERE clauses. On the live
+    paper DB those tables are large enough that COALESCE(ts, ...) can turn a
+    small recent-window query into a full scan.
+    """
+    parts = [f"{name} >= {param}" for name in names if name in cols]
+    if include_null and include_null in cols:
+        parts.append(f"{include_null} IS NULL")
+    if not parts:
+        return f"0 >= {param}"
+    return "(" + " OR ".join(parts) + ")"
+
+
 def rows_as_dicts(rows):
     return [dict(row) for row in rows]
 
@@ -126,6 +141,7 @@ def missed_summary(db, since_ts, limit):
     tradable_expr = "COALESCE(tradable_missed, 0)" if "tradable_missed" in cols else "0"
     stop_before_expr = "COALESCE(would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
     params = {"since": since_ts, "limit": limit}
+    recent_where = since_predicate(cols, ["created_event_ts", "signal_ts", "baseline_ts"])
     base = """
       WITH base AS (
         SELECT
@@ -146,7 +162,7 @@ def missed_summary(db, since_ts, limit):
             ELSE 'sub25_or_unknown'
           END AS peak_trust_status
         FROM paper_missed_signal_attribution
-        WHERE {event_ts_expr} >= :since
+        WHERE {recent_where}
           AND token_ca IS NOT NULL
           AND token_ca != ''
       ),
@@ -195,6 +211,7 @@ def missed_summary(db, since_ts, limit):
         component_expr="component" if "component" in cols else "NULL",
         reject_reason_expr="reject_reason" if "reject_reason" in cols else "NULL",
         event_ts_expr=event_ts_expr,
+        recent_where=recent_where,
         max_pnl_expr=max_pnl_expr,
         mark_pnl_expr=mark_pnl_expr,
         quote_exec_expr=quote_exec_expr,
@@ -280,7 +297,6 @@ def trade_summary(db, since_ts, limit):
     if not table_exists(db, "paper_trades"):
         return {"available": False, "reason": "paper_trades_missing"}
     cols = columns(db, "paper_trades")
-    entry_ts_expr = coalesce_expr(cols, ["entry_ts", "signal_ts"], "0")
     exit_ts_expr = "exit_ts" if "exit_ts" in cols else "NULL"
     pnl_expr = "pnl_pct" if "pnl_pct" in cols else "0"
     if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:
@@ -300,13 +316,7 @@ def trade_summary(db, since_ts, limit):
     mode_expr = "entry_mode" if "entry_mode" in cols else "strategy_stage" if "strategy_stage" in cols else "NULL"
     branch_expr = "entry_branch" if "entry_branch" in cols else "NULL"
     params = {"since": since_ts, "limit": limit}
-    where = f"""
-      WHERE (
-        {entry_ts_expr} >= :since
-        OR COALESCE({exit_ts_expr}, 0) >= :since
-        OR {exit_ts_expr} IS NULL
-      )
-    """
+    where = "WHERE " + since_predicate(cols, ["entry_ts", "signal_ts", "exit_ts"], include_null="exit_ts")
     totals = one_as_dict(db.execute(
         f"""
         SELECT
@@ -367,12 +377,12 @@ def fast_lane_summary(db, since_ts, limit):
     first_error_expr = coalesce_expr(cols, ["first_error", "last_error"], "'none'")
     session_expr = "market_session" if "market_session" in cols else "'unknown'"
     params = {"since": since_ts, "limit": limit}
+    recent_where = since_predicate(cols, ["created_at", "updated_at"])
     status = rows_as_dicts(db.execute(
         f"""
         SELECT {status_expr} AS status, COUNT(*) AS n, MAX({updated_expr}) AS latest_updated_at
         FROM paper_fast_entry_queue
-        WHERE COALESCE({created_expr}, {updated_expr}, 0) >= :since
-           OR COALESCE({updated_expr}, {created_expr}, 0) >= :since
+        WHERE {recent_where}
         GROUP BY {status_expr}
         ORDER BY n DESC
         """,
@@ -384,8 +394,7 @@ def fast_lane_summary(db, since_ts, limit):
                {status_expr} AS status,
                COUNT(*) AS n
         FROM paper_fast_entry_queue
-        WHERE COALESCE({created_expr}, {updated_expr}, 0) >= :since
-           OR COALESCE({updated_expr}, {created_expr}, 0) >= :since
+        WHERE {recent_where}
         GROUP BY COALESCE({branch_expr}, 'unknown'), {status_expr}
         ORDER BY n DESC
         LIMIT :limit
@@ -398,8 +407,7 @@ def fast_lane_summary(db, since_ts, limit):
                {first_error_expr} AS reason,
                COUNT(*) AS n
         FROM paper_fast_entry_queue
-        WHERE COALESCE({created_expr}, {updated_expr}, 0) >= :since
-           OR COALESCE({updated_expr}, {created_expr}, 0) >= :since
+        WHERE {recent_where}
         GROUP BY {status_expr}, {first_error_expr}
         ORDER BY n DESC
         LIMIT :limit
@@ -412,8 +420,7 @@ def fast_lane_summary(db, since_ts, limit):
                {status_expr} AS status,
                COUNT(*) AS n
         FROM paper_fast_entry_queue
-        WHERE COALESCE({created_expr}, {updated_expr}, 0) >= :since
-           OR COALESCE({updated_expr}, {created_expr}, 0) >= :since
+        WHERE {recent_where}
         GROUP BY COALESCE({session_expr}, 'unknown'), {status_expr}
         ORDER BY n DESC
         LIMIT :limit
@@ -499,6 +506,14 @@ def build_snapshot(db, hours, limit):
     now_ts = int(time.time())
     since_ts = now_ts - int(hours * 3600)
     generated_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    section_query_ms = {}
+
+    def timed_section(name, fn):
+        started = time.time()
+        result = fn()
+        section_query_ms[name] = int((time.time() - started) * 1000)
+        return result
+
     return {
         "schema_version": 1,
         "snapshot_id": f"paper_live_{hours}h_{now_ts}",
@@ -510,9 +525,10 @@ def build_snapshot(db, hours, limit):
             "since_iso": dt.datetime.fromtimestamp(since_ts, dt.timezone.utc).isoformat().replace("+00:00", "Z"),
             "until_iso": dt.datetime.fromtimestamp(now_ts, dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         },
-        "missed": missed_summary(db, since_ts, limit),
-        "trades": trade_summary(db, since_ts, limit),
-        "fast_lane": fast_lane_summary(db, since_ts, limit),
+        "section_query_ms": section_query_ms,
+        "missed": timed_section("missed", lambda: missed_summary(db, since_ts, limit)),
+        "trades": timed_section("trades", lambda: trade_summary(db, since_ts, limit)),
+        "fast_lane": timed_section("fast_lane", lambda: fast_lane_summary(db, since_ts, limit)),
     }
 
 
