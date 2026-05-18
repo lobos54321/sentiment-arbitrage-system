@@ -171,7 +171,17 @@ LOTTO_PULLBACK_STRONG_MIN_BS = float(os.environ.get('LOTTO_PULLBACK_STRONG_MIN_B
 DISCOVERY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
 DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED = os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_PROBE_ENABLED', 'true').lower() != 'false'
 DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_ENABLED = os.environ.get('DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_ENABLED', 'true').lower() != 'false'
-DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC = int(os.environ.get('DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC', '60'))
+DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC = int(os.environ.get('DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC', '90'))
+DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_CHECKPOINTS_SEC = tuple(
+    sorted(
+        {
+            int(part.strip())
+            for part in os.environ.get('DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_CHECKPOINTS_SEC', '90,60,30').split(',')
+            if part.strip()
+        },
+        reverse=True,
+    )
+)
 DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_QUOTE_EXTEND_SEC', '90'))
 DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC = int(os.environ.get('DISCOVERY_FINAL_RECLAIM_RETRY_EXTEND_SEC', '90'))
 DISCOVERY_FINAL_RECLAIM_MAX_RETRIES = max(0, int(os.environ.get('DISCOVERY_FINAL_RECLAIM_MAX_RETRIES', '6')))
@@ -12031,7 +12041,12 @@ def _ttl_final_reclaim_quote_override_detail(candidate, gate, *, quote_probe=Non
     candidate = candidate or {}
     gate = gate or {}
     quote_probe = quote_probe or candidate.get('final_reclaim_quote_probe') or {}
-    if not candidate.get('final_reclaim_attempted'):
+    attempted = bool(
+        candidate.get('final_reclaim_attempted')
+        or candidate.get('pre_expiry_final_reclaim_attempted')
+        or candidate.get('pre_expiry_final_reclaim_attempted_marks')
+    )
+    if not attempted:
         return {'pass': False, 'reason': 'ttl_final_reclaim_not_attempted'}
     if not (candidate.get('final_reclaim_quote_executable') or quote_probe.get('success')):
         return {'pass': False, 'reason': 'ttl_final_reclaim_quote_not_executable'}
@@ -12068,8 +12083,8 @@ def _pre_expiry_final_reclaim_due(candidate, *, now_ts=None, window_sec=None, mo
     candidate = candidate or {}
     if not DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_ENABLED:
         return {'pass': False, 'reason': 'pre_expiry_final_reclaim_disabled'}
-    if candidate.get('final_reclaim_attempted') or candidate.get('pre_expiry_final_reclaim_attempted'):
-        return {'pass': False, 'reason': 'pre_expiry_final_reclaim_already_attempted'}
+    if candidate.get('final_reclaim_attempted'):
+        return {'pass': False, 'reason': 'pre_expiry_final_reclaim_final_already_attempted'}
     mode = str(mode or candidate.get('mode') or '')
     if mode not in PAPER_TINY_SCOUT_ENTRY_MODES:
         return {'pass': False, 'reason': 'pre_expiry_final_reclaim_mode_not_tiny', 'mode': mode}
@@ -12079,21 +12094,66 @@ def _pre_expiry_final_reclaim_due(candidate, *, now_ts=None, window_sec=None, mo
     except (TypeError, ValueError):
         expires_at = 0.0
     ttl_remaining_sec = expires_at - now_ts
-    window_sec = DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC if window_sec is None else int(window_sec)
+    explicit_window_sec = window_sec is not None
     if ttl_remaining_sec <= 0:
         return {'pass': False, 'reason': 'pre_expiry_final_reclaim_already_expired', 'ttl_remaining_sec': ttl_remaining_sec}
-    if ttl_remaining_sec > window_sec:
+    if explicit_window_sec:
+        checkpoints = (int(window_sec),)
+    else:
+        checkpoints = tuple(
+            sorted(
+                {
+                    int(value)
+                    for value in (DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_CHECKPOINTS_SEC or (DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC,))
+                },
+                reverse=True,
+            )
+        )
+    max_window = max(checkpoints or (DISCOVERY_PRE_EXPIRY_FINAL_RECLAIM_WINDOW_SEC,))
+    if ttl_remaining_sec > max_window:
         return {
             'pass': False,
             'reason': 'pre_expiry_final_reclaim_not_due',
             'ttl_remaining_sec': ttl_remaining_sec,
-            'window_sec': window_sec,
+            'window_sec': max_window,
+            'checkpoints_sec': list(checkpoints),
+        }
+    attempted_raw = candidate.get('pre_expiry_final_reclaim_attempted_marks') or []
+    if isinstance(attempted_raw, str):
+        try:
+            parsed = json.loads(attempted_raw)
+            attempted_raw = parsed if isinstance(parsed, list) else [attempted_raw]
+        except Exception:
+            attempted_raw = [part for part in attempted_raw.split(',') if part]
+    attempted_marks = set()
+    for value in attempted_raw:
+        try:
+            attempted_marks.add(int(float(value)))
+        except (TypeError, ValueError):
+            continue
+    if candidate.get('pre_expiry_final_reclaim_attempted') and not attempted_marks and window_sec is not None:
+        attempted_marks.add(int(window_sec))
+    checkpoint = None
+    for mark in checkpoints:
+        if ttl_remaining_sec <= mark and mark not in attempted_marks:
+            checkpoint = mark
+            break
+    if checkpoint is None:
+        return {
+            'pass': False,
+            'reason': 'pre_expiry_final_reclaim_checkpoint_already_attempted',
+            'ttl_remaining_sec': ttl_remaining_sec,
+            'attempted_marks_sec': sorted(attempted_marks, reverse=True),
+            'checkpoints_sec': list(checkpoints),
         }
     return {
         'pass': True,
         'reason': 'pre_expiry_final_reclaim_due',
         'ttl_remaining_sec': ttl_remaining_sec,
-        'window_sec': window_sec,
+        'window_sec': max_window,
+        'checkpoint_sec': checkpoint,
+        'attempted_marks_sec': sorted(attempted_marks, reverse=True),
+        'checkpoints_sec': list(checkpoints),
         'mode': mode,
     }
 
@@ -12712,7 +12772,16 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
         pending['source_component'] = candidate.get('source_component')
         pending['source_reject_reason'] = candidate.get('source_reject_reason')
         pending['final_reclaim_attempted'] = bool(candidate.get('final_reclaim_attempted'))
-        if pending['final_reclaim_attempted'] or candidate.get('last_wait_reason') == 'tracking_ttl_expired':
+        pending['pre_expiry_final_reclaim_attempted'] = bool(
+            candidate.get('pre_expiry_final_reclaim_attempted')
+            or candidate.get('pre_expiry_final_reclaim_attempted_marks')
+        )
+        pending['pre_expiry_final_reclaim_attempted_marks'] = candidate.get('pre_expiry_final_reclaim_attempted_marks')
+        if (
+            pending['final_reclaim_attempted']
+            or pending['pre_expiry_final_reclaim_attempted']
+            or candidate.get('last_wait_reason') == 'tracking_ttl_expired'
+        ):
             pending['ttl_rescue_used'] = True
         if str(candidate.get('source_reject_reason') or '').lower() in {
             'entry_edge_spread_too_high',
@@ -12794,7 +12863,16 @@ def _build_discovery_pending(w_entry, candidate, lifecycle_id, mode, detail):
         'spread_abort_count': 0,
     }
     pending['final_reclaim_attempted'] = bool(candidate.get('final_reclaim_attempted'))
-    if pending['final_reclaim_attempted'] or candidate.get('last_wait_reason') == 'tracking_ttl_expired':
+    pending['pre_expiry_final_reclaim_attempted'] = bool(
+        candidate.get('pre_expiry_final_reclaim_attempted')
+        or candidate.get('pre_expiry_final_reclaim_attempted_marks')
+    )
+    pending['pre_expiry_final_reclaim_attempted_marks'] = candidate.get('pre_expiry_final_reclaim_attempted_marks')
+    if (
+        pending['final_reclaim_attempted']
+        or pending['pre_expiry_final_reclaim_attempted']
+        or candidate.get('last_wait_reason') == 'tracking_ttl_expired'
+    ):
         pending['ttl_rescue_used'] = True
     if str(candidate.get('source_reject_reason') or '').lower() in {
         'entry_edge_spread_too_high',
@@ -12885,8 +12963,20 @@ def process_discovery_tracking_candidates(
                 candidate['final_reclaim_quote_probe'] = final_reclaim_quote_probe
                 candidate['final_reclaim_quote_executable'] = final_reclaim_quote_executable
             candidate['pre_expiry_final_reclaim_attempted'] = True
-            candidate['final_reclaim_attempted'] = True
             candidate['pre_expiry_final_reclaim_detail'] = pre_expiry_reclaim
+            attempted_marks = list(candidate.get('pre_expiry_final_reclaim_attempted_marks') or [])
+            checkpoint = pre_expiry_reclaim.get('checkpoint_sec')
+            if checkpoint is not None:
+                try:
+                    checkpoint = int(float(checkpoint))
+                    if checkpoint not in attempted_marks:
+                        attempted_marks.append(checkpoint)
+                except (TypeError, ValueError):
+                    pass
+            candidate['pre_expiry_final_reclaim_attempted_marks'] = sorted(
+                attempted_marks,
+                reverse=True,
+            )
             if final_reclaim_quote_executable:
                 candidate['last_check_ts'] = 0.0
                 candidate['ttl_rescue_used'] = True
@@ -12917,6 +13007,8 @@ def process_discovery_tracking_candidates(
                     'attempts': candidate.get('attempts'),
                     'last_wait_reason': candidate.get('last_wait_reason'),
                     'ttl_remaining_sec': pre_expiry_reclaim.get('ttl_remaining_sec'),
+                    'checkpoint_sec': pre_expiry_reclaim.get('checkpoint_sec'),
+                    'attempted_marks_sec': candidate.get('pre_expiry_final_reclaim_attempted_marks'),
                     'pre_expiry_final_reclaim': pre_expiry_reclaim,
                     'final_reclaim_quote_probe': final_reclaim_quote_probe,
                     'final_reclaim_quote_executable': final_reclaim_quote_executable,
@@ -13909,15 +14001,25 @@ def process_discovery_tracking_candidates(
             'source_component': candidate.get('source_component') or 'discovery_tracking',
             'source_reject_reason': candidate.get('source_reject_reason') or candidate.get('last_wait_reason'),
             'final_reclaim_attempted': bool(candidate.get('final_reclaim_attempted')),
+            'pre_expiry_final_reclaim_attempted': bool(
+                candidate.get('pre_expiry_final_reclaim_attempted')
+                or candidate.get('pre_expiry_final_reclaim_attempted_marks')
+            ),
             'ttl_rescue_used': bool(
                 candidate.get('final_reclaim_attempted')
+                or candidate.get('pre_expiry_final_reclaim_attempted')
+                or candidate.get('pre_expiry_final_reclaim_attempted_marks')
                 or candidate.get('final_reclaim_quote_executable')
                 or candidate.get('last_wait_reason') == 'tracking_ttl_expired'
             ),
             'retry_watch_used': bool(candidate.get('retry_watch_used')),
             'intervention_flags': [
                 'discovery_tracking',
-                'ttl_rescue' if candidate.get('final_reclaim_attempted') else '',
+                'ttl_rescue' if (
+                    candidate.get('final_reclaim_attempted')
+                    or candidate.get('pre_expiry_final_reclaim_attempted')
+                    or candidate.get('pre_expiry_final_reclaim_attempted_marks')
+                ) else '',
                 'ttl_quote_executable' if candidate.get('final_reclaim_quote_executable') else '',
                 'retry_watch' if candidate.get('retry_watch_used') else '',
             ],

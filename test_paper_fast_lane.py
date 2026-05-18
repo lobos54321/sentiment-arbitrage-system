@@ -425,33 +425,71 @@ def test_gmgn_momentum_canary_blocks_unconfirmed_or_quiet(monkeypatch):
     assert quiet["reason"] == "source_gmgn_momentum_canary_quiet_session"
 
 
-def test_stale_quote_clean_refresh_canary_requires_fresh_update_and_activity(monkeypatch):
+def test_source_quote_clean_refresh_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED", False)
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_quote_clean_refresh_tiny_probe",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "two_quote_clean_snapshots": 1,
+            "gmgn_volume_confirmed": 1,
+            "original_signal_ts": now - 60,
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is False
+    assert detail["reason"] == "source_quote_clean_refresh_disabled"
+
+
+def test_source_quote_clean_refresh_canary_requires_non_stale_two_snapshot_activity(monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_REQUIRE_TWO_SNAPSHOTS", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_ORIGINAL_AGE_SEC", 120)
     now = int(time.time())
     allowed = fast.direct_fill_policy({
         "source_type": "source_resonance_fast",
         "entry_branch": "source_quote_clean_refresh_tiny_probe",
         "payload_json": json.dumps({
             "quote_clean_seen": 1,
+            "two_quote_clean_snapshots": 1,
             "source_updated_at": "2099-01-01 00:00:00",
             "gmgn_volume_confirmed": 1,
-            "original_signal_ts": now - 900,
+            "original_signal_ts": now - 60,
+            "market_session": "asia",
         }),
     }, now_ts=now)
-    blocked = fast.direct_fill_policy({
+    stale = fast.direct_fill_policy({
         "source_type": "source_resonance_fast",
         "entry_branch": "source_quote_clean_refresh_tiny_probe",
         "payload_json": json.dumps({
             "quote_clean_seen": 1,
+            "two_quote_clean_snapshots": 1,
             "source_updated_at": "2099-01-01 00:00:00",
+            "gmgn_volume_confirmed": 1,
             "original_signal_ts": now - 900,
+            "market_session": "asia",
+        }),
+    }, now_ts=now)
+    missing_activity = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_quote_clean_refresh_tiny_probe",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "two_quote_clean_snapshots": 1,
+            "source_updated_at": "2099-01-01 00:00:00",
+            "original_signal_ts": now - 60,
+            "market_session": "asia",
         }),
     }, now_ts=now)
 
     assert allowed["pass"] is True
     assert allowed["reason"] == "source_quote_clean_refresh_tiny_probe"
-    assert blocked["pass"] is False
-    assert blocked["reason"] == "source_quote_clean_refresh_activity_not_confirmed"
+    assert stale["pass"] is False
+    assert stale["reason"] == "source_quote_clean_refresh_original_signal_stale"
+    assert missing_activity["pass"] is False
+    assert missing_activity["reason"] == "source_quote_clean_refresh_activity_not_confirmed"
 
 
 def test_kline_recovery_canary_requires_fresh_tradable_timestamp(monkeypatch):
@@ -463,17 +501,77 @@ def test_kline_recovery_canary_requires_fresh_tradable_timestamp(monkeypatch):
         "entry_branch": "kline_recovery_quote_clean_tiny_probe",
         "payload_json": json.dumps({"tradable_missed": 1, "first_tradable_ts": now - 121}),
     }, now_ts=now)
-    fresh = fast.direct_fill_policy({
+    missing_strong = fast.direct_fill_policy({
         "source_type": "kline_recovery_fast",
         "entry_branch": "kline_recovery_quote_clean_tiny_probe",
         "payload_json": json.dumps({"tradable_missed": 1, "first_tradable_ts": now - 30}),
+    }, now_ts=now)
+    fresh = fast.direct_fill_policy({
+        "source_type": "kline_recovery_fast",
+        "entry_branch": "kline_recovery_quote_clean_tiny_probe",
+        "payload_json": json.dumps({
+            "tradable_missed": 1,
+            "first_tradable_ts": now - 30,
+            "strong_signal_seen": 1,
+        }),
     }, now_ts=now)
 
     assert stale["pass"] is False
     assert stale["status"] == "counterfactual_only"
     assert stale["reason"] == "kline_recovery_tradable_signal_stale_watch_only"
+    assert missing_strong["pass"] is False
+    assert missing_strong["reason"] == "kline_recovery_strong_signal_missing"
     assert fresh["pass"] is True
     assert fresh["reason"] == "kline_recovery_quote_clean_tiny_probe"
+
+
+def test_branch_circuit_downgrades_negative_ev_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_ENABLED", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED", 20)
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR", -0.03)
+    db = fast.connect_db(tmp_path / "paper.db")
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            entry_branch TEXT,
+            pnl_pct REAL,
+            trusted_peak_pnl REAL,
+            entry_ts INTEGER,
+            exit_ts INTEGER,
+            signal_ts INTEGER
+        )
+        """
+    )
+    # 15:00 UTC is the US bucket. This should not contaminate Asia/Europe.
+    us_ts = 1_779_116_400
+    db.executemany(
+        """
+        INSERT INTO paper_trades(entry_branch, pnl_pct, trusted_peak_pnl, entry_ts, exit_ts, signal_ts)
+        VALUES ('source_quote_clean_refresh_tiny_probe', ?, ?, ?, ?, ?)
+        """,
+        [(-0.06, 0.0, us_ts, us_ts + 60, us_ts) for _ in range(20)],
+    )
+    db.commit()
+
+    us = fast.branch_circuit_detail(
+        db,
+        "source_quote_clean_refresh_tiny_probe",
+        market_session="us",
+        now_ts=us_ts + 120,
+    )
+    asia = fast.branch_circuit_detail(
+        db,
+        "source_quote_clean_refresh_tiny_probe",
+        market_session="asia",
+        now_ts=us_ts + 120,
+    )
+
+    assert us["pass"] is False
+    assert us["reason"] == "branch_circuit_negative_ev"
+    assert us["closed_n"] == 20
+    assert us["avg_pnl"] < -0.03
+    assert asia["pass"] is True
+    assert asia["closed_n"] == 0
 
 
 def test_smart_quality_and_matrix_reclaim_require_fresh_quote_evidence(monkeypatch):

@@ -3916,16 +3916,52 @@ def test_pre_expiry_final_reclaim_is_due_inside_window():
     assert detail["pass"] is True
     assert detail["reason"] == "pre_expiry_final_reclaim_due"
     assert detail["ttl_remaining_sec"] == 60
+    assert detail["checkpoint_sec"] == 60
 
 
-def test_pre_expiry_final_reclaim_skips_before_window_or_after_attempt():
+def test_pre_expiry_final_reclaim_uses_multiple_checkpoints():
+    first = _pre_expiry_final_reclaim_due(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "expires_at": 1_090,
+        },
+        now_ts=1_000,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+    second = _pre_expiry_final_reclaim_due(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "expires_at": 1_060,
+            "pre_expiry_final_reclaim_attempted_marks": [90],
+        },
+        now_ts=1_000,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+    third = _pre_expiry_final_reclaim_due(
+        {
+            "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+            "expires_at": 1_030,
+            "pre_expiry_final_reclaim_attempted_marks": [90, 60],
+        },
+        now_ts=1_000,
+        mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    )
+
+    assert first["pass"] is True
+    assert first["checkpoint_sec"] == 90
+    assert second["pass"] is True
+    assert second["checkpoint_sec"] == 60
+    assert third["pass"] is True
+    assert third["checkpoint_sec"] == 30
+
+
+def test_pre_expiry_final_reclaim_skips_before_window_or_after_final_attempt():
     early = _pre_expiry_final_reclaim_due(
         {
             "mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
-            "expires_at": 1_061,
+            "expires_at": 1_091,
         },
         now_ts=1_000,
-        window_sec=60,
         mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
     )
     attempted = _pre_expiry_final_reclaim_due(
@@ -3942,7 +3978,7 @@ def test_pre_expiry_final_reclaim_skips_before_window_or_after_attempt():
     assert early["pass"] is False
     assert early["reason"] == "pre_expiry_final_reclaim_not_due"
     assert attempted["pass"] is False
-    assert attempted["reason"] == "pre_expiry_final_reclaim_already_attempted"
+    assert attempted["reason"] == "pre_expiry_final_reclaim_final_already_attempted"
 
 
 def test_source_resonance_direct_probe_default_disabled(monkeypatch):

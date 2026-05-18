@@ -589,6 +589,27 @@ function trustedPeakRatio(row = {}) {
   return null;
 }
 
+function marketSessionForTs(value) {
+  const ts = Number(value);
+  if (!Number.isFinite(ts) || ts <= 0) return 'unknown';
+  const hour = new Date(ts * 1000).getUTCHours();
+  if (hour >= 0 && hour < 8) return 'asia';
+  if (hour >= 8 && hour < 14) return 'europe';
+  if (hour >= 14 && hour < 22) return 'us';
+  return 'quiet';
+}
+
+function percentileLinear(values, pct) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  if (sorted.length === 1) return sorted[0];
+  const pos = (sorted.length - 1) * pct;
+  const lo = Math.floor(pos);
+  const hi = Math.min(lo + 1, sorted.length - 1);
+  const frac = pos - lo;
+  return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+}
+
 function getPaperReviewDir() {
   const raw = process.env.PAPER_REVIEW_DIR || join(dirname(getPaperDbPath()), 'review-artifacts');
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
@@ -6728,6 +6749,12 @@ const server = http.createServer(async (req, res) => {
         ? getTableColumns(paperDb, 'paper_trades')
         : new Set();
       const trustedFastPeakExpr = trustedTradePeakSqlExpr(tradeColumns);
+      const tradeFilterTsNames = ['exit_ts', 'entry_ts', 'signal_ts'].filter((name) => tradeColumns.has(name));
+      const tradeSessionTsNames = ['entry_ts', 'signal_ts', 'exit_ts'].filter((name) => tradeColumns.has(name));
+      const tradeFilterTsExpr = tradeFilterTsNames.length ? `COALESCE(${[...tradeFilterTsNames, '0'].join(', ')})` : '0';
+      const tradeSessionTsExpr = tradeSessionTsNames.length ? `COALESCE(${[...tradeSessionTsNames, '0'].join(', ')})` : '0';
+      const tradeBranchExpr = tradeColumns.has('entry_branch') ? "COALESCE(entry_branch, 'unknown')" : "'unknown'";
+      const tradeModeExpr = tradeColumns.has('entry_mode') ? "COALESCE(entry_mode, 'unknown')" : "'unknown'";
       const queueUpdatedExpr = queueColumns.has('updated_at') ? 'updated_at' : 'created_at';
       const queueBranchExpr = queueColumns.has('entry_branch') ? 'entry_branch' : (queueColumns.has('source_type') ? 'source_type' : "'unknown'");
       const firstErrorExpr = queueColumns.has('first_error')
@@ -6831,6 +6858,60 @@ const server = http.createServer(async (req, res) => {
             ORDER BY fills DESC
           `).all({ sinceTs })
         : [];
+      const branchEvRows = tableNames.has('paper_trades') && tradeColumns.has('entry_branch') && tradeColumns.has('pnl_pct')
+        ? paperDb.prepare(`
+            SELECT
+              ${tradeBranchExpr} AS entry_branch,
+              ${tradeModeExpr} AS entry_mode,
+              ${tradeSessionTsExpr} AS session_ts,
+              COALESCE(pnl_pct, 0) AS pnl_pct,
+              ${trustedFastPeakExpr} AS trusted_peak_pnl
+            FROM paper_trades
+            WHERE pnl_pct IS NOT NULL
+              AND ${tradeFilterTsExpr} >= @sinceTs
+          `).all({ sinceTs })
+        : [];
+      const branchEvMap = new Map();
+      for (const row of branchEvRows) {
+        const session = marketSessionForTs(row.session_ts);
+        const key = `${row.entry_branch || 'unknown'}\u0000${row.entry_mode || 'unknown'}\u0000${session}`;
+        if (!branchEvMap.has(key)) {
+          branchEvMap.set(key, {
+            entry_branch: row.entry_branch || 'unknown',
+            entry_mode: row.entry_mode || 'unknown',
+            market_session: session,
+            pnls: [],
+            wins: 0,
+            trusted_dog_capture_n: 0,
+          });
+        }
+        const group = branchEvMap.get(key);
+        const pnl = Number(row.pnl_pct || 0);
+        group.pnls.push(pnl);
+        if (pnl > 0) group.wins += 1;
+        if (Number(row.trusted_peak_pnl || 0) >= 0.25) group.trusted_dog_capture_n += 1;
+      }
+      const branchEvSummary = Array.from(branchEvMap.values()).map((group) => {
+        const closedN = group.pnls.length;
+        const avg = closedN ? group.pnls.reduce((sum, value) => sum + value, 0) / closedN : 0;
+        return {
+          entry_branch: group.entry_branch,
+          entry_mode: group.entry_mode,
+          market_session: group.market_session,
+          closed_n: closedN,
+          wins: group.wins,
+          win_rate_pct: closedN ? roundNumber((group.wins / closedN) * 100, 2) : null,
+          avg_pnl_pct: roundNumber(avg * 100, 2),
+          p10_pnl_pct: closedN ? roundNumber(percentileLinear(group.pnls, 0.10) * 100, 2) : null,
+          p90_pnl_pct: closedN ? roundNumber(percentileLinear(group.pnls, 0.90) * 100, 2) : null,
+          max_loss_pct: closedN ? roundNumber(Math.min(...group.pnls) * 100, 2) : null,
+          trusted_dog_capture_n: group.trusted_dog_capture_n,
+          auto_action: closedN >= 20 && avg < -0.03 ? 'downgrade_to_watch_only' : 'allow_or_observe',
+        };
+      }).sort((a, b) => (
+        Number(b.closed_n || 0) - Number(a.closed_n || 0)
+        || Math.abs(Number(b.avg_pnl_pct || 0)) - Math.abs(Number(a.avg_pnl_pct || 0))
+      )).slice(0, 80);
       const latencyRows = tableNames.has('paper_trades')
         ? paperDb.prepare(`
             SELECT COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms) AS ms
@@ -6877,6 +6958,7 @@ const server = http.createServer(async (req, res) => {
         branch_summary: branchSummary,
         reason_summary: reasonSummary,
         session_summary: sessionSummary,
+        branch_ev_summary: branchEvSummary,
         fast_trades: fastTrades,
         recent_queue: recentQueue,
         recent_fast_trades: recentFastTrades,

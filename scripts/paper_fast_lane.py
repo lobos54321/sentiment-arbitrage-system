@@ -88,8 +88,24 @@ FAST_ENTRY_SOURCE_GMGN_CANARY_QUIET_ENABLED = os.environ.get(
 ).lower() == "true"
 FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED = os.environ.get(
     "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED",
+    "false",
+).lower() != "false"
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_ORIGINAL_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_ORIGINAL_AGE_SEC",
+    "120",
+))
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_UPDATE_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_UPDATE_AGE_SEC",
+    "30",
+))
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_REQUIRE_TWO_SNAPSHOTS = os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_REQUIRE_TWO_SNAPSHOTS",
     "true",
 ).lower() != "false"
+FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_QUIET_ENABLED = os.environ.get(
+    "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_QUIET_ENABLED",
+    "false",
+).lower() == "true"
 FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_KLINE_RESCUE_DIRECT_ENABLED",
     "false",
@@ -113,6 +129,22 @@ FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
 FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC",
     "300",
+))
+FAST_ENTRY_BRANCH_CIRCUIT_ENABLED = os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_BRANCH_CIRCUIT_LOOKBACK_SEC = float(os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_LOOKBACK_SEC",
+    str(24 * 60 * 60),
+))
+FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED = int(os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED",
+    "20",
+))
+FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR = float(os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR",
+    "-0.03",
 ))
 
 FAST_LANE_HARD_REJECT_STATUSES = {
@@ -650,13 +682,49 @@ def source_quote_clean_refresh_detail(payload, *, now_ts=None):
     payload = payload or {}
     if not FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED:
         return {"pass": False, "reason": "source_quote_clean_refresh_disabled"}
+    session = str(payload.get("market_session") or market_session_for_ts(now_ts or time.time()))
+    if session == "quiet" and not FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_QUIET_ENABLED:
+        return {"pass": False, "reason": "source_quote_clean_refresh_quiet_session", "market_session": session}
+    original_age_sec = payload_ts_age_sec(
+        payload,
+        ("original_signal_ts", "original_receive_ts"),
+        now_ts=now_ts,
+    )
+    if original_age_sec is None:
+        return {"pass": False, "reason": "source_quote_clean_refresh_original_signal_missing"}
+    if original_age_sec > FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_ORIGINAL_AGE_SEC:
+        return {
+            "pass": False,
+            "reason": "source_quote_clean_refresh_original_signal_stale",
+            "original_age_sec": original_age_sec,
+            "max_original_age_sec": FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_ORIGINAL_AGE_SEC,
+        }
     if not _payload_bool(payload, "quote_clean_seen"):
         return {"pass": False, "reason": "source_quote_clean_refresh_missing_quote_clean"}
-    if payload.get("source_updated_at") and not updated_at_is_fresh(payload.get("source_updated_at"), now_ts=now_ts):
+    if (
+        FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_REQUIRE_TWO_SNAPSHOTS
+        and not _payload_bool(payload, "two_quote_clean_snapshots")
+    ):
+        return {"pass": False, "reason": "source_quote_clean_refresh_needs_two_quote_snapshots"}
+    if payload.get("source_updated_at") and not updated_at_is_fresh(
+        payload.get("source_updated_at"),
+        now_ts=now_ts,
+        max_age_sec=FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_MAX_UPDATE_AGE_SEC,
+    ):
         return {"pass": False, "reason": "source_quote_clean_refresh_stale_update"}
-    if not source_activity_confirmed(payload):
+    source_activity_fresh = bool(
+        _payload_bool(payload, "activity_confirmed")
+        or _payload_bool(payload, "gmgn_momentum_confirmed")
+        or _payload_bool(payload, "gmgn_volume_confirmed")
+    )
+    if not source_activity_fresh:
         return {"pass": False, "reason": "source_quote_clean_refresh_activity_not_confirmed"}
-    return {"pass": True, "reason": "source_quote_clean_refresh_tiny_probe"}
+    return {
+        "pass": True,
+        "reason": "source_quote_clean_refresh_tiny_probe",
+        "market_session": session,
+        "original_age_sec": original_age_sec,
+    }
 
 
 def updated_at_is_fresh(value, *, now_ts=None, max_age_sec=None):
@@ -705,6 +773,125 @@ def recovery_tradable_fresh_detail(payload, *, now_ts=None, max_age_sec=None):
     }
 
 
+def recovery_strong_signal_confirmed(payload):
+    payload = payload or {}
+    return bool(
+        _payload_bool(payload, "strong_signal_seen")
+        or _payload_bool(payload, "hard_gate_reconfirmed")
+        or _payload_bool(payload, "source_momentum_confirmed")
+        or _payload_bool(payload, "activity_confirmed")
+        or _payload_bool(payload, "gmgn_momentum_confirmed")
+        or _payload_bool(payload, "gmgn_volume_confirmed")
+        or _payload_bool(payload, "two_quote_clean_snapshots")
+        or _payload_int(payload, "resonance_level") >= 3
+    )
+
+
+def kline_recovery_detail(payload, *, now_ts=None):
+    detail = recovery_tradable_fresh_detail(payload, now_ts=now_ts)
+    if not detail.get("pass"):
+        return detail
+    if not recovery_strong_signal_confirmed(payload):
+        return {
+            **detail,
+            "pass": False,
+            "reason": "recovery_strong_signal_missing",
+        }
+    return {
+        **detail,
+        "reason": "kline_recovery_fresh_quote_and_strong_signal",
+    }
+
+
+def branch_circuit_detail(db, branch, *, market_session=None, now_ts=None):
+    if not FAST_ENTRY_BRANCH_CIRCUIT_ENABLED:
+        return {"pass": True, "reason": "branch_circuit_disabled"}
+    if not branch or not table_exists(db, "paper_trades"):
+        return {"pass": True, "reason": "branch_circuit_no_history"}
+    cols = table_columns(db, "paper_trades")
+    if "entry_branch" not in cols or "pnl_pct" not in cols:
+        return {"pass": True, "reason": "branch_circuit_schema_missing"}
+    filter_ts_cols = [name for name in ("exit_ts", "entry_ts", "signal_ts") if name in cols]
+    session_ts_cols = [name for name in ("entry_ts", "signal_ts", "exit_ts") if name in cols]
+    filter_ts_expr = f"COALESCE({', '.join(filter_ts_cols + ['0'])})" if filter_ts_cols else "0"
+    session_ts_expr = f"COALESCE({', '.join(session_ts_cols + ['0'])})" if session_ts_cols else "0"
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    since_ts = now_ts - FAST_ENTRY_BRANCH_CIRCUIT_LOOKBACK_SEC
+    session = str(market_session or "").strip().lower()
+    session_clause = ""
+    params = [branch, since_ts]
+    if session in {"asia", "europe", "us", "quiet"} and session_ts_expr != "0":
+        session_clause = f"""
+          AND CASE
+            WHEN CAST(strftime('%H', datetime({session_ts_expr}, 'unixepoch')) AS INTEGER) BETWEEN 0 AND 7 THEN 'asia'
+            WHEN CAST(strftime('%H', datetime({session_ts_expr}, 'unixepoch')) AS INTEGER) BETWEEN 8 AND 13 THEN 'europe'
+            WHEN CAST(strftime('%H', datetime({session_ts_expr}, 'unixepoch')) AS INTEGER) BETWEEN 14 AND 21 THEN 'us'
+            ELSE 'quiet'
+          END = ?
+        """
+        params.append(session)
+    peak_expr = "COALESCE(peak_pnl, 0)"
+    if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), NULLIF(quote_peak_pnl, 0), 0)"
+    elif "trusted_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), 0)"
+    elif "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(quote_peak_pnl, 0), 0)"
+    rows = db.execute(
+        f"""
+        SELECT COALESCE(pnl_pct, 0) AS pnl_pct,
+               {peak_expr} AS trusted_peak_pnl
+        FROM paper_trades
+        WHERE entry_branch = ?
+          AND pnl_pct IS NOT NULL
+          AND {filter_ts_expr} >= ?
+          {session_clause}
+        ORDER BY {filter_ts_expr} DESC
+        """,
+        tuple(params),
+    ).fetchall()
+    pnls = sorted(float(row["pnl_pct"] or 0.0) for row in rows)
+    closed_n = len(pnls)
+    avg_pnl = (sum(pnls) / closed_n) if closed_n else 0.0
+    wins = sum(1 for pnl in pnls if pnl > 0)
+    dog_capture_n = sum(1 for row in rows if float(row["trusted_peak_pnl"] or 0.0) >= 0.25)
+
+    def percentile(values, pct):
+        if not values:
+            return None
+        if len(values) == 1:
+            return values[0]
+        pos = (len(values) - 1) * pct
+        lo = int(pos)
+        hi = min(lo + 1, len(values) - 1)
+        frac = pos - lo
+        return values[lo] * (1 - frac) + values[hi] * frac
+
+    detail = {
+        "pass": True,
+        "reason": "branch_circuit_pass",
+        "entry_branch": branch,
+        "market_session": session or "all",
+        "closed_n": closed_n,
+        "wins": wins,
+        "win_rate": (wins / closed_n) if closed_n else None,
+        "avg_pnl": avg_pnl,
+        "p10_pnl": percentile(pnls, 0.10),
+        "p90_pnl": percentile(pnls, 0.90),
+        "max_loss": min(pnls) if pnls else None,
+        "trusted_dog_capture_n": dog_capture_n,
+        "lookback_sec": FAST_ENTRY_BRANCH_CIRCUIT_LOOKBACK_SEC,
+        "min_closed": FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED,
+        "avg_pnl_floor": FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR,
+        "auto_action": "allow_or_keep_watch",
+    }
+    if closed_n >= FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED and avg_pnl < FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR:
+        detail["pass"] = False
+        detail["reason"] = "branch_circuit_negative_ev"
+        detail["auto_action"] = "downgrade_to_watch_only"
+    return detail
+
+
 def direct_fill_policy(row, *, now_ts=None):
     branch = str(row_value(row, "entry_branch", "") or "")
     source_type = str(row_value(row, "source_type", "") or "")
@@ -731,7 +918,7 @@ def direct_fill_policy(row, *, now_ts=None):
     if branch == "kline_recovery_quote_clean_tiny_probe":
         if not FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED:
             return {"pass": False, "status": "counterfactual_only", "reason": "kline_recovery_canary_disabled"}
-        detail = recovery_tradable_fresh_detail(payload, now_ts=now_ts)
+        detail = kline_recovery_detail(payload, now_ts=now_ts)
         if not detail.get("pass"):
             reason = detail.get("reason") or "recovery_not_confirmed"
             if reason.startswith("recovery_"):
@@ -1255,6 +1442,36 @@ def process_queue_item(db, row, owner):
     policy = direct_fill_policy(row, now_ts=now_ts)
     if not policy.get("pass"):
         mark_queue(db, row["id"], policy.get("status") or "watch_only", policy.get("reason"))
+        return
+    branch = str(row_value(row, "entry_branch", "") or row_value(row, "source_type", "") or "")
+    circuit = branch_circuit_detail(
+        db,
+        branch,
+        market_session=row_value(row, "market_session"),
+        now_ts=now_ts,
+    )
+    if not circuit.get("pass"):
+        mark_queue(db, row["id"], "watch_only", circuit.get("reason") or "branch_circuit_block")
+        try:
+            token_ca = row["token_ca"]
+            signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
+            ptm.record_decision_event(
+                db,
+                component="paper_fast_lane",
+                event_type="branch_circuit",
+                decision="watch_only",
+                reason=circuit.get("reason") or "branch_circuit_block",
+                token_ca=token_ca,
+                symbol=row["symbol"],
+                lifecycle_id=ptm.build_lifecycle_id(token_ca, signal_ts),
+                signal_ts=signal_ts,
+                route=row["source_type"],
+                data_source="paper_trades_branch_ev",
+                payload=circuit,
+            )
+            db.commit()
+        except Exception:
+            pass
         return
     if now_ts - float(row["created_at"] or now_ts) > FAST_ENTRY_MAX_QUEUE_AGE_SEC:
         mark_queue(db, row["id"], "expired", "fast_lane_queue_age_expired")

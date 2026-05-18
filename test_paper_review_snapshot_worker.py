@@ -141,3 +141,63 @@ def test_review_snapshot_worker_separates_mark_only_missed_peaks(tmp_path):
     assert mark_only["peak_trust_status"] == "mark_only_peak_untrusted"
     trusted = next(row for row in snapshot["missed"]["top_dogs"] if row["token_ca"] == "TRUST")
     assert trusted["peak_trust_status"] == "trusted_peak"
+
+
+def test_review_snapshot_worker_outputs_branch_session_ev(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_trades (
+          id INTEGER PRIMARY KEY,
+          token_ca TEXT,
+          symbol TEXT,
+          signal_ts INTEGER,
+          entry_ts INTEGER,
+          exit_ts INTEGER,
+          entry_mode TEXT,
+          entry_branch TEXT,
+          pnl_pct REAL,
+          trusted_peak_pnl REAL,
+          quote_peak_pnl REAL,
+          peak_pnl REAL,
+          position_size_sol REAL
+        );
+        CREATE TABLE paper_fast_entry_queue (
+          id INTEGER PRIMARY KEY,
+          created_at REAL,
+          updated_at REAL,
+          status TEXT,
+          source_type TEXT,
+          entry_branch TEXT,
+          first_error TEXT,
+          market_session TEXT
+        );
+        """
+    )
+    ts = 1_779_116_400  # 2026-05-18 15:00 UTC, us session
+    db.executemany(
+        """
+        INSERT INTO paper_trades
+          (token_ca, symbol, signal_ts, entry_ts, exit_ts, entry_mode, entry_branch,
+           pnl_pct, trusted_peak_pnl, quote_peak_pnl, peak_pnl, position_size_sol)
+        VALUES
+          (?, 'DOG', ?, ?, ?, 'source_resonance_tiny_probe',
+           'source_quote_clean_refresh_tiny_probe', ?, ?, NULL, 9.9, 0.001)
+        """,
+        [
+            (f"T{i}", ts, ts, ts + 60, -0.06, 0.0)
+            for i in range(20)
+        ],
+    )
+    db.commit()
+
+    snapshot = build_snapshot(db, 24, 10)
+    ev = snapshot["fast_lane"]["branch_ev_summary"][0]
+
+    assert ev["entry_branch"] == "source_quote_clean_refresh_tiny_probe"
+    assert ev["market_session"] == "us"
+    assert ev["closed_n"] == 20
+    assert ev["avg_pnl_pct"] == -6.0
+    assert ev["auto_action"] == "downgrade_to_watch_only"

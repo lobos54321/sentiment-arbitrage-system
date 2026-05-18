@@ -59,6 +59,33 @@ def one_as_dict(row):
     return dict(row) if row else {}
 
 
+def market_session_for_ts(value):
+    try:
+        hour = dt.datetime.fromtimestamp(int(float(value or 0)), dt.timezone.utc).hour
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "unknown"
+    if 0 <= hour < 8:
+        return "asia"
+    if 8 <= hour < 14:
+        return "europe"
+    if 14 <= hour < 22:
+        return "us"
+    return "quiet"
+
+
+def percentile(values, pct):
+    if not values:
+        return None
+    values = sorted(float(v) for v in values)
+    if len(values) == 1:
+        return values[0]
+    pos = (len(values) - 1) * pct
+    lo = int(pos)
+    hi = min(lo + 1, len(values) - 1)
+    frac = pos - lo
+    return values[lo] * (1 - frac) + values[hi] * frac
+
+
 def missed_summary(db, since_ts, limit):
     if not table_exists(db, "paper_missed_signal_attribution"):
         return {"available": False, "reason": "paper_missed_signal_attribution_missing"}
@@ -393,13 +420,78 @@ def fast_lane_summary(db, since_ts, limit):
         """,
         params,
     ).fetchall())
+    branch_ev = branch_ev_summary(db, since_ts, limit)
     return {
         "available": True,
         "queue_status": status,
         "branch_summary": branches,
         "reason_summary": reasons,
         "session_summary": sessions,
+        "branch_ev_summary": branch_ev,
     }
+
+
+def branch_ev_summary(db, since_ts, limit):
+    if not table_exists(db, "paper_trades"):
+        return []
+    cols = columns(db, "paper_trades")
+    if "entry_branch" not in cols or "pnl_pct" not in cols:
+        return []
+    filter_ts_expr = coalesce_expr(cols, ["exit_ts", "entry_ts", "signal_ts"], "0")
+    session_ts_expr = coalesce_expr(cols, ["entry_ts", "signal_ts", "exit_ts"], "0")
+    mode_expr = "entry_mode" if "entry_mode" in cols else "'unknown'"
+    peak_expr = "peak_pnl" if "peak_pnl" in cols else "0"
+    if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), NULLIF(quote_peak_pnl, 0), 0)"
+    elif "trusted_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), 0)"
+    elif "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(quote_peak_pnl, 0), 0)"
+    rows = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE(entry_branch, 'unknown') AS entry_branch,
+               COALESCE({mode_expr}, 'unknown') AS entry_mode,
+               {session_ts_expr} AS session_ts,
+               COALESCE(pnl_pct, 0) AS pnl_pct,
+               {peak_expr} AS trusted_peak_pnl
+        FROM paper_trades
+        WHERE COALESCE(pnl_pct, NULL) IS NOT NULL
+          AND {filter_ts_expr} >= :since
+        """,
+        {"since": since_ts},
+    ).fetchall())
+    groups = {}
+    for row in rows:
+        session = market_session_for_ts(row.get("session_ts"))
+        key = (row.get("entry_branch") or "unknown", row.get("entry_mode") or "unknown", session)
+        group = groups.setdefault(key, {"pnls": [], "wins": 0, "trusted_dogs": 0})
+        pnl = float(row.get("pnl_pct") or 0.0)
+        group["pnls"].append(pnl)
+        if pnl > 0:
+            group["wins"] += 1
+        if float(row.get("trusted_peak_pnl") or 0.0) >= 0.25:
+            group["trusted_dogs"] += 1
+    out = []
+    for (branch, mode, session), group in groups.items():
+        pnls = group["pnls"]
+        closed_n = len(pnls)
+        avg_pnl = sum(pnls) / closed_n if closed_n else 0.0
+        out.append({
+            "entry_branch": branch,
+            "entry_mode": mode,
+            "market_session": session,
+            "closed_n": closed_n,
+            "wins": group["wins"],
+            "win_rate_pct": round((group["wins"] / closed_n) * 100.0, 2) if closed_n else None,
+            "avg_pnl_pct": round(avg_pnl * 100.0, 2),
+            "p10_pnl_pct": round(percentile(pnls, 0.10) * 100.0, 2) if pnls else None,
+            "p90_pnl_pct": round(percentile(pnls, 0.90) * 100.0, 2) if pnls else None,
+            "max_loss_pct": round(min(pnls) * 100.0, 2) if pnls else None,
+            "trusted_dog_capture_n": group["trusted_dogs"],
+            "auto_action": "downgrade_to_watch_only" if closed_n >= 20 and avg_pnl < -0.03 else "allow_or_observe",
+        })
+    out.sort(key=lambda item: (item["closed_n"], abs(item["avg_pnl_pct"] or 0)), reverse=True)
+    return out[:limit]
 
 
 def build_snapshot(db, hours, limit):
