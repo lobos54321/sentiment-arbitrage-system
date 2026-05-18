@@ -88,3 +88,56 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
     assert snapshot["fast_lane"]["available"] is True
     assert snapshot["fast_lane"]["reason_summary"][0]["reason"] == "entry_quote_failed_429"
     assert snapshot["fast_lane"]["session_summary"][0]["market_session"] == "us"
+
+
+def test_review_snapshot_worker_separates_mark_only_missed_peaks(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+          id INTEGER PRIMARY KEY,
+          created_event_ts REAL,
+          token_ca TEXT,
+          symbol TEXT,
+          route TEXT,
+          component TEXT,
+          reject_reason TEXT,
+          executable_peak_pnl REAL,
+          quote_clean_peak_pnl REAL,
+          tradable_peak_pnl REAL,
+          theoretical_peak_pnl REAL,
+          max_pnl_recorded REAL,
+          tradable_missed INTEGER,
+          would_stop_before_peak INTEGER
+        );
+        """
+    )
+    now_ts = int(time.time())
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution
+          (created_event_ts, token_ca, symbol, route, component, reject_reason,
+           executable_peak_pnl, quote_clean_peak_pnl, tradable_peak_pnl,
+           theoretical_peak_pnl, max_pnl_recorded, tradable_missed, would_stop_before_peak)
+        VALUES
+          (?, 'MARK', 'MARKONLY', 'ATH', 'matrix_evaluator', 'mark_spike',
+           NULL, NULL, NULL, 1.40, 1.40, 1, 0),
+          (?, 'TRUST', 'TRUSTED', 'ATH', 'matrix_evaluator', 'trusted_quote',
+           NULL, 0.60, NULL, 0.60, 0.60, 1, 0)
+        """,
+        (now_ts - 60, now_ts - 55),
+    )
+    db.commit()
+
+    snapshot = build_snapshot(db, 24, 10)
+
+    overall = snapshot["missed"]["overall"]
+    assert overall["gold_unique"] == 0
+    assert overall["silver_unique"] == 1
+    assert overall["mark_only_gold_unique"] == 1
+    mark_only = next(row for row in snapshot["missed"]["top_dogs"] if row["token_ca"] == "MARK")
+    assert mark_only["peak_trust_status"] == "mark_only_peak_untrusted"
+    trusted = next(row for row in snapshot["missed"]["top_dogs"] if row["token_ca"] == "TRUST")
+    assert trusted["peak_trust_status"] == "trusted_peak"

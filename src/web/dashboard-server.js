@@ -538,6 +538,57 @@ function getTableColumns(database, tableName) {
   return new Set(database.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
 }
 
+function sqlCol(name, qualifier = '') {
+  return qualifier ? `${qualifier}.${name}` : name;
+}
+
+function trustedTradePeakSqlExpr(cols, qualifier = '') {
+  const trusted = sqlCol('trusted_peak_pnl', qualifier);
+  const quote = sqlCol('quote_peak_pnl', qualifier);
+  if (cols.has('trusted_peak_pnl') && cols.has('quote_peak_pnl')) {
+    return `COALESCE(NULLIF(${trusted}, 0), NULLIF(${quote}, 0), 0)`;
+  }
+  if (cols.has('trusted_peak_pnl')) return `COALESCE(NULLIF(${trusted}, 0), 0)`;
+  if (cols.has('quote_peak_pnl')) return `COALESCE(NULLIF(${quote}, 0), 0)`;
+  return cols.has('peak_pnl') ? `COALESCE(${sqlCol('peak_pnl', qualifier)}, 0)` : '0';
+}
+
+function markTradePeakSqlExpr(cols, qualifier = '') {
+  if (cols.has('mark_peak_pnl')) return `COALESCE(${sqlCol('mark_peak_pnl', qualifier)}, 0)`;
+  return cols.has('peak_pnl') ? `COALESCE(${sqlCol('peak_pnl', qualifier)}, 0)` : '0';
+}
+
+function trustedMissedPeakSqlExpr(cols, qualifier = 'm') {
+  let names = ['executable_peak_pnl', 'quote_clean_peak_pnl', 'tradable_peak_pnl']
+    .filter((name) => cols.has(name))
+    .map((name) => sqlCol(name, qualifier));
+  if (names.length === 0) {
+    names = ['max_pnl_recorded', 'pnl_24h', 'pnl_60m', 'pnl_15m', 'pnl_5m']
+      .filter((name) => cols.has(name))
+      .map((name) => sqlCol(name, qualifier));
+  }
+  return `COALESCE(${[...names, '0'].join(', ')})`;
+}
+
+function markMissedPeakSqlExpr(cols, qualifier = 'm') {
+  const names = ['theoretical_peak_pnl', 'max_pnl_recorded', 'pnl_24h', 'pnl_60m', 'pnl_15m', 'pnl_5m']
+    .filter((name) => cols.has(name))
+    .map((name) => sqlCol(name, qualifier));
+  return `COALESCE(${[...names, '0'].join(', ')})`;
+}
+
+function trustedPeakRatio(row = {}) {
+  const trusted = Number(row.trusted_peak_pnl);
+  if (Number.isFinite(trusted) && trusted > 0) return trusted;
+  const quote = Number(row.quote_peak_pnl);
+  if (Number.isFinite(quote) && quote > 0) return quote;
+  if (row.trusted_peak_pnl === undefined && row.quote_peak_pnl === undefined) {
+    const legacy = Number(row.peak_pnl);
+    return Number.isFinite(legacy) ? legacy : null;
+  }
+  return null;
+}
+
 function getPaperReviewDir() {
   const raw = process.env.PAPER_REVIEW_DIR || join(dirname(getPaperDbPath()), 'review-artifacts');
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
@@ -630,6 +681,10 @@ function loadReviewTradeRows(paperDb, tableNames, sinceTs, limit, options = {}) 
     col('exit_reason'),
     col('pnl_pct'),
     col('peak_pnl'),
+    col('mark_peak_pnl'),
+    col('quote_peak_pnl'),
+    col('trusted_peak_pnl'),
+    col('peak_trust_status'),
     col('position_size_sol'),
     col('capital_tier'),
     col('position_size_class'),
@@ -1002,17 +1057,19 @@ export function buildClosedLoopProbeSummary(
   }
 
   if (tableNames.has('paper_trades')) {
+    const tradeCols = getTableColumns(paperDb, 'paper_trades');
+    const trustedPeakExpr = trustedTradePeakSqlExpr(tradeCols);
     const modeFilterSql = includePaperPnlDetails
       ? ''
       : `AND COALESCE(entry_mode, 'unknown') IN (${sqlInList(CLOSED_LOOP_PROBE_MODES)})`;
     const tradeSourceSql = sinceTs
       ? `
       WITH recent_trades AS (
-        SELECT entry_mode, token_ca, pnl_pct, peak_pnl
+        SELECT entry_mode, token_ca, pnl_pct, ${trustedPeakExpr} AS trusted_peak_pnl
         FROM paper_trades
         WHERE entry_ts >= @since ${modeFilterSql}
         UNION ALL
-        SELECT entry_mode, token_ca, pnl_pct, peak_pnl
+        SELECT entry_mode, token_ca, pnl_pct, ${trustedPeakExpr} AS trusted_peak_pnl
         FROM paper_trades
         WHERE entry_ts IS NULL AND exit_ts >= @since ${modeFilterSql}
       )
@@ -1029,7 +1086,7 @@ export function buildClosedLoopProbeSummary(
         SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
         AVG(pnl_pct) AS avg_pnl,
         SUM(pnl_pct) AS total_pnl,
-        MAX(peak_pnl) AS max_peak_pnl
+        MAX(${sinceTs ? 'trusted_peak_pnl' : trustedPeakExpr}) AS max_peak_pnl
       FROM ${tradeTableSql}
       ${tradeWhereSql}
       GROUP BY COALESCE(entry_mode, 'unknown')
@@ -1071,6 +1128,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
     gold_unique: 0,
     silver_unique: 0,
     bronze_unique: 0,
+    mark_only_gold_unique: 0,
+    mark_only_silver_unique: 0,
+    mark_only_bronze_unique: 0,
     top_missed_dogs: [],
     by_final_blocker: [],
   };
@@ -1086,18 +1146,8 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
   const missedWhereTsExpr = missedCols.has('created_event_ts')
     ? 'm.created_event_ts'
     : (missedCols.has('signal_ts') ? 'm.signal_ts' : eventTsExpr);
-  const maxPnlExpr = `COALESCE(${[
-    missedCols.has('executable_peak_pnl') ? 'm.executable_peak_pnl' : null,
-    missedCols.has('quote_clean_peak_pnl') ? 'm.quote_clean_peak_pnl' : null,
-    missedCols.has('tradable_peak_pnl') ? 'm.tradable_peak_pnl' : null,
-    missedCols.has('theoretical_peak_pnl') ? 'm.theoretical_peak_pnl' : null,
-    missedCols.has('max_pnl_recorded') ? 'm.max_pnl_recorded' : null,
-    missedCols.has('pnl_24h') ? 'm.pnl_24h' : null,
-    missedCols.has('pnl_60m') ? 'm.pnl_60m' : null,
-    missedCols.has('pnl_15m') ? 'm.pnl_15m' : null,
-    missedCols.has('pnl_5m') ? 'm.pnl_5m' : null,
-    '0',
-  ].filter(Boolean).join(', ')})`;
+  const maxPnlExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
+  const markPnlExpr = markMissedPeakSqlExpr(missedCols, 'm');
   const quoteCleanExpr = missedCols.has('tradable_missed')
     ? `CASE
         WHEN COALESCE(m.tradable_missed, 0) = 1
@@ -1145,6 +1195,12 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         ${missedColumn('tradable_peak_pnl')} AS tradable_peak_pnl,
         ${quoteCleanExpr} AS quote_clean,
         ${maxPnlExpr} AS max_pnl,
+        ${markPnlExpr} AS mark_pnl,
+        CASE
+          WHEN ${maxPnlExpr} >= 0.25 THEN 'trusted_peak'
+          WHEN ${markPnlExpr} >= 0.25 THEN 'mark_only_peak_untrusted'
+          ELSE 'sub25_or_unknown'
+        END AS peak_trust_status,
         ${eventTsExpr} AS event_ts,
         CASE
           WHEN m.component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
@@ -1163,7 +1219,7 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         *,
         ROW_NUMBER() OVER (
           PARTITION BY token_ca
-          ORDER BY COALESCE(max_pnl, 0) DESC, COALESCE(event_ts, 0) DESC
+          ORDER BY COALESCE(max_pnl, 0) DESC, COALESCE(mark_pnl, 0) DESC, COALESCE(event_ts, 0) DESC
         ) AS rn
       FROM base
       WHERE token_ca IS NOT NULL AND token_ca != ''
@@ -1195,6 +1251,8 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         tradable_peak_pnl,
         quote_clean,
         max_pnl,
+        mark_pnl,
+        peak_trust_status,
         event_ts,
         entry_mode_candidate
       FROM ranked
@@ -1206,6 +1264,8 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
       gmgn_lead_time_sec: null,
       quote_clean: Number(row.quote_clean || 0) === 1,
       max_pnl: Number(row.max_pnl || 0),
+      mark_pnl: Number(row.mark_pnl || 0),
+      peak_trust_status: row.peak_trust_status || null,
       tradable_peak_pnl: row.tradable_peak_pnl == null ? null : Number(row.tradable_peak_pnl),
       rejection_hardness: row.rejection_hardness || null,
       theoretical_peak_pnl: row.theoretical_peak_pnl == null ? null : Number(row.theoretical_peak_pnl),
@@ -1223,6 +1283,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
       gold_unique: 0,
       silver_unique: 0,
       bronze_unique: 0,
+      mark_only_gold_unique: 0,
+      mark_only_silver_unique: 0,
+      mark_only_bronze_unique: 0,
     };
     const blockerMap = new Map();
     for (const row of one) {
@@ -1231,6 +1294,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
       if (row.max_pnl >= 1.0) summary.gold_unique += 1;
       else if (row.max_pnl >= 0.5) summary.silver_unique += 1;
       else if (row.max_pnl >= 0.25) summary.bronze_unique += 1;
+      if (row.max_pnl < 1.0 && row.mark_pnl >= 1.0) summary.mark_only_gold_unique += 1;
+      else if (row.max_pnl < 0.5 && row.mark_pnl >= 0.5) summary.mark_only_silver_unique += 1;
+      else if (row.max_pnl < 0.25 && row.mark_pnl >= 0.25) summary.mark_only_bronze_unique += 1;
       const blocker = blockerMap.get(row.final_blocker_key) || {
         route: row.route,
         final_component: row.final_component,
@@ -1241,20 +1307,32 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         gold_unique: 0,
         silver_unique: 0,
         bronze_unique: 0,
+        mark_only_gold_unique: 0,
+        mark_only_silver_unique: 0,
+        mark_only_bronze_unique: 0,
         max_pnl: 0,
+        mark_pnl: 0,
       };
       blocker.unique_tokens += 1;
       if (row.quote_clean) blocker.quote_clean_unique += 1;
       if (row.max_pnl >= 1.0) blocker.gold_unique += 1;
       else if (row.max_pnl >= 0.5) blocker.silver_unique += 1;
       else if (row.max_pnl >= 0.25) blocker.bronze_unique += 1;
+      if (row.max_pnl < 1.0 && row.mark_pnl >= 1.0) blocker.mark_only_gold_unique += 1;
+      else if (row.max_pnl < 0.5 && row.mark_pnl >= 0.5) blocker.mark_only_silver_unique += 1;
+      else if (row.max_pnl < 0.25 && row.mark_pnl >= 0.25) blocker.mark_only_bronze_unique += 1;
       blocker.max_pnl = Math.max(blocker.max_pnl, row.max_pnl);
+      blocker.mark_pnl = Math.max(blocker.mark_pnl, row.mark_pnl || 0);
       blockerMap.set(row.final_blocker_key, blocker);
     }
 
     topBase = one
-      .filter((row) => row.max_pnl >= 0.25)
-      .sort((a, b) => Number(b.max_pnl || 0) - Number(a.max_pnl || 0) || Number(b.event_ts || 0) - Number(a.event_ts || 0))
+      .filter((row) => row.max_pnl >= 0.25 || row.mark_pnl >= 0.25)
+      .sort((a, b) => (
+        Number(b.max_pnl || 0) - Number(a.max_pnl || 0)
+        || Number(b.mark_pnl || 0) - Number(a.mark_pnl || 0)
+        || Number(b.event_ts || 0) - Number(a.event_ts || 0)
+      ))
       .slice(0, limit);
 
     byFinalBlocker = Array.from(blockerMap.values())
@@ -1262,6 +1340,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         Number(b.gold_unique || 0) - Number(a.gold_unique || 0)
         || Number(b.silver_unique || 0) - Number(a.silver_unique || 0)
         || Number(b.bronze_unique || 0) - Number(a.bronze_unique || 0)
+        || Number(b.mark_only_gold_unique || 0) - Number(a.mark_only_gold_unique || 0)
+        || Number(b.mark_only_silver_unique || 0) - Number(a.mark_only_silver_unique || 0)
+        || Number(b.mark_only_bronze_unique || 0) - Number(a.mark_only_bronze_unique || 0)
         || Number(b.unique_tokens || 0) - Number(a.unique_tokens || 0)
         || Number(b.max_pnl || 0) - Number(a.max_pnl || 0)
       ))
@@ -1269,14 +1350,16 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
       .map((row) => ({
         ...row,
         max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
+        mark_pnl_pct: roundNumber(Number(row.mark_pnl || 0) * 100, 2),
       }));
   } else {
     const summaryOnlyCte = `
       WITH base AS (
-        SELECT
-          m.token_ca,
-          ${quoteCleanExpr} AS quote_clean,
-          ${maxPnlExpr} AS max_pnl
+	        SELECT
+	          m.token_ca,
+	          ${quoteCleanExpr} AS quote_clean,
+	          ${maxPnlExpr} AS max_pnl,
+	          ${markPnlExpr} AS mark_pnl
         FROM paper_missed_signal_attribution m
         WHERE 1 = 1
           ${sinceTs ? `AND ${missedWhereTsExpr} >= @since` : ''}
@@ -1284,10 +1367,11 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
       ),
       per_token AS (
         SELECT
-          token_ca,
-          MAX(CASE WHEN COALESCE(quote_clean, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean,
-          MAX(COALESCE(max_pnl, 0)) AS max_pnl,
-          MAX(CASE
+	          token_ca,
+	          MAX(CASE WHEN COALESCE(quote_clean, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean,
+	          MAX(COALESCE(max_pnl, 0)) AS max_pnl,
+	          MAX(COALESCE(mark_pnl, 0)) AS mark_pnl,
+	          MAX(CASE
             WHEN COALESCE(quote_clean, 0) = 1 AND COALESCE(max_pnl, 0) >= 0.25
             THEN 1 ELSE 0
           END) AS quote_clean_dog
@@ -1301,9 +1385,12 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
         COUNT(*) AS unique_tokens,
         COALESCE(SUM(CASE WHEN quote_clean = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_unique,
         COALESCE(SUM(CASE WHEN quote_clean_dog = 1 THEN 1 ELSE 0 END), 0) AS quote_clean_dog_unique,
-        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 1.0 THEN 1 ELSE 0 END), 0) AS gold_unique,
-        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.5 AND COALESCE(max_pnl, 0) < 1.0 THEN 1 ELSE 0 END), 0) AS silver_unique,
-        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.25 AND COALESCE(max_pnl, 0) < 0.5 THEN 1 ELSE 0 END), 0) AS bronze_unique
+	        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 1.0 THEN 1 ELSE 0 END), 0) AS gold_unique,
+	        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.5 AND COALESCE(max_pnl, 0) < 1.0 THEN 1 ELSE 0 END), 0) AS silver_unique,
+	        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) >= 0.25 AND COALESCE(max_pnl, 0) < 0.5 THEN 1 ELSE 0 END), 0) AS bronze_unique,
+	        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) < 1.0 AND COALESCE(mark_pnl, 0) >= 1.0 THEN 1 ELSE 0 END), 0) AS mark_only_gold_unique,
+	        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) < 0.5 AND COALESCE(mark_pnl, 0) >= 0.5 AND COALESCE(mark_pnl, 0) < 1.0 THEN 1 ELSE 0 END), 0) AS mark_only_silver_unique,
+	        COALESCE(SUM(CASE WHEN COALESCE(max_pnl, 0) < 0.25 AND COALESCE(mark_pnl, 0) >= 0.25 AND COALESCE(mark_pnl, 0) < 0.5 THEN 1 ELSE 0 END), 0) AS mark_only_bronze_unique
       FROM per_token
     `).get(sinceTs ? { since: sinceTs } : {});
   }
@@ -1343,6 +1430,8 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
     .map((row) => ({
       ...row,
       max_pnl_pct: roundNumber(Number(row.max_pnl || 0) * 100, 2),
+      mark_pnl_pct: row.mark_pnl == null ? null : roundNumber(Number(row.mark_pnl) * 100, 2),
+      peak_trust_status: row.peak_trust_status || null,
       theoretical_peak_pnl_pct: row.theoretical_peak_pnl == null ? null : roundNumber(Number(row.theoretical_peak_pnl) * 100, 2),
       quote_clean_peak_pnl_pct: row.quote_clean_peak_pnl == null ? null : roundNumber(Number(row.quote_clean_peak_pnl) * 100, 2),
       executable_peak_pnl_pct: row.executable_peak_pnl == null ? null : roundNumber(Number(row.executable_peak_pnl) * 100, 2),
@@ -1356,6 +1445,9 @@ export function buildClosedLoopMissedDogSummary(paperDb, tableNames, sinceTs, li
     gold_unique: Number(summary?.gold_unique || 0),
     silver_unique: Number(summary?.silver_unique || 0),
     bronze_unique: Number(summary?.bronze_unique || 0),
+    mark_only_gold_unique: Number(summary?.mark_only_gold_unique || 0),
+    mark_only_silver_unique: Number(summary?.mark_only_silver_unique || 0),
+    mark_only_bronze_unique: Number(summary?.mark_only_bronze_unique || 0),
     top_missed_dogs: topMissedDogs,
     by_final_blocker: byFinalBlocker,
   };
@@ -3863,6 +3955,8 @@ const server = http.createServer(async (req, res) => {
         );
         if (paperTables.has('paper_trades')) {
           const tradeCols = getTableColumns(paperDb, 'paper_trades');
+          const trustedPeakExpr = trustedTradePeakSqlExpr(tradeCols);
+          const markPeakExpr = markTradePeakSqlExpr(tradeCols);
           const tradeWhere = sinceTs ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since OR COALESCE(exit_ts, 0) >= @since' : '';
           paperTrades = paperDb.prepare(`
             SELECT
@@ -3872,7 +3966,9 @@ const server = http.createServer(async (req, res) => {
               entry_ts,
               exit_ts,
               pnl_pct,
-              peak_pnl,
+              ${trustedPeakExpr} AS peak_pnl,
+              ${markPeakExpr} AS mark_peak_pnl,
+              ${tradeCols.has('peak_trust_status') ? 'peak_trust_status' : "'legacy_peak' AS peak_trust_status"},
               position_size_sol,
               signal_route,
               ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'},
@@ -3896,15 +3992,8 @@ const server = http.createServer(async (req, res) => {
           const missedWhereTsExpr = missedCols.has('created_event_ts')
             ? 'm.created_event_ts'
             : (missedCols.has('signal_ts') ? 'm.signal_ts' : missedEventTsExpr);
-          const maxPnlExpr = `COALESCE(${[
-            missedCols.has('tradable_peak_pnl') ? 'm.tradable_peak_pnl' : null,
-            missedCols.has('max_pnl_recorded') ? 'm.max_pnl_recorded' : null,
-            missedCols.has('pnl_24h') ? 'm.pnl_24h' : null,
-            missedCols.has('pnl_60m') ? 'm.pnl_60m' : null,
-            missedCols.has('pnl_15m') ? 'm.pnl_15m' : null,
-            missedCols.has('pnl_5m') ? 'm.pnl_5m' : null,
-            'NULL',
-          ].filter(Boolean).join(', ')})`;
+          const maxPnlExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
+          const markPnlExpr = markMissedPeakSqlExpr(missedCols, 'm');
           const hasSourceResonance = paperTables.has('source_resonance_candidates');
           const sourceCols = hasSourceResonance ? getTableColumns(paperDb, 'source_resonance_candidates') : new Set();
           const missedSignalTs = missedCols.has('signal_ts') ? 'COALESCE(m.signal_ts, 0)' : '0';
@@ -3971,6 +4060,12 @@ const server = http.createServer(async (req, res) => {
                 ${missedColumn('first_tradable_pnl')} AS first_tradable_pnl,
                 ${quoteCleanExpr} AS quote_clean,
                 ${maxPnlExpr} AS row_max_pnl,
+                ${markPnlExpr} AS row_mark_pnl,
+                CASE
+                  WHEN ${maxPnlExpr} >= 0.25 THEN 'trusted_peak'
+                  WHEN ${markPnlExpr} >= 0.25 THEN 'mark_only_peak_untrusted'
+                  ELSE 'sub25_or_unknown'
+                END AS peak_trust_status,
                 ${missedEventTsExpr} AS event_ts,
                 CASE
                   WHEN m.component = 'source_resonance_probe' THEN 'source_resonance_tiny_probe'
@@ -4319,6 +4414,7 @@ const server = http.createServer(async (req, res) => {
             ELSE 'unknown'
           END`;
       const regimeExpr = tradeCols.has('regime_tag') ? "COALESCE(regime_tag, 'unknown')" : "COALESCE(market_regime, 'unknown')";
+      const trustedPeakExpr = trustedTradePeakSqlExpr(tradeCols);
       const capitalLifecycle = tableNames.has('paper_trades') ? paperDb.prepare(`
         SELECT
           ${tierExpr} AS capital_tier,
@@ -4327,8 +4423,8 @@ const server = http.createServer(async (req, res) => {
           COUNT(*) AS trades,
           SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
           AVG(pnl_pct) AS avg_pnl,
-          AVG(peak_pnl) AS avg_peak,
-          AVG(CASE WHEN pnl_pct IS NOT NULL AND peak_pnl IS NOT NULL THEN MAX(peak_pnl - pnl_pct, 0) ELSE NULL END) AS avg_giveback
+          AVG(${trustedPeakExpr}) AS avg_peak,
+          AVG(CASE WHEN pnl_pct IS NOT NULL THEN MAX(${trustedPeakExpr} - pnl_pct, 0) ELSE NULL END) AS avg_giveback
         FROM paper_trades
         WHERE COALESCE(entry_ts, exit_ts, 0) >= @since
         GROUP BY capital_tier, entry_mode, regime_tag
@@ -4514,7 +4610,9 @@ const server = http.createServer(async (req, res) => {
         'exit_ts',
         'exit_reason',
         'pnl_pct',
-        'peak_pnl',
+        `${trustedTradePeakSqlExpr(cols)} AS peak_pnl`,
+        `${markTradePeakSqlExpr(cols)} AS mark_peak_pnl`,
+        cols.has('peak_trust_status') ? 'peak_trust_status' : "'legacy_peak' AS peak_trust_status",
         'position_size_sol',
         'signal_route',
         'strategy_stage',
@@ -4621,7 +4719,10 @@ const server = http.createServer(async (req, res) => {
       }
       const cols = getTableColumns(paperDb, 'paper_trades');
       const selectCols = [
-        'id', 'symbol', 'token_ca', 'entry_ts', 'exit_ts', 'exit_reason', 'pnl_pct', 'peak_pnl',
+        'id', 'symbol', 'token_ca', 'entry_ts', 'exit_ts', 'exit_reason', 'pnl_pct',
+        `${trustedTradePeakSqlExpr(cols)} AS peak_pnl`,
+        `${markTradePeakSqlExpr(cols)} AS mark_peak_pnl`,
+        cols.has('peak_trust_status') ? 'peak_trust_status' : "'legacy_peak' AS peak_trust_status",
         'position_size_sol', 'signal_route', 'signal_type', 'strategy_stage',
         cols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode',
         cols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json',
@@ -4651,7 +4752,7 @@ const server = http.createServer(async (req, res) => {
         const recoveryProbeReason = firstValue(monitorState.recoveryProbeReason, monitorState.recovery_probe_reason);
         const closed = row.exit_ts != null || row.exit_reason != null;
         const pnl = row.pnl_pct == null ? null : Number(row.pnl_pct);
-        const peak = row.peak_pnl == null ? null : Number(row.peak_pnl);
+        const peak = trustedPeakRatio(row);
         const entryQuoteSuccess = entryAudit.success === true || entryAudit.routeAvailable === true;
         const entryQuoteFailure = Boolean(entryAudit.failureReason) || entryAudit.success === false || entryAudit.routeAvailable === false;
         if (!groups.has(key)) {
@@ -4718,6 +4819,8 @@ const server = http.createServer(async (req, res) => {
             position_size_sol: row.position_size_sol,
             pnl_pct: pnl == null ? null : roundNumber(pnl * 100, 2),
             peak_pnl_pct: peak == null ? null : roundNumber(peak * 100, 2),
+            mark_peak_pnl_pct: row.mark_peak_pnl == null ? null : roundNumber(Number(row.mark_peak_pnl) * 100, 2),
+            peak_trust_status: row.peak_trust_status || null,
             entry_quote_success: entryQuoteSuccess,
             entry_quote_failure_reason: entryAudit.failureReason || null,
             ath_recovery_family: athRecoveryFamily,
@@ -5034,9 +5137,14 @@ const server = http.createServer(async (req, res) => {
       if (tableNames.has('paper_trades')) {
         const tradeCols = getTableColumns(paperDb, 'paper_trades');
         const tradeWhere = sinceTs ? 'WHERE entry_ts >= @since' : '';
+        const trustedPeakExpr = trustedTradePeakSqlExpr(tradeCols);
+        const markPeakExpr = markTradePeakSqlExpr(tradeCols);
         const tradeRows = paperDb.prepare(`
           SELECT id, lifecycle_id, token_ca, symbol, signal_ts, signal_route, signal_type,
-                 strategy_stage, entry_ts, exit_ts, exit_reason, pnl_pct, peak_pnl,
+                 strategy_stage, entry_ts, exit_ts, exit_reason, pnl_pct,
+                 ${trustedPeakExpr} AS peak_pnl,
+                 ${markPeakExpr} AS mark_peak_pnl,
+                 ${tradeCols.has('peak_trust_status') ? 'peak_trust_status' : "'legacy_peak' AS peak_trust_status"},
                  position_size_sol,
                  ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'},
                  ${tradeCols.has('monitor_state_json') ? 'monitor_state_json' : 'NULL AS monitor_state_json'},
@@ -5080,6 +5188,8 @@ const server = http.createServer(async (req, res) => {
           summary.exit_reason = trade.exit_reason;
           summary.pnl_pct = trade.pnl_pct == null ? null : roundNumber(Number(trade.pnl_pct) * 100, 2);
           summary.peak_pnl_pct = trade.peak_pnl == null ? null : roundNumber(Number(trade.peak_pnl) * 100, 2);
+          summary.mark_peak_pnl_pct = trade.mark_peak_pnl == null ? null : roundNumber(Number(trade.mark_peak_pnl) * 100, 2);
+          summary.peak_trust_status = trade.peak_trust_status || null;
           summary.position_size_sol = trade.position_size_sol;
           if (summary.entry_mode) summary.event_entry_mode = summary.event_entry_mode || summary.entry_mode;
           summary.entry_mode = inferEntryMode(trade);
@@ -5361,6 +5471,7 @@ const server = http.createServer(async (req, res) => {
       const missedCols = new Set(
         paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
       );
+      const trustedMissedPeakExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
       const maxMissedId = Number(paperDb.prepare('SELECT COALESCE(MAX(id), 0) AS max_id FROM paper_missed_signal_attribution').get().max_id || 0);
       const idFloor = Math.max(0, maxMissedId - scanLimit);
       const whereSql = sinceTs
@@ -5728,7 +5839,7 @@ const server = http.createServer(async (req, res) => {
             COALESCE(m.component, '-') AS component,
             COALESCE(m.reject_reason, '-') AS reject_reason,
             ${eventTsExpr} AS event_ts,
-            COALESCE(m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+            ${trustedMissedPeakExpr} AS max_pnl,
             m.pnl_5m,
             m.pnl_15m,
             m.pnl_60m,
@@ -6014,6 +6125,8 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
         return;
       }
+      const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
+      const trustedMissedPeakExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
       const baseCte = `
         WITH base AS (
           SELECT
@@ -6027,7 +6140,7 @@ const server = http.createServer(async (req, res) => {
             m.pnl_15m,
             m.pnl_60m,
             m.pnl_24h,
-            COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+            ${trustedMissedPeakExpr} AS max_pnl,
             COALESCE(m.tradable_missed, 0) AS tradable_missed,
             COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
             m.tradability_status,
@@ -6209,13 +6322,13 @@ const server = http.createServer(async (req, res) => {
             SELECT
               t.*,
               COALESCE(m.symbol, t.event_symbol, substr(t.token_ca, 1, 8), '?') AS symbol,
-              COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+              ${trustedMissedPeakExpr} AS max_pnl,
               COALESCE(m.tradable_missed, 0) AS tradable_missed,
               COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
               m.tradability_status,
               ROW_NUMBER() OVER (
                 PARTITION BY t.event_id
-                ORDER BY COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC
+                ORDER BY ${trustedMissedPeakExpr} DESC
               ) AS rn
             FROM terminal t
             LEFT JOIN paper_missed_signal_attribution m
@@ -6611,6 +6724,10 @@ const server = http.createServer(async (req, res) => {
       const queueColumns = tableNames.has('paper_fast_entry_queue')
         ? getTableColumns(paperDb, 'paper_fast_entry_queue')
         : new Set();
+      const tradeColumns = tableNames.has('paper_trades')
+        ? getTableColumns(paperDb, 'paper_trades')
+        : new Set();
+      const trustedFastPeakExpr = trustedTradePeakSqlExpr(tradeColumns);
       const queueUpdatedExpr = queueColumns.has('updated_at') ? 'updated_at' : 'created_at';
       const queueBranchExpr = queueColumns.has('entry_branch') ? 'entry_branch' : (queueColumns.has('source_type') ? 'source_type' : "'unknown'");
       const firstErrorExpr = queueColumns.has('first_error')
@@ -6678,7 +6795,7 @@ const server = http.createServer(async (req, res) => {
         ? paperDb.prepare(`
             SELECT id, symbol, token_ca, entry_ts, exit_ts, exit_reason,
                    entry_mode, entry_branch, pnl_pct * 100.0 AS pnl_pct,
-                   peak_pnl * 100.0 AS peak_pct,
+                   ${trustedFastPeakExpr} * 100.0 AS peak_pct,
                    position_size_sol,
                    signal_to_quote_latency_ms,
                    signal_to_quote_drift_pct,
@@ -6698,7 +6815,7 @@ const server = http.createServer(async (req, res) => {
               COUNT(*) AS fills,
               SUM(CASE WHEN exit_ts IS NOT NULL THEN 1 ELSE 0 END) AS closed,
               AVG(pnl_pct) * 100.0 AS avg_pnl_pct,
-              AVG(peak_pnl) * 100.0 AS avg_peak_pct,
+              AVG(${trustedFastPeakExpr}) * 100.0 AS avg_peak_pct,
               AVG(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS avg_fast_lane_sla_ms,
               MAX(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS max_fast_lane_sla_ms,
               AVG(COALESCE(json_extract(entry_execution_audit_json, '$.entryLatencyAudit.fast_lane_sla_latency_ms'), signal_to_quote_latency_ms)) AS avg_signal_to_quote_ms,

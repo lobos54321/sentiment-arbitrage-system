@@ -15,6 +15,17 @@ function pct(value) {
   return n == null ? null : roundNumber(n * 100, 2);
 }
 
+function trustedPeakRatio(row = {}) {
+  const trusted = finiteNumber(row.trusted_peak_pnl);
+  if (trusted != null && trusted > 0) return trusted;
+  const quote = finiteNumber(row.quote_peak_pnl);
+  if (quote != null && quote > 0) return quote;
+  if (row.trusted_peak_pnl === undefined && row.quote_peak_pnl === undefined) {
+    return finiteNumber(row.peak_pnl);
+  }
+  return null;
+}
+
 function parseJsonObject(value) {
   if (!value || typeof value !== 'string') return {};
   try {
@@ -92,7 +103,7 @@ export function buildShadowTrailAudit({ trades = [], pathSamplesByTrade = new Ma
     if (!groups.has(key)) groups.set(key, emptyTrailGroup(key));
     const group = groups.get(key);
     const actual = finiteNumber(trade.pnl_pct) || 0;
-    const storedPeak = Math.max(finiteNumber(trade.peak_pnl) || 0, actual);
+    const storedPeak = Math.max(trustedPeakRatio(trade) || 0, actual);
     const samples = pathSamplesByTrade.get(Number(trade.id)) || [];
     const quotePeak = maxQuoteCleanSample(samples);
     const peak = quotePeak == null ? storedPeak : Math.max(storedPeak, quotePeak);
@@ -164,7 +175,7 @@ export function buildFastFailCounterfactualAudit({ trades = [], pathSamplesByTra
       capital_tier: capitalTier(trade),
       exit_reason: trade.exit_reason || null,
       realized_pnl_pct: pct(trade.pnl_pct),
-      peak_pnl_pct: pct(trade.peak_pnl),
+      peak_pnl_pct: pct(trustedPeakRatio(trade)),
       post_exit_sample_n: samples.length,
       post_exit_quote_clean_sample_n: quotePeaks.length,
       post_exit_quote_clean_peak_pct: pct(bestQuote),

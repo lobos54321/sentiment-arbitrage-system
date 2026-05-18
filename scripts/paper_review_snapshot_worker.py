@@ -20,6 +20,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "data" / "review-artifacts" / "live"
+PEAK_UNTRUSTED_MARK_GAP_PCT = float(os.environ.get("PEAK_UNTRUSTED_MARK_GAP_PCT", "0.25"))
 
 
 def connect(path):
@@ -63,12 +64,19 @@ def missed_summary(db, since_ts, limit):
         return {"available": False, "reason": "paper_missed_signal_attribution_missing"}
     cols = columns(db, "paper_missed_signal_attribution")
     event_ts_expr = coalesce_expr(cols, ["created_event_ts", "signal_ts", "baseline_ts"], "0")
-    max_pnl_expr = coalesce_expr(
+    trusted_peak_cols = [
+        name for name in ("executable_peak_pnl", "quote_clean_peak_pnl", "tradable_peak_pnl")
+        if name in cols
+    ]
+    if not trusted_peak_cols:
+        trusted_peak_cols = [
+            name for name in ("max_pnl_recorded", "pnl_24h", "pnl_60m", "pnl_15m", "pnl_5m")
+            if name in cols
+        ]
+    max_pnl_expr = f"COALESCE({', '.join(trusted_peak_cols + ['0'])})"
+    mark_pnl_expr = coalesce_expr(
         cols,
         [
-            "executable_peak_pnl",
-            "quote_clean_peak_pnl",
-            "tradable_peak_pnl",
             "theoretical_peak_pnl",
             "max_pnl_recorded",
             "pnl_24h",
@@ -101,9 +109,15 @@ def missed_summary(db, since_ts, limit):
           COALESCE({reject_reason_expr}, '-') AS reject_reason,
           {event_ts_expr} AS event_ts,
           {max_pnl_expr} AS max_pnl,
+          {mark_pnl_expr} AS mark_pnl,
           {quote_exec_expr} AS quote_exec,
           {tradable_expr} AS tradable_missed,
-          {stop_before_expr} AS would_stop_before_peak
+          {stop_before_expr} AS would_stop_before_peak,
+          CASE
+            WHEN {max_pnl_expr} >= 0.25 THEN 'trusted_peak'
+            WHEN {mark_pnl_expr} >= 0.25 THEN 'mark_only_peak_untrusted'
+            ELSE 'sub25_or_unknown'
+          END AS peak_trust_status
         FROM paper_missed_signal_attribution
         WHERE {event_ts_expr} >= :since
           AND token_ca IS NOT NULL
@@ -117,9 +131,15 @@ def missed_summary(db, since_ts, limit):
           MAX(component) AS component,
           MAX(reject_reason) AS reject_reason,
           MAX(max_pnl) AS max_pnl,
+          MAX(mark_pnl) AS mark_pnl,
           MAX(quote_exec) AS quote_exec,
           MAX(tradable_missed) AS tradable_missed,
-          MAX(would_stop_before_peak) AS would_stop_before_peak
+          MAX(would_stop_before_peak) AS would_stop_before_peak,
+          CASE
+            WHEN MAX(max_pnl) >= 0.25 THEN 'trusted_peak'
+            WHEN MAX(mark_pnl) >= 0.25 THEN 'mark_only_peak_untrusted'
+            ELSE 'sub25_or_unknown'
+          END AS peak_trust_status
         FROM base
         GROUP BY token_ca
       ),
@@ -130,9 +150,15 @@ def missed_summary(db, since_ts, limit):
           reject_reason,
           token_ca,
           MAX(max_pnl) AS max_pnl,
+          MAX(mark_pnl) AS mark_pnl,
           MAX(quote_exec) AS quote_exec,
           MAX(tradable_missed) AS tradable_missed,
-          MAX(would_stop_before_peak) AS would_stop_before_peak
+          MAX(would_stop_before_peak) AS would_stop_before_peak,
+          CASE
+            WHEN MAX(max_pnl) >= 0.25 THEN 'trusted_peak'
+            WHEN MAX(mark_pnl) >= 0.25 THEN 'mark_only_peak_untrusted'
+            ELSE 'sub25_or_unknown'
+          END AS peak_trust_status
         FROM base
         GROUP BY route, component, reject_reason, token_ca
       )
@@ -143,6 +169,7 @@ def missed_summary(db, since_ts, limit):
         reject_reason_expr="reject_reason" if "reject_reason" in cols else "NULL",
         event_ts_expr=event_ts_expr,
         max_pnl_expr=max_pnl_expr,
+        mark_pnl_expr=mark_pnl_expr,
         quote_exec_expr=quote_exec_expr,
         tradable_expr=tradable_expr,
         stop_before_expr=stop_before_expr,
@@ -155,6 +182,9 @@ def missed_summary(db, since_ts, limit):
           SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_unique,
           SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_unique,
           SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_unique,
+          SUM(CASE WHEN max_pnl < 1.0 AND mark_pnl >= 1.0 THEN 1 ELSE 0 END) AS mark_only_gold_unique,
+          SUM(CASE WHEN max_pnl < 0.5 AND mark_pnl >= 0.5 AND mark_pnl < 1.0 THEN 1 ELSE 0 END) AS mark_only_silver_unique,
+          SUM(CASE WHEN max_pnl < 0.25 AND mark_pnl >= 0.25 AND mark_pnl < 0.5 THEN 1 ELSE 0 END) AS mark_only_bronze_unique,
           SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
           SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
           SUM(CASE WHEN would_stop_before_peak = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,
@@ -174,6 +204,9 @@ def missed_summary(db, since_ts, limit):
           SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_unique,
           SUM(CASE WHEN max_pnl >= 0.5 AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_unique,
           SUM(CASE WHEN max_pnl >= 0.25 AND max_pnl < 0.5 THEN 1 ELSE 0 END) AS bronze_unique,
+          SUM(CASE WHEN max_pnl < 1.0 AND mark_pnl >= 1.0 THEN 1 ELSE 0 END) AS mark_only_gold_unique,
+          SUM(CASE WHEN max_pnl < 0.5 AND mark_pnl >= 0.5 AND mark_pnl < 1.0 THEN 1 ELSE 0 END) AS mark_only_silver_unique,
+          SUM(CASE WHEN max_pnl < 0.25 AND mark_pnl >= 0.25 AND mark_pnl < 0.5 THEN 1 ELSE 0 END) AS mark_only_bronze_unique,
           SUM(CASE WHEN quote_exec = 1 THEN 1 ELSE 0 END) AS quote_executable_unique,
           SUM(CASE WHEN tradable_missed = 1 THEN 1 ELSE 0 END) AS tradable_unique,
           SUM(CASE WHEN would_stop_before_peak = 1 THEN 1 ELSE 0 END) AS stop_before_peak_unique,
@@ -196,12 +229,14 @@ def missed_summary(db, since_ts, limit):
           component,
           reject_reason,
           max_pnl,
+          mark_pnl,
+          peak_trust_status,
           quote_exec,
           tradable_missed,
           would_stop_before_peak
         FROM per_token
-        WHERE max_pnl >= 0.25
-        ORDER BY quote_exec DESC, max_pnl DESC
+        WHERE max_pnl >= 0.25 OR mark_pnl >= 0.25
+        ORDER BY quote_exec DESC, max_pnl DESC, mark_pnl DESC
         LIMIT :limit
         """,
         params,
@@ -221,7 +256,19 @@ def trade_summary(db, since_ts, limit):
     entry_ts_expr = coalesce_expr(cols, ["entry_ts", "signal_ts"], "0")
     exit_ts_expr = "exit_ts" if "exit_ts" in cols else "NULL"
     pnl_expr = "pnl_pct" if "pnl_pct" in cols else "0"
-    peak_expr = "peak_pnl" if "peak_pnl" in cols else "0"
+    if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), NULLIF(quote_peak_pnl, 0), 0)"
+    elif "trusted_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), 0)"
+    elif "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(quote_peak_pnl, 0), 0)"
+    else:
+        peak_expr = "peak_pnl" if "peak_pnl" in cols else "0"
+    mark_peak_expr = (
+        "mark_peak_pnl"
+        if "mark_peak_pnl" in cols
+        else "peak_pnl" if "peak_pnl" in cols else "0"
+    )
     size_expr = "position_size_sol" if "position_size_sol" in cols else "0"
     mode_expr = "entry_mode" if "entry_mode" in cols else "strategy_stage" if "strategy_stage" in cols else "NULL"
     branch_expr = "entry_branch" if "entry_branch" in cols else "NULL"
@@ -242,6 +289,12 @@ def trade_summary(db, since_ts, limit):
           SUM(CASE WHEN {pnl_expr} > 0 THEN 1 ELSE 0 END) AS wins,
           AVG({pnl_expr}) AS avg_pnl,
           AVG({peak_expr}) AS avg_peak,
+          AVG({mark_peak_expr}) AS avg_mark_peak,
+          SUM(CASE
+            WHEN {mark_peak_expr} - {peak_expr} >= {PEAK_UNTRUSTED_MARK_GAP_PCT}
+             AND {mark_peak_expr} >= 0.25
+            THEN 1 ELSE 0 END
+          ) AS mark_only_peak_spikes,
           SUM(COALESCE({size_expr}, 0) * COALESCE({pnl_expr}, 0)) AS est_pnl_sol
         FROM paper_trades
         {where}
@@ -258,6 +311,12 @@ def trade_summary(db, since_ts, limit):
           SUM(CASE WHEN {pnl_expr} > 0 THEN 1 ELSE 0 END) AS wins,
           AVG({pnl_expr}) AS avg_pnl,
           AVG({peak_expr}) AS avg_peak,
+          AVG({mark_peak_expr}) AS avg_mark_peak,
+          SUM(CASE
+            WHEN {mark_peak_expr} - {peak_expr} >= {PEAK_UNTRUSTED_MARK_GAP_PCT}
+             AND {mark_peak_expr} >= 0.25
+            THEN 1 ELSE 0 END
+          ) AS mark_only_peak_spikes,
           SUM(COALESCE({size_expr}, 0) * COALESCE({pnl_expr}, 0)) AS est_pnl_sol
         FROM paper_trades
         {where}

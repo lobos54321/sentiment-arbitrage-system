@@ -39,6 +39,17 @@ function pctFromRatio(value, digits = 2) {
   return n == null ? null : roundNumber(n * 100, digits);
 }
 
+function trustedPeakRatio(trade = {}) {
+  const trusted = numberOrNull(trade.trusted_peak_pnl);
+  if (trusted != null && trusted > 0) return trusted;
+  const quote = numberOrNull(trade.quote_peak_pnl);
+  if (quote != null && quote > 0) return quote;
+  if (trade.trusted_peak_pnl === undefined && trade.quote_peak_pnl === undefined) {
+    return numberOrNull(trade.peak_pnl);
+  }
+  return null;
+}
+
 function pctAlreadyOrRatio(primaryPct, fallbackRatio, digits = 2) {
   const pct = numberOrNull(primaryPct);
   if (pct != null) return roundNumber(pct, digits);
@@ -125,7 +136,7 @@ function extractEntryDiagnostics(trade = {}) {
 function extractExitDiagnostics(trade = {}, pathSamples = [], decisionEvents = []) {
   const exitAudit = parseJsonObject(trade.exit_execution_audit_json);
   const monitorState = parseJsonObject(trade.monitor_state_json);
-  const peak = numberOrNull(trade.peak_pnl) || 0;
+  const peak = trustedPeakRatio(trade) || 0;
   const pnl = numberOrNull(trade.pnl_pct) || 0;
   const pathQuoteGaps = pathSamples
     .map((sample) => {
@@ -166,7 +177,7 @@ function extractExitDiagnostics(trade = {}, pathSamples = [], decisionEvents = [
 
 export function inferLossCause(trade = {}, pathSamples = [], decisionEvents = []) {
   const pnl = numberOrNull(trade.pnl_pct);
-  const peak = numberOrNull(trade.peak_pnl) || 0;
+  const peak = trustedPeakRatio(trade) || 0;
   const reason = String(trade.exit_reason || '');
   const route = String(trade.signal_route || trade.signal_type || '').toUpperCase();
   const entry = extractEntryDiagnostics(trade);
@@ -290,7 +301,7 @@ export function buildReplayTimeline(trade = {}, pathSamples = [], decisionEvents
       decision: 'closed',
       reason: trade.exit_reason,
       pnl_pct: pctFromRatio(trade.pnl_pct, 2),
-      peak_pnl_pct: pctFromRatio(trade.peak_pnl, 2),
+      peak_pnl_pct: pctFromRatio(trustedPeakRatio(trade), 2),
     });
   }
   return items
@@ -303,7 +314,7 @@ export function buildTradeReplay(trade = {}, pathSamples = [], decisionEvents = 
   const exit = extractExitDiagnostics(trade, pathSamples, decisionEvents);
   const loss = inferLossCause(trade, pathSamples, decisionEvents);
   const tradePnl = numberOrNull(trade.pnl_pct);
-  const peak = numberOrNull(trade.peak_pnl);
+  const peak = trustedPeakRatio(trade);
   const samplesWithQuote = pathSamples.filter((sample) => sample.quote_pnl != null).length;
   const replay = {
     trade_id: trade.id,
@@ -319,7 +330,7 @@ export function buildTradeReplay(trade = {}, pathSamples = [], decisionEvents = 
     exit_ts: numberOrNull(trade.exit_ts),
     hold_sec: trade.entry_ts && trade.exit_ts ? Math.max(0, Math.round(Number(trade.exit_ts) - Number(trade.entry_ts))) : null,
     pnl_pct: pctFromRatio(trade.pnl_pct, 2),
-    peak_pnl_pct: pctFromRatio(trade.peak_pnl, 2),
+    peak_pnl_pct: pctFromRatio(trustedPeakRatio(trade), 2),
     exit_reason: trade.exit_reason || null,
     entry,
     exit,

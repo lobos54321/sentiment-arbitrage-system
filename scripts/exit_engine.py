@@ -54,6 +54,7 @@ QUOTE_MARK_REPRICE_DIVERGENCE = float(os.environ.get("EXIT_QUOTE_REPRICE_DIVERGE
 QUOTE_PRIMARY_GUARDIAN_EXITS = os.environ.get("QUOTE_PRIMARY_GUARDIAN_EXITS", "true").lower() != "false"
 EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC = float(os.environ.get("EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC", "10"))
 EXIT_STOP_QUOTE_CONFIRMATION_BUFFER = float(os.environ.get("EXIT_STOP_QUOTE_CONFIRMATION_BUFFER", "0.0"))
+PEAK_UNTRUSTED_MARK_GAP_PCT = float(os.environ.get("PEAK_UNTRUSTED_MARK_GAP_PCT", "0.25"))
 PARTIAL_IDEMPOTENCY_EPSILON = 1e-9
 QUOTE_PRIMARY_EXIT_MARKERS = (
     "profit_protect",
@@ -67,6 +68,13 @@ QUOTE_STOP_EXIT_MARKERS = (
     "lotto_sl",
     "stop_loss",
 )
+QUOTE_PRICE_SOURCES = {
+    "shared-quote-cache",
+    "shared-quote-runtime",
+    "jupiter",
+    "jupiter_quote",
+    "execution_quote",
+}
 
 
 def _pct(value, default=0.0):
@@ -74,6 +82,75 @@ def _pct(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _is_quote_price_source(source):
+    return str(source or "").strip().lower() in QUOTE_PRICE_SOURCES
+
+
+def _peak_status(mark_peak, trusted_peak, quote_peak):
+    if max(trusted_peak, quote_peak) > 0:
+        if mark_peak - max(trusted_peak, quote_peak) >= PEAK_UNTRUSTED_MARK_GAP_PCT:
+            return "peak_untrusted_mark_spike"
+        return "trusted_quote_peak"
+    if mark_peak > 0:
+        return "mark_only_peak_untrusted"
+    return "trusted_peak_pending_quote"
+
+
+def _watch_entry_trusted_peak(w_entry):
+    if not isinstance(w_entry, dict):
+        return None
+    for key in ("trusted_peak_pnl", "quote_peak_pnl", "trustedPeakPnl", "quotePeakPnl"):
+        value = _pct(w_entry.get(key), None)
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def _update_guardian_peak_state(pos, pnl, source, *, quote_pnl=None, w_peak=None, now_ts=None):
+    now_ts = int(now_ts or time.time())
+    pnl = _pct(pnl, None)
+    mark_peak = _pct(getattr(pos, "mark_peak_pnl", None), 0.0) or 0.0
+    if pnl is not None:
+        mark_peak = max(mark_peak, pnl)
+
+    quote_peak = _pct(getattr(pos, "quote_peak_pnl", None), 0.0) or 0.0
+    trusted_peak = max(_pct(getattr(pos, "trusted_peak_pnl", None), 0.0) or 0.0, _pct(w_peak, 0.0) or 0.0)
+    quote_pnl = _pct(quote_pnl, None)
+    quote_peak_candidate = quote_pnl
+    if quote_peak_candidate is None and pnl is not None and _is_quote_price_source(source):
+        quote_peak_candidate = pnl
+    if quote_peak_candidate is not None:
+        quote_peak = max(quote_peak, quote_peak_candidate)
+        trusted_peak = max(trusted_peak, quote_peak)
+        try:
+            pos.peak_ts = now_ts
+        except Exception:
+            pass
+
+    try:
+        pos.mark_peak_pnl = mark_peak
+        pos.quote_peak_pnl = quote_peak
+        pos.trusted_peak_pnl = trusted_peak
+        pos.peak_pnl = trusted_peak
+        pos.peak_trust_status = _peak_status(mark_peak, trusted_peak, quote_peak)
+        state = getattr(pos, "monitor_state", None)
+        if not isinstance(state, dict):
+            state = {}
+        state["markPeakPnl"] = mark_peak
+        state["quotePeakPnl"] = quote_peak
+        state["trustedPeakPnl"] = trusted_peak
+        state["peakPnl"] = trusted_peak
+        state["highPnl"] = round(trusted_peak * 100.0, 6)
+        state["peakTrustStatus"] = pos.peak_trust_status
+        state["peakUntrustedMarkSpike"] = pos.peak_trust_status == "peak_untrusted_mark_spike"
+        state["peakMarkQuoteGap"] = mark_peak - max(trusted_peak, quote_peak)
+        state["lastPeakPriceSource"] = str(source or "")
+        pos.monitor_state = state
+    except Exception:
+        pass
+    return trusted_peak
 
 
 def _clamp_pct(value, default=0.0):
@@ -132,10 +209,9 @@ def _dog_catcher_guardian_floor_detail(pos, pnl, *, w_entry=None):
         float(pnl or 0.0),
     )
     if w_entry:
-        try:
-            peak = max(peak, float(w_entry.get("peak_pnl") or 0.0))
-        except (TypeError, ValueError):
-            pass
+        watch_trusted_peak = _watch_entry_trusted_peak(w_entry)
+        if watch_trusted_peak is not None:
+            peak = max(peak, watch_trusted_peak)
     floor = _cohort_probe_floor_for_position(pos, peak)
     detail = {
         "pass": False,
@@ -820,18 +896,20 @@ class ExitGuardianThread(threading.Thread):
                     self._exit_pending.add(trade_id)
                     continue
 
-                # === Update peak_pnl in real-time (critical for trail accuracy) ===
-                # BUG FIX: Sync peak between Guardian (pos.peak_pnl) and ExitMatrix (w_entry['peak_pnl'])
-                # Without this, they diverge and Guardian uses stale peak → wrong trail floor
+                # === Update peak in real time, but only trust quote-confirmed peaks ===
+                # Raw mark prices remain useful as a radar signal, but they must not
+                # raise trail floors or review/giveback peaks without executable quote
+                # confirmation.
+                w_peak = None
                 if w_entry:
-                    w_peak = w_entry.get('peak_pnl', 0) or 0
-                    if w_peak > pos.peak_pnl:
-                        pos.peak_pnl = w_peak  # read ExitMatrix's peak
-                if pnl > pos.peak_pnl:
-                    pos.peak_pnl = pnl
-                    pos.peak_ts = time.time()  # A3: record when peak was achieved
+                    w_peak = _watch_entry_trusted_peak(w_entry)
+                    if w_peak is not None and w_peak > pos.peak_pnl:
+                        pos.trusted_peak_pnl = w_peak
+                        pos.peak_pnl = w_peak  # read ExitMatrix's trusted peak
+                _trusted_peak = _update_guardian_peak_state(pos, pnl, src, w_peak=w_peak, now_ts=time.time())
                 if w_entry and pos.peak_pnl > (w_entry.get('peak_pnl', 0) or 0):
-                    w_entry['peak_pnl'] = pos.peak_pnl  # write back for ExitMatrix
+                    w_entry['trusted_peak_pnl'] = _trusted_peak
+                    w_entry['peak_pnl'] = _trusted_peak  # write back trusted peak for ExitMatrix
 
                 # === B+C: Record price into ring buffer for velocity calc ===
                 pos.price_ring.append((time.time(), price))
@@ -1718,7 +1796,17 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
             updated_state['tokenAmount'] = remaining_raw
             updated_state['phase0PartialLocked'] = True
             updated_state['phase0PartialLockPnl'] = gx_trigger_pnl
-            updated_state['phase0PartialLockPeak'] = max(float(getattr(gx_pos, 'peak_pnl', 0) or 0), gx_trigger_pnl)
+            _update_guardian_peak_state(
+                gx_pos,
+                gx_trigger_pnl,
+                'exit_guardian',
+                quote_pnl=gx_quote_pnl,
+                now_ts=time.time(),
+            )
+            updated_state['phase0PartialLockPeak'] = max(
+                float(getattr(gx_pos, 'trusted_peak_pnl', 0) or 0),
+                float(gx_quote_pnl or 0),
+            )
             updated_state['soldPct'] = min(gx_target_sold_pct, prev_sold_pct + gx_sell_pct)
             updated_state['lockedPnl'] = gx_trigger_pnl
             to_close.append({
@@ -1852,6 +1940,13 @@ def process_guardian_exits(exit_guardian, positions, lifecycles,
                 f"trigger={gx_trigger_pnl:+.1%} quote={gx_quote_pnl:+.1%} "
                 f"gap={gx_quote_mark_gap:+.1%}"
             )
+        _update_guardian_peak_state(
+            gx_pos,
+            gx_trigger_pnl,
+            'exit_guardian',
+            quote_pnl=gx_quote_pnl,
+            now_ts=time.time(),
+        )
         to_close.append({
             'trade_id': gx_trade_id,
             'reason': gx['reason'],

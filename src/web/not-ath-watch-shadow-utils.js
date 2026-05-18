@@ -37,6 +37,24 @@ function hasTable(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
 }
 
+function tableColumns(db, name) {
+  if (!hasTable(db, name)) return new Set();
+  return new Set(db.prepare(`PRAGMA table_info(${name})`).all().map((row) => row.name));
+}
+
+function trustedMissedPeakSqlExpr(cols, qualifier = 'm') {
+  const col = (name) => `${qualifier}.${name}`;
+  let names = ['executable_peak_pnl', 'quote_clean_peak_pnl', 'tradable_peak_pnl']
+    .filter((name) => cols.has(name))
+    .map(col);
+  if (names.length === 0) {
+    names = ['max_pnl_recorded', 'pnl_24h', 'pnl_60m', 'pnl_15m', 'pnl_5m']
+      .filter((name) => cols.has(name))
+      .map(col);
+  }
+  return `COALESCE(${[...names, '0'].join(', ')})`;
+}
+
 function cohortMeta(cohort) {
   return NOT_ATH_RELAXED_SHADOW_COHORTS[cohort] || {
     order: 999,
@@ -67,7 +85,7 @@ function addCohortDerivedFields(row) {
   };
 }
 
-function relaxedShadowCohortSql({ sinceTs }) {
+function relaxedShadowCohortSql({ sinceTs, trustedPeakExpr }) {
   const snapshotWhereSql = sinceTs ? 'AND snapshot_ts >= @since' : '';
   const missedWhereSql = sinceTs ? 'AND created_event_ts >= @since' : '';
   return `
@@ -169,13 +187,13 @@ function relaxedShadowCohortSql({ sinceTs }) {
         m.pnl_15m,
         m.pnl_60m,
         m.pnl_24h,
-        COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) AS max_pnl,
+        ${trustedPeakExpr} AS max_pnl,
         COALESCE(m.tradable_missed, 0) AS tradable_missed,
         COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
         m.tradability_status,
         ROW_NUMBER() OVER (
           PARTITION BY m.token_ca, COALESCE(m.signal_ts, 0)
-          ORDER BY COALESCE(m.tradable_peak_pnl, m.max_pnl_recorded, m.pnl_24h, m.pnl_60m, m.pnl_15m, m.pnl_5m, 0) DESC,
+          ORDER BY ${trustedPeakExpr} DESC,
                    m.created_event_ts DESC,
                    m.id DESC
         ) AS rn
@@ -251,7 +269,11 @@ export function buildNotAthRelaxedShadowCohorts(db, options = {}) {
     };
   }
 
-  const cte = relaxedShadowCohortSql({ sinceTs });
+  const missedCols = tableColumns(db, 'paper_missed_signal_attribution');
+  const cte = relaxedShadowCohortSql({
+    sinceTs,
+    trustedPeakExpr: trustedMissedPeakSqlExpr(missedCols, 'm'),
+  });
   const cohorts = db.prepare(`
     ${cte}
     SELECT

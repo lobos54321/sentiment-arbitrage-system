@@ -18,6 +18,25 @@ function pctFromRatio(value) {
   return n == null ? null : roundNumber(n * 100, 2);
 }
 
+const PEAK_UNTRUSTED_MARK_GAP_PCT = Number(process.env.PEAK_UNTRUSTED_MARK_GAP_PCT || '0.25');
+
+function trustedPeakRatio(row = {}) {
+  const trusted = finiteNumber(row.trusted_peak_pnl);
+  if (trusted != null && trusted > 0) return trusted;
+  const quote = finiteNumber(row.quote_peak_pnl);
+  if (quote != null && quote > 0) return quote;
+  if (row.trusted_peak_pnl === undefined && row.quote_peak_pnl === undefined) {
+    return finiteNumber(row.peak_pnl);
+  }
+  return null;
+}
+
+function markPeakRatio(row = {}) {
+  const mark = finiteNumber(row.mark_peak_pnl);
+  if (mark != null) return mark;
+  return finiteNumber(row.peak_pnl);
+}
+
 function parseJsonObject(value) {
   if (!value || typeof value !== 'string') return {};
   try {
@@ -103,6 +122,7 @@ function emptyGroup(key, extra = {}) {
     pnl_n: 0,
     peak_n: 0,
     giveback_n: 0,
+    mark_only_peak_spikes: 0,
     total_pnl_pct: 0,
     total_peak_pct: 0,
     total_giveback_pct: 0,
@@ -122,6 +142,7 @@ function finalizeGroup(group) {
     avg_pnl_pct: group.pnl_n ? roundNumber(group.total_pnl_pct / group.pnl_n, 2) : null,
     avg_peak_pnl_pct: group.peak_n ? roundNumber(group.total_peak_pct / group.peak_n, 2) : null,
     avg_giveback_pct: group.giveback_n ? roundNumber(group.total_giveback_pct / group.giveback_n, 2) : null,
+    mark_only_peak_spikes: group.mark_only_peak_spikes || 0,
     avg_signal_to_quote_latency_ms: group.latency_n ? Math.round(group.total_signal_to_quote_latency_ms / group.latency_n) : null,
     avg_signal_to_quote_drift_pct: group.drift_n ? roundNumber(group.total_signal_to_quote_drift_pct / group.drift_n, 2) : null,
     est_pnl_sol: roundNumber(group.est_pnl_sol, 6),
@@ -129,7 +150,7 @@ function finalizeGroup(group) {
   };
 }
 
-function applyTrade(group, row, pnlPct, peakPct, givebackPct) {
+function applyTrade(group, row, pnlPct, peakPct, givebackPct, markOnlySpike = false) {
   group.total += 1;
   const closed = row.exit_ts != null || row.exit_reason != null || pnlPct != null;
   if (closed) group.closed += 1;
@@ -151,6 +172,7 @@ function applyTrade(group, row, pnlPct, peakPct, givebackPct) {
     group.giveback_n += 1;
     group.total_giveback_pct += givebackPct;
   }
+  if (markOnlySpike) group.mark_only_peak_spikes += 1;
   const latencyMs = finiteNumber(row.signal_to_quote_latency_ms);
   if (latencyMs != null) {
     group.latency_n += 1;
@@ -177,8 +199,16 @@ export function buildTradeReviewSummary(rows = []) {
     const entryBranch = inferReviewEntryBranch(row);
     const capitalTier = capitalTierForTrade(row);
     const pnlPct = pctFromRatio(row.pnl_pct);
-    const peakPct = pctFromRatio(row.peak_pnl);
+    const peakRatio = trustedPeakRatio(row);
+    const markPeakRatioValue = markPeakRatio(row);
+    const peakPct = pctFromRatio(peakRatio);
+    const markPeakPct = pctFromRatio(markPeakRatioValue);
     const givebackPct = pnlPct != null && peakPct != null ? roundNumber(Math.max(0, peakPct - pnlPct), 2) : null;
+    const markOnlySpike = (
+      markPeakRatioValue != null
+      && (peakRatio == null || markPeakRatioValue - peakRatio >= PEAK_UNTRUSTED_MARK_GAP_PCT)
+      && markPeakRatioValue >= 0.25
+    );
 
     if (row.token_ca) uniqueTokens.add(String(row.token_ca));
     if (row.lifecycle_id) uniqueLifecycles.add(String(row.lifecycle_id));
@@ -186,10 +216,10 @@ export function buildTradeReviewSummary(rows = []) {
     if (!byEntryMode.has(entryMode)) byEntryMode.set(entryMode, emptyGroup(entryMode, { entry_mode: entryMode, capital_tier: capitalTier }));
     if (!byEntryBranch.has(entryBranch)) byEntryBranch.set(entryBranch, emptyGroup(entryBranch, { entry_branch: entryBranch, capital_tier: capitalTier }));
 
-    applyTrade(totals, row, pnlPct, peakPct, givebackPct);
-    applyTrade(byTier.get(capitalTier), row, pnlPct, peakPct, givebackPct);
-    applyTrade(byEntryMode.get(entryMode), row, pnlPct, peakPct, givebackPct);
-    applyTrade(byEntryBranch.get(entryBranch), row, pnlPct, peakPct, givebackPct);
+    applyTrade(totals, row, pnlPct, peakPct, givebackPct, markOnlySpike);
+    applyTrade(byTier.get(capitalTier), row, pnlPct, peakPct, givebackPct, markOnlySpike);
+    applyTrade(byEntryMode.get(entryMode), row, pnlPct, peakPct, givebackPct, markOnlySpike);
+    applyTrade(byEntryBranch.get(entryBranch), row, pnlPct, peakPct, givebackPct, markOnlySpike);
 
     if (givebackPct != null && givebackPct > 0) {
       topGivebackTrades.push({
@@ -205,6 +235,8 @@ export function buildTradeReviewSummary(rows = []) {
         position_size_sol: finiteNumber(row.position_size_sol),
         pnl_pct: pnlPct,
         peak_pnl_pct: peakPct,
+        mark_peak_pnl_pct: markPeakPct,
+        peak_trust_status: row.peak_trust_status || (markOnlySpike ? 'mark_only_peak_untrusted' : 'trusted_peak'),
         giveback_pct: givebackPct,
       });
     }
@@ -287,6 +319,9 @@ export function buildPaperReviewSnapshot({
       missed_gold_unique: closedLoop?.missed_dogs?.gold_unique ?? null,
       missed_silver_unique: closedLoop?.missed_dogs?.silver_unique ?? null,
       missed_bronze_unique: closedLoop?.missed_dogs?.bronze_unique ?? null,
+      missed_mark_only_gold_unique: closedLoop?.missed_dogs?.mark_only_gold_unique ?? null,
+      missed_mark_only_silver_unique: closedLoop?.missed_dogs?.mark_only_silver_unique ?? null,
+      missed_mark_only_bronze_unique: closedLoop?.missed_dogs?.mark_only_bronze_unique ?? null,
       paper_trades_total: tradeReview?.totals?.total ?? null,
       paper_trade_rows: tradeReview?.counting_units?.paper_trade_rows ?? tradeReview?.totals?.total ?? null,
       unique_tokens_with_trade: tradeReview?.counting_units?.unique_tokens_with_trade ?? null,
@@ -297,6 +332,7 @@ export function buildPaperReviewSnapshot({
       paper_avg_pnl_pct: tradeReview?.totals?.avg_pnl_pct ?? null,
       paper_avg_peak_pnl_pct: tradeReview?.totals?.avg_peak_pnl_pct ?? null,
       paper_avg_giveback_pct: tradeReview?.totals?.avg_giveback_pct ?? null,
+      paper_mark_only_peak_spikes: tradeReview?.totals?.mark_only_peak_spikes ?? null,
       hard_gate_pass_probe_fills: hardGateProbe?.fills ?? null,
       hard_gate_pass_probe_avg_pnl_pct: hardGateProbe?.avg_pnl_pct ?? null,
       source_resonance_probe_fills: sourceProbe?.fills ?? null,
@@ -316,6 +352,9 @@ export function buildPaperReviewSnapshot({
         gold_unique: closedLoop?.missed_dogs?.gold_unique ?? null,
         silver_unique: closedLoop?.missed_dogs?.silver_unique ?? null,
         bronze_unique: closedLoop?.missed_dogs?.bronze_unique ?? null,
+        mark_only_gold_unique: closedLoop?.missed_dogs?.mark_only_gold_unique ?? null,
+        mark_only_silver_unique: closedLoop?.missed_dogs?.mark_only_silver_unique ?? null,
+        mark_only_bronze_unique: closedLoop?.missed_dogs?.mark_only_bronze_unique ?? null,
         top_missed_dogs: closedLoop?.missed_dogs?.top_missed_dogs || [],
         by_final_blocker: closedLoop?.missed_dogs?.by_final_blocker || [],
       },
@@ -364,8 +403,10 @@ export function buildPaperReviewMarkdown(snapshot) {
     mode: row.entry_mode,
     tier: row.capital_tier,
     peak: row.peak_pnl_pct,
+    mark_peak: row.mark_peak_pnl_pct,
     exit: row.pnl_pct,
     giveback: row.giveback_pct,
+    peak_status: row.peak_trust_status,
     reason: row.exit_reason,
   }));
   const branchRows = (snapshot.trade_review?.by_entry_branch || []).slice(0, 12).map((row) => ({
@@ -391,7 +432,7 @@ export function buildPaperReviewMarkdown(snapshot) {
     `- premium_signals: ${summary.premium_signal_rows ?? ''} rows / ${summary.premium_unique_tokens ?? ''} unique`,
     `- hard_gate_pass_unique: ${summary.hard_gate_pass_unique ?? ''}`,
     `- source_resonance_unique: ${summary.source_resonance_unique ?? ''}, gmgn_pre_seen_unique: ${summary.gmgn_pre_seen_unique ?? ''}`,
-    `- missed dogs: gold=${summary.missed_gold_unique ?? ''}, silver=${summary.missed_silver_unique ?? ''}, bronze=${summary.missed_bronze_unique ?? ''}, quote_clean=${summary.quote_clean_missed_dog_unique ?? ''}`,
+    `- missed dogs: trusted gold=${summary.missed_gold_unique ?? ''}, silver=${summary.missed_silver_unique ?? ''}, bronze=${summary.missed_bronze_unique ?? ''}, mark_only=${summary.missed_mark_only_gold_unique ?? ''}/${summary.missed_mark_only_silver_unique ?? ''}/${summary.missed_mark_only_bronze_unique ?? ''}, quote_clean=${summary.quote_clean_missed_dog_unique ?? ''}`,
     `- paper trades: total=${summary.paper_trades_total ?? ''}, closed=${summary.paper_trades_closed ?? ''}, win_rate_pct=${summary.paper_win_rate_pct ?? ''}, avg_pnl_pct=${summary.paper_avg_pnl_pct ?? ''}, avg_giveback_pct=${summary.paper_avg_giveback_pct ?? ''}`,
     `- counting_units: rows=${summary.paper_trade_rows ?? ''}, unique_tokens=${summary.unique_tokens_with_trade ?? ''}, unique_lifecycles=${summary.unique_lifecycles_with_trade ?? ''}`,
     '',
@@ -405,7 +446,7 @@ export function buildPaperReviewMarkdown(snapshot) {
     '',
     `## Top Giveback Trades`,
     '',
-    givebackRows.length ? tableRows(givebackRows, ['symbol', 'mode', 'tier', 'peak', 'exit', 'giveback', 'reason']) : '_No giveback rows._',
+    givebackRows.length ? tableRows(givebackRows, ['symbol', 'mode', 'tier', 'peak', 'mark_peak', 'exit', 'giveback', 'peak_status', 'reason']) : '_No giveback rows._',
     '',
     `## Entry Branches`,
     '',

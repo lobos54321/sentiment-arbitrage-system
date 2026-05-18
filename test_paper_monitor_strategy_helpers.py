@@ -176,11 +176,46 @@ class _DummyPos:
         self.trade_id = 42
         self.lifecycle_id = "life-parent"
         self.signal_ts = 1_778_220_000
+        self.entry_ts = self.signal_ts + 30
         self.premium_signal_id = None
         self.strategy_stage = "paper"
         self.signal_type = route
         self.pool_address = "PoolCA"
         self.peak_pnl = 0.0
+        self.mark_peak_pnl = 0.0
+        self.quote_peak_pnl = 0.0
+        self.trusted_peak_pnl = 0.0
+        self.peak_trust_status = "trusted_peak_pending_quote"
+        self.peak_ts = self.entry_ts
+
+
+def test_update_position_peak_state_keeps_mark_spike_untrusted():
+    pos = _DummyPos()
+
+    first = monitor.update_position_peak_state(
+        pos,
+        current_pnl=2.0,
+        price_source="dex_mark",
+        now_ts=pos.entry_ts + 10,
+    )
+    assert first["mark_peak_pnl"] == 2.0
+    assert first["trusted_peak_pnl"] == 0.0
+    assert pos.peak_pnl == 0.0
+    assert pos.peak_trust_status == "mark_only_peak_untrusted"
+
+    second = monitor.update_position_peak_state(
+        pos,
+        current_pnl=1.8,
+        price_source="shared-quote-cache",
+        quote_pnl=0.12,
+        now_ts=pos.entry_ts + 20,
+    )
+    assert second["mark_peak_pnl"] == 2.0
+    assert second["quote_peak_pnl"] == 0.12
+    assert second["trusted_peak_pnl"] == 0.12
+    assert pos.peak_pnl == 0.12
+    assert pos.peak_trust_status == "peak_untrusted_mark_spike"
+    assert pos.monitor_state["peakUntrustedMarkSpike"] is True
 
 
 def _ath_no_kline_pending():

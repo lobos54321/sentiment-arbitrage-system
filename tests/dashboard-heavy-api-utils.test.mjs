@@ -170,6 +170,27 @@ test('closed loop missed dog summary ranks one blocker per token in SQL', () => 
     baseline_ts: 1004,
   });
   insert.run({
+    token_ca: 'token-mark-only',
+    symbol: 'MARK',
+    signal_id: 6,
+    signal_ts: 1005,
+    route: 'ATH',
+    component: 'matrix_evaluator',
+    reject_reason: 'mark_spike',
+    tradability_status: 'tradable_reclaim',
+    tradability_reason: 'mark_only',
+    tradable_peak_pnl: null,
+    tradable_missed: 1,
+    would_stop_before_peak: 0,
+    max_pnl_recorded: 1.3,
+    pnl_24h: null,
+    pnl_60m: null,
+    pnl_15m: null,
+    pnl_5m: null,
+    created_event_ts: 1005,
+    baseline_ts: 1005,
+  });
+  insert.run({
     token_ca: 'old-token',
     symbol: 'OLD',
     signal_id: 5,
@@ -200,18 +221,21 @@ test('closed loop missed dog summary ranks one blocker per token in SQL', () => 
   );
 
   assert.equal(summary.available, true);
-  assert.equal(summary.unique_tokens, 3);
-  assert.equal(summary.quote_clean_unique, 2);
+  assert.equal(summary.unique_tokens, 4);
+  assert.equal(summary.quote_clean_unique, 3);
   assert.equal(summary.quote_clean_dog_unique, 1);
   assert.equal(summary.gold_unique, 1);
   assert.equal(summary.silver_unique, 1);
   assert.equal(summary.bronze_unique, 0);
-  assert.equal(summary.top_missed_dogs.length, 2);
+  assert.equal(summary.mark_only_gold_unique, 1);
+  assert.equal(summary.top_missed_dogs.length, 3);
   assert.equal(summary.top_missed_dogs[0].token_ca, 'token-a');
   assert.equal(summary.top_missed_dogs[0].final_blocker_key, 'ATH:source_resonance_probe:scout_quality_buy_pressure_weak');
   assert.equal(summary.top_missed_dogs[0].entry_mode_candidate, 'source_resonance_tiny_probe');
   assert.equal(summary.top_missed_dogs[1].token_ca, 'token-b');
   assert.equal(summary.top_missed_dogs[1].quote_clean, false);
+  assert.equal(summary.top_missed_dogs[2].token_ca, 'token-mark-only');
+  assert.equal(summary.top_missed_dogs[2].peak_trust_status, 'mark_only_peak_untrusted');
   assert.equal(summary.by_final_blocker[0].final_blocker_key, 'ATH:source_resonance_probe:scout_quality_buy_pressure_weak');
   assert.equal(summary.by_final_blocker[0].gold_unique, 1);
 
@@ -222,11 +246,12 @@ test('closed loop missed dog summary ranks one blocker per token in SQL', () => 
     5,
     { includeDetails: false }
   );
-  assert.equal(summaryOnly.unique_tokens, 3);
-  assert.equal(summaryOnly.quote_clean_unique, 2);
+  assert.equal(summaryOnly.unique_tokens, 4);
+  assert.equal(summaryOnly.quote_clean_unique, 3);
   assert.equal(summaryOnly.quote_clean_dog_unique, 1);
   assert.equal(summaryOnly.gold_unique, 1);
   assert.equal(summaryOnly.silver_unique, 1);
+  assert.equal(summaryOnly.mark_only_gold_unique, 1);
   assert.deepEqual(summaryOnly.top_missed_dogs, []);
   assert.deepEqual(summaryOnly.by_final_blocker, []);
   db.close();

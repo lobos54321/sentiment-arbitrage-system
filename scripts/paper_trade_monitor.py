@@ -191,6 +191,7 @@ PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_QUOTE_PNL = float(os.environ.get('PROBE_HOLD_QUO
 PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP = float(os.environ.get('PROBE_HOLD_QUOTE_PROFIT_GAP_MIN_GAP', '0.08'))
 QUOTE_GUARD_POLICY_VERSION = os.environ.get('QUOTE_GUARD_POLICY_VERSION', 'd162c067')
 FAST_EXTERNAL_OPEN_SYNC_SEC = float(os.environ.get('FAST_EXTERNAL_OPEN_SYNC_SEC', '1'))
+PEAK_UNTRUSTED_MARK_GAP_PCT = float(os.environ.get('PEAK_UNTRUSTED_MARK_GAP_PCT', '0.25'))
 
 DEFAULT_PAPER_EXECUTION = {
     'executionMode': 'parity',
@@ -1171,6 +1172,12 @@ def parse_monitor_state(monitor_state_json):
 def monitor_peak_pnl_decimal(monitor_state, fallback=0.0):
     if not isinstance(monitor_state, dict):
         return float(fallback or 0.0)
+    for key in ('trustedPeakPnl', 'quotePeakPnl'):
+        if monitor_state.get(key) is not None:
+            try:
+                return float(monitor_state.get(key))
+            except Exception:
+                pass
     if monitor_state.get('highPnl') is not None:
         try:
             return float(monitor_state.get('highPnl')) / 100.0
@@ -1184,9 +1191,57 @@ def monitor_peak_pnl_decimal(monitor_state, fallback=0.0):
     return float(fallback or 0.0)
 
 
+def monitor_mark_peak_pnl_decimal(monitor_state, fallback=0.0):
+    if not isinstance(monitor_state, dict):
+        return float(fallback or 0.0)
+    for key in ('markPeakPnl', 'rawMarkPeakPnl'):
+        if monitor_state.get(key) is not None:
+            try:
+                return float(monitor_state.get(key))
+            except Exception:
+                pass
+    if monitor_state.get('highPnl') is not None:
+        try:
+            return float(monitor_state.get('highPnl')) / 100.0
+        except Exception:
+            pass
+    if monitor_state.get('peakPnl') is not None:
+        try:
+            return float(monitor_state.get('peakPnl'))
+        except Exception:
+            pass
+    return float(fallback or 0.0)
+
+
+def monitor_quote_peak_pnl_decimal(monitor_state, fallback=0.0):
+    if not isinstance(monitor_state, dict):
+        return float(fallback or 0.0)
+    for key in ('quotePeakPnl', 'trustedPeakPnl'):
+        if monitor_state.get(key) is not None:
+            try:
+                return float(monitor_state.get(key))
+            except Exception:
+                pass
+    return float(fallback or 0.0)
+
+
+def monitor_state_has_trusted_peak(monitor_state):
+    return isinstance(monitor_state, dict) and (
+        monitor_state.get('trustedPeakPnl') is not None
+        or monitor_state.get('quotePeakPnl') is not None
+    )
+
+
 def sync_position_from_monitor_state(pos, allow_token_amount_override=False):
     state = pos.monitor_state or {}
-    pos.peak_pnl = monitor_peak_pnl_decimal(state, pos.peak_pnl)
+    pos.mark_peak_pnl = monitor_mark_peak_pnl_decimal(state, getattr(pos, 'mark_peak_pnl', pos.peak_pnl))
+    pos.quote_peak_pnl = monitor_quote_peak_pnl_decimal(state, getattr(pos, 'quote_peak_pnl', 0.0))
+    if monitor_state_has_trusted_peak(state):
+        pos.trusted_peak_pnl = monitor_peak_pnl_decimal(state, getattr(pos, 'trusted_peak_pnl', pos.quote_peak_pnl))
+    else:
+        pos.trusted_peak_pnl = getattr(pos, 'trusted_peak_pnl', pos.quote_peak_pnl)
+    pos.peak_pnl = pos.trusted_peak_pnl
+    pos.peak_trust_status = state.get('peakTrustStatus') or getattr(pos, 'peak_trust_status', None) or peak_trust_status(pos)
     pos.trailing_active = bool(state.get('breakeven', state.get('trailingActive', pos.trailing_active)))
     pos.bars_held = int(state.get('barsHeld', pos.bars_held) or pos.bars_held)
     pos.last_mark_ts = int(state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
@@ -14405,6 +14460,10 @@ def init_paper_db(db_path=None):
                 market_regime TEXT,
                 replay_source TEXT DEFAULT 'live_monitor',
                 peak_pnl REAL DEFAULT 0,
+                mark_peak_pnl REAL DEFAULT 0,
+                quote_peak_pnl REAL DEFAULT 0,
+                trusted_peak_pnl REAL DEFAULT 0,
+                peak_trust_status TEXT DEFAULT 'trusted_peak_pending_quote',
                 trailing_active INTEGER DEFAULT 0,
                 position_size_sol REAL,
                 token_amount_raw TEXT,
@@ -14527,6 +14586,10 @@ def init_paper_db(db_path=None):
             "ALTER TABLE paper_trades ADD COLUMN policy_version TEXT",
             "ALTER TABLE paper_trades ADD COLUMN entry_branch TEXT",
             "ALTER TABLE paper_trades ADD COLUMN intervention_flags_json TEXT",
+            "ALTER TABLE paper_trades ADD COLUMN mark_peak_pnl REAL DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN quote_peak_pnl REAL DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN trusted_peak_pnl REAL DEFAULT 0",
+            "ALTER TABLE paper_trades ADD COLUMN peak_trust_status TEXT DEFAULT 'trusted_peak_pending_quote'",
             "ALTER TABLE paper_trades ADD COLUMN signal_route TEXT",
             "ALTER TABLE paper_trades ADD COLUMN entry_mode TEXT",
             "ALTER TABLE paper_trades ADD COLUMN lotto_state_json TEXT",
@@ -16530,6 +16593,91 @@ def _safe_float(value, default=0.0):
         return default
 
 
+QUOTE_PRICE_SOURCES = {
+    'shared-quote-cache',
+    'shared-quote-runtime',
+    'jupiter_quote',
+    'jupiter',
+    'execution_quote',
+    'paper_fast_entry_queue+jupiter_quote',
+}
+
+
+def is_quote_price_source(source):
+    return str(source or '').strip().lower() in QUOTE_PRICE_SOURCES
+
+
+def peak_trust_status(pos):
+    mark_peak = _safe_float(getattr(pos, 'mark_peak_pnl', None), 0.0) or 0.0
+    trusted_peak = _safe_float(getattr(pos, 'trusted_peak_pnl', None), 0.0) or 0.0
+    quote_peak = _safe_float(getattr(pos, 'quote_peak_pnl', None), 0.0) or 0.0
+    if max(trusted_peak, quote_peak) > 0:
+        if mark_peak - max(trusted_peak, quote_peak) >= PEAK_UNTRUSTED_MARK_GAP_PCT:
+            return 'peak_untrusted_mark_spike'
+        return 'trusted_quote_peak'
+    if mark_peak > 0:
+        return 'mark_only_peak_untrusted'
+    return 'trusted_peak_pending_quote'
+
+
+def update_position_peak_state(pos, *, current_pnl=None, price_source=None, quote_pnl=None, now_ts=None):
+    """Track raw mark peak separately from quote-confirmed/trusted peak.
+
+    The legacy ``peak_pnl`` attribute is kept as the trusted peak so existing
+    trail/exit code stops using mark-only spikes as executable floors.
+    """
+    now_ts = int(now_ts or time.time())
+    current_pnl = _safe_float(current_pnl, None)
+    quote_pnl = _safe_float(quote_pnl, None)
+    if quote_pnl is None and current_pnl is not None and is_quote_price_source(price_source):
+        quote_pnl = current_pnl
+
+    mark_peak = _safe_float(getattr(pos, 'mark_peak_pnl', None), 0.0) or 0.0
+    if current_pnl is not None:
+        mark_peak = max(mark_peak, current_pnl)
+
+    quote_peak = _safe_float(getattr(pos, 'quote_peak_pnl', None), 0.0) or 0.0
+    if quote_pnl is not None:
+        quote_peak = max(quote_peak, quote_pnl)
+
+    trusted_peak = max(
+        _safe_float(getattr(pos, 'trusted_peak_pnl', None), 0.0) or 0.0,
+        quote_peak,
+    )
+
+    pos.mark_peak_pnl = mark_peak
+    pos.quote_peak_pnl = quote_peak
+    pos.trusted_peak_pnl = trusted_peak
+    pos.peak_pnl = trusted_peak
+    pos.peak_trust_status = peak_trust_status(pos)
+    if quote_pnl is not None and quote_pnl >= trusted_peak:
+        pos.peak_ts = now_ts
+
+    state = dict(getattr(pos, 'monitor_state', None) or {})
+    state['markPeakPnl'] = _safe_float(mark_peak, None)
+    state['quotePeakPnl'] = _safe_float(quote_peak, None)
+    state['trustedPeakPnl'] = _safe_float(trusted_peak, None)
+    state['peakPnl'] = _safe_float(trusted_peak, None)
+    state['highPnl'] = round(_safe_float(trusted_peak, 0.0) * 100.0, 6)
+    state['peakTrustStatus'] = pos.peak_trust_status
+    state['lastPeakUpdateTs'] = now_ts
+    if mark_peak - max(trusted_peak, quote_peak) >= PEAK_UNTRUSTED_MARK_GAP_PCT:
+        state['peakUntrustedMarkSpike'] = True
+        state['peakMarkQuoteGap'] = _safe_float(mark_peak - max(trusted_peak, quote_peak), None)
+    else:
+        state['peakUntrustedMarkSpike'] = False
+        state['peakMarkQuoteGap'] = _safe_float(mark_peak - max(trusted_peak, quote_peak), None)
+    if price_source:
+        state['lastPeakPriceSource'] = str(price_source)
+    pos.monitor_state = state
+    return {
+        'mark_peak_pnl': mark_peak,
+        'quote_peak_pnl': quote_peak,
+        'trusted_peak_pnl': trusted_peak,
+        'peak_trust_status': pos.peak_trust_status,
+    }
+
+
 def parse_entry_execution(entry_execution_json):
     if isinstance(entry_execution_json, dict):
         return entry_execution_json
@@ -16558,7 +16706,7 @@ def has_partial_state_gap(token_amount_raw, entry_execution, monitor_state):
     return not any(state.get(field) not in (None, False, 0, 0.0, '') for field in partial_state_fields)
 
 
-def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entry_ts, position_size_sol, token_amount_raw, token_decimals, peak_pnl=0.0, trailing_active=False, bars_held=0, last_mark_ts=None):
+def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entry_ts, position_size_sol, token_amount_raw, token_decimals, peak_pnl=0.0, mark_peak_pnl=None, quote_peak_pnl=None, trusted_peak_pnl=None, peak_trust_status=None, trailing_active=False, bars_held=0, last_mark_ts=None):
     sanitized = dict(monitor_state or {})
     sanitized['tokenCA'] = token_ca or sanitized.get('tokenCA') or None
     sanitized['symbol'] = symbol or sanitized.get('symbol') or 'UNKNOWN'
@@ -16573,8 +16721,21 @@ def sanitize_monitor_state(monitor_state, *, token_ca, symbol, entry_price, entr
     sanitized['tokenAmount'] = _safe_int(token_amount_raw, 0)
     sanitized['tokenDecimals'] = _safe_int(token_decimals, 0)
     sanitized['entryTime'] = _safe_int(entry_ts, 0) * 1000
-    sanitized['highPnl'] = round(_safe_float(peak_pnl, 0.0) * 100.0, 6)
-    sanitized['peakPnl'] = _safe_float(peak_pnl, 0.0)
+    trusted_peak = _safe_float(trusted_peak_pnl, _safe_float(peak_pnl, 0.0))
+    mark_peak = _safe_float(mark_peak_pnl, monitor_mark_peak_pnl_decimal(sanitized, trusted_peak))
+    quote_peak = _safe_float(quote_peak_pnl, monitor_quote_peak_pnl_decimal(sanitized, trusted_peak))
+    sanitized['highPnl'] = round(trusted_peak * 100.0, 6)
+    sanitized['peakPnl'] = trusted_peak
+    sanitized['markPeakPnl'] = mark_peak
+    sanitized['quotePeakPnl'] = quote_peak
+    sanitized['trustedPeakPnl'] = trusted_peak
+    sanitized['peakTrustStatus'] = peak_trust_status or sanitized.get('peakTrustStatus') or (
+        'peak_untrusted_mark_spike'
+        if mark_peak - max(trusted_peak, quote_peak) >= PEAK_UNTRUSTED_MARK_GAP_PCT
+        else 'trusted_quote_peak' if max(trusted_peak, quote_peak) > 0 else 'trusted_peak_pending_quote'
+    )
+    sanitized['peakUntrustedMarkSpike'] = sanitized['peakTrustStatus'] == 'peak_untrusted_mark_spike'
+    sanitized['peakMarkQuoteGap'] = _safe_float(mark_peak - max(trusted_peak, quote_peak), None)
     sanitized['breakeven'] = bool(trailing_active)
     sanitized['trailingActive'] = bool(trailing_active)
     sanitized['barsHeld'] = max(0, _safe_int(bars_held, 0))
@@ -16631,7 +16792,8 @@ class Position:
     """Tracks an open paper trade position."""
     __slots__ = [
         'trade_id', 'token_ca', 'symbol', 'signal_ts', 'entry_price', 'entry_ts',
-        'pool_address', 'peak_pnl', 'trailing_active', 'bars_held', 'last_bar_ts',
+        'pool_address', 'peak_pnl', 'mark_peak_pnl', 'quote_peak_pnl',
+        'trusted_peak_pnl', 'peak_trust_status', 'trailing_active', 'bars_held', 'last_bar_ts',
         'strategy_stage', 'lifecycle_id', 'exit_rules', 'position_size_sol',
         'token_amount_raw', 'token_decimals', 'exit_quote_failures', 'last_exit_quote_failure', 'last_mark_ts',
         'monitor_state', 'entry_execution_json', 'premium_signal_id', 'signal_type',
@@ -16663,6 +16825,10 @@ class Position:
         self.exit_quote_failures = int(exit_quote_failures or 0)
         self.last_exit_quote_failure = last_exit_quote_failure or None
         self.peak_pnl = 0.0
+        self.mark_peak_pnl = 0.0
+        self.quote_peak_pnl = 0.0
+        self.trusted_peak_pnl = 0.0
+        self.peak_trust_status = 'trusted_peak_pending_quote'
         self.peak_ts = int(entry_ts)  # A3: timestamp of last peak_pnl update (for time-decay trail)
         self.trailing_active = False
         self.bars_held = 0
@@ -16731,14 +16897,17 @@ def restore_open_position_from_row(db, row, strategy_config):
             "UPDATE paper_trades SET token_amount_raw = ?, token_decimals = ? WHERE id = ?",
             (str(recovered['token_amount_raw']), recovered['token_decimals'], row['id'])
         )
-    pos.peak_pnl = row['peak_pnl'] or 0
+    pos.mark_peak_pnl = _safe_float(_row_value(row, 'mark_peak_pnl'), _safe_float(_row_value(row, 'peak_pnl'), 0.0)) or 0.0
+    pos.quote_peak_pnl = _safe_float(_row_value(row, 'quote_peak_pnl'), monitor_quote_peak_pnl_decimal(pos.monitor_state, 0.0)) or 0.0
+    pos.trusted_peak_pnl = _safe_float(_row_value(row, 'trusted_peak_pnl'), pos.quote_peak_pnl) or 0.0
+    pos.peak_pnl = pos.trusted_peak_pnl
+    pos.peak_trust_status = _row_value(row, 'peak_trust_status') or peak_trust_status(pos)
     pos.trailing_active = bool(row['trailing_active'])
     pos.bars_held = row['bars_held'] or 0
     pos.last_bar_ts = int(row['entry_ts']) + max((row['bars_held'] or 0) - 1, 0) * 60
     pos.last_mark_ts = pos.last_bar_ts
     if pos.monitor_state:
         sync_position_from_monitor_state(pos)
-        pos.peak_pnl = monitor_peak_pnl_decimal(pos.monitor_state, pos.peak_pnl)
         pos.trailing_active = bool(pos.monitor_state.get('breakeven', pos.monitor_state.get('trailingActive', pos.trailing_active)))
         pos.bars_held = int(pos.monitor_state.get('barsHeld', pos.bars_held) or pos.bars_held)
         pos.last_mark_ts = int(pos.monitor_state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
@@ -16753,6 +16922,10 @@ def restore_open_position_from_row(db, row, strategy_config):
         token_amount_raw=pos.token_amount_raw,
         token_decimals=pos.token_decimals,
         peak_pnl=pos.peak_pnl,
+        mark_peak_pnl=pos.mark_peak_pnl,
+        quote_peak_pnl=pos.quote_peak_pnl,
+        trusted_peak_pnl=pos.trusted_peak_pnl,
+        peak_trust_status=pos.peak_trust_status,
         trailing_active=pos.trailing_active,
         bars_held=pos.bars_held,
         last_mark_ts=pos.last_mark_ts,
@@ -17570,7 +17743,10 @@ def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decisi
         """
         UPDATE paper_trades
         SET exit_price = ?, exit_ts = ?, exit_reason = ?, pnl_pct = ?,
-            bars_held = ?, stage_outcome = ?, exit_quote_failures = ?, last_exit_quote_failure = ?,
+            bars_held = ?, stage_outcome = ?,
+            peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+            trusted_peak_pnl = ?, peak_trust_status = ?,
+            exit_quote_failures = ?, last_exit_quote_failure = ?,
             exit_execution_audit_json = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?
         WHERE id = ?
         """,
@@ -17581,6 +17757,11 @@ def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decisi
             float(pnl_pct),
             pos.bars_held,
             stage_outcome,
+            pos.peak_pnl,
+            getattr(pos, 'mark_peak_pnl', pos.peak_pnl),
+            getattr(pos, 'quote_peak_pnl', 0.0),
+            getattr(pos, 'trusted_peak_pnl', pos.peak_pnl),
+            getattr(pos, 'peak_trust_status', peak_trust_status(pos)),
             pos.exit_quote_failures,
             pos.last_exit_quote_failure,
             json.dumps(build_execution_audit(None, audit_payload)),
@@ -17696,7 +17877,9 @@ def run_monitor(db):
     last_external_open_sync = 0.0
 
     open_rows = db.execute("""
-        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
+        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl,
+               mark_peak_pnl, quote_peak_pnl, trusted_peak_pnl, peak_trust_status,
+               trailing_active, bars_held,
                strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
                entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure,
                premium_signal_id, signal_type
@@ -17765,14 +17948,17 @@ def run_monitor(db):
                 log_prefix='LEGACY-GUARD',
             )
             continue
-        pos.peak_pnl = r['peak_pnl'] or 0
+        pos.mark_peak_pnl = _safe_float(_row_value(r, 'mark_peak_pnl'), _safe_float(_row_value(r, 'peak_pnl'), 0.0)) or 0.0
+        pos.quote_peak_pnl = _safe_float(_row_value(r, 'quote_peak_pnl'), monitor_quote_peak_pnl_decimal(pos.monitor_state, 0.0)) or 0.0
+        pos.trusted_peak_pnl = _safe_float(_row_value(r, 'trusted_peak_pnl'), pos.quote_peak_pnl) or 0.0
+        pos.peak_pnl = pos.trusted_peak_pnl
+        pos.peak_trust_status = _row_value(r, 'peak_trust_status') or peak_trust_status(pos)
         pos.trailing_active = bool(r['trailing_active'])
         pos.bars_held = r['bars_held'] or 0
         pos.last_bar_ts = int(r['entry_ts']) + max((r['bars_held'] or 0) - 1, 0) * 60
         pos.last_mark_ts = pos.last_bar_ts
         if pos.monitor_state:
             sync_position_from_monitor_state(pos)
-            pos.peak_pnl = monitor_peak_pnl_decimal(pos.monitor_state, pos.peak_pnl)
             pos.trailing_active = bool(pos.monitor_state.get('breakeven', pos.monitor_state.get('trailingActive', pos.trailing_active)))
             pos.bars_held = int(pos.monitor_state.get('barsHeld', pos.bars_held) or pos.bars_held)
             pos.last_mark_ts = int(pos.monitor_state.get('lastMarkTs', pos.last_mark_ts) or pos.last_mark_ts)
@@ -17787,6 +17973,10 @@ def run_monitor(db):
             token_amount_raw=pos.token_amount_raw,
             token_decimals=pos.token_decimals,
             peak_pnl=pos.peak_pnl,
+            mark_peak_pnl=pos.mark_peak_pnl,
+            quote_peak_pnl=pos.quote_peak_pnl,
+            trusted_peak_pnl=pos.trusted_peak_pnl,
+            peak_trust_status=pos.peak_trust_status,
             trailing_active=pos.trailing_active,
             bars_held=pos.bars_held,
             last_mark_ts=pos.last_mark_ts,
@@ -17883,7 +18073,9 @@ def run_monitor(db):
                 if known_trade_ids:
                     placeholders = ",".join("?" for _ in known_trade_ids)
                     query = f"""
-                        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
+                        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl,
+                               mark_peak_pnl, quote_peak_pnl, trusted_peak_pnl, peak_trust_status,
+                               trailing_active, bars_held,
                                strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
                                entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure,
                                premium_signal_id, signal_type
@@ -17895,7 +18087,9 @@ def run_monitor(db):
                     rows = db.execute(query, tuple(known_trade_ids)).fetchall()
                 else:
                     rows = db.execute("""
-                        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl, trailing_active, bars_held,
+                        SELECT id, token_ca, symbol, signal_ts, entry_price, entry_ts, peak_pnl,
+                               mark_peak_pnl, quote_peak_pnl, trusted_peak_pnl, peak_trust_status,
+                               trailing_active, bars_held,
                                strategy_stage, lifecycle_id, position_size_sol, token_amount_raw, token_decimals,
                                entry_execution_json, monitor_state_json, exit_quote_failures, last_exit_quote_failure,
                                premium_signal_id, signal_type
@@ -22243,20 +22437,13 @@ def run_monitor(db):
                         # Without this, peak_pnl stays 0 forever and Trail/Lock never fires
                         state_updates = {'last_matrix_check': time.time()}
                         
-                        # Persist peak_pnl (critical for trail stop + lock profit)
-                        if 'peak_pnl' in exit_matrix and exit_matrix.get('current_pnl') is not None:
-                            new_peak = max(
-                                w_entry.get('peak_pnl', 0) or 0,
-                                exit_matrix.get('peak_pnl') or 0,
-                                exit_matrix['current_pnl'],
-                            )
-                            state_updates['peak_pnl'] = new_peak
-                        elif exit_matrix.get('current_pnl') is not None:
-                            new_peak = max(w_entry.get('peak_pnl', 0) or 0, exit_matrix['current_pnl'])
-                            state_updates['peak_pnl'] = new_peak
-                        if state_updates.get('peak_pnl') is not None and state_updates['peak_pnl'] > pos.peak_pnl:
-                            pos.peak_pnl = state_updates['peak_pnl']
-                            pos.peak_ts = int(time.time())
+                        peak_state = update_position_peak_state(
+                            pos,
+                            current_pnl=exit_matrix.get('current_pnl'),
+                            price_source=pre_src,
+                            now_ts=time.time(),
+                        )
+                        state_updates['peak_pnl'] = peak_state['trusted_peak_pnl']
                         
                         # Persist moon_peak_pnl (critical for moon trail)
                         if exit_matrix.get('moon_peak_pnl') is not None:
@@ -22287,10 +22474,13 @@ def run_monitor(db):
                             'quoteTsSec': pre_ts,
                             'realizedPnl': exit_matrix.get('current_pnl', 0.0),
                             'triggerPnl': exit_matrix.get('current_pnl', 0.0),
+                            'quotePnl': exit_matrix.get('current_pnl') if is_quote_price_source(pre_src) else None,
                             'shouldExit': False,
                             'action': 'hold',
                             'execution': {'success': True, 'effectivePrice': pre_price},
-                            'markSource': 'matrix_engine'
+                            'markSource': 'matrix_engine',
+                            'priceSource': pre_src,
+                            'peakState': peak_state,
                         }
                         
                         if exit_matrix['action'] in ('exit', 'lock_profit'):
@@ -22912,9 +23102,24 @@ def run_monitor(db):
                     )
                     db.execute("""
                         UPDATE paper_trades
-                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?, first_peak_pct = ?, monitor_state_json = ?
+                        SET peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                            trusted_peak_pnl = ?, peak_trust_status = ?,
+                            trailing_active = ?, bars_held = ?, stage_outcome = ?,
+                            first_peak_pct = ?, monitor_state_json = ?
                         WHERE id = ?
-                    """, (pos.peak_pnl, int(pos.trailing_active), pos.bars_held, f"{pos.strategy_stage}_open", lifecycle['first_peak_pct'], json.dumps(pos.monitor_state), pos.trade_id))
+                    """, (
+                        pos.peak_pnl,
+                        pos.mark_peak_pnl,
+                        pos.quote_peak_pnl,
+                        pos.trusted_peak_pnl,
+                        pos.peak_trust_status,
+                        int(pos.trailing_active),
+                        pos.bars_held,
+                        f"{pos.strategy_stage}_open",
+                        lifecycle['first_peak_pct'],
+                        json.dumps(pos.monitor_state),
+                        pos.trade_id,
+                    ))
                     db.commit()
                     if action in ('partial_sell', 'exit') or should_exit:
                         trigger_price_text = f"{price:.10f}" if price is not None else 'na'
@@ -23025,15 +23230,28 @@ def run_monitor(db):
                         quote_sanity_status=exit_eval.get('quoteSanityStatus'),
                     )
                     sync_position_from_monitor_state(pos, allow_token_amount_override=True)
+                    update_position_peak_state(
+                        pos,
+                        current_pnl=trigger_pnl,
+                        price_source=mark_source,
+                        quote_pnl=partial_quote_pnl,
+                        now_ts=exit_ts,
+                    )
                     db.execute(
                         """
                         UPDATE paper_trades
-                        SET peak_pnl = ?, trailing_active = ?, bars_held = ?, stage_outcome = ?,
+                        SET peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                            trusted_peak_pnl = ?, peak_trust_status = ?,
+                            trailing_active = ?, bars_held = ?, stage_outcome = ?,
                             token_amount_raw = ?, exit_execution_json = ?, exit_execution_audit_json = ?, monitor_state_json = ?
                         WHERE id = ?
                         """,
                         (
                             pos.peak_pnl,
+                            pos.mark_peak_pnl,
+                            pos.quote_peak_pnl,
+                            pos.trusted_peak_pnl,
+                            pos.peak_trust_status,
                             int(pos.trailing_active),
                             pos.bars_held,
                             f"{pos.strategy_stage}_partial_{(exit_eval.get('tpName') or 'TP').lower()}",
@@ -23215,24 +23433,28 @@ def run_monitor(db):
                         else:
                             accounting_source = f'accounting_divergence_not_mark_overridden(was={accounting_source})'
 
-                mark_peak_before_close = _safe_float(pos.peak_pnl, 0.0)
-                close_peak_candidates = [
-                    mark_peak_before_close,
-                    _safe_float(trigger_pnl, None),
-                    _safe_float(exit_quote_pnl, None),
-                    _safe_float(realized_pnl, None),
-                ]
-                close_peak_candidates = [
-                    value for value in close_peak_candidates
-                    if value is not None and value == value
-                ]
-                close_peak_pnl = max(close_peak_candidates) if close_peak_candidates else mark_peak_before_close
-                if close_peak_pnl > mark_peak_before_close:
-                    pos.peak_pnl = close_peak_pnl
-                    pos.monitor_state = dict(pos.monitor_state or {})
-                    pos.monitor_state['markPeakPnlBeforeClose'] = _safe_float(mark_peak_before_close, None)
-                    pos.monitor_state['peakPnlAdjustedByCloseQuote'] = True
-                    pos.monitor_state['closePeakPnl'] = _safe_float(close_peak_pnl, None)
+                mark_peak_before_close = _safe_float(pos.mark_peak_pnl, 0.0)
+                close_quote_peak = max(
+                    [
+                        value for value in (
+                            _safe_float(exit_quote_pnl, None),
+                            _safe_float(realized_pnl, None),
+                        )
+                        if value is not None and value == value
+                    ],
+                    default=None,
+                )
+                update_position_peak_state(
+                    pos,
+                    current_pnl=trigger_pnl,
+                    price_source=mark_source,
+                    quote_pnl=close_quote_peak,
+                    now_ts=exit_ts,
+                )
+                pos.monitor_state = dict(pos.monitor_state or {})
+                pos.monitor_state['markPeakPnlBeforeClose'] = _safe_float(mark_peak_before_close, None)
+                pos.monitor_state['closeTrustedPeakPnl'] = _safe_float(pos.trusted_peak_pnl, None)
+                pos.monitor_state['closeQuotePeakPnl'] = _safe_float(pos.quote_peak_pnl, None)
 
                 pos.monitor_state = dict(pos.monitor_state or {})
                 pos.monitor_state['closed'] = True
@@ -23264,14 +23486,22 @@ def run_monitor(db):
                     UPDATE paper_trades
                     SET exit_price = ?, exit_ts = ?, exit_reason = ?,
                         pnl_pct = ?, bars_held = ?, market_regime = ?,
-                        peak_pnl = ?, trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
+                        peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                        trusted_peak_pnl = ?, peak_trust_status = ?,
+                        trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
                         exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
                         strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?,
                         monitor_state_json = ?, regime_tag = ?
                     WHERE id = ?
                 """, (
                     effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
-                    regime, pos.peak_pnl, int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0,
+                    regime,
+                    pos.peak_pnl,
+                    pos.mark_peak_pnl,
+                    pos.quote_peak_pnl,
+                    pos.trusted_peak_pnl,
+                    pos.peak_trust_status,
+                    int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0,
                     json.dumps(exit_execution), json.dumps(build_execution_audit(exit_execution, {
                         'auditVersion': 1,
                         'stage': pos.strategy_stage,

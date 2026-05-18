@@ -208,6 +208,8 @@ function serializeTrade(row) {
     signal_route: row.signal_route || null,
     pnl_pct: row.pnl_pct == null ? null : roundNumber(Number(row.pnl_pct) * 100, 2),
     peak_pnl_pct: row.peak_pnl == null ? null : roundNumber(Number(row.peak_pnl) * 100, 2),
+    mark_peak_pnl_pct: row.mark_peak_pnl == null ? null : roundNumber(Number(row.mark_peak_pnl) * 100, 2),
+    peak_trust_status: row.peak_trust_status || null,
     position_size_sol: row.position_size_sol == null ? null : Number(row.position_size_sol),
     source_resonance_cohort: resonance.source_resonance_cohort,
     gmgn_pre_seen: boolOrNull(resonance.gmgn_pre_seen),
@@ -218,6 +220,7 @@ function serializeTrade(row) {
 function serializeMissed(row) {
   if (!row) return null;
   const maxPnl = numeric(row.max_pnl ?? row.max_pnl_recorded ?? row.tradable_peak_pnl ?? row.pnl_24h ?? row.pnl_60m ?? row.pnl_15m ?? row.pnl_5m);
+  const markPnl = numeric(row.row_mark_pnl ?? row.mark_pnl);
   const tradablePeakPnl = numeric(row.tradable_peak_pnl);
   const firstTradablePnl = numeric(row.first_tradable_pnl);
   const quoteClean = row.quote_clean ?? (
@@ -248,6 +251,8 @@ function serializeMissed(row) {
     first_tradable_pnl_pct: firstTradablePnl == null ? null : roundNumber(firstTradablePnl * 100, 2),
     tradable_peak_pnl_pct: tradablePeakPnl == null ? null : roundNumber(tradablePeakPnl * 100, 2),
     max_pnl_pct: maxPnl == null ? null : roundNumber(maxPnl * 100, 2),
+    mark_pnl_pct: markPnl == null ? null : roundNumber(markPnl * 100, 2),
+    peak_trust_status: row.peak_trust_status || null,
     source_resonance_cohort: row.source_resonance_cohort || row.cohort || null,
     source_resonance_level: row.source_resonance_level ?? row.resonance_level ?? null,
     source_resonance_score: row.source_resonance_score ?? row.resonance_score ?? null,

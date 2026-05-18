@@ -42,7 +42,10 @@ test('buildTradeReviewSummary calculates giveback and tier rollups', () => {
       exit_reason: 'trail',
       position_size_sol: 0.002,
       pnl_pct: 0.04,
-      peak_pnl: 0.15,
+      peak_pnl: 10.0,
+      mark_peak_pnl: 10.0,
+      trusted_peak_pnl: 0.15,
+      peak_trust_status: 'peak_untrusted_mark_spike',
     },
     {
       id: 2,
@@ -63,9 +66,12 @@ test('buildTradeReviewSummary calculates giveback and tier rollups', () => {
   assert.equal(summary.totals.closed, 2);
   assert.equal(summary.totals.win_rate_pct, 50);
   assert.equal(summary.totals.avg_giveback_pct, 9);
+  assert.equal(summary.totals.mark_only_peak_spikes, 1);
   assert.equal(summary.by_capital_tier.find((row) => row.capital_tier === 'tiny_probe').avg_giveback_pct, 11);
   assert.equal(summary.by_capital_tier.find((row) => row.capital_tier === 'stage1_main').avg_pnl_pct, -5);
   assert.equal(summary.top_giveback_trades[0].symbol, 'DOG1');
+  assert.equal(summary.top_giveback_trades[0].peak_pnl_pct, 15);
+  assert.equal(summary.top_giveback_trades[0].mark_peak_pnl_pct, 1000);
 });
 
 test('buildPaperReviewSnapshot and markdown preserve review fingerprints', () => {

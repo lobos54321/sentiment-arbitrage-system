@@ -113,7 +113,7 @@ test('not-ath relaxed shadow cohorts separate strict pass from wider recall', ()
 
   insertSnapshot(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, snapshot_ts: 1000, horizon_sec: 0 });
   insertSnapshot(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, snapshot_ts: 1300, horizon_sec: 300 });
-  insertMissed(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, max_pnl_recorded: 1.2 });
+  insertMissed(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, max_pnl_recorded: 1.2, tradable_peak_pnl: 1.2 });
 
   insertSnapshot(db, {
     token_ca: 'LooseCA',
@@ -125,7 +125,7 @@ test('not-ath relaxed shadow cohorts separate strict pass from wider recall', ()
     momentum_reclaim: 0,
     snapshot_pass: 0,
   });
-  insertMissed(db, { token_ca: 'LooseCA', symbol: 'LOOSE', signal_ts: 200, max_pnl_recorded: 0.7 });
+  insertMissed(db, { token_ca: 'LooseCA', symbol: 'LOOSE', signal_ts: 200, max_pnl_recorded: 0.7, tradable_peak_pnl: 0.7 });
 
   insertSnapshot(db, {
     token_ca: 'LowLiqCA',
@@ -137,10 +137,10 @@ test('not-ath relaxed shadow cohorts separate strict pass from wider recall', ()
     quote_clean: 0,
     snapshot_pass: 0,
   });
-  insertMissed(db, { token_ca: 'LowLiqCA', symbol: 'LOWLIQ', signal_ts: 300, max_pnl_recorded: 0.4 });
+  insertMissed(db, { token_ca: 'LowLiqCA', symbol: 'LOWLIQ', signal_ts: 300, max_pnl_recorded: 0.4, tradable_peak_pnl: 0.4 });
 
   insertSnapshot(db, { token_ca: 'LateCA', symbol: 'LATE', signal_ts: 400, snapshot_ts: 3100, horizon_sec: 2100 });
-  insertMissed(db, { token_ca: 'LateCA', symbol: 'LATE', signal_ts: 400, max_pnl_recorded: 1.5 });
+  insertMissed(db, { token_ca: 'LateCA', symbol: 'LATE', signal_ts: 400, max_pnl_recorded: 1.5, tradable_peak_pnl: 1.5 });
 
   const report = buildNotAthRelaxedShadowCohorts(db, { limit: 20 });
   const byCohort = Object.fromEntries(report.cohorts.map((row) => [row.cohort, row]));
