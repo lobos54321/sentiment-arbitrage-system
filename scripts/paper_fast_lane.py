@@ -130,6 +130,10 @@ FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC",
     "300",
 ))
+FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC = float(os.environ.get(
+    "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC",
+    str(8 * 60 * 60),
+))
 FAST_ENTRY_BRANCH_CIRCUIT_ENABLED = os.environ.get(
     "FAST_ENTRY_BRANCH_CIRCUIT_ENABLED",
     "true",
@@ -238,6 +242,14 @@ def optional_col(cols, name, default="NULL"):
     return name if name in cols else f"{default} AS {name}"
 
 
+def unixish_sql_expr(column):
+    return (
+        f"CASE WHEN COALESCE({column}, 0) > 1000000000000 "
+        f"THEN CAST({column} / 1000 AS INTEGER) "
+        f"ELSE CAST(COALESCE({column}, 0) AS INTEGER) END"
+    )
+
+
 def add_column_if_missing(db, table, column, definition):
     if column not in table_columns(db, table):
         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -316,6 +328,19 @@ def init_fast_lane_schema(db):
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_queue_key ON paper_fast_entry_queue(queue_key)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_first_error ON paper_fast_entry_queue(first_error)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfeq_market_session ON paper_fast_entry_queue(market_session)")
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_fast_missed_rescue_state (
+                missed_attribution_id INTEGER PRIMARY KEY,
+                rescue_signature TEXT NOT NULL,
+                last_status TEXT,
+                last_reason TEXT,
+                last_action_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfmr_state_updated ON paper_fast_missed_rescue_state(updated_at)")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_entry_locks (
@@ -1600,14 +1625,156 @@ def process_queue_item(db, row, owner):
         release_token_lock(db, token_ca, owner)
 
 
+def process_premium_signal_row(pdb, row, *, now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    status = str(row["hard_gate_status"] or "").upper()
+    if status_is_hard_reject(status):
+        return "hard_reject"
+    branch = None
+    priority = 50
+    source_type = None
+    if status in FAST_LANE_PREMIUM_PASS_STATUSES:
+        source_type = "hard_gate_fast"
+        branch = "hard_gate_fast_clean"
+        priority = 10
+    elif status in FAST_LANE_RESCUE_STATUSES:
+        source_type = "kline_retry_reclaim_fast"
+        branch = status.lower()
+        priority = 30
+    else:
+        return "ignored"
+    payload = {
+        "premium_signal_id": row["id"],
+        "signal_type": row["signal_type"],
+        "description": row["description"],
+    }
+    policy_probe = {
+        "entry_branch": branch,
+        "source_type": source_type,
+        "payload_json": json.dumps(payload),
+    }
+    policy = direct_fill_policy(policy_probe)
+    if not policy.get("pass"):
+        inserted = record_fast_lane_observation(
+            pdb,
+            source_type=source_type,
+            token_ca=row["token_ca"],
+            symbol=row["symbol"],
+            signal_ts=row["timestamp"],
+            receive_ts=row["receive_ts"],
+            recorded_ts=row["created_at"],
+            entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
+            entry_branch=branch,
+            hard_gate_status=status,
+            trigger_mc=row["market_cap"],
+            priority=priority,
+            payload=payload,
+            status=policy.get("status") or "watch_only",
+            reason=policy.get("reason"),
+            now_ts=now_ts,
+        )
+        if inserted:
+            log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=%s", source_type, row["token_ca"], status, policy.get("reason"))
+        return "watch_only"
+    receive_ts = row["receive_ts"] or row["timestamp"]
+    if candidate_is_too_stale(receive_ts, now_ts, source_type):
+        inserted = record_fast_lane_observation(
+            pdb,
+            source_type=source_type,
+            token_ca=row["token_ca"],
+            symbol=row["symbol"],
+            signal_ts=row["timestamp"],
+            receive_ts=row["receive_ts"],
+            recorded_ts=row["created_at"],
+            entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
+            entry_branch=branch,
+            hard_gate_status=status,
+            trigger_mc=row["market_cap"],
+            priority=priority,
+            payload=payload,
+            status="watch_only",
+            reason="premium_signal_stale_watch_only",
+            now_ts=now_ts,
+        )
+        if inserted:
+            log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=premium_signal_stale_watch_only", source_type, row["token_ca"], status)
+        return "watch_only"
+    inserted = enqueue_fast_entry(
+        pdb,
+        source_type=source_type,
+        token_ca=row["token_ca"],
+        symbol=row["symbol"],
+        signal_ts=row["timestamp"],
+        receive_ts=row["receive_ts"],
+        recorded_ts=row["created_at"],
+        entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
+        entry_branch=branch,
+        hard_gate_status=status,
+        trigger_mc=row["market_cap"],
+        priority=priority,
+        payload=payload,
+        now_ts=now_ts,
+    )
+    if inserted:
+        log.info("[FAST_QUEUE] premium source=%s token=%s status=%s", source_type, row["token_ca"], status)
+        return "queued"
+    return "deduped"
+
+
+def scan_premium_once(sdb, pdb, *, last_id=0, lookback_sec=0, now_ts=None):
+    """Scan new premium rows and reconcile recent status changes.
+
+    Some premium rows are inserted before their final hard_gate_status is known.
+    An id-only cursor can therefore miss a row that later turns into PASS or a
+    rescue status. The recent-window reconciliation path is deliberately
+    idempotent; fast-lane queue keys and token dedupe prevent duplicate entries.
+    """
+    init_fast_lane_schema(pdb)
+    if not table_exists(sdb, "premium_signals"):
+        return {"last_id": last_id, "rows": 0, "queued": 0, "watch_only": 0, "deduped": 0}
+    cols = table_columns(sdb, "premium_signals")
+    timestamp_expr = unixish_sql_expr("timestamp") if "timestamp" in cols else "0"
+    cutoff = int((now_ts if now_ts is not None else time.time()) - max(0, int(lookback_sec or 0)))
+    actionable_statuses = tuple(FAST_LANE_PREMIUM_PASS_STATUSES | FAST_LANE_RESCUE_STATUSES)
+    placeholders = ",".join("?" for _ in actionable_statuses)
+    rows = sdb.execute(
+        f"""
+        SELECT id, token_ca, symbol, timestamp, hard_gate_status,
+               {optional_col(cols, 'signal_type')},
+               {optional_col(cols, 'source_message_ts')},
+               {optional_col(cols, 'receive_ts')},
+               {optional_col(cols, 'created_at')},
+               {optional_col(cols, 'market_cap')},
+               {optional_col(cols, 'description', "''")}
+        FROM premium_signals
+        WHERE id > ?
+           OR (
+             {timestamp_expr} >= ?
+             AND UPPER(COALESCE(hard_gate_status, '')) IN ({placeholders})
+           )
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (last_id, cutoff, *actionable_statuses, FAST_ENTRY_PREMIUM_BATCH_LIMIT * 2),
+    ).fetchall()
+    counts = {"last_id": last_id, "rows": len(rows), "queued": 0, "watch_only": 0, "deduped": 0, "ignored": 0, "hard_reject": 0}
+    for row in rows:
+        counts["last_id"] = max(int(counts["last_id"]), int(row["id"] or 0))
+        result = process_premium_signal_row(pdb, row, now_ts=now_ts)
+        counts[result] = counts.get(result, 0) + 1
+    return counts
+
+
 def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
     last_id = 0
     try:
         sdb = connect_db(signal_db_path)
         if table_exists(sdb, "premium_signals"):
             cutoff = int(time.time() - max(0, int(lookback_sec or 0)))
+            cols = table_columns(sdb, "premium_signals")
+            timestamp_expr = unixish_sql_expr("timestamp") if "timestamp" in cols else "0"
             row = sdb.execute(
-                "SELECT COALESCE(MAX(id), 0) AS id FROM premium_signals WHERE COALESCE(timestamp, 0) < ?",
+                f"SELECT COALESCE(MAX(id), 0) AS id FROM premium_signals WHERE {timestamp_expr} < ?",
                 (cutoff,),
             ).fetchone()
             last_id = int(row["id"] or 0)
@@ -1622,90 +1789,13 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
             if not table_exists(sdb, "premium_signals"):
                 time.sleep(FAST_ENTRY_SCAN_INTERVAL_SEC)
                 continue
-            cols = table_columns(sdb, "premium_signals")
-            rows = sdb.execute(
-                f"""
-                SELECT id, token_ca, symbol, timestamp, hard_gate_status,
-                       {optional_col(cols, 'signal_type')},
-                       {optional_col(cols, 'source_message_ts')},
-                       {optional_col(cols, 'receive_ts')},
-                       {optional_col(cols, 'created_at')},
-                       {optional_col(cols, 'market_cap')},
-                       {optional_col(cols, 'description', "''")}
-                FROM premium_signals
-                WHERE id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (last_id, FAST_ENTRY_PREMIUM_BATCH_LIMIT),
-            ).fetchall()
-            for row in rows:
-                last_id = max(last_id, int(row["id"] or 0))
-                status = str(row["hard_gate_status"] or "").upper()
-                if status_is_hard_reject(status):
-                    continue
-                branch = None
-                priority = 50
-                source_type = None
-                if status in FAST_LANE_PREMIUM_PASS_STATUSES:
-                    source_type = "hard_gate_fast"
-                    branch = "hard_gate_fast_clean"
-                    priority = 10
-                elif status in FAST_LANE_RESCUE_STATUSES:
-                    source_type = "kline_retry_reclaim_fast"
-                    branch = status.lower()
-                    priority = 30
-                else:
-                    continue
-                payload = {
-                    "premium_signal_id": row["id"],
-                    "signal_type": row["signal_type"],
-                    "description": row["description"],
-                }
-                policy_probe = {
-                    "entry_branch": branch,
-                    "source_type": source_type,
-                    "payload_json": json.dumps(payload),
-                }
-                policy = direct_fill_policy(policy_probe)
-                if not policy.get("pass"):
-                    inserted = record_fast_lane_observation(
-                        pdb,
-                        source_type=source_type,
-                        token_ca=row["token_ca"],
-                        symbol=row["symbol"],
-                        signal_ts=row["timestamp"],
-                        receive_ts=row["receive_ts"],
-                        recorded_ts=row["created_at"],
-                        entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
-                        entry_branch=branch,
-                        hard_gate_status=status,
-                        trigger_mc=row["market_cap"],
-                        priority=priority,
-                        payload=payload,
-                        status=policy.get("status") or "watch_only",
-                        reason=policy.get("reason"),
-                    )
-                    if inserted:
-                        log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=%s", source_type, row["token_ca"], status, policy.get("reason"))
-                    continue
-                inserted = enqueue_fast_entry(
-                    pdb,
-                    source_type=source_type,
-                    token_ca=row["token_ca"],
-                    symbol=row["symbol"],
-                    signal_ts=row["timestamp"],
-                    receive_ts=row["receive_ts"],
-                    recorded_ts=row["created_at"],
-                    entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
-                    entry_branch=branch,
-                    hard_gate_status=status,
-                    trigger_mc=row["market_cap"],
-                    priority=priority,
-                    payload=payload,
-                )
-                if inserted:
-                    log.info("[FAST_QUEUE] premium source=%s token=%s status=%s", source_type, row["token_ca"], status)
+            result = scan_premium_once(
+                sdb,
+                pdb,
+                last_id=last_id,
+                lookback_sec=lookback_sec,
+            )
+            last_id = int(result.get("last_id") or last_id)
             sdb.close()
             pdb.close()
         except Exception as exc:
@@ -1825,147 +1915,206 @@ def source_resonance_scan(paper_db_path, stop_event):
         stop_event.wait(FAST_ENTRY_SCAN_INTERVAL_SEC)
 
 
+def missed_rescue_signature(row):
+    values = [
+        row_value(row, "tradable_missed", 0),
+        row_value(row, "first_tradable_ts"),
+        row_value(row, "executable_peak_pnl"),
+        row_value(row, "route"),
+        row_value(row, "component"),
+        row_value(row, "reject_reason"),
+    ]
+    return "|".join("" if value is None else str(value) for value in values)
+
+
+def mark_missed_rescue_processed(db, missed_id, signature, *, status=None, reason=None, now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    db.execute(
+        """
+        INSERT INTO paper_fast_missed_rescue_state (
+            missed_attribution_id, rescue_signature, last_status, last_reason,
+            last_action_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(missed_attribution_id) DO UPDATE SET
+            rescue_signature = excluded.rescue_signature,
+            last_status = excluded.last_status,
+            last_reason = excluded.last_reason,
+            last_action_at = excluded.last_action_at,
+            updated_at = excluded.updated_at
+        """,
+        (int(missed_id), signature, status, reason, now_ts, now_ts),
+    )
+
+
+def process_missed_rescue_row(db, row, *, now_ts=None):
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    reason = str(row["reject_reason"] or "missed_rescue")
+    rescue_created_ts = now_ts
+    original_signal_ts = row["signal_ts"] or row["baseline_ts"] or row["first_tradable_ts"] or rescue_created_ts
+    reason_l = reason.lower()
+    if reason.startswith("tracking_ttl"):
+        source_type = "ttl_final_reclaim_fast"
+        branch = "ttl_final_reclaim_quote_clean"
+    elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
+        source_type = "kline_recovery_fast"
+        branch = "kline_recovery_quote_clean_tiny_probe"
+    elif "spread" in reason:
+        source_type = "spread_recovery_fast"
+        branch = reason
+    elif "quote" in reason:
+        source_type = "missing_quote_recovery_fast"
+        branch = reason
+    elif reason in SMART_QUALITY_RECHECK_REASONS:
+        source_type = "smart_quality_reclaim_fast"
+        branch = "smart_quality_reclaim_tiny_probe"
+    elif reason in MATRIX_TIMEOUT_RECHECK_REASONS or reason_l.startswith("timeout (") or reason_l.startswith("price_collapse"):
+        source_type = "matrix_timeout_reclaim_fast"
+        branch = "matrix_timeout_final_quote_tiny_probe"
+    else:
+        source_type = "stale_refresh_fast"
+        branch = reason
+    payload = {
+        "missed_attribution_id": row["id"],
+        "signal_id": row["signal_id"],
+        "original_signal_ts": original_signal_ts,
+        "original_receive_ts": original_signal_ts,
+        "first_tradable_ts": row["first_tradable_ts"],
+        "rescue_created_ts": rescue_created_ts,
+        "recovery_created_ts": rescue_created_ts,
+        "tradable_missed": row["tradable_missed"],
+        "recovery_quote_clean": bool(row["tradable_missed"]),
+        "route": row["route"],
+        "component": row["component"],
+        "reject_reason": reason,
+        "executable_peak_pnl": row["executable_peak_pnl"],
+    }
+    policy_probe = {
+        "entry_branch": branch,
+        "source_type": source_type,
+        "payload_json": json.dumps(payload),
+    }
+    policy = direct_fill_policy(policy_probe, now_ts=now_ts)
+    if not policy.get("pass"):
+        inserted = record_fast_lane_observation(
+            db,
+            source_type=source_type,
+            token_ca=row["token_ca"],
+            symbol=row["symbol"],
+            signal_ts=original_signal_ts,
+            receive_ts=original_signal_ts,
+            recorded_ts=row["baseline_ts"],
+            entry_mode_hint="pre_pass_resonance_tiny_probe",
+            entry_branch=branch,
+            trigger_price=row["baseline_price"],
+            priority=35,
+            payload=payload,
+            status=policy.get("status") or "counterfactual_only",
+            reason=policy.get("reason"),
+            now_ts=now_ts,
+        )
+        if inserted:
+            log.info("[FAST_COUNTERFACTUAL] missed-rescue token=%s reason=%s policy=%s", row["token_ca"], reason, policy.get("reason"))
+        return {"status": policy.get("status") or "counterfactual_only", "reason": policy.get("reason"), "inserted": inserted}
+    inserted = enqueue_fast_entry(
+        db,
+        source_type=source_type,
+        token_ca=row["token_ca"],
+        symbol=row["symbol"],
+        signal_ts=original_signal_ts,
+        receive_ts=original_signal_ts,
+        recorded_ts=row["baseline_ts"],
+        entry_mode_hint="pre_pass_resonance_tiny_probe",
+        entry_branch=branch,
+        trigger_price=row["baseline_price"],
+        priority=35,
+        payload=payload,
+        now_ts=now_ts,
+    )
+    if inserted:
+        log.info("[FAST_QUEUE] missed-rescue token=%s reason=%s", row["token_ca"], reason)
+    return {"status": "queued" if inserted else "deduped", "reason": policy.get("reason"), "inserted": inserted}
+
+
+def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    init_fast_lane_schema(db)
+    if not table_exists(db, "paper_missed_signal_attribution"):
+        return {"rows": 0, "processed": 0, "queued": 0, "watch_only": 0, "counterfactual_only": 0, "deduped": 0}
+    cols = table_columns(db, "paper_missed_signal_attribution")
+    cutoff = now_ts - FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC
+    updated_expr = "COALESCE(strftime('%s', m.updated_at), 0)" if "updated_at" in cols else "0"
+    created_expr = "COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)"
+    first_tradable_expr = "COALESCE(m.first_tradable_ts, 0)" if "first_tradable_ts" in cols else "0"
+    rows = db.execute(
+        f"""
+        SELECT m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
+               m.reject_reason, m.baseline_price, m.baseline_ts,
+               {optional_col(cols, 'first_tradable_ts')},
+               {optional_col(cols, 'tradable_missed', '0')},
+               {optional_col(cols, 'executable_peak_pnl', '0')},
+               s.rescue_signature AS processed_signature
+        FROM paper_missed_signal_attribution m
+        LEFT JOIN paper_fast_missed_rescue_state s ON s.missed_attribution_id = m.id
+        WHERE COALESCE({ 'm.tradable_missed' if 'tradable_missed' in cols else '0' }, 0) = 1
+          AND (
+            {first_tradable_expr} >= ?
+            OR {created_expr} >= ?
+            OR {updated_expr} >= ?
+          )
+          AND (
+            m.reject_reason IN (
+              'tracking_ttl_expired',
+              'not_ath_prebuy_kline_retry_expired',
+              'not_ath_prebuy_kline_block',
+              'entry_edge_spread_too_high',
+              'missing_trigger_or_quote',
+              'entry_edge_probe_missing_trigger_or_quote',
+              'weak_buying_pressure',
+              'no_kline_low_volume',
+              'negative_trend',
+              'chasing_top',
+              'scout_quality_buy_pressure_weak',
+              'scout_quality_volume_low',
+              'scout_quality_tx_low',
+              'scout_quality_negative_trend',
+              'matrices not yet aligned'
+            )
+            OR m.reject_reason LIKE 'lotto_stale_%'
+            OR m.reject_reason LIKE 'timeout (%'
+            OR m.reject_reason LIKE 'price_collapse%'
+          )
+        ORDER BY COALESCE({first_tradable_expr}, {created_expr}, 0) ASC, m.id ASC
+        LIMIT ?
+        """,
+        (cutoff, cutoff, cutoff, limit or FAST_ENTRY_MISSED_RESCUE_LIMIT),
+    ).fetchall()
+    counts = {"rows": len(rows), "processed": 0, "queued": 0, "watch_only": 0, "counterfactual_only": 0, "deduped": 0}
+    for row in rows:
+        signature = missed_rescue_signature(row)
+        if row["processed_signature"] == signature:
+            continue
+        result = process_missed_rescue_row(db, row, now_ts=now_ts)
+        status = result.get("status") or "unknown"
+        counts["processed"] += 1
+        counts[status] = counts.get(status, 0) + 1
+        mark_missed_rescue_processed(
+            db,
+            row["id"],
+            signature,
+            status=status,
+            reason=result.get("reason"),
+            now_ts=now_ts,
+        )
+    if counts["processed"]:
+        db.commit()
+    return counts
+
+
 def missed_rescue_scan(paper_db_path, stop_event):
-    last_seen = 0
-    try:
-        db = connect_db(paper_db_path)
-        if table_exists(db, "paper_missed_signal_attribution"):
-            cutoff = time.time() - FAST_ENTRY_MAX_QUEUE_AGE_SEC
-            row = db.execute(
-                "SELECT COALESCE(MAX(id), 0) AS id FROM paper_missed_signal_attribution WHERE COALESCE(created_event_ts, 0) < ?",
-                (cutoff,),
-            ).fetchone()
-            last_seen = int(row["id"] or 0)
-        db.close()
-    except Exception:
-        last_seen = 0
     while not stop_event.is_set():
         try:
             db = connect_db(paper_db_path)
-            init_fast_lane_schema(db)
-            if table_exists(db, "paper_missed_signal_attribution"):
-                cols = table_columns(db, "paper_missed_signal_attribution")
-                rows = db.execute(
-                    f"""
-                    SELECT id, token_ca, symbol, signal_ts, signal_id, route, component,
-                           reject_reason, baseline_price, baseline_ts,
-                           {optional_col(cols, 'first_tradable_ts')},
-                           {optional_col(cols, 'tradable_missed', '0')},
-                           {optional_col(cols, 'executable_peak_pnl', '0')}
-                    FROM paper_missed_signal_attribution
-                    WHERE id > ?
-                      AND COALESCE({ 'tradable_missed' if 'tradable_missed' in cols else '0' }, 0) = 1
-                      AND (
-                        reject_reason IN (
-                          'tracking_ttl_expired',
-                          'not_ath_prebuy_kline_retry_expired',
-                          'not_ath_prebuy_kline_block',
-                          'entry_edge_spread_too_high',
-                          'missing_trigger_or_quote',
-                          'entry_edge_probe_missing_trigger_or_quote',
-                          'weak_buying_pressure',
-                          'no_kline_low_volume',
-                          'negative_trend',
-                          'chasing_top',
-                          'scout_quality_buy_pressure_weak',
-                          'scout_quality_volume_low',
-                          'scout_quality_tx_low',
-                          'scout_quality_negative_trend',
-                          'matrices not yet aligned'
-                        )
-                        OR reject_reason LIKE 'lotto_stale_%'
-                        OR reject_reason LIKE 'timeout (%'
-                        OR reject_reason LIKE 'price_collapse%'
-                      )
-                    ORDER BY id ASC
-                    LIMIT ?
-                    """,
-                    (last_seen, FAST_ENTRY_MISSED_RESCUE_LIMIT),
-                ).fetchall()
-                for row in rows:
-                    last_seen = max(last_seen, int(row["id"] or 0))
-                    reason = str(row["reject_reason"] or "missed_rescue")
-                    rescue_created_ts = int(time.time())
-                    original_signal_ts = row["signal_ts"] or row["baseline_ts"] or row["first_tradable_ts"] or rescue_created_ts
-                    reason_l = reason.lower()
-                    if reason.startswith("tracking_ttl"):
-                        source_type = "ttl_final_reclaim_fast"
-                        branch = "ttl_final_reclaim_quote_clean"
-                    elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
-                        source_type = "kline_recovery_fast"
-                        branch = "kline_recovery_quote_clean_tiny_probe"
-                    elif "spread" in reason:
-                        source_type = "spread_recovery_fast"
-                        branch = reason
-                    elif "quote" in reason:
-                        source_type = "missing_quote_recovery_fast"
-                        branch = reason
-                    elif reason in SMART_QUALITY_RECHECK_REASONS:
-                        source_type = "smart_quality_reclaim_fast"
-                        branch = "smart_quality_reclaim_tiny_probe"
-                    elif reason in MATRIX_TIMEOUT_RECHECK_REASONS or reason_l.startswith("timeout (") or reason_l.startswith("price_collapse"):
-                        source_type = "matrix_timeout_reclaim_fast"
-                        branch = "matrix_timeout_final_quote_tiny_probe"
-                    else:
-                        source_type = "stale_refresh_fast"
-                        branch = reason
-                    payload = {
-                        "missed_attribution_id": row["id"],
-                        "signal_id": row["signal_id"],
-                        "original_signal_ts": original_signal_ts,
-                        "original_receive_ts": original_signal_ts,
-                        "first_tradable_ts": row["first_tradable_ts"],
-                        "rescue_created_ts": rescue_created_ts,
-                        "recovery_created_ts": rescue_created_ts,
-                        "tradable_missed": row["tradable_missed"],
-                        "recovery_quote_clean": bool(row["tradable_missed"]),
-                        "route": row["route"],
-                        "component": row["component"],
-                        "reject_reason": reason,
-                        "executable_peak_pnl": row["executable_peak_pnl"],
-                    }
-                    policy_probe = {
-                        "entry_branch": branch,
-                        "source_type": source_type,
-                        "payload_json": json.dumps(payload),
-                    }
-                    policy = direct_fill_policy(policy_probe)
-                    if not policy.get("pass"):
-                        inserted = record_fast_lane_observation(
-                            db,
-                            source_type=source_type,
-                            token_ca=row["token_ca"],
-                            symbol=row["symbol"],
-                            signal_ts=original_signal_ts,
-                            receive_ts=original_signal_ts,
-                            recorded_ts=row["baseline_ts"],
-                            entry_mode_hint="pre_pass_resonance_tiny_probe",
-                            entry_branch=branch,
-                            trigger_price=row["baseline_price"],
-                            priority=35,
-                            payload=payload,
-                            status=policy.get("status") or "counterfactual_only",
-                            reason=policy.get("reason"),
-                        )
-                        if inserted:
-                            log.info("[FAST_COUNTERFACTUAL] missed-rescue token=%s reason=%s policy=%s", row["token_ca"], reason, policy.get("reason"))
-                        continue
-                    inserted = enqueue_fast_entry(
-                        db,
-                        source_type=source_type,
-                        token_ca=row["token_ca"],
-                        symbol=row["symbol"],
-                        signal_ts=original_signal_ts,
-                        receive_ts=original_signal_ts,
-                        recorded_ts=row["baseline_ts"],
-                        entry_mode_hint="pre_pass_resonance_tiny_probe",
-                        entry_branch=branch,
-                        trigger_price=row["baseline_price"],
-                        priority=35,
-                        payload=payload,
-                    )
-                    if inserted:
-                        log.info("[FAST_QUEUE] missed-rescue token=%s reason=%s", row["token_ca"], reason)
+            scan_missed_rescue_once(db)
             db.close()
         except Exception as exc:
             log.warning("missed rescue scan failed: %s", exc, exc_info=True)

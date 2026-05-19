@@ -5805,6 +5805,7 @@ const server = http.createServer(async (req, res) => {
       const missedCols = new Set(
         paperDb.prepare("PRAGMA table_info(paper_missed_signal_attribution)").all().map((row) => row.name)
       );
+      const trustedMissedPeakExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
       const tradeCols = tableNames.has('paper_trades')
         ? new Set(paperDb.prepare("PRAGMA table_info(paper_trades)").all().map((row) => row.name))
         : new Set();
@@ -5841,14 +5842,16 @@ const server = http.createServer(async (req, res) => {
       const tradableSelect = hasTradability ? `
             COALESCE(m.tradable_missed, 0) AS tradable_missed,
             COALESCE(m.would_stop_before_peak, 0) AS would_stop_before_peak,
-            m.tradability_status,
-            m.tradability_reason,
-            m.first_tradable_pnl,
-            m.tradable_peak_pnl,` : `
+            ${missedCols.has('tradability_status') ? 'm.tradability_status' : 'NULL'} AS tradability_status,
+            ${missedCols.has('tradability_reason') ? 'm.tradability_reason' : 'NULL'} AS tradability_reason,
+            ${missedCols.has('first_tradable_ts') ? 'm.first_tradable_ts' : 'NULL'} AS first_tradable_ts,
+            ${missedCols.has('first_tradable_pnl') ? 'm.first_tradable_pnl' : 'NULL'} AS first_tradable_pnl,
+            ${missedCols.has('tradable_peak_pnl') ? 'm.tradable_peak_pnl' : 'NULL'} AS tradable_peak_pnl,` : `
             NULL AS tradable_missed,
             NULL AS would_stop_before_peak,
             NULL AS tradability_status,
             NULL AS tradability_reason,
+            NULL AS first_tradable_ts,
             NULL AS first_tradable_pnl,
             NULL AS tradable_peak_pnl,`;
       const baseCte = `
@@ -5887,6 +5890,7 @@ const server = http.createServer(async (req, res) => {
             MAX(would_stop_before_peak) AS would_stop_before_peak,
             MAX(tradability_status) AS tradability_status,
             MAX(tradability_reason) AS tradability_reason,
+            MAX(first_tradable_ts) AS first_tradable_ts,
             MAX(first_tradable_pnl) AS first_tradable_pnl,
             MAX(tradable_peak_pnl) AS tradable_peak_pnl,
             MAX(quote_exec) AS quote_exec
@@ -5917,6 +5921,65 @@ const server = http.createServer(async (req, res) => {
           FROM base
           GROUP BY route, component, reject_reason, token_ca
         )`;
+      const queueActionCte = (() => {
+        if (!tableNames.has('paper_fast_entry_queue')) {
+          return `,
+        queue_action AS (
+          SELECT
+            NULL AS token_ca,
+            NULL AS fast_queue_status,
+            NULL AS fast_queue_reason,
+            NULL AS fast_queue_branch,
+            NULL AS fast_queue_source_type,
+            NULL AS fast_queue_updated_at,
+            NULL AS recovery_action_status
+          WHERE 0
+        )`;
+        }
+        const queueCols = getTableColumns(paperDb, 'paper_fast_entry_queue');
+        const queueUpdatedExpr = queueCols.has('updated_at') ? 'updated_at' : 'created_at';
+        const queueReasonExpr = queueCols.has('first_error')
+          ? (queueCols.has('last_error') ? "COALESCE(first_error, last_error, 'none')" : "COALESCE(first_error, 'none')")
+          : (queueCols.has('last_error') ? "COALESCE(last_error, 'none')" : "'none'");
+        const queueBranchExpr = queueCols.has('entry_branch') ? 'entry_branch' : (queueCols.has('source_type') ? 'source_type' : "'unknown'");
+        const queueSourceExpr = queueCols.has('source_type') ? 'source_type' : "'unknown'";
+        const queueSignalTsExpr = queueCols.has('source_signal_ts') ? 'COALESCE(source_signal_ts, 0)' : '0';
+        const queueSinceFilter = sinceTs ? `WHERE ${queueUpdatedExpr} >= @since OR ${queueSignalTsExpr} >= @since` : '';
+        return `,
+        queue_ranked AS (
+          SELECT
+            token_ca,
+            status AS fast_queue_status,
+            ${queueReasonExpr} AS fast_queue_reason,
+            ${queueBranchExpr} AS fast_queue_branch,
+            ${queueSourceExpr} AS fast_queue_source_type,
+            ${queueUpdatedExpr} AS fast_queue_updated_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY token_ca
+              ORDER BY ${queueUpdatedExpr} DESC, id DESC
+            ) AS rn
+          FROM paper_fast_entry_queue
+          ${queueSinceFilter}
+        ),
+        queue_action AS (
+          SELECT
+            token_ca,
+            fast_queue_status,
+            fast_queue_reason,
+            fast_queue_branch,
+            fast_queue_source_type,
+            fast_queue_updated_at,
+            CASE
+              WHEN fast_queue_status = 'entered' THEN 'entered'
+              WHEN fast_queue_status IN ('queued', 'claimed', 'retry_watch') THEN 'active_queue'
+              WHEN fast_queue_status IN ('watch_only', 'counterfactual_only') THEN fast_queue_status
+              WHEN fast_queue_status IS NULL THEN 'no_recovery_action'
+              ELSE fast_queue_status
+            END AS recovery_action_status
+          FROM queue_ranked
+          WHERE rn = 1
+        )`;
+      })();
       const summaryRows = paperDb.prepare(`
         ${baseCte}
         SELECT * FROM (
@@ -6019,25 +6082,53 @@ const server = http.createServer(async (req, res) => {
       const byBlockerAllUnique = summaryRows.filter((row) => row.section === 'by_blocker_all_unique').slice(0, limit);
       const topCleanQuoteDogs = paperDb.prepare(`
         ${baseCte}
+        ${queueActionCte}
         SELECT
-          symbol,
-          token_ca,
-          route,
-          component,
-          reject_reason,
-          max_pnl,
-          pnl_5m,
-          pnl_15m,
-          pnl_60m,
-          pnl_24h,
-          tradability_status,
-          tradability_reason,
-          first_tradable_pnl,
-          tradable_peak_pnl,
-          event_ts
+          p.symbol,
+          p.token_ca,
+          p.route,
+          p.component,
+          p.reject_reason,
+          p.max_pnl,
+          p.pnl_5m,
+          p.pnl_15m,
+          p.pnl_60m,
+          p.pnl_24h,
+          p.tradability_status,
+          p.tradability_reason,
+          p.first_tradable_ts,
+          p.first_tradable_pnl,
+          p.tradable_peak_pnl,
+          p.event_ts,
+          q.fast_queue_status,
+          q.fast_queue_reason,
+          q.fast_queue_branch,
+          q.fast_queue_source_type,
+          q.fast_queue_updated_at,
+          COALESCE(q.recovery_action_status, 'no_recovery_action') AS recovery_action_status
         FROM per_token
+        p
+        LEFT JOIN queue_action q ON q.token_ca = p.token_ca
         WHERE quote_exec = 1
         ORDER BY max_pnl DESC
+        LIMIT @limit
+      `).all({ ...whereParams, limit });
+      const recoveryActionability = paperDb.prepare(`
+        ${baseCte}
+        ${queueActionCte}
+        SELECT
+          COALESCE(q.recovery_action_status, 'no_recovery_action') AS recovery_action_status,
+          COALESCE(q.fast_queue_reason, 'none') AS fast_queue_reason,
+          COUNT(*) AS unique_tokens,
+          ${tierCaseSql('p.max_pnl')},
+          MAX(p.max_pnl) AS max_pnl
+        FROM per_token p
+        LEFT JOIN queue_action q ON q.token_ca = p.token_ca
+        WHERE p.quote_exec = 1
+        GROUP BY
+          COALESCE(q.recovery_action_status, 'no_recovery_action'),
+          COALESCE(q.fast_queue_reason, 'none')
+        ORDER BY unique_tokens DESC, gold_n DESC, silver_n DESC, bronze_n DESC, max_pnl DESC
         LIMIT @limit
       `).all({ ...whereParams, limit });
       let recoveryActions = [];
@@ -6092,6 +6183,7 @@ const server = http.createServer(async (req, res) => {
         by_blocker_clean_quote: byBlockerCleanQuote,
         by_blocker_all_unique: byBlockerAllUnique,
         top_clean_quote_dogs: topCleanQuoteDogs,
+        recovery_actionability: recoveryActionability,
         recovery_actions: recoveryActions,
         notes: {
           endpoint_goal: 'fast closed-loop summary for missed gold/silver/bronze recovery, avoiding full attribution scans',

@@ -639,3 +639,175 @@ def test_watch_observation_is_not_claimed(tmp_path):
     row = db.execute("SELECT status, last_error FROM paper_fast_entry_queue").fetchone()
     assert row["status"] == "watch_only"
     assert row["last_error"] == "source_resonance_gmgn_only_watch_only"
+
+
+def test_premium_scan_reconciles_recent_status_changes(tmp_path):
+    signal_db = fast.connect_db(tmp_path / "signals.db")
+    paper_db = fast.connect_db(tmp_path / "paper.db")
+    now = int(time.time())
+    signal_db.execute(
+        """
+        CREATE TABLE premium_signals (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            timestamp INTEGER,
+            hard_gate_status TEXT,
+            signal_type TEXT,
+            receive_ts INTEGER,
+            created_at INTEGER,
+            market_cap REAL,
+            description TEXT
+        )
+        """
+    )
+    signal_db.execute(
+        """
+        INSERT INTO premium_signals (
+            id, token_ca, symbol, timestamp, hard_gate_status, signal_type,
+            receive_ts, created_at, market_cap, description
+        ) VALUES (1, 'TokenPass', 'PASSDOG', ?, 'PASS', 'ATH', ?, ?, 12345, '')
+        """,
+        (now - 5, now - 5, now - 5),
+    )
+    signal_db.commit()
+
+    result = fast.scan_premium_once(
+        signal_db,
+        paper_db,
+        last_id=1,
+        lookback_sec=120,
+        now_ts=now,
+    )
+
+    assert result["rows"] == 1
+    assert result["queued"] == 1
+    row = paper_db.execute(
+        "SELECT token_ca, source_type, entry_branch, status FROM paper_fast_entry_queue"
+    ).fetchone()
+    assert row["token_ca"] == "TokenPass"
+    assert row["source_type"] == "hard_gate_fast"
+    assert row["entry_branch"] == "hard_gate_fast_clean"
+    assert row["status"] == "queued"
+
+
+def test_premium_scan_records_stale_pass_as_watch_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_RETRY_LATENCY_SEC", 10)
+    signal_db = fast.connect_db(tmp_path / "signals.db")
+    paper_db = fast.connect_db(tmp_path / "paper.db")
+    now = int(time.time())
+    signal_db.execute(
+        """
+        CREATE TABLE premium_signals (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            timestamp INTEGER,
+            hard_gate_status TEXT,
+            signal_type TEXT,
+            receive_ts INTEGER,
+            created_at INTEGER,
+            market_cap REAL,
+            description TEXT
+        )
+        """
+    )
+    signal_db.execute(
+        """
+        INSERT INTO premium_signals (
+            id, token_ca, symbol, timestamp, hard_gate_status, signal_type,
+            receive_ts, created_at, market_cap, description
+        ) VALUES (1, 'TokenStalePass', 'LATE', ?, 'PASS', 'ATH', ?, ?, 12345, '')
+        """,
+        (now - 60, now - 60, now - 60),
+    )
+    signal_db.commit()
+
+    result = fast.scan_premium_once(
+        signal_db,
+        paper_db,
+        last_id=1,
+        lookback_sec=120,
+        now_ts=now,
+    )
+
+    assert result["rows"] == 1
+    assert result["watch_only"] == 1
+    row = paper_db.execute(
+        "SELECT status, last_error FROM paper_fast_entry_queue WHERE token_ca = 'TokenStalePass'"
+    ).fetchone()
+    assert row["status"] == "watch_only"
+    assert row["last_error"] == "premium_signal_stale_watch_only"
+
+
+def test_missed_rescue_scans_tradability_signature_not_only_new_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC", 300)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenMiss', 'MISS', ?, 11, 'ATH', 'discovery_tracking',
+            'tracking_ttl_expired', 1.0, ?, ?, ?, 1, 0.7,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 240, now - 240, now - 240, now - 30, now),
+    )
+    db.commit()
+
+    first = fast.scan_missed_rescue_once(db, now_ts=now)
+    second = fast.scan_missed_rescue_once(db, now_ts=now + 1)
+    db.execute(
+        """
+        UPDATE paper_missed_signal_attribution
+        SET executable_peak_pnl = 1.2,
+            updated_at = datetime(?, 'unixepoch')
+        WHERE id = 1
+        """,
+        (now + 2,),
+    )
+    db.commit()
+    third = fast.scan_missed_rescue_once(db, now_ts=now + 2)
+
+    assert first["processed"] == 1
+    assert first["queued"] == 1
+    assert second["processed"] == 0
+    assert third["processed"] == 1
+    assert third["deduped"] == 1
+    row = db.execute(
+        """
+        SELECT rescue_signature, last_status
+        FROM paper_fast_missed_rescue_state
+        WHERE missed_attribution_id = 1
+        """
+    ).fetchone()
+    assert "1.2" in row["rescue_signature"]
+    assert row["last_status"] == "deduped"
