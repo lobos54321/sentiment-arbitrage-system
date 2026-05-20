@@ -48,19 +48,13 @@ fi
 
 echo "[STARTUP] Starting Node.js..."
 (
-  while true; do
-    echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/node.log
-    SENTIMENT_DB=/app/data/sentiment_arb.db \
-    LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
-    KLINE_DB=/app/data/kline_cache.db \
-    SHADOW_MODE=false \
-    AUTO_BUY_ENABLED=true \
-    PYTHONUNBUFFERED=1 \
-    node src/index.js --premium 2>&1 | tee -a /app/data/node.log
-    EXIT_CODE=$?
-    echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), restarting in 15s" | tee -a /app/data/node.log
-    sleep 15
-  done
+  SENTIMENT_DB=/app/data/sentiment_arb.db \
+  LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
+  KLINE_DB=/app/data/kline_cache.db \
+  SHADOW_MODE=false \
+  AUTO_BUY_ENABLED=true \
+  PYTHONUNBUFFERED=1 \
+  node src/index.js --premium 2>&1 | tee -a /app/data/node.log
 ) &
 NODE_PID=$!
 
