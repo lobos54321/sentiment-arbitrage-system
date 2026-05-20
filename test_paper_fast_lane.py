@@ -300,6 +300,8 @@ def test_gmgn_only_source_resonance_is_watch_only_by_default():
     assert detail["pass"] is False
     assert detail["status"] == "watch_only"
     assert detail["reason"] == "source_resonance_gmgn_only_watch_only"
+    assert detail["detail"]["shadow_entry"] is True
+    assert detail["detail"]["required_next_state"] == "telegram_gmgn_quote_clean"
 
 
 def test_quote_clean_source_requires_activity_confirmation(monkeypatch):
@@ -664,6 +666,46 @@ def test_watch_observation_is_not_claimed(tmp_path):
     row = db.execute("SELECT status, last_error FROM paper_fast_entry_queue").fetchone()
     assert row["status"] == "watch_only"
     assert row["last_error"] == "source_resonance_gmgn_only_watch_only"
+
+
+def test_watch_observation_records_shadow_decision_event(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    fast.ptm.init_decision_audit(db)
+    now = int(time.time())
+
+    assert fast.record_fast_lane_observation(
+        db,
+        source_type="source_resonance_fast",
+        token_ca="TokenShadow",
+        symbol="SHDW",
+        signal_ts=now,
+        entry_branch="source_resonance_gmgn_fast",
+        source_resonance_cohort="telegram_gmgn",
+        status="watch_only",
+        reason="source_resonance_gmgn_only_watch_only",
+        payload={"gmgn_pre_seen": 1},
+        now_ts=now,
+    )
+
+    row = db.execute(
+        """
+        SELECT component, event_type, decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE token_ca = 'TokenShadow'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+
+    assert row["component"] == "paper_fast_lane"
+    assert row["event_type"] == "shadow_observation"
+    assert row["decision"] == "shadow"
+    assert row["reason"] == "source_resonance_gmgn_only_watch_only"
+    assert payload["shadow_entry"] is True
+    assert payload["source_resonance_cohort"] == "telegram_gmgn"
 
 
 def test_premium_scan_reconciles_recent_status_changes(tmp_path, monkeypatch):

@@ -35,6 +35,21 @@ ENTRY_MODE_QUALITY_BAD_AVG_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_BAD_
 ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE = float(os.environ.get("ENTRY_MODE_QUALITY_MIN_GOOD_PEAK_RATE", "0.15"))
 ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL", "-0.05"))
 ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK = float(os.environ.get("ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK", "0.12"))
+ENTRY_MODE_QUALITY_AUTO_KILL_SWITCH_ENABLED = os.environ.get(
+    "ENTRY_MODE_QUALITY_AUTO_KILL_SWITCH_ENABLED",
+    "true",
+).lower() != "false"
+ENTRY_MODE_QUALITY_NEGATIVE_EV_MIN_SAMPLES = max(
+    1,
+    int(os.environ.get("ENTRY_MODE_QUALITY_NEGATIVE_EV_MIN_SAMPLES", "20")),
+)
+ENTRY_MODE_QUALITY_TAIL_MIN_SAMPLES = max(
+    1,
+    int(os.environ.get("ENTRY_MODE_QUALITY_TAIL_MIN_SAMPLES", str(ENTRY_MODE_QUALITY_MIN_SAMPLES))),
+)
+ENTRY_MODE_QUALITY_AVG_PNL_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_AVG_PNL_FLOOR", "0"))
+ENTRY_MODE_QUALITY_P10_PNL_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_P10_PNL_FLOOR", "-0.30"))
+ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR", "-0.80"))
 ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES_DEFAULT = ",".join(
     sorted(entry_mode_registry_shadow_only_modes(ENTRY_MODE_REGISTRY))
 )
@@ -91,6 +106,9 @@ def _empty_stats(entry_mode):
         "peak_lt_3_rate": 0.0,
         "avg_peak": None,
         "avg_final": None,
+        "p10_final": None,
+        "p90_final": None,
+        "max_loss": None,
     }
 
 
@@ -107,7 +125,26 @@ def _thresholds_for(entry_mode):
         "capture_bad_final": float(override.get("capture_bad_final", ENTRY_MODE_QUALITY_CAPTURE_BAD_FINAL)),
         "capture_giveback": float(override.get("capture_giveback", ENTRY_MODE_QUALITY_CAPTURE_GIVEBACK)),
         "shadow_sec": ENTRY_MODE_QUALITY_SHADOW_SEC,
+        "auto_kill_switch_enabled": ENTRY_MODE_QUALITY_AUTO_KILL_SWITCH_ENABLED,
+        "negative_ev_min_samples": ENTRY_MODE_QUALITY_NEGATIVE_EV_MIN_SAMPLES,
+        "tail_min_samples": ENTRY_MODE_QUALITY_TAIL_MIN_SAMPLES,
+        "avg_pnl_floor": ENTRY_MODE_QUALITY_AVG_PNL_FLOOR,
+        "p10_pnl_floor": ENTRY_MODE_QUALITY_P10_PNL_FLOOR,
+        "max_loss_floor": ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR,
     }
+
+
+def _percentile(values, pct):
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * pct
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    frac = pos - lo
+    return ordered[lo] * (1 - frac) + ordered[hi] * frac
 
 
 def recent_entry_mode_stats(db, entry_mode, *, window=None):
@@ -150,6 +187,9 @@ def recent_entry_mode_stats(db, entry_mode, *, window=None):
         "peak_lt_3_rate": peak_low / sample_n,
         "avg_peak": sum(peaks) / sample_n,
         "avg_final": sum(finals) / sample_n,
+        "p10_final": _percentile(finals, 0.10),
+        "p90_final": _percentile(finals, 0.90),
+        "max_loss": min(finals) if finals else None,
         "window": limit,
         "thresholds": _thresholds_for(entry_mode),
     }
@@ -199,15 +239,50 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
 
     thresholds = _thresholds_for(entry_mode)
 
-    if stats.get("sample_n", 0) < thresholds["min_samples"]:
-        base["reason"] = "entry_mode_quality_insufficient_samples"
-        return base
-
     peak_lt_rate = _safe_float(stats.get("peak_lt_3_rate"), 0.0)
     peak_gt_rate = _safe_float(stats.get("peak_gt_10_rate"), 0.0)
     avg_peak = _safe_float(stats.get("avg_peak"), 0.0)
     avg_final = _safe_float(stats.get("avg_final"), 0.0)
     avg_giveback = avg_peak - avg_final
+    p10_final = stats.get("p10_final")
+    max_loss = stats.get("max_loss")
+
+    kill_reason = None
+    if thresholds["auto_kill_switch_enabled"]:
+        if max_loss is not None and _safe_float(max_loss) < thresholds["max_loss_floor"]:
+            kill_reason = "entry_mode_quality_catastrophic_loss"
+        elif (
+            stats.get("sample_n", 0) >= thresholds["tail_min_samples"]
+            and p10_final is not None
+            and _safe_float(p10_final) < thresholds["p10_pnl_floor"]
+        ):
+            kill_reason = "entry_mode_quality_tail_loss"
+        elif (
+            stats.get("sample_n", 0) >= thresholds["negative_ev_min_samples"]
+            and avg_final < thresholds["avg_pnl_floor"]
+        ):
+            kill_reason = "entry_mode_quality_negative_ev"
+
+    if kill_reason:
+        shadow_until = now_ts + ENTRY_MODE_QUALITY_SHADOW_SEC
+        _SHADOW_UNTIL[entry_mode] = shadow_until
+        base.update({
+            "decision": "shadow",
+            "reason": kill_reason,
+            "shadow_until": shadow_until,
+            "remaining_sec": ENTRY_MODE_QUALITY_SHADOW_SEC,
+            "auto_action": "downgrade_to_watch_only",
+            "kill_switch": {
+                "status": "tripped",
+                "reason": kill_reason,
+                "auto_action": "downgrade_to_watch_only",
+            },
+        })
+        return base
+
+    if stats.get("sample_n", 0) < thresholds["min_samples"]:
+        base["reason"] = "entry_mode_quality_insufficient_samples"
+        return base
 
     degraded = (
         peak_lt_rate >= thresholds["low_peak_rate"]
@@ -228,6 +303,7 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
             "reason": "entry_mode_quality_degraded",
             "shadow_until": shadow_until,
             "remaining_sec": ENTRY_MODE_QUALITY_SHADOW_SEC,
+            "auto_action": "downgrade_to_watch_only",
         })
         return base
 

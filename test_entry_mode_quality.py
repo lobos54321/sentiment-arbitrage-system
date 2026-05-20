@@ -170,6 +170,43 @@ def test_entry_mode_quality_degraded_path_shadows_future_entries():
     assert decision["reason"] == "entry_mode_quality_degraded"
 
 
+def test_entry_mode_quality_catastrophic_loss_trips_immediately():
+    db = _db()
+    _insert(db, "custom_catastrophic_probe", 0.20, -0.85, 1)
+
+    decision = evaluate_entry_mode_quality(db, "custom_catastrophic_probe", now_ts=1000)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_catastrophic_loss"
+    assert decision["auto_action"] == "downgrade_to_watch_only"
+    assert decision["kill_switch"]["status"] == "tripped"
+
+
+def test_entry_mode_quality_tail_loss_trips_after_recent_window():
+    db = _db()
+    pnls = [-0.40, -0.35, -0.05, -0.04, -0.03, 0.01, 0.02, 0.04]
+    for idx, pnl in enumerate(pnls):
+        _insert(db, "custom_tail_probe", 0.20, pnl, idx)
+
+    stats = recent_entry_mode_stats(db, "custom_tail_probe")
+    decision = evaluate_entry_mode_quality(db, "custom_tail_probe", now_ts=1000)
+
+    assert stats["p10_final"] < -0.30
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_tail_loss"
+
+
+def test_entry_mode_quality_negative_ev_trips_after_twenty_closed():
+    db = _db()
+    for idx in range(20):
+        _insert(db, "custom_negative_ev_probe", 0.20, -0.01, idx)
+
+    decision = evaluate_entry_mode_quality(db, "custom_negative_ev_probe", now_ts=1000)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_negative_ev"
+
+
 def test_matrix_reclaim_shadows_when_peaks_are_given_back():
     db = _db()
     for idx in range(6):

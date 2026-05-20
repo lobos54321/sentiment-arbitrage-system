@@ -841,6 +841,10 @@ PAPER_PROVIDER_TREND_CACHE_TTL_SEC = float(os.environ.get('PAPER_PROVIDER_TREND_
 PAPER_PROVIDER_TREND_STALE_SEC = float(os.environ.get('PAPER_PROVIDER_TREND_STALE_SEC', '120'))
 PAPER_PROVIDER_HELIUS_CONCENTRATION_CACHE_TTL_SEC = float(os.environ.get('PAPER_PROVIDER_HELIUS_CONCENTRATION_CACHE_TTL_SEC', '60'))
 PAPER_PROVIDER_CACHE_MAX_KEYS = int(os.environ.get('PAPER_PROVIDER_CACHE_MAX_KEYS', '2000'))
+PAPER_SHARED_RUNTIME_POOL_CACHE_TTL_SEC = float(os.environ.get('PAPER_SHARED_RUNTIME_POOL_CACHE_TTL_SEC', '900'))
+PAPER_SHARED_RUNTIME_OHLCV_CACHE_TTL_SEC = float(os.environ.get('PAPER_SHARED_RUNTIME_OHLCV_CACHE_TTL_SEC', '30'))
+PAPER_SHARED_RUNTIME_QUOTE_CACHE_TTL_SEC = float(os.environ.get('PAPER_SHARED_RUNTIME_QUOTE_CACHE_TTL_SEC', '1.5'))
+PAPER_SHARED_RUNTIME_FAILURE_CACHE_TTL_SEC = float(os.environ.get('PAPER_SHARED_RUNTIME_FAILURE_CACHE_TTL_SEC', '0.5'))
 MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC = float(os.environ.get('MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC', '60'))
 MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC = float(os.environ.get('MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC', '180'))
 MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC = float(os.environ.get('MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC', '900'))
@@ -860,6 +864,8 @@ _DEX_LAST_WARN_AT = 0.0
 _PROVIDER_CACHE_LOCK = threading.RLock()
 _PROVIDER_TREND_CACHE = {}
 _PROVIDER_HELIUS_CONCENTRATION_CACHE = {}
+_SHARED_RUNTIME_LOCAL_CACHE = {}
+_SHARED_RUNTIME_INFLIGHT = {}
 _MISSED_ATTRIBUTION_WRITE_LOCK = threading.Lock()
 _MISSED_ATTRIBUTION_BACKOFF_UNTIL = 0.0
 _MISSED_ATTRIBUTION_LOCK_FAILURES = 0
@@ -15054,6 +15060,35 @@ def get_shared_market_runtime(namespace='paper-monitor:bridge'):
     return runtime
 
 
+def _shared_runtime_cache_key(namespace, method, payload):
+    try:
+        payload_key = json.dumps(payload or {}, sort_keys=True, default=str)
+    except Exception:
+        payload_key = str(payload)
+    return f"{namespace}:{method}:{payload_key}"
+
+
+def _shared_runtime_cache_ttl(method, result):
+    if not isinstance(result, dict):
+        return PAPER_SHARED_RUNTIME_FAILURE_CACHE_TTL_SEC
+    failed = bool(
+        result.get('failureReason')
+        or result.get('error')
+        or result.get('reason') in {'RATE_LIMITED', 'COOLDOWN_ACTIVE', 'UPSTREAM_UNAVAILABLE'}
+        or result.get('ok') is False
+        or result.get('success') is False
+    )
+    if failed:
+        return PAPER_SHARED_RUNTIME_FAILURE_CACHE_TTL_SEC
+    if method == 'resolvePool':
+        return PAPER_SHARED_RUNTIME_POOL_CACHE_TTL_SEC
+    if method == 'fetchRecentOhlcvByPool':
+        return PAPER_SHARED_RUNTIME_OHLCV_CACHE_TTL_SEC
+    if method == 'getSwapQuote':
+        return PAPER_SHARED_RUNTIME_QUOTE_CACHE_TTL_SEC
+    return 0.0
+
+
 def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monitor:bridge'):
     runtime = get_shared_market_runtime(namespace)
     budgeted_methods = {
@@ -15062,9 +15097,39 @@ def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monito
         'getSwapQuote',
     }
     budget = None
+    cache_key = None
+    inflight_entry = None
+    leader = False
     if method in budgeted_methods:
+        cache_key = _shared_runtime_cache_key(runtime['namespace'], method, payload)
+        now = time.time()
+        with _PROVIDER_CACHE_LOCK:
+            cached = _SHARED_RUNTIME_LOCAL_CACHE.get(cache_key)
+            if cached and now < cached.get('expires_at', 0.0):
+                return cached.get('data')
+            inflight_entry = _SHARED_RUNTIME_INFLIGHT.get(cache_key)
+            if inflight_entry is None:
+                inflight_entry = {'event': threading.Event()}
+                _SHARED_RUNTIME_INFLIGHT[cache_key] = inflight_entry
+                leader = True
+        if not leader:
+            inflight_entry['event'].wait(max(0.05, float(timeout or 1)))
+            with _PROVIDER_CACHE_LOCK:
+                cached = _SHARED_RUNTIME_LOCAL_CACHE.get(cache_key)
+                if cached and time.time() < cached.get('expires_at', 0.0):
+                    return cached.get('data')
+            return None
         budget = provider_request_allowed('shared_market_data')
         if not budget.get('pass'):
+            with _PROVIDER_CACHE_LOCK:
+                _SHARED_RUNTIME_LOCAL_CACHE[cache_key] = {
+                    'data': None,
+                    'fetched_at': time.time(),
+                    'expires_at': time.time() + max(0.0, PAPER_SHARED_RUNTIME_FAILURE_CACHE_TTL_SEC),
+                }
+                inflight = _SHARED_RUNTIME_INFLIGHT.pop(cache_key, None)
+                if inflight:
+                    inflight['event'].set()
             return None
     bridge_payload = {
         'mode': 'paper',
@@ -15072,6 +15137,7 @@ def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monito
         'payload': payload or {},
         'namespace': runtime['namespace'],
     }
+    res = None
     try:
         res = call_execution_bridge('shared-runtime', bridge_payload, timeout)
         if budget is not None:
@@ -15089,6 +15155,25 @@ def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monito
         if budget is not None:
             record_provider_result('shared_market_data', success=False, error=exc)
         return None
+    finally:
+        if cache_key and leader:
+            ttl = _shared_runtime_cache_ttl(method, res)
+            with _PROVIDER_CACHE_LOCK:
+                if ttl > 0:
+                    cached_data = None if (
+                        isinstance(res, dict)
+                        and res.get('failureReason')
+                        and not res.get('success')
+                    ) else res
+                    _SHARED_RUNTIME_LOCAL_CACHE[cache_key] = {
+                        'data': cached_data,
+                        'fetched_at': time.time(),
+                        'expires_at': time.time() + ttl,
+                    }
+                    _provider_cache_prune(_SHARED_RUNTIME_LOCAL_CACHE)
+                inflight = _SHARED_RUNTIME_INFLIGHT.pop(cache_key, None)
+                if inflight:
+                    inflight['event'].set()
 
 
 def get_shared_cache_value(key, namespace='paper-monitor:bridge'):

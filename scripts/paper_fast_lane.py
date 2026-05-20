@@ -567,6 +567,8 @@ def record_fast_lane_observation(db, *, source_type, token_ca, symbol=None, sign
         **(payload or {}),
         "direct_fill_status": status,
         "direct_fill_reason": reason,
+        "shadow_entry": status == "watch_only",
+        "counterfactual_entry": status == "counterfactual_only",
     }
     try:
         with SQLITE_WRITE_LOCK:
@@ -629,6 +631,41 @@ def record_fast_lane_observation(db, *, source_type, token_ca, symbol=None, sign
                     (status, reason, first_error, first_error_at, json.dumps(payload, ensure_ascii=False), history, session, now_ts, key),
                 )
             db.commit()
+        if inserted and table_exists(db, "paper_decision_events"):
+            try:
+                audit_decision = "shadow" if status == "watch_only" else status
+                audit_event_type = (
+                    "shadow_observation"
+                    if status == "watch_only"
+                    else "counterfactual_observation"
+                    if status == "counterfactual_only"
+                    else "non_entry_observation"
+                )
+                ptm.record_decision_event(
+                    db,
+                    component="paper_fast_lane",
+                    event_type=audit_event_type,
+                    decision=audit_decision,
+                    reason=reason,
+                    token_ca=token_ca,
+                    symbol=symbol,
+                    lifecycle_id=ptm.build_lifecycle_id(token_ca, signal_ts),
+                    signal_ts=signal_ts,
+                    route=source_type,
+                    data_source="paper_fast_entry_queue",
+                    payload={
+                        "source_type": source_type,
+                        "entry_branch": branch,
+                        "entry_mode_hint": entry_mode_hint,
+                        "source_resonance_cohort": source_resonance_cohort,
+                        "status": status,
+                        "reason": reason,
+                        **payload,
+                    },
+                    event_ts=now_ts,
+                )
+            except Exception:
+                log.debug("fast lane observation audit failed token=%s source=%s", token_ca, source_type, exc_info=True)
         return inserted
     except sqlite3.OperationalError as exc:
         log.warning("observation failed token=%s source=%s: %s", token_ca, source_type, exc)
@@ -1060,6 +1097,14 @@ def direct_fill_policy(row, *, now_ts=None):
             "pass": False,
             "status": "watch_only",
             "reason": "source_resonance_gmgn_only_watch_only",
+            "detail": {
+                "entry_branch": branch,
+                "source_type": source_type,
+                "shadow_entry": True,
+                "counterfactual_entry": False,
+                "auto_action": "keep_shadow_until_quote_clean_and_timing",
+                "required_next_state": "telegram_gmgn_quote_clean",
+            },
         }
     if branch == "source_resonance_quote_clean_fast":
         original_age_sec = payload_ts_age_sec(
@@ -1978,6 +2023,7 @@ def source_resonance_scan(paper_db_path, stop_event):
                     }
                     policy = direct_fill_policy(policy_probe)
                     if not policy.get("pass"):
+                        payload["direct_fill_policy"] = policy.get("detail") or {}
                         inserted = record_fast_lane_observation(
                             db,
                             source_type="source_resonance_fast",

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 import paper_trade_monitor as monitor  # noqa: E402
 from paper_decision_audit import init_decision_audit  # noqa: E402
+from provider_budget import clear_provider_budget_state  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     ATH_HIGH_MC_TINY_PROBE_MODE,
     ATH_MATRIX_DISSONANCE_TINY_PROBE_MODE,
@@ -121,6 +122,27 @@ def _gmgn_resonance_context(cohort="telegram_gmgn", lead=180, quote_clean=False)
             "quote_clean_seen": quote_clean,
         },
     }
+
+
+def test_shared_runtime_local_cache_reuses_identical_market_data_call(monkeypatch):
+    clear_provider_budget_state()
+    with monitor._PROVIDER_CACHE_LOCK:
+        monitor._SHARED_RUNTIME_LOCAL_CACHE.clear()
+        monitor._SHARED_RUNTIME_INFLIGHT.clear()
+    calls = []
+
+    def fake_bridge(command, payload, timeout=8):
+        calls.append((command, payload, timeout))
+        return {"ok": True, "poolAddress": "PoolA", "error": None}
+
+    monkeypatch.setattr(monitor, "call_execution_bridge", fake_bridge)
+
+    first = monitor.call_shared_runtime("resolvePool", {"tokenCA": "TokenA"}, timeout=1)
+    second = monitor.call_shared_runtime("resolvePool", {"tokenCA": "TokenA"}, timeout=1)
+
+    assert first == {"ok": True, "poolAddress": "PoolA", "error": None}
+    assert second == first
+    assert len(calls) == 1
 
 
 def _paper_trade_db(rows=()):
