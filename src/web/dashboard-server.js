@@ -3182,7 +3182,12 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', message: 'Sentiment Arbitrage API Running', timestamp: Date.now() }));
+    res.end(JSON.stringify({
+      status: 'ok',
+      message: 'Sentiment Arbitrage API Running',
+      timestamp: Date.now(),
+      commit: runtimeCommitFingerprint(),
+    }));
     return;
   } else if (url.pathname === '/dashboard') {
     res.writeHead(302, { 'Location': '/premium' });
