@@ -45,7 +45,7 @@ from watchlist_store import WatchlistStore
 from matrix_evaluator import MatrixEvaluator, ExitMatrixEvaluator
 from entry_engine import (
     calculate_kelly_position, evaluate_smart_entry,
-    fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
+    fetch_dexscreener_trend_snapshot as _raw_fetch_dexscreener_trend_snapshot, evaluate_trend_phase,
     clear_dex_trend_cache,
     get_liquidity_position_cap, get_adaptive_stop_loss,
     is_chasing_top,
@@ -74,7 +74,11 @@ from paper_decision_audit import (
 )
 from lifecycle_classifier import classify_lifecycle
 from entry_decision_contract import build_entry_decision_contract
-from entry_readiness_policy import PAPER_TINY_SCOUT_MODES, evaluate_entry_readiness_policy
+from entry_readiness_policy import (
+    PAPER_TINY_SCOUT_MODES,
+    build_entry_execution_eligibility,
+    evaluate_entry_readiness_policy,
+)
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
@@ -831,6 +835,13 @@ REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', '').strip() or None
 REDIS_KEY_PREFIX = os.environ.get('PRICE_REDIS_KEY_PREFIX', 'live_price:').strip() or 'live_price:'
 LIVE_PRICE_MAX_AGE_MS = int(os.environ.get('LIVE_PRICE_MAX_AGE_MS', '90000'))
 DEX_RATE_LIMIT_COOLDOWN_SEC = int(os.environ.get('DEX_RATE_LIMIT_COOLDOWN_SEC', '60'))
+PAPER_PROVIDER_TREND_CACHE_TTL_SEC = float(os.environ.get('PAPER_PROVIDER_TREND_CACHE_TTL_SEC', '8'))
+PAPER_PROVIDER_TREND_STALE_SEC = float(os.environ.get('PAPER_PROVIDER_TREND_STALE_SEC', '120'))
+PAPER_PROVIDER_HELIUS_CONCENTRATION_CACHE_TTL_SEC = float(os.environ.get('PAPER_PROVIDER_HELIUS_CONCENTRATION_CACHE_TTL_SEC', '60'))
+PAPER_PROVIDER_CACHE_MAX_KEYS = int(os.environ.get('PAPER_PROVIDER_CACHE_MAX_KEYS', '2000'))
+MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC = float(os.environ.get('MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC', '60'))
+MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC = float(os.environ.get('MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC', '180'))
+MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC = float(os.environ.get('MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC', '900'))
 SOL_PRICE_TTL_SEC = int(os.environ.get('SOL_PRICE_TTL_SEC', '30'))
 MARKET_DATA_UNIFIED_ROLLOUT = os.environ.get('MARKET_DATA_UNIFIED_ROLLOUT', 'true').lower() != 'false'
 MARKET_DATA_UNIFIED_PAPER_MONITOR = os.environ.get('MARKET_DATA_UNIFIED_PAPER_MONITOR', 'true').lower() != 'false'
@@ -844,6 +855,13 @@ _REDIS_CLIENT = None
 _REDIS_INIT_ATTEMPTED = False
 _DEX_RATE_LIMIT_UNTIL = 0.0
 _DEX_LAST_WARN_AT = 0.0
+_PROVIDER_CACHE_LOCK = threading.RLock()
+_PROVIDER_TREND_CACHE = {}
+_PROVIDER_HELIUS_CONCENTRATION_CACHE = {}
+_MISSED_ATTRIBUTION_WRITE_LOCK = threading.Lock()
+_MISSED_ATTRIBUTION_BACKOFF_UNTIL = 0.0
+_MISSED_ATTRIBUTION_LOCK_FAILURES = 0
+_MISSED_ATTRIBUTION_LAST_WARN_AT = 0.0
 _SOL_PRICE_CACHE = {'price': None, 'fetched_at': 0.0}
 _KLINE_DB_CONN = None
 _KLINE_DB_FAILED = False
@@ -7240,6 +7258,16 @@ def evaluate_source_resonance_tiny_probe(
         or lifecycle.get('quote_clean_seen')
         or lifecycle.get('quote_executable')
     )
+    liquidity_usd = _source_resonance_first_number(
+        dex_snapshot.get('liquidity_usd'),
+        dex_snapshot.get('liquidity'),
+        signal.get('liquidity_usd'),
+        watchlist_entry.get('liquidity_usd'),
+        external_alpha.get('last_liquidity'),
+        external_alpha.get('gmgn_last_liquidity'),
+        positive=True,
+        default=None,
+    )
     resonance_cohort = (
         external_alpha.get('cohort')
         or external_alpha.get('resonance_cohort')
@@ -7273,6 +7301,8 @@ def evaluate_source_resonance_tiny_probe(
         'gmgn_momentum_confirmed': momentum_confirmed,
         'gmgn_volume_confirmed': volume_confirmed,
         'quote_clean_seen': quote_clean_seen,
+        'quote_executable': quote_clean_seen,
+        'liquidity_usd': liquidity_usd,
         'resonance_cohort': resonance_cohort,
         'lifecycle_state': lifecycle.get('lifecycle_state'),
         'entry_bias': lifecycle.get('entry_bias'),
@@ -7330,6 +7360,20 @@ def evaluate_source_resonance_tiny_probe(
     )
 
     def _result(passed, reason):
+        execution_eligibility = build_entry_execution_eligibility(
+            entry_mode=SOURCE_RESONANCE_TINY_PROBE_MODE,
+            route=route_name,
+            signal_ts=signal_ts_sec,
+            now_ts=now_ts,
+            observed=observed,
+            external_alpha=external_alpha,
+            dex_snapshot=dex_snapshot,
+            require_quote_clean=SOURCE_RESONANCE_TINY_PROBE_REQUIRE_QUOTE_CLEAN,
+            require_timing=True,
+            timing_confirmed=False,
+            quote_clean_seen=quote_clean_seen,
+            quote_executable=quote_clean_seen,
+        ).to_dict()
         return {
             'pass': bool(passed),
             'reason': reason,
@@ -7341,7 +7385,12 @@ def evaluate_source_resonance_tiny_probe(
             'resonance_cohort': resonance_cohort,
             'source_component': 'source_resonance_probe',
             'source_reject_reason': str(hard_gate_status or '').lower(),
-            'timing_passed': bool(SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY),
+            'timing_passed': bool(
+                SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY
+                and execution_eligibility.get('direct_entry_ok')
+            ),
+            'requested_timing_bypass': bool(SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY),
+            'entry_execution_eligibility': execution_eligibility,
             'policy_version': DOG_CATCHER_POLICY_VERSION if DOG_CATCHER_V1_ENABLED else None,
             'entry_branch': 'source_resonance_soft_override' if soft_override.get('pass') else 'source_resonance_tiny_probe',
             'source_resonance_soft_override_used': bool(soft_override.get('pass')),
@@ -7425,7 +7474,9 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
     pending['execution_scope'] = 'paper_only'
     source_probe_size_sol = float(detail.get('position_size_sol') or SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL)
     pending['kelly_position_sol'] = source_probe_size_sol
-    pending['timing_passed'] = bool(detail.get('timing_passed'))
+    execution_eligibility = detail.get('entry_execution_eligibility') or {}
+    pending['entry_execution_eligibility'] = execution_eligibility
+    pending['timing_passed'] = bool(detail.get('timing_passed') and execution_eligibility.get('direct_entry_ok'))
     pending['dog_catcher_fast_lane'] = True
     pending['replay_source'] = 'live_monitor_source_resonance_probe'
     pending['stage_outcome'] = stage_outcome or 'source_resonance_tiny_probe_armed'
@@ -7474,7 +7525,8 @@ def _apply_source_resonance_probe_to_pending(pending, detail, *, route=None, sta
                 'position_size_sol': source_probe_size_sol,
                 'paper_only_scout': True,
                 'execution_scope': 'paper_only',
-                'timing_passed': bool(detail.get('timing_passed')),
+                'timing_passed': bool(pending.get('timing_passed')),
+                'entry_execution_eligibility': execution_eligibility,
                 'policy_version': pending.get('policy_version'),
                 'entry_branch': pending.get('entry_branch'),
                 'intervention_flags': pending.get('intervention_flags'),
@@ -7846,6 +7898,14 @@ def evaluate_hard_gate_pass_tiny_probe(
         dex_snapshot.get('top10_holder_pct'),
         default=None,
     )
+    liquidity_usd = _source_resonance_first_number(
+        dex_snapshot.get('liquidity_usd'),
+        dex_snapshot.get('liquidity'),
+        signal.get('liquidity_usd'),
+        watchlist_entry.get('liquidity_usd'),
+        positive=True,
+        default=None,
+    )
 
     quote_executable = bool(
         _source_resonance_first_number(
@@ -7897,6 +7957,7 @@ def evaluate_hard_gate_pass_tiny_probe(
         'timestamp_valid': resonance_context.get('timestamp_valid'),
         'timestamp_anomaly_reason': resonance_context.get('timestamp_anomaly_reason'),
         'quote_clean_seen': resonance_context.get('quote_clean_seen'),
+        'liquidity_usd': liquidity_usd,
     }
     thresholds = {
         'size_sol': HARD_GATE_PASS_TINY_PROBE_SIZE_SOL,
@@ -7922,6 +7983,21 @@ def evaluate_hard_gate_pass_tiny_probe(
     }
 
     def _result(passed, reason):
+        quote_clean_seen = bool(resonance_context.get('quote_clean_seen'))
+        execution_eligibility = build_entry_execution_eligibility(
+            entry_mode=HARD_GATE_PASS_TINY_PROBE_MODE,
+            route=route_name,
+            signal_ts=signal_ts_sec,
+            now_ts=now_ts,
+            observed=observed,
+            external_alpha=resonance_context.get('external_alpha') or external_alpha,
+            dex_snapshot=dex_snapshot,
+            require_quote_clean=True,
+            require_timing=True,
+            timing_confirmed=False,
+            quote_clean_seen=quote_clean_seen,
+            quote_executable=quote_executable,
+        ).to_dict()
         return {
             'pass': bool(passed),
             'reason': reason,
@@ -7938,8 +8014,12 @@ def evaluate_hard_gate_pass_tiny_probe(
             'source_resonance_score': resonance_context.get('source_resonance_score'),
             'source_resonance_level': resonance_context.get('source_resonance_level'),
             'source_component': 'hard_gate_pass_probe',
-            'timing_passed': bool(HARD_GATE_PASS_DIRECT_ENTRY_ENABLED),
+            'timing_passed': bool(
+                HARD_GATE_PASS_DIRECT_ENTRY_ENABLED
+                and execution_eligibility.get('direct_entry_ok')
+            ),
             'direct_entry_enabled': bool(HARD_GATE_PASS_DIRECT_ENTRY_ENABLED),
+            'entry_execution_eligibility': execution_eligibility,
             'resonance_context': resonance_context,
             'external_alpha': resonance_context.get('external_alpha') or external_alpha,
             'observed': observed,
@@ -8019,7 +8099,9 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
     pending['paper_only_scout'] = True
     pending['execution_scope'] = 'paper_only'
     pending['kelly_position_sol'] = HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
-    pending['timing_passed'] = bool(detail.get('timing_passed'))
+    execution_eligibility = detail.get('entry_execution_eligibility') or {}
+    pending['entry_execution_eligibility'] = execution_eligibility
+    pending['timing_passed'] = bool(detail.get('timing_passed') and execution_eligibility.get('direct_entry_ok'))
     pending['dog_catcher_fast_lane'] = True
     pending['replay_source'] = 'live_monitor_hard_gate_pass_probe'
     pending['stage_outcome'] = stage_outcome or 'hard_gate_pass_tiny_probe_armed'
@@ -15006,6 +15088,57 @@ def set_shared_cache_value(key, value, ttl_ms, namespace='paper-monitor:bridge')
     return bool(result)
 
 
+def _provider_cache_prune(cache):
+    if len(cache) <= PAPER_PROVIDER_CACHE_MAX_KEYS:
+        return
+    for key, _value in sorted(cache.items(), key=lambda item: item[1].get('fetched_at', 0.0))[: max(1, len(cache) // 5)]:
+        cache.pop(key, None)
+
+
+def clear_paper_provider_caches():
+    with _PROVIDER_CACHE_LOCK:
+        _PROVIDER_TREND_CACHE.clear()
+        _PROVIDER_HELIUS_CONCENTRATION_CACHE.clear()
+
+
+def fetch_dexscreener_trend_snapshot(token_ca, timeout=5, *, force_refresh=False, cache_ttl_sec=None):
+    """Paper-monitor provider cache around the entry-engine DexScreener fetcher."""
+    token = str(token_ca or '').strip()
+    if not token:
+        return None
+    now = time.time()
+    ttl = PAPER_PROVIDER_TREND_CACHE_TTL_SEC if cache_ttl_sec is None else float(cache_ttl_sec or 0.0)
+    with _PROVIDER_CACHE_LOCK:
+        cached = _PROVIDER_TREND_CACHE.get(token)
+        if cached and not force_refresh and now < cached.get('expires_at', 0.0):
+            return cached.get('data')
+        stale_data = cached.get('data') if cached else None
+        stale_age = now - cached.get('fetched_at', 0.0) if cached else None
+
+    shared_cooldown_ms = get_shared_cooldown_ms('dexscreener', namespace='market-data:quotes')
+    if (
+        stale_data is not None
+        and stale_age is not None
+        and stale_age <= PAPER_PROVIDER_TREND_STALE_SEC
+        and (_dex_rate_limited() or shared_cooldown_ms > 0)
+    ):
+        return stale_data
+
+    data = _raw_fetch_dexscreener_trend_snapshot(token, timeout=timeout)
+    if data is None:
+        if stale_data is not None and stale_age is not None and stale_age <= PAPER_PROVIDER_TREND_STALE_SEC:
+            return stale_data
+        return None
+    with _PROVIDER_CACHE_LOCK:
+        _PROVIDER_TREND_CACHE[token] = {
+            'data': data,
+            'fetched_at': now,
+            'expires_at': now + max(0.0, ttl),
+        }
+        _provider_cache_prune(_PROVIDER_TREND_CACHE)
+    return data
+
+
 def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
     if _is_dexscreener_url(url):
@@ -15259,7 +15392,7 @@ def poll_helius_volume(trade_id, pool_address, interval=30):
     except Exception:
         return cache.get('tps_smooth', cache.get('tps', 0.0)) if cache else 0.0
 
-def helius_token_concentration(token_ca, timeout=2.5):
+def _raw_helius_token_concentration(token_ca, timeout=2.5):
     """LIVE on-chain top1/top10 concentration via Helius RPC.
 
     Critical for LOTTO rug prevention: signal-time top10 is stale by the
@@ -15319,6 +15452,115 @@ def helius_token_concentration(token_ca, timeout=2.5):
         }
     except Exception:
         return None
+
+
+def helius_token_concentration(token_ca, timeout=2.5, *, force_refresh=False, cache_ttl_sec=None):
+    token = str(token_ca or '').strip()
+    if not token:
+        return None
+    now = time.time()
+    ttl = (
+        PAPER_PROVIDER_HELIUS_CONCENTRATION_CACHE_TTL_SEC
+        if cache_ttl_sec is None
+        else float(cache_ttl_sec or 0.0)
+    )
+    with _PROVIDER_CACHE_LOCK:
+        cached = _PROVIDER_HELIUS_CONCENTRATION_CACHE.get(token)
+        if cached and not force_refresh and now < cached.get('expires_at', 0.0):
+            return cached.get('data')
+
+    data = _raw_helius_token_concentration(token, timeout=timeout)
+    if data is None:
+        return cached.get('data') if cached else None
+    with _PROVIDER_CACHE_LOCK:
+        _PROVIDER_HELIUS_CONCENTRATION_CACHE[token] = {
+            'data': data,
+            'fetched_at': now,
+            'expires_at': now + max(0.0, ttl),
+        }
+        _provider_cache_prune(_PROVIDER_HELIUS_CONCENTRATION_CACHE)
+    return data
+
+
+def sqlite_locked_error(exc):
+    message = str(exc or '').lower()
+    return 'database is locked' in message or 'database table is locked' in message or 'database schema is locked' in message
+
+
+def missed_attribution_update_due(now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    return now_ts >= _MISSED_ATTRIBUTION_BACKOFF_UNTIL
+
+
+def _missed_attribution_lock_backoff_detail(exc, *, now_ts=None):
+    global _MISSED_ATTRIBUTION_BACKOFF_UNTIL, _MISSED_ATTRIBUTION_LOCK_FAILURES, _MISSED_ATTRIBUTION_LAST_WARN_AT
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    _MISSED_ATTRIBUTION_LOCK_FAILURES += 1
+    delay = min(
+        MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC,
+        MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC * (2 ** min(_MISSED_ATTRIBUTION_LOCK_FAILURES - 1, 4)),
+    )
+    _MISSED_ATTRIBUTION_BACKOFF_UNTIL = now_ts + delay
+    detail = {
+        'skipped': True,
+        'reason': 'database_locked_backoff',
+        'backoff_sec': delay,
+        'backoff_until': _MISSED_ATTRIBUTION_BACKOFF_UNTIL,
+        'failure_count': _MISSED_ATTRIBUTION_LOCK_FAILURES,
+        'error': str(exc),
+    }
+    if now_ts - _MISSED_ATTRIBUTION_LAST_WARN_AT >= 60:
+        log.warning(
+            f"  [MISSED_ATTRIBUTION] database_locked_backoff "
+            f"failures={_MISSED_ATTRIBUTION_LOCK_FAILURES} backoff={delay:.0f}s"
+        )
+        _MISSED_ATTRIBUTION_LAST_WARN_AT = now_ts
+    return detail
+
+
+def run_due_missed_attribution_update(
+    db,
+    *,
+    historical_price_fetcher=None,
+    live_price_fetcher=None,
+    now=None,
+    limit=250,
+):
+    global _MISSED_ATTRIBUTION_BACKOFF_UNTIL, _MISSED_ATTRIBUTION_LOCK_FAILURES
+    now = float(now if now is not None else time.time())
+    if not missed_attribution_update_due(now):
+        return {
+            'updated': 0,
+            'skipped': True,
+            'reason': 'database_locked_backoff_active',
+            'backoff_until': _MISSED_ATTRIBUTION_BACKOFF_UNTIL,
+            'backoff_remaining_sec': max(0.0, _MISSED_ATTRIBUTION_BACKOFF_UNTIL - now),
+        }
+    if not _MISSED_ATTRIBUTION_WRITE_LOCK.acquire(blocking=False):
+        return {'updated': 0, 'skipped': True, 'reason': 'writer_busy'}
+    try:
+        updated = update_due_missed_attributions(
+            db,
+            historical_price_fetcher=historical_price_fetcher,
+            live_price_fetcher=live_price_fetcher,
+            now=now,
+            limit=limit,
+        )
+        _MISSED_ATTRIBUTION_LOCK_FAILURES = 0
+        _MISSED_ATTRIBUTION_BACKOFF_UNTIL = 0.0
+        return {'updated': updated, 'skipped': False, 'reason': 'updated'}
+    except Exception as exc:
+        if sqlite_locked_error(exc):
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            detail = _missed_attribution_lock_backoff_detail(exc, now_ts=now)
+            detail['updated'] = 0
+            return detail
+        raise
+    finally:
+        _MISSED_ATTRIBUTION_WRITE_LOCK.release()
 
 
 def get_recent_signatures(token_ca, limit=100):
@@ -18460,15 +18702,20 @@ def run_monitor(db):
                 log.debug(f"  [PAPER_HARD_GATE_PASS_PROBE] quote retry scan failed: {_hard_gate_retry_err}")
             last_hard_gate_quote_retry = now
 
-        if not pending_priority and not signal_poll_has_work and now - last_missed_attribution_update >= 60:
+        if not pending_priority and not signal_poll_has_work and now - last_missed_attribution_update >= MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC:
             try:
-                _missed_updated = update_due_missed_attributions(
+                _missed_result = run_due_missed_attribution_update(
                     db,
                     historical_price_fetcher=fetch_kline_close_at_or_after,
                     live_price_fetcher=fetch_live_price_for_attribution,
                     now=now,
                     limit=250,
                 )
+                _missed_updated = int((_missed_result or {}).get('updated') or 0)
+                if (_missed_result or {}).get('skipped'):
+                    _skip_reason = (_missed_result or {}).get('reason') or 'skipped'
+                    if _skip_reason != 'database_locked_backoff_active':
+                        log.debug(f"  [MISSED_ATTRIBUTION] skipped reason={_skip_reason}")
                 if _missed_updated:
                     log.info(f"  [MISSED_ATTRIBUTION] updated={_missed_updated}")
                     try:

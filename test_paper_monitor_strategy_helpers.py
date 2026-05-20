@@ -2628,6 +2628,11 @@ def test_source_resonance_tiny_probe_requires_gmgn_lead_and_activity():
     assert decision["pass"] is True
     assert decision["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
     assert decision["timing_passed"] is False
+    assert decision["entry_execution_eligibility"]["direct_entry_ok"] is False
+    assert decision["entry_execution_eligibility"]["reason"] in {
+        "entry_execution_liquidity_required",
+        "entry_execution_timing_required",
+    }
 
 
 def test_source_resonance_tiny_probe_blocks_late_gmgn_seen():
@@ -2794,7 +2799,7 @@ def test_apply_source_resonance_probe_to_pending_caps_size_and_marks_probe():
     assert pending["scout_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
     assert pending["paper_only_scout"] is True
     assert pending["execution_scope"] == "paper_only"
-    assert pending["timing_passed"] is True
+    assert pending["timing_passed"] is False
     assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_source_resonance_probe"
 
@@ -2911,6 +2916,54 @@ def test_signal_latency_context_payload_and_stamp():
     stamp_signal_latency_context(pending, sig, local_seen_ts_ms=base_ms + 2_000)
     assert pending["receive_ts_ms"] == base_ms + 250
     assert pending["w_entry"]["signal_local_seen_ts_ms"] == base_ms + 2_000
+
+
+def test_paper_provider_cache_reuses_dex_and_helius(monkeypatch):
+    monitor.clear_paper_provider_caches()
+    dex_calls = []
+    helius_calls = []
+
+    def fake_dex(token_ca, timeout=5):
+        dex_calls.append((token_ca, timeout))
+        return {"price_change_m5": 4.2, "liquidity_usd": 15000}
+
+    def fake_helius(token_ca, timeout=2.5):
+        helius_calls.append((token_ca, timeout))
+        return {"top1_pct": 12, "top10_pct": 38}
+
+    monkeypatch.setattr(monitor, "_raw_fetch_dexscreener_trend_snapshot", fake_dex)
+    monkeypatch.setattr(monitor, "_raw_helius_token_concentration", fake_helius)
+
+    first_dex = monitor.fetch_dexscreener_trend_snapshot("TokenCache", cache_ttl_sec=60)
+    second_dex = monitor.fetch_dexscreener_trend_snapshot("TokenCache", cache_ttl_sec=60)
+    first_helius = monitor.helius_token_concentration("TokenCache", cache_ttl_sec=60)
+    second_helius = monitor.helius_token_concentration("TokenCache", cache_ttl_sec=60)
+
+    assert first_dex == second_dex
+    assert first_helius == second_helius
+    assert len(dex_calls) == 1
+    assert len(helius_calls) == 1
+
+
+def test_missed_attribution_db_lock_uses_backoff(monkeypatch):
+    monkeypatch.setattr(monitor, "_MISSED_ATTRIBUTION_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(monitor, "_MISSED_ATTRIBUTION_LOCK_FAILURES", 0)
+    monkeypatch.setattr(monitor, "_MISSED_ATTRIBUTION_LAST_WARN_AT", 0.0)
+    monkeypatch.setattr(monitor, "MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC", 10)
+    monkeypatch.setattr(monitor, "MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC", 20)
+
+    def locked_update(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(monitor, "update_due_missed_attributions", locked_update)
+    db = sqlite3.connect(":memory:")
+    result = monitor.run_due_missed_attribution_update(db, now=100)
+    skipped = monitor.run_due_missed_attribution_update(db, now=105)
+
+    assert result["reason"] == "database_locked_backoff"
+    assert result["backoff_sec"] == 10
+    assert monitor.missed_attribution_update_due(105) is False
+    assert skipped["reason"] == "database_locked_backoff_active"
 
 
 def test_hard_gate_pass_tiny_probe_requires_gmgn_pre_seen(monkeypatch):
@@ -3225,7 +3278,7 @@ def test_apply_hard_gate_pass_probe_to_pending_marks_paper_only():
     assert pending["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
     assert pending["paper_only_scout"] is True
     assert pending["execution_scope"] == "paper_only"
-    assert pending["timing_passed"] is True
+    assert pending["timing_passed"] is False
     assert pending["kelly_position_sol"] == monitor.HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
     assert pending["replay_source"] == "live_monitor_hard_gate_pass_probe"
     assert pending["lotto_state"]["executionScope"] == "paper_only"
@@ -3735,7 +3788,7 @@ def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
     assert pending_entries["TokenCA:1000"]["entry_mode"] == HARD_GATE_PASS_TINY_PROBE_MODE
     assert pending_entries["TokenCA:1000"]["paper_only_scout"] is True
     assert pending_entries["TokenCA:1000"]["execution_scope"] == "paper_only"
-    assert pending_entries["TokenCA:1000"]["timing_passed"] is True
+    assert pending_entries["TokenCA:1000"]["timing_passed"] is False
     assert pending_entries["TokenCA:1000"]["resonance_cohort"] == "telegram_gmgn"
     assert pending_entries["TokenCA:1000"]["gmgn_pre_seen"] is True
 
@@ -3796,7 +3849,7 @@ def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price(monkey
     assert detail["pass"] is True
     assert pending["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
     assert pending["paper_only_scout"] is True
-    assert pending["timing_passed"] is True
+    assert pending["timing_passed"] is False
     assert pending["kelly_position_sol"] == monitor.SOURCE_RESONANCE_TINY_PROBE_SIZE_SOL
     event = db.execute(
         """

@@ -15,6 +15,10 @@ import os
 
 ENTRY_READINESS_MAX_WAIT_SEC = int(os.environ.get("ENTRY_READINESS_MAX_WAIT_SEC", "900"))
 ENTRY_READINESS_POLL_SEC = float(os.environ.get("ENTRY_READINESS_POLL_SEC", "10"))
+ENTRY_EXECUTION_MAX_SIGNAL_AGE_SEC = float(os.environ.get("ENTRY_EXECUTION_MAX_SIGNAL_AGE_SEC", "300"))
+ENTRY_EXECUTION_MIN_LIQUIDITY_USD = float(os.environ.get("ENTRY_EXECUTION_MIN_LIQUIDITY_USD", "5000"))
+ENTRY_EXECUTION_REQUIRE_QUOTE_CLEAN = os.environ.get("ENTRY_EXECUTION_REQUIRE_QUOTE_CLEAN", "true").lower() != "false"
+ENTRY_EXECUTION_REQUIRE_TIMING = os.environ.get("ENTRY_EXECUTION_REQUIRE_TIMING", "true").lower() != "false"
 GMGN_TINY_SCOUT_MODES = (
     "gmgn_concentration_tiny_scout",
     "gmgn_low_kline_tiny_scout",
@@ -88,6 +92,30 @@ class EntryReadinessPolicy:
         return data
 
 
+@dataclass(frozen=True)
+class EntryExecutionEligibility:
+    decision: str
+    reason: str
+    entry_mode: str
+    route: str
+    direct_entry_ok: bool
+    freshness_ok: bool
+    quote_clean_ok: bool
+    quote_executable_ok: bool
+    liquidity_ok: bool
+    timing_ok: bool
+    route_ev_ok: bool
+    risk_ok: bool
+    signal_age_sec: object
+    liquidity_usd: object
+    min_liquidity_usd: float
+    checks: dict
+    detail: dict
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 def _f(value, default=0.0):
     try:
         if value is None:
@@ -95,6 +123,208 @@ def _f(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _truthy(value):
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "pass", "clean", "ok"}
+    return bool(value)
+
+
+def _first_positive(*values):
+    for value in values:
+        try:
+            if value is None:
+                continue
+            number = float(value)
+            if number > 0:
+                return number
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _ts_sec(value):
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts <= 0:
+        return None
+    if ts > 1_000_000_000_000:
+        return ts / 1000.0
+    return ts
+
+
+def _signal_age_sec(signal_ts=None, now_ts=None, observed=None, pending=None):
+    observed = observed or {}
+    pending = pending or {}
+    explicit_age = observed.get("signal_age_sec")
+    if explicit_age is not None:
+        try:
+            return max(0.0, float(explicit_age))
+        except (TypeError, ValueError):
+            pass
+    ts = _ts_sec(signal_ts or observed.get("signal_ts_sec") or pending.get("signal_ts"))
+    if ts is None:
+        return None
+    now = _ts_sec(now_ts) or _ts_sec(observed.get("now_ts"))
+    if now is None:
+        return None
+    return max(0.0, now - ts)
+
+
+def build_entry_execution_eligibility(
+    *,
+    entry_mode="",
+    route=None,
+    signal_ts=None,
+    now_ts=None,
+    pending=None,
+    observed=None,
+    external_alpha=None,
+    dex_snapshot=None,
+    min_liquidity_usd=None,
+    max_signal_age_sec=None,
+    require_quote_clean=None,
+    require_timing=None,
+    timing_confirmed=None,
+    quote_clean_seen=None,
+    quote_executable=None,
+    route_ev_detail=None,
+    risk_ok=True,
+):
+    """Canonical final-entry eligibility gate.
+
+    Lifecycle strength may arm a candidate, but executable entry still needs
+    fresh signal state, quote evidence, liquidity, timing, and route health.
+    """
+    pending = pending or {}
+    observed = observed or {}
+    external_alpha = external_alpha or {}
+    dex_snapshot = dex_snapshot or {}
+    min_liquidity_usd = (
+        ENTRY_EXECUTION_MIN_LIQUIDITY_USD
+        if min_liquidity_usd is None
+        else float(min_liquidity_usd or 0.0)
+    )
+    max_signal_age_sec = (
+        ENTRY_EXECUTION_MAX_SIGNAL_AGE_SEC
+        if max_signal_age_sec is None
+        else float(max_signal_age_sec or 0.0)
+    )
+    require_quote_clean = ENTRY_EXECUTION_REQUIRE_QUOTE_CLEAN if require_quote_clean is None else bool(require_quote_clean)
+    require_timing = ENTRY_EXECUTION_REQUIRE_TIMING if require_timing is None else bool(require_timing)
+    signal_age_sec = _signal_age_sec(signal_ts=signal_ts, now_ts=now_ts, observed=observed, pending=pending)
+
+    quote_clean = _truthy(
+        quote_clean_seen
+        if quote_clean_seen is not None
+        else (
+            observed.get("quote_clean_seen")
+            or observed.get("quote_clean")
+            or external_alpha.get("quote_clean_seen")
+            or external_alpha.get("quote_clean")
+            or external_alpha.get("quote_executable")
+            or pending.get("quote_clean_seen")
+            or pending.get("source_quote_clean_seen")
+        )
+    )
+    quote_ok = _truthy(
+        quote_executable
+        if quote_executable is not None
+        else (
+            observed.get("quote_executable")
+            or observed.get("quote_route_available")
+            or external_alpha.get("quote_executable")
+            or external_alpha.get("entry_quote_success_seen")
+            or pending.get("quote_anchored_entry")
+            or pending.get("final_reclaim_quote_executable")
+        )
+    )
+    if quote_clean:
+        quote_ok = True
+
+    liquidity_usd = _first_positive(
+        observed.get("liquidity_usd"),
+        observed.get("gmgn_last_liquidity"),
+        dex_snapshot.get("liquidity_usd"),
+        dex_snapshot.get("liquidity"),
+        external_alpha.get("last_liquidity"),
+        external_alpha.get("gmgn_last_liquidity"),
+        pending.get("liquidity_usd"),
+    )
+    freshness_ok = signal_age_sec is None or max_signal_age_sec <= 0 or signal_age_sec <= max_signal_age_sec
+    quote_clean_ok = (not require_quote_clean) or quote_clean
+    quote_executable_ok = quote_ok
+    liquidity_ok = min_liquidity_usd <= 0 or (liquidity_usd is not None and liquidity_usd >= min_liquidity_usd)
+    if timing_confirmed is None:
+        timing_confirmed = (
+            observed.get("timing_confirmed")
+            or observed.get("timing_passed")
+            or pending.get("timing_passed")
+        )
+    timing_ok = (not require_timing) or _truthy(timing_confirmed)
+
+    route_ev_ok = True
+    if isinstance(route_ev_detail, dict):
+        route_ev_ok = route_ev_detail.get("pass") is not False
+    elif route_ev_detail is not None:
+        route_ev_ok = bool(route_ev_detail)
+    risk_ok = bool(risk_ok)
+
+    checks = {
+        "freshness_ok": freshness_ok,
+        "quote_clean_ok": quote_clean_ok,
+        "quote_executable_ok": quote_executable_ok,
+        "liquidity_ok": liquidity_ok,
+        "timing_ok": timing_ok,
+        "route_ev_ok": route_ev_ok,
+        "risk_ok": risk_ok,
+    }
+    reason = "entry_execution_pass"
+    if not freshness_ok:
+        reason = "entry_execution_signal_stale"
+    elif not quote_clean_ok:
+        reason = "entry_execution_quote_clean_required"
+    elif not quote_executable_ok:
+        reason = "entry_execution_quote_executable_required"
+    elif not liquidity_ok:
+        reason = "entry_execution_liquidity_required"
+    elif not timing_ok:
+        reason = "entry_execution_timing_required"
+    elif not route_ev_ok:
+        reason = "entry_execution_route_ev_block"
+    elif not risk_ok:
+        reason = "entry_execution_risk_block"
+
+    direct_entry_ok = all(checks.values())
+    return EntryExecutionEligibility(
+        decision="pass" if direct_entry_ok else "watch_only",
+        reason=reason,
+        entry_mode=str(entry_mode or ""),
+        route=str(route or pending.get("signal_route") or pending.get("signal_type") or observed.get("route") or "").upper(),
+        direct_entry_ok=direct_entry_ok,
+        freshness_ok=freshness_ok,
+        quote_clean_ok=quote_clean_ok,
+        quote_executable_ok=quote_executable_ok,
+        liquidity_ok=liquidity_ok,
+        timing_ok=timing_ok,
+        route_ev_ok=route_ev_ok,
+        risk_ok=risk_ok,
+        signal_age_sec=signal_age_sec,
+        liquidity_usd=liquidity_usd,
+        min_liquidity_usd=min_liquidity_usd,
+        checks=checks,
+        detail={
+            "max_signal_age_sec": max_signal_age_sec,
+            "require_quote_clean": require_quote_clean,
+            "require_timing": require_timing,
+            "quote_clean_seen": quote_clean,
+            "quote_executable": quote_ok,
+            "route_ev_detail": route_ev_detail if isinstance(route_ev_detail, dict) else None,
+        },
+    )
 
 
 def _profile_from_lifecycle(route=None, lifecycle=None, pending=None, now_ts=None):

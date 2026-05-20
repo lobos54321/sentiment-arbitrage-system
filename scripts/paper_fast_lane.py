@@ -27,6 +27,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import paper_trade_monitor as ptm
+from entry_readiness_policy import build_entry_execution_eligibility
 
 
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
@@ -161,6 +162,10 @@ FAST_ENTRY_BRANCH_CIRCUIT_P10_PNL_FLOOR = float(os.environ.get(
 FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR = float(os.environ.get(
     "FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR",
     "-0.80",
+))
+FAST_ENTRY_SOURCE_MIN_LIQUIDITY_USD = float(os.environ.get(
+    "FAST_ENTRY_SOURCE_MIN_LIQUIDITY_USD",
+    "5000",
 ))
 
 FAST_LANE_HARD_REJECT_STATUSES = {
@@ -688,6 +693,42 @@ def _payload_int(payload, key, default=0):
         return int(default)
 
 
+def _payload_float(payload, key, default=0.0):
+    try:
+        return float((payload or {}).get(key) or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def source_execution_eligibility_detail(payload, *, entry_mode="source_resonance_tiny_probe", route=None, now_ts=None, require_quote_clean=True):
+    payload = payload or {}
+    signal_ts = payload.get("original_signal_ts") or payload.get("original_receive_ts")
+    liquidity_usd = _payload_float(
+        payload,
+        "liquidity_usd",
+        _payload_float(payload, "gmgn_last_liquidity", 0.0),
+    )
+    quote_clean_seen = _payload_bool(payload, "quote_clean_seen") or _payload_bool(payload, "two_quote_clean_snapshots")
+    eligibility = build_entry_execution_eligibility(
+        entry_mode=entry_mode,
+        route=route or payload.get("signal_type"),
+        signal_ts=signal_ts,
+        now_ts=now_ts,
+        observed={
+            "quote_clean_seen": quote_clean_seen,
+            "quote_executable": quote_clean_seen,
+            "liquidity_usd": liquidity_usd,
+        },
+        min_liquidity_usd=FAST_ENTRY_SOURCE_MIN_LIQUIDITY_USD,
+        require_quote_clean=require_quote_clean,
+        require_timing=False,
+        timing_confirmed=True,
+        quote_clean_seen=quote_clean_seen,
+        quote_executable=quote_clean_seen,
+    ).to_dict()
+    return eligibility
+
+
 def source_gmgn_momentum_canary_detail(payload, *, now_ts=None):
     payload = payload or {}
     if not FAST_ENTRY_SOURCE_GMGN_MOMENTUM_CANARY_ENABLED:
@@ -707,11 +748,19 @@ def source_gmgn_momentum_canary_detail(payload, *, now_ts=None):
         return {"pass": False, "reason": "source_gmgn_momentum_canary_unconfirmed"}
     if payload.get("source_updated_at") and not updated_at_is_fresh(payload.get("source_updated_at"), now_ts=now_ts):
         return {"pass": False, "reason": "source_gmgn_momentum_canary_stale_update"}
+    eligibility = source_execution_eligibility_detail(payload, now_ts=now_ts, require_quote_clean=True)
+    if not eligibility.get("direct_entry_ok"):
+        return {
+            "pass": False,
+            "reason": eligibility.get("reason") or "entry_execution_not_eligible",
+            "entry_execution_eligibility": eligibility,
+        }
     return {
         "pass": True,
         "reason": "source_gmgn_momentum_canary",
         "market_session": session,
         "resonance_level": resonance_level,
+        "entry_execution_eligibility": eligibility,
     }
 
 
@@ -756,11 +805,19 @@ def source_quote_clean_refresh_detail(payload, *, now_ts=None):
     )
     if not source_activity_fresh:
         return {"pass": False, "reason": "source_quote_clean_refresh_activity_not_confirmed"}
+    eligibility = source_execution_eligibility_detail(payload, now_ts=now_ts, require_quote_clean=True)
+    if not eligibility.get("direct_entry_ok"):
+        return {
+            "pass": False,
+            "reason": eligibility.get("reason") or "entry_execution_not_eligible",
+            "entry_execution_eligibility": eligibility,
+        }
     return {
         "pass": True,
         "reason": "source_quote_clean_refresh_tiny_probe",
         "market_session": session,
         "original_age_sec": original_age_sec,
+        "entry_execution_eligibility": eligibility,
     }
 
 
@@ -1027,6 +1084,14 @@ def direct_fill_policy(row, *, now_ts=None):
                 "pass": False,
                 "status": "watch_only",
                 "reason": "source_quote_clean_activity_not_confirmed",
+            }
+        eligibility = source_execution_eligibility_detail(payload, now_ts=now_ts, require_quote_clean=True)
+        if not eligibility.get("direct_entry_ok"):
+            return {
+                "pass": False,
+                "status": "watch_only",
+                "reason": eligibility.get("reason") or "entry_execution_not_eligible",
+                "detail": eligibility,
             }
     if branch == "tracking_ttl_expired":
         tradable_age_sec = payload_ts_age_sec(
@@ -1843,12 +1908,14 @@ def source_resonance_scan(paper_db_path, stop_event):
             db = connect_db(paper_db_path)
             init_fast_lane_schema(db)
             if table_exists(db, "source_resonance_candidates"):
+                source_cols = table_columns(db, "source_resonance_candidates")
                 rows = db.execute(
-                    """
+                    f"""
                     SELECT id, token_ca, symbol, signal_ts, telegram_signal_id, signal_type,
                            receive_ts, signal_recorded_ts, gmgn_pre_seen, quote_clean_seen,
                            two_quote_clean_snapshots, gmgn_momentum_confirmed,
                            gmgn_volume_confirmed, gmgn_momentum_rounds,
+                           {optional_col(source_cols, "gmgn_last_liquidity", "NULL")},
                            cohort, resonance_level, resonance_score, updated_at
                     FROM source_resonance_candidates
                     WHERE (COALESCE(quote_clean_seen, 0) = 1 OR COALESCE(gmgn_pre_seen, 0) = 1 OR cohort LIKE '%telegram_gmgn%')
@@ -1877,6 +1944,8 @@ def source_resonance_scan(paper_db_path, stop_event):
                         "gmgn_momentum_confirmed": row["gmgn_momentum_confirmed"],
                         "gmgn_volume_confirmed": row["gmgn_volume_confirmed"],
                         "gmgn_momentum_rounds": row["gmgn_momentum_rounds"],
+                        "gmgn_last_liquidity": row["gmgn_last_liquidity"],
+                        "liquidity_usd": row["gmgn_last_liquidity"],
                         "source_updated_at": row["updated_at"],
                         "market_session": market_session_for_ts(original_receive_ts or detected_ts),
                     }

@@ -309,6 +309,7 @@ def test_quote_clean_source_requires_activity_confirmation(monkeypatch):
         "quote_clean_seen": 1,
         "source_updated_at": "2099-01-01 00:00:00",
         "original_signal_ts": now,
+        "liquidity_usd": 12000,
     }
 
     blocked = fast.direct_fill_policy({
@@ -344,6 +345,27 @@ def test_quote_clean_source_rejects_stale_original_signal(monkeypatch):
     assert detail["pass"] is False
     assert detail["status"] == "watch_only"
     assert detail["reason"] == "source_quote_clean_original_signal_stale_watch_only"
+
+
+def test_quote_clean_source_requires_liquidity(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_ACTIVITY_REQUIRED", True)
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_resonance_quote_clean_fast",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "source_updated_at": "2099-01-01 00:00:00",
+            "original_signal_ts": now,
+            "gmgn_momentum_confirmed": 1,
+            "liquidity_usd": 1000,
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is False
+    assert detail["status"] == "watch_only"
+    assert detail["reason"] == "entry_execution_liquidity_required"
+    assert detail["detail"]["liquidity_ok"] is False
 
 
 def test_ttl_rescue_requires_fresh_tradable_timestamp(monkeypatch):
@@ -385,9 +407,11 @@ def test_gmgn_momentum_canary_allows_confirmed_non_quiet(monkeypatch):
         "entry_branch": "source_gmgn_momentum_canary",
         "payload_json": json.dumps({
             "gmgn_pre_seen": 1,
+            "quote_clean_seen": 1,
             "gmgn_momentum_confirmed": 1,
             "resonance_level": 3,
             "market_session": "asia",
+            "liquidity_usd": 12000,
         }),
     }, now_ts=now)
 
@@ -458,6 +482,7 @@ def test_source_quote_clean_refresh_canary_requires_non_stale_two_snapshot_activ
             "gmgn_volume_confirmed": 1,
             "original_signal_ts": now - 60,
             "market_session": "asia",
+            "liquidity_usd": 12000,
         }),
     }, now_ts=now)
     stale = fast.direct_fill_policy({
