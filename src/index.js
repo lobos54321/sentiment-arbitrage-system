@@ -184,7 +184,7 @@ function startShadowDataSidecars(config) {
         '--loop',
         '--paper-db', paperDb,
         '--out-dir', process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
-        '--windows', process.env.PAPER_REVIEW_WINDOWS || '2,8,24',
+        '--windows', process.env.PAPER_REVIEW_WINDOWS || '2,8,12,24',
         '--interval', process.env.PAPER_REVIEW_SNAPSHOT_INTERVAL_SEC || '300',
         '--limit', process.env.PAPER_REVIEW_SNAPSHOT_LIMIT || '40',
         '--lock-file', process.env.PAPER_REVIEW_SNAPSHOT_LOCK_FILE || '/tmp/paper_review_snapshot.lock',
