@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import time
 
+from provider_budget import provider_budget_snapshot, provider_request_allowed, record_provider_result
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _risk_cache = {}
 
@@ -40,6 +42,7 @@ def gmgn_readonly_runtime_status():
         "cache_sec": GMGN_READONLY_CACHE_SEC,
         "timeout_sec": GMGN_READONLY_TIMEOUT_SEC,
         "gmgn_cli": cli_path or "",
+        "provider_budget": provider_budget_snapshot("gmgn"),
     }
 
 
@@ -227,14 +230,31 @@ def fetch_gmgn_token_enrichment(token_ca, chain="sol", enabled=None, now=None):
     if cached and now - cached["fetched_at"] < GMGN_READONLY_CACHE_SEC:
         return cached["data"]
 
+    budget = provider_request_allowed("gmgn", now=now)
+    if not budget.get("pass"):
+        if cached:
+            stale = dict(cached["data"])
+            stale["stale"] = True
+            stale["provider_budget"] = budget
+            stale["last_error"] = budget.get("reason")
+            return stale
+        return {
+            "available": False,
+            "source": "gmgn",
+            "reason": budget.get("reason") or "provider_budget_blocked",
+            "provider_budget": budget,
+        }
+
     try:
         raw = _run_gmgn_cli(["token", "info", "--chain", chain, "--address", token_ca])
+        record_provider_result("gmgn", success=True, now=now)
         normalized = normalize_gmgn_token_info(raw)
         normalized["available"] = True
         normalized["risk_flags"] = gmgn_risk_flags(normalized)
         _risk_cache[cache_key] = {"fetched_at": now, "data": normalized}
         return normalized
     except Exception as exc:
+        record_provider_result("gmgn", success=False, error=exc, now=now)
         fallback = {"available": False, "source": "gmgn", "reason": "fetch_failed", "error": str(exc)[:300]}
         if cached:
             stale = dict(cached["data"])

@@ -103,7 +103,13 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
 
     snapshot = build_snapshot(db, 24, 10)
 
-    assert set(snapshot["section_query_ms"]) == {"missed", "trades", "fast_lane"}
+    assert set(snapshot["section_query_ms"]) == {
+        "missed",
+        "trades",
+        "fast_lane",
+        "entry_mode_performance",
+        "route_health",
+    }
     assert snapshot["missed"]["available"] is True
     assert snapshot["missed"]["overall"]["unique_tokens"] == 1
     assert snapshot["missed"]["overall"]["gold_unique"] == 1
@@ -113,6 +119,10 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
     assert snapshot["fast_lane"]["available"] is True
     assert snapshot["fast_lane"]["reason_summary"][0]["reason"] == "entry_quote_failed_429"
     assert snapshot["fast_lane"]["session_summary"][0]["market_session"] == "us"
+    assert snapshot["entry_mode_performance"]["available"] is True
+    assert snapshot["entry_mode_performance"]["by_entry_mode"][0]["entry_mode"] == "hard_gate_pass_tiny_probe"
+    assert snapshot["route_health"]["available"] is True
+    assert snapshot["route_health"]["routes"][0]["entry_branch"] == "hard_gate_fast_clean"
 
 
 def test_review_snapshot_worker_separates_mark_only_missed_peaks(tmp_path):
@@ -226,3 +236,6 @@ def test_review_snapshot_worker_outputs_branch_session_ev(tmp_path):
     assert ev["closed_n"] == 20
     assert ev["avg_pnl_pct"] == -6.0
     assert ev["auto_action"] == "downgrade_to_watch_only"
+    route = snapshot["route_health"]["routes"][0]
+    assert route["kill_switch"]["status"] == "tripped"
+    assert route["kill_switch"]["auto_action"] == "downgrade_to_watch_only"

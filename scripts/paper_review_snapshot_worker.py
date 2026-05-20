@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "data" / "review-artifacts" / "live"
 PEAK_UNTRUSTED_MARK_GAP_PCT = float(os.environ.get("PEAK_UNTRUSTED_MARK_GAP_PCT", "0.25"))
+ENTRY_MODE_PERFORMANCE_ROW_LIMIT = int(os.environ.get("ENTRY_MODE_PERFORMANCE_ROW_LIMIT", "20000"))
 
 
 def connect(path):
@@ -123,6 +124,60 @@ def percentile(values, pct):
     hi = min(lo + 1, len(values) - 1)
     frac = pos - lo
     return values[lo] * (1 - frac) + values[hi] * frac
+
+
+def parse_json_object(raw):
+    try:
+        data = json.loads(raw or "{}")
+        return data if isinstance(data, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def first_value(*values):
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def entry_mode_bucket(entry_mode, size_sol):
+    mode = str(entry_mode or "").lower()
+    size = as_float(size_sol, 0.0)
+    if "gmgn" in mode and "tiny_scout" in mode:
+        return "gmgn_tiny_scout"
+    if "tiny_scout" in mode or "tiny_probe" in mode:
+        return "tiny_scout"
+    if "probe" in mode and 0 < size <= 0.005:
+        return "tiny_scout"
+    if "scout" in mode and 0 < size <= 0.005:
+        return "tiny_scout"
+    if "scout" in mode or "probe" in mode:
+        return "scout"
+    return "primary"
+
+
+def infer_entry_mode(row):
+    monitor_state = parse_json_object(row.get("monitor_state_json"))
+    lotto_state = parse_json_object(row.get("lotto_state_json"))
+    entry_audit = parse_json_object(row.get("entry_execution_audit_json"))
+    entry_decision = lotto_state.get("entryDecision") or {}
+    monitor_contract = monitor_state.get("entryDecisionContract") or {}
+    audit_contract = entry_audit.get("entryDecisionContract") or {}
+    return str(first_value(
+        row.get("entry_mode"),
+        monitor_state.get("entryMode"),
+        monitor_state.get("entry_mode"),
+        monitor_state.get("smartEntryReason"),
+        monitor_state.get("passReason"),
+        monitor_contract.get("entry_mode"),
+        audit_contract.get("entry_mode"),
+        entry_decision.get("entry_mode"),
+        lotto_state.get("entry_mode"),
+        f"{str(row.get('signal_route')).lower()}_unknown" if row.get("signal_route") else None,
+        row.get("strategy_stage"),
+        "unknown",
+    ))
 
 
 def missed_summary(db, since_ts, limit):
@@ -423,6 +478,175 @@ def trade_summary(db, since_ts, limit):
     return {"available": True, "totals": totals, "by_mode": by_mode}
 
 
+def _trade_rows_for_window(db, since_ts):
+    if not table_exists(db, "paper_trades"):
+        return []
+    cols = columns(db, "paper_trades")
+    peak_expr = "peak_pnl" if "peak_pnl" in cols else "0"
+    if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), NULLIF(quote_peak_pnl, 0), 0)"
+    elif "trusted_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), 0)"
+    elif "quote_peak_pnl" in cols:
+        peak_expr = "COALESCE(NULLIF(quote_peak_pnl, 0), 0)"
+    mark_peak_expr = "mark_peak_pnl" if "mark_peak_pnl" in cols else peak_expr
+    select_cols = [
+        "id",
+        col_expr(cols, "symbol"),
+        col_expr(cols, "token_ca"),
+        col_expr(cols, "entry_ts", "0"),
+        col_expr(cols, "exit_ts"),
+        col_expr(cols, "exit_reason"),
+        col_expr(cols, "pnl_pct", "0"),
+        f"{peak_expr} AS peak_pnl",
+        f"{mark_peak_expr} AS mark_peak_pnl",
+        col_expr(cols, "position_size_sol", "0"),
+        col_expr(cols, "signal_route"),
+        col_expr(cols, "signal_type"),
+        col_expr(cols, "strategy_stage"),
+        col_expr(cols, "entry_mode"),
+        col_expr(cols, "entry_branch"),
+        col_expr(cols, "monitor_state_json"),
+        col_expr(cols, "lotto_state_json"),
+        col_expr(cols, "entry_execution_audit_json"),
+    ]
+    where = "WHERE " + since_predicate(cols, ["entry_ts", "signal_ts", "exit_ts"], include_null="exit_ts")
+    return rows_as_dicts(db.execute(
+        f"""
+        SELECT {', '.join(select_cols)}
+        FROM paper_trades
+        {where}
+        ORDER BY entry_ts DESC, id DESC
+        LIMIT :row_limit
+        """,
+        {"since": since_ts, "row_limit": ENTRY_MODE_PERFORMANCE_ROW_LIMIT},
+    ).fetchall())
+
+
+def entry_mode_performance_summary(db, since_ts, limit):
+    if not table_exists(db, "paper_trades"):
+        return {"available": False, "reason": "paper_trades_missing"}
+    rows = _trade_rows_for_window(db, since_ts)
+    groups = {}
+    recent = []
+    for row in rows:
+        entry_audit = parse_json_object(row.get("entry_execution_audit_json"))
+        monitor_state = parse_json_object(row.get("monitor_state_json"))
+        entry_mode = infer_entry_mode(row)
+        bucket = entry_mode_bucket(entry_mode, row.get("position_size_sol"))
+        key = (bucket, entry_mode)
+        group = groups.setdefault(key, {
+            "bucket": bucket,
+            "entry_mode": entry_mode,
+            "total": 0,
+            "open": 0,
+            "closed": 0,
+            "wins": 0,
+            "losses": 0,
+            "pnls": [],
+            "peaks": [],
+            "position_sizes": [],
+            "est_pnl_sol": 0.0,
+            "entry_quote_success_n": 0,
+            "entry_quote_failure_n": 0,
+            "parent_block_reasons": {},
+            "recovery_probe_reasons": {},
+        })
+        closed = row.get("exit_ts") is not None or row.get("exit_reason") is not None
+        pnl = as_float(row.get("pnl_pct"), None)
+        peak = as_float(row.get("peak_pnl"), None)
+        size = as_float(row.get("position_size_sol"), None)
+        group["total"] += 1
+        group["closed" if closed else "open"] += 1
+        if pnl is not None:
+            group["pnls"].append(pnl)
+            if closed and pnl > 0:
+                group["wins"] += 1
+            if closed and pnl <= 0:
+                group["losses"] += 1
+            if size is not None:
+                group["est_pnl_sol"] += pnl * size
+        if peak is not None:
+            group["peaks"].append(peak)
+        if size is not None:
+            group["position_sizes"].append(size)
+        if entry_audit.get("success") is True or entry_audit.get("routeAvailable") is True:
+            group["entry_quote_success_n"] += 1
+        if entry_audit.get("failureReason") or entry_audit.get("success") is False or entry_audit.get("routeAvailable") is False:
+            group["entry_quote_failure_n"] += 1
+        parent_reason = first_value(monitor_state.get("parentBlockReason"), monitor_state.get("parent_block_reason"))
+        recovery_reason = first_value(monitor_state.get("recoveryProbeReason"), monitor_state.get("recovery_probe_reason"))
+        if parent_reason:
+            group["parent_block_reasons"][str(parent_reason)] = group["parent_block_reasons"].get(str(parent_reason), 0) + 1
+        if recovery_reason:
+            group["recovery_probe_reasons"][str(recovery_reason)] = group["recovery_probe_reasons"].get(str(recovery_reason), 0) + 1
+        if len(recent) < limit:
+            recent.append({
+                "id": row.get("id"),
+                "symbol": row.get("symbol"),
+                "token_ca": row.get("token_ca"),
+                "entry_ts": row.get("entry_ts"),
+                "exit_ts": row.get("exit_ts"),
+                "exit_reason": row.get("exit_reason"),
+                "signal_route": row.get("signal_route"),
+                "strategy_stage": row.get("strategy_stage"),
+                "entry_mode": entry_mode,
+                "bucket": bucket,
+                "position_size_sol": size,
+                "pnl_pct": round(pnl * 100.0, 2) if pnl is not None else None,
+                "peak_pnl_pct": round(peak * 100.0, 2) if peak is not None else None,
+                "mark_peak_pnl_pct": round(as_float(row.get("mark_peak_pnl"), 0.0) * 100.0, 2),
+            })
+
+    by_mode = []
+    bucket_summary = {}
+    for group in groups.values():
+        pnls = group["pnls"]
+        peaks = group["peaks"]
+        sizes = group["position_sizes"]
+        quote_total = group["entry_quote_success_n"] + group["entry_quote_failure_n"]
+        record = {
+            "bucket": group["bucket"],
+            "entry_mode": group["entry_mode"],
+            "total": group["total"],
+            "open": group["open"],
+            "closed": group["closed"],
+            "wins": group["wins"],
+            "losses": group["losses"],
+            "win_rate_pct": round((group["wins"] / group["closed"]) * 100.0, 1) if group["closed"] else None,
+            "avg_pnl_pct": round((sum(pnls) / len(pnls)) * 100.0, 2) if pnls else None,
+            "p10_pnl_pct": round(percentile(pnls, 0.10) * 100.0, 2) if pnls else None,
+            "p90_pnl_pct": round(percentile(pnls, 0.90) * 100.0, 2) if pnls else None,
+            "max_loss_pct": round(min(pnls) * 100.0, 2) if pnls else None,
+            "avg_peak_pnl_pct": round((sum(peaks) / len(peaks)) * 100.0, 2) if peaks else None,
+            "avg_position_size_sol": round(sum(sizes) / len(sizes), 4) if sizes else None,
+            "est_pnl_sol": round(group["est_pnl_sol"], 6),
+            "avg_ev_sol_per_trade": round(group["est_pnl_sol"] / group["total"], 6) if group["total"] else None,
+            "entry_quote_success_n": group["entry_quote_success_n"],
+            "entry_quote_failure_n": group["entry_quote_failure_n"],
+            "entry_quote_success_rate_pct": round((group["entry_quote_success_n"] / quote_total) * 100.0, 1) if quote_total else None,
+            "parent_block_reasons": group["parent_block_reasons"],
+            "recovery_probe_reasons": group["recovery_probe_reasons"],
+        }
+        by_mode.append(record)
+        bucket = bucket_summary.setdefault(group["bucket"], {"total": 0, "closed": 0, "open": 0, "est_pnl_sol": 0.0})
+        bucket["total"] += group["total"]
+        bucket["closed"] += group["closed"]
+        bucket["open"] += group["open"]
+        bucket["est_pnl_sol"] += group["est_pnl_sol"]
+    for summary in bucket_summary.values():
+        summary["est_pnl_sol"] = round(summary["est_pnl_sol"], 6)
+    by_mode.sort(key=lambda item: (item["bucket"], -item["total"]))
+    return {
+        "available": True,
+        "row_limit": ENTRY_MODE_PERFORMANCE_ROW_LIMIT,
+        "row_count": len(rows),
+        "bucket_summary": bucket_summary,
+        "by_entry_mode": by_mode[:limit],
+        "recent": recent,
+    }
+
+
 def fast_lane_summary(db, since_ts, limit):
     if not table_exists(db, "paper_fast_entry_queue"):
         return {"available": False, "reason": "paper_fast_entry_queue_missing"}
@@ -559,6 +783,172 @@ def branch_ev_summary(db, since_ts, limit):
     return out[:limit]
 
 
+def route_health_summary(db, since_ts, limit):
+    queue_available = table_exists(db, "paper_fast_entry_queue")
+    trade_available = table_exists(db, "paper_trades")
+    routes = {}
+
+    if queue_available:
+        q_cols = columns(db, "paper_fast_entry_queue")
+        created_expr = "created_at" if "created_at" in q_cols else "0"
+        updated_expr = "updated_at" if "updated_at" in q_cols else created_expr
+        branch_expr = "entry_branch" if "entry_branch" in q_cols else "source_type" if "source_type" in q_cols else "NULL"
+        mode_expr = "entry_mode_hint" if "entry_mode_hint" in q_cols else "NULL"
+        status_expr = "status" if "status" in q_cols else "'unknown'"
+        payload_expr = "payload_json" if "payload_json" in q_cols else "NULL"
+        reason_expr = coalesce_expr(q_cols, ["first_error", "last_error"], "'none'")
+        queue_rows = rows_as_dicts(db.execute(
+            f"""
+            SELECT COALESCE({branch_expr}, 'unknown') AS entry_branch,
+                   COALESCE({mode_expr}, '') AS entry_mode,
+                   {status_expr} AS status,
+                   {payload_expr} AS payload_json,
+                   {reason_expr} AS reason
+            FROM paper_fast_entry_queue
+            WHERE {created_expr} >= :since OR {updated_expr} >= :since
+            LIMIT :row_limit
+            """,
+            {"since": since_ts, "row_limit": ENTRY_MODE_PERFORMANCE_ROW_LIMIT},
+        ).fetchall())
+        for row in queue_rows:
+            branch = row.get("entry_branch") or "unknown"
+            mode = row.get("entry_mode") or ""
+            key = (branch, mode)
+            route = routes.setdefault(key, {
+                "entry_branch": branch,
+                "entry_mode": mode,
+                "candidates": 0,
+                "entered": 0,
+                "watch_only": 0,
+                "counterfactual": 0,
+                "stale": 0,
+                "quote_clean_n": 0,
+                "status_counts": {},
+                "reason_counts": {},
+                "pnls": [],
+                "wins": 0,
+                "est_pnl_sol": 0.0,
+            })
+            status = str(row.get("status") or "unknown")
+            reason = str(row.get("reason") or "none")
+            payload = parse_json_object(row.get("payload_json"))
+            route["candidates"] += 1
+            route["status_counts"][status] = route["status_counts"].get(status, 0) + 1
+            route["reason_counts"][reason] = route["reason_counts"].get(reason, 0) + 1
+            if status in {"entered", "filled", "filled_paper"}:
+                route["entered"] += 1
+            if status == "watch_only":
+                route["watch_only"] += 1
+            if status == "counterfactual_only":
+                route["counterfactual"] += 1
+            if "stale" in reason or "stale" in status:
+                route["stale"] += 1
+            if (
+                payload.get("quote_clean_seen")
+                or payload.get("two_quote_clean_snapshots")
+                or payload.get("recovery_quote_clean")
+                or payload.get("final_reclaim_quote_executable")
+            ):
+                route["quote_clean_n"] += 1
+
+    if trade_available:
+        t_cols = columns(db, "paper_trades")
+        if "pnl_pct" in t_cols:
+            trade_rows = _trade_rows_for_window(db, since_ts)
+            for row in trade_rows:
+                branch = row.get("entry_branch") or "unknown"
+                mode = infer_entry_mode(row)
+                if branch == "unknown" and str(mode).lower() in {"stage1", "stage2a", "stage3"}:
+                    continue
+                key = (branch, mode)
+                route = routes.setdefault(key, {
+                    "entry_branch": branch,
+                    "entry_mode": mode,
+                    "candidates": 0,
+                    "entered": 0,
+                    "watch_only": 0,
+                    "counterfactual": 0,
+                    "stale": 0,
+                    "quote_clean_n": 0,
+                    "status_counts": {},
+                    "reason_counts": {},
+                    "pnls": [],
+                    "wins": 0,
+                    "est_pnl_sol": 0.0,
+                })
+                pnl = as_float(row.get("pnl_pct"), None)
+                size = as_float(row.get("position_size_sol"), 0.0)
+                if pnl is not None:
+                    route["pnls"].append(pnl)
+                    if pnl > 0:
+                        route["wins"] += 1
+                    route["est_pnl_sol"] += pnl * size
+                route["entered"] += 1
+
+    out = []
+    totals = {
+        "routes": 0,
+        "candidates": 0,
+        "entered": 0,
+        "watch_only": 0,
+        "counterfactual": 0,
+        "stale": 0,
+    }
+    for route in routes.values():
+        pnls = route.pop("pnls")
+        closed_n = len(pnls)
+        p10 = percentile(pnls, 0.10) if pnls else None
+        max_loss = min(pnls) if pnls else None
+        avg = (sum(pnls) / closed_n) if closed_n else None
+        kill_reason = "route_health_observe"
+        kill_status = "observe"
+        if max_loss is not None and max_loss < -0.80:
+            kill_status = "tripped"
+            kill_reason = "route_health_catastrophic_loss"
+        elif p10 is not None and p10 < -0.30:
+            kill_status = "tripped"
+            kill_reason = "route_health_tail_loss"
+        elif closed_n >= 20 and avg is not None and avg < 0:
+            kill_status = "tripped"
+            kill_reason = "route_health_negative_ev"
+        candidates = int(route["candidates"] or 0)
+        record = {
+            **route,
+            "closed_n": closed_n,
+            "wins": route["wins"],
+            "win_rate_pct": round((route["wins"] / closed_n) * 100.0, 2) if closed_n else None,
+            "avg_pnl_pct": round(avg * 100.0, 2) if avg is not None else None,
+            "p10_pnl_pct": round(p10 * 100.0, 2) if p10 is not None else None,
+            "p90_pnl_pct": round(percentile(pnls, 0.90) * 100.0, 2) if pnls else None,
+            "max_loss_pct": round(max_loss * 100.0, 2) if max_loss is not None else None,
+            "est_pnl_sol": round(route["est_pnl_sol"], 6),
+            "quote_clean_rate_pct": round((route["quote_clean_n"] / candidates) * 100.0, 2) if candidates else None,
+            "kill_switch": {
+                "status": kill_status,
+                "reason": kill_reason,
+                "auto_action": "downgrade_to_watch_only" if kill_status == "tripped" else "allow_or_observe",
+            },
+        }
+        out.append(record)
+        totals["routes"] += 1
+        for name in ("candidates", "entered", "watch_only", "counterfactual", "stale"):
+            totals[name] += int(record.get(name) or 0)
+    out.sort(key=lambda item: (
+        1 if (item.get("kill_switch") or {}).get("status") == "tripped" else 0,
+        item.get("candidates") or 0,
+        item.get("closed_n") or 0,
+    ), reverse=True)
+    return {
+        "available": queue_available or trade_available,
+        "totals": totals,
+        "routes": out[:limit],
+        "notes": {
+            "kill_switch_rule": "tripped when max_loss<-80%, p10<-30%, or closed>=20 and avg_pnl<0",
+            "quote_clean_rate": "derived from fast-lane payload quote_clean/reclaim/final quote flags",
+        },
+    }
+
+
 def build_snapshot(db, hours, limit):
     now_ts = int(time.time())
     since_ts = now_ts - int(hours * 3600)
@@ -586,6 +976,11 @@ def build_snapshot(db, hours, limit):
         "missed": timed_section("missed", lambda: missed_summary(db, since_ts, limit)),
         "trades": timed_section("trades", lambda: trade_summary(db, since_ts, limit)),
         "fast_lane": timed_section("fast_lane", lambda: fast_lane_summary(db, since_ts, limit)),
+        "entry_mode_performance": timed_section(
+            "entry_mode_performance",
+            lambda: entry_mode_performance_summary(db, since_ts, max(limit, 120)),
+        ),
+        "route_health": timed_section("route_health", lambda: route_health_summary(db, since_ts, max(limit, 120))),
     }
 
 

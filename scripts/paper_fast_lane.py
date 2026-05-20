@@ -28,6 +28,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import paper_trade_monitor as ptm
 from entry_readiness_policy import build_entry_execution_eligibility
+from sqlite_write_coordinator import SQLiteSingleWriterLock
 
 
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
@@ -225,7 +226,7 @@ DEGRADED_CANARY_BRANCHES = {
     "matrix_timeout_final_quote_tiny_probe",
 }
 
-SQLITE_WRITE_LOCK = threading.Lock()
+SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("paper_fast_lane")
 
 
 def connect_db(path):

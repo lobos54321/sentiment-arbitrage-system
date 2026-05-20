@@ -79,6 +79,8 @@ from entry_readiness_policy import (
     build_entry_execution_eligibility,
     evaluate_entry_readiness_policy,
 )
+from provider_budget import provider_request_allowed, record_provider_result
+from sqlite_write_coordinator import sqlite_single_writer
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
@@ -1442,7 +1444,13 @@ def run_db_write_with_retry(db, writer, *, label, attempts=3, base_sleep_sec=0.3
     last_exc = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            return writer()
+            with sqlite_single_writer(f"paper_trade_monitor:{label}"):
+                return writer()
+        except TimeoutError as exc:
+            last_exc = exc
+            log.warning(f"  [DB_RETRY] {label} single_writer_timeout attempt={attempt}/{attempts}")
+            if attempt < attempts:
+                time.sleep(base_sleep_sec * attempt)
         except sqlite3.OperationalError as exc:
             if not _sqlite_is_locked_error(exc):
                 raise
@@ -2467,6 +2475,36 @@ def pending_is_paper_tiny_scout(pending):
             and pending_size_sol <= 0.005
         )
     )
+
+
+def pending_requires_quote_clean_for_final_entry(pending, entry_branch=None):
+    pending = pending or {}
+    mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '').lower()
+    branch = str(entry_branch or pending.get('entry_branch') or '').lower()
+    replay_source = str(pending.get('replay_source') or '').lower()
+    if mode in {
+        SOURCE_RESONANCE_TINY_PROBE_MODE,
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+    }:
+        return True
+    if any(marker in branch for marker in ('source_resonance', 'gmgn_fast', 'quote_clean_fast', 'hard_gate_fast')):
+        return True
+    if 'fast_lane' in replay_source and any(marker in branch for marker in ('source', 'hard_gate', 'gmgn')):
+        return True
+    return False
+
+
+def pending_final_entry_max_signal_age_sec(pending):
+    pending = pending or {}
+    if (
+        pending.get('quote_anchored_entry')
+        or pending.get('final_reclaim_quote_executable')
+        or pending.get('retry_watch_recovered')
+        or pending.get('ttl_final_reclaim_quote_clean')
+    ):
+        return 0
+    return None
 
 
 def paper_entry_capital_tier(pending, size_sol, strategy_stage=None):
@@ -15018,6 +15056,16 @@ def get_shared_market_runtime(namespace='paper-monitor:bridge'):
 
 def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monitor:bridge'):
     runtime = get_shared_market_runtime(namespace)
+    budgeted_methods = {
+        'resolvePool',
+        'fetchRecentOhlcvByPool',
+        'getSwapQuote',
+    }
+    budget = None
+    if method in budgeted_methods:
+        budget = provider_request_allowed('shared_market_data')
+        if not budget.get('pass'):
+            return None
     bridge_payload = {
         'mode': 'paper',
         'method': method,
@@ -15026,10 +15074,20 @@ def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monito
     }
     try:
         res = call_execution_bridge('shared-runtime', bridge_payload, timeout)
+        if budget is not None:
+            failure_reason = res.get('failureReason') if isinstance(res, dict) else None
+            record_provider_result(
+                'shared_market_data',
+                success=not failure_reason,
+                rate_limited='429' in str(failure_reason or '').lower() or 'rate' in str(failure_reason or '').lower(),
+                error=failure_reason,
+            )
         if isinstance(res, dict) and res.get('failureReason') and not res.get('success'):
             return None
         return res
-    except Exception:
+    except Exception as exc:
+        if budget is not None:
+            record_provider_result('shared_market_data', success=False, error=exc)
         return None
 
 
@@ -15124,7 +15182,14 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5, *, force_refresh=False
     ):
         return stale_data
 
+    budget = provider_request_allowed('dexscreener')
+    if not budget.get('pass'):
+        if stale_data is not None and stale_age is not None and stale_age <= PAPER_PROVIDER_TREND_STALE_SEC:
+            return stale_data
+        return None
+
     data = _raw_fetch_dexscreener_trend_snapshot(token, timeout=timeout)
+    record_provider_result('dexscreener', success=data is not None, rate_limited=_dex_rate_limited())
     if data is None:
         if stale_data is not None and stale_age is not None and stale_age <= PAPER_PROVIDER_TREND_STALE_SEC:
             return stale_data
@@ -15141,10 +15206,14 @@ def fetch_dexscreener_trend_snapshot(token_ca, timeout=5, *, force_refresh=False
 
 def curl_json(url, timeout=15):
     """Fetch JSON via curl."""
+    budget = None
     if _is_dexscreener_url(url):
         if _dex_rate_limited():
             return None
         if get_shared_cooldown_ms('dexscreener', namespace='market-data:quotes') > 0:
+            return None
+        budget = provider_request_allowed('dexscreener')
+        if not budget.get('pass'):
             return None
 
     try:
@@ -15161,32 +15230,49 @@ def curl_json(url, timeout=15):
             stderr = (result.stderr or '').strip()
             if stderr:
                 log.warning(f"Fetch failed for {url}: {stderr}")
+            if budget is not None:
+                record_provider_result('dexscreener', success=False, error=stderr)
             return None
 
         body = (result.stdout or '').strip()
         if not body:
             log.warning(f"Empty response from {url}")
+            if budget is not None:
+                record_provider_result('dexscreener', success=False, error='empty_response')
             return None
 
         if body[0] not in '{[':
             preview = body[:160].replace('\n', ' ')
             if _is_dexscreener_url(url) and '1015' in preview:
                 _mark_dex_rate_limited(url, preview)
+                if budget is not None:
+                    record_provider_result('dexscreener', success=False, rate_limited=True, error=preview)
                 return None
             log.warning(f"Non-JSON response from {url}: {preview}")
+            if budget is not None:
+                record_provider_result('dexscreener', success=False, error=preview)
             return None
 
         try:
-            return json.loads(body)
+            payload = json.loads(body)
+            if budget is not None:
+                record_provider_result('dexscreener', success=True)
+            return payload
         except json.JSONDecodeError as e:
             preview = body[:160].replace('\n', ' ')
             if _is_dexscreener_url(url) and '1015' in preview:
                 _mark_dex_rate_limited(url, preview)
+                if budget is not None:
+                    record_provider_result('dexscreener', success=False, rate_limited=True, error=preview)
                 return None
             log.warning(f"JSON parse failed for {url}: {e}; preview={preview}")
+            if budget is not None:
+                record_provider_result('dexscreener', success=False, error=e)
             return None
     except Exception as e:
         log.warning(f"Fetch exception for {url}: {e}")
+        if budget is not None:
+            record_provider_result('dexscreener', success=False, error=e)
         return None
 
 
@@ -15405,6 +15491,10 @@ def _raw_helius_token_concentration(token_ca, timeout=2.5):
     if not HELIUS_API_KEY or 'your' in HELIUS_API_KEY.lower():
         return None
 
+    budget = provider_request_allowed('helius', cost=2)
+    if not budget.get('pass'):
+        return None
+    rate_limited = False
     try:
         # Step 1: get top largest token accounts (max 20 per RPC call)
         largest_payload = {
@@ -15413,10 +15503,13 @@ def _raw_helius_token_concentration(token_ca, timeout=2.5):
             "params": [token_ca, {"commitment": "confirmed"}]
         }
         l_status, l_data = _post_json(HELIUS_RPC_URL, largest_payload, timeout)
+        rate_limited = rate_limited or l_status == 429
         if l_status != 200 or 'result' not in l_data:
+            record_provider_result('helius', success=False, rate_limited=rate_limited, error=l_status)
             return None
         accounts = (l_data.get('result') or {}).get('value') or []
         if not accounts:
+            record_provider_result('helius', success=False, rate_limited=rate_limited, error='empty_largest_accounts')
             return None
 
         # Step 2: total supply
@@ -15426,14 +15519,18 @@ def _raw_helius_token_concentration(token_ca, timeout=2.5):
             "params": [token_ca, {"commitment": "confirmed"}]
         }
         s_status, s_data = _post_json(HELIUS_RPC_URL, supply_payload, timeout)
+        rate_limited = rate_limited or s_status == 429
         if s_status != 200 or 'result' not in s_data:
+            record_provider_result('helius', success=False, rate_limited=rate_limited, error=s_status)
             return None
         supply_value = (s_data.get('result') or {}).get('value') or {}
         try:
             total_supply = float(supply_value.get('amount') or 0)
         except (TypeError, ValueError):
+            record_provider_result('helius', success=False, rate_limited=rate_limited, error='invalid_supply')
             return None
         if total_supply <= 0:
+            record_provider_result('helius', success=False, rate_limited=rate_limited, error='zero_supply')
             return None
 
         def _amt(a):
@@ -15445,12 +15542,15 @@ def _raw_helius_token_concentration(token_ca, timeout=2.5):
         top1_amt = _amt(accounts[0])
         top10_amt = sum(_amt(a) for a in accounts[:10])
 
-        return {
+        result = {
             'top1_pct': (top1_amt / total_supply) * 100.0,
             'top10_pct': (top10_amt / total_supply) * 100.0,
             'top_n_visible': len(accounts),
         }
-    except Exception:
+        record_provider_result('helius', success=True, rate_limited=rate_limited)
+        return result
+    except Exception as exc:
+        record_provider_result('helius', success=False, error=exc)
         return None
 
 
@@ -15567,6 +15667,9 @@ def get_recent_signatures(token_ca, limit=100):
     """Fetch recent signatures using Helius RPC to count momentum"""
     if not HELIUS_API_KEY or 'your' in HELIUS_API_KEY.lower():
         return []
+    budget = provider_request_allowed('helius')
+    if not budget.get('pass'):
+        return []
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -15581,11 +15684,16 @@ def get_recent_signatures(token_ca, limit=100):
             # Short timeout: we only care about real-time speed. If it's slow, we skip it.
             status, res_data = _post_json(HELIUS_RPC_URL, payload, 2.5)
             if status == 200 and 'result' in res_data:
+                record_provider_result('helius', success=True)
                 return [item['signature'] for item in res_data['result']]
+            if status == 429:
+                record_provider_result('helius', success=False, rate_limited=True, error=status)
+                return []
         except Exception:
             pass
         if attempt < 2:
             time.sleep(0.1)
+    record_provider_result('helius', success=False, error='signatures_unavailable')
     return []
 
 
@@ -18227,40 +18335,42 @@ def close_position_with_guard_reason(db, pos, lifecycle, reason, pnl_pct, decisi
     }
     if isinstance(audit_extra, dict):
         audit_payload.update(audit_extra)
-    db.execute(
-        """
-        UPDATE paper_trades
-        SET exit_price = ?, exit_ts = ?, exit_reason = ?, pnl_pct = ?,
-            bars_held = ?, stage_outcome = ?,
-            peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
-            trusted_peak_pnl = ?, peak_trust_status = ?,
-            exit_quote_failures = ?, last_exit_quote_failure = ?,
-            exit_execution_audit_json = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?
-        WHERE id = ?
-        """,
-        (
-            0,
-            exit_ts,
-            reason,
-            float(pnl_pct),
-            pos.bars_held,
-            stage_outcome,
-            pos.peak_pnl,
-            getattr(pos, 'mark_peak_pnl', pos.peak_pnl),
-            getattr(pos, 'quote_peak_pnl', 0.0),
-            getattr(pos, 'trusted_peak_pnl', pos.peak_pnl),
-            getattr(pos, 'peak_trust_status', peak_trust_status(pos)),
-            pos.exit_quote_failures,
-            pos.last_exit_quote_failure,
-            json.dumps(build_execution_audit(None, audit_payload)),
-            'blocked_by_infra',
-            'unavailable',
-            'closed_synthetic',
-            1,
-            pos.trade_id,
+    def _write_guard_close():
+        db.execute(
+            """
+            UPDATE paper_trades
+            SET exit_price = ?, exit_ts = ?, exit_reason = ?, pnl_pct = ?,
+                bars_held = ?, stage_outcome = ?,
+                peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                trusted_peak_pnl = ?, peak_trust_status = ?,
+                exit_quote_failures = ?, last_exit_quote_failure = ?,
+                exit_execution_audit_json = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?
+            WHERE id = ?
+            """,
+            (
+                0,
+                exit_ts,
+                reason,
+                float(pnl_pct),
+                pos.bars_held,
+                stage_outcome,
+                pos.peak_pnl,
+                getattr(pos, 'mark_peak_pnl', pos.peak_pnl),
+                getattr(pos, 'quote_peak_pnl', 0.0),
+                getattr(pos, 'trusted_peak_pnl', pos.peak_pnl),
+                getattr(pos, 'peak_trust_status', peak_trust_status(pos)),
+                pos.exit_quote_failures,
+                pos.last_exit_quote_failure,
+                json.dumps(build_execution_audit(None, audit_payload)),
+                'blocked_by_infra',
+                'unavailable',
+                'closed_synthetic',
+                1,
+                pos.trade_id,
+            )
         )
-    )
-    db.commit()
+        db.commit()
+    run_db_write_with_retry(db, _write_guard_close, label=f"guard_close:{pos.trade_id}:{reason}", attempts=3)
     if lifecycle is not None:
         lifecycle['stage3_dormant'] = False
         lifecycle['stage3_blacklisted'] = True
@@ -18282,15 +18392,17 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
         audit_extra={failure_count_field: pos.exit_quote_failures},
         log_prefix='TRAPPED',
     )
-    db.execute(
-        """
-        UPDATE paper_trades
-        SET strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 1
-        WHERE id = ?
-        """,
-        ('blocked_by_infra', 'unavailable', 'closed_synthetic', pos.trade_id)
-    )
-    db.commit()
+    def _write_trapped_close_status():
+        db.execute(
+            """
+            UPDATE paper_trades
+            SET strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 1
+            WHERE id = ?
+            """,
+            ('blocked_by_infra', 'unavailable', 'closed_synthetic', pos.trade_id)
+        )
+        db.commit()
+    run_db_write_with_retry(db, _write_trapped_close_status, label=f"trapped_close:{pos.trade_id}:{reason}", attempts=3)
 
 
 # === Live Monitor Loop ===
@@ -18470,14 +18582,21 @@ def run_monitor(db):
             last_mark_ts=pos.last_mark_ts,
         )
         if normalize_monitor_state_json(raw_monitor_state) != normalize_monitor_state_json(pos.monitor_state):
-            db.execute(
-                "UPDATE paper_trades SET monitor_state_json = ? WHERE id = ?",
-                (json.dumps(pos.monitor_state, ensure_ascii=False), pos.trade_id)
+            def _write_sanitized_monitor_state(pos=pos):
+                db.execute(
+                    "UPDATE paper_trades SET monitor_state_json = ? WHERE id = ?",
+                    (json.dumps(pos.monitor_state, ensure_ascii=False), pos.trade_id)
+                )
+                db.commit()
+            run_db_write_with_retry(
+                db,
+                _write_sanitized_monitor_state,
+                label=f"sanitize_monitor_state:{pos.trade_id}",
+                attempts=3,
             )
             sanitized_monitor_states += 1
         positions[pos.trade_id] = pos
         time.sleep(0.2)
-    db.commit()
 
     if positions:
         log.info(f"  Restored {len(positions)} open positions")
@@ -19237,21 +19356,28 @@ def run_monitor(db):
                                     pos.monitor_state['lastAthTs'] = boost_updates['last_ath_ts']
                                     pos.monitor_state['lastAthMc'] = boost_updates['last_ath_mc']
                                     pos.monitor_state['lottoTrailLockoutUntil'] = boost_updates['trail_lockout_until']
-                                    db.execute(
-                                        """
-                                        UPDATE paper_trades
-                                        SET ath_boost_count = ?, last_ath_ts = ?, last_ath_mc = ?, monitor_state_json = ?
-                                        WHERE id = ?
-                                        """,
-                                        (
-                                            boost_updates['ath_count'],
-                                            boost_updates['last_ath_ts'],
-                                            boost_updates['last_ath_mc'],
-                                            json.dumps(pos.monitor_state),
-                                            pos.trade_id,
+                                    def _write_lotto_ath_boost(pos=pos):
+                                        db.execute(
+                                            """
+                                            UPDATE paper_trades
+                                            SET ath_boost_count = ?, last_ath_ts = ?, last_ath_mc = ?, monitor_state_json = ?
+                                            WHERE id = ?
+                                            """,
+                                            (
+                                                boost_updates['ath_count'],
+                                                boost_updates['last_ath_ts'],
+                                                boost_updates['last_ath_mc'],
+                                                json.dumps(pos.monitor_state),
+                                                pos.trade_id,
+                                            )
                                         )
+                                        db.commit()
+                                    run_db_write_with_retry(
+                                        db,
+                                        _write_lotto_ath_boost,
+                                        label=f"lotto_ath_boost:{pos.trade_id}",
+                                        attempts=3,
                                     )
-                        db.commit()
                         log.info(
                             f"  [LOTTO] ATH boost {sig.get('symbol') or token_ca[:8]}: "
                             f"count={boost_updates['ath_count']} mc=${boost_updates['last_ath_mc']:,.0f} "
@@ -22358,6 +22484,77 @@ def run_monitor(db):
                         pending_entries.pop(lifecycle_id, None)
                         continue
 
+                    _entry_branch = pending.get('entry_branch') or _dog_catcher_branch_for_pending(pending)
+                    try:
+                        _entry_dex_snapshot = fetch_dexscreener_trend_snapshot(pending['token_ca'])
+                    except Exception:
+                        _entry_dex_snapshot = None
+                    _final_require_quote_clean = pending_requires_quote_clean_for_final_entry(pending, _entry_branch)
+                    _entry_execution_eligibility = build_entry_execution_eligibility(
+                        entry_mode=pending.get('entry_mode') or timing_reason,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        signal_ts=pending.get('signal_ts'),
+                        now_ts=now,
+                        pending=pending,
+                        observed={
+                            'quote_clean_seen': (
+                                pending.get('quote_clean_seen')
+                                or pending.get('source_quote_clean_seen')
+                                or pending.get('two_quote_clean_snapshots')
+                                or pending.get('final_reclaim_quote_executable')
+                            ),
+                            'quote_executable': bool(execution.get('success')) and not bool(execution.get('syntheticPaperEntry')),
+                            'timing_confirmed': True,
+                            'liquidity_usd': (
+                                (_entry_timing_lifecycle.get('lifecycle_features') or {}).get('liquidity_usd')
+                                or (_entry_timing_lifecycle.get('lifecycle_features') or {}).get('last_liquidity')
+                            ),
+                        },
+                        external_alpha=pending.get('external_alpha') or pending.get('source_resonance_probe') or {},
+                        dex_snapshot=_entry_dex_snapshot,
+                        max_signal_age_sec=pending_final_entry_max_signal_age_sec(pending),
+                        require_quote_clean=_final_require_quote_clean,
+                        require_timing=True,
+                        timing_confirmed=True,
+                        quote_clean_seen=(
+                            pending.get('quote_clean_seen')
+                            or pending.get('source_quote_clean_seen')
+                            or pending.get('two_quote_clean_snapshots')
+                            or pending.get('final_reclaim_quote_executable')
+                        ),
+                        quote_executable=bool(execution.get('success')) and not bool(execution.get('syntheticPaperEntry')),
+                        route_ev_detail={
+                            'pass': (pending.get('entry_mode_quality') or {}).get('pass') is not False,
+                            'entry_mode_quality': pending.get('entry_mode_quality'),
+                        },
+                        risk_ok=not bool((_token_risk or {}).get('blocked')),
+                    ).to_dict()
+                    pending['entry_execution_eligibility'] = _entry_execution_eligibility
+                    record_decision_event(
+                        db,
+                        component='entry_execution_eligibility',
+                        event_type='entry_audit' if _entry_execution_eligibility.get('direct_entry_ok') else 'entry_block',
+                        decision=_entry_execution_eligibility.get('decision'),
+                        reason=_entry_execution_eligibility.get('reason'),
+                        token_ca=pending['token_ca'],
+                        symbol=pending['symbol'],
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=pending['signal_ts'],
+                        signal_id=pending.get('premium_signal_id'),
+                        strategy_stage=_pending_strategy_stage,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        data_source='entry_execution_eligibility+jupiter_quote+dexscreener',
+                        payload=with_lifecycle_payload(_entry_execution_eligibility, _entry_timing_lifecycle),
+                    )
+                    if not _entry_execution_eligibility.get('direct_entry_ok'):
+                        log.info(
+                            f"  [ENTRY_EXECUTION_ELIGIBILITY] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_entry_execution_eligibility.get('reason')} "
+                            f"mode={pending.get('entry_mode') or timing_reason} branch={_entry_branch}"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
                     _entry_decision_contract = build_entry_decision_contract(
                         entry_readiness_policy=pending.get('entry_readiness_policy'),
                         entry_mode=pending.get('entry_mode') or timing_reason,
@@ -22394,10 +22591,6 @@ def run_monitor(db):
                         now_ts=now,
                     )
 
-                    try:
-                        _entry_dex_snapshot = fetch_dexscreener_trend_snapshot(pending['token_ca'])
-                    except Exception:
-                        _entry_dex_snapshot = None
                     _entry_lifecycle = lifecycle_payload_for(
                         watchlist_entry=pending_w_entry,
                         dex_snapshot=_entry_dex_snapshot,
@@ -22418,7 +22611,6 @@ def run_monitor(db):
                     _position_size_class = position_size_class(actual_position_size_sol)
                     stamp_dog_catcher_pending(pending)
                     _policy_version = pending.get('policy_version')
-                    _entry_branch = pending.get('entry_branch') or _dog_catcher_branch_for_pending(pending)
                     _intervention_flags = _normalize_intervention_flags(pending.get('intervention_flags') or [])
                     _intervention_flags_json = json.dumps(_intervention_flags) if _intervention_flags else None
                     _monitor_state = {
@@ -22437,6 +22629,7 @@ def run_monitor(db):
                         'entrySpreadPct': _spread,
                         'entryEdgeBudget': _entry_edge_budget,
                         'entryReadinessPolicy': pending.get('entry_readiness_policy'),
+                        'entryExecutionEligibility': _entry_execution_eligibility,
                         'entryDecisionContract': _entry_decision_contract.to_dict(),
                         'entrySol': actual_position_size_sol,
                         'capitalTier': _capital_tier,
@@ -22533,6 +22726,7 @@ def run_monitor(db):
                                 'entrySpreadPct': _spread,
                                 'entryEdgeBudget': _entry_edge_budget,
                                 'entryReadinessPolicy': pending.get('entry_readiness_policy'),
+                                'entryExecutionEligibility': _entry_execution_eligibility,
                                 'entryDecisionContract': _entry_decision_contract.to_dict(),
                                 'entryLatencyAudit': _entry_latency_audit,
                                 'positionSizeSol': actual_position_size_sol,
@@ -22611,6 +22805,7 @@ def run_monitor(db):
                             'pnl_unit': PNL_UNIT_RATIO_DECIMAL,
                             'entry_edge_budget': _entry_edge_budget,
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
+                            'entry_execution_eligibility': _entry_execution_eligibility,
                             'entry_decision_contract': _entry_decision_contract.to_dict(),
                             'revival_canary': bool(pending.get('revival_canary')),
                             'policy_version': _policy_version,
@@ -23122,15 +23317,22 @@ def run_monitor(db):
                                             pos.monitor_state['dogCatcherTrailQuoteMissingReason'] = dog_trail_detail.get('reason')
                                             pos.exit_quote_failures = retry_count
                                             pos.last_exit_quote_failure = dog_trail_detail.get('reason') or 'dog_catcher_trail_quote_missing_retry_exit'
-                                            db.execute(
-                                                "UPDATE paper_trades SET monitor_state_json = ?, last_exit_quote_failure = ?, exit_quote_failures = COALESCE(exit_quote_failures, 0) + 1 WHERE id = ?",
-                                                (
-                                                    json.dumps(pos.monitor_state, ensure_ascii=False),
-                                                    pos.last_exit_quote_failure,
-                                                    pos.trade_id,
-                                                ),
+                                            def _write_urgent_exit_retry():
+                                                db.execute(
+                                                    "UPDATE paper_trades SET monitor_state_json = ?, last_exit_quote_failure = ?, exit_quote_failures = COALESCE(exit_quote_failures, 0) + 1 WHERE id = ?",
+                                                    (
+                                                        json.dumps(pos.monitor_state, ensure_ascii=False),
+                                                        pos.last_exit_quote_failure,
+                                                        pos.trade_id,
+                                                    ),
+                                                )
+                                                db.commit()
+                                            run_db_write_with_retry(
+                                                db,
+                                                _write_urgent_exit_retry,
+                                                label=f"urgent_exit_retry:{pos.trade_id}",
+                                                attempts=3,
                                             )
-                                            db.commit()
                                             record_decision_event(
                                                 db,
                                                 component='paper_exit_executor',
@@ -23643,40 +23845,47 @@ def run_monitor(db):
                                     )
                             except Exception as _quote_monitor_err:
                                 log.debug(f"  [PROBE_QUOTE_MONITOR] failed for {pos.symbol}: {_quote_monitor_err}")
-                    record_trade_path_sample(
+                    def _write_open_position_sample():
+                        record_trade_path_sample(
+                            db,
+                            pos,
+                            sample_ts=bar_ts,
+                            action=action,
+                            reason=reason,
+                            mark_price=price,
+                            mark_pnl=trigger_pnl,
+                            mark_source=mark_source,
+                            quote_execution=mark_execution if action in ('partial_sell', 'exit', 'close') or should_exit else hold_quote_execution,
+                            peak_pnl=pos.peak_pnl,
+                            phase_policy=phase_policy_payload,
+                        )
+                        db.execute("""
+                            UPDATE paper_trades
+                            SET peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                                trusted_peak_pnl = ?, peak_trust_status = ?,
+                                trailing_active = ?, bars_held = ?, stage_outcome = ?,
+                                first_peak_pct = ?, monitor_state_json = ?
+                            WHERE id = ?
+                        """, (
+                            pos.peak_pnl,
+                            pos.mark_peak_pnl,
+                            pos.quote_peak_pnl,
+                            pos.trusted_peak_pnl,
+                            pos.peak_trust_status,
+                            int(pos.trailing_active),
+                            pos.bars_held,
+                            f"{pos.strategy_stage}_open",
+                            lifecycle['first_peak_pct'],
+                            json.dumps(pos.monitor_state),
+                            pos.trade_id,
+                        ))
+                        db.commit()
+                    run_db_write_with_retry(
                         db,
-                        pos,
-                        sample_ts=bar_ts,
-                        action=action,
-                        reason=reason,
-                        mark_price=price,
-                        mark_pnl=trigger_pnl,
-                        mark_source=mark_source,
-                        quote_execution=mark_execution if action in ('partial_sell', 'exit', 'close') or should_exit else hold_quote_execution,
-                        peak_pnl=pos.peak_pnl,
-                        phase_policy=phase_policy_payload,
+                        _write_open_position_sample,
+                        label=f"position_path_sample:{pos.trade_id}",
+                        attempts=3,
                     )
-                    db.execute("""
-                        UPDATE paper_trades
-                        SET peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
-                            trusted_peak_pnl = ?, peak_trust_status = ?,
-                            trailing_active = ?, bars_held = ?, stage_outcome = ?,
-                            first_peak_pct = ?, monitor_state_json = ?
-                        WHERE id = ?
-                    """, (
-                        pos.peak_pnl,
-                        pos.mark_peak_pnl,
-                        pos.quote_peak_pnl,
-                        pos.trusted_peak_pnl,
-                        pos.peak_trust_status,
-                        int(pos.trailing_active),
-                        pos.bars_held,
-                        f"{pos.strategy_stage}_open",
-                        lifecycle['first_peak_pct'],
-                        json.dumps(pos.monitor_state),
-                        pos.trade_id,
-                    ))
-                    db.commit()
                     if action in ('partial_sell', 'exit') or should_exit:
                         trigger_price_text = f"{price:.10f}" if price is not None else 'na'
                         quote_price_text = 'na'
@@ -23793,44 +24002,51 @@ def run_monitor(db):
                         quote_pnl=partial_quote_pnl,
                         now_ts=exit_ts,
                     )
-                    db.execute(
-                        """
-                        UPDATE paper_trades
-                        SET peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
-                            trusted_peak_pnl = ?, peak_trust_status = ?,
-                            trailing_active = ?, bars_held = ?, stage_outcome = ?,
-                            token_amount_raw = ?, exit_execution_json = ?, exit_execution_audit_json = ?, monitor_state_json = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            pos.peak_pnl,
-                            pos.mark_peak_pnl,
-                            pos.quote_peak_pnl,
-                            pos.trusted_peak_pnl,
-                            pos.peak_trust_status,
-                            int(pos.trailing_active),
-                            pos.bars_held,
-                            f"{pos.strategy_stage}_partial_{(exit_eval.get('tpName') or 'TP').lower()}",
-                            str(pos.token_amount_raw),
-                            json.dumps(exit_eval.get('execution')),
-                            json.dumps(build_execution_audit(exit_eval.get('execution'), {
-                                'auditVersion': 1,
-                                'stage': pos.strategy_stage,
-                                'lifecycleId': pos.lifecycle_id,
-                                'decisionType': exit_eval.get('action'),
-                                'tpName': exit_eval.get('tpName'),
-                                **price_unit_contract_payload(),
-                                'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
-                                'quotePnlPct': _safe_float(partial_quote_pnl * 100.0 if partial_quote_pnl is not None else None, None),
-                                'quoteMarkGapPct': _safe_float(partial_quote_mark_gap * 100.0 if partial_quote_mark_gap is not None else None, None),
-                                'quoteSanityStatus': exit_eval.get('quoteSanityStatus'),
-                                'markSource': mark_source,
-                            })),
-                            json.dumps(pos.monitor_state),
-                            pos.trade_id,
+                    def _write_partial_exit():
+                        db.execute(
+                            """
+                            UPDATE paper_trades
+                            SET peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                                trusted_peak_pnl = ?, peak_trust_status = ?,
+                                trailing_active = ?, bars_held = ?, stage_outcome = ?,
+                                token_amount_raw = ?, exit_execution_json = ?, exit_execution_audit_json = ?, monitor_state_json = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                pos.peak_pnl,
+                                pos.mark_peak_pnl,
+                                pos.quote_peak_pnl,
+                                pos.trusted_peak_pnl,
+                                pos.peak_trust_status,
+                                int(pos.trailing_active),
+                                pos.bars_held,
+                                f"{pos.strategy_stage}_partial_{(exit_eval.get('tpName') or 'TP').lower()}",
+                                str(pos.token_amount_raw),
+                                json.dumps(exit_eval.get('execution')),
+                                json.dumps(build_execution_audit(exit_eval.get('execution'), {
+                                    'auditVersion': 1,
+                                    'stage': pos.strategy_stage,
+                                    'lifecycleId': pos.lifecycle_id,
+                                    'decisionType': exit_eval.get('action'),
+                                    'tpName': exit_eval.get('tpName'),
+                                    **price_unit_contract_payload(),
+                                    'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                                    'quotePnlPct': _safe_float(partial_quote_pnl * 100.0 if partial_quote_pnl is not None else None, None),
+                                    'quoteMarkGapPct': _safe_float(partial_quote_mark_gap * 100.0 if partial_quote_mark_gap is not None else None, None),
+                                    'quoteSanityStatus': exit_eval.get('quoteSanityStatus'),
+                                    'markSource': mark_source,
+                                })),
+                                json.dumps(pos.monitor_state),
+                                pos.trade_id,
+                            )
                         )
+                        db.commit()
+                    run_db_write_with_retry(
+                        db,
+                        _write_partial_exit,
+                        label=f"partial_exit:{pos.trade_id}",
+                        attempts=3,
                     )
-                    db.commit()
                     log.info(
                         f"  PARTIAL {pos.symbol}/{pos.strategy_stage}: {exit_eval.get('tpName')} "
                         f"trigger_pnl={trigger_pnl*100:+.1f}% sold_pct={_safe_float(pos.monitor_state.get('soldPct'), 0.0)*100:.0f}% "
@@ -23850,31 +24066,38 @@ def run_monitor(db):
                         pos.exit_quote_failures += 1
                     else:
                         pos.exit_quote_failures = 0
-                    db.execute(
-                        "UPDATE paper_trades SET exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0 WHERE id = ?",
-                        (
-                            json.dumps(exit_execution),
-                            json.dumps(build_execution_audit(exit_execution, {
-                                'auditVersion': 1,
-                                'stage': pos.strategy_stage,
-                                'lifecycleId': pos.lifecycle_id,
-                                'decisionType': exit_eval.get('action'),
-                                'markSource': mark_source,
-                                **price_unit_contract_payload(),
-                                'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
-                                'quoteFreshness': exit_eval.get('quoteFreshness'),
-                                'quoteStop': exit_eval.get('quoteStop'),
-                                'quotePrimary': exit_eval.get('quotePrimary'),
-                            })),
-                            pos.exit_quote_failures,
-                            pos.last_exit_quote_failure,
-                            'blocked_by_infra',
-                            'unavailable',
-                            'open',
-                            pos.trade_id,
+                    def _write_exit_quote_failure():
+                        db.execute(
+                            "UPDATE paper_trades SET exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = ?, last_exit_quote_failure = ?, strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = 0 WHERE id = ?",
+                            (
+                                json.dumps(exit_execution),
+                                json.dumps(build_execution_audit(exit_execution, {
+                                    'auditVersion': 1,
+                                    'stage': pos.strategy_stage,
+                                    'lifecycleId': pos.lifecycle_id,
+                                    'decisionType': exit_eval.get('action'),
+                                    'markSource': mark_source,
+                                    **price_unit_contract_payload(),
+                                    'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                                    'quoteFreshness': exit_eval.get('quoteFreshness'),
+                                    'quoteStop': exit_eval.get('quoteStop'),
+                                    'quotePrimary': exit_eval.get('quotePrimary'),
+                                })),
+                                pos.exit_quote_failures,
+                                pos.last_exit_quote_failure,
+                                'blocked_by_infra',
+                                'unavailable',
+                                'open',
+                                pos.trade_id,
+                            )
                         )
+                        db.commit()
+                    run_db_write_with_retry(
+                        db,
+                        _write_exit_quote_failure,
+                        label=f"exit_quote_failure:{pos.trade_id}",
+                        attempts=3,
                     )
-                    db.commit()
                     record_decision_event(
                         db,
                         component='execution_api',
@@ -24038,67 +24261,74 @@ def run_monitor(db):
                     f"entrySol={_safe_float(lifecycle_entry_sol, None)} finalExitSol={_safe_float(actual_out, None)} "
                     f"totalRealizedSol={_safe_float(total_realized_sol, None)} realizedPnlPct={_safe_float(realized_pnl * 100.0, None)}"
                 )
-                db.execute("""
-                    UPDATE paper_trades
-                    SET exit_price = ?, exit_ts = ?, exit_reason = ?,
-                        pnl_pct = ?, bars_held = ?, market_regime = ?,
-                        peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
-                        trusted_peak_pnl = ?, peak_trust_status = ?,
-                        trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
-                        exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
-                        strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?,
-                        monitor_state_json = ?, regime_tag = ?
-                    WHERE id = ?
-                """, (
-                    effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
-                    regime,
-                    pos.peak_pnl,
-                    pos.mark_peak_pnl,
-                    pos.quote_peak_pnl,
-                    pos.trusted_peak_pnl,
-                    pos.peak_trust_status,
-                    int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0,
-                    json.dumps(exit_execution), json.dumps(build_execution_audit(exit_execution, {
-                        'auditVersion': 1,
-                        'stage': pos.strategy_stage,
-                        'lifecycleId': pos.lifecycle_id,
-                        'decisionType': exit_eval.get('action'),
-                        'actionReason': exit_eval.get('actionReason'),
-                        'markSource': mark_source,
-                        **price_unit_contract_payload(
-                            effectiveExitPriceUnit=PRICE_UNIT_SOL_PER_TOKEN,
-                            triggerPriceUnit=PRICE_UNIT_SOL_PER_TOKEN,
-                        ),
-                        'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
-                        'realizedPnlPct': _safe_float(realized_pnl * 100.0, None),
-                        'totalRealizedSol': _safe_float(total_realized_sol, None),
-                        'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
-                        'accountingSource': accounting_source,
-                        'quotePnlPct': _safe_float(exit_quote_pnl * 100.0 if exit_quote_pnl is not None else None, None),
-                        'quoteMarkGapPct': _safe_float(exit_quote_mark_gap * 100.0 if exit_quote_mark_gap is not None else None, None),
-                        'quoteSanityStatus': exit_eval.get('quoteSanityStatus'),
-                        'quoteFreshness': exit_eval.get('quoteFreshness'),
-                        'quoteStop': exit_eval.get('quoteStop'),
-                        'quotePrimary': exit_eval.get('quotePrimary'),
-                        'partialRealizedSol': _safe_float((pos.monitor_state or {}).get('partialRealizedSol'), None),
-                        'partialCostBasisSol': _safe_float((pos.monitor_state or {}).get('partialCostBasisSol'), None),
-                        'partialRealizedPnlContribution': _safe_float((pos.monitor_state or {}).get('partialRealizedPnlContribution'), None),
-                        'soldPct': _safe_float((pos.monitor_state or {}).get('soldPct'), None),
-                        'preExitTotalSolReceived': _safe_float(exit_eval.get('preExitTotalSolReceived', exit_execution.get('preExitTotalSolReceived')), None),
-                        'exitSolReceived': _safe_float(exit_eval.get('exitSolReceived', exit_execution.get('exitSolReceived')), None),
-                        'postExitTotalSolReceived': _safe_float(exit_eval.get('postExitTotalSolReceived', exit_execution.get('postExitTotalSolReceived')), None),
-                        'triggerPrice': _safe_float(exit_price, None),
-                        'effectiveExitPrice': _safe_float(effective_exit_price, None),
-                    })),
-                    'synthetic_mark_exit' if synthetic_exit else ('force_timeout' if is_force_timeout else reason),
-                    'synthetic_mark' if synthetic_exit else ('unavailable' if is_force_timeout else 'available'),
-                    'closed_synthetic_mark' if synthetic_exit else ('closed_force_timeout' if is_force_timeout else 'closed_real'),
-                    1 if synthetic_exit else 0,
-                    json.dumps(pos.monitor_state),
-                    _exit_regime_tag,
-                    pos.trade_id,
-                ))
-                db.commit()
+                def _write_position_close():
+                    db.execute("""
+                        UPDATE paper_trades
+                        SET exit_price = ?, exit_ts = ?, exit_reason = ?,
+                            pnl_pct = ?, bars_held = ?, market_regime = ?,
+                            peak_pnl = ?, mark_peak_pnl = ?, quote_peak_pnl = ?,
+                            trusted_peak_pnl = ?, peak_trust_status = ?,
+                            trailing_active = ?, stage_outcome = ?, first_peak_pct = ?,
+                            exit_execution_json = ?, exit_execution_audit_json = ?, exit_quote_failures = 0, last_exit_quote_failure = NULL,
+                            strategy_outcome = ?, execution_availability = ?, accounting_outcome = ?, synthetic_close = ?,
+                            monitor_state_json = ?, regime_tag = ?
+                        WHERE id = ?
+                    """, (
+                        effective_exit_price, exit_ts, reason, realized_pnl, pos.bars_held,
+                        regime,
+                        pos.peak_pnl,
+                        pos.mark_peak_pnl,
+                        pos.quote_peak_pnl,
+                        pos.trusted_peak_pnl,
+                        pos.peak_trust_status,
+                        int(pos.trailing_active), stage_outcome, lifecycle.get('first_peak_pct') or 0.0,
+                        json.dumps(exit_execution), json.dumps(build_execution_audit(exit_execution, {
+                            'auditVersion': 1,
+                            'stage': pos.strategy_stage,
+                            'lifecycleId': pos.lifecycle_id,
+                            'decisionType': exit_eval.get('action'),
+                            'actionReason': exit_eval.get('actionReason'),
+                            'markSource': mark_source,
+                            **price_unit_contract_payload(
+                                effectiveExitPriceUnit=PRICE_UNIT_SOL_PER_TOKEN,
+                                triggerPriceUnit=PRICE_UNIT_SOL_PER_TOKEN,
+                            ),
+                            'triggerPnlPct': _safe_float(trigger_pnl * 100.0, None),
+                            'realizedPnlPct': _safe_float(realized_pnl * 100.0, None),
+                            'totalRealizedSol': _safe_float(total_realized_sol, None),
+                            'lifecycleEntrySol': _safe_float(lifecycle_entry_sol, None),
+                            'accountingSource': accounting_source,
+                            'quotePnlPct': _safe_float(exit_quote_pnl * 100.0 if exit_quote_pnl is not None else None, None),
+                            'quoteMarkGapPct': _safe_float(exit_quote_mark_gap * 100.0 if exit_quote_mark_gap is not None else None, None),
+                            'quoteSanityStatus': exit_eval.get('quoteSanityStatus'),
+                            'quoteFreshness': exit_eval.get('quoteFreshness'),
+                            'quoteStop': exit_eval.get('quoteStop'),
+                            'quotePrimary': exit_eval.get('quotePrimary'),
+                            'partialRealizedSol': _safe_float((pos.monitor_state or {}).get('partialRealizedSol'), None),
+                            'partialCostBasisSol': _safe_float((pos.monitor_state or {}).get('partialCostBasisSol'), None),
+                            'partialRealizedPnlContribution': _safe_float((pos.monitor_state or {}).get('partialRealizedPnlContribution'), None),
+                            'soldPct': _safe_float((pos.monitor_state or {}).get('soldPct'), None),
+                            'preExitTotalSolReceived': _safe_float(exit_eval.get('preExitTotalSolReceived', exit_execution.get('preExitTotalSolReceived')), None),
+                            'exitSolReceived': _safe_float(exit_eval.get('exitSolReceived', exit_execution.get('exitSolReceived')), None),
+                            'postExitTotalSolReceived': _safe_float(exit_eval.get('postExitTotalSolReceived', exit_execution.get('postExitTotalSolReceived')), None),
+                            'triggerPrice': _safe_float(exit_price, None),
+                            'effectiveExitPrice': _safe_float(effective_exit_price, None),
+                        })),
+                        'synthetic_mark_exit' if synthetic_exit else ('force_timeout' if is_force_timeout else reason),
+                        'synthetic_mark' if synthetic_exit else ('unavailable' if is_force_timeout else 'available'),
+                        'closed_synthetic_mark' if synthetic_exit else ('closed_force_timeout' if is_force_timeout else 'closed_real'),
+                        1 if synthetic_exit else 0,
+                        json.dumps(pos.monitor_state),
+                        _exit_regime_tag,
+                        pos.trade_id,
+                    ))
+                    db.commit()
+                run_db_write_with_retry(
+                    db,
+                    _write_position_close,
+                    label=f"position_close:{pos.trade_id}:{reason}",
+                    attempts=3,
+                )
                 record_decision_event(
                     db,
                     component='trade_lifecycle',

@@ -705,6 +705,52 @@ function missedRecoverySummaryFromLiveSnapshot(liveSnapshot, { dbPath, requested
   };
 }
 
+function entryModePerformanceFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, limit }) {
+  const section = liveSnapshot?.entry_mode_performance || {};
+  return {
+    generated_at: new Date().toISOString(),
+    db_path: dbPath,
+    materialized: true,
+    materialized_snapshot_id: liveSnapshot.snapshot_id,
+    materialized_generated_at: liveSnapshot.generated_at,
+    materialized_path: livePaperReviewPath(requestedHours),
+    filters: {
+      since_ts: liveSnapshot.window?.since_ts ?? null,
+      since_iso: liveSnapshot.window?.since_iso ?? null,
+      limit,
+      live_query: false,
+    },
+    bucket_summary: section.bucket_summary || {},
+    by_entry_mode: Array.isArray(section.by_entry_mode) ? section.by_entry_mode.slice(0, limit) : [],
+    recent: Array.isArray(section.recent) ? section.recent.slice(0, Math.min(limit, 50)) : [],
+    row_count: Number(section.row_count || 0),
+    row_limit: section.row_limit ?? null,
+  };
+}
+
+function routeHealthFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, limit }) {
+  const section = liveSnapshot?.route_health || {};
+  return {
+    generated_at: new Date().toISOString(),
+    db_path: dbPath,
+    materialized: true,
+    materialized_snapshot_id: liveSnapshot.snapshot_id,
+    materialized_generated_at: liveSnapshot.generated_at,
+    materialized_path: livePaperReviewPath(requestedHours),
+    window_hours: requestedHours,
+    filters: {
+      since_ts: liveSnapshot.window?.since_ts ?? null,
+      since_iso: liveSnapshot.window?.since_iso ?? null,
+      limit,
+      live_query: false,
+    },
+    available: section.available !== false,
+    totals: section.totals || {},
+    routes: Array.isArray(section.routes) ? section.routes.slice(0, limit) : [],
+    notes: section.notes || {},
+  };
+}
+
 function runtimeCommitFingerprint() {
   const envCommit = firstValue(
     process.env.GIT_COMMIT,
@@ -4811,6 +4857,34 @@ const server = http.createServer(async (req, res) => {
     try {
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '1000', 10) || 1000, 10000));
       const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      const requestedHours = Number.parseInt(url.searchParams.get('hours') || '0', 10);
+      const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
+        || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
+      const wantsMaterialized = (
+        ['1', 'true', 'yes'].includes(String(url.searchParams.get('materialized') || '').toLowerCase())
+        || (Number.isFinite(requestedHours) && requestedHours > 2)
+      );
+      if (wantsMaterialized && !forceLive) {
+        const snapshotHours = Number.isFinite(requestedHours) && requestedHours > 0 ? requestedHours : 8;
+        const liveSnapshot = readLivePaperReview(snapshotHours);
+        if (liveSnapshot && !liveSnapshot.error && liveSnapshot.entry_mode_performance) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify(entryModePerformanceFromLiveSnapshot(liveSnapshot, {
+            dbPath: paperDbPath,
+            requestedHours: snapshotHours,
+            limit,
+          }), null, 2));
+          return;
+        }
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          available: false,
+          materialized: true,
+          reason: liveSnapshot?.error || 'materialized_entry_mode_performance_not_ready',
+          path: livePaperReviewPath(snapshotHours),
+        }, null, 2));
+        return;
+      }
       paperDb = new Database(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
       if (!hasTable) {
@@ -6920,6 +6994,34 @@ const server = http.createServer(async (req, res) => {
     } finally {
       try { if (paperDb) paperDb.close(); } catch {}
     }
+    return;
+  } else if (url.pathname === '/api/paper/route-health') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    const requestedHours = boundedIntParam(url, 'hours', 8, 1, 24);
+    const limit = boundedIntParam(url, 'limit', 120, 1, 300);
+    const liveSnapshot = readLivePaperReview(requestedHours);
+    if (liveSnapshot && !liveSnapshot.error && liveSnapshot.route_health) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(routeHealthFromLiveSnapshot(liveSnapshot, {
+        dbPath: paperDbPath,
+        requestedHours,
+        limit,
+      }), null, 2));
+      return;
+    }
+    res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      available: false,
+      materialized: true,
+      reason: liveSnapshot?.error || 'materialized_route_health_not_ready',
+      path: livePaperReviewPath(requestedHours),
+    }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/fast-lane') {
     if (!checkAuth(req, url, res)) return;

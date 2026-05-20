@@ -12,6 +12,8 @@ import logging
 import os
 import time
 
+from sqlite_write_coordinator import sqlite_single_writer
+
 
 log = logging.getLogger("paper_trade.audit")
 
@@ -279,58 +281,59 @@ def record_decision_event(
 ):
     """Best-effort audit write. Never break trading because audit failed."""
     try:
-        lifecycle = _extract_lifecycle_payload(payload or {})
-        cur = db.execute(
-            """
-            INSERT INTO paper_decision_events
-                (event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
-                 signal_ts, strategy_stage, route, component, event_type,
-                 decision, reason, data_source, lifecycle_state, vitality_score,
-                 entry_bias, lifecycle_features_json, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event_ts or time.time(),
-                signal_id,
-                token_ca,
-                symbol,
-                lifecycle_id,
-                trade_id,
-                signal_ts,
-                strategy_stage,
-                route,
-                component,
-                event_type,
-                decision,
-                reason,
-                data_source,
-                lifecycle.get("lifecycle_state"),
-                lifecycle.get("vitality_score"),
-                lifecycle.get("entry_bias"),
-                json.dumps(lifecycle.get("lifecycle_features") or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
-                json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
-            ),
-        )
-        event_id = cur.lastrowid
-        try:
-            _maybe_record_missed_attribution(
-                db,
-                decision_event_id=event_id,
-                event_ts=event_ts or time.time(),
-                signal_id=signal_id,
-                token_ca=token_ca,
-                symbol=symbol,
-                lifecycle_id=lifecycle_id,
-                signal_ts=signal_ts,
-                route=route,
-                component=component,
-                decision=decision,
-                reason=reason,
-                payload=payload or {},
+        with sqlite_single_writer("paper_decision_audit:record_event"):
+            lifecycle = _extract_lifecycle_payload(payload or {})
+            cur = db.execute(
+                """
+                INSERT INTO paper_decision_events
+                    (event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
+                     signal_ts, strategy_stage, route, component, event_type,
+                     decision, reason, data_source, lifecycle_state, vitality_score,
+                     entry_bias, lifecycle_features_json, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_ts or time.time(),
+                    signal_id,
+                    token_ca,
+                    symbol,
+                    lifecycle_id,
+                    trade_id,
+                    signal_ts,
+                    strategy_stage,
+                    route,
+                    component,
+                    event_type,
+                    decision,
+                    reason,
+                    data_source,
+                    lifecycle.get("lifecycle_state"),
+                    lifecycle.get("vitality_score"),
+                    lifecycle.get("entry_bias"),
+                    json.dumps(lifecycle.get("lifecycle_features") or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
+                    json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=_json_default),
+                ),
             )
-        except Exception as missed_exc:
-            log.debug("[AUDIT] missed attribution write failed: %s", missed_exc)
-        db.commit()
+            event_id = cur.lastrowid
+            try:
+                _maybe_record_missed_attribution(
+                    db,
+                    decision_event_id=event_id,
+                    event_ts=event_ts or time.time(),
+                    signal_id=signal_id,
+                    token_ca=token_ca,
+                    symbol=symbol,
+                    lifecycle_id=lifecycle_id,
+                    signal_ts=signal_ts,
+                    route=route,
+                    component=component,
+                    decision=decision,
+                    reason=reason,
+                    payload=payload or {},
+                )
+            except Exception as missed_exc:
+                log.debug("[AUDIT] missed attribution write failed: %s", missed_exc)
+            db.commit()
     except Exception as exc:
         log.debug("[AUDIT] decision event write failed: %s", exc)
 
@@ -672,6 +675,7 @@ def update_due_missed_attributions(
 
     updated = 0
     touched = 0
+    pending_updates = []
     for row in rows:
         token_ca = row["token_ca"]
         base_ts = row["baseline_ts"] or row["signal_ts"] or int(row["created_event_ts"])
@@ -696,9 +700,11 @@ def update_due_missed_attributions(
                 changes["baseline_source"] = baseline_source or "missing:no_price_source"
             changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             set_clause = ", ".join(f"{key} = ?" for key in changes)
-            db.execute(
-                f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
-                [*changes.values(), row["id"]],
+            pending_updates.append(
+                (
+                    f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
+                    [*changes.values(), row["id"]],
+                )
             )
             if len(changes) > 1:
                 updated += 1
@@ -769,23 +775,30 @@ def update_due_missed_attributions(
         if row["status"] != next_status:
             changes["status"] = next_status
         if not changes:
-            db.execute(
-                "UPDATE paper_missed_signal_attribution SET updated_at = ? WHERE id = ?",
-                (time.strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+            pending_updates.append(
+                (
+                    "UPDATE paper_missed_signal_attribution SET updated_at = ? WHERE id = ?",
+                    (time.strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+                )
             )
             touched += 1
             continue
         changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         set_clause = ", ".join(f"{key} = ?" for key in changes)
-        db.execute(
-            f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
-            [*changes.values(), row["id"]],
+        pending_updates.append(
+            (
+                f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
+                [*changes.values(), row["id"]],
+            )
         )
         updated += 1
 
-    if updated or touched:
-        db.commit()
+    if pending_updates:
+        with sqlite_single_writer("paper_decision_audit:missed_attribution_update"):
+            for sql, params in pending_updates:
+                db.execute(sql, params)
+            db.commit()
     return updated
 
 

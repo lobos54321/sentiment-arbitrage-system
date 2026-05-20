@@ -97,6 +97,83 @@ def test_gmgn_policy_boosts_clean_smart_money():
     assert policy["edge_score"] >= 4
 
 
+def test_gmgn_policy_requires_execution_context_for_mc_aware_top10_relaxation():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "market_cap": 160_000,
+            "top10_holder_rate": 0.58,
+            "bundler_rate": 0.05,
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+            "creator_hold_rate": 0.0,
+            "dev_team_hold_rate": 0.0,
+        },
+        {"liquidity_usd": 7000},
+    )
+
+    assert policy["action"] == "reject"
+    assert policy["reason"] == "gmgn_high_top10_requires_execution_eligibility"
+    assert policy["features"]["top10_mc_tier"] == "mid_mc"
+
+
+def test_gmgn_policy_allows_mc_aware_top10_only_when_quote_timing_and_risk_pass():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "market_cap": 160_000,
+            "top10_holder_rate": 0.58,
+            "bundler_rate": 0.05,
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+            "creator_hold_rate": 0.0,
+            "dev_team_hold_rate": 0.0,
+        },
+        {
+            "liquidity_usd": 7000,
+            "entry_execution_eligibility": {
+                "quote_clean_ok": True,
+                "quote_executable_ok": True,
+                "timing_ok": True,
+                "liquidity_ok": True,
+                "risk_ok": True,
+            },
+        },
+    )
+
+    assert policy["action"] == "downsize"
+    assert "gmgn_mc_aware_top10_allowed" in policy["flags"]
+    assert policy["features"]["top10_relax_execution_eligible"] is True
+
+
+def test_gmgn_policy_still_rejects_toxic_bundler_with_mc_aware_top10_context():
+    policy = evaluate_gmgn_lotto_policy(
+        {
+            "available": True,
+            "market_cap": 160_000,
+            "top10_holder_rate": 0.58,
+            "bundler_rate": 0.72,
+            "rat_trader_amount_rate": 0.01,
+            "entrapment_ratio": 0.01,
+            "creator_hold_rate": 0.0,
+            "dev_team_hold_rate": 0.0,
+        },
+        {
+            "liquidity_usd": 7000,
+            "entry_execution_eligibility": {
+                "quote_clean_ok": True,
+                "quote_executable_ok": True,
+                "timing_ok": True,
+                "liquidity_ok": True,
+                "risk_ok": True,
+            },
+        },
+    )
+
+    assert policy["action"] == "reject"
+    assert policy["reason"] == "gmgn_toxic_bundler"
+
+
 def test_gmgn_tiny_scout_rescues_clean_concentration_near_miss():
     policy = evaluate_gmgn_lotto_policy(
         {

@@ -22,6 +22,11 @@ GMGN_CREATOR_HOLD_REJECT_RATE = float(os.environ.get("GMGN_CREATOR_HOLD_REJECT_R
 GMGN_DEV_TEAM_HOLD_REJECT_RATE = float(os.environ.get("GMGN_DEV_TEAM_HOLD_REJECT_RATE", "0.05"))
 GMGN_TOP10_REJECT_RATE = float(os.environ.get("GMGN_TOP10_REJECT_RATE", "0.50"))
 GMGN_BUNDLER_REJECT_RATE = float(os.environ.get("GMGN_BUNDLER_REJECT_RATE", "0.60"))
+GMGN_TOP10_MC_AWARE_ENABLED = os.environ.get("GMGN_TOP10_MC_AWARE_ENABLED", "true").lower() != "false"
+GMGN_TOP10_LOW_MC_USD = float(os.environ.get("GMGN_TOP10_LOW_MC_USD", "100000"))
+GMGN_TOP10_MID_MC_USD = float(os.environ.get("GMGN_TOP10_MID_MC_USD", "300000"))
+GMGN_TOP10_LOW_MC_REJECT_RATE = float(os.environ.get("GMGN_TOP10_LOW_MC_REJECT_RATE", "0.70"))
+GMGN_TOP10_MID_MC_REJECT_RATE = float(os.environ.get("GMGN_TOP10_MID_MC_REJECT_RATE", "0.60"))
 
 GMGN_BUNDLER_DOWNSIZE_RATE = float(os.environ.get("GMGN_BUNDLER_DOWNSIZE_RATE", "0.35"))
 GMGN_BOT_DOWNSIZE_RATE = float(os.environ.get("GMGN_BOT_DOWNSIZE_RATE", "0.50"))
@@ -81,6 +86,73 @@ def _i(value, default=0):
         return default
 
 
+def _truthy(value):
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "ok", "pass", "clean"}
+    return bool(value)
+
+
+def _first_positive(*values):
+    for value in values:
+        number = _f(value, 0.0)
+        if number > 0:
+            return number
+    return 0.0
+
+
+def gmgn_top10_threshold_for_market_cap(market_cap):
+    market_cap = _f(market_cap, 0.0)
+    if not GMGN_TOP10_MC_AWARE_ENABLED or market_cap <= 0:
+        return GMGN_TOP10_REJECT_RATE, "fixed_or_unknown_mc"
+    if market_cap < GMGN_TOP10_LOW_MC_USD:
+        return max(GMGN_TOP10_REJECT_RATE, GMGN_TOP10_LOW_MC_REJECT_RATE), "low_mc"
+    if market_cap < GMGN_TOP10_MID_MC_USD:
+        return max(GMGN_TOP10_REJECT_RATE, GMGN_TOP10_MID_MC_REJECT_RATE), "mid_mc"
+    return GMGN_TOP10_REJECT_RATE, "standard_mc"
+
+
+def _execution_context(lotto_detail):
+    lotto_detail = lotto_detail or {}
+    eligibility = lotto_detail.get("entry_execution_eligibility")
+    if not isinstance(eligibility, dict):
+        eligibility = {}
+    quote_clean_ok = _truthy(
+        eligibility.get("quote_clean_ok")
+        or eligibility.get("quote_clean_seen")
+        or lotto_detail.get("quote_clean_ok")
+        or lotto_detail.get("quote_clean_seen")
+        or lotto_detail.get("source_quote_clean_seen")
+        or lotto_detail.get("final_reclaim_quote_executable")
+    )
+    quote_executable_ok = _truthy(
+        eligibility.get("quote_executable_ok")
+        or eligibility.get("quote_executable")
+        or lotto_detail.get("quote_executable")
+        or lotto_detail.get("final_reclaim_quote_executable")
+    )
+    timing_ok = _truthy(
+        eligibility.get("timing_ok")
+        or lotto_detail.get("timing_ok")
+        or lotto_detail.get("timing_passed")
+        or lotto_detail.get("reclaim_passed")
+        or lotto_detail.get("smart_entry_passed")
+    )
+    liquidity_ok = eligibility.get("liquidity_ok")
+    if liquidity_ok is None:
+        liquidity_ok = _first_positive(lotto_detail.get("liquidity_usd"), lotto_detail.get("last_liquidity")) > 0
+    risk_ok = eligibility.get("risk_ok")
+    if risk_ok is None:
+        risk_ok = not _truthy(lotto_detail.get("toxic")) and not _truthy(lotto_detail.get("risk_blocked"))
+    return {
+        "quote_clean_ok": bool(quote_clean_ok),
+        "quote_executable_ok": bool(quote_executable_ok),
+        "timing_ok": bool(timing_ok),
+        "liquidity_ok": bool(liquidity_ok),
+        "risk_ok": bool(risk_ok),
+        "direct_entry_ok": bool(eligibility.get("direct_entry_ok")),
+    }
+
+
 def _noop(reason):
     return {
         "enabled": GMGN_PAPER_POLICY_ENABLED,
@@ -114,9 +186,28 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
 
     lotto_detail = lotto_detail or {}
     entry_mode = entry_mode or lotto_detail.get("entry_mode") or ""
+    market_cap = _first_positive(
+        gmgn.get("market_cap"),
+        gmgn.get("usd_market_cap"),
+        lotto_detail.get("market_cap"),
+        lotto_detail.get("current_mc"),
+        lotto_detail.get("signal_mc"),
+        lotto_detail.get("mc_usd"),
+    )
+    top10_threshold, top10_tier = gmgn_top10_threshold_for_market_cap(market_cap)
+    execution_context = _execution_context(lotto_detail)
+    top10_relax_execution_eligible = all(
+        execution_context.get(name)
+        for name in ("quote_clean_ok", "quote_executable_ok", "timing_ok", "liquidity_ok", "risk_ok")
+    )
 
     features = {
         "entry_mode": entry_mode,
+        "market_cap": market_cap,
+        "top10_mc_tier": top10_tier,
+        "top10_reject_rate_effective": top10_threshold,
+        "top10_relax_execution_eligible": top10_relax_execution_eligible,
+        "execution_context": execution_context,
         "bundler_rate": _f(gmgn.get("bundler_rate")),
         "rat_trader_amount_rate": _f(gmgn.get("rat_trader_amount_rate")),
         "entrapment_ratio": _f(gmgn.get("entrapment_ratio")),
@@ -137,6 +228,7 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
     }
 
     flags = []
+    hard_reject_flags = set()
     toxic_score = 0
     edge_score = 0
 
@@ -145,12 +237,25 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
         ("gmgn_toxic_entrapment", features["entrapment_ratio"], GMGN_ENTRAPMENT_REJECT_RATE),
         ("gmgn_creator_holding", features["creator_hold_rate"], GMGN_CREATOR_HOLD_REJECT_RATE),
         ("gmgn_dev_team_holding", features["dev_team_hold_rate"], GMGN_DEV_TEAM_HOLD_REJECT_RATE),
-        ("gmgn_high_top10_concentration", features["top10_holder_rate"], GMGN_TOP10_REJECT_RATE),
         ("gmgn_toxic_bundler", features["bundler_rate"], GMGN_BUNDLER_REJECT_RATE),
     ]
     for flag, value, threshold in reject_checks:
         if value > threshold:
             flags.append(flag)
+            hard_reject_flags.add(flag)
+            toxic_score += 2
+
+    if features["top10_holder_rate"] > top10_threshold:
+        flags.append("gmgn_high_top10_concentration")
+        hard_reject_flags.add("gmgn_high_top10_concentration")
+        toxic_score += 2
+    elif features["top10_holder_rate"] > GMGN_TOP10_REJECT_RATE:
+        if top10_relax_execution_eligible and not hard_reject_flags:
+            flags.append("gmgn_mc_aware_top10_allowed")
+            toxic_score += 1
+        else:
+            flags.append("gmgn_high_top10_requires_execution_eligibility")
+            hard_reject_flags.add("gmgn_high_top10_requires_execution_eligibility")
             toxic_score += 2
 
     if features["bundler_rate"] > GMGN_BUNDLER_DOWNSIZE_RATE:
@@ -195,10 +300,15 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
     size_multiplier = 1.0
     spread_penalty_pct = 0.0
 
-    hard_reject = any(flag in flags for flag, _value, _threshold in reject_checks)
+    hard_reject = bool(hard_reject_flags)
     if hard_reject:
         action = "reject" if GMGN_PAPER_REJECT_ENABLED else "shadow_reject"
-        reason = next(flag for flag in flags if flag.startswith("gmgn_toxic_") or flag.endswith("_holding") or flag == "gmgn_high_top10_concentration")
+        reason = next(
+            flag for flag in flags
+            if flag.startswith("gmgn_toxic_")
+            or flag.endswith("_holding")
+            or flag in {"gmgn_high_top10_concentration", "gmgn_high_top10_requires_execution_eligibility"}
+        )
         spread_penalty_pct = GMGN_TOXIC_SPREAD_PENALTY_PCT
         size_multiplier = GMGN_MIN_SIZE_MULTIPLIER
     elif GMGN_PAPER_DOWNSIZE_ENABLED and toxic_score > 0:
