@@ -641,7 +641,8 @@ def test_watch_observation_is_not_claimed(tmp_path):
     assert row["last_error"] == "source_resonance_gmgn_only_watch_only"
 
 
-def test_premium_scan_reconciles_recent_status_changes(tmp_path):
+def test_premium_scan_reconciles_recent_status_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_HARD_GATE_DIRECT_ENABLED", True)
     signal_db = fast.connect_db(tmp_path / "signals.db")
     paper_db = fast.connect_db(tmp_path / "paper.db")
     now = int(time.time())
@@ -689,6 +690,57 @@ def test_premium_scan_reconciles_recent_status_changes(tmp_path):
     assert row["source_type"] == "hard_gate_fast"
     assert row["entry_branch"] == "hard_gate_fast_clean"
     assert row["status"] == "queued"
+
+
+def test_premium_scan_records_hard_gate_pass_as_counterfactual_when_direct_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_HARD_GATE_DIRECT_ENABLED", False)
+    signal_db = fast.connect_db(tmp_path / "signals.db")
+    paper_db = fast.connect_db(tmp_path / "paper.db")
+    now = int(time.time())
+    signal_db.execute(
+        """
+        CREATE TABLE premium_signals (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            timestamp INTEGER,
+            hard_gate_status TEXT,
+            signal_type TEXT,
+            receive_ts INTEGER,
+            created_at INTEGER,
+            market_cap REAL,
+            description TEXT
+        )
+        """
+    )
+    signal_db.execute(
+        """
+        INSERT INTO premium_signals (
+            id, token_ca, symbol, timestamp, hard_gate_status, signal_type,
+            receive_ts, created_at, market_cap, description
+        ) VALUES (1, 'TokenPass', 'PASSDOG', ?, 'PASS', 'ATH', ?, ?, 12345, '')
+        """,
+        (now - 5, now - 5, now - 5),
+    )
+    signal_db.commit()
+
+    result = fast.scan_premium_once(
+        signal_db,
+        paper_db,
+        last_id=0,
+        lookback_sec=120,
+        now_ts=now,
+    )
+
+    assert result["rows"] == 1
+    assert result["watch_only"] == 1
+    row = paper_db.execute(
+        "SELECT source_type, entry_branch, status, last_error FROM paper_fast_entry_queue"
+    ).fetchone()
+    assert row["source_type"] == "hard_gate_fast"
+    assert row["entry_branch"] == "hard_gate_fast_clean"
+    assert row["status"] == "counterfactual_only"
+    assert row["last_error"] == "hard_gate_fast_direct_entry_disabled_counterfactual_only"
 
 
 def test_premium_scan_records_stale_pass_as_watch_only(tmp_path, monkeypatch):

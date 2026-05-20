@@ -635,6 +635,76 @@ function readLivePaperReview(hours) {
   }
 }
 
+function missedRecoveryRowFromLiveSnapshot(row = {}, section = 'overall') {
+  const uniqueTokens = Number(row.unique_tokens || 0);
+  const gold = Number(row.gold_unique || row.gold_n || 0);
+  const silver = Number(row.silver_unique || row.silver_n || 0);
+  const bronze = Number(row.bronze_unique || row.bronze_n || 0);
+  return {
+    section,
+    route: row.route ?? null,
+    component: row.component ?? null,
+    reject_reason: row.reject_reason ?? null,
+    unique_tokens: uniqueTokens,
+    gold_n: gold,
+    silver_n: silver,
+    bronze_n: bronze,
+    sub25_n: Math.max(0, uniqueTokens - gold - silver - bronze),
+    mark_only_gold_n: Number(row.mark_only_gold_unique || 0),
+    mark_only_silver_n: Number(row.mark_only_silver_unique || 0),
+    mark_only_bronze_n: Number(row.mark_only_bronze_unique || 0),
+    quote_executable_unique: Number(row.quote_executable_unique || 0),
+    clean_tradable_unique: Number(row.clean_tradable_unique || row.quote_executable_unique || 0),
+    tradable_unique: Number(row.tradable_unique || 0),
+    stop_before_peak_unique: Number(row.stop_before_peak_unique || 0),
+    max_pnl: row.max_pnl ?? null,
+    avg_max_pnl: row.avg_max_pnl ?? null,
+  };
+}
+
+function missedRecoverySummaryFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, limit }) {
+  const missed = liveSnapshot?.missed || {};
+  const overall = missedRecoveryRowFromLiveSnapshot(missed.overall || {}, 'overall');
+  const byGate = Array.isArray(missed.by_gate) ? missed.by_gate : [];
+  const byBlockerAllUnique = byGate
+    .map((row) => missedRecoveryRowFromLiveSnapshot(row, 'by_blocker_all_unique'))
+    .slice(0, limit);
+  const byBlockerCleanQuote = byBlockerAllUnique
+    .filter((row) => Number(row.quote_executable_unique || 0) > 0)
+    .map((row) => ({ ...row, section: 'by_blocker_clean_quote' }))
+    .slice(0, limit);
+  const topDogs = Array.isArray(missed.top_dogs) ? missed.top_dogs.slice(0, limit) : [];
+  return {
+    generated_at: new Date().toISOString(),
+    db_path: dbPath,
+    materialized: true,
+    materialized_snapshot_id: liveSnapshot.snapshot_id,
+    materialized_generated_at: liveSnapshot.generated_at,
+    materialized_path: livePaperReviewPath(requestedHours),
+    filters: {
+      since_ts: liveSnapshot.window?.since_ts ?? null,
+      since_iso: liveSnapshot.window?.since_iso ?? null,
+      tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% max/peak pnl',
+      clean_quote_definition: 'tradable_missed=1 and would_stop_before_peak!=1',
+      include_actions: false,
+      live_query: false,
+    },
+    query_ms: 0,
+    overall_unique: overall,
+    by_route: [],
+    by_blocker_clean_quote: byBlockerCleanQuote,
+    by_blocker_all_unique: byBlockerAllUnique,
+    top_clean_quote_dogs: topDogs.filter((row) => Number(row.quote_exec || row.quote_executable_unique || 0) > 0),
+    recovery_actionability: [],
+    recovery_actions: [],
+    notes: {
+      endpoint_goal: 'materialized missed-dog recovery summary; pass live=1 only for short-window debugging',
+      recovery_actions: 'omitted from materialized live-safe snapshot',
+      source_snapshot: 'paper_review_snapshot_worker',
+    },
+  };
+}
+
 function runtimeCommitFingerprint() {
   const envCommit = firstValue(
     process.env.GIT_COMMIT,
@@ -664,8 +734,13 @@ function runtimeCommitFingerprint() {
 function reviewPolicyFingerprint(registrySummary = null) {
   const envKeys = [
     'HARD_GATE_PASS_TINY_PROBE_ENABLED',
+    'HARD_GATE_PASS_DIRECT_ENTRY_ENABLED',
+    'FAST_ENTRY_HARD_GATE_DIRECT_ENABLED',
     'PRE_PASS_RESONANCE_TINY_PROBE_ENABLED',
     'SOURCE_RESONANCE_TINY_PROBE_ENABLED',
+    'SOURCE_RESONANCE_DIRECT_PROBE_ENABLED',
+    'SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY',
+    'SOURCE_RESONANCE_TINY_PROBE_REQUIRE_QUOTE_CLEAN',
     'REVIVAL_CANARY_POLICY_VERSION',
     'ENTRY_MODE_POLICY_VERSION',
     'PREMIUM_LIVE_EXECUTION_ENABLED',
@@ -5791,6 +5866,29 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = boundedWindowedSinceTs(url, 2, 24);
       const queryStartedAt = Date.now();
       const includeRecoveryActions = String(url.searchParams.get('include_actions') || '').toLowerCase() === '1';
+      const requestedHours = Number.parseInt(url.searchParams.get('hours') || '2', 10);
+      const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
+        || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
+      if (Number.isFinite(requestedHours) && requestedHours > 2 && !forceLive) {
+        const liveSnapshot = readLivePaperReview(requestedHours);
+        if (liveSnapshot && !liveSnapshot.error) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify(missedRecoverySummaryFromLiveSnapshot(liveSnapshot, {
+            dbPath: paperDbPath,
+            requestedHours,
+            limit,
+          }), null, 2));
+          return;
+        }
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          available: false,
+          materialized: true,
+          reason: liveSnapshot?.error || 'materialized_snapshot_not_ready',
+          path: livePaperReviewPath(requestedHours),
+        }, null, 2));
+        return;
+      }
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
       const whereParams = sinceTs ? { since: sinceTs } : {};
       paperDb = new Database(paperDbPath, { readonly: true });

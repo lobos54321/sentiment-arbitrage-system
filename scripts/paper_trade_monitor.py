@@ -402,10 +402,15 @@ SOURCE_RESONANCE_STALE_CANARY_MAX_SIGNAL_AGE_SEC = int(os.environ.get('SOURCE_RE
 SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS = int(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS', '2'))
 SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT = float(os.environ.get('SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT', '3'))
 SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_REQUIRE_MOMENTUM', 'false').lower() == 'true'
-SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get('SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'true').lower() != 'false'
+SOURCE_RESONANCE_TINY_PROBE_REQUIRE_QUOTE_CLEAN = os.environ.get(
+    'SOURCE_RESONANCE_TINY_PROBE_REQUIRE_QUOTE_CLEAN', 'true'
+).lower() != 'false'
+SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY = os.environ.get(
+    'SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY', 'false'
+).lower() == 'true'
 SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_NO_PRICE_PROBE_ENABLED', 'true').lower() != 'false'
 SOURCE_RESONANCE_SMART_ENTRY_SOFT_REJECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_SMART_ENTRY_SOFT_REJECT_PROBE_ENABLED', 'true').lower() != 'false'
-SOURCE_RESONANCE_DIRECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_DIRECT_PROBE_ENABLED', 'true').lower() != 'false'
+SOURCE_RESONANCE_DIRECT_PROBE_ENABLED = os.environ.get('SOURCE_RESONANCE_DIRECT_PROBE_ENABLED', 'false').lower() == 'true'
 PAPER_TINY_SCOUT_ENTRY_MODES.add(SOURCE_RESONANCE_TINY_PROBE_MODE)
 
 # --- hard_gate_pass_tiny_probe: baseline paper-only probe for Telegram premium
@@ -415,6 +420,9 @@ HARD_GATE_PASS_TINY_PROBE_MODE = 'hard_gate_pass_tiny_probe'
 HARD_GATE_PASS_TINY_PROBE_ENABLED = os.environ.get(
     'HARD_GATE_PASS_TINY_PROBE_ENABLED', 'true'
 ).lower() != 'false'
+HARD_GATE_PASS_DIRECT_ENTRY_ENABLED = os.environ.get(
+    'HARD_GATE_PASS_DIRECT_ENTRY_ENABLED', 'false'
+).lower() == 'true'
 HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN = os.environ.get(
     'HARD_GATE_PASS_REQUIRE_GMGN_PRE_SEEN', 'true'
 ).lower() != 'false'
@@ -486,6 +494,8 @@ _hard_gate_pass_probe_arm_ts = []  # type: list[dict | float]
 _hard_gate_pass_probe_cooldown = {}  # type: dict[str, float]
 # Quote retry candidates for PASS signals that could not get a signal price yet.
 _hard_gate_pass_quote_retry = {}  # type: dict[str, dict]
+
+NO_WATCHLIST_ENTRY_AUTO_CLOSE_MINUTES = float(os.environ.get('NO_WATCHLIST_ENTRY_AUTO_CLOSE_MINUTES', '45'))
 
 PRE_PASS_RESONANCE_TINY_PROBE_MODE = 'pre_pass_resonance_tiny_probe'
 PRE_PASS_RESONANCE_TINY_PROBE_ENABLED = os.environ.get(
@@ -7218,6 +7228,23 @@ def evaluate_source_resonance_tiny_probe(
     gain_pct = _source_resonance_number(external_alpha.get('gmgn_momentum_gain_pct'), 0.0) or 0.0
     momentum_confirmed = bool(external_alpha.get('gmgn_momentum_confirmed'))
     volume_confirmed = bool(external_alpha.get('gmgn_volume_confirmed'))
+    quote_clean_seen = bool(
+        external_alpha.get('quote_clean')
+        or external_alpha.get('quote_executable')
+        or external_alpha.get('quote_clean_seen')
+        or external_alpha.get('two_quote_clean_snapshots')
+        or external_alpha.get('entry_quote_success_seen')
+        or watchlist_entry.get('quote_clean')
+        or watchlist_entry.get('quote_executable_clean')
+        or watchlist_entry.get('source_quote_clean_seen')
+        or lifecycle.get('quote_clean_seen')
+        or lifecycle.get('quote_executable')
+    )
+    resonance_cohort = (
+        external_alpha.get('cohort')
+        or external_alpha.get('resonance_cohort')
+        or ('telegram_gmgn_quote_clean' if quote_clean_seen else 'telegram_gmgn')
+    )
     signal_ts_sec = normalize_signal_ts_seconds(
         signal.get('timestamp')
         or signal.get('signal_ts')
@@ -7245,6 +7272,8 @@ def evaluate_source_resonance_tiny_probe(
         'gmgn_momentum_gain_pct': gain_pct,
         'gmgn_momentum_confirmed': momentum_confirmed,
         'gmgn_volume_confirmed': volume_confirmed,
+        'quote_clean_seen': quote_clean_seen,
+        'resonance_cohort': resonance_cohort,
         'lifecycle_state': lifecycle.get('lifecycle_state'),
         'entry_bias': lifecycle.get('entry_bias'),
     }
@@ -7277,8 +7306,7 @@ def evaluate_source_resonance_tiny_probe(
         or volume_confirmed
         or rounds >= SOURCE_RESONANCE_TINY_PROBE_MIN_ROUNDS
         or gain_pct >= SOURCE_RESONANCE_TINY_PROBE_MIN_GAIN_PCT
-        or external_alpha.get('quote_clean')
-        or external_alpha.get('quote_executable')
+        or quote_clean_seen
     )
     stale_soft_override = bool(
         soft_override.get('pass')
@@ -7310,7 +7338,7 @@ def evaluate_source_resonance_tiny_probe(
             'paper_only_scout': True,
             'probe': True,
             'probe_source': 'source_resonance',
-            'resonance_cohort': 'telegram_gmgn',
+            'resonance_cohort': resonance_cohort,
             'source_component': 'source_resonance_probe',
             'source_reject_reason': str(hard_gate_status or '').lower(),
             'timing_passed': bool(SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY),
@@ -7346,6 +7374,8 @@ def evaluate_source_resonance_tiny_probe(
         return _result(False, external_alpha.get('reason') or 'source_resonance_external_alpha_missing')
     if not external_alpha.get('gmgn_pre_seen'):
         return _result(False, 'source_resonance_gmgn_not_pre_seen')
+    if SOURCE_RESONANCE_TINY_PROBE_REQUIRE_QUOTE_CLEAN and not quote_clean_seen:
+        return _result(False, 'source_resonance_quote_clean_required')
     if not timestamp_valid:
         return _result(False, timestamp_anomaly_reason or 'source_resonance_timestamp_invalid')
     if (
@@ -7908,7 +7938,8 @@ def evaluate_hard_gate_pass_tiny_probe(
             'source_resonance_score': resonance_context.get('source_resonance_score'),
             'source_resonance_level': resonance_context.get('source_resonance_level'),
             'source_component': 'hard_gate_pass_probe',
-            'timing_passed': True,
+            'timing_passed': bool(HARD_GATE_PASS_DIRECT_ENTRY_ENABLED),
+            'direct_entry_enabled': bool(HARD_GATE_PASS_DIRECT_ENTRY_ENABLED),
             'resonance_context': resonance_context,
             'external_alpha': resonance_context.get('external_alpha') or external_alpha,
             'observed': observed,
@@ -7988,7 +8019,7 @@ def _apply_hard_gate_pass_probe_to_pending(pending, detail, *, route=None, stage
     pending['paper_only_scout'] = True
     pending['execution_scope'] = 'paper_only'
     pending['kelly_position_sol'] = HARD_GATE_PASS_TINY_PROBE_SIZE_SOL
-    pending['timing_passed'] = True
+    pending['timing_passed'] = bool(detail.get('timing_passed'))
     pending['dog_catcher_fast_lane'] = True
     pending['replay_source'] = 'live_monitor_hard_gate_pass_probe'
     pending['stage_outcome'] = stage_outcome or 'hard_gate_pass_tiny_probe_armed'
@@ -8527,6 +8558,28 @@ def arm_hard_gate_pass_tiny_probe(
         'pool': pool,
         'watchlist_id': registered_entry.get('id'),
     }
+    if not HARD_GATE_PASS_DIRECT_ENTRY_ENABLED:
+        record_decision_event(
+            db,
+            component='hard_gate_pass_probe',
+            event_type='probe_observation',
+            decision='counterfactual_only' if detail.get('pass') else 'watch_only',
+            reason=(
+                'hard_gate_pass_direct_entry_disabled_counterfactual_only'
+                if detail.get('pass')
+                else f"hard_gate_pass_direct_entry_disabled_{detail.get('reason') or 'reject'}"
+            ),
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=sig.get('timestamp'),
+            signal_id=sig.get('id'),
+            route=route_name,
+            data_source='premium_signals+dexscreener+helius',
+            payload=with_lifecycle_payload(detail, signal_lifecycle),
+            event_ts=now_ts,
+        )
+        return False
     if not detail.get('pass'):
         if detail.get('reason') == 'quote_not_executable' and allow_quote_retry and _schedule_hard_gate_pass_quote_retry(
             sig=sig,
@@ -22588,6 +22641,69 @@ def run_monitor(db):
                         
                         # Log every exit evaluation
                         held_min = int((time.time() - pos.entry_ts) / 60)
+                        if (
+                            not w_entry
+                            and NO_WATCHLIST_ENTRY_AUTO_CLOSE_MINUTES >= 0
+                            and held_min >= NO_WATCHLIST_ENTRY_AUTO_CLOSE_MINUTES
+                        ):
+                            no_watch_pnl = 0.0
+                            try:
+                                if pre_price and pos.entry_price and pos.entry_price > 0:
+                                    no_watch_pnl = (float(pre_price) / float(pos.entry_price)) - 1.0
+                            except Exception:
+                                no_watch_pnl = 0.0
+                            lifecycle = lifecycles.setdefault(
+                                pos.lifecycle_id,
+                                build_lifecycle_state(
+                                    pos.lifecycle_id,
+                                    pos.token_ca,
+                                    pos.symbol,
+                                    pos.signal_ts,
+                                    getattr(pos, 'premium_signal_id', None),
+                                    getattr(pos, 'signal_type', None),
+                                ),
+                            )
+                            record_decision_event(
+                                db,
+                                component='exit_strategy',
+                                event_type='dead_position_close',
+                                decision='exit',
+                                reason='no_watchlist_entry_auto_close',
+                                token_ca=pos.token_ca,
+                                symbol=pos.symbol,
+                                lifecycle_id=pos.lifecycle_id,
+                                trade_id=pos.trade_id,
+                                signal_ts=pos.signal_ts,
+                                signal_id=getattr(pos, 'premium_signal_id', None),
+                                strategy_stage=pos.strategy_stage,
+                                route=(pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                                data_source=pre_src,
+                                payload={
+                                    'held_min': held_min,
+                                    'current_price': pre_price,
+                                    'current_pnl': no_watch_pnl,
+                                    'auto_close_after_min': NO_WATCHLIST_ENTRY_AUTO_CLOSE_MINUTES,
+                                },
+                            )
+                            with positions_lock:
+                                positions.pop(trade_id, None)
+                            close_position_with_guard_reason(
+                                db,
+                                pos,
+                                lifecycle,
+                                reason='no_watchlist_entry_auto_close',
+                                pnl_pct=no_watch_pnl,
+                                decision_type='dead_position_close',
+                                audit_extra={
+                                    'heldMin': held_min,
+                                    'currentPrice': pre_price,
+                                    'priceSource': pre_src,
+                                    'autoCloseAfterMin': NO_WATCHLIST_ENTRY_AUTO_CLOSE_MINUTES,
+                                },
+                                log_prefix='DEAD_POSITION',
+                            )
+                            last_progress = time.time()
+                            continue
                         pnl_pct = exit_matrix.get('current_pnl', 0) * 100
                         log.info(
                             f"  [EXIT_MATRIX] {pos.symbol}/{pos.strategy_stage} "

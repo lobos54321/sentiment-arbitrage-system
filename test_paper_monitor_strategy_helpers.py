@@ -2617,6 +2617,7 @@ def test_source_resonance_tiny_probe_requires_gmgn_lead_and_activity():
             "gmgn_momentum_gain_pct": 4,
             "gmgn_momentum_confirmed": False,
             "gmgn_volume_confirmed": False,
+            "quote_clean_seen": True,
             "last_market_cap": 42000,
         },
         route="LOTTO",
@@ -2626,7 +2627,7 @@ def test_source_resonance_tiny_probe_requires_gmgn_lead_and_activity():
 
     assert decision["pass"] is True
     assert decision["entry_mode"] == SOURCE_RESONANCE_TINY_PROBE_MODE
-    assert decision["timing_passed"] is True
+    assert decision["timing_passed"] is False
 
 
 def test_source_resonance_tiny_probe_blocks_late_gmgn_seen():
@@ -2637,6 +2638,7 @@ def test_source_resonance_tiny_probe_blocks_late_gmgn_seen():
             "gmgn_pre_seen": True,
             "gmgn_lead_time_sec": -20,
             "last_seen_age_sec": 30,
+            "quote_clean_seen": True,
             "gmgn_momentum_rounds": 3,
             "gmgn_momentum_gain_pct": 10,
         },
@@ -2660,6 +2662,7 @@ def test_source_resonance_tiny_probe_soft_override_allows_canary_on_soft_quality
             "gmgn_momentum_gain_pct": 0,
             "gmgn_momentum_confirmed": False,
             "gmgn_volume_confirmed": False,
+            "quote_clean_seen": True,
             "last_market_cap": 42000,
         },
         route="LOTTO",
@@ -2682,6 +2685,7 @@ def test_source_resonance_tiny_probe_rejects_stale_signal_anchor():
             "gmgn_pre_seen": True,
             "gmgn_lead_time_sec": 180,
             "last_seen_age_sec": 30,
+            "quote_clean_seen": True,
             "gmgn_momentum_rounds": 3,
             "gmgn_momentum_gain_pct": 10,
             "last_market_cap": 42000,
@@ -2754,6 +2758,7 @@ def test_source_resonance_tiny_probe_rejects_timestamp_anomalies():
             "last_seen_age_sec": -48,
             "timestamp_valid": False,
             "timestamp_anomaly_reason": "gmgn_lead_time_unreasonable,external_alpha_future_seen",
+            "quote_clean_seen": True,
             "gmgn_momentum_rounds": 3,
             "gmgn_momentum_gain_pct": 10,
         },
@@ -3234,6 +3239,7 @@ def test_hard_gate_pass_quote_retry_schedules_and_arms(monkeypatch):
     monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
     monkeypatch.setattr(monitor, "_hard_gate_pass_quote_retry", {})
     monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_DIRECT_ENTRY_ENABLED", True)
     monkeypatch.setattr(monitor, "HARD_GATE_PASS_QUOTE_RETRY_ENABLED", True)
     monkeypatch.setattr(
         monitor,
@@ -3672,6 +3678,7 @@ def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
     monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
     monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
     monkeypatch.setattr(monitor, "HARD_GATE_PASS_TINY_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "HARD_GATE_PASS_DIRECT_ENTRY_ENABLED", True)
     monkeypatch.setattr(
         monitor,
         "fetch_dexscreener_trend_snapshot",
@@ -3735,6 +3742,7 @@ def test_arm_hard_gate_pass_tiny_probe_builds_non_lotto_pending(monkeypatch):
 
 def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price(monkeypatch):
     monkeypatch.setattr(monitor, "SOURCE_RESONANCE_DIRECT_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY", True)
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
@@ -3765,6 +3773,7 @@ def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price(monkey
         "gmgn_momentum_gain_pct": 4,
         "gmgn_momentum_confirmed": False,
         "gmgn_volume_confirmed": False,
+        "quote_clean_seen": True,
         "last_market_cap": 42000,
     }
 
@@ -3806,6 +3815,7 @@ def test_source_resonance_upgrade_arms_pending_after_smart_entry_no_price(monkey
 
 def test_source_resonance_upgrade_allows_smart_entry_soft_reject(monkeypatch):
     monkeypatch.setattr(monitor, "SOURCE_RESONANCE_DIRECT_PROBE_ENABLED", True)
+    monkeypatch.setattr(monitor, "SOURCE_RESONANCE_TINY_PROBE_BYPASS_SMART_ENTRY", True)
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
@@ -3837,6 +3847,7 @@ def test_source_resonance_upgrade_allows_smart_entry_soft_reject(monkeypatch):
         "gmgn_momentum_gain_pct": 0,
         "gmgn_momentum_confirmed": False,
         "gmgn_volume_confirmed": False,
+        "quote_clean_seen": True,
         "last_market_cap": 42000,
     }
 

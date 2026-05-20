@@ -58,6 +58,10 @@ FAST_ENTRY_PREMIUM_BATCH_LIMIT = int(os.environ.get("FAST_ENTRY_PREMIUM_BATCH_LI
 FAST_ENTRY_SOURCE_SCAN_LIMIT = int(os.environ.get("FAST_ENTRY_SOURCE_SCAN_LIMIT", "40"))
 FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_SEC", "30"))
 FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
+FAST_ENTRY_HARD_GATE_DIRECT_ENABLED = os.environ.get(
+    "FAST_ENTRY_HARD_GATE_DIRECT_ENABLED",
+    "false",
+).lower() == "true"
 FAST_ENTRY_SOURCE_GMGN_ONLY_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_SOURCE_GMGN_ONLY_DIRECT_ENABLED",
     "false",
@@ -149,6 +153,14 @@ FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED = int(os.environ.get(
 FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR = float(os.environ.get(
     "FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR",
     "-0.03",
+))
+FAST_ENTRY_BRANCH_CIRCUIT_P10_PNL_FLOOR = float(os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_P10_PNL_FLOOR",
+    "-0.30",
+))
+FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR = float(os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR",
+    "-0.80",
 ))
 
 FAST_LANE_HARD_REJECT_STATUSES = {
@@ -907,11 +919,21 @@ def branch_circuit_detail(db, branch, *, market_session=None, now_ts=None):
         "lookback_sec": FAST_ENTRY_BRANCH_CIRCUIT_LOOKBACK_SEC,
         "min_closed": FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED,
         "avg_pnl_floor": FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR,
+        "p10_pnl_floor": FAST_ENTRY_BRANCH_CIRCUIT_P10_PNL_FLOOR,
+        "max_loss_floor": FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR,
         "auto_action": "allow_or_keep_watch",
     }
     if closed_n >= FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED and avg_pnl < FAST_ENTRY_BRANCH_CIRCUIT_AVG_PNL_FLOOR:
         detail["pass"] = False
         detail["reason"] = "branch_circuit_negative_ev"
+        detail["auto_action"] = "downgrade_to_watch_only"
+    elif closed_n >= FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED and detail["p10_pnl"] is not None and detail["p10_pnl"] < FAST_ENTRY_BRANCH_CIRCUIT_P10_PNL_FLOOR:
+        detail["pass"] = False
+        detail["reason"] = "branch_circuit_tail_loss"
+        detail["auto_action"] = "downgrade_to_watch_only"
+    elif closed_n > 0 and detail["max_loss"] is not None and detail["max_loss"] < FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR:
+        detail["pass"] = False
+        detail["reason"] = "branch_circuit_catastrophic_loss"
         detail["auto_action"] = "downgrade_to_watch_only"
     return detail
 
@@ -920,6 +942,18 @@ def direct_fill_policy(row, *, now_ts=None):
     branch = str(row_value(row, "entry_branch", "") or "")
     source_type = str(row_value(row, "source_type", "") or "")
     payload = row_payload(row)
+    if "hard_gate" in source_type or "hard_gate" in branch:
+        if not FAST_ENTRY_HARD_GATE_DIRECT_ENABLED:
+            return {
+                "pass": False,
+                "status": "counterfactual_only",
+                "reason": "hard_gate_fast_direct_entry_disabled_counterfactual_only",
+                "detail": {
+                    "entry_branch": branch,
+                    "source_type": source_type,
+                    "auto_action": "downgrade_to_counterfactual_only",
+                },
+            }
     if branch == "source_gmgn_momentum_canary":
         detail = source_gmgn_momentum_canary_detail(payload, now_ts=now_ts)
         if not detail.get("pass"):
@@ -1648,6 +1682,29 @@ def process_premium_signal_row(pdb, row, *, now_ts=None):
         "signal_type": row["signal_type"],
         "description": row["description"],
     }
+    receive_ts = row["receive_ts"] or row["timestamp"]
+    if candidate_is_too_stale(receive_ts, now_ts, source_type):
+        inserted = record_fast_lane_observation(
+            pdb,
+            source_type=source_type,
+            token_ca=row["token_ca"],
+            symbol=row["symbol"],
+            signal_ts=row["timestamp"],
+            receive_ts=row["receive_ts"],
+            recorded_ts=row["created_at"],
+            entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
+            entry_branch=branch,
+            hard_gate_status=status,
+            trigger_mc=row["market_cap"],
+            priority=priority,
+            payload=payload,
+            status="watch_only",
+            reason="premium_signal_stale_watch_only",
+            now_ts=now_ts,
+        )
+        if inserted:
+            log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=premium_signal_stale_watch_only", source_type, row["token_ca"], status)
+        return "watch_only"
     policy_probe = {
         "entry_branch": branch,
         "source_type": source_type,
@@ -1675,29 +1732,6 @@ def process_premium_signal_row(pdb, row, *, now_ts=None):
         )
         if inserted:
             log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=%s", source_type, row["token_ca"], status, policy.get("reason"))
-        return "watch_only"
-    receive_ts = row["receive_ts"] or row["timestamp"]
-    if candidate_is_too_stale(receive_ts, now_ts, source_type):
-        inserted = record_fast_lane_observation(
-            pdb,
-            source_type=source_type,
-            token_ca=row["token_ca"],
-            symbol=row["symbol"],
-            signal_ts=row["timestamp"],
-            receive_ts=row["receive_ts"],
-            recorded_ts=row["created_at"],
-            entry_mode_hint="hard_gate_pass_tiny_probe" if source_type == "hard_gate_fast" else "pre_pass_resonance_tiny_probe",
-            entry_branch=branch,
-            hard_gate_status=status,
-            trigger_mc=row["market_cap"],
-            priority=priority,
-            payload=payload,
-            status="watch_only",
-            reason="premium_signal_stale_watch_only",
-            now_ts=now_ts,
-        )
-        if inserted:
-            log.info("[FAST_WATCH] premium source=%s token=%s status=%s reason=premium_signal_stale_watch_only", source_type, row["token_ca"], status)
         return "watch_only"
     inserted = enqueue_fast_entry(
         pdb,

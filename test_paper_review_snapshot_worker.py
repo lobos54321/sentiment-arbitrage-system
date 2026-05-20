@@ -1,7 +1,7 @@
 import sqlite3
 import time
 
-from scripts.paper_review_snapshot_worker import build_snapshot, missed_since_predicate, since_predicate
+from scripts.paper_review_snapshot_worker import build_snapshot, market_session_for_ts, missed_since_predicate, since_predicate
 
 
 def test_since_predicate_keeps_timestamp_columns_index_friendly():
@@ -201,7 +201,7 @@ def test_review_snapshot_worker_outputs_branch_session_ev(tmp_path):
         );
         """
     )
-    ts = 1_779_116_400  # 2026-05-18 15:00 UTC, us session
+    ts = int(time.time()) - 3600
     db.executemany(
         """
         INSERT INTO paper_trades
@@ -222,7 +222,7 @@ def test_review_snapshot_worker_outputs_branch_session_ev(tmp_path):
     ev = snapshot["fast_lane"]["branch_ev_summary"][0]
 
     assert ev["entry_branch"] == "source_quote_clean_refresh_tiny_probe"
-    assert ev["market_session"] == "us"
+    assert ev["market_session"] == market_session_for_ts(ts)
     assert ev["closed_n"] == 20
     assert ev["avg_pnl_pct"] == -6.0
     assert ev["auto_action"] == "downgrade_to_watch_only"
