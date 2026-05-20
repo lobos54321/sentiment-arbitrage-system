@@ -636,7 +636,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--paper-db", default=os.environ.get("PAPER_DB", str(DEFAULT_PAPER_DB)))
     parser.add_argument("--out-dir", default=os.environ.get("PAPER_REVIEW_LIVE_DIR", str(DEFAULT_OUT_DIR)))
-    parser.add_argument("--windows", default=os.environ.get("PAPER_REVIEW_WINDOWS", "2,8,24"))
+    parser.add_argument("--windows", default=os.environ.get("PAPER_REVIEW_WINDOWS", "2,8,12,24"))
     parser.add_argument("--limit", type=int, default=int(os.environ.get("PAPER_REVIEW_SNAPSHOT_LIMIT", "40")))
     parser.add_argument("--interval", type=float, default=float(os.environ.get("PAPER_REVIEW_SNAPSHOT_INTERVAL_SEC", "300")))
     parser.add_argument("--loop", action="store_true")
