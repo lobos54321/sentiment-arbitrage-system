@@ -24,7 +24,7 @@ TMP_DELETE_BYTES = int(float(os.environ.get("ZEABUR_TMP_DELETE_MIN_MB", "256")) 
 DISK_WARN_FREE_BYTES = int(float(os.environ.get("ZEABUR_DISK_WARN_FREE_MB", "256")) * 1024 * 1024)
 QUARANTINE_MALFORMED_PAPER_DB = os.environ.get("ZEABUR_QUARANTINE_MALFORMED_PAPER_DB", "true").lower() != "false"
 RECOVERY_DIR = Path(os.environ.get("ZEABUR_RECOVERY_DIR", str(DATA_DIR / "recovery")))
-QUICK_CHECK_MAX_BYTES = int(float(os.environ.get("ZEABUR_PREFLIGHT_QUICK_CHECK_MAX_MB", "1024")) * 1024 * 1024)
+QUICK_CHECK_MAX_BYTES = int(float(os.environ.get("ZEABUR_PREFLIGHT_QUICK_CHECK_MAX_MB", "64")) * 1024 * 1024)
 
 LOG_NAMES = [
     "node.log",
@@ -195,8 +195,11 @@ def checkpoint_db(path: Path) -> None:
                     return
             else:
                 log(f"quick_check skipped {path.name} size={size // (1024 * 1024)}MB max={QUICK_CHECK_MAX_BYTES // (1024 * 1024)}MB")
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            log(f"checkpoint ok {path.name}")
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint and int(checkpoint[0] or 0) != 0:
+                log(f"WARN checkpoint busy {path.name} result={tuple(checkpoint)}")
+            else:
+                log(f"checkpoint ok {path.name} result={tuple(checkpoint) if checkpoint else None}")
         finally:
             conn.close()
     except Exception as exc:
