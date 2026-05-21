@@ -1,6 +1,7 @@
 import sqlite3
 import time
 import json
+import datetime as dt
 
 from scripts import paper_fast_lane as fast
 
@@ -389,6 +390,24 @@ def test_ttl_rescue_requires_fresh_tradable_timestamp(monkeypatch):
     assert fresh["pass"] is True
 
 
+def test_clean_reclaim_uses_recent_missed_update_as_fresh_anchor(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "not_ath_reclaim_fast",
+        "entry_branch": "not_ath_reclaim_quote_clean_tiny_probe",
+        "payload_json": json.dumps({
+            "tradable_missed": 1,
+            "would_stop_before_peak": 0,
+            "first_tradable_ts": now - 1800,
+            "missed_updated_at": dt.datetime.utcfromtimestamp(now - 20).strftime("%Y-%m-%d %H:%M:%S"),
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is True
+    assert detail["detail"]["tradable_age_sec"] <= 25
+
+
 def test_kline_rescue_is_counterfactual_only_by_default():
     detail = fast.direct_fill_policy({
         "source_type": "kline_retry_reclaim_fast",
@@ -576,7 +595,7 @@ def test_not_ath_reclaim_canary_allows_clean_fresh_reclaim(monkeypatch):
     }, now_ts=now)
 
     assert stopped["pass"] is False
-    assert stopped["reason"] == "not_ath_reclaim_stop_before_peak_watch_only"
+    assert stopped["reason"] == "clean_dog_reclaim_stop_before_peak_watch_only"
     assert fresh["pass"] is True
     assert fresh["reason"] == "not_ath_reclaim_quote_clean_tiny_probe"
 
@@ -1009,7 +1028,7 @@ def test_missed_not_ath_kline_rescue_queues_lotto_reclaim_mode(tmp_path, monkeyp
     result = fast.scan_missed_rescue_once(db, now_ts=now)
     queue = db.execute(
         """
-        SELECT source_type, entry_branch, entry_mode_hint, status
+        SELECT source_type, entry_branch, entry_mode_hint, status, priority
         FROM paper_fast_entry_queue
         WHERE token_ca = 'TokenNotAth'
         """
@@ -1020,3 +1039,66 @@ def test_missed_not_ath_kline_rescue_queues_lotto_reclaim_mode(tmp_path, monkeyp
     assert queue["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
     assert queue["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
     assert queue["status"] == "queued"
+    assert queue["priority"] == fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
+
+
+def test_missed_pre_pass_stale_rescue_queues_clean_reclaim(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenPrePass', 'PRE', ?, 11, 'LOTTO', 'upstream_gate',
+            'pre_pass_signal_too_stale', 1.0, ?, ?, ?, 1, 0, 1.1,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 1800, now - 1800, now - 1800, now - 1600, now - 15),
+    )
+    db.commit()
+
+    result = fast.scan_missed_rescue_once(db, now_ts=now)
+    queue = db.execute(
+        """
+        SELECT source_type, entry_branch, entry_mode_hint, status, priority
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenPrePass'
+        """
+    ).fetchone()
+
+    assert result["queued"] == 1
+    assert queue["source_type"] == "pre_pass_stale_reclaim_fast"
+    assert queue["entry_branch"] == "pre_pass_stale_reclaim_quote_clean_tiny_probe"
+    assert queue["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert queue["status"] == "queued"
+    assert queue["priority"] == fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY

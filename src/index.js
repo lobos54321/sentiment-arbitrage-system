@@ -16,8 +16,8 @@
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import fs from 'fs';
-import { spawn } from 'child_process';
-import { dirname } from 'path';
+import { spawn, spawnSync } from 'child_process';
+import { dirname, join } from 'path';
 import { TelegramUserListener } from './inputs/telegram-user-listener.js';
 import { SolanaSnapshotService } from './inputs/chain-snapshot-sol.js';
 import { BSCSnapshotService } from './inputs/chain-snapshot-bsc.js';
@@ -57,6 +57,34 @@ function envFlag(name, defaultValue = true) {
   const raw = process.env[name];
   if (raw == null || raw === '') return defaultValue;
   return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+}
+
+function runVolumePreflightOnce() {
+  if (!envFlag('NODE_STARTUP_PREFLIGHT_ENABLED', true)) return;
+  const dataDir = process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
+  const script = join(process.cwd(), 'scripts', 'zeabur_preflight_cleanup.py');
+  if (!fs.existsSync(script)) return;
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const logPath = join(dataDir, 'preflight.log');
+    fs.appendFileSync(logPath, `[node-preflight] ${new Date().toISOString()} starting ${script}\n`);
+    const result = spawnSync('python3', [script], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ZEABUR_DATA_DIR: dataDir,
+        PYTHONUNBUFFERED: '1',
+      },
+      encoding: 'utf8',
+      timeout: Number(process.env.NODE_STARTUP_PREFLIGHT_TIMEOUT_MS || 45000),
+      maxBuffer: 1024 * 1024,
+    });
+    if (result.stdout) fs.appendFileSync(logPath, result.stdout);
+    if (result.stderr) fs.appendFileSync(logPath, result.stderr);
+    fs.appendFileSync(logPath, `[node-preflight] ${new Date().toISOString()} exit status=${result.status} signal=${result.signal || ''} error=${result.error?.message || ''}\n`);
+  } catch (error) {
+    console.error('[node-preflight] failed:', error?.message || error);
+  }
 }
 
 function premiumLiveExecutionEnabled(config = {}) {
@@ -1060,6 +1088,8 @@ class PremiumChannelSystem {
 // ==========================================
 
 async function main() {
+  runVolumePreflightOnce();
+
   const mode = process.argv.includes('--premium') || process.env.PREMIUM_MODE_ENABLED === 'true'
     ? 'premium'
     : 'default';

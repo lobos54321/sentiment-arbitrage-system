@@ -11,6 +11,7 @@ import {
   buildClosedLoopMissedDogSummary,
   boundedIntParam,
   boundedWindowedSinceTs,
+  dogCatchGoalFromLiveSnapshot,
   missedRecoverySummaryFromLiveSnapshot,
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
@@ -183,6 +184,41 @@ test('dog catch goal progress uses peak wins and clean missed dogs', () => {
     'peak_win_rate_below_target',
   ]);
   db.close();
+});
+
+test('dog catch goal can be served from materialized live snapshot section', () => {
+  const snapshot = {
+    snapshot_id: 'paper_live_2h_test',
+    generated_at: '2026-05-21T00:00:00Z',
+    dog_catch_goal: {
+      available: true,
+      since_ts: 1000,
+      trades: { fills: 1, peak_wins: 1, captured_gold_silver_unique: 1 },
+      missed: {
+        clean_gold_silver_unique: 2,
+        clean_gold_unique: 1,
+        clean_silver_unique: 1,
+        by_blocker: [{ route: 'LOTTO', reject_reason: 'tracking_ttl_expired', gold_n: 1 }],
+      },
+      goal: {
+        eligible_gold_silver_unique: 3,
+        captured_gold_silver_unique: 1,
+        clean_gold_silver_capture_rate: 1 / 3,
+        pass: false,
+        blockers: ['clean_gold_silver_capture_rate_below_target'],
+      },
+    },
+  };
+
+  const progress = dogCatchGoalFromLiveSnapshot(snapshot, {
+    dbPath: '/tmp/paper.db',
+    requestedHours: 2,
+  });
+
+  assert.equal(progress.materialized, true);
+  assert.equal(progress.materialized_snapshot_id, 'paper_live_2h_test');
+  assert.equal(progress.goal.eligible_gold_silver_unique, 3);
+  assert.equal(progress.missed.by_blocker[0].reject_reason, 'tracking_ttl_expired');
 });
 
 test('closed loop missed dog summary ranks one blocker per token in SQL', () => {

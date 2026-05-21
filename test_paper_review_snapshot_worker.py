@@ -109,6 +109,7 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
         "fast_lane",
         "entry_mode_performance",
         "route_health",
+        "dog_catch_goal",
     }
     assert snapshot["missed"]["available"] is True
     assert snapshot["missed"]["overall"]["unique_tokens"] == 1
@@ -123,6 +124,9 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
     assert snapshot["entry_mode_performance"]["by_entry_mode"][0]["entry_mode"] == "hard_gate_pass_tiny_probe"
     assert snapshot["route_health"]["available"] is True
     assert snapshot["route_health"]["routes"][0]["entry_branch"] == "hard_gate_fast_clean"
+    assert snapshot["dog_catch_goal"]["available"] is True
+    assert snapshot["dog_catch_goal"]["trades"]["fills"] == 1
+    assert snapshot["dog_catch_goal"]["missed"]["clean_gold_unique"] == 1
 
 
 def test_review_snapshot_worker_separates_mark_only_missed_peaks(tmp_path):

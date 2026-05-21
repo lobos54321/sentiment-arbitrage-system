@@ -37,6 +37,10 @@ DEFAULT_SIGNAL_DB = PROJECT_ROOT / "data" / "sentiment_arb.db"
 log = logging.getLogger("paper_fast_lane")
 
 FAST_LANE_POLICY_VERSION = os.environ.get("PAPER_FAST_LANE_POLICY_VERSION", "fast_lane_v1")
+CLEAN_DOG_RECLAIM_POLICY_VERSION = os.environ.get(
+    "CLEAN_DOG_RECLAIM_POLICY_VERSION",
+    "clean_dog_reclaim_v2",
+)
 FAST_ENTRY_ENABLED = os.environ.get("PAPER_FAST_ENTRY_ENABLED", "true").lower() != "false"
 FAST_ENTRY_SIZE_SOL = float(os.environ.get("FAST_ENTRY_SIZE_SOL", "0.002"))
 FAST_ENTRY_DEGRADED_SIZE_SOL = float(os.environ.get("FAST_ENTRY_DEGRADED_SIZE_SOL", "0.001"))
@@ -60,6 +64,8 @@ FAST_ENTRY_PREMIUM_BATCH_LIMIT = int(os.environ.get("FAST_ENTRY_PREMIUM_BATCH_LI
 FAST_ENTRY_SOURCE_SCAN_LIMIT = int(os.environ.get("FAST_ENTRY_SOURCE_SCAN_LIMIT", "40"))
 FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_SEC", "30"))
 FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
+FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY", "8"))
+FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY", "12"))
 FAST_ENTRY_HARD_GATE_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_HARD_GATE_DIRECT_ENABLED",
     "false",
@@ -210,6 +216,13 @@ KLINE_RESCUE_BRANCHES = {
     "not_ath_prebuy_kline_retry_expired",
 }
 
+CLEAN_DOG_RECLAIM_BRANCHES = {
+    "not_ath_reclaim_quote_clean_tiny_probe",
+    "tracking_ttl_reclaim_quote_clean_tiny_probe",
+    "pre_pass_stale_reclaim_quote_clean_tiny_probe",
+    "smart_entry_reclaim_quote_clean_tiny_probe",
+}
+
 SMART_QUALITY_RECHECK_REASONS = {
     "weak_buying_pressure",
     "no_kline_low_volume",
@@ -229,7 +242,7 @@ DEGRADED_CANARY_BRANCHES = {
     "source_gmgn_momentum_canary",
     "source_quote_clean_refresh_tiny_probe",
     "ttl_final_reclaim_quote_clean",
-    "not_ath_reclaim_quote_clean_tiny_probe",
+    *CLEAN_DOG_RECLAIM_BRANCHES,
     "kline_recovery_quote_clean_tiny_probe",
     "smart_quality_reclaim_tiny_probe",
     "matrix_timeout_final_quote_tiny_probe",
@@ -905,7 +918,19 @@ def recovery_tradable_fresh_detail(payload, *, now_ts=None, max_age_sec=None):
     max_age_sec = FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC if max_age_sec is None else max_age_sec
     if not (_payload_bool(payload, "tradable_missed") or _payload_bool(payload, "recovery_quote_clean") or _payload_bool(payload, "final_reclaim_quote_executable")):
         return {"pass": False, "reason": "recovery_quote_clean_missing"}
-    age_sec = payload_ts_age_sec(payload, ("first_tradable_ts", "recovery_created_ts", "rescue_created_ts"), now_ts=now_ts)
+    age_sec = payload_ts_age_sec(
+        payload,
+        (
+            "last_tradable_ts",
+            "last_clean_quote_ts",
+            "missed_updated_at",
+            "updated_at",
+            "first_tradable_ts",
+            "recovery_created_ts",
+            "rescue_created_ts",
+        ),
+        now_ts=now_ts,
+    )
     if age_sec is None:
         return {"pass": False, "reason": "recovery_tradable_timestamp_missing"}
     if age_sec > float(max_age_sec):
@@ -1096,14 +1121,14 @@ def direct_fill_policy(row, *, now_ts=None):
                 reason = reason[len("recovery_"):]
             return {"pass": False, "status": "counterfactual_only", "reason": f"kline_recovery_{reason}", "detail": detail}
         return {"pass": True, "status": "queued", "reason": "kline_recovery_quote_clean_tiny_probe", "detail": detail}
-    if branch == "not_ath_reclaim_quote_clean_tiny_probe":
+    if branch in CLEAN_DOG_RECLAIM_BRANCHES:
         if not FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED:
-            return {"pass": False, "status": "watch_only", "reason": "not_ath_reclaim_canary_disabled"}
+            return {"pass": False, "status": "watch_only", "reason": "clean_dog_reclaim_canary_disabled"}
         if _payload_bool(payload, "would_stop_before_peak"):
             return {
                 "pass": False,
                 "status": "watch_only",
-                "reason": "not_ath_reclaim_stop_before_peak_watch_only",
+                "reason": "clean_dog_reclaim_stop_before_peak_watch_only",
                 "detail": {"would_stop_before_peak": True},
             }
         detail = recovery_tradable_fresh_detail(
@@ -1112,8 +1137,8 @@ def direct_fill_policy(row, *, now_ts=None):
             max_age_sec=FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC,
         )
         if not detail.get("pass"):
-            return {"pass": False, "status": "watch_only", "reason": f"not_ath_reclaim_{detail.get('reason')}", "detail": detail}
-        return {"pass": True, "status": "queued", "reason": "not_ath_reclaim_quote_clean_tiny_probe", "detail": detail}
+            return {"pass": False, "status": "watch_only", "reason": f"clean_dog_reclaim_{detail.get('reason')}", "detail": detail}
+        return {"pass": True, "status": "queued", "reason": branch, "detail": detail}
     if branch == "smart_quality_reclaim_tiny_probe":
         if not FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED:
             return {"pass": False, "status": "watch_only", "reason": "smart_quality_recheck_canary_disabled"}
@@ -2103,9 +2128,11 @@ def source_resonance_scan(paper_db_path, stop_event):
 
 def missed_rescue_signature(row):
     values = [
+        CLEAN_DOG_RECLAIM_POLICY_VERSION,
         row_value(row, "tradable_missed", 0),
         row_value(row, "would_stop_before_peak", 0),
         row_value(row, "first_tradable_ts"),
+        row_value(row, "updated_at"),
         row_value(row, "executable_peak_pnl"),
         row_value(row, "route"),
         row_value(row, "component"),
@@ -2123,8 +2150,11 @@ def missed_rescue_entry_mode_hint(row, reason, branch):
         and (
             reason_l.startswith("tracking_ttl")
             or "not_ath_prebuy_kline" in reason_l
+            or reason_l == "pre_pass_signal_too_stale"
             or reason_l.startswith("lotto_stale_")
             or branch_l.startswith("not_ath_reclaim")
+            or branch_l.startswith("pre_pass_stale_reclaim")
+            or branch_l.startswith("tracking_ttl_reclaim")
         )
     ):
         return "lotto_not_ath_reclaim_tiny_probe"
@@ -2152,6 +2182,21 @@ def mark_missed_rescue_processed(db, missed_id, signature, *, status=None, reaso
     )
 
 
+def missed_rescue_priority(row, branch):
+    peak = 0.0
+    try:
+        peak = float(row_value(row, "executable_peak_pnl", 0) or 0)
+    except (TypeError, ValueError):
+        peak = 0.0
+    if branch in CLEAN_DOG_RECLAIM_BRANCHES:
+        if peak >= 0.50:
+            return FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
+        if peak >= 0.25:
+            return FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY
+        return 20
+    return 35
+
+
 def process_missed_rescue_row(db, row, *, now_ts=None):
     now_ts = int(now_ts if now_ts is not None else time.time())
     reason = str(row["reject_reason"] or "missed_rescue")
@@ -2160,7 +2205,10 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
     reason_l = reason.lower()
     if reason.startswith("tracking_ttl"):
         source_type = "ttl_final_reclaim_fast"
-        branch = "ttl_final_reclaim_quote_clean"
+        branch = "tracking_ttl_reclaim_quote_clean_tiny_probe"
+    elif reason_l == "pre_pass_signal_too_stale":
+        source_type = "pre_pass_stale_reclaim_fast"
+        branch = "pre_pass_stale_reclaim_quote_clean_tiny_probe"
     elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
         source_type = "not_ath_reclaim_fast"
         branch = "not_ath_reclaim_quote_clean_tiny_probe"
@@ -2172,7 +2220,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         branch = reason
     elif reason in SMART_QUALITY_RECHECK_REASONS:
         source_type = "smart_quality_reclaim_fast"
-        branch = "smart_quality_reclaim_tiny_probe"
+        branch = "smart_entry_reclaim_quote_clean_tiny_probe"
     elif reason in MATRIX_TIMEOUT_RECHECK_REASONS or reason_l.startswith("timeout (") or reason_l.startswith("price_collapse"):
         source_type = "matrix_timeout_reclaim_fast"
         branch = "matrix_timeout_final_quote_tiny_probe"
@@ -2185,6 +2233,9 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         "original_signal_ts": original_signal_ts,
         "original_receive_ts": original_signal_ts,
         "first_tradable_ts": row["first_tradable_ts"],
+        "last_tradable_ts": row_value(row, "updated_at"),
+        "last_clean_quote_ts": row_value(row, "updated_at"),
+        "missed_updated_at": row_value(row, "updated_at"),
         "rescue_created_ts": rescue_created_ts,
         "recovery_created_ts": rescue_created_ts,
         "tradable_missed": row["tradable_missed"],
@@ -2196,6 +2247,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         "executable_peak_pnl": row["executable_peak_pnl"],
     }
     entry_mode_hint = missed_rescue_entry_mode_hint(row, reason, branch)
+    priority = missed_rescue_priority(row, branch)
     policy_probe = {
         "entry_branch": branch,
         "source_type": source_type,
@@ -2215,7 +2267,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
             entry_mode_hint=entry_mode_hint,
             entry_branch=branch,
             trigger_price=row["baseline_price"],
-            priority=35,
+            priority=priority,
             payload=payload,
             status=policy.get("status") or "counterfactual_only",
             reason=policy.get("reason"),
@@ -2235,7 +2287,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         entry_mode_hint=entry_mode_hint,
         entry_branch=branch,
         trigger_price=row["baseline_price"],
-        priority=35,
+        priority=priority,
         payload=payload,
         now_ts=now_ts,
     )
@@ -2263,6 +2315,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
                {optional_col(cols, 'tradable_missed', '0')},
                {optional_col(cols, 'would_stop_before_peak', '0')},
                {optional_col(cols, 'executable_peak_pnl', '0')},
+               {'m.updated_at AS updated_at' if 'updated_at' in cols else 'NULL AS updated_at'},
                s.rescue_signature AS processed_signature
         FROM paper_missed_signal_attribution m
         LEFT JOIN paper_fast_missed_rescue_state s ON s.missed_attribution_id = m.id
@@ -2281,10 +2334,12 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
               'entry_edge_spread_too_high',
               'missing_trigger_or_quote',
               'entry_edge_probe_missing_trigger_or_quote',
+              'pre_pass_signal_too_stale',
               'weak_buying_pressure',
               'no_kline_low_volume',
               'negative_trend',
               'chasing_top',
+              'trend_bearish_timeout',
               'scout_quality_buy_pressure_weak',
               'scout_quality_volume_low',
               'scout_quality_tx_low',

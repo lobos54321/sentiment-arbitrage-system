@@ -787,6 +787,194 @@ def branch_ev_summary(db, since_ts, limit):
     return out[:limit]
 
 
+def dog_catch_goal_summary(db, since_ts):
+    target_capture = float(os.environ.get("DOG_CATCH_GOAL_CAPTURE_RATE", "0.60"))
+    target_peak_win = float(os.environ.get("DOG_CATCH_GOAL_PEAK_WIN_RATE", "0.55"))
+    target_roi = float(os.environ.get("DOG_CATCH_GOAL_ROI", "2.0"))
+    dog_peak = float(os.environ.get("DOG_CATCH_GOAL_DOG_PEAK", "0.50"))
+    win_peak = float(os.environ.get("DOG_CATCH_GOAL_WIN_PEAK", "0.30"))
+    result = {
+        "available": True,
+        "since_ts": since_ts,
+        "targets": {
+            "clean_gold_silver_capture_rate": target_capture,
+            "peak_win_rate": target_peak_win,
+            "realized_roi": target_roi,
+            "dog_peak_threshold": dog_peak,
+            "win_peak_threshold": win_peak,
+        },
+        "trades": {
+            "fills": 0,
+            "closed": 0,
+            "peak_wins": 0,
+            "peak_win_rate": None,
+            "captured_gold_silver_unique": 0,
+            "realized_pnl_sol": 0.0,
+            "deployed_sol": 0.0,
+            "realized_roi": None,
+        },
+        "missed": {
+            "clean_gold_silver_unique": 0,
+            "clean_gold_unique": 0,
+            "clean_silver_unique": 0,
+            "by_blocker": [],
+        },
+        "goal": {
+            "eligible_gold_silver_unique": 0,
+            "captured_gold_silver_unique": 0,
+            "clean_gold_silver_capture_rate": None,
+            "pass": False,
+            "blockers": [],
+        },
+    }
+    captured_tokens = set()
+    if table_exists(db, "paper_trades"):
+        cols = columns(db, "paper_trades")
+        peak_expr = "peak_pnl" if "peak_pnl" in cols else "0"
+        if "trusted_peak_pnl" in cols and "quote_peak_pnl" in cols:
+            peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), NULLIF(quote_peak_pnl, 0), 0)"
+        elif "trusted_peak_pnl" in cols:
+            peak_expr = "COALESCE(NULLIF(trusted_peak_pnl, 0), 0)"
+        elif "quote_peak_pnl" in cols:
+            peak_expr = "COALESCE(NULLIF(quote_peak_pnl, 0), 0)"
+        pnl_expr = "pnl_pct" if "pnl_pct" in cols else "0"
+        size_expr = "position_size_sol" if "position_size_sol" in cols else "0"
+        token_expr = "token_ca" if "token_ca" in cols else "NULL"
+        where = "WHERE " + since_predicate(cols, ["entry_ts", "exit_ts"])
+        closed_expr = "1"
+        if "exit_ts" in cols or "exit_reason" in cols or "pnl_pct" in cols:
+            closed_terms = []
+            if "exit_ts" in cols:
+                closed_terms.append("exit_ts IS NOT NULL")
+            if "exit_reason" in cols:
+                closed_terms.append("exit_reason IS NOT NULL")
+            if "pnl_pct" in cols:
+                closed_terms.append("pnl_pct IS NOT NULL")
+            closed_expr = f"CASE WHEN {' OR '.join(closed_terms)} THEN 1 ELSE 0 END"
+        rows = rows_as_dicts(db.execute(
+            f"""
+            SELECT {token_expr} AS token_ca,
+                   {peak_expr} AS peak_pnl,
+                   {pnl_expr} AS pnl_pct,
+                   {size_expr} AS position_size_sol,
+                   {closed_expr} AS closed
+            FROM paper_trades
+            {where}
+            """,
+            {"since": since_ts},
+        ).fetchall())
+        result["trades"]["fills"] = len(rows)
+        for row in rows:
+            peak = as_float(row.get("peak_pnl"), 0.0)
+            pnl = as_float(row.get("pnl_pct"), 0.0)
+            size = as_float(row.get("position_size_sol"), 0.0)
+            if as_int(row.get("closed"), 0) == 1:
+                result["trades"]["closed"] += 1
+            if peak >= win_peak:
+                result["trades"]["peak_wins"] += 1
+            if peak >= dog_peak and row.get("token_ca"):
+                captured_tokens.add(str(row.get("token_ca")))
+            result["trades"]["deployed_sol"] += size
+            result["trades"]["realized_pnl_sol"] += pnl * size
+        result["trades"]["captured_gold_silver_unique"] = len(captured_tokens)
+        if result["trades"]["fills"]:
+            result["trades"]["peak_win_rate"] = result["trades"]["peak_wins"] / result["trades"]["fills"]
+        if result["trades"]["deployed_sol"] > 0:
+            result["trades"]["realized_roi"] = result["trades"]["realized_pnl_sol"] / result["trades"]["deployed_sol"]
+        result["trades"]["realized_pnl_sol"] = round(result["trades"]["realized_pnl_sol"], 6)
+        result["trades"]["deployed_sol"] = round(result["trades"]["deployed_sol"], 6)
+
+    if table_exists(db, "paper_missed_signal_attribution"):
+        cols = columns(db, "paper_missed_signal_attribution")
+        peak_expr = coalesce_expr(cols, ["executable_peak_pnl", "tradable_peak_pnl", "max_pnl_recorded", "pnl_24h", "pnl_60m", "pnl_15m", "pnl_5m"], "0")
+        token_expr = "token_ca" if "token_ca" in cols else "NULL"
+        route_expr = "COALESCE(route, '-')" if "route" in cols else "'-'"
+        component_expr = "COALESCE(component, '-')" if "component" in cols else "'-'"
+        reason_expr = "COALESCE(reject_reason, '-')" if "reject_reason" in cols else "'-'"
+        clean_expr = "COALESCE(tradable_missed, 0) = 1" if "tradable_missed" in cols else "0"
+        stop_expr = "COALESCE(would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
+        caught_clause = ""
+        params = {"since": since_ts, "dog_peak": dog_peak}
+        if captured_tokens:
+            placeholders = []
+            for idx, token in enumerate(sorted(captured_tokens)):
+                key = f"caught_{idx}"
+                placeholders.append(f":{key}")
+                params[key] = token
+            caught_clause = f"AND token_ca NOT IN ({', '.join(placeholders)})"
+        rows = rows_as_dicts(db.execute(
+            f"""
+            WITH per_token AS (
+              SELECT {token_expr} AS token_ca,
+                     MAX({peak_expr}) AS max_pnl
+              FROM paper_missed_signal_attribution
+              WHERE {missed_since_predicate(cols)}
+                AND ({clean_expr})
+                AND {stop_expr} != 1
+                {caught_clause}
+              GROUP BY token_ca
+            )
+            SELECT
+              COALESCE(SUM(CASE WHEN max_pnl >= :dog_peak THEN 1 ELSE 0 END), 0) AS clean_gold_silver,
+              COALESCE(SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END), 0) AS clean_gold,
+              COALESCE(SUM(CASE WHEN max_pnl >= :dog_peak AND max_pnl < 1.0 THEN 1 ELSE 0 END), 0) AS clean_silver
+            FROM per_token
+            """,
+            params,
+        ).fetchall())
+        row = rows[0] if rows else {}
+        result["missed"]["clean_gold_silver_unique"] = as_int(row.get("clean_gold_silver"), 0)
+        result["missed"]["clean_gold_unique"] = as_int(row.get("clean_gold"), 0)
+        result["missed"]["clean_silver_unique"] = as_int(row.get("clean_silver"), 0)
+        result["missed"]["by_blocker"] = rows_as_dicts(db.execute(
+            f"""
+            WITH per_token AS (
+              SELECT {route_expr} AS route,
+                     {component_expr} AS component,
+                     {reason_expr} AS reject_reason,
+                     {token_expr} AS token_ca,
+                     MAX({peak_expr}) AS max_pnl
+              FROM paper_missed_signal_attribution
+              WHERE {missed_since_predicate(cols)}
+                AND ({clean_expr})
+                AND {stop_expr} != 1
+                {caught_clause}
+              GROUP BY route, component, reject_reason, token_ca
+            )
+            SELECT route, component, reject_reason,
+                   COUNT(*) AS unique_tokens,
+                   SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_n,
+                   SUM(CASE WHEN max_pnl >= :dog_peak AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_n,
+                   MAX(max_pnl) AS max_pnl
+            FROM per_token
+            WHERE max_pnl >= :dog_peak
+            GROUP BY route, component, reject_reason
+            ORDER BY gold_n DESC, silver_n DESC, unique_tokens DESC, max_pnl DESC
+            LIMIT 20
+            """,
+            params,
+        ).fetchall())
+
+    result["goal"]["captured_gold_silver_unique"] = result["trades"]["captured_gold_silver_unique"]
+    result["goal"]["eligible_gold_silver_unique"] = (
+        result["trades"]["captured_gold_silver_unique"]
+        + result["missed"]["clean_gold_silver_unique"]
+    )
+    if result["goal"]["eligible_gold_silver_unique"]:
+        result["goal"]["clean_gold_silver_capture_rate"] = (
+            result["goal"]["captured_gold_silver_unique"]
+            / result["goal"]["eligible_gold_silver_unique"]
+        )
+    if result["goal"]["clean_gold_silver_capture_rate"] is None or result["goal"]["clean_gold_silver_capture_rate"] < target_capture:
+        result["goal"]["blockers"].append("clean_gold_silver_capture_rate_below_target")
+    if result["trades"]["peak_win_rate"] is None or result["trades"]["peak_win_rate"] < target_peak_win:
+        result["goal"]["blockers"].append("peak_win_rate_below_target")
+    if result["trades"]["realized_roi"] is None or result["trades"]["realized_roi"] < target_roi:
+        result["goal"]["blockers"].append("realized_roi_below_target")
+    result["goal"]["pass"] = not result["goal"]["blockers"]
+    return result
+
+
 def route_health_summary(db, since_ts, limit):
     queue_available = table_exists(db, "paper_fast_entry_queue")
     trade_available = table_exists(db, "paper_trades")
@@ -985,6 +1173,7 @@ def build_snapshot(db, hours, limit):
             lambda: entry_mode_performance_summary(db, since_ts, max(limit, 120)),
         ),
         "route_health": timed_section("route_health", lambda: route_health_summary(db, since_ts, max(limit, 120))),
+        "dog_catch_goal": timed_section("dog_catch_goal", lambda: dog_catch_goal_summary(db, since_ts)),
     }
 
 

@@ -1019,6 +1019,93 @@ function routeHealthFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, lim
   };
 }
 
+export function dogCatchGoalFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, options = {} }) {
+  const section = liveSnapshot?.dog_catch_goal;
+  if (section && typeof section === 'object' && section.available !== false) {
+    return {
+      generated_at: new Date().toISOString(),
+      db_path: dbPath,
+      window_hours: requestedHours,
+      materialized: true,
+      live_query: false,
+      materialized_snapshot_id: liveSnapshot.snapshot_id || null,
+      materialized_generated_at: liveSnapshot.generated_at || null,
+      available: true,
+      ...section,
+    };
+  }
+  const missedSummary = missedRecoverySummaryFromLiveSnapshot(liveSnapshot, {
+    dbPath,
+    requestedHours,
+    limit: 80,
+  });
+  const routeHealth = routeHealthFromLiveSnapshot(liveSnapshot, {
+    dbPath,
+    requestedHours,
+    limit: 120,
+  });
+  const dogPeak = Number(options.dogPeakRatio ?? 0.50);
+  const winPeak = Number(options.winPeakRatio ?? 0.30);
+  const targetCatchRate = Number(options.targetCatchRate ?? 0.60);
+  const targetWinRate = Number(options.targetWinRate ?? 0.55);
+  const targetRoi = Number(options.targetRoi ?? 2.0);
+  const captured = Number(routeHealth?.totals?.entered || 0);
+  const cleanGold = Number(missedSummary?.overall_unique?.gold_n || 0);
+  const cleanSilver = Number(missedSummary?.overall_unique?.silver_n || 0);
+  const eligible = captured + cleanGold + cleanSilver;
+  const captureRate = eligible > 0 ? captured / eligible : null;
+  const blockers = [];
+  if (captureRate == null || captureRate < targetCatchRate) blockers.push('clean_gold_silver_capture_rate_below_target');
+  blockers.push('peak_win_rate_requires_trade_level_snapshot');
+  blockers.push('realized_roi_requires_trade_level_snapshot');
+  return {
+    generated_at: new Date().toISOString(),
+    db_path: dbPath,
+    window_hours: requestedHours,
+    materialized: true,
+    live_query: false,
+    materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+    materialized_generated_at: liveSnapshot?.generated_at || null,
+    available: Boolean(liveSnapshot),
+    since_ts: liveSnapshot?.window?.since_ts ?? null,
+    targets: {
+      clean_gold_silver_capture_rate: targetCatchRate,
+      peak_win_rate: targetWinRate,
+      realized_roi: targetRoi,
+      dog_peak_threshold: dogPeak,
+      win_peak_threshold: winPeak,
+    },
+    trades: {
+      fills: captured,
+      closed: null,
+      peak_wins: null,
+      peak_win_rate: null,
+      captured_gold_silver_unique: captured,
+      realized_pnl_sol: null,
+      deployed_sol: null,
+      realized_roi: null,
+    },
+    missed: {
+      clean_gold_silver_unique: cleanGold + cleanSilver,
+      clean_gold_unique: cleanGold,
+      clean_silver_unique: cleanSilver,
+      by_blocker: Array.isArray(missedSummary?.by_blocker_clean_quote)
+        ? missedSummary.by_blocker_clean_quote.filter((row) => Number(row.gold_n || 0) + Number(row.silver_n || 0) > 0)
+        : [],
+    },
+    goal: {
+      eligible_gold_silver_unique: eligible,
+      captured_gold_silver_unique: captured,
+      clean_gold_silver_capture_rate: captureRate,
+      pass: false,
+      blockers,
+    },
+    notes: {
+      fallback: 'dog_catch_goal section missing in this snapshot; using route-health entered count and missed summary until the snapshot worker refreshes.',
+    },
+  };
+}
+
 function runtimeCommitFingerprint() {
   const envCommit = firstValue(
     process.env.GIT_COMMIT,
@@ -7315,6 +7402,16 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = Math.floor(Date.now() / 1000) - requestedHours * 3600;
       if (!live) {
         const liveSnapshot = readLivePaperReview(Math.min(requestedHours, 24));
+        const options = {
+          targetCatchRate: Number(url.searchParams.get('target_capture') || 0.60),
+          targetWinRate: Number(url.searchParams.get('target_win_rate') || 0.55),
+          targetRoi: Number(url.searchParams.get('target_roi') || 2.0),
+          dogPeakRatio: Number(url.searchParams.get('dog_peak') || 0.50),
+          winPeakRatio: Number(url.searchParams.get('win_peak') || 0.30),
+        };
+        const materializedProgress = liveSnapshot && !liveSnapshot.error
+          ? dogCatchGoalFromLiveSnapshot(liveSnapshot, { dbPath: paperDbPath, requestedHours, options })
+          : null;
         res.writeHead(liveSnapshot && !liveSnapshot.error ? 200 : 202, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
           generated_at: new Date().toISOString(),
@@ -7326,7 +7423,7 @@ const server = http.createServer(async (req, res) => {
           materialized_generated_at: liveSnapshot?.generated_at || null,
           available: Boolean(liveSnapshot && !liveSnapshot.error),
           reason: liveSnapshot?.error || (liveSnapshot ? null : 'materialized_snapshot_not_ready'),
-          summary: liveSnapshot?.summary || null,
+          ...(materializedProgress || {}),
           note: 'Pass live=1 for an on-demand DB calculation; default stays materialized so dashboard health cannot be blocked by SQLite.',
         }, null, 2));
         return;
