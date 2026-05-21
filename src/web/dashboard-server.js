@@ -580,6 +580,9 @@ function readTinyText(filePath, maxBytes = 2000) {
 export function buildStorageHealthSnapshot(options = {}) {
   const root = options.projectRoot || projectRoot;
   const dataDir = options.dataDir || process.env.ZEABUR_DATA_DIR || join(root, 'data');
+  const includeDisk = options.includeDisk === true || String(process.env.STORAGE_HEALTH_INCLUDE_DISK || '').toLowerCase() === 'true';
+  const includeFileStats = options.includeFileStats === true || String(process.env.STORAGE_HEALTH_INCLUDE_FILE_STATS || '').toLowerCase() === 'true';
+  const includePreflightTail = options.includePreflightTail === true || String(process.env.STORAGE_HEALTH_INCLUDE_PREFLIGHT_TAIL || '').toLowerCase() === 'true';
   const paperDbPath = options.paperDbPath || getPaperDbPath();
   const signalDbPath = options.signalDbPath || resolvedDbPath;
   const klineDbPath = options.klineDbPath || (isAbsolute(process.env.KLINE_DB || '')
@@ -590,7 +593,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     : join(root, process.env.LIFECYCLE_DB || 'data/lifecycle_tracks.db'));
   let disk = { available: false };
   try {
-    if (typeof fs.statfsSync === 'function') {
+    if (includeDisk && typeof fs.statfsSync === 'function') {
       const stats = fs.statfsSync(dataDir);
       const total = Number(stats.blocks || 0) * Number(stats.bsize || 0);
       const free = Number(stats.bavail || stats.bfree || 0) * Number(stats.bsize || 0);
@@ -609,6 +612,12 @@ export function buildStorageHealthSnapshot(options = {}) {
   } catch (error) {
     disk = { available: false, path: dataDir, error: error.message };
   }
+  const describeFile = ([label, path]) => includeFileStats ? fileInfo(label, path) : {
+    label,
+    path,
+    skipped: true,
+    reason: 'file_stats_disabled',
+  };
   const dbFiles = [
     ['paper_trades', paperDbPath],
     ['paper_trades_wal', `${paperDbPath}-wal`],
@@ -620,7 +629,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     ['kline_cache_wal', `${klineDbPath}-wal`],
     ['lifecycle_tracks', lifecycleDbPath],
     ['lifecycle_tracks_wal', `${lifecycleDbPath}-wal`],
-  ].map(([label, path]) => fileInfo(label, path));
+  ].map(describeFile);
   const logFiles = [
     'node.log',
     'paper-trader.log',
@@ -630,15 +639,15 @@ export function buildStorageHealthSnapshot(options = {}) {
     'gmgn-scout.log',
     'lifecycle.log',
     'preflight.log',
-  ].map((name) => fileInfo(name, join(dataDir, name)));
+  ].map((name) => describeFile([name, join(dataDir, name)]));
   return {
     generated_at: new Date().toISOString(),
     data_dir: dataDir,
     disk,
     db_files: dbFiles,
     log_files: logFiles,
-    integrity_error: readTinyText(`${paperDbPath}.integrity_error`),
-    preflight_tail: readTinyText(join(dataDir, 'preflight.log'), 4000),
+    integrity_error: includeFileStats ? readTinyText(`${paperDbPath}.integrity_error`) : null,
+    preflight_tail: includePreflightTail ? readTinyText(join(dataDir, 'preflight.log'), 4000) : null,
   };
 }
 
@@ -7286,7 +7295,11 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/storage-health') {
     if (!checkAuth(req, url, res)) return;
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(buildStorageHealthSnapshot(), null, 2));
+    res.end(JSON.stringify(buildStorageHealthSnapshot({
+      includeDisk: ['1', 'true', 'yes'].includes(String(url.searchParams.get('disk') || '').toLowerCase()),
+      includeFileStats: ['1', 'true', 'yes'].includes(String(url.searchParams.get('files') || '').toLowerCase()),
+      includePreflightTail: ['1', 'true', 'yes'].includes(String(url.searchParams.get('tail') || '').toLowerCase()),
+    }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/dog-catch-goal') {
     if (!checkAuth(req, url, res)) return;
@@ -7296,10 +7309,29 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Paper trades database not found' }));
       return;
     }
-    let paperDb;
+    const live = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase());
     try {
       const requestedHours = boundedIntParam(url, 'hours', 24, 1, 72);
       const sinceTs = Math.floor(Date.now() / 1000) - requestedHours * 3600;
+      if (!live) {
+        const liveSnapshot = readLivePaperReview(Math.min(requestedHours, 24));
+        res.writeHead(liveSnapshot && !liveSnapshot.error ? 200 : 202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          generated_at: new Date().toISOString(),
+          db_path: paperDbPath,
+          window_hours: requestedHours,
+          materialized: true,
+          live_query: false,
+          materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+          materialized_generated_at: liveSnapshot?.generated_at || null,
+          available: Boolean(liveSnapshot && !liveSnapshot.error),
+          reason: liveSnapshot?.error || (liveSnapshot ? null : 'materialized_snapshot_not_ready'),
+          summary: liveSnapshot?.summary || null,
+          note: 'Pass live=1 for an on-demand DB calculation; default stays materialized so dashboard health cannot be blocked by SQLite.',
+        }, null, 2));
+        return;
+      }
+      let paperDb;
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
       const progress = buildDogCatchGoalProgress(paperDb, tableNames, sinceTs, {
@@ -7314,13 +7346,14 @@ const server = http.createServer(async (req, res) => {
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
         window_hours: requestedHours,
+        materialized: false,
+        live_query: true,
         ...progress,
       }, null, 2));
+      try { if (paperDb) paperDb.close(); } catch {}
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
-    } finally {
-      try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/fast-lane') {

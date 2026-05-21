@@ -27,6 +27,8 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   const snapshot = buildStorageHealthSnapshot({
     projectRoot: dir,
     dataDir: dir,
+    includeFileStats: true,
+    includePreflightTail: true,
     paperDbPath: paper,
     signalDbPath: join(dir, 'sentiment_arb.db'),
     klineDbPath: join(dir, 'kline_cache.db'),
