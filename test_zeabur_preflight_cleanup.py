@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -37,3 +38,22 @@ def test_malformed_paper_db_is_quarantined_without_deleting_family(tmp_path, mon
     manifest = json.loads((recovery_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["moved"]
     assert "not a database" in manifest["reason"].lower()
+
+
+def test_large_valid_db_skips_startup_quick_check_but_checkpoints(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    paper_db = data_dir / "paper_trades.db"
+    conn = sqlite3.connect(paper_db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO t (value) VALUES ('ok')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(preflight, "QUICK_CHECK_MAX_BYTES", 1)
+
+    preflight.checkpoint_db(paper_db)
+
+    assert paper_db.exists()
+    assert not paper_db.with_suffix(".db.integrity_error").exists()

@@ -24,6 +24,7 @@ TMP_DELETE_BYTES = int(float(os.environ.get("ZEABUR_TMP_DELETE_MIN_MB", "256")) 
 DISK_WARN_FREE_BYTES = int(float(os.environ.get("ZEABUR_DISK_WARN_FREE_MB", "256")) * 1024 * 1024)
 QUARANTINE_MALFORMED_PAPER_DB = os.environ.get("ZEABUR_QUARANTINE_MALFORMED_PAPER_DB", "true").lower() != "false"
 RECOVERY_DIR = Path(os.environ.get("ZEABUR_RECOVERY_DIR", str(DATA_DIR / "recovery")))
+QUICK_CHECK_MAX_BYTES = int(float(os.environ.get("ZEABUR_PREFLIGHT_QUICK_CHECK_MAX_MB", "1024")) * 1024 * 1024)
 
 LOG_NAMES = [
     "node.log",
@@ -181,15 +182,19 @@ def checkpoint_db(path: Path) -> None:
         conn = sqlite3.connect(str(path), timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=5000")
-            row = conn.execute("PRAGMA quick_check").fetchone()
-            status = row[0] if row else "unknown"
-            if status != "ok":
-                log(f"WARN quick_check {path.name}: {status}")
-                write_integrity_marker(path, status)
-                if should_quarantine(path, f"quick_check: {status}"):
-                    conn.close()
-                    quarantine_db_family(path, f"quick_check: {status}")
-                return
+            size = path.stat().st_size
+            if size <= QUICK_CHECK_MAX_BYTES:
+                row = conn.execute("PRAGMA quick_check").fetchone()
+                status = row[0] if row else "unknown"
+                if status != "ok":
+                    log(f"WARN quick_check {path.name}: {status}")
+                    write_integrity_marker(path, status)
+                    if should_quarantine(path, f"quick_check: {status}"):
+                        conn.close()
+                        quarantine_db_family(path, f"quick_check: {status}")
+                    return
+            else:
+                log(f"quick_check skipped {path.name} size={size // (1024 * 1024)}MB max={QUICK_CHECK_MAX_BYTES // (1024 * 1024)}MB")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             log(f"checkpoint ok {path.name}")
         finally:
