@@ -207,7 +207,7 @@ def test_entry_mode_performance_excludes_old_open_rows_from_recent_window(tmp_pa
           ('OLD', 'OLD', ?, ?, NULL, 'lotto_unknown', 0.0, 0.0, 0.05),
           ('NEW', 'NEW', ?, ?, ?, 'pre_pass_resonance_tiny_probe', 0.10, 0.20, 0.001)
         """,
-        (now_ts - 90000, now_ts - 90000, now_ts - 60, now_ts - 60, now_ts - 30),
+        (now_ts - 60, now_ts - 90000, now_ts - 60, now_ts - 60, now_ts - 30),
     )
     db.commit()
 
