@@ -22,6 +22,12 @@ DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "data" / "review-artifacts" / "live"
 PEAK_UNTRUSTED_MARK_GAP_PCT = float(os.environ.get("PEAK_UNTRUSTED_MARK_GAP_PCT", "0.25"))
 ENTRY_MODE_PERFORMANCE_ROW_LIMIT = int(os.environ.get("ENTRY_MODE_PERFORMANCE_ROW_LIMIT", "20000"))
+CLEAN_DOG_RECLAIM_BRANCHES = {
+    "not_ath_reclaim_quote_clean_tiny_probe",
+    "tracking_ttl_reclaim_quote_clean_tiny_probe",
+    "pre_pass_stale_reclaim_quote_clean_tiny_probe",
+    "smart_entry_reclaim_quote_clean_tiny_probe",
+}
 
 
 def connect(path):
@@ -139,6 +145,30 @@ def first_value(*values):
         if value not in (None, ""):
             return value
     return None
+
+
+def empty_route_health_record(branch, mode):
+    return {
+        "entry_branch": branch,
+        "entry_mode": mode,
+        "candidates": 0,
+        "entered": 0,
+        "watch_only": 0,
+        "counterfactual": 0,
+        "stale": 0,
+        "quote_clean_n": 0,
+        "clean_dog_candidates": 0,
+        "clean_dog_entered": 0,
+        "clean_dog_watch_only": 0,
+        "clean_dog_stale": 0,
+        "clean_dog_counterfactual": 0,
+        "status_counts": {},
+        "reason_counts": {},
+        "clean_dog_reason_counts": {},
+        "pnls": [],
+        "wins": 0,
+        "est_pnl_sol": 0.0,
+    }
 
 
 def entry_mode_bucket(entry_mode, size_sol):
@@ -1006,24 +1036,20 @@ def route_health_summary(db, since_ts, limit):
             branch = row.get("entry_branch") or "unknown"
             mode = row.get("entry_mode") or ""
             key = (branch, mode)
-            route = routes.setdefault(key, {
-                "entry_branch": branch,
-                "entry_mode": mode,
-                "candidates": 0,
-                "entered": 0,
-                "watch_only": 0,
-                "counterfactual": 0,
-                "stale": 0,
-                "quote_clean_n": 0,
-                "status_counts": {},
-                "reason_counts": {},
-                "pnls": [],
-                "wins": 0,
-                "est_pnl_sol": 0.0,
-            })
+            route = routes.setdefault(key, empty_route_health_record(branch, mode))
             status = str(row.get("status") or "unknown")
             reason = str(row.get("reason") or "none")
             payload = parse_json_object(row.get("payload_json"))
+            eligibility = payload.get("clean_dog_reclaim_eligibility") if isinstance(payload.get("clean_dog_reclaim_eligibility"), dict) else {}
+            is_clean_dog = bool(
+                branch in CLEAN_DOG_RECLAIM_BRANCHES
+                or payload.get("clean_dog_reclaim_policy_version")
+                or (
+                    as_int(payload.get("tradable_missed"), 0) == 1
+                    and as_int(payload.get("would_stop_before_peak"), 0) != 1
+                    and "reclaim" in str(branch).lower()
+                )
+            )
             route["candidates"] += 1
             route["status_counts"][status] = route["status_counts"].get(status, 0) + 1
             route["reason_counts"][reason] = route["reason_counts"].get(reason, 0) + 1
@@ -1040,8 +1066,20 @@ def route_health_summary(db, since_ts, limit):
                 or payload.get("two_quote_clean_snapshots")
                 or payload.get("recovery_quote_clean")
                 or payload.get("final_reclaim_quote_executable")
+                or eligibility.get("clean_quote_ok")
             ):
                 route["quote_clean_n"] += 1
+            if is_clean_dog:
+                route["clean_dog_candidates"] += 1
+                route["clean_dog_reason_counts"][reason] = route["clean_dog_reason_counts"].get(reason, 0) + 1
+                if status in {"entered", "filled", "filled_paper"}:
+                    route["clean_dog_entered"] += 1
+                if status == "watch_only":
+                    route["clean_dog_watch_only"] += 1
+                if status == "counterfactual_only":
+                    route["clean_dog_counterfactual"] += 1
+                if "stale" in reason or "stale" in status:
+                    route["clean_dog_stale"] += 1
 
     if trade_available:
         t_cols = columns(db, "paper_trades")
@@ -1053,21 +1091,7 @@ def route_health_summary(db, since_ts, limit):
                 if branch == "unknown" and str(mode).lower() in {"stage1", "stage2a", "stage3"}:
                     continue
                 key = (branch, mode)
-                route = routes.setdefault(key, {
-                    "entry_branch": branch,
-                    "entry_mode": mode,
-                    "candidates": 0,
-                    "entered": 0,
-                    "watch_only": 0,
-                    "counterfactual": 0,
-                    "stale": 0,
-                    "quote_clean_n": 0,
-                    "status_counts": {},
-                    "reason_counts": {},
-                    "pnls": [],
-                    "wins": 0,
-                    "est_pnl_sol": 0.0,
-                })
+                route = routes.setdefault(key, empty_route_health_record(branch, mode))
                 pnl = as_float(row.get("pnl_pct"), None)
                 size = as_float(row.get("position_size_sol"), 0.0)
                 if pnl is not None:
@@ -1076,6 +1100,8 @@ def route_health_summary(db, since_ts, limit):
                         route["wins"] += 1
                     route["est_pnl_sol"] += pnl * size
                 route["entered"] += 1
+                if branch in CLEAN_DOG_RECLAIM_BRANCHES or "reclaim" in str(mode).lower():
+                    route["clean_dog_entered"] += 1
 
     out = []
     totals = {
@@ -1085,6 +1111,11 @@ def route_health_summary(db, since_ts, limit):
         "watch_only": 0,
         "counterfactual": 0,
         "stale": 0,
+        "clean_dog_candidates": 0,
+        "clean_dog_entered": 0,
+        "clean_dog_watch_only": 0,
+        "clean_dog_stale": 0,
+        "clean_dog_counterfactual": 0,
     }
     for route in routes.values():
         pnls = route.pop("pnls")
@@ -1115,6 +1146,7 @@ def route_health_summary(db, since_ts, limit):
             "max_loss_pct": round(max_loss * 100.0, 2) if max_loss is not None else None,
             "est_pnl_sol": round(route["est_pnl_sol"], 6),
             "quote_clean_rate_pct": round((route["quote_clean_n"] / candidates) * 100.0, 2) if candidates else None,
+            "clean_dog_capture_rate_pct": round((route["clean_dog_entered"] / route["clean_dog_candidates"]) * 100.0, 2) if route["clean_dog_candidates"] else None,
             "kill_switch": {
                 "status": kill_status,
                 "reason": kill_reason,
@@ -1123,7 +1155,18 @@ def route_health_summary(db, since_ts, limit):
         }
         out.append(record)
         totals["routes"] += 1
-        for name in ("candidates", "entered", "watch_only", "counterfactual", "stale"):
+        for name in (
+            "candidates",
+            "entered",
+            "watch_only",
+            "counterfactual",
+            "stale",
+            "clean_dog_candidates",
+            "clean_dog_entered",
+            "clean_dog_watch_only",
+            "clean_dog_stale",
+            "clean_dog_counterfactual",
+        ):
             totals[name] += int(record.get(name) or 0)
     out.sort(key=lambda item: (
         1 if (item.get("kill_switch") or {}).get("status") == "tripped" else 0,
@@ -1137,6 +1180,7 @@ def route_health_summary(db, since_ts, limit):
         "notes": {
             "kill_switch_rule": "tripped when max_loss<-80%, p10<-30%, or closed>=20 and avg_pnl<0",
             "quote_clean_rate": "derived from fast-lane payload quote_clean/reclaim/final quote flags",
+            "clean_dog_capture_rate": "entered clean dog reclaim rows divided by clean dog reclaim queue candidates",
         },
     }
 

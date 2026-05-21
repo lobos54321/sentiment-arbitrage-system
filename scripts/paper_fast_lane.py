@@ -27,7 +27,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import paper_trade_monitor as ptm
-from entry_readiness_policy import build_entry_execution_eligibility
+from entry_readiness_policy import (
+    build_clean_dog_reclaim_eligibility,
+    build_entry_execution_eligibility,
+)
 from sqlite_write_coordinator import SQLiteSingleWriterLock
 
 
@@ -380,7 +383,19 @@ def init_fast_lane_schema(db):
             )
             """
         )
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "token_ca", "TEXT")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "entry_branch", "TEXT")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "entry_mode_hint", "TEXT")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "policy_version", "TEXT")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "state", "TEXT")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "blocker", "TEXT")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "first_seen_at", "REAL")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "last_clean_quote_ts", "REAL")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "last_tradable_ts", "REAL")
+        add_column_if_missing(db, "paper_fast_missed_rescue_state", "eligibility_json", "TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_pfmr_state_updated ON paper_fast_missed_rescue_state(updated_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfmr_state_state ON paper_fast_missed_rescue_state(state, updated_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_pfmr_state_branch ON paper_fast_missed_rescue_state(entry_branch, state)")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_entry_locks (
@@ -962,6 +977,21 @@ def recovery_strong_signal_confirmed(payload):
     )
 
 
+def clean_dog_reclaim_eligibility_detail(branch, payload, *, now_ts=None):
+    eligibility = build_clean_dog_reclaim_eligibility(
+        payload,
+        entry_branch=branch,
+        route=(payload or {}).get("route"),
+        now_ts=now_ts,
+        max_tradable_age_sec=FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC,
+        route_allowed=branch in CLEAN_DOG_RECLAIM_BRANCHES,
+        canary_budget_ok=FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED,
+    )
+    data = eligibility.to_dict()
+    data["tradable_age_sec"] = data.get("last_tradable_age_sec")
+    return data
+
+
 def kline_recovery_detail(payload, *, now_ts=None):
     detail = recovery_tradable_fresh_detail(payload, now_ts=now_ts)
     if not detail.get("pass"):
@@ -1122,22 +1152,9 @@ def direct_fill_policy(row, *, now_ts=None):
             return {"pass": False, "status": "counterfactual_only", "reason": f"kline_recovery_{reason}", "detail": detail}
         return {"pass": True, "status": "queued", "reason": "kline_recovery_quote_clean_tiny_probe", "detail": detail}
     if branch in CLEAN_DOG_RECLAIM_BRANCHES:
-        if not FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED:
-            return {"pass": False, "status": "watch_only", "reason": "clean_dog_reclaim_canary_disabled"}
-        if _payload_bool(payload, "would_stop_before_peak"):
-            return {
-                "pass": False,
-                "status": "watch_only",
-                "reason": "clean_dog_reclaim_stop_before_peak_watch_only",
-                "detail": {"would_stop_before_peak": True},
-            }
-        detail = recovery_tradable_fresh_detail(
-            payload,
-            now_ts=now_ts,
-            max_age_sec=FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC,
-        )
-        if not detail.get("pass"):
-            return {"pass": False, "status": "watch_only", "reason": f"clean_dog_reclaim_{detail.get('reason')}", "detail": detail}
+        detail = clean_dog_reclaim_eligibility_detail(branch, payload, now_ts=now_ts)
+        if not detail.get("direct_reclaim_ok"):
+            return {"pass": False, "status": "watch_only", "reason": detail.get("reason"), "detail": detail}
         return {"pass": True, "status": "queued", "reason": branch, "detail": detail}
     if branch == "smart_quality_reclaim_tiny_probe":
         if not FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED:
@@ -2163,22 +2180,101 @@ def missed_rescue_entry_mode_hint(row, reason, branch):
     return "pre_pass_resonance_tiny_probe"
 
 
-def mark_missed_rescue_processed(db, missed_id, signature, *, status=None, reason=None, now_ts=None):
+def clean_dog_reclaim_state(status, reason):
+    status_l = str(status or "").lower()
+    reason_l = str(reason or "").lower()
+    if status_l in {"entered", "filled", "filled_paper"}:
+        return "entered"
+    if status_l == "queued":
+        return "queued"
+    if "stale" in reason_l:
+        return "stale"
+    if "stop_before_peak" in reason_l or "toxic" in reason_l or "top_holder" in reason_l:
+        return "shadow"
+    if "quote_clean_missing" in reason_l or "timestamp_missing" in reason_l or "momentum_missing" in reason_l:
+        return "tracking"
+    if status_l == "watch_only":
+        return "watch_only"
+    if status_l == "counterfactual_only":
+        return "counterfactual"
+    if status_l == "deduped":
+        return "deduped"
+    return status_l or "observed"
+
+
+def _payload_ts(payload, *keys):
+    payload = payload or {}
+    for key in keys:
+        ts = parse_datetime_ts(payload.get(key))
+        if ts is not None:
+            return float(ts)
+    return None
+
+
+def mark_missed_rescue_processed(
+    db,
+    missed_id,
+    signature,
+    *,
+    status=None,
+    reason=None,
+    now_ts=None,
+    token_ca=None,
+    entry_branch=None,
+    entry_mode_hint=None,
+    blocker=None,
+    payload=None,
+    eligibility=None,
+):
     now_ts = float(now_ts if now_ts is not None else time.time())
+    payload = payload or {}
+    eligibility = eligibility if isinstance(eligibility, dict) else None
+    state = clean_dog_reclaim_state(status, reason)
+    last_clean_quote_ts = _payload_ts(payload, "last_clean_quote_ts", "missed_updated_at", "updated_at")
+    last_tradable_ts = _payload_ts(payload, "last_tradable_ts", "first_tradable_ts", "missed_updated_at", "updated_at")
     db.execute(
         """
         INSERT INTO paper_fast_missed_rescue_state (
             missed_attribution_id, rescue_signature, last_status, last_reason,
-            last_action_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            last_action_at, updated_at, token_ca, entry_branch, entry_mode_hint,
+            policy_version, state, blocker, first_seen_at, last_clean_quote_ts,
+            last_tradable_ts, eligibility_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(missed_attribution_id) DO UPDATE SET
             rescue_signature = excluded.rescue_signature,
             last_status = excluded.last_status,
             last_reason = excluded.last_reason,
             last_action_at = excluded.last_action_at,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            token_ca = COALESCE(excluded.token_ca, paper_fast_missed_rescue_state.token_ca),
+            entry_branch = COALESCE(excluded.entry_branch, paper_fast_missed_rescue_state.entry_branch),
+            entry_mode_hint = COALESCE(excluded.entry_mode_hint, paper_fast_missed_rescue_state.entry_mode_hint),
+            policy_version = excluded.policy_version,
+            state = excluded.state,
+            blocker = COALESCE(excluded.blocker, paper_fast_missed_rescue_state.blocker),
+            first_seen_at = COALESCE(paper_fast_missed_rescue_state.first_seen_at, excluded.first_seen_at),
+            last_clean_quote_ts = COALESCE(excluded.last_clean_quote_ts, paper_fast_missed_rescue_state.last_clean_quote_ts),
+            last_tradable_ts = COALESCE(excluded.last_tradable_ts, paper_fast_missed_rescue_state.last_tradable_ts),
+            eligibility_json = excluded.eligibility_json
         """,
-        (int(missed_id), signature, status, reason, now_ts, now_ts),
+        (
+            int(missed_id),
+            signature,
+            status,
+            reason,
+            now_ts,
+            now_ts,
+            token_ca,
+            entry_branch,
+            entry_mode_hint,
+            CLEAN_DOG_RECLAIM_POLICY_VERSION,
+            state,
+            blocker,
+            now_ts,
+            last_clean_quote_ts,
+            last_tradable_ts,
+            json.dumps(eligibility or {}, ensure_ascii=False),
+        ),
     )
 
 
@@ -2255,6 +2351,14 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         "payload_json": json.dumps(payload),
     }
     policy = direct_fill_policy(policy_probe, now_ts=now_ts)
+    eligibility = policy.get("detail") if isinstance(policy.get("detail"), dict) else None
+    if branch in CLEAN_DOG_RECLAIM_BRANCHES:
+        payload["clean_dog_reclaim_policy_version"] = CLEAN_DOG_RECLAIM_POLICY_VERSION
+        payload["clean_dog_reclaim_eligibility"] = eligibility or {}
+        payload["clean_dog_reclaim_state"] = clean_dog_reclaim_state(
+            "queued" if policy.get("pass") else (policy.get("status") or "watch_only"),
+            policy.get("reason"),
+        )
     if not policy.get("pass"):
         inserted = record_fast_lane_observation(
             db,
@@ -2275,7 +2379,16 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         )
         if inserted:
             log.info("[FAST_COUNTERFACTUAL] missed-rescue token=%s reason=%s policy=%s", row["token_ca"], reason, policy.get("reason"))
-        return {"status": policy.get("status") or "counterfactual_only", "reason": policy.get("reason"), "inserted": inserted}
+        return {
+            "status": policy.get("status") or "counterfactual_only",
+            "reason": policy.get("reason"),
+            "inserted": inserted,
+            "entry_branch": branch,
+            "entry_mode_hint": entry_mode_hint,
+            "blocker": reason,
+            "payload": payload,
+            "eligibility": eligibility,
+        }
     inserted = enqueue_fast_entry(
         db,
         source_type=source_type,
@@ -2293,7 +2406,16 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
     )
     if inserted:
         log.info("[FAST_QUEUE] missed-rescue token=%s reason=%s", row["token_ca"], reason)
-    return {"status": "queued" if inserted else "deduped", "reason": policy.get("reason"), "inserted": inserted}
+    return {
+        "status": "queued" if inserted else "deduped",
+        "reason": policy.get("reason"),
+        "inserted": inserted,
+        "entry_branch": branch,
+        "entry_mode_hint": entry_mode_hint,
+        "blocker": reason,
+        "payload": payload,
+        "eligibility": eligibility,
+    }
 
 
 def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
@@ -2371,6 +2493,12 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
             status=status,
             reason=result.get("reason"),
             now_ts=now_ts,
+            token_ca=row["token_ca"],
+            entry_branch=result.get("entry_branch"),
+            entry_mode_hint=result.get("entry_mode_hint"),
+            blocker=result.get("blocker") or row["reject_reason"],
+            payload=result.get("payload"),
+            eligibility=result.get("eligibility"),
         )
     if counts["processed"]:
         db.commit()

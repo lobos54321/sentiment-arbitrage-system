@@ -10,7 +10,9 @@ turn it into an entry.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import datetime as dt
 import os
+import time
 
 
 ENTRY_READINESS_MAX_WAIT_SEC = int(os.environ.get("ENTRY_READINESS_MAX_WAIT_SEC", "900"))
@@ -19,6 +21,8 @@ ENTRY_EXECUTION_MAX_SIGNAL_AGE_SEC = float(os.environ.get("ENTRY_EXECUTION_MAX_S
 ENTRY_EXECUTION_MIN_LIQUIDITY_USD = float(os.environ.get("ENTRY_EXECUTION_MIN_LIQUIDITY_USD", "5000"))
 ENTRY_EXECUTION_REQUIRE_QUOTE_CLEAN = os.environ.get("ENTRY_EXECUTION_REQUIRE_QUOTE_CLEAN", "true").lower() != "false"
 ENTRY_EXECUTION_REQUIRE_TIMING = os.environ.get("ENTRY_EXECUTION_REQUIRE_TIMING", "true").lower() != "false"
+CLEAN_DOG_RECLAIM_MIN_LIQUIDITY_USD = float(os.environ.get("CLEAN_DOG_RECLAIM_MIN_LIQUIDITY_USD", "0"))
+CLEAN_DOG_RECLAIM_MIN_PEAK_PNL = float(os.environ.get("CLEAN_DOG_RECLAIM_MIN_PEAK_PNL", "0.25"))
 GMGN_TINY_SCOUT_MODES = (
     "gmgn_concentration_tiny_scout",
     "gmgn_low_kline_tiny_scout",
@@ -116,6 +120,34 @@ class EntryExecutionEligibility:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class CleanDogReclaimEligibility:
+    decision: str
+    reason: str
+    entry_branch: str
+    route: str
+    direct_reclaim_ok: bool
+    clean_quote_ok: bool
+    tradable_ok: bool
+    would_stop_before_peak_ok: bool
+    last_tradable_fresh_ok: bool
+    reclaim_momentum_ok: bool
+    liquidity_ok: bool
+    toxic_ok: bool
+    top_holder_ok: bool
+    route_allowed: bool
+    canary_budget_ok: bool
+    last_tradable_age_sec: object
+    max_tradable_age_sec: float
+    liquidity_usd: object
+    min_liquidity_usd: float
+    checks: dict
+    detail: dict
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 def _f(value, default=0.0):
     try:
         if value is None:
@@ -156,6 +188,32 @@ def _ts_sec(value):
     return ts
 
 
+def _any_ts_sec(value):
+    if value in (None, ""):
+        return None
+    ts = _ts_sec(value)
+    if ts is not None:
+        return ts
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            parsed = dt.datetime.strptime(text.replace("Z", "")[:26], fmt)
+            return parsed.replace(tzinfo=dt.timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _first_ts(*values):
+    for value in values:
+        ts = _any_ts_sec(value)
+        if ts is not None and ts > 0:
+            return ts
+    return None
+
+
 def _signal_age_sec(signal_ts=None, now_ts=None, observed=None, pending=None):
     observed = observed or {}
     pending = pending or {}
@@ -172,6 +230,168 @@ def _signal_age_sec(signal_ts=None, now_ts=None, observed=None, pending=None):
     if now is None:
         return None
     return max(0.0, now - ts)
+
+
+def build_clean_dog_reclaim_eligibility(
+    payload=None,
+    *,
+    entry_branch="",
+    route=None,
+    now_ts=None,
+    max_tradable_age_sec=300,
+    min_liquidity_usd=None,
+    route_allowed=True,
+    canary_budget_ok=True,
+):
+    """Eligibility gate for missed-dog reclaim canaries.
+
+    This is deliberately separate from generic entry execution eligibility:
+    the original signal may be old, but a fresh clean quote/tradable reclaim
+    can still be actionable. Freshness must therefore anchor to the latest
+    tradable/clean quote attribution timestamp, not to the first signal time.
+    """
+    payload = payload or {}
+    now = _any_ts_sec(now_ts) or time.time()
+    min_liquidity_usd = (
+        CLEAN_DOG_RECLAIM_MIN_LIQUIDITY_USD
+        if min_liquidity_usd is None
+        else float(min_liquidity_usd or 0.0)
+    )
+    max_tradable_age_sec = float(max_tradable_age_sec or 0.0)
+    route_name = str(route or payload.get("route") or "").upper()
+    branch = str(entry_branch or payload.get("entry_branch") or "")
+
+    tradable_ok = _truthy(payload.get("tradable_missed"))
+    clean_quote_ok = _truthy(
+        payload.get("recovery_quote_clean")
+        or payload.get("final_reclaim_quote_executable")
+        or payload.get("quote_clean_seen")
+        or payload.get("quote_clean")
+        or tradable_ok
+    )
+    would_stop_before_peak_ok = not _truthy(payload.get("would_stop_before_peak"))
+
+    fresh_ts = _first_ts(
+        payload.get("last_tradable_ts"),
+        payload.get("last_clean_quote_ts"),
+        payload.get("missed_updated_at"),
+        payload.get("updated_at"),
+        payload.get("first_tradable_ts"),
+    )
+    last_tradable_age_sec = None if fresh_ts is None else max(0.0, now - fresh_ts)
+    last_tradable_fresh_ok = (
+        last_tradable_age_sec is not None
+        and (max_tradable_age_sec <= 0 or last_tradable_age_sec <= max_tradable_age_sec)
+    )
+
+    peak_raw = (
+        payload.get("executable_peak_pnl")
+        if payload.get("executable_peak_pnl") is not None
+        else payload.get("tradable_peak_pnl")
+    )
+    peak_present = peak_raw is not None
+    peak_pnl = _f(peak_raw, 0.0)
+    explicit_momentum = (
+        payload.get("reclaim_momentum_ok")
+        if payload.get("reclaim_momentum_ok") is not None
+        else payload.get("momentum_reclaim")
+        if payload.get("momentum_reclaim") is not None
+        else payload.get("activity_reclaim")
+        if payload.get("activity_reclaim") is not None
+        else payload.get("activity_confirmed")
+    )
+    reclaim_momentum_ok = (
+        _truthy(explicit_momentum)
+        if explicit_momentum is not None
+        else (tradable_ok and (not peak_present or peak_pnl >= CLEAN_DOG_RECLAIM_MIN_PEAK_PNL))
+    )
+
+    liquidity_usd = _first_positive(
+        payload.get("liquidity_usd"),
+        payload.get("gmgn_last_liquidity"),
+        payload.get("last_liquidity"),
+    )
+    liquidity_ok = min_liquidity_usd <= 0 or (liquidity_usd is not None and liquidity_usd >= min_liquidity_usd)
+
+    toxic_ok = not any(
+        _truthy(payload.get(name))
+        for name in ("toxic", "toxic_bundler", "bundler_toxic", "bundler_risk", "honeypot", "rug_pull")
+    )
+    top_holder_ok = not any(
+        _truthy(payload.get(name))
+        for name in ("top1_risk", "top10_reject", "top_holder_risk", "insider_concentration")
+    )
+    route_allowed = bool(route_allowed)
+    canary_budget_ok = bool(canary_budget_ok)
+
+    checks = {
+        "clean_quote_ok": clean_quote_ok,
+        "tradable_ok": tradable_ok,
+        "would_stop_before_peak_ok": would_stop_before_peak_ok,
+        "last_tradable_fresh_ok": last_tradable_fresh_ok,
+        "reclaim_momentum_ok": reclaim_momentum_ok,
+        "liquidity_ok": liquidity_ok,
+        "toxic_ok": toxic_ok,
+        "top_holder_ok": top_holder_ok,
+        "route_allowed": route_allowed,
+        "canary_budget_ok": canary_budget_ok,
+    }
+    reason = "clean_dog_reclaim_pass"
+    if not canary_budget_ok:
+        reason = "clean_dog_reclaim_canary_disabled"
+    elif not route_allowed:
+        reason = "clean_dog_reclaim_route_not_allowed"
+    elif not clean_quote_ok or not tradable_ok:
+        reason = "clean_dog_reclaim_recovery_quote_clean_missing"
+    elif not would_stop_before_peak_ok:
+        reason = "clean_dog_reclaim_stop_before_peak_watch_only"
+    elif fresh_ts is None:
+        reason = "clean_dog_reclaim_recovery_tradable_timestamp_missing"
+    elif not last_tradable_fresh_ok:
+        reason = "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
+    elif not reclaim_momentum_ok:
+        reason = "clean_dog_reclaim_reclaim_momentum_missing"
+    elif not liquidity_ok:
+        reason = "clean_dog_reclaim_liquidity_required"
+    elif not toxic_ok:
+        reason = "clean_dog_reclaim_toxic_risk_block"
+    elif not top_holder_ok:
+        reason = "clean_dog_reclaim_top_holder_risk_block"
+
+    direct_reclaim_ok = all(checks.values())
+    return CleanDogReclaimEligibility(
+        decision="pass" if direct_reclaim_ok else "watch_only",
+        reason=reason,
+        entry_branch=branch,
+        route=route_name,
+        direct_reclaim_ok=direct_reclaim_ok,
+        clean_quote_ok=clean_quote_ok,
+        tradable_ok=tradable_ok,
+        would_stop_before_peak_ok=would_stop_before_peak_ok,
+        last_tradable_fresh_ok=last_tradable_fresh_ok,
+        reclaim_momentum_ok=reclaim_momentum_ok,
+        liquidity_ok=liquidity_ok,
+        toxic_ok=toxic_ok,
+        top_holder_ok=top_holder_ok,
+        route_allowed=route_allowed,
+        canary_budget_ok=canary_budget_ok,
+        last_tradable_age_sec=last_tradable_age_sec,
+        max_tradable_age_sec=max_tradable_age_sec,
+        liquidity_usd=liquidity_usd,
+        min_liquidity_usd=min_liquidity_usd,
+        checks=checks,
+        detail={
+            "freshness_anchor_ts": fresh_ts,
+            "freshness_anchor_keys": [
+                "last_tradable_ts",
+                "last_clean_quote_ts",
+                "missed_updated_at",
+                "updated_at",
+                "first_tradable_ts",
+            ],
+            "executable_peak_pnl": peak_pnl,
+        },
+    )
 
 
 def build_entry_execution_eligibility(

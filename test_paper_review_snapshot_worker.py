@@ -286,3 +286,55 @@ def test_review_snapshot_worker_outputs_branch_session_ev(tmp_path):
     route = snapshot["route_health"]["routes"][0]
     assert route["kill_switch"]["status"] == "tripped"
     assert route["kill_switch"]["auto_action"] == "downgrade_to_watch_only"
+
+
+def test_route_health_outputs_clean_dog_capture_metrics(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_fast_entry_queue (
+          id INTEGER PRIMARY KEY,
+          created_at REAL,
+          updated_at REAL,
+          status TEXT,
+          source_type TEXT,
+          entry_branch TEXT,
+          entry_mode_hint TEXT,
+          payload_json TEXT,
+          last_error TEXT,
+          first_error TEXT
+        );
+        """
+    )
+    now_ts = int(time.time())
+    payload = """{"tradable_missed": 1, "would_stop_before_peak": 0,
+      "recovery_quote_clean": true,
+      "clean_dog_reclaim_policy_version": "clean_dog_reclaim_v2",
+      "clean_dog_reclaim_eligibility": {"clean_quote_ok": true}}"""
+    db.execute(
+        """
+        INSERT INTO paper_fast_entry_queue
+          (created_at, updated_at, status, source_type, entry_branch,
+           entry_mode_hint, payload_json, last_error, first_error)
+        VALUES
+          (?, ?, 'watch_only', 'not_ath_reclaim_fast',
+           'not_ath_reclaim_quote_clean_tiny_probe',
+           'lotto_not_ath_reclaim_tiny_probe', ?,
+           'clean_dog_reclaim_recovery_tradable_signal_stale_watch_only',
+           'clean_dog_reclaim_recovery_tradable_signal_stale_watch_only')
+        """,
+        (now_ts - 60, now_ts - 30, payload),
+    )
+    db.commit()
+
+    snapshot = build_snapshot(db, 2, 10)
+    route = snapshot["route_health"]["routes"][0]
+
+    assert snapshot["route_health"]["totals"]["clean_dog_candidates"] == 1
+    assert snapshot["route_health"]["totals"]["clean_dog_watch_only"] == 1
+    assert snapshot["route_health"]["totals"]["clean_dog_stale"] == 1
+    assert route["clean_dog_candidates"] == 1
+    assert route["clean_dog_capture_rate_pct"] == 0.0
+    assert route["clean_dog_reason_counts"]["clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"] == 1
