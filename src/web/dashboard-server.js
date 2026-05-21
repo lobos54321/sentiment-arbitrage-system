@@ -3237,10 +3237,11 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: 'ok',
+      status: global.__startupError ? 'degraded' : 'ok',
       message: 'Sentiment Arbitrage API Running',
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
+      startup_error: global.__startupError || null,
     }));
     return;
   } else if (url.pathname === '/dashboard') {

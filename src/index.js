@@ -64,6 +64,12 @@ function premiumLiveExecutionEnabled(config = {}) {
     && Boolean(config.PREMIUM_LIVE_EXECUTION_ENABLED);
 }
 
+function startDashboardOnce() {
+  if (global.__dashboardStarted) return;
+  global.__dashboardStarted = true;
+  startDashboardServer();
+}
+
 function startPythonSidecar({ name, args, env = {}, logPath }) {
   let child = null;
   let stopped = false;
@@ -916,7 +922,7 @@ class PremiumChannelSystem {
         // V3.4: Start dashboard FIRST so Zeabur health check passes immediately.
         // Previously this was at the end of start(), but Telegram listener init
         // could take 30-60s, causing Zeabur to kill the container before port 3000 responded.
-        startDashboardServer();
+        startDashboardOnce();
         this.shadowDataSidecars = startShadowDataSidecars(this.config);
 
         const isLive = premiumLiveExecutionEnabled(this.config);
@@ -1058,20 +1064,43 @@ async function main() {
     ? 'premium'
     : 'default';
 
-  const system = mode === 'premium'
-    ? new PremiumChannelSystem()
-    : new SentimentArbitrageSystem();
+  // In Zeabur, keep the dashboard/health endpoint alive even if the trading
+  // runtime cannot start because a SQLite file or the persistent volume is in a
+  // bad state. Paper workers are supervised separately by the startup script.
+  if (mode === 'premium') {
+    startDashboardOnce();
+  }
+
+  let system;
+  try {
+    system = mode === 'premium'
+      ? new PremiumChannelSystem()
+      : new SentimentArbitrageSystem();
+  } catch (error) {
+    global.__startupError = {
+      message: error?.message || String(error),
+      stack: error?.stack || null,
+      at: new Date().toISOString(),
+      mode,
+    };
+    console.error('❌ Runtime construction failed:', error);
+    if (mode === 'premium') {
+      console.error('⚠️  Dashboard-only degraded mode is active; check /health and /api/logs.');
+      return;
+    }
+    throw error;
+  }
 
   // Graceful shutdown
   process.on('SIGINT', async () => {
     console.log('\n\n🛑 Received SIGINT, shutting down gracefully...');
-    await system.stop();
+    if (system) await system.stop();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
     console.log('\n\n🛑 Received SIGTERM, shutting down gracefully...');
-    await system.stop();
+    if (system) await system.stop();
     process.exit(0);
   });
 

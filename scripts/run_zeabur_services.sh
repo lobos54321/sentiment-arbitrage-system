@@ -26,6 +26,9 @@ else
   echo "[STARTUP] WARN: gmgn-cli missing; GMGN enrichment will degrade"
 fi
 
+echo "[STARTUP] Running volume preflight cleanup..."
+python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+
 echo "[STARTUP] Starting redis-server..."
 redis-server --bind 127.0.0.1 --port 6379 --save '' --appendonly no \
   --dir /app/data --logfile /app/logs/redis.log --daemonize no &
@@ -48,13 +51,20 @@ fi
 
 echo "[STARTUP] Starting Node.js..."
 (
-  SENTIMENT_DB=/app/data/sentiment_arb.db \
-  LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
-  KLINE_DB=/app/data/kline_cache.db \
-  SHADOW_MODE=false \
-  AUTO_BUY_ENABLED=true \
-  PYTHONUNBUFFERED=1 \
-  node src/index.js --premium 2>&1 | tee -a /app/data/node.log
+  while true; do
+    echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/node.log
+    SENTIMENT_DB=/app/data/sentiment_arb.db \
+    LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
+    KLINE_DB=/app/data/kline_cache.db \
+    SHADOW_MODE=false \
+    AUTO_BUY_ENABLED=true \
+    PYTHONUNBUFFERED=1 \
+    node src/index.js --premium 2>&1 | tee -a /app/data/node.log
+    EXIT_CODE=$?
+    echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/node.log
+    python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+    sleep 15
+  done
 ) &
 NODE_PID=$!
 
