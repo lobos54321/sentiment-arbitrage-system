@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
+    "prestart": "mkdir -p ${ZEABUR_DATA_DIR:-./data} && ZEABUR_DATA_DIR=${ZEABUR_DATA_DIR:-./data} python3 scripts/zeabur_preflight_cleanup.py >> ${ZEABUR_DATA_DIR:-./data}/preflight.log 2>&1 || true",
     "start": "node src/index.js --premium",
     "premium": "node src/index.js --premium",
     "premium:shadow": "SHADOW_MODE=true node src/index.js --premium",
