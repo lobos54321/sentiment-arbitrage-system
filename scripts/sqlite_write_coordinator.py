@@ -18,7 +18,7 @@ import time
 
 
 DEFAULT_LOCK_FILE = Path(os.environ.get("PAPER_SQLITE_WRITER_LOCK_FILE", "/tmp/paper_sqlite_single_writer.lock"))
-DEFAULT_TIMEOUT_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_TIMEOUT_SEC", "10"))
+DEFAULT_TIMEOUT_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_TIMEOUT_SEC", "30"))
 POLL_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_POLL_SEC", "0.025"))
 _PROCESS_WRITE_LOCK = threading.RLock()
 

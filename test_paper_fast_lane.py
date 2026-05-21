@@ -552,6 +552,35 @@ def test_kline_recovery_canary_requires_fresh_tradable_timestamp(monkeypatch):
     assert fresh["reason"] == "kline_recovery_quote_clean_tiny_probe"
 
 
+def test_not_ath_reclaim_canary_allows_clean_fresh_reclaim(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED", True)
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    now = int(time.time())
+    stopped = fast.direct_fill_policy({
+        "source_type": "not_ath_reclaim_fast",
+        "entry_branch": "not_ath_reclaim_quote_clean_tiny_probe",
+        "payload_json": json.dumps({
+            "tradable_missed": 1,
+            "first_tradable_ts": now - 30,
+            "would_stop_before_peak": 1,
+        }),
+    }, now_ts=now)
+    fresh = fast.direct_fill_policy({
+        "source_type": "not_ath_reclaim_fast",
+        "entry_branch": "not_ath_reclaim_quote_clean_tiny_probe",
+        "payload_json": json.dumps({
+            "tradable_missed": 1,
+            "first_tradable_ts": now - 30,
+            "would_stop_before_peak": 0,
+        }),
+    }, now_ts=now)
+
+    assert stopped["pass"] is False
+    assert stopped["reason"] == "not_ath_reclaim_stop_before_peak_watch_only"
+    assert fresh["pass"] is True
+    assert fresh["reason"] == "not_ath_reclaim_quote_clean_tiny_probe"
+
+
 def test_branch_circuit_downgrades_negative_ev_session(tmp_path, monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_ENABLED", True)
     monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_MIN_CLOSED", 20)
@@ -930,3 +959,64 @@ def test_missed_rescue_scans_tradability_signature_not_only_new_ids(tmp_path, mo
     ).fetchone()
     assert "1.2" in row["rescue_signature"]
     assert row["last_status"] == "deduped"
+
+
+def test_missed_not_ath_kline_rescue_queues_lotto_reclaim_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenNotAth', 'NATH', ?, 11, 'LOTTO', 'discovery_tracking',
+            'not_ath_prebuy_kline_block', 1.0, ?, ?, ?, 1, 0, 0.7,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 180, now - 180, now - 180, now - 20, now),
+    )
+    db.commit()
+
+    result = fast.scan_missed_rescue_once(db, now_ts=now)
+    queue = db.execute(
+        """
+        SELECT source_type, entry_branch, entry_mode_hint, status
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenNotAth'
+        """
+    ).fetchone()
+
+    assert result["queued"] == 1
+    assert queue["source_type"] == "not_ath_reclaim_fast"
+    assert queue["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
+    assert queue["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert queue["status"] == "queued"

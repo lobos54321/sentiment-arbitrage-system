@@ -120,6 +120,10 @@ FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED = os.environ.get(
     "FAST_ENTRY_KLINE_RECOVERY_CANARY_ENABLED",
     "true",
 ).lower() != "false"
+FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED",
+    "true",
+).lower() != "false"
 FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED = os.environ.get(
     "FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED",
     "true",
@@ -134,6 +138,10 @@ FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
 ))
 FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC",
+    "300",
+))
+FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC",
     "300",
 ))
 FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC = float(os.environ.get(
@@ -221,6 +229,7 @@ DEGRADED_CANARY_BRANCHES = {
     "source_gmgn_momentum_canary",
     "source_quote_clean_refresh_tiny_probe",
     "ttl_final_reclaim_quote_clean",
+    "not_ath_reclaim_quote_clean_tiny_probe",
     "kline_recovery_quote_clean_tiny_probe",
     "smart_quality_reclaim_tiny_probe",
     "matrix_timeout_final_quote_tiny_probe",
@@ -691,13 +700,22 @@ def row_value(row, key, default=None):
 def source_to_mode_and_stage(row):
     source_type = str(row_value(row, "source_type", "") or "")
     branch = str(row_value(row, "entry_branch", "") or source_type)
+    mode_hint = row_value(row, "entry_mode_hint")
     if "hard_gate" in source_type or "hard_gate" in branch:
         return "hard_gate_pass_tiny_probe", "stage1"
     if "source_resonance" in source_type or "source_resonance" in branch:
         return "source_resonance_tiny_probe", "lotto"
-    if "ttl" in source_type or "kline" in source_type or "spread" in source_type or "missing_quote" in source_type:
+    if mode_hint:
+        return str(mode_hint), "lotto"
+    if (
+        "ttl" in source_type
+        or "kline" in source_type
+        or "spread" in source_type
+        or "missing_quote" in source_type
+        or "reclaim" in source_type
+    ):
         return "pre_pass_resonance_tiny_probe", "lotto"
-    return row_value(row, "entry_mode_hint") or "pre_pass_resonance_tiny_probe", "lotto"
+    return "pre_pass_resonance_tiny_probe", "lotto"
 
 
 def row_payload(row):
@@ -1078,6 +1096,24 @@ def direct_fill_policy(row, *, now_ts=None):
                 reason = reason[len("recovery_"):]
             return {"pass": False, "status": "counterfactual_only", "reason": f"kline_recovery_{reason}", "detail": detail}
         return {"pass": True, "status": "queued", "reason": "kline_recovery_quote_clean_tiny_probe", "detail": detail}
+    if branch == "not_ath_reclaim_quote_clean_tiny_probe":
+        if not FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED:
+            return {"pass": False, "status": "watch_only", "reason": "not_ath_reclaim_canary_disabled"}
+        if _payload_bool(payload, "would_stop_before_peak"):
+            return {
+                "pass": False,
+                "status": "watch_only",
+                "reason": "not_ath_reclaim_stop_before_peak_watch_only",
+                "detail": {"would_stop_before_peak": True},
+            }
+        detail = recovery_tradable_fresh_detail(
+            payload,
+            now_ts=now_ts,
+            max_age_sec=FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC,
+        )
+        if not detail.get("pass"):
+            return {"pass": False, "status": "watch_only", "reason": f"not_ath_reclaim_{detail.get('reason')}", "detail": detail}
+        return {"pass": True, "status": "queued", "reason": "not_ath_reclaim_quote_clean_tiny_probe", "detail": detail}
     if branch == "smart_quality_reclaim_tiny_probe":
         if not FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED:
             return {"pass": False, "status": "watch_only", "reason": "smart_quality_recheck_canary_disabled"}
@@ -2068,6 +2104,7 @@ def source_resonance_scan(paper_db_path, stop_event):
 def missed_rescue_signature(row):
     values = [
         row_value(row, "tradable_missed", 0),
+        row_value(row, "would_stop_before_peak", 0),
         row_value(row, "first_tradable_ts"),
         row_value(row, "executable_peak_pnl"),
         row_value(row, "route"),
@@ -2075,6 +2112,25 @@ def missed_rescue_signature(row):
         row_value(row, "reject_reason"),
     ]
     return "|".join("" if value is None else str(value) for value in values)
+
+
+def missed_rescue_entry_mode_hint(row, reason, branch):
+    route = str(row_value(row, "route", "") or "").upper()
+    reason_l = str(reason or "").lower()
+    branch_l = str(branch or "").lower()
+    if (
+        route in {"LOTTO", "NOT_ATH"}
+        and (
+            reason_l.startswith("tracking_ttl")
+            or "not_ath_prebuy_kline" in reason_l
+            or reason_l.startswith("lotto_stale_")
+            or branch_l.startswith("not_ath_reclaim")
+        )
+    ):
+        return "lotto_not_ath_reclaim_tiny_probe"
+    if reason_l in SMART_QUALITY_RECHECK_REASONS:
+        return "lotto_micro_reclaim_tiny_probe"
+    return "pre_pass_resonance_tiny_probe"
 
 
 def mark_missed_rescue_processed(db, missed_id, signature, *, status=None, reason=None, now_ts=None):
@@ -2106,8 +2162,8 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         source_type = "ttl_final_reclaim_fast"
         branch = "ttl_final_reclaim_quote_clean"
     elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
-        source_type = "kline_recovery_fast"
-        branch = "kline_recovery_quote_clean_tiny_probe"
+        source_type = "not_ath_reclaim_fast"
+        branch = "not_ath_reclaim_quote_clean_tiny_probe"
     elif "spread" in reason:
         source_type = "spread_recovery_fast"
         branch = reason
@@ -2132,15 +2188,18 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         "rescue_created_ts": rescue_created_ts,
         "recovery_created_ts": rescue_created_ts,
         "tradable_missed": row["tradable_missed"],
+        "would_stop_before_peak": row_value(row, "would_stop_before_peak", 0),
         "recovery_quote_clean": bool(row["tradable_missed"]),
         "route": row["route"],
         "component": row["component"],
         "reject_reason": reason,
         "executable_peak_pnl": row["executable_peak_pnl"],
     }
+    entry_mode_hint = missed_rescue_entry_mode_hint(row, reason, branch)
     policy_probe = {
         "entry_branch": branch,
         "source_type": source_type,
+        "entry_mode_hint": entry_mode_hint,
         "payload_json": json.dumps(payload),
     }
     policy = direct_fill_policy(policy_probe, now_ts=now_ts)
@@ -2153,7 +2212,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
             signal_ts=original_signal_ts,
             receive_ts=original_signal_ts,
             recorded_ts=row["baseline_ts"],
-            entry_mode_hint="pre_pass_resonance_tiny_probe",
+            entry_mode_hint=entry_mode_hint,
             entry_branch=branch,
             trigger_price=row["baseline_price"],
             priority=35,
@@ -2173,7 +2232,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
         signal_ts=original_signal_ts,
         receive_ts=original_signal_ts,
         recorded_ts=row["baseline_ts"],
-        entry_mode_hint="pre_pass_resonance_tiny_probe",
+        entry_mode_hint=entry_mode_hint,
         entry_branch=branch,
         trigger_price=row["baseline_price"],
         priority=35,
@@ -2195,17 +2254,20 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
     updated_expr = "COALESCE(strftime('%s', m.updated_at), 0)" if "updated_at" in cols else "0"
     created_expr = "COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)"
     first_tradable_expr = "COALESCE(m.first_tradable_ts, 0)" if "first_tradable_ts" in cols else "0"
+    stop_before_peak_expr = "COALESCE(m.would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
     rows = db.execute(
         f"""
         SELECT m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
                m.reject_reason, m.baseline_price, m.baseline_ts,
                {optional_col(cols, 'first_tradable_ts')},
                {optional_col(cols, 'tradable_missed', '0')},
+               {optional_col(cols, 'would_stop_before_peak', '0')},
                {optional_col(cols, 'executable_peak_pnl', '0')},
                s.rescue_signature AS processed_signature
         FROM paper_missed_signal_attribution m
         LEFT JOIN paper_fast_missed_rescue_state s ON s.missed_attribution_id = m.id
         WHERE COALESCE({ 'm.tradable_missed' if 'tradable_missed' in cols else '0' }, 0) = 1
+          AND {stop_before_peak_expr} != 1
           AND (
             {first_tradable_expr} >= ?
             OR {created_expr} >= ?
@@ -2331,7 +2393,7 @@ def run_worker(args):
         args.signal_db,
         args.concurrency,
     )
-    with ThreadPoolExecutor(max_workers=args.concurrency + 3, thread_name_prefix="paper-fast") as pool:
+    with ThreadPoolExecutor(max_workers=args.concurrency + 2, thread_name_prefix="paper-fast") as pool:
         pool.submit(premium_scan, args.signal_db, args.paper_db, stop_event, args.lookback_sec)
         pool.submit(source_resonance_scan, args.paper_db, stop_event)
         pool.submit(missed_rescue_scan, args.paper_db, stop_event)
@@ -2345,7 +2407,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--paper-db", default=os.environ.get("PAPER_DB", str(DEFAULT_PAPER_DB)))
     parser.add_argument("--signal-db", default=os.environ.get("SENTIMENT_DB", os.environ.get("DB_PATH", str(DEFAULT_SIGNAL_DB))))
-    parser.add_argument("--concurrency", type=int, default=int(os.environ.get("FAST_ENTRY_WORKER_CONCURRENCY", "4")))
+    parser.add_argument("--concurrency", type=int, default=int(os.environ.get("FAST_ENTRY_WORKER_CONCURRENCY", "2")))
     parser.add_argument("--lookback-sec", type=int, default=int(os.environ.get("FAST_ENTRY_BOOT_LOOKBACK_SEC", "120")))
     parser.add_argument("--lock-file", default=os.environ.get("PAPER_FAST_LANE_LOCK_FILE", "/tmp/paper_fast_lane.lock"))
     args = parser.parse_args()

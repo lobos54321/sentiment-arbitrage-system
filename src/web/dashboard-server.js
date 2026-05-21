@@ -538,6 +538,110 @@ function getPaperDbPath() {
   return isAbsolute(paperDbPath) ? paperDbPath : join(projectRoot, paperDbPath);
 }
 
+function fileInfo(label, filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    return {
+      label,
+      path: filePath,
+      exists: true,
+      size_bytes: stats.size,
+      size_mb: Math.round((stats.size / (1024 * 1024)) * 100) / 100,
+      mtime: stats.mtime.toISOString(),
+    };
+  } catch (error) {
+    return {
+      label,
+      path: filePath,
+      exists: false,
+      error: error?.code === 'ENOENT' ? null : error.message,
+    };
+  }
+}
+
+function readTinyText(filePath, maxBytes = 2000) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const stats = fs.statSync(filePath);
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const length = Math.min(maxBytes, stats.size);
+      const buffer = Buffer.alloc(length);
+      fs.readSync(fd, buffer, 0, length, Math.max(0, stats.size - length));
+      return buffer.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+export function buildStorageHealthSnapshot(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const dataDir = options.dataDir || process.env.ZEABUR_DATA_DIR || join(root, 'data');
+  const paperDbPath = options.paperDbPath || getPaperDbPath();
+  const signalDbPath = options.signalDbPath || resolvedDbPath;
+  const klineDbPath = options.klineDbPath || (isAbsolute(process.env.KLINE_DB || '')
+    ? process.env.KLINE_DB
+    : join(root, process.env.KLINE_DB || 'data/kline_cache.db'));
+  const lifecycleDbPath = options.lifecycleDbPath || (isAbsolute(process.env.LIFECYCLE_DB || '')
+    ? process.env.LIFECYCLE_DB
+    : join(root, process.env.LIFECYCLE_DB || 'data/lifecycle_tracks.db'));
+  let disk = { available: false };
+  try {
+    if (typeof fs.statfsSync === 'function') {
+      const stats = fs.statfsSync(dataDir);
+      const total = Number(stats.blocks || 0) * Number(stats.bsize || 0);
+      const free = Number(stats.bavail || stats.bfree || 0) * Number(stats.bsize || 0);
+      const used = Math.max(0, total - free);
+      disk = {
+        available: true,
+        path: dataDir,
+        total_bytes: total,
+        used_bytes: used,
+        free_bytes: free,
+        used_pct: total ? Math.round((used / total) * 1000) / 10 : null,
+        free_mb: Math.round((free / (1024 * 1024)) * 100) / 100,
+        low_free: free > 0 && free < Number(process.env.ZEABUR_DISK_WARN_FREE_MB || 256) * 1024 * 1024,
+      };
+    }
+  } catch (error) {
+    disk = { available: false, path: dataDir, error: error.message };
+  }
+  const dbFiles = [
+    ['paper_trades', paperDbPath],
+    ['paper_trades_wal', `${paperDbPath}-wal`],
+    ['paper_trades_shm', `${paperDbPath}-shm`],
+    ['paper_trades_integrity_marker', `${paperDbPath}.integrity_error`],
+    ['sentiment_arb', signalDbPath],
+    ['sentiment_arb_wal', `${signalDbPath}-wal`],
+    ['kline_cache', klineDbPath],
+    ['kline_cache_wal', `${klineDbPath}-wal`],
+    ['lifecycle_tracks', lifecycleDbPath],
+    ['lifecycle_tracks_wal', `${lifecycleDbPath}-wal`],
+  ].map(([label, path]) => fileInfo(label, path));
+  const logFiles = [
+    'node.log',
+    'paper-trader.log',
+    'paper-fast-lane.log',
+    'paper-review-snapshot.log',
+    'source-resonance.log',
+    'gmgn-scout.log',
+    'lifecycle.log',
+    'preflight.log',
+  ].map((name) => fileInfo(name, join(dataDir, name)));
+  return {
+    generated_at: new Date().toISOString(),
+    data_dir: dataDir,
+    disk,
+    db_files: dbFiles,
+    log_files: logFiles,
+    integrity_error: readTinyText(`${paperDbPath}.integrity_error`),
+    preflight_tail: readTinyText(join(dataDir, 'preflight.log'), 4000),
+  };
+}
+
 function getTableColumns(database, tableName) {
   return new Set(database.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
 }
@@ -579,6 +683,153 @@ function markMissedPeakSqlExpr(cols, qualifier = 'm') {
     .filter((name) => cols.has(name))
     .map((name) => sqlCol(name, qualifier));
   return `COALESCE(${[...names, '0'].join(', ')})`;
+}
+
+export function buildDogCatchGoalProgress(paperDb, tableNames, sinceTs, options = {}) {
+  const targetCatchRate = Number(options.targetCatchRate ?? 0.60);
+  const targetWinRate = Number(options.targetWinRate ?? 0.55);
+  const targetRoi = Number(options.targetRoi ?? 2.0);
+  const dogPeakRatio = Number(options.dogPeakRatio ?? 0.50);
+  const winPeakRatio = Number(options.winPeakRatio ?? 0.30);
+  const result = {
+    available: Boolean(paperDb),
+    since_ts: sinceTs,
+    targets: {
+      clean_gold_silver_capture_rate: targetCatchRate,
+      peak_win_rate: targetWinRate,
+      realized_roi: targetRoi,
+      dog_peak_threshold: dogPeakRatio,
+      win_peak_threshold: winPeakRatio,
+    },
+    trades: {
+      fills: 0,
+      closed: 0,
+      peak_wins: 0,
+      peak_win_rate: null,
+      captured_gold_silver_unique: 0,
+      realized_pnl_sol: 0,
+      deployed_sol: 0,
+      realized_roi: null,
+    },
+    missed: {
+      clean_gold_silver_unique: 0,
+      clean_gold_unique: 0,
+      clean_silver_unique: 0,
+    },
+    goal: {
+      eligible_gold_silver_unique: 0,
+      captured_gold_silver_unique: 0,
+      clean_gold_silver_capture_rate: null,
+      pass: false,
+      blockers: [],
+    },
+  };
+  if (!paperDb) return result;
+
+  const capturedTokens = new Set();
+  if (tableNames.has('paper_trades')) {
+    const tradeCols = getTableColumns(paperDb, 'paper_trades');
+    const peakExpr = trustedTradePeakSqlExpr(tradeCols, 'pt');
+    const pnlExpr = tradeCols.has('pnl_pct') ? 'pt.pnl_pct' : '0';
+    const sizeExpr = tradeCols.has('position_size_sol') ? 'pt.position_size_sol' : '0';
+    const entryTsExpr = tradeCols.has('entry_ts') ? 'COALESCE(pt.entry_ts, 0)' : '0';
+    const exitTsExpr = tradeCols.has('exit_ts') ? 'COALESCE(pt.exit_ts, 0)' : '0';
+    const tokenExpr = tradeCols.has('token_ca') ? 'pt.token_ca' : 'NULL';
+    const closedExpr = tradeCols.has('exit_ts') || tradeCols.has('exit_reason') || tradeCols.has('pnl_pct')
+      ? `CASE WHEN ${[
+        tradeCols.has('exit_ts') ? 'pt.exit_ts IS NOT NULL' : null,
+        tradeCols.has('exit_reason') ? 'pt.exit_reason IS NOT NULL' : null,
+        tradeCols.has('pnl_pct') ? 'pt.pnl_pct IS NOT NULL' : null,
+      ].filter(Boolean).join(' OR ')} THEN 1 ELSE 0 END`
+      : '0';
+    const rows = paperDb.prepare(`
+      SELECT ${tokenExpr} AS token_ca,
+             ${peakExpr} AS peak_pnl,
+             ${pnlExpr} AS pnl_pct,
+             ${sizeExpr} AS position_size_sol,
+             ${closedExpr} AS closed
+      FROM paper_trades pt
+      WHERE (${entryTsExpr} >= @since OR ${exitTsExpr} >= @since)
+    `).all({ since: sinceTs });
+    result.trades.fills = rows.length;
+    for (const row of rows) {
+      const peak = Number(row.peak_pnl || 0);
+      const pnl = Number(row.pnl_pct || 0);
+      const size = Number(row.position_size_sol || 0);
+      if (Number(row.closed || 0) === 1) result.trades.closed += 1;
+      if (peak >= winPeakRatio) result.trades.peak_wins += 1;
+      if (peak >= dogPeakRatio && row.token_ca) capturedTokens.add(String(row.token_ca));
+      result.trades.deployed_sol += Number.isFinite(size) ? size : 0;
+      result.trades.realized_pnl_sol += Number.isFinite(pnl) && Number.isFinite(size) ? pnl * size : 0;
+    }
+    result.trades.captured_gold_silver_unique = capturedTokens.size;
+    result.trades.peak_win_rate = result.trades.fills ? result.trades.peak_wins / result.trades.fills : null;
+    result.trades.realized_roi = result.trades.deployed_sol > 0
+      ? result.trades.realized_pnl_sol / result.trades.deployed_sol
+      : null;
+  }
+
+  if (tableNames.has('paper_missed_signal_attribution')) {
+    const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
+    const tradeColsForMissed = tableNames.has('paper_trades') ? getTableColumns(paperDb, 'paper_trades') : new Set();
+    const missedTradeWindowPredicates = [
+      tradeColsForMissed.has('entry_ts') ? 'COALESCE(pt.entry_ts, 0) >= @since' : null,
+      tradeColsForMissed.has('exit_ts') ? 'COALESCE(pt.exit_ts, 0) >= @since' : null,
+    ].filter(Boolean);
+    const maxPnlExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
+    const eventTsExpr = `COALESCE(${[
+      missedCols.has('created_event_ts') ? 'm.created_event_ts' : null,
+      missedCols.has('signal_ts') ? 'm.signal_ts' : null,
+      missedCols.has('baseline_ts') ? 'm.baseline_ts' : null,
+      '0',
+    ].filter(Boolean).join(', ')})`;
+    const quoteCleanExpr = missedCols.has('tradable_missed')
+      ? `COALESCE(m.tradable_missed, 0) = 1 AND COALESCE(${missedCols.has('would_stop_before_peak') ? 'm.would_stop_before_peak' : '0'}, 0) != 1`
+      : '0';
+    const caughtFilter = tableNames.has('paper_trades') && tradeColsForMissed.has('token_ca') && missedTradeWindowPredicates.length > 0
+      ? `AND NOT EXISTS (
+          SELECT 1 FROM paper_trades pt
+          WHERE pt.token_ca = m.token_ca
+            AND (${missedTradeWindowPredicates.join(' OR ')})
+        )`
+      : '';
+    const row = paperDb.prepare(`
+      WITH ranked AS (
+        SELECT m.token_ca,
+               MAX(${maxPnlExpr}) AS max_pnl
+        FROM paper_missed_signal_attribution m
+        WHERE ${eventTsExpr} >= @since
+          AND (${quoteCleanExpr})
+          ${caughtFilter}
+        GROUP BY m.token_ca
+      )
+      SELECT
+        COALESCE(SUM(CASE WHEN max_pnl >= @dogPeak THEN 1 ELSE 0 END), 0) AS clean_gold_silver,
+        COALESCE(SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END), 0) AS clean_gold,
+        COALESCE(SUM(CASE WHEN max_pnl >= @dogPeak AND max_pnl < 1.0 THEN 1 ELSE 0 END), 0) AS clean_silver
+      FROM ranked
+    `).get({ since: sinceTs, dogPeak: dogPeakRatio });
+    result.missed.clean_gold_silver_unique = Number(row?.clean_gold_silver || 0);
+    result.missed.clean_gold_unique = Number(row?.clean_gold || 0);
+    result.missed.clean_silver_unique = Number(row?.clean_silver || 0);
+  }
+
+  result.goal.captured_gold_silver_unique = result.trades.captured_gold_silver_unique;
+  result.goal.eligible_gold_silver_unique = result.trades.captured_gold_silver_unique + result.missed.clean_gold_silver_unique;
+  result.goal.clean_gold_silver_capture_rate = result.goal.eligible_gold_silver_unique
+    ? result.goal.captured_gold_silver_unique / result.goal.eligible_gold_silver_unique
+    : null;
+  if (result.goal.clean_gold_silver_capture_rate == null || result.goal.clean_gold_silver_capture_rate < targetCatchRate) {
+    result.goal.blockers.push('clean_gold_silver_capture_rate_below_target');
+  }
+  if (result.trades.peak_win_rate == null || result.trades.peak_win_rate < targetWinRate) {
+    result.goal.blockers.push('peak_win_rate_below_target');
+  }
+  if (result.trades.realized_roi == null || result.trades.realized_roi < targetRoi) {
+    result.goal.blockers.push('realized_roi_below_target');
+  }
+  result.goal.pass = result.goal.blockers.length === 0;
+  return result;
 }
 
 function trustedPeakRatio(row = {}) {
@@ -7032,6 +7283,46 @@ const server = http.createServer(async (req, res) => {
       path: livePaperReviewPath(requestedHours),
     }, null, 2));
     return;
+  } else if (url.pathname === '/api/paper/storage-health') {
+    if (!checkAuth(req, url, res)) return;
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(buildStorageHealthSnapshot(), null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/dog-catch-goal') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const requestedHours = boundedIntParam(url, 'hours', 24, 1, 72);
+      const sinceTs = Math.floor(Date.now() / 1000) - requestedHours * 3600;
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+      const progress = buildDogCatchGoalProgress(paperDb, tableNames, sinceTs, {
+        targetCatchRate: Number(url.searchParams.get('target_capture') || 0.60),
+        targetWinRate: Number(url.searchParams.get('target_win_rate') || 0.55),
+        targetRoi: Number(url.searchParams.get('target_roi') || 2.0),
+        dogPeakRatio: Number(url.searchParams.get('dog_peak') || 0.50),
+        winPeakRatio: Number(url.searchParams.get('win_peak') || 0.30),
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        window_hours: requestedHours,
+        ...progress,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/paper/fast-lane') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
@@ -7279,19 +7570,44 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/download/paper_trades') {
     // Paper trades数据库下载 — 需要 token 认证
     if (!checkAuth(req, url, res)) return;
-    const paperDbPath = join(projectRoot, 'data', 'paper_trades.db');
+    const paperDbPath = getPaperDbPath();
     if (!fs.existsSync(paperDbPath)) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Paper trades database not found' }));
       return;
     }
-    const stats = fs.statSync(paperDbPath);
+    let downloadPath = paperDbPath;
+    let cleanupPath = null;
+    if (!['0', 'false', 'raw'].includes(String(url.searchParams.get('backup') || '1').toLowerCase())) {
+      let sourceDb;
+      try {
+        cleanupPath = join('/tmp', `paper_trades_download_${process.pid}_${Date.now()}.db`);
+        sourceDb = new Database(paperDbPath, { readonly: true, timeout: 5000 });
+        try { sourceDb.pragma('wal_checkpoint(PASSIVE)'); } catch {}
+        if (typeof sourceDb.backup === 'function') {
+          await sourceDb.backup(cleanupPath);
+          downloadPath = cleanupPath;
+        }
+      } catch (e) {
+        try { if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath); } catch {}
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Paper trades backup failed: ${e.message}` }));
+        try { if (sourceDb) sourceDb.close(); } catch {}
+        return;
+      } finally {
+        try { if (sourceDb) sourceDb.close(); } catch {}
+      }
+    }
+    const stats = fs.statSync(downloadPath);
     res.writeHead(200, {
       'Content-Type': 'application/octet-stream',
       'Content-Disposition': 'attachment; filename="paper_trades.db"',
       'Content-Length': stats.size
     });
-    const fileStream = fs.createReadStream(paperDbPath);
+    const fileStream = fs.createReadStream(downloadPath);
+    fileStream.on('close', () => {
+      try { if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath); } catch {}
+    });
     fileStream.pipe(res);
     return;
   } else if (url.pathname === '/api/export') {

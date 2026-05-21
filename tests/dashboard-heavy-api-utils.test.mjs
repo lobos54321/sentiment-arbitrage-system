@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import {
+  buildDogCatchGoalProgress,
+  buildStorageHealthSnapshot,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   boundedIntParam,
@@ -11,6 +16,27 @@ import {
   shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
 } from '../src/web/dashboard-server.js';
+
+test('storage health reports db markers and disk snapshot without opening sqlite', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'storage-health-'));
+  const paper = join(dir, 'paper_trades.db');
+  fs.writeFileSync(paper, 'sqlite-placeholder');
+  fs.writeFileSync(`${paper}.integrity_error`, 'malformed page');
+  fs.writeFileSync(join(dir, 'preflight.log'), '[preflight] checkpoint failed');
+
+  const snapshot = buildStorageHealthSnapshot({
+    projectRoot: dir,
+    dataDir: dir,
+    paperDbPath: paper,
+    signalDbPath: join(dir, 'sentiment_arb.db'),
+    klineDbPath: join(dir, 'kline_cache.db'),
+    lifecycleDbPath: join(dir, 'lifecycle_tracks.db'),
+  });
+
+  assert.equal(snapshot.db_files.find((row) => row.label === 'paper_trades').exists, true);
+  assert.match(snapshot.integrity_error, /malformed page/);
+  assert.match(snapshot.preflight_tail, /checkpoint failed/);
+});
 
 test('boundedIntParam clamps oversized live query parameters', () => {
   const url = new URL('https://example.test/api?event_limit=40000&limit=999');
@@ -93,6 +119,68 @@ test('materialized missed recovery summary excludes stop-before-peak rows from c
     summary.top_clean_quote_dogs.map((row) => row.token_ca),
     ['CleanDog']
   );
+});
+
+test('dog catch goal progress uses peak wins and clean missed dogs', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE paper_trades (
+      token_ca TEXT,
+      entry_ts REAL,
+      exit_ts REAL,
+      pnl_pct REAL,
+      trusted_peak_pnl REAL,
+      position_size_sol REAL
+    );
+    CREATE TABLE paper_missed_signal_attribution (
+      token_ca TEXT,
+      signal_ts REAL,
+      created_event_ts REAL,
+      baseline_ts REAL,
+      tradable_missed INTEGER,
+      would_stop_before_peak INTEGER,
+      executable_peak_pnl REAL
+    );
+  `);
+  db.prepare(`
+    INSERT INTO paper_trades (token_ca, entry_ts, exit_ts, pnl_pct, trusted_peak_pnl, position_size_sol)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('caught-dog', 1001, 1010, 1.0, 0.7, 0.002);
+  db.prepare(`
+    INSERT INTO paper_trades (token_ca, entry_ts, exit_ts, pnl_pct, trusted_peak_pnl, position_size_sol)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('small-loser', 1002, 1011, -0.1, 0.1, 0.002);
+  db.prepare(`
+    INSERT INTO paper_missed_signal_attribution (
+      token_ca, signal_ts, created_event_ts, baseline_ts, tradable_missed,
+      would_stop_before_peak, executable_peak_pnl
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run('missed-dog', 1003, 1003, 1003, 1, 0, 0.6);
+  db.prepare(`
+    INSERT INTO paper_missed_signal_attribution (
+      token_ca, signal_ts, created_event_ts, baseline_ts, tradable_missed,
+      would_stop_before_peak, executable_peak_pnl
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run('stop-first', 1004, 1004, 1004, 1, 1, 2.0);
+
+  const progress = buildDogCatchGoalProgress(
+    db,
+    new Set(['paper_trades', 'paper_missed_signal_attribution']),
+    1000,
+    { targetCatchRate: 0.60, targetWinRate: 0.55, targetRoi: 0.40 }
+  );
+
+  assert.equal(progress.trades.fills, 2);
+  assert.equal(progress.trades.peak_wins, 1);
+  assert.equal(progress.trades.captured_gold_silver_unique, 1);
+  assert.equal(progress.missed.clean_gold_silver_unique, 1);
+  assert.equal(progress.goal.eligible_gold_silver_unique, 2);
+  assert.equal(progress.goal.clean_gold_silver_capture_rate, 0.5);
+  assert.deepEqual(progress.goal.blockers, [
+    'clean_gold_silver_capture_rate_below_target',
+    'peak_win_rate_below_target',
+  ]);
+  db.close();
 });
 
 test('closed loop missed dog summary ranks one blocker per token in SQL', () => {
