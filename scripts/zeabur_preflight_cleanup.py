@@ -8,9 +8,11 @@ sidecars start.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -20,6 +22,8 @@ KEEP_LOG_BYTES = int(float(os.environ.get("ZEABUR_LOG_TRIM_KEEP_MB", "64")) * 10
 DELETE_LARGE_TMP = os.environ.get("ZEABUR_DELETE_LARGE_TMP", "false").lower() == "true"
 TMP_DELETE_BYTES = int(float(os.environ.get("ZEABUR_TMP_DELETE_MIN_MB", "256")) * 1024 * 1024)
 DISK_WARN_FREE_BYTES = int(float(os.environ.get("ZEABUR_DISK_WARN_FREE_MB", "256")) * 1024 * 1024)
+QUARANTINE_MALFORMED_PAPER_DB = os.environ.get("ZEABUR_QUARANTINE_MALFORMED_PAPER_DB", "true").lower() != "false"
+RECOVERY_DIR = Path(os.environ.get("ZEABUR_RECOVERY_DIR", str(DATA_DIR / "recovery")))
 
 LOG_NAMES = [
     "node.log",
@@ -101,8 +105,77 @@ def remove_large_temp_files() -> None:
                 log(f"WARN remove temp failed for {path}: {exc}")
 
 
+def write_integrity_marker(path: Path, status: str) -> None:
+    marker = path.with_suffix(path.suffix + ".integrity_error")
+    try:
+        marker.write_text(str(status)[:4000], encoding="utf-8")
+    except Exception as exc:
+        log(f"WARN write integrity marker failed {marker}: {exc}")
+
+
+def should_quarantine(path: Path, reason: str) -> bool:
+    if not QUARANTINE_MALFORMED_PAPER_DB:
+        return False
+    if path.name != "paper_trades.db":
+        return False
+    reason_l = str(reason or "").lower()
+    return (
+        "malformed" in reason_l
+        or "database disk image" in reason_l
+        or "file is not a database" in reason_l
+        or "quick_check" in reason_l
+    )
+
+
+def quarantine_db_family(path: Path, reason: str) -> None:
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    dest_dir = RECOVERY_DIR / f"{path.stem}_corrupt_{ts}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for suffix in ("", "-wal", "-shm", ".integrity_error"):
+        src = Path(f"{path}{suffix}") if suffix.startswith("-") else path.with_suffix(path.suffix + suffix) if suffix else path
+        if not src.exists():
+            continue
+        dest = dest_dir / src.name
+        try:
+            os.replace(src, dest)
+            moved.append({"from": str(src), "to": str(dest), "size_bytes": dest.stat().st_size})
+        except Exception as exc:
+            log(f"WARN quarantine move failed {src}: {exc}")
+    manifest = {
+        "created_at": ts,
+        "reason": str(reason)[:4000],
+        "db": str(path),
+        "moved": moved,
+        "note": "Original malformed paper DB files were preserved here; live path was cleared so paper services can recreate a clean DB.",
+    }
+    try:
+        (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception as exc:
+        log(f"WARN quarantine manifest failed {dest_dir}: {exc}")
+    log(f"quarantined malformed {path.name} -> {dest_dir} files={len(moved)}")
+
+
+def sqlite_header_invalid(path: Path) -> bool:
+    try:
+        if path.stat().st_size == 0:
+            return False
+        with path.open("rb") as fh:
+            header = fh.read(16)
+        return header != b"SQLite format 3\x00"
+    except Exception:
+        return False
+
+
 def checkpoint_db(path: Path) -> None:
     if not path.exists():
+        return
+    if path.name == "paper_trades.db" and sqlite_header_invalid(path):
+        reason = "file is not a database: invalid sqlite header"
+        log(f"WARN checkpoint failed {path.name}: {reason}")
+        write_integrity_marker(path, reason)
+        if should_quarantine(path, reason):
+            quarantine_db_family(path, reason)
         return
     try:
         conn = sqlite3.connect(str(path), timeout=5)
@@ -112,8 +185,10 @@ def checkpoint_db(path: Path) -> None:
             status = row[0] if row else "unknown"
             if status != "ok":
                 log(f"WARN quick_check {path.name}: {status}")
-                marker = path.with_suffix(path.suffix + ".integrity_error")
-                marker.write_text(str(status)[:2000], encoding="utf-8")
+                write_integrity_marker(path, status)
+                if should_quarantine(path, f"quick_check: {status}"):
+                    conn.close()
+                    quarantine_db_family(path, f"quick_check: {status}")
                 return
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             log(f"checkpoint ok {path.name}")
@@ -121,6 +196,9 @@ def checkpoint_db(path: Path) -> None:
             conn.close()
     except Exception as exc:
         log(f"WARN checkpoint failed {path.name}: {exc}")
+        if should_quarantine(path, str(exc)):
+            write_integrity_marker(path, str(exc))
+            quarantine_db_family(path, str(exc))
 
 
 def main() -> int:
