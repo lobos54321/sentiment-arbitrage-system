@@ -2488,12 +2488,10 @@ def pending_requires_quote_clean_for_final_entry(pending, entry_branch=None):
     mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '').lower()
     branch = str(entry_branch or pending.get('entry_branch') or '').lower()
     replay_source = str(pending.get('replay_source') or '').lower()
-    if mode in {
-        SOURCE_RESONANCE_TINY_PROBE_MODE,
-        HARD_GATE_PASS_TINY_PROBE_MODE,
-        PRE_PASS_RESONANCE_TINY_PROBE_MODE,
-    }:
+    if mode in {SOURCE_RESONANCE_TINY_PROBE_MODE, HARD_GATE_PASS_TINY_PROBE_MODE}:
         return True
+    if mode == PRE_PASS_RESONANCE_TINY_PROBE_MODE:
+        return bool(PRE_PASS_RESONANCE_REQUIRE_QUOTE_CLEAN)
     if any(marker in branch for marker in ('source_resonance', 'gmgn_fast', 'quote_clean_fast', 'hard_gate_fast')):
         return True
     if 'fast_lane' in replay_source and any(marker in branch for marker in ('source', 'hard_gate', 'gmgn')):
@@ -2503,6 +2501,7 @@ def pending_requires_quote_clean_for_final_entry(pending, entry_branch=None):
 
 def pending_final_entry_max_signal_age_sec(pending):
     pending = pending or {}
+    mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '').lower()
     if (
         pending.get('quote_anchored_entry')
         or pending.get('final_reclaim_quote_executable')
@@ -2510,6 +2509,10 @@ def pending_final_entry_max_signal_age_sec(pending):
         or pending.get('ttl_final_reclaim_quote_clean')
     ):
         return 0
+    if mode == PRE_PASS_RESONANCE_TINY_PROBE_MODE:
+        return PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC
+    if mode == 'smart_entry_pullback_bounce':
+        return SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC
     return None
 
 
@@ -12666,7 +12669,16 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
             return True, decision
         log.info(
             f"  [REVIVAL_CANARY] shadow {symbol or token_ca}: "
-            f"mode={entry_mode} reason={decision.get('reason')}"
+            f"mode={entry_mode} reason={decision.get('reason')} "
+            f"health_reason={(canary_gate.get('policy_health') or {}).get('reason')} "
+            f"closed={(canary_gate.get('policy_health') or {}).get('closed_trades')} "
+            f"wins={(canary_gate.get('policy_health') or {}).get('wins')} "
+            f"losses={(canary_gate.get('policy_health') or {}).get('losses')} "
+            f"loss_sol={(canary_gate.get('policy_health') or {}).get('total_loss_sol')} "
+            f"streak={(canary_gate.get('policy_health') or {}).get('consecutive_losses')} "
+            f"quote_stops={(canary_gate.get('policy_health') or {}).get('quote_guard_stops')} "
+            f"gap_alerts={(canary_gate.get('policy_health') or {}).get('gap_alerts')} "
+            f"rate={canary_gate.get('mode_count_1h')}/{REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR}"
         )
         return False, decision
 

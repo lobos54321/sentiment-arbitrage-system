@@ -145,6 +145,31 @@ def test_shared_runtime_local_cache_reuses_identical_market_data_call(monkeypatc
     assert len(calls) == 1
 
 
+def test_final_entry_quote_clean_profiles_protect_hard_source_without_blocking_pre_pass():
+    assert monitor.pending_requires_quote_clean_for_final_entry({
+        "entry_mode": HARD_GATE_PASS_TINY_PROBE_MODE,
+    })
+    assert monitor.pending_requires_quote_clean_for_final_entry({
+        "entry_mode": SOURCE_RESONANCE_TINY_PROBE_MODE,
+    })
+    assert not monitor.pending_requires_quote_clean_for_final_entry({
+        "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+    })
+
+
+def test_final_entry_freshness_profiles_match_entry_family():
+    assert monitor.pending_final_entry_max_signal_age_sec({
+        "entry_mode": PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+    }) == monitor.PRE_PASS_RESONANCE_MAX_SIGNAL_AGE_SEC
+    assert monitor.pending_final_entry_max_signal_age_sec({
+        "entry_mode": "smart_entry_pullback_bounce",
+    }) == monitor.SMART_PULLBACK_BOUNCE_MAX_SIGNAL_AGE_SEC
+    assert monitor.pending_final_entry_max_signal_age_sec({
+        "entry_mode": "smart_entry_pullback_bounce",
+        "final_reclaim_quote_executable": {"pass": True},
+    }) == 0
+
+
 def _paper_trade_db(rows=()):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

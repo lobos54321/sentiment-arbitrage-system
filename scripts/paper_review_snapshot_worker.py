@@ -510,7 +510,11 @@ def _trade_rows_for_window(db, since_ts):
         col_expr(cols, "lotto_state_json"),
         col_expr(cols, "entry_execution_audit_json"),
     ]
-    where = "WHERE " + since_predicate(cols, ["entry_ts", "signal_ts", "exit_ts"], include_null="exit_ts")
+    # Entry-mode and route-health windows should describe trades whose own
+    # lifecycle touched the requested window. Old open rows are handled by the
+    # general trade summary; including every NULL exit_ts here pollutes recent
+    # route EV with historical positions.
+    where = "WHERE " + since_predicate(cols, ["entry_ts", "signal_ts", "exit_ts"])
     return rows_as_dicts(db.execute(
         f"""
         SELECT {', '.join(select_cols)}

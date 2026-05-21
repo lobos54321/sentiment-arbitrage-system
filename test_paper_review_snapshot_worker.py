@@ -178,6 +178,49 @@ def test_review_snapshot_worker_separates_mark_only_missed_peaks(tmp_path):
     assert trusted["peak_trust_status"] == "trusted_peak"
 
 
+def test_entry_mode_performance_excludes_old_open_rows_from_recent_window(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_trades (
+          id INTEGER PRIMARY KEY,
+          token_ca TEXT,
+          symbol TEXT,
+          signal_ts INTEGER,
+          entry_ts INTEGER,
+          exit_ts INTEGER,
+          entry_mode TEXT,
+          pnl_pct REAL,
+          peak_pnl REAL,
+          position_size_sol REAL
+        );
+        """
+    )
+    now_ts = int(time.time())
+    db.execute(
+        """
+        INSERT INTO paper_trades
+          (token_ca, symbol, signal_ts, entry_ts, exit_ts, entry_mode, pnl_pct, peak_pnl, position_size_sol)
+        VALUES
+          ('OLD', 'OLD', ?, ?, NULL, 'lotto_unknown', 0.0, 0.0, 0.05),
+          ('NEW', 'NEW', ?, ?, ?, 'pre_pass_resonance_tiny_probe', 0.10, 0.20, 0.001)
+        """,
+        (now_ts - 90000, now_ts - 90000, now_ts - 60, now_ts - 60, now_ts - 30),
+    )
+    db.commit()
+
+    snapshot = build_snapshot(db, 24, 10)
+
+    recent_tokens = {row["token_ca"] for row in snapshot["entry_mode_performance"]["recent"]}
+    modes = {row["entry_mode"] for row in snapshot["entry_mode_performance"]["by_entry_mode"]}
+    assert "NEW" in recent_tokens
+    assert "OLD" not in recent_tokens
+    assert "pre_pass_resonance_tiny_probe" in modes
+    assert "lotto_unknown" not in modes
+
+
 def test_review_snapshot_worker_outputs_branch_session_ev(tmp_path):
     db_path = tmp_path / "paper.db"
     db = sqlite3.connect(db_path)

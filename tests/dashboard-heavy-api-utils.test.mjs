@@ -6,7 +6,9 @@ import {
   buildClosedLoopMissedDogSummary,
   boundedIntParam,
   boundedWindowedSinceTs,
+  missedRecoverySummaryFromLiveSnapshot,
   resetPaperReportGateForTest,
+  shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
 } from '../src/web/dashboard-server.js';
 
@@ -45,6 +47,52 @@ test('paper report gate rejects concurrent and cooldown requests', () => {
 
   assert.equal(cooldown.allowed, false);
   assert.equal(cooldown.reason, 'paper_report_cooldown');
+});
+
+test('missed recovery summary uses materialized snapshots for 2h default window', () => {
+  assert.equal(shouldUseMaterializedMissedRecoverySummary(2, false), true);
+  assert.equal(shouldUseMaterializedMissedRecoverySummary(8, false), true);
+  assert.equal(shouldUseMaterializedMissedRecoverySummary(2, true), false);
+  assert.equal(shouldUseMaterializedMissedRecoverySummary(1, false), false);
+});
+
+test('materialized missed recovery summary excludes stop-before-peak rows from clean dogs', () => {
+  const summary = missedRecoverySummaryFromLiveSnapshot({
+    snapshot_id: 'paper_live_2h_test',
+    generated_at: '2026-05-21T00:00:00Z',
+    window: { since_ts: 100, since_iso: '2026-05-21T00:00:00Z' },
+    missed: {
+      overall: {
+        unique_tokens: 2,
+        gold_unique: 1,
+        quote_executable_unique: 2,
+      },
+      by_gate: [],
+      top_dogs: [
+        {
+          token_ca: 'StopFirst',
+          symbol: 'STOP',
+          quote_exec: 1,
+          tradable_missed: 1,
+          would_stop_before_peak: 1,
+          max_pnl: 10,
+        },
+        {
+          token_ca: 'CleanDog',
+          symbol: 'CLEAN',
+          quote_exec: 1,
+          tradable_missed: 1,
+          would_stop_before_peak: 0,
+          max_pnl: 2,
+        },
+      ],
+    },
+  }, { dbPath: '/tmp/paper.db', requestedHours: 2, limit: 10 });
+
+  assert.deepEqual(
+    summary.top_clean_quote_dogs.map((row) => row.token_ca),
+    ['CleanDog']
+  );
 });
 
 test('closed loop missed dog summary ranks one blocker per token in SQL', () => {

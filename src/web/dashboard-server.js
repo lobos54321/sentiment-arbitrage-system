@@ -175,6 +175,10 @@ export function tryBeginPaperReport(endpoint = 'paper_report', nowMs = Date.now(
   };
 }
 
+export function shouldUseMaterializedMissedRecoverySummary(requestedHours, forceLive = false) {
+  return Number.isFinite(requestedHours) && requestedHours >= 2 && !forceLive;
+}
+
 function beginLivePaperReport(res, endpoint) {
   const gate = tryBeginPaperReport(endpoint);
   if (gate.allowed) return gate.release;
@@ -662,7 +666,7 @@ function missedRecoveryRowFromLiveSnapshot(row = {}, section = 'overall') {
   };
 }
 
-function missedRecoverySummaryFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, limit }) {
+export function missedRecoverySummaryFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, limit }) {
   const missed = liveSnapshot?.missed || {};
   const overall = missedRecoveryRowFromLiveSnapshot(missed.overall || {}, 'overall');
   const byGate = Array.isArray(missed.by_gate) ? missed.by_gate : [];
@@ -673,7 +677,11 @@ function missedRecoverySummaryFromLiveSnapshot(liveSnapshot, { dbPath, requested
     .filter((row) => Number(row.quote_executable_unique || 0) > 0)
     .map((row) => ({ ...row, section: 'by_blocker_clean_quote' }))
     .slice(0, limit);
-  const topDogs = Array.isArray(missed.top_dogs) ? missed.top_dogs.slice(0, limit) : [];
+  const topDogs = Array.isArray(missed.top_dogs) ? missed.top_dogs : [];
+  const cleanTopDogs = topDogs
+    .filter((row) => Number(row.quote_exec || row.quote_executable_unique || 0) > 0)
+    .filter((row) => Number(row.would_stop_before_peak || 0) !== 1)
+    .slice(0, limit);
   return {
     generated_at: new Date().toISOString(),
     db_path: dbPath,
@@ -694,7 +702,7 @@ function missedRecoverySummaryFromLiveSnapshot(liveSnapshot, { dbPath, requested
     by_route: [],
     by_blocker_clean_quote: byBlockerCleanQuote,
     by_blocker_all_unique: byBlockerAllUnique,
-    top_clean_quote_dogs: topDogs.filter((row) => Number(row.quote_exec || row.quote_executable_unique || 0) > 0),
+    top_clean_quote_dogs: cleanTopDogs,
     recovery_actionability: [],
     recovery_actions: [],
     notes: {
@@ -5948,7 +5956,7 @@ const server = http.createServer(async (req, res) => {
       const requestedHours = Number.parseInt(url.searchParams.get('hours') || '2', 10);
       const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
         || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
-      if (Number.isFinite(requestedHours) && requestedHours > 2 && !forceLive) {
+      if (shouldUseMaterializedMissedRecoverySummary(requestedHours, forceLive)) {
         const liveSnapshot = readLivePaperReview(requestedHours);
         if (liveSnapshot && !liveSnapshot.error) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
