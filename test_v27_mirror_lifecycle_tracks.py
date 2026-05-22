@@ -1,10 +1,11 @@
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, "scripts")
 
 from v27_event_log import V27EventLog  # noqa: E402
-from v27_mirror_lifecycle_tracks import mirror_lifecycle_tracks, verify_lifecycle_mirror_parity  # noqa: E402
+from v27_mirror_lifecycle_tracks import acquire_loop_lock, mirror_lifecycle_tracks, run_mirror_once, verify_lifecycle_mirror_parity  # noqa: E402
 
 
 def create_lifecycle_db(db_path):
@@ -88,3 +89,80 @@ def test_lifecycle_track_mirror_keeps_missing_pool_unresolved(tmp_path):
     assert event["aggregate_id"] == "token_lifecycle:solana:TokenNoPool:unknown_pool:0"
     assert event["payload"]["canonical_pool_group"] == "unknown_pool"
     assert event["payload"]["pool_resolution_quality"] == "missing_pool"
+
+
+def test_lifecycle_scoped_parity_does_not_treat_previous_ids_as_orphans(tmp_path):
+    lifecycle_db = tmp_path / "lifecycle.db"
+    event_log_dir = tmp_path / "v27"
+    with create_lifecycle_db(lifecycle_db) as db:
+        for track_id in (1, 2):
+            db.execute(
+                """
+                INSERT INTO tracks
+                    (id, token_ca, symbol, signal_ts, entry_price, entry_ts,
+                     pool_address, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (track_id, f"Token{track_id}", f"T{track_id}", 1_700_000_000 + track_id, 0.001, 1_700_000_003 + track_id, f"Pool{track_id}", "active"),
+            )
+        db.commit()
+
+    mirror_lifecycle_tracks(lifecycle_db, event_log_dir)
+    scoped = verify_lifecycle_mirror_parity(lifecycle_db, event_log_dir, since_id=2, limit=1)
+
+    assert scoped["db_rows"] == 1
+    assert scoped["mirrored_events"] == 1
+    assert scoped["orphan_mirrored_track_ids"] == []
+    assert scoped["parity_ok"] is True
+
+
+def test_lifecycle_mirror_new_only_cursor_advances_from_event_log(tmp_path):
+    lifecycle_db = tmp_path / "lifecycle.db"
+    event_log_dir = tmp_path / "v27"
+    with create_lifecycle_db(lifecycle_db) as db:
+        for track_id in (1, 2):
+            db.execute(
+                """
+                INSERT INTO tracks
+                    (id, token_ca, symbol, signal_ts, entry_price, entry_ts,
+                     pool_address, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (track_id, f"Token{track_id}", f"T{track_id}", 1_700_000_000 + track_id, 0.001, 1_700_000_003 + track_id, f"Pool{track_id}", "active"),
+            )
+        db.commit()
+
+    args = SimpleNamespace(
+        lifecycle_db=str(lifecycle_db),
+        event_log_dir=str(event_log_dir),
+        since_id=None,
+        until_id=None,
+        limit=1,
+        dry_run=False,
+        table="tracks",
+        default_chain="solana",
+        new_only=True,
+    )
+    first = run_mirror_once(args)
+    second = run_mirror_once(args)
+
+    assert first["cursor"]["since_id"] is None
+    assert first["mirror"]["appended"] == 1
+    assert first["cursor"]["max_mirrored_track_id"] == 1
+    assert second["cursor"]["since_id"] == 2
+    assert second["mirror"]["appended"] == 1
+    assert second["cursor"]["max_mirrored_track_id"] == 2
+
+
+def test_lifecycle_mirror_loop_lock_rejects_duplicate_worker(tmp_path):
+    lock_path = tmp_path / "v27_lifecycle.lock"
+    first = acquire_loop_lock(lock_path)
+    assert first is not None
+    try:
+        assert acquire_loop_lock(lock_path) is None
+    finally:
+        first.close()
+
+    second = acquire_loop_lock(lock_path)
+    assert second is not None
+    second.close()

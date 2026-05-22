@@ -151,7 +151,9 @@ function startShadowDataSidecars(config) {
   const fastLaneLog = process.env.PAPER_FAST_LANE_LOG || './data/paper-fast-lane.log';
   const reviewSnapshotLog = process.env.PAPER_REVIEW_SNAPSHOT_LOG || './data/paper-review-snapshot.log';
   const v27TelegramMirrorLog = process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || './data/v27-telegram-signal-mirror.log';
+  const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
+  const lifecycleDb = process.env.LIFECYCLE_DB || './data/lifecycle_tracks.db';
 
   const workers = [
     startPythonSidecar({
@@ -249,6 +251,27 @@ function startShadowDataSidecars(config) {
       env: {
         DB_PATH: signalDb,
         SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+      },
+    }));
+  }
+  if (envFlag('V27_LIFECYCLE_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-lifecycle-mirror',
+      logPath: v27LifecycleMirrorLog,
+      args: [
+        'scripts/v27_mirror_lifecycle_tracks.py',
+        '--loop',
+        '--new-only',
+        '--lifecycle-db', lifecycleDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_LIFECYCLE_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_LIFECYCLE_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_LIFECYCLE_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_LIFECYCLE_MIRROR_LOCK_FILE || '/tmp/v27_lifecycle_mirror.lock',
+      ],
+      env: {
+        LIFECYCLE_DB: lifecycleDb,
         V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
       },
     }));
