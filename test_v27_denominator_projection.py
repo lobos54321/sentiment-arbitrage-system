@@ -248,3 +248,106 @@ def test_denominator_projection_does_not_count_backfilled_signal_as_d1(tmp_path)
     assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
     assert projection["metrics"]["telegram_realtime_observable_gold_silver_D1"] == 0
     assert projection["records"][0]["realtime_observable"] is False
+
+
+def test_denominator_projection_merges_telegram_signal_with_source_label_event(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenSource:unknown_pool:0",
+        idempotency_key="premium_signals:1",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenSource",
+            "symbol": "SRC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenSource:unknown_pool:0",
+        idempotency_key="signal_features_source_label:1",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenSource",
+            "symbol": "SRC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "silver",
+            "source_dog_label_version": "legacy_signal_features_seed_v0.1",
+            "source_label_research_only": True,
+            "source_reference_price_type": "legacy_entry_price",
+            "source_label_window": "24h",
+            "source_label_available_at": "2026-01-15T00:00:00Z",
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["telegram_signal_seen_events"] == 1
+    assert projection["source_dog_label_events"] == 1
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["metrics"]["telegram_realtime_observable_gold_silver_D1"] == 1
+    assert projection["metrics"]["telegram_realtime_clean_gold_silver_D2"] == 0
+    assert projection["evidence_gaps"]["ProductionSourceDogLabelContract"] == 1
+    assert projection["records"][0]["source_label_research_only"] is True
+
+
+def test_denominator_projection_keeps_unresolved_source_label_as_gap(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenUnresolved:unknown_pool:0",
+        idempotency_key="signal_features_source_label:1",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenUnresolved",
+            "symbol": "UNR",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": None,
+            "source_label_quality": "legacy_label_unresolved",
+            "source_label_research_only": True,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["source_dog_label_events"] == 1
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 0
+    assert projection["evidence_gaps"]["SourceDogLabelContract"] == 1
+    assert projection["evidence_gaps"]["TelegramLifecycleEvent"] == 1
+
+
+def test_denominator_projection_does_not_count_source_label_without_telegram_anchor_as_d0(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenOnlyLabel:unknown_pool:0",
+        idempotency_key="signal_features_source_label:1",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenOnlyLabel",
+            "symbol": "ONLY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 0
+    assert projection["evidence_gaps"]["TelegramLifecycleEvent"] == 1
+    assert projection["evidence_gaps"]["ProductionSourceDogLabelContract"] == 1
