@@ -240,6 +240,7 @@ def test_pipeline_smoke_can_seed_ex_ante_feasibility(tmp_path, monkeypatch):
             include_trade_outcomes=True,
             include_standardized_stops=True,
             include_ex_ante_feasibility=True,
+            include_earliest_actionable_times=True,
         )
 
     projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
@@ -247,8 +248,12 @@ def test_pipeline_smoke_can_seed_ex_ante_feasibility(tmp_path, monkeypatch):
     assert report["health"]["status"] == "v27_pipeline_smoke_ok"
     assert report["blocking_reasons"] == []
     assert report["steps"]["ex_ante_feasibility"]["ok"] is True
+    assert report["steps"]["earliest_actionable_times"]["ok"] is True
     assert projection["health"]["ex_ante_feasibility_ok"] is True
+    assert projection["health"]["earliest_actionable_time_ok"] is True
     assert projection["contract_evidence"]["ExAnteFeasibility"]["future_leakage_count"] == 0
+    assert projection["contract_evidence"]["EarliestActionableTime"]["invariant_violation_count"] == 0
     assert "TradeOutcomeLabelContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "StandardizedStopContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "ExAnteFeasibility" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "EarliestActionableTime" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]

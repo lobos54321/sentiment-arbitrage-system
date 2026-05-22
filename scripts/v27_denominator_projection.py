@@ -32,6 +32,7 @@ LIFECYCLE_IDENTITY_EVENT_TYPE = "token_lifecycle_identity_resolved"
 TRADE_OUTCOME_LABEL_EVENT_TYPE = "trade_outcome_label_recorded"
 STANDARDIZED_STOP_EVENT_TYPE = "standardized_stop_contract_recorded"
 EX_ANTE_FEASIBILITY_EVENT_TYPE = "ex_ante_feasibility_recorded"
+EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -41,6 +42,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     TRADE_OUTCOME_LABEL_EVENT_TYPE,
     STANDARDIZED_STOP_EVENT_TYPE,
     EX_ANTE_FEASIBILITY_EVENT_TYPE,
+    EARLIEST_ACTIONABLE_EVENT_TYPE,
 }
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
@@ -73,6 +75,26 @@ def _lag_ms(older_ts, newer_ts):
     if older is None or newer is None:
         return None
     return max(0, int((newer - older).total_seconds() * 1000))
+
+
+def _timestamp_epoch_seconds(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        return ts / 1000.0 if ts > 1_000_000_000_000 else ts
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        ts = float(text)
+        return ts / 1000.0 if ts > 1_000_000_000_000 else ts
+    except ValueError:
+        pass
+    parsed = _parse_iso_ts(text)
+    if parsed is None:
+        return None
+    return parsed.timestamp()
 
 
 def _load_spec_metadata(spec_manifest_path=DEFAULT_SPEC_MANIFEST):
@@ -486,6 +508,78 @@ def _extract_ex_ante_feasibility_contract(event, bags):
     }
 
 
+def _extract_earliest_actionable_time_contract(event, bags):
+    version = _extract_scalar(bags, [("earliest_actionable_policy_version",), ("actionable_time_policy_version",)])
+    if event.get("event_type") != EARLIEST_ACTIONABLE_EVENT_TYPE and not version:
+        return None
+    earliest_actionable_ts = _extract_scalar(bags, [("earliest_actionable_ts",)])
+    required_inputs_available_at = _extract_scalar(bags, [("required_inputs_available_at",)], default={})
+    peak_ts = _extract_scalar(bags, [("peak_ts",)])
+    counterfactual_entry_ts = _extract_scalar(bags, [("counterfactual_entry_ts",), ("entry_ts",)])
+    actionable_before_peak = _extract_flag(bags, [("actionable_before_peak",)])
+    reason = _extract_scalar(bags, [("earliest_actionable_reason",)])
+    if not version and earliest_actionable_ts is None and peak_ts is None and actionable_before_peak is None:
+        return None
+    if required_inputs_available_at is None:
+        required_inputs_available_at = {}
+    missing_inputs_before_ts = _extract_scalar(bags, [("missing_inputs_before_ts",)], default=[])
+    if missing_inputs_before_ts is None:
+        missing_inputs_before_ts = []
+    if not isinstance(missing_inputs_before_ts, list):
+        missing_inputs_before_ts = [missing_inputs_before_ts]
+    missing_fields = []
+    invariant_violations = []
+    if not version:
+        missing_fields.append("earliest_actionable_policy_version")
+    if earliest_actionable_ts is None:
+        missing_fields.append("earliest_actionable_ts")
+    if not isinstance(required_inputs_available_at, dict) or not required_inputs_available_at:
+        missing_fields.append("required_inputs_available_at")
+    if peak_ts is None:
+        missing_fields.append("peak_ts")
+    if counterfactual_entry_ts is None:
+        missing_fields.append("counterfactual_entry_ts")
+    if actionable_before_peak is None:
+        missing_fields.append("actionable_before_peak")
+    if not reason:
+        missing_fields.append("earliest_actionable_reason")
+    earliest_sec = _timestamp_epoch_seconds(earliest_actionable_ts)
+    entry_sec = _timestamp_epoch_seconds(counterfactual_entry_ts)
+    peak_sec = _timestamp_epoch_seconds(peak_ts)
+    if earliest_actionable_ts is not None and earliest_sec is None:
+        missing_fields.append("earliest_actionable_ts_parseable")
+    if counterfactual_entry_ts is not None and entry_sec is None:
+        missing_fields.append("counterfactual_entry_ts_parseable")
+    if peak_ts is not None and peak_sec is None:
+        missing_fields.append("peak_ts_parseable")
+    if earliest_sec is not None and entry_sec is not None and earliest_sec > entry_sec:
+        invariant_violations.append("earliest_actionable_after_counterfactual_entry")
+    if entry_sec is not None and peak_sec is not None and entry_sec > peak_sec:
+        invariant_violations.append("counterfactual_entry_after_peak")
+    if actionable_before_peak is False:
+        invariant_violations.append("not_actionable_before_peak")
+    return {
+        "earliest_actionable_policy_version": version,
+        "earliest_actionable_ts": earliest_actionable_ts,
+        "required_inputs_available_at": required_inputs_available_at,
+        "missing_inputs_before_ts": missing_inputs_before_ts,
+        "peak_ts": peak_ts,
+        "peak_ts_quality": _extract_scalar(bags, [("peak_ts_quality",)], default="unknown"),
+        "peak_ts_source": _extract_scalar(bags, [("peak_ts_source",)]),
+        "counterfactual_entry_ts": counterfactual_entry_ts,
+        "actionable_before_peak": actionable_before_peak,
+        "earliest_actionable_reason": reason,
+        "actionability_quality": _extract_scalar(bags, [("actionability_quality",)], default="unknown"),
+        "decision_ts": _extract_scalar(bags, [("decision_ts",), ("decision_available_at",)]),
+        "decision_available_at": _extract_scalar(bags, [("decision_available_at",)]),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+        "missing_fields": sorted(set(missing_fields)),
+        "invariant_violations": sorted(set(invariant_violations)),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -578,6 +672,7 @@ def _extract_decision_fact(event):
         "trade_outcome_label_contract": _extract_trade_outcome_label_contract(event, bags),
         "standardized_stop_contract": _extract_standardized_stop_contract(event, bags),
         "ex_ante_feasibility_contract": _extract_ex_ante_feasibility_contract(event, bags),
+        "earliest_actionable_time_contract": _extract_earliest_actionable_time_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -617,6 +712,7 @@ def _new_record(fact):
         "trade_outcome_label_candidates": [],
         "standardized_stop_candidates": [],
         "ex_ante_feasibility_candidates": [],
+        "earliest_actionable_time_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -625,6 +721,7 @@ def _new_record(fact):
         "trade_outcome_label": None,
         "standardized_stop_contract": None,
         "ex_ante_feasibility_contract": None,
+        "earliest_actionable_time": None,
         "captured": False,
     }
 
@@ -692,6 +789,9 @@ def _merge_fact(record, fact):
     ex_ante_feasibility = fact.get("ex_ante_feasibility_contract")
     if ex_ante_feasibility:
         record["ex_ante_feasibility_candidates"].append(ex_ante_feasibility)
+    earliest_actionable_time = fact.get("earliest_actionable_time_contract")
+    if earliest_actionable_time:
+        record["earliest_actionable_time_candidates"].append(earliest_actionable_time)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -826,6 +926,15 @@ def _finalize_ex_ante_feasibility(record):
     selected = candidates[0]
     valid = not selected.get("missing_fields") and not selected.get("leakage_fields")
     record["ex_ante_feasible"] = bool(valid and selected.get("ex_ante_feasible") is True)
+
+
+def _finalize_earliest_actionable_time(record):
+    candidates = sorted(
+        record.get("earliest_actionable_time_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["earliest_actionable_time_candidates"] = candidates
+    record["earliest_actionable_time"] = candidates[0] if candidates else None
 
 
 def _record_missing_evidence(record):
@@ -1018,6 +1127,40 @@ def _contract_evidence_from_records(record_list):
                     "leakage_fields": sorted({field for item in leaky for field in item.get("leakage_fields", [])}),
                 }
             )
+    earliest_actionable_records = [
+        record
+        for record in record_list
+        if record.get("earliest_actionable_time_candidates")
+    ]
+    malformed_earliest_actionable = []
+    invariant_violations_earliest_actionable = []
+    for record in earliest_actionable_records:
+        malformed = [
+            item
+            for item in record.get("earliest_actionable_time_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_earliest_actionable.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        violated = [
+            item
+            for item in record.get("earliest_actionable_time_candidates") or []
+            if item.get("invariant_violations")
+        ]
+        if violated:
+            invariant_violations_earliest_actionable.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(violated),
+                    "invariant_violations": sorted({field for item in violated for field in item.get("invariant_violations", [])}),
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -1079,6 +1222,37 @@ def _contract_evidence_from_records(record_list):
             ),
             "ex_ante_feasibility_projection_version": "v2.7.0.ex_ante_feasibility.v1",
         },
+        "EarliestActionableTime": {
+            "eligible_earliest_actionable_records": len(earliest_actionable_records),
+            "earliest_actionable_count": sum(len(record.get("earliest_actionable_time_candidates") or []) for record in earliest_actionable_records),
+            "actionable_before_peak_count": sum(
+                1
+                for record in earliest_actionable_records
+                for item in record.get("earliest_actionable_time_candidates") or []
+                if item.get("actionable_before_peak") is True
+            ),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_earliest_actionable),
+            "malformed_earliest_actionable_times": malformed_earliest_actionable,
+            "invariant_violation_count": sum(item["violation_count"] for item in invariant_violations_earliest_actionable),
+            "invariant_violations": invariant_violations_earliest_actionable,
+            "peak_ts_qualities": sorted(
+                {
+                    item.get("peak_ts_quality")
+                    for record in earliest_actionable_records
+                    for item in record.get("earliest_actionable_time_candidates") or []
+                    if item.get("peak_ts_quality")
+                }
+            ),
+            "earliest_actionable_policy_versions": sorted(
+                {
+                    item.get("earliest_actionable_policy_version")
+                    for record in earliest_actionable_records
+                    for item in record.get("earliest_actionable_time_candidates") or []
+                    if item.get("earliest_actionable_policy_version")
+                }
+            ),
+            "earliest_actionable_projection_version": "v2.7.0.earliest_actionable_time.v1",
+        },
     }
 
 
@@ -1102,6 +1276,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "trade_outcome_label_recorded_events": 0,
         "standardized_stop_contract_recorded_events": 0,
         "ex_ante_feasibility_recorded_events": 0,
+        "earliest_actionable_time_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -1128,6 +1303,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "TradeOutcomeLabelContract": {},
             "StandardizedStopContract": {},
             "ExAnteFeasibility": {},
+            "EarliestActionableTime": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -1140,6 +1316,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "trade_outcome_label_ok": False,
             "standardized_stop_ok": False,
             "ex_ante_feasibility_ok": False,
+            "earliest_actionable_time_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -1184,6 +1361,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["standardized_stop_contract_recorded_events"] += 1
         if event.get("event_type") == EX_ANTE_FEASIBILITY_EVENT_TYPE:
             projection["ex_ante_feasibility_recorded_events"] += 1
+        if event.get("event_type") == EARLIEST_ACTIONABLE_EVENT_TYPE:
+            projection["earliest_actionable_time_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -1221,6 +1400,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_trade_outcome_label(record)
         _finalize_standardized_stop(record)
         _finalize_ex_ante_feasibility(record)
+        _finalize_earliest_actionable_time(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -1315,6 +1495,12 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["ExAnteFeasibility"]["ex_ante_feasible_count"] > 0
         and contract_evidence["ExAnteFeasibility"]["malformed_count"] == 0
         and contract_evidence["ExAnteFeasibility"]["future_leakage_count"] == 0
+    )
+    projection["health"]["earliest_actionable_time_ok"] = (
+        contract_evidence["EarliestActionableTime"]["eligible_earliest_actionable_records"] > 0
+        and contract_evidence["EarliestActionableTime"]["actionable_before_peak_count"] > 0
+        and contract_evidence["EarliestActionableTime"]["malformed_count"] == 0
+        and contract_evidence["EarliestActionableTime"]["invariant_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

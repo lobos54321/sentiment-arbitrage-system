@@ -329,6 +329,13 @@ def build_contract_statuses(
         "ex_ante_feasibility_missing_malformed_or_leaky",
         ex_ante_evidence,
     )
+    earliest_actionable_evidence = contract_evidence.get("EarliestActionableTime") or {}
+    statuses["EarliestActionableTime"] = _status(
+        "EarliestActionableTime",
+        "pass" if projection_built and projection_health.get("earliest_actionable_time_ok") else "missing_evidence",
+        "earliest_actionable_missing_malformed_or_invariant_violation",
+        earliest_actionable_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

@@ -94,6 +94,42 @@ def append_ex_ante(log, *, token_ca, paper_trade_id=1, pool="pool-a", used_futur
     )
 
 
+def append_earliest_actionable(log, *, token_ca, paper_trade_id=1, pool="pool-a", entry_after_peak=False, missing_version=False):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "earliest_actionable_policy_version": None if missing_version else "legacy_actual_paper_entry_actionable_time_v0.1",
+        "earliest_actionable_ts": 1_700_000_003,
+        "required_inputs_available_at": {
+            "telegram_anchor_available_at": 1_700_000_000,
+            "pool_resolved_available_at": 1_700_000_002,
+            "entry_quote_executable_available_at": 1_700_000_002,
+            "exit_quote_executable_available_at": 1_700_000_002,
+            "critical_risk_not_bad_available_at": 1_700_000_002,
+            "liquidity_ok_available_at": 1_700_000_002,
+            "decision_engine_available_at": 1_700_000_002,
+        },
+        "missing_inputs_before_ts": [],
+        "peak_ts": 1_700_000_002 if entry_after_peak else 1_700_000_120,
+        "peak_ts_quality": "legacy_outcome_window_close_proxy",
+        "peak_ts_source": "paper_trade_exit_ts",
+        "counterfactual_entry_ts": 1_700_000_003,
+        "actionable_before_peak": not entry_after_peak,
+        "earliest_actionable_reason": "legacy_actual_paper_entry_inputs_available_by_decision",
+        "actionability_quality": "legacy_actual_paper_entry_window_proof",
+    }
+    return log.append_event(
+        event_type="earliest_actionable_time_recorded",
+        aggregate_id=f"earliest_actionable_time:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"earliest_actionable_time:{paper_trade_id}",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -289,6 +325,42 @@ def test_denominator_projection_rejects_ex_ante_future_leakage(tmp_path):
     assert evidence["future_leakage"][0]["leakage_fields"] == ["used_future_peak"]
     assert projection["records"][0]["ex_ante_feasible"] is False
     assert projection["metrics"]["telegram_externally_actionable_gold_silver_D3a"] == 0
+
+
+def test_denominator_projection_consumes_earliest_actionable_time_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenAct", captured=True, **FULL_D3B_FLAGS)
+    append_earliest_actionable(log, token_ca="TokenAct")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["earliest_actionable_time_recorded_events"] == 1
+    assert projection["health"]["earliest_actionable_time_ok"] is True
+    evidence = projection["contract_evidence"]["EarliestActionableTime"]
+    assert evidence["eligible_earliest_actionable_records"] == 1
+    assert evidence["actionable_before_peak_count"] == 1
+    assert evidence["malformed_count"] == 0
+    assert evidence["invariant_violation_count"] == 0
+    assert evidence["peak_ts_qualities"] == ["legacy_outcome_window_close_proxy"]
+    record = projection["records"][0]
+    assert record["earliest_actionable_time"]["earliest_actionable_policy_version"] == "legacy_actual_paper_entry_actionable_time_v0.1"
+
+
+def test_denominator_projection_rejects_earliest_actionable_invariant_violation(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenLate", captured=True, **FULL_D3B_FLAGS)
+    append_earliest_actionable(log, token_ca="TokenLate", entry_after_peak=True)
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["EarliestActionableTime"]
+    assert projection["health"]["earliest_actionable_time_ok"] is False
+    assert evidence["actionable_before_peak_count"] == 0
+    assert evidence["invariant_violation_count"] == 1
+    assert evidence["invariant_violations"][0]["invariant_violations"] == [
+        "counterfactual_entry_after_peak",
+        "not_actionable_before_peak",
+    ]
 
 
 def test_denominator_projection_merges_telegram_signal_anchor_with_missed_label_seed(tmp_path):
