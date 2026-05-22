@@ -6,7 +6,9 @@ sys.path.insert(0, "scripts")
 from paper_decision_audit import init_decision_audit, record_decision_event  # noqa: E402
 from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_paper_decisions import (  # noqa: E402
+    mirror_missed_attributions,
     mirror_paper_decisions,
+    verify_missed_mirror_parity,
     verify_mirror_parity,
 )
 
@@ -100,3 +102,57 @@ def test_backfill_preserves_invalid_json_as_dirty_payload_evidence(tmp_path):
     assert event["payload"]["payload"]["_json_field"] == "payload_json"
     assert "_json_parse_error" in event["payload"]["payload"]
     assert verify_mirror_parity(db_path, event_log_dir)["parity_ok"] is True
+
+
+def test_backfill_mirrors_missed_attribution_as_legacy_source_label_seed(tmp_path):
+    db_path = tmp_path / "paper_trades.db"
+    event_log_dir = tmp_path / "v27"
+    with new_db(db_path) as db:
+        db.execute(
+            """
+            INSERT INTO paper_missed_signal_attribution
+                (decision_event_id, created_event_ts, token_ca, symbol, signal_id, signal_ts,
+                 route, component, decision, reject_reason, baseline_price, baseline_source,
+                 baseline_ts, tradable_missed, tradable_peak_pnl, would_stop_before_peak, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                10,
+                1_700_000_004,
+                "TokenMiss",
+                "MISS",
+                77,
+                1_700_000_000,
+                "LOTTO",
+                "upstream_gate",
+                "skip",
+                "tracking_ttl_expired",
+                0.001,
+                "legacy_baseline",
+                1_700_000_000,
+                1,
+                0.75,
+                0,
+                "resolved",
+            ),
+        )
+        db.commit()
+
+    first = mirror_missed_attributions(db_path, event_log_dir)
+    duplicate = mirror_missed_attributions(db_path, event_log_dir)
+    parity = verify_missed_mirror_parity(db_path, event_log_dir)
+
+    assert first["read_rows"] == 1
+    assert first["appended"] == 1
+    assert duplicate["duplicate"] == 1
+    assert parity["parity_ok"] is True
+
+    event = next(V27EventLog(event_log_dir).iter_events())
+    assert event["event_type"] == "paper_missed_signal_attribution_recorded"
+    assert event["source"] == "paper_missed_signal_attribution"
+    assert event["idempotency_key"] == "paper_missed_signal_attribution:1"
+    assert event["payload"]["source_dog_label"] == "silver"
+    assert event["payload"]["source_dog_label_version"] == "legacy_missed_attribution_seed_v0.1"
+    assert event["payload"]["source_label_research_only"] is True
+    assert event["payload"]["telegram_seen"] is True
+    assert event["payload"]["realtime_observable"] is True

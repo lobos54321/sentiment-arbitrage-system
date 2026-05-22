@@ -133,3 +133,43 @@ def test_denominator_projection_reports_missing_token_and_evidence_gaps(tmp_path
     assert projection["evidence_gaps"]["SourceDogLabelContract"] == 1
     assert projection["evidence_gaps"]["RealtimeCleanDetector"] == 1
     assert "SourceDogLabelContract" in projection["records"][0]["missing_evidence"]
+
+
+def test_denominator_projection_consumes_missed_attribution_seed_without_overclaiming_d2(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="paper_missed_signal_attribution_recorded",
+        aggregate_id="paper_missed:token:TokenMiss",
+        idempotency_key="paper_missed_signal_attribution:1",
+        payload={
+            "missed_attribution_id": 1,
+            "decision_event_id": 10,
+            "token_ca": "TokenMiss",
+            "symbol": "MISS",
+            "signal_id": 77,
+            "signal_ts": 1_700_000_000,
+            "route": "LOTTO",
+            "component": "upstream_gate",
+            "legacy_event_type": "missed_signal_attribution",
+            "decision": "skip",
+            "reason": "tracking_ttl_expired",
+            "source_dog_label": "silver",
+            "source_dog_label_version": "legacy_missed_attribution_seed_v0.1",
+            "source_label_research_only": True,
+            "telegram_seen": True,
+            "realtime_observable": True,
+            "baseline_price": 0.001,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["mirrored_missed_attribution_events"] == 1
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["metrics"]["telegram_realtime_observable_gold_silver_D1"] == 1
+    assert projection["metrics"]["telegram_realtime_clean_gold_silver_D2"] == 0
+    assert projection["metrics"]["telegram_externally_actionable_gold_silver_D3a"] == 0
+    assert projection["evidence_gaps"]["RealtimeCleanDetector"] == 1
+    assert projection["evidence_gaps"]["ExAnteFeasibility"] == 1
+    assert projection["records"][0]["source_dog_label"] == "silver"
