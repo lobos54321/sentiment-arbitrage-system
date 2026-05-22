@@ -260,6 +260,110 @@ def _json_default(value):
         return "<unserializable>"
 
 
+def _truthy_env(name, default="false"):
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _json_safe(value):
+    return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True, default=_json_default))
+
+
+def _event_ts_to_iso(value):
+    if value is None:
+        return None
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts > 1_000_000_000_000:
+        ts = ts / 1000.0
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _v27_event_log_dir():
+    return os.environ.get("V27_EVENT_LOG_DIR") or os.path.join(os.getcwd(), "data", "v27_event_log")
+
+
+def _v27_decision_aggregate_id(*, lifecycle_id=None, token_ca=None, trade_id=None, signal_id=None, component=None):
+    if lifecycle_id:
+        return f"paper_decision:lifecycle:{lifecycle_id}"
+    if token_ca:
+        return f"paper_decision:token:{token_ca}"
+    if trade_id is not None:
+        return f"paper_decision:trade:{trade_id}"
+    if signal_id is not None:
+        return f"paper_decision:signal:{signal_id}"
+    return f"paper_decision:component:{component or 'unknown'}"
+
+
+def _mirror_v27_decision_event(
+    *,
+    decision_event_id,
+    event_ts,
+    signal_id,
+    token_ca,
+    symbol,
+    lifecycle_id,
+    trade_id,
+    signal_ts,
+    strategy_stage,
+    route,
+    component,
+    event_type,
+    decision,
+    reason,
+    data_source,
+    payload,
+    lifecycle,
+):
+    if not _truthy_env("V27_EVENT_LOG_MIRROR_ENABLED"):
+        return None
+    try:
+        try:
+            from v27_event_log import V27EventLog
+        except ImportError:
+            from scripts.v27_event_log import V27EventLog
+
+        observed_at = _event_ts_to_iso(event_ts)
+        event_log = V27EventLog(_v27_event_log_dir())
+        return event_log.append_event(
+            event_type="paper_decision_event_recorded",
+            aggregate_id=_v27_decision_aggregate_id(
+                lifecycle_id=lifecycle_id,
+                token_ca=token_ca,
+                trade_id=trade_id,
+                signal_id=signal_id,
+                component=component,
+            ),
+            payload={
+                "decision_event_id": decision_event_id,
+                "event_ts": event_ts,
+                "signal_id": signal_id,
+                "token_ca": token_ca,
+                "symbol": symbol,
+                "lifecycle_id": lifecycle_id,
+                "trade_id": trade_id,
+                "signal_ts": signal_ts,
+                "strategy_stage": strategy_stage,
+                "route": route,
+                "component": component,
+                "legacy_event_type": event_type,
+                "decision": decision,
+                "reason": reason,
+                "data_source": data_source,
+                "lifecycle": _json_safe(lifecycle or {}),
+                "payload": _json_safe(payload or {}),
+            },
+            source="paper_decision_audit",
+            idempotency_key=f"paper_decision_events:{decision_event_id}",
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+    except Exception as exc:
+        log.debug("[AUDIT] v2.7 event-log mirror failed: %s", exc)
+        return None
+
+
 def record_decision_event(
     db,
     *,
@@ -282,6 +386,7 @@ def record_decision_event(
     """Best-effort audit write. Never break trading because audit failed."""
     try:
         with sqlite_single_writer("paper_decision_audit:record_event"):
+            created_event_ts = event_ts or time.time()
             lifecycle = _extract_lifecycle_payload(payload or {})
             cur = db.execute(
                 """
@@ -293,7 +398,7 @@ def record_decision_event(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    event_ts or time.time(),
+                    created_event_ts,
                     signal_id,
                     token_ca,
                     symbol,
@@ -319,7 +424,7 @@ def record_decision_event(
                 _maybe_record_missed_attribution(
                     db,
                     decision_event_id=event_id,
-                    event_ts=event_ts or time.time(),
+                    event_ts=created_event_ts,
                     signal_id=signal_id,
                     token_ca=token_ca,
                     symbol=symbol,
@@ -334,6 +439,25 @@ def record_decision_event(
             except Exception as missed_exc:
                 log.debug("[AUDIT] missed attribution write failed: %s", missed_exc)
             db.commit()
+            _mirror_v27_decision_event(
+                decision_event_id=event_id,
+                event_ts=created_event_ts,
+                signal_id=signal_id,
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                trade_id=trade_id,
+                signal_ts=signal_ts,
+                strategy_stage=strategy_stage,
+                route=route,
+                component=component,
+                event_type=event_type,
+                decision=decision,
+                reason=reason,
+                data_source=data_source,
+                payload=payload or {},
+                lifecycle=lifecycle,
+            )
     except Exception as exc:
         log.debug("[AUDIT] decision event write failed: %s", exc)
 
