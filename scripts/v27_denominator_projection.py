@@ -8,6 +8,7 @@ contract fields. Missing evidence is reported instead of inferred.
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,6 +136,13 @@ def _as_int(value, default=0):
         return default
 
 
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _clean_label(value):
     if value is None:
         return None
@@ -194,6 +202,34 @@ def _extract_source_label(bags):
     return label
 
 
+def _earlier_iso(existing, candidate):
+    if not candidate:
+        return existing
+    if not existing:
+        return candidate
+    existing_parsed = _parse_iso_ts(existing)
+    candidate_parsed = _parse_iso_ts(candidate)
+    if existing_parsed is None:
+        return candidate
+    if candidate_parsed is None:
+        return existing
+    return candidate if candidate_parsed < existing_parsed else existing
+
+
+def _later_iso(existing, candidate):
+    if not candidate:
+        return existing
+    if not existing:
+        return candidate
+    existing_parsed = _parse_iso_ts(existing)
+    candidate_parsed = _parse_iso_ts(candidate)
+    if existing_parsed is None:
+        return candidate
+    if candidate_parsed is None:
+        return existing
+    return candidate if candidate_parsed > existing_parsed else existing
+
+
 def _denominator_key(fields):
     return ":".join(
         [
@@ -203,6 +239,79 @@ def _denominator_key(fields):
             str(fields.get("lifecycle_epoch", 0)),
         ]
     )
+
+
+def _extract_reference_price_contract(event, bags):
+    explicit_price = _as_float(
+        _extract_scalar(
+            bags,
+            [
+                ("source_reference_price",),
+                ("reference_price",),
+                ("counterfactual_entry_quote",),
+                ("simulated_fill_price",),
+                ("entry_quote_price",),
+                ("entry_price",),
+                ("baseline_price",),
+            ],
+        )
+    )
+    if explicit_price is None or not math.isfinite(explicit_price) or explicit_price <= 0:
+        return None
+    explicit_type = _extract_scalar(
+        bags,
+        [
+            ("source_reference_price_type",),
+            ("reference_price_type",),
+            ("entry_quote_price_type",),
+            ("price_type",),
+        ],
+    )
+    if explicit_type == "missing":
+        return None
+    if not explicit_type:
+        if _as_float(_extract_scalar(bags, [("baseline_price",)])) is not None:
+            explicit_type = "legacy_baseline_price"
+        elif _as_float(_extract_scalar(bags, [("entry_price",)])) is not None:
+            explicit_type = "legacy_entry_price"
+        elif _as_float(_extract_scalar(bags, [("simulated_fill_price",)])) is not None:
+            explicit_type = "simulated_fill_price"
+        elif _as_float(_extract_scalar(bags, [("counterfactual_entry_quote",), ("entry_quote_price",)])) is not None:
+            explicit_type = "counterfactual_entry_quote"
+        else:
+            explicit_type = "legacy_reference_price"
+    reference_ts = _extract_scalar(
+        bags,
+        [
+            ("source_reference_price_ts",),
+            ("reference_price_ts",),
+            ("entry_quote_ts",),
+            ("source_label_available_at",),
+            ("signal_ts",),
+            ("event_ts",),
+            ("receive_ts",),
+        ],
+        default=event.get("available_at") or event.get("observed_at") or event.get("ingested_at"),
+    )
+    return {
+        "reference_price_type": str(explicit_type),
+        "reference_price": explicit_price,
+        "reference_price_ts": reference_ts,
+        "reference_quote_source": _extract_scalar(bags, [("reference_quote_source",), ("quote_source",), ("data_source",)], default=event.get("source")),
+        "reference_quote_age_sec": _extract_scalar(bags, [("reference_quote_age_sec",), ("quote_age_sec",)]),
+        "reference_price_available_at": _extract_scalar(
+            bags,
+            [("reference_price_available_at",), ("source_label_available_at",), ("receive_ts",)],
+            default=event.get("available_at"),
+        ),
+        "reference_price_quality": _extract_scalar(
+            bags,
+            [("reference_price_quality",), ("source_label_quality",), ("quote_quality",)],
+            default="legacy_seed",
+        ),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
 
 
 def _extract_decision_fact(event):
@@ -262,7 +371,17 @@ def _extract_decision_fact(event):
         "event_id": event.get("event_id"),
         "global_seq": event.get("global_seq"),
         "aggregate_id": event.get("aggregate_id"),
+        "seed_event_type": event.get("event_type"),
+        "observed_at": event.get("observed_at"),
+        "ingested_at": event.get("ingested_at"),
+        "available_at": event.get("available_at"),
         "decision_event_id": outer.get("decision_event_id"),
+        "telegram_signal_id": outer.get("telegram_signal_id") or _extract_scalar(bags, [("telegram_signal_id",), ("signal", "telegram_signal_id")]),
+        "remote_signal_id": outer.get("remote_signal_id") or _extract_scalar(bags, [("remote_signal_id",)]),
+        "signal_id": outer.get("signal_id") or _extract_scalar(bags, [("signal_id",)]),
+        "signal_type": outer.get("signal_type") or _extract_scalar(bags, [("signal_type",)]),
+        "source_message_ts": outer.get("source_message_ts") or _extract_scalar(bags, [("source_message_ts",), ("message_ts",)]),
+        "receive_ts": outer.get("receive_ts") or _extract_scalar(bags, [("receive_ts",)]),
         "token_ca": token_ca,
         "symbol": outer.get("symbol"),
         "chain": chain,
@@ -274,6 +393,7 @@ def _extract_decision_fact(event):
         "reason": outer.get("reason"),
         "source_dog_label": source_label,
         "source_label_research_only": _extract_flag(bags, [("source_label_research_only",), ("source_dog_label_research_only",)]),
+        "reference_price_contract": _extract_reference_price_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -299,14 +419,20 @@ def _new_record(fact):
         "lifecycle_epoch": fact.get("lifecycle_epoch"),
         "merged_decision_event_ids": [],
         "source_event_ids": [],
+        "telegram_signal_stack": [],
+        "decision_signal_ids": [],
         "routes": [],
         "components": [],
         "dedup_reason": "same chain/token/canonical_pool_group/lifecycle_epoch",
         "primary_outcome_role": "source_dog_label" if fact.get("source_dog_label") else "unlabeled_decision_seed",
         "source_label_conflicts": [],
+        "reference_price_candidates": [],
+        "reference_price_conflicts": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
+        "signal_credit_assignment": None,
+        "reference_price_contract": None,
         "captured": False,
     }
 
@@ -329,6 +455,21 @@ DENOMINATOR_FLAGS = [
 def _merge_fact(record, fact):
     record["merged_decision_event_ids"].append(fact.get("decision_event_id"))
     record["source_event_ids"].append(fact.get("event_id"))
+    if fact.get("seed_event_type") == TELEGRAM_SIGNAL_EVENT_TYPE and fact.get("telegram_signal_id") is not None:
+        signal_entry = {
+            "telegram_signal_id": fact.get("telegram_signal_id"),
+            "remote_signal_id": fact.get("remote_signal_id"),
+            "signal_type": fact.get("signal_type"),
+            "event_id": fact.get("event_id"),
+            "global_seq": fact.get("global_seq"),
+            "available_at": fact.get("available_at"),
+            "source_message_ts": fact.get("source_message_ts"),
+            "receive_ts": fact.get("receive_ts"),
+        }
+        if signal_entry not in record["telegram_signal_stack"]:
+            record["telegram_signal_stack"].append(signal_entry)
+    if fact.get("signal_id") is not None and fact.get("signal_id") not in record["decision_signal_ids"]:
+        record["decision_signal_ids"].append(fact.get("signal_id"))
     if fact.get("route") and fact.get("route") not in record["routes"]:
         record["routes"].append(fact.get("route"))
     if fact.get("component") and fact.get("component") not in record["components"]:
@@ -347,8 +488,68 @@ def _merge_fact(record, fact):
             record["source_dog_label"] = label
             record["primary_outcome_role"] = "source_dog_label"
 
+    reference_price = fact.get("reference_price_contract")
+    if reference_price:
+        record["reference_price_candidates"].append(reference_price)
+
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
+
+
+def _finalize_signal_credit(record):
+    stack = sorted(
+        record.get("telegram_signal_stack") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("event_id") or "")),
+    )
+    record["telegram_signal_stack"] = stack
+    if not stack:
+        record["signal_credit_assignment"] = None
+        return
+    credited = stack[0]
+    record["signal_credit_assignment"] = {
+        "credited_signal_id": credited.get("telegram_signal_id"),
+        "credited_signal_event_id": credited.get("event_id"),
+        "credit_assignment_reason": "first_valid_telegram_anchor",
+        "signal_stack_before_entry": stack,
+        "signal_stack_after_entry": [],
+        "credit_policy_version": "v2.7.0.signal_credit.v1",
+    }
+
+
+def _finalize_reference_price(record):
+    candidates = sorted(
+        record.get("reference_price_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["reference_price_candidates"] = candidates
+    if not candidates:
+        record["reference_price_contract"] = None
+        return
+    selected = candidates[0]
+    for candidate in candidates[1:]:
+        if (
+            candidate.get("reference_price_type") != selected.get("reference_price_type")
+            or candidate.get("reference_price") != selected.get("reference_price")
+        ):
+            record["reference_price_conflicts"].append(
+                {
+                    "selected_source_event_id": selected.get("source_event_id"),
+                    "incoming_source_event_id": candidate.get("source_event_id"),
+                    "selected_type": selected.get("reference_price_type"),
+                    "incoming_type": candidate.get("reference_price_type"),
+                }
+            )
+    record["reference_price_contract"] = {
+        "reference_price_type": selected.get("reference_price_type"),
+        "reference_price": selected.get("reference_price"),
+        "reference_price_ts": selected.get("reference_price_ts"),
+        "reference_quote_source": selected.get("reference_quote_source"),
+        "reference_quote_age_sec": selected.get("reference_quote_age_sec"),
+        "reference_price_available_at": selected.get("reference_price_available_at"),
+        "reference_price_quality": selected.get("reference_price_quality"),
+        "reference_price_source_event_id": selected.get("source_event_id"),
+        "reference_price_contract_version": "v2.7.0.reference_price.v1",
+    }
 
 
 def _record_missing_evidence(record):
@@ -372,6 +573,12 @@ def _record_missing_evidence(record):
     ]:
         if record.get(field) is None:
             missing.append(contract)
+    membership = record.get("denominator_membership") or {}
+    if membership.get("D0_telegram_gold_silver_total"):
+        if not record.get("signal_credit_assignment"):
+            missing.append("SignalCreditAssignmentContract")
+        if not record.get("reference_price_contract"):
+            missing.append("ReferencePriceContract")
     record["missing_evidence"] = missing
     return missing
 
@@ -397,6 +604,60 @@ def _record_denominator_membership(record):
         "D2_realtime_clean_gold_silver": bool(d2),
         "D3a_externally_actionable_gold_silver": bool(d3a),
         "D3b_policy_actionable_gold_silver": bool(d3b),
+    }
+
+
+def _metric_definitions(metrics, metrics_window):
+    definitions = {}
+    window_id = metrics_window.get("window_id")
+    for metric_name, value in sorted(metrics.items()):
+        definitions[metric_name] = {
+            "metric_id": f"telegram_dog.{metric_name}",
+            "metric_name": metric_name,
+            "window_id": window_id,
+            "window_start": metrics_window.get("window_start"),
+            "window_end": metrics_window.get("window_end"),
+            "metric_version": "v2.7.0.denominator_metrics.v1",
+            "value": value,
+        }
+    return definitions
+
+
+def _contract_evidence_from_records(record_list):
+    d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
+    signal_credit_missing = [
+        record.get("denominator_dedup_key")
+        for record in d0_records
+        if not record.get("signal_credit_assignment")
+    ]
+    reference_price_missing = [
+        record.get("denominator_dedup_key")
+        for record in d0_records
+        if not record.get("reference_price_contract")
+    ]
+    reference_price_conflicts = [
+        {
+            "denominator_dedup_key": record.get("denominator_dedup_key"),
+            "conflicts": record.get("reference_price_conflicts"),
+        }
+        for record in d0_records
+        if record.get("reference_price_conflicts")
+    ]
+    return {
+        "SignalCreditAssignmentContract": {
+            "eligible_d0_records": len(d0_records),
+            "missing_count": len(signal_credit_missing),
+            "missing_denominator_keys": signal_credit_missing,
+            "credit_policy_version": "v2.7.0.signal_credit.v1",
+        },
+        "ReferencePriceContract": {
+            "eligible_d0_records": len(d0_records),
+            "missing_count": len(reference_price_missing),
+            "missing_denominator_keys": reference_price_missing,
+            "conflict_count": len(reference_price_conflicts),
+            "conflicts": reference_price_conflicts,
+            "reference_price_contract_version": "v2.7.0.reference_price.v1",
+        },
     }
 
 
@@ -433,11 +694,22 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "telegram_capture_rate_D3a": None,
             "telegram_capture_rate_D3b": None,
         },
+        "metrics_window": None,
+        "metric_definitions": {},
+        "metric_definitions_hash": None,
+        "contract_evidence": {
+            "SignalCreditAssignmentContract": {},
+            "ReferencePriceContract": {},
+            "MetricsWindowContract": {},
+        },
         "evidence_gaps": {},
         "health": {
             "event_log_ok": False,
             "projection_built": False,
             "denominator_clean": False,
+            "signal_credit_assignment_ok": False,
+            "reference_price_ok": False,
+            "metrics_window_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -455,10 +727,15 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
 
     facts = []
     resolved_pool_by_identity = {}
+    window_start = None
+    window_end = None
     for event in event_log.iter_events() or []:
         projection["input_events"] += 1
         projection["event_log_latest_event_id"] = event.get("event_id")
         projection["event_log_latest_at"] = event.get("ingested_at")
+        event_window_ts = event.get("available_at") or event.get("ingested_at") or event.get("observed_at")
+        window_start = _earlier_iso(window_start, event_window_ts)
+        window_end = _later_iso(window_end, event_window_ts)
         if event.get("event_type") not in DENOMINATOR_SEED_EVENT_TYPES:
             continue
         if event.get("event_type") == MIRRORED_DECISION_EVENT_TYPE:
@@ -503,10 +780,12 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     record_list = []
     for key in sorted(records):
         record = records[key]
+        _finalize_signal_credit(record)
+        _finalize_reference_price(record)
+        _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
             projection["evidence_gaps"][contract] = projection["evidence_gaps"].get(contract, 0) + 1
-        _record_denominator_membership(record)
         membership = record["denominator_membership"]
         metrics = projection["metrics"]
         metrics["denominator_seed_records"] += 1
@@ -539,9 +818,51 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     if metrics["telegram_policy_actionable_gold_silver_D3b"]:
         metrics["telegram_capture_rate_D3b"] = metrics["telegram_captured_actionable_D3b"] / metrics["telegram_policy_actionable_gold_silver_D3b"]
 
+    metrics_window = {
+        "metric_window_schema_version": "v2.7.0.metrics_window.v1",
+        "metric_id": "telegram_dog.denominator_projection",
+        "window_id": f"event_log_seq_1_{projection['event_log_latest_seq']}",
+        "window_start": window_start,
+        "window_end": window_end,
+        "window_start_seq": 1 if projection["event_log_latest_seq"] else None,
+        "window_end_seq": projection["event_log_latest_seq"],
+        "metric_version": "v2.7.0.denominator_metrics.v1",
+    }
+    projection["metrics_window"] = metrics_window
+    projection["metric_definitions"] = _metric_definitions(metrics, metrics_window)
+    projection["metric_definitions_hash"] = sha256_hex(projection["metric_definitions"])
+    contract_evidence = _contract_evidence_from_records(record_list)
+    metrics_window_valid = bool(
+        metrics_window.get("window_id")
+        and metrics_window.get("window_start")
+        and metrics_window.get("window_end")
+        and metrics_window.get("metric_version")
+        and projection.get("metric_definitions_hash")
+    )
+    contract_evidence["MetricsWindowContract"] = {
+        "metric_id": metrics_window.get("metric_id"),
+        "window_id": metrics_window.get("window_id"),
+        "window_start": metrics_window.get("window_start"),
+        "window_end": metrics_window.get("window_end"),
+        "metric_version": metrics_window.get("metric_version"),
+        "metric_count": len(projection["metric_definitions"]),
+        "metric_definitions_hash": projection.get("metric_definitions_hash"),
+        "metrics_window_valid": metrics_window_valid,
+    }
+    projection["contract_evidence"] = contract_evidence
     projection["records_hash"] = sha256_hex(record_list)
     projection["health"]["projection_built"] = True
     projection["health"]["denominator_clean"] = not projection["dirty_events"] and not projection["dirty_records"]
+    projection["health"]["signal_credit_assignment_ok"] = (
+        contract_evidence["SignalCreditAssignmentContract"]["eligible_d0_records"] > 0
+        and contract_evidence["SignalCreditAssignmentContract"]["missing_count"] == 0
+    )
+    projection["health"]["reference_price_ok"] = (
+        contract_evidence["ReferencePriceContract"]["eligible_d0_records"] > 0
+        and contract_evidence["ReferencePriceContract"]["missing_count"] == 0
+        and contract_evidence["ReferencePriceContract"]["conflict_count"] == 0
+    )
+    projection["health"]["metrics_window_ok"] = metrics_window_valid
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
     elif projection["dirty_records"]:

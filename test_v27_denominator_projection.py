@@ -326,6 +326,7 @@ def test_denominator_projection_merges_telegram_signal_with_source_label_event(t
             "source_dog_label_version": "legacy_signal_features_seed_v0.1",
             "source_label_research_only": True,
             "source_reference_price_type": "legacy_entry_price",
+            "source_reference_price": 0.001,
             "source_label_window": "24h",
             "source_label_available_at": "2026-01-15T00:00:00Z",
         },
@@ -341,6 +342,90 @@ def test_denominator_projection_merges_telegram_signal_with_source_label_event(t
     assert projection["metrics"]["telegram_realtime_clean_gold_silver_D2"] == 0
     assert projection["evidence_gaps"]["ProductionSourceDogLabelContract"] == 1
     assert projection["records"][0]["source_label_research_only"] is True
+    assert projection["records"][0]["signal_credit_assignment"]["credited_signal_id"] == 1
+    assert projection["records"][0]["reference_price_contract"]["reference_price_type"] == "legacy_entry_price"
+    assert projection["contract_evidence"]["SignalCreditAssignmentContract"]["missing_count"] == 0
+    assert projection["contract_evidence"]["ReferencePriceContract"]["missing_count"] == 0
+    assert projection["contract_evidence"]["MetricsWindowContract"]["metrics_window_valid"] is True
+    assert projection["health"]["signal_credit_assignment_ok"] is True
+    assert projection["health"]["reference_price_ok"] is True
+    assert projection["health"]["metrics_window_ok"] is True
+
+
+def test_denominator_projection_blocks_shadow_contracts_when_no_d0_records(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenOnlyLabel:unknown_pool:0",
+        idempotency_key="signal_features_source_label:1",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenOnlyLabel",
+            "symbol": "ONLY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+            "source_reference_price_type": "legacy_entry_price",
+            "source_reference_price": 0.001,
+            "source_label_available_at": "2026-01-15T00:00:00Z",
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 0
+    assert projection["contract_evidence"]["SignalCreditAssignmentContract"]["eligible_d0_records"] == 0
+    assert projection["contract_evidence"]["ReferencePriceContract"]["eligible_d0_records"] == 0
+    assert projection["health"]["signal_credit_assignment_ok"] is False
+    assert projection["health"]["reference_price_ok"] is False
+
+
+def test_denominator_projection_rejects_non_positive_reference_price_for_d0(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenZeroRef:unknown_pool:0",
+        idempotency_key="premium_signals:1",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenZeroRef",
+            "symbol": "ZERO",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenZeroRef:unknown_pool:0",
+        idempotency_key="signal_features_source_label:1",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenZeroRef",
+            "symbol": "ZERO",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+            "source_reference_price_type": "legacy_entry_price",
+            "source_reference_price": 0.0,
+            "source_label_available_at": "2026-01-15T00:00:00Z",
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["records"][0]["signal_credit_assignment"]["credited_signal_id"] == 1
+    assert projection["records"][0]["reference_price_contract"] is None
+    assert projection["contract_evidence"]["ReferencePriceContract"]["missing_count"] == 1
+    assert projection["health"]["signal_credit_assignment_ok"] is True
+    assert projection["health"]["reference_price_ok"] is False
 
 
 def test_denominator_projection_keeps_unresolved_source_label_as_gap(tmp_path):

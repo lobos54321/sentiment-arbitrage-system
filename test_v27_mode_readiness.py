@@ -85,16 +85,19 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["ConsumerCheckpointContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ProjectionHandlerIdempotencyContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["CacheInvalidationContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SignalCreditAssignmentContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ReferencePriceContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["MetricsWindowContract"]["status"] == "pass"
     assert matrix["modes"]["observe_only"]["status"] == "allowed"
-    assert matrix["highest_allowed_mode"] == "observe_only"
-    assert matrix["modes"]["shadow"]["status"] == "blocked"
-    assert "TransactionalOutboxContract" not in matrix["modes"]["shadow"]["blocking_contracts"]
-    assert "SignalCreditAssignmentContract" in matrix["modes"]["shadow"]["blocking_contracts"]
+    assert matrix["modes"]["shadow"]["status"] == "allowed"
+    assert matrix["highest_allowed_mode"] == "shadow"
+    assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"
     assert "EntryExecutionStateMachine" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert matrix["modes"]["normal_tiny"]["status"] == "blocked"
     assert "WorkerFleetConsistencyContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert matrix["health"]["observe_only_ready"] is True
+    assert matrix["health"]["shadow_ready"] is True
     assert matrix["health"]["normal_tiny_ready"] is False
 
 

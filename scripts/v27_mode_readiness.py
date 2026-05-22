@@ -286,6 +286,28 @@ def build_contract_statuses(
         "source_dog_label_events_missing",
         {"source_dog_label_events": projection.get("source_dog_label_events")},
     )
+    contract_evidence = projection.get("contract_evidence") if isinstance(projection.get("contract_evidence"), dict) else {}
+    signal_credit_evidence = contract_evidence.get("SignalCreditAssignmentContract") or {}
+    statuses["SignalCreditAssignmentContract"] = _status(
+        "SignalCreditAssignmentContract",
+        "pass" if projection_built and projection_health.get("signal_credit_assignment_ok") else "missing_evidence",
+        "signal_credit_assignment_missing_or_dirty",
+        signal_credit_evidence,
+    )
+    reference_price_evidence = contract_evidence.get("ReferencePriceContract") or {}
+    statuses["ReferencePriceContract"] = _status(
+        "ReferencePriceContract",
+        "pass" if projection_built and projection_health.get("reference_price_ok") else "missing_evidence",
+        "reference_price_missing_or_conflicted",
+        reference_price_evidence,
+    )
+    metrics_window_evidence = contract_evidence.get("MetricsWindowContract") or {}
+    statuses["MetricsWindowContract"] = _status(
+        "MetricsWindowContract",
+        "pass" if projection_built and projection_health.get("metrics_window_ok") else "missing_evidence",
+        "metrics_window_missing_or_invalid",
+        metrics_window_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",
