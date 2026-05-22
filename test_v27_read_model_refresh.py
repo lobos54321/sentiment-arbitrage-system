@@ -56,7 +56,9 @@ def test_refresh_writes_projection_snapshot_and_health_atomically_consumable(tmp
     assert health["projection_hash"] == snapshot["projection_hash"]
     assert report["mode_readiness_path"] == str(out_dir / "mode_readiness.json")
     assert report["mode_readiness"]["normal_tiny_ready"] is False
-    assert "SourceRegistryContract" in report["mode_readiness"]["blocking_contracts"]["observe_only"]
+    assert report["mode_readiness"]["observe_only_ready"] is True
+    assert report["mode_readiness"]["highest_allowed_mode"] == "observe_only"
+    assert report["mode_readiness"]["blocking_contracts"]["observe_only"] == []
     assert mode_readiness["matrix_schema_version"] == "v2.7.0.mode_readiness.v1"
     assert mode_readiness["modes"]["normal_tiny"]["status"] == "blocked"
     assert projection["event_log_latest_seq"] == 1

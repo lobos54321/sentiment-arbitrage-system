@@ -14,6 +14,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from v27_event_log import V27EventLog, V27EventLogError  # noqa: E402
+from v27_basic_contract_readiness import build_basic_contract_readiness  # noqa: E402
 from v27_read_model_freshness import validate_snapshot_file  # noqa: E402
 from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_PATH, validate_all  # noqa: E402
 
@@ -165,7 +166,7 @@ def _m0_route_registry_ok(registry_path):
     return all(item["frozen"] for item in frozen.values()), {"registry_present": True, "m0_freeze": frozen}
 
 
-def build_contract_statuses(*, spec_report, spec_error, event_log, snapshot_report, snapshot, registry_path):
+def build_contract_statuses(*, spec_report, spec_error, event_log, snapshot_report, snapshot, registry_path, basic_readiness):
     projection = snapshot.get("projection") if isinstance(snapshot, dict) else {}
     if not isinstance(projection, dict):
         projection = {}
@@ -181,6 +182,13 @@ def build_contract_statuses(*, spec_report, spec_error, event_log, snapshot_repo
     route_ok, route_evidence = _m0_route_registry_ok(registry_path)
 
     statuses = {}
+    for contract_id, item in (basic_readiness.get("contracts") or {}).items():
+        statuses[contract_id] = {
+            "contract_id": contract_id,
+            "status": item.get("status"),
+            "blocking_reason": item.get("blocking_reason"),
+            "evidence": item.get("evidence") or {},
+        }
     statuses["CanonicalSpecIntegrityContract"] = _status(
         "CanonicalSpecIntegrityContract",
         "pass" if spec_report else "fail",
@@ -193,12 +201,7 @@ def build_contract_statuses(*, spec_report, spec_error, event_log, snapshot_repo
         "canonical_serialization_unverified",
         {"spec_hash_algorithm": "sha256(canonical_json)", "spec_valid": bool(spec_report)},
     )
-    statuses["RouteRegistryContract"] = _status(
-        "RouteRegistryContract",
-        "pass" if route_ok else "missing_evidence",
-        "route_registry_m0_freeze_unverified",
-        route_evidence,
-    )
+    statuses["RouteRegistryContract"] = _status("RouteRegistryContract", "pass" if route_ok else "missing_evidence", "route_registry_m0_freeze_unverified", route_evidence)
     statuses["EventSemanticsContract"] = _status(
         "EventSemanticsContract",
         "pass" if event_log_ok else "missing_evidence",
@@ -333,6 +336,11 @@ def build_mode_readiness_matrix(
         spec_error = str(exc)
 
     catalog = _load_json(catalog_path)
+    basic_readiness = build_basic_contract_readiness(
+        manifest_path=manifest_path,
+        catalog_path=catalog_path,
+        registry_path=registry_path,
+    )
     snapshot_report = validate_snapshot_file(snapshot_path, max_snapshot_age_ms=max_snapshot_age_ms)
     snapshot = _snapshot_payload(snapshot_path) or {}
     event_log = _event_log_report(event_log_dir)
@@ -343,6 +351,7 @@ def build_mode_readiness_matrix(
         snapshot_report=snapshot_report,
         snapshot=snapshot,
         registry_path=registry_path,
+        basic_readiness=basic_readiness,
     )
 
     catalog_contracts = catalog.get("contracts") or {}
@@ -381,6 +390,7 @@ def build_mode_readiness_matrix(
         "spec": spec_report or {"spec_valid": False, "error": spec_error},
         "event_log": event_log,
         "read_model": snapshot_report,
+        "basic_readiness": basic_readiness,
         "contract_statuses": contract_statuses,
         "modes": modes,
         "highest_allowed_mode": highest_allowed,

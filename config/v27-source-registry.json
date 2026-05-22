@@ -1,0 +1,29 @@
+{
+  "source_registry_schema_version": "v2.7.0.source_registry.v1",
+  "sources": [
+    {
+      "telegram_source_id": "premium:egeye_ai_gems_100x_vip",
+      "telegram_channel_id": "3636518327",
+      "source_name": "Egeye AI Gems 100X Vip",
+      "source_tier": "premium",
+      "parser_template_version": "legacy_premium_signal_seed_v0.1",
+      "active_from": "2026-05-22T00:00:00Z",
+      "active_to": null,
+      "allowed_modes": ["observe_only", "shadow"],
+      "source_owner": "system",
+      "source_status": "active"
+    },
+    {
+      "telegram_source_id": "csv:momentumtrackercn",
+      "telegram_channel_id": "t.me/momentumtrackercn",
+      "source_name": "MomentumTrackerCN",
+      "source_tier": "A",
+      "parser_template_version": "legacy_channels_csv_seed_v0.1",
+      "active_from": "2026-05-22T00:00:00Z",
+      "active_to": null,
+      "allowed_modes": ["observe_only"],
+      "source_owner": "system",
+      "source_status": "active"
+    }
+  ]
+}

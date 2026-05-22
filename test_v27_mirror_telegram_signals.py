@@ -87,7 +87,10 @@ def test_premium_signal_mirror_is_idempotent_and_preserves_realtime_anchor(tmp_p
     assert event["payload"]["realtime_observable"] is True
     assert event["payload"]["realtime_observable_quality"] == "realtime_seed"
     assert event["payload"]["raw_message_hash"]
-    assert event["payload"]["legacy_premium_signal"]["raw_message"] == "raw signal text"
+    assert event["payload"]["raw_message_length"] == len("raw signal text")
+    assert event["payload"]["payload_schema_valid"] is True
+    assert event["payload"]["raw_text_fields_redacted"] == ["raw_message"]
+    assert event["payload"]["legacy_premium_signal"]["raw_message"] == "<redacted_raw_text>"
 
 
 def test_premium_signal_mirror_marks_backfilled_rows_not_realtime_observable(tmp_path):

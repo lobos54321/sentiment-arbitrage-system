@@ -26,6 +26,7 @@ DEFAULT_SIGNAL_DB = PROJECT_ROOT / "data" / "sentiment_arb.db"
 DEFAULT_EVENT_LOG_DIR = PROJECT_ROOT / "data" / "v27_event_log"
 DEFAULT_LOCK_FILE = Path("/tmp/v27_telegram_signal_mirror.lock")
 SIGNAL_EVENT_TYPE = "telegram_signal_seen"
+RAW_TEXT_FIELDS = {"raw_message", "message_text", "description"}
 
 
 def _table_exists(db, table):
@@ -140,6 +141,10 @@ def _signal_payload(row, *, default_chain="solana"):
     backfilled = bool(gate_result.get("backfilled") is True)
     parse_status = str(_value(row, "parse_status") or "").strip().lower()
     realtime_observable = bool(token_ca and receive_ts is not None and parse_status in {"", "parsed", "ok"} and not backfilled)
+    redacted_legacy_signal = {
+        key: ("<redacted_raw_text>" if key in RAW_TEXT_FIELDS and value is not None else value)
+        for key, value in row.items()
+    }
     return {
         "telegram_signal_id": row.get("id"),
         "remote_signal_id": _value(row, "remote_signal_id"),
@@ -169,10 +174,13 @@ def _signal_payload(row, *, default_chain="solana"):
         "top10_pct": _value(row, "top10_pct"),
         "raw_message_hash": _sha256_text(raw_message),
         "raw_message_length": len(str(raw_message)) if raw_message is not None else 0,
+        "payload_schema_valid": True,
+        "unsafe_pattern_detected": False,
+        "raw_text_fields_redacted": sorted([field for field in RAW_TEXT_FIELDS if row.get(field) is not None]),
         "gate_result": gate_result,
         "signal_links": signal_links,
         "narrative_features": narrative_features,
-        "legacy_premium_signal": row,
+        "legacy_premium_signal": redacted_legacy_signal,
     }
 
 

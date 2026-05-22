@@ -1,0 +1,30 @@
+{
+  "chain_config_schema_version": "v2.7.0.chain_config.v1",
+  "default_chain": "solana",
+  "chains": {
+    "solana": {
+      "chain": "solana",
+      "native_unit": "SOL",
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "finality_rule": "confirmed_or_better",
+      "default_fee_model": "solana_priority_fee_seed_v0.1",
+      "supported_quote_provider": ["dexscreener", "gmgn", "jupiter"],
+      "risk_provider": ["gmgn", "helius"],
+      "address_validator": "base58_solana_pubkey",
+      "default_slippage_model": "solana_seed_slippage_v0.1",
+      "default_priority_fee_model": "solana_seed_priority_fee_v0.1"
+    },
+    "bsc": {
+      "chain": "bsc",
+      "native_unit": "BNB",
+      "quote_mint": "WBNB",
+      "finality_rule": "safe_block_or_configured_confirmations",
+      "default_fee_model": "bsc_gas_seed_v0.1",
+      "supported_quote_provider": ["dexscreener", "gmgn"],
+      "risk_provider": ["gmgn"],
+      "address_validator": "evm_checksum_or_lowercase_address",
+      "default_slippage_model": "bsc_seed_slippage_v0.1",
+      "default_priority_fee_model": "bsc_seed_gas_v0.1"
+    }
+  }
+}
