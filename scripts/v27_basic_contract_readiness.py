@@ -16,6 +16,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from v27_mirror_telegram_signals import _signal_payload  # noqa: E402
+from v27_paper_mode_safety import build_paper_mode_safety_boundary  # noqa: E402
 from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_PATH, validate_all  # noqa: E402
 
 
@@ -68,40 +69,16 @@ def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PA
         return _contract("SpecConsistencyLinterContract", False, "spec_consistency_linter_exception", {"error": str(exc)})
 
 
-def verify_paper_mode_safety(env=None):
-    env = env or os.environ
-    live_execution_enabled = str(env.get("PREMIUM_LIVE_EXECUTION_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
-    live_secret_names = [
-        "TRADE_WALLET_PRIVATE_KEY",
-        "LIVE_PRIVATE_KEY",
-        "WALLET_PRIVATE_KEY",
-        "SOLANA_PRIVATE_KEY",
-        "BSC_PRIVATE_KEY",
-    ]
-    present_live_secret_names = [name for name in live_secret_names if env.get(name)]
-    live_swap_endpoint_enabled = str(env.get("LIVE_SWAP_ENDPOINT_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
-    real_order_router_enabled = str(env.get("REAL_ORDER_ROUTER_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
-    network_transaction_signing_enabled = str(env.get("NETWORK_TRANSACTION_SIGNING_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
-    passed = not (
-        live_execution_enabled
-        or present_live_secret_names
-        or live_swap_endpoint_enabled
-        or real_order_router_enabled
-        or network_transaction_signing_enabled
+def verify_paper_mode_safety(env=None, runtime_evidence_path=None):
+    passed, reason, evidence = build_paper_mode_safety_boundary(
+        env=env or os.environ,
+        runtime_evidence_path=runtime_evidence_path,
     )
     return _contract(
         "PaperModeSafetyBoundary",
         passed,
-        "paper_live_capability_detected",
-        {
-            "paper_mode_required": True,
-            "premium_live_execution_enabled": live_execution_enabled,
-            "live_private_key_present": bool(present_live_secret_names),
-            "present_live_secret_names": present_live_secret_names,
-            "live_swap_endpoint_enabled": live_swap_endpoint_enabled,
-            "real_order_router_enabled": real_order_router_enabled,
-            "network_transaction_signing_enabled": network_transaction_signing_enabled,
-        },
+        reason or "paper_mode_safety_unverified",
+        evidence,
     )
 
 

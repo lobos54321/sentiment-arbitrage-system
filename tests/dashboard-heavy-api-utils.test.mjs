@@ -14,6 +14,7 @@ import {
   dogCatchGoalFromLiveSnapshot,
   missedRecoverySummaryFromLiveSnapshot,
   readV27DenominatorReadModelHealth,
+  readV27ModeReadiness,
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
@@ -117,6 +118,44 @@ test('v27 read model health blocks unsafe projection statuses even if stale payl
   assert.equal(health.dashboard_safe, false);
   assert.deepEqual(health.blocking_reasons, ['projection_status_event_log_invalid', 'event_log_empty']);
   assert.equal(health.health.dashboard_safe, false);
+});
+
+test('v27 mode readiness exposes materialized matrix and missing state', () => {
+  const missingDir = fs.mkdtempSync(join(os.tmpdir(), 'v27-mode-readiness-missing-'));
+  const missing = readV27ModeReadiness({
+    projectRoot: missingDir,
+    modeReadinessPath: join(missingDir, 'data', 'v27_read_models', 'mode_readiness.json'),
+  });
+  assert.equal(missing.available, false);
+  assert.deepEqual(missing.blocking_reasons, ['v27_mode_readiness_missing']);
+
+  const readyDir = fs.mkdtempSync(join(os.tmpdir(), 'v27-mode-readiness-ready-'));
+  const modeReadinessPath = join(readyDir, 'mode_readiness.json');
+  fs.writeFileSync(modeReadinessPath, JSON.stringify({
+    matrix_schema_version: 'v2.7.0.mode_readiness.v1',
+    highest_allowed_mode: 'shadow',
+    health: {
+      observe_only_ready: true,
+      shadow_ready: true,
+      ultra_tiny_ready: false,
+      normal_tiny_ready: false,
+      status: 'mode_readiness_evaluated',
+    },
+    contract_statuses: {
+      PaperModeSafetyBoundary: {
+        status: 'pass',
+        evidence: {
+          runtime_evidence_present: true,
+          live_private_key_present: false,
+        },
+      },
+    },
+  }));
+
+  const readiness = readV27ModeReadiness({ modeReadinessPath });
+  assert.equal(readiness.available, true);
+  assert.equal(readiness.highest_allowed_mode, 'shadow');
+  assert.equal(readiness.contract_statuses.PaperModeSafetyBoundary.evidence.runtime_evidence_present, true);
 });
 
 test('storage health includes v27 sidecar logs for mirror diagnosis', () => {

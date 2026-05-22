@@ -39,6 +39,7 @@ import { applyMarketDataProcessOverride, isMarketDataProcessEnabled } from './ma
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
+import { writeV27PaperModeSafetyRuntimeEvidence } from './runtime/v27-paper-mode-safety.js';
 
 dotenv.config();
 
@@ -1081,6 +1082,30 @@ class PremiumChannelSystem {
     console.log('═'.repeat(80) + '\n');
   }
 
+  writePaperModeSafetyRuntimeEvidence(stage) {
+    try {
+      const { path, evidence } = writeV27PaperModeSafetyRuntimeEvidence({
+        config: this.config,
+        processRole: 'premium-channel-system',
+        stage,
+        liveComponents: {
+          jupiterExecutor: this.jupiterExecutor,
+          liveExecutionExecutor: this.liveExecutionExecutor,
+          livePositionMonitor: this.livePositionMonitor,
+          livePriceMonitor: this.livePriceMonitor,
+          quoteClient: this.quoteClient,
+        },
+      });
+      if (!evidence.paper_live_boundary_ok) {
+        console.error(`[v27-paper-mode-safety] boundary violation stage=${stage} violations=${evidence.violations.join(',')} path=${path}`);
+      } else {
+        console.log(`[v27-paper-mode-safety] ok stage=${stage} path=${path}`);
+      }
+    } catch (error) {
+      console.error('[v27-paper-mode-safety] failed to write runtime evidence:', error?.message || error);
+    }
+  }
+
   loadConfig() {
     return {
       DB_PATH: process.env.DB_PATH || './data/sentiment_arb.db',
@@ -1125,6 +1150,7 @@ class PremiumChannelSystem {
         // Previously this was at the end of start(), but Telegram listener init
         // could take 30-60s, causing Zeabur to kill the container before port 3000 responded.
         startDashboardOnce();
+        this.writePaperModeSafetyRuntimeEvidence('before_sidecars');
         this.shadowDataSidecars = startShadowDataSidecars(this.config);
 
         const isLive = premiumLiveExecutionEnabled(this.config);
@@ -1145,6 +1171,7 @@ class PremiumChannelSystem {
       this.livePriceMonitor = new LivePriceMonitorV2(this.jupiterExecutor, { quoteClient: this.quoteClient });
       this.livePriceMonitor.start();
       this.engine.setLivePriceMonitor(this.livePriceMonitor);
+      this.writePaperModeSafetyRuntimeEvidence('after_market_data_init');
 
       // K 线收集器：持续记录价格到 SQLite 供回测使用
       this.klineCollector = new KlineCollector();

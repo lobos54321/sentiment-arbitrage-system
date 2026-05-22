@@ -918,6 +918,61 @@ function v27DenominatorFreshnessPath(options = {}) {
   return isAbsolute(raw) ? raw : join(root, raw);
 }
 
+function v27ModeReadinessPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.modeReadinessPath || process.env.V27_MODE_READINESS_PATH || join(v27ReadModelDir(options), 'mode_readiness.json');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+export function readV27ModeReadiness(options = {}) {
+  const path = v27ModeReadinessPath(options);
+  const generatedAt = new Date().toISOString();
+  if (!fs.existsSync(path)) {
+    return {
+      generated_at: generatedAt,
+      available: false,
+      materialized: true,
+      path,
+      highest_allowed_mode: null,
+      blocking_reasons: ['v27_mode_readiness_missing'],
+      health: {
+        observe_only_ready: false,
+        shadow_ready: false,
+        ultra_tiny_ready: false,
+        normal_tiny_ready: false,
+        status: 'v27_mode_readiness_missing',
+      },
+    };
+  }
+  try {
+    const payload = JSON.parse(fs.readFileSync(path, 'utf8'));
+    return {
+      generated_at: generatedAt,
+      available: true,
+      materialized: true,
+      path,
+      ...payload,
+    };
+  } catch (error) {
+    return {
+      generated_at: generatedAt,
+      available: false,
+      materialized: true,
+      path,
+      highest_allowed_mode: null,
+      blocking_reasons: ['v27_mode_readiness_parse_failed'],
+      error: error.message,
+      health: {
+        observe_only_ready: false,
+        shadow_ready: false,
+        ultra_tiny_ready: false,
+        normal_tiny_ready: false,
+        status: 'v27_mode_readiness_parse_failed',
+      },
+    };
+  }
+}
+
 export function readV27DenominatorReadModelHealth(options = {}) {
   const path = v27DenominatorFreshnessPath(options);
   const generatedAt = new Date().toISOString();
@@ -7487,6 +7542,12 @@ const server = http.createServer(async (req, res) => {
       : 202;
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(health, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-mode-readiness') {
+    if (!checkAuth(req, url, res)) return;
+    const readiness = readV27ModeReadiness();
+    res.writeHead(readiness.available ? 200 : 202, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(readiness, null, 2));
     return;
   } else if (url.pathname === '/api/paper/dog-catch-goal') {
     if (!checkAuth(req, url, res)) return;
