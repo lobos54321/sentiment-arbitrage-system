@@ -14,6 +14,7 @@ SPEC_PATH = (
     / "spec.manifest.json"
 )
 CATALOG_PATH = SPEC_PATH.parent / "contract-catalog.json"
+GAP_REGISTER_PATH = SPEC_PATH.parent / "gap-register.json"
 ENTRY_MODE_REGISTRY_PATH = Path(__file__).resolve().parent / "config" / "entry-mode-registry.json"
 
 
@@ -22,11 +23,17 @@ def _load_manifest():
         return json.load(fh)
 
 
+def _load_gap_register():
+    with GAP_REGISTER_PATH.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def test_v27_manifest_has_stable_identity_and_rendered_views():
     manifest = _load_manifest()
 
     assert manifest["spec_id"] == "telegram_dog_regime_capture"
     assert manifest["spec_version"] == "2.7.0"
+    assert manifest["gap_register_file"] == "gap-register.json"
 
     rendered = manifest["rendered_views"]
     assert len(rendered) == 3
@@ -79,6 +86,34 @@ def test_v27_manifest_tracks_m0_freeze_modes_and_high_risk_contracts():
     assert required <= contracts
 
 
+def test_v27_gap_register_carries_forward_adversarial_contracts():
+    gap_register = _load_gap_register()
+    gap_contracts = {
+        contract_id
+        for batch in gap_register["batches"]
+        for contract_id in batch["contract_ids"]
+    }
+
+    assert gap_register["status"] == "machine_checkable_adversarial_gap_register"
+    assert len(gap_contracts) == 175
+    required = {
+        "AggregateBoundaryContract",
+        "ProviderByzantineQuorumContract",
+        "PolicyActivationBarrierContract",
+        "AdminSessionSecurityContract",
+        "DatabaseTransactionIsolationContract",
+        "ResourceExhaustionContract",
+        "SourceImpersonationDetector",
+        "ContractConflictResolutionContract",
+        "RuntimeSpecAssertionContract",
+        "PromotionEvidencePackageContract",
+        "RollbackVerificationContract",
+        "LabelDisputeResolutionContract",
+    }
+
+    assert required <= gap_contracts
+
+
 def test_v27_spec_validator_computes_stable_hash_and_contract_coverage():
     result = validate_all(SPEC_PATH, CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH)
 
@@ -87,7 +122,8 @@ def test_v27_spec_validator_computes_stable_hash_and_contract_coverage():
     assert result["section_count"] == 24
     assert result["required_contract_count"] == 77
     assert result["catalog_contract_count"] == 77
-    assert result["spec_hash"] == "0b52d45db2c76a8afa62acd213bbff4c24d3eff817ffee85613e0166ab7f496a"
+    assert result["gap_register_count"] == 175
+    assert result["spec_hash"] == "575db4a61a7040bc148d575f4a9ae39436bde3d917cba93c6262500b729244a1"
 
 
 def test_v27_spec_validator_rejects_reopened_m0_direct_probe_modes(tmp_path):
