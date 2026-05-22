@@ -15,6 +15,7 @@ import {
   missedRecoverySummaryFromLiveSnapshot,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
+  resolveDashboardLogPath,
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
@@ -161,6 +162,7 @@ test('v27 mode readiness exposes materialized matrix and missing state', () => {
 test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   const dir = fs.mkdtempSync(join(os.tmpdir(), 'storage-health-v27-logs-'));
   fs.writeFileSync(join(dir, 'v27-paper-trade-source-label-mirror.log'), 'mirror failed');
+  fs.writeFileSync(join(dir, 'v27-earliest-actionable-mirror.log'), 'earliest actionable failed');
 
   const snapshot = buildStorageHealthSnapshot({
     projectRoot: dir,
@@ -173,8 +175,27 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   });
 
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-paper-trade-source-label-mirror.log').exists, true);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-trade-outcome-mirror.log').exists, false);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-standardized-stop-mirror.log').exists, false);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-ex-ante-feasibility-mirror.log').exists, false);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-earliest-actionable-mirror.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-read-model-refresh.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-event-log-recovery.log').exists, false);
+});
+
+test('dashboard log resolver exposes v27 mirror sidecar logs', () => {
+  const env = {
+    V27_TRADE_OUTCOME_MIRROR_LOG: '/tmp/trade-outcome.log',
+    V27_STANDARDIZED_STOP_MIRROR_LOG: '/tmp/standardized-stop.log',
+    V27_EX_ANTE_FEASIBILITY_MIRROR_LOG: '/tmp/ex-ante.log',
+    V27_EARLIEST_ACTIONABLE_MIRROR_LOG: '/tmp/earliest-actionable.log',
+  };
+
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-trade-outcome-mirror', env), '/tmp/trade-outcome.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-standardized-stop-mirror', env), '/tmp/standardized-stop.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-ex-ante-feasibility-mirror', env), '/tmp/ex-ante.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-earliest-actionable-mirror', env), '/tmp/earliest-actionable.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/not-registered', env), null);
 });
 
 test('boundedIntParam clamps oversized live query parameters', () => {

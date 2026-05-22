@@ -577,6 +577,26 @@ function readTinyText(filePath, maxBytes = 2000) {
   }
 }
 
+export function resolveDashboardLogPath(pathname, env = process.env) {
+  const logPathByEndpoint = {
+    '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
+    '/api/logs/gmgn-scout': env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log',
+    '/api/logs/paper-fast-lane': env.PAPER_FAST_LANE_LOG || '/app/data/paper-fast-lane.log',
+    '/api/logs/v27-telegram-signal-mirror': env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || '/app/data/v27-telegram-signal-mirror.log',
+    '/api/logs/v27-source-label-mirror': env.V27_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-source-label-mirror.log',
+    '/api/logs/v27-paper-trade-source-label-mirror': env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-paper-trade-source-label-mirror.log',
+    '/api/logs/v27-trade-outcome-mirror': env.V27_TRADE_OUTCOME_MIRROR_LOG || '/app/data/v27-trade-outcome-mirror.log',
+    '/api/logs/v27-standardized-stop-mirror': env.V27_STANDARDIZED_STOP_MIRROR_LOG || '/app/data/v27-standardized-stop-mirror.log',
+    '/api/logs/v27-ex-ante-feasibility-mirror': env.V27_EX_ANTE_FEASIBILITY_MIRROR_LOG || '/app/data/v27-ex-ante-feasibility-mirror.log',
+    '/api/logs/v27-earliest-actionable-mirror': env.V27_EARLIEST_ACTIONABLE_MIRROR_LOG || '/app/data/v27-earliest-actionable-mirror.log',
+    '/api/logs/v27-paper-decision-mirror': env.V27_PAPER_DECISION_MIRROR_LOG || '/app/data/v27-paper-decision-mirror.log',
+    '/api/logs/v27-lifecycle-mirror': env.V27_LIFECYCLE_MIRROR_LOG || '/app/data/v27-lifecycle-mirror.log',
+    '/api/logs/v27-read-model-refresh': env.V27_READ_MODEL_REFRESH_LOG || '/app/data/v27-read-model-refresh.log',
+    '/api/logs/v27-event-log-recovery': env.V27_EVENT_LOG_RECOVERY_LOG || '/app/data/v27-event-log-recovery.log',
+  };
+  return logPathByEndpoint[pathname] || null;
+}
+
 export function buildStorageHealthSnapshot(options = {}) {
   const root = options.projectRoot || projectRoot;
   const dataDir = options.dataDir || process.env.ZEABUR_DATA_DIR || join(root, 'data');
@@ -640,6 +660,10 @@ export function buildStorageHealthSnapshot(options = {}) {
     'v27-telegram-signal-mirror.log',
     'v27-source-label-mirror.log',
     'v27-paper-trade-source-label-mirror.log',
+    'v27-trade-outcome-mirror.log',
+    'v27-standardized-stop-mirror.log',
+    'v27-ex-ante-feasibility-mirror.log',
+    'v27-earliest-actionable-mirror.log',
     'v27-paper-decision-mirror.log',
     'v27-lifecycle-mirror.log',
     'v27-read-model-refresh.log',
@@ -8073,38 +8097,10 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   } else if (
-    url.pathname === '/api/logs/gmgn-scout'
-    || url.pathname === '/api/logs/source-resonance'
-    || url.pathname === '/api/logs/paper-fast-lane'
-    || url.pathname === '/api/logs/v27-telegram-signal-mirror'
-    || url.pathname === '/api/logs/v27-source-label-mirror'
-    || url.pathname === '/api/logs/v27-paper-trade-source-label-mirror'
-    || url.pathname === '/api/logs/v27-paper-decision-mirror'
-    || url.pathname === '/api/logs/v27-lifecycle-mirror'
-    || url.pathname === '/api/logs/v27-read-model-refresh'
-    || url.pathname === '/api/logs/v27-event-log-recovery'
+    resolveDashboardLogPath(url.pathname)
   ) {
     if (!checkAuth(req, url, res)) return;
-    let logPath = process.env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log';
-    if (url.pathname.endsWith('/gmgn-scout')) {
-      logPath = process.env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log';
-    } else if (url.pathname.endsWith('/paper-fast-lane')) {
-      logPath = process.env.PAPER_FAST_LANE_LOG || '/app/data/paper-fast-lane.log';
-    } else if (url.pathname.endsWith('/v27-telegram-signal-mirror')) {
-      logPath = process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || '/app/data/v27-telegram-signal-mirror.log';
-    } else if (url.pathname.endsWith('/v27-source-label-mirror')) {
-      logPath = process.env.V27_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-source-label-mirror.log';
-    } else if (url.pathname.endsWith('/v27-paper-trade-source-label-mirror')) {
-      logPath = process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-paper-trade-source-label-mirror.log';
-    } else if (url.pathname.endsWith('/v27-paper-decision-mirror')) {
-      logPath = process.env.V27_PAPER_DECISION_MIRROR_LOG || '/app/data/v27-paper-decision-mirror.log';
-    } else if (url.pathname.endsWith('/v27-lifecycle-mirror')) {
-      logPath = process.env.V27_LIFECYCLE_MIRROR_LOG || '/app/data/v27-lifecycle-mirror.log';
-    } else if (url.pathname.endsWith('/v27-read-model-refresh')) {
-      logPath = process.env.V27_READ_MODEL_REFRESH_LOG || '/app/data/v27-read-model-refresh.log';
-    } else if (url.pathname.endsWith('/v27-event-log-recovery')) {
-      logPath = process.env.V27_EVENT_LOG_RECOVERY_LOG || '/app/data/v27-event-log-recovery.log';
-    }
+    const logPath = resolveDashboardLogPath(url.pathname);
     const tailLines = boundedIntParam(url, 'lines', 500, 1, 5000);
     if (fs.existsSync(logPath)) {
       try {
