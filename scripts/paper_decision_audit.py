@@ -315,8 +315,12 @@ def _mirror_v27_decision_event(
     data_source,
     payload,
     lifecycle,
+    event_log_dir=None,
+    enabled=None,
 ):
-    if not _truthy_env("V27_EVENT_LOG_MIRROR_ENABLED"):
+    if enabled is None:
+        enabled = _truthy_env("V27_EVENT_LOG_MIRROR_ENABLED")
+    if not enabled:
         return None
     try:
         try:
@@ -325,7 +329,7 @@ def _mirror_v27_decision_event(
             from scripts.v27_event_log import V27EventLog
 
         observed_at = _event_ts_to_iso(event_ts)
-        event_log = V27EventLog(_v27_event_log_dir())
+        event_log = V27EventLog(event_log_dir or _v27_event_log_dir())
         return event_log.append_event(
             event_type="paper_decision_event_recorded",
             aggregate_id=_v27_decision_aggregate_id(
