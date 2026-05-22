@@ -66,6 +66,7 @@ def create_paper_db(db_path):
             premium_signal_id INTEGER,
             entry_price REAL,
             entry_ts INTEGER,
+            execution_availability TEXT,
             exit_ts INTEGER,
             peak_pnl REAL
         )
@@ -96,10 +97,10 @@ def create_paper_db(db_path):
     db.execute(
         """
         INSERT INTO paper_trades
-            (id, token_ca, symbol, premium_signal_id, entry_price, entry_ts, exit_ts, peak_pnl)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, token_ca, symbol, premium_signal_id, entry_price, entry_ts, execution_availability, exit_ts, peak_pnl)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (1, "TokenPipe", "PIPE", 1, 0.001, 1_700_000_004_000, 1_700_000_300_000, 1.25),
+        (1, "TokenPipe", "PIPE", 1, 0.001, 1_700_000_004_000, "available", 1_700_000_300_000, 1.25),
     )
     db.commit()
     return db
@@ -219,3 +220,35 @@ def test_pipeline_smoke_can_seed_trade_outcome_and_standardized_stop(tmp_path, m
     assert projection["health"]["standardized_stop_ok"] is True
     assert "TradeOutcomeLabelContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "StandardizedStopContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+
+
+def test_pipeline_smoke_can_seed_ex_ante_feasibility(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    signal_db = tmp_path / "signals.db"
+    paper_db = tmp_path / "paper.db"
+    lifecycle_db = tmp_path / "lifecycle.db"
+    output_dir = tmp_path / "read_models"
+    with create_signal_db(signal_db), create_paper_db(paper_db), create_lifecycle_db(lifecycle_db):
+        report = run_pipeline_smoke(
+            signal_db=signal_db,
+            paper_db=paper_db,
+            lifecycle_db=lifecycle_db,
+            event_log_dir=tmp_path / "events",
+            output_dir=output_dir,
+            limit=1,
+            include_missed=False,
+            include_trade_outcomes=True,
+            include_standardized_stops=True,
+            include_ex_ante_feasibility=True,
+        )
+
+    projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
+
+    assert report["health"]["status"] == "v27_pipeline_smoke_ok"
+    assert report["blocking_reasons"] == []
+    assert report["steps"]["ex_ante_feasibility"]["ok"] is True
+    assert projection["health"]["ex_ante_feasibility_ok"] is True
+    assert projection["contract_evidence"]["ExAnteFeasibility"]["future_leakage_count"] == 0
+    assert "TradeOutcomeLabelContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "StandardizedStopContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "ExAnteFeasibility" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]

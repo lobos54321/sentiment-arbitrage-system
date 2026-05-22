@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from v27_event_log import V27EventLog  # noqa: E402
+from v27_mirror_ex_ante_feasibility import DEFAULT_FEASIBILITY_POLICY_VERSION, run_mirror_once as run_ex_ante_feasibility_mirror_once  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
 from v27_mirror_paper_trade_source_labels import run_mirror_once as run_paper_trade_source_label_mirror_once  # noqa: E402
@@ -78,6 +79,7 @@ def run_pipeline_smoke(
     include_paper_trade_source_labels=False,
     include_trade_outcomes=False,
     include_standardized_stops=False,
+    include_ex_ante_feasibility=False,
     paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
@@ -181,6 +183,25 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_ex_ante_feasibility:
+        steps["ex_ante_feasibility"] = _run_step(
+            "ex_ante_feasibility",
+            run_ex_ante_feasibility_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                feasibility_policy_version=DEFAULT_FEASIBILITY_POLICY_VERSION,
+                new_only=True,
+            ),
+        )
     steps["paper_decisions"] = _run_step(
         "paper_decisions",
         run_paper_decision_mirror_once,
@@ -247,6 +268,7 @@ def run_pipeline_smoke(
         "include_paper_trade_source_labels": bool(include_paper_trade_source_labels),
         "include_trade_outcomes": bool(include_trade_outcomes),
         "include_standardized_stops": bool(include_standardized_stops),
+        "include_ex_ante_feasibility": bool(include_ex_ante_feasibility),
         "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
@@ -272,6 +294,7 @@ def main():
     parser.add_argument("--include-paper-trade-source-labels", action="store_true")
     parser.add_argument("--include-trade-outcomes", action="store_true")
     parser.add_argument("--include-standardized-stops", action="store_true")
+    parser.add_argument("--include-ex-ante-feasibility", action="store_true")
     parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
@@ -288,6 +311,7 @@ def main():
         include_paper_trade_source_labels=args.include_paper_trade_source_labels,
         include_trade_outcomes=args.include_trade_outcomes,
         include_standardized_stops=args.include_standardized_stops,
+        include_ex_ante_feasibility=args.include_ex_ante_feasibility,
         paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )

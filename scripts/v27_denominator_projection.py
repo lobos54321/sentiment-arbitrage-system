@@ -31,6 +31,7 @@ SOURCE_DOG_LABEL_EVENT_TYPE = "source_dog_label_recorded"
 LIFECYCLE_IDENTITY_EVENT_TYPE = "token_lifecycle_identity_resolved"
 TRADE_OUTCOME_LABEL_EVENT_TYPE = "trade_outcome_label_recorded"
 STANDARDIZED_STOP_EVENT_TYPE = "standardized_stop_contract_recorded"
+EX_ANTE_FEASIBILITY_EVENT_TYPE = "ex_ante_feasibility_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -39,6 +40,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     LIFECYCLE_IDENTITY_EVENT_TYPE,
     TRADE_OUTCOME_LABEL_EVENT_TYPE,
     STANDARDIZED_STOP_EVENT_TYPE,
+    EX_ANTE_FEASIBILITY_EVENT_TYPE,
 }
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
@@ -415,6 +417,73 @@ def _extract_standardized_stop_contract(event, bags):
     }
 
 
+def _extract_ex_ante_feasibility_contract(event, bags):
+    version = _extract_scalar(bags, [("feasibility_policy_version",)])
+    if event.get("event_type") != EX_ANTE_FEASIBILITY_EVENT_TYPE and not version:
+        return None
+    ex_ante_feasible = _extract_flag(bags, [("ex_ante_feasible",)])
+    feasibility_class = _extract_scalar(bags, [("feasibility_class",)])
+    decision_ts = _extract_scalar(bags, [("decision_ts",), ("decision_available_at",), ("counterfactual_entry_ts",), ("entry_ts")])
+    forbidden_future_fields_used = _extract_scalar(bags, [("forbidden_future_fields_used",)], default=[])
+    if forbidden_future_fields_used is None:
+        forbidden_future_fields_used = []
+    if not isinstance(forbidden_future_fields_used, list):
+        forbidden_future_fields_used = [forbidden_future_fields_used]
+    used_future_peak = _extract_flag(bags, [("used_future_peak",)])
+    used_future_outcome = _extract_flag(bags, [("used_future_outcome",)])
+    used_posthoc_label = _extract_flag(bags, [("used_posthoc_label",)])
+    used_future_peak = False if used_future_peak is None else used_future_peak
+    used_future_outcome = False if used_future_outcome is None else used_future_outcome
+    used_posthoc_label = False if used_posthoc_label is None else used_posthoc_label
+    if not version and ex_ante_feasible is None and feasibility_class is None:
+        return None
+    missing_fields = []
+    leakage_fields = []
+    if ex_ante_feasible is None:
+        missing_fields.append("ex_ante_feasible")
+    if not feasibility_class:
+        missing_fields.append("feasibility_class")
+    if not version:
+        missing_fields.append("feasibility_policy_version")
+    if decision_ts is None:
+        missing_fields.append("decision_ts")
+    if used_future_peak:
+        leakage_fields.append("used_future_peak")
+    if used_future_outcome:
+        leakage_fields.append("used_future_outcome")
+    if used_posthoc_label:
+        leakage_fields.append("used_posthoc_label")
+    leakage_fields.extend(str(field) for field in forbidden_future_fields_used if field)
+    return {
+        "ex_ante_feasible": ex_ante_feasible,
+        "feasibility_class": feasibility_class,
+        "feasibility_policy_version": version,
+        "decision_ts": decision_ts,
+        "decision_available_at": _extract_scalar(bags, [("decision_available_at",)], default=decision_ts),
+        "counterfactual_entry_ts": _extract_scalar(bags, [("counterfactual_entry_ts",), ("entry_ts",)]),
+        "system_min_decision_latency_sec": _as_float(_extract_scalar(bags, [("system_min_decision_latency_sec",)])),
+        "system_min_entry_latency_sec": _as_float(_extract_scalar(bags, [("system_min_entry_latency_sec",)])),
+        "entry_delay_from_signal_sec": _as_float(_extract_scalar(bags, [("entry_delay_from_signal_sec",)])),
+        "entry_quote_available": _extract_flag(bags, [("entry_quote_available",)]),
+        "entry_quote_available_at": _extract_scalar(bags, [("entry_quote_available_at",)]),
+        "current_quote_availability": _extract_flag(bags, [("current_quote_availability",)]),
+        "current_pool_resolution": _extract_scalar(bags, [("current_pool_resolution",), ("canonical_pool_group",)]),
+        "current_provider_health": _extract_scalar(bags, [("current_provider_health",)]),
+        "current_risk_availability": _extract_scalar(bags, [("current_risk_availability",)]),
+        "current_queue_delay_sec": _as_float(_extract_scalar(bags, [("current_queue_delay_sec",)])),
+        "feature_max_available_at": _extract_scalar(bags, [("feature_max_available_at",)]),
+        "used_future_peak": bool(used_future_peak),
+        "used_future_outcome": bool(used_future_outcome),
+        "used_posthoc_label": bool(used_posthoc_label),
+        "forbidden_future_fields_used": forbidden_future_fields_used,
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+        "missing_fields": missing_fields,
+        "leakage_fields": sorted(set(leakage_fields)),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -506,6 +575,7 @@ def _extract_decision_fact(event):
         "reference_price_contract": _extract_reference_price_contract(event, bags),
         "trade_outcome_label_contract": _extract_trade_outcome_label_contract(event, bags),
         "standardized_stop_contract": _extract_standardized_stop_contract(event, bags),
+        "ex_ante_feasibility_contract": _extract_ex_ante_feasibility_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -544,6 +614,7 @@ def _new_record(fact):
         "reference_price_compatible_alias_candidates": [],
         "trade_outcome_label_candidates": [],
         "standardized_stop_candidates": [],
+        "ex_ante_feasibility_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -551,6 +622,7 @@ def _new_record(fact):
         "reference_price_contract": None,
         "trade_outcome_label": None,
         "standardized_stop_contract": None,
+        "ex_ante_feasibility_contract": None,
         "captured": False,
     }
 
@@ -615,6 +687,9 @@ def _merge_fact(record, fact):
     standardized_stop = fact.get("standardized_stop_contract")
     if standardized_stop:
         record["standardized_stop_candidates"].append(standardized_stop)
+    ex_ante_feasibility = fact.get("ex_ante_feasibility_contract")
+    if ex_ante_feasibility:
+        record["ex_ante_feasibility_candidates"].append(ex_ante_feasibility)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -735,6 +810,20 @@ def _finalize_standardized_stop(record):
     )
     record["standardized_stop_candidates"] = candidates
     record["standardized_stop_contract"] = candidates[0] if candidates else None
+
+
+def _finalize_ex_ante_feasibility(record):
+    candidates = sorted(
+        record.get("ex_ante_feasibility_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["ex_ante_feasibility_candidates"] = candidates
+    record["ex_ante_feasibility_contract"] = candidates[0] if candidates else None
+    if not candidates:
+        return
+    selected = candidates[0]
+    valid = not selected.get("missing_fields") and not selected.get("leakage_fields")
+    record["ex_ante_feasible"] = bool(valid and selected.get("ex_ante_feasible") is True)
 
 
 def _record_missing_evidence(record):
@@ -893,6 +982,40 @@ def _contract_evidence_from_records(record_list):
                     "missing_fields": sorted({field for stop in malformed for field in stop.get("missing_fields", [])}),
                 }
             )
+    ex_ante_records = [
+        record
+        for record in record_list
+        if record.get("ex_ante_feasibility_candidates")
+    ]
+    malformed_ex_ante = []
+    future_leakage_ex_ante = []
+    for record in ex_ante_records:
+        malformed = [
+            feasibility
+            for feasibility in record.get("ex_ante_feasibility_candidates") or []
+            if feasibility.get("missing_fields")
+        ]
+        if malformed:
+            malformed_ex_ante.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        leaky = [
+            feasibility
+            for feasibility in record.get("ex_ante_feasibility_candidates") or []
+            if feasibility.get("leakage_fields")
+        ]
+        if leaky:
+            future_leakage_ex_ante.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "future_leakage_count": len(leaky),
+                    "leakage_fields": sorted({field for item in leaky for field in item.get("leakage_fields", [])}),
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -936,6 +1059,24 @@ def _contract_evidence_from_records(record_list):
             ),
             "stop_contract_projection_version": "v2.7.0.standardized_stop.v1",
         },
+        "ExAnteFeasibility": {
+            "eligible_ex_ante_records": len(ex_ante_records),
+            "ex_ante_feasibility_count": sum(len(record.get("ex_ante_feasibility_candidates") or []) for record in ex_ante_records),
+            "ex_ante_feasible_count": sum(1 for record in ex_ante_records if record.get("ex_ante_feasible") is True),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_ex_ante),
+            "malformed_feasibility": malformed_ex_ante,
+            "future_leakage_count": sum(item["future_leakage_count"] for item in future_leakage_ex_ante),
+            "future_leakage": future_leakage_ex_ante,
+            "feasibility_policy_versions": sorted(
+                {
+                    feasibility.get("feasibility_policy_version")
+                    for record in ex_ante_records
+                    for feasibility in record.get("ex_ante_feasibility_candidates") or []
+                    if feasibility.get("feasibility_policy_version")
+                }
+            ),
+            "ex_ante_feasibility_projection_version": "v2.7.0.ex_ante_feasibility.v1",
+        },
     }
 
 
@@ -958,6 +1099,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "lifecycle_identity_events": 0,
         "trade_outcome_label_recorded_events": 0,
         "standardized_stop_contract_recorded_events": 0,
+        "ex_ante_feasibility_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -983,6 +1125,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "MetricsWindowContract": {},
             "TradeOutcomeLabelContract": {},
             "StandardizedStopContract": {},
+            "ExAnteFeasibility": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -994,6 +1137,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "metrics_window_ok": False,
             "trade_outcome_label_ok": False,
             "standardized_stop_ok": False,
+            "ex_ante_feasibility_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -1036,6 +1180,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["trade_outcome_label_recorded_events"] += 1
         if event.get("event_type") == STANDARDIZED_STOP_EVENT_TYPE:
             projection["standardized_stop_contract_recorded_events"] += 1
+        if event.get("event_type") == EX_ANTE_FEASIBILITY_EVENT_TYPE:
+            projection["ex_ante_feasibility_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -1072,6 +1218,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_reference_price(record)
         _finalize_trade_outcome_label(record)
         _finalize_standardized_stop(record)
+        _finalize_ex_ante_feasibility(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -1160,6 +1307,12 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     projection["health"]["standardized_stop_ok"] = (
         contract_evidence["StandardizedStopContract"]["eligible_standardized_stop_records"] > 0
         and contract_evidence["StandardizedStopContract"]["malformed_count"] == 0
+    )
+    projection["health"]["ex_ante_feasibility_ok"] = (
+        contract_evidence["ExAnteFeasibility"]["eligible_ex_ante_records"] > 0
+        and contract_evidence["ExAnteFeasibility"]["ex_ante_feasible_count"] > 0
+        and contract_evidence["ExAnteFeasibility"]["malformed_count"] == 0
+        and contract_evidence["ExAnteFeasibility"]["future_leakage_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

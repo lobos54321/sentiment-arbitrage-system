@@ -322,6 +322,13 @@ def build_contract_statuses(
         "standardized_stop_missing_or_malformed",
         standardized_stop_evidence,
     )
+    ex_ante_evidence = contract_evidence.get("ExAnteFeasibility") or {}
+    statuses["ExAnteFeasibility"] = _status(
+        "ExAnteFeasibility",
+        "pass" if projection_built and projection_health.get("ex_ante_feasibility_ok") else "missing_evidence",
+        "ex_ante_feasibility_missing_malformed_or_leaky",
+        ex_ante_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

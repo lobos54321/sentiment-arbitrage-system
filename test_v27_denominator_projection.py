@@ -59,6 +59,41 @@ FULL_D3B_FLAGS = {
 }
 
 
+def append_ex_ante(log, *, token_ca, paper_trade_id=1, pool="pool-a", used_future_peak=False, missing_version=False):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "decision_ts": 1_700_000_002,
+        "decision_available_at": 1_700_000_002,
+        "counterfactual_entry_ts": 1_700_000_003,
+        "feasibility_policy_version": None if missing_version else "legacy_actual_paper_entry_feasibility_v0.1",
+        "ex_ante_feasible": True,
+        "feasibility_class": "legacy_actual_paper_entry",
+        "entry_quote_available": True,
+        "entry_quote_available_at": 1_700_000_002,
+        "current_quote_availability": True,
+        "current_pool_resolution": pool,
+        "current_provider_health": "legacy_not_recorded",
+        "current_risk_availability": "legacy_not_recorded",
+        "current_queue_delay_sec": 0,
+        "feature_max_available_at": 1_700_000_002,
+        "used_future_peak": used_future_peak,
+        "used_future_outcome": False,
+        "used_posthoc_label": False,
+        "forbidden_future_fields_used": [],
+    }
+    return log.append_event(
+        event_type="ex_ante_feasibility_recorded",
+        aggregate_id=f"ex_ante_feasibility:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"ex_ante_feasibility:{paper_trade_id}",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -217,6 +252,43 @@ def test_denominator_projection_consumes_missed_attribution_seed_without_overcla
     assert projection["evidence_gaps"]["RealtimeCleanDetector"] == 1
     assert projection["evidence_gaps"]["ExAnteFeasibility"] == 1
     assert projection["records"][0]["source_dog_label"] == "silver"
+
+
+def test_denominator_projection_consumes_ex_ante_feasibility_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags.pop("ex_ante_feasible")
+    append_decision(log, decision_id=1, token_ca="TokenFeas", captured=True, **flags)
+    append_ex_ante(log, token_ca="TokenFeas")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["ex_ante_feasibility_recorded_events"] == 1
+    assert projection["health"]["ex_ante_feasibility_ok"] is True
+    assert projection["contract_evidence"]["ExAnteFeasibility"]["eligible_ex_ante_records"] == 1
+    assert projection["contract_evidence"]["ExAnteFeasibility"]["ex_ante_feasible_count"] == 1
+    assert projection["contract_evidence"]["ExAnteFeasibility"]["future_leakage_count"] == 0
+    assert projection["metrics"]["telegram_externally_actionable_gold_silver_D3a"] == 1
+    record = projection["records"][0]
+    assert record["ex_ante_feasible"] is True
+    assert record["ex_ante_feasibility_contract"]["feasibility_policy_version"] == "legacy_actual_paper_entry_feasibility_v0.1"
+
+
+def test_denominator_projection_rejects_ex_ante_future_leakage(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags.pop("ex_ante_feasible")
+    append_decision(log, decision_id=1, token_ca="TokenLeak", captured=True, **flags)
+    append_ex_ante(log, token_ca="TokenLeak", used_future_peak=True)
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["ExAnteFeasibility"]
+    assert projection["health"]["ex_ante_feasibility_ok"] is False
+    assert evidence["future_leakage_count"] == 1
+    assert evidence["future_leakage"][0]["leakage_fields"] == ["used_future_peak"]
+    assert projection["records"][0]["ex_ante_feasible"] is False
+    assert projection["metrics"]["telegram_externally_actionable_gold_silver_D3a"] == 0
 
 
 def test_denominator_projection_merges_telegram_signal_anchor_with_missed_label_seed(tmp_path):
