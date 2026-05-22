@@ -173,3 +173,78 @@ def test_denominator_projection_consumes_missed_attribution_seed_without_overcla
     assert projection["evidence_gaps"]["RealtimeCleanDetector"] == 1
     assert projection["evidence_gaps"]["ExAnteFeasibility"] == 1
     assert projection["records"][0]["source_dog_label"] == "silver"
+
+
+def test_denominator_projection_merges_telegram_signal_anchor_with_missed_label_seed(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenMerge:unknown_pool:0",
+        idempotency_key="premium_signals:1",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenMerge",
+            "symbol": "MERGE",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+            "realtime_observable_quality": "realtime_seed",
+            "signal_type": "NOT_ATH",
+        },
+    )
+    log.append_event(
+        event_type="paper_missed_signal_attribution_recorded",
+        aggregate_id="paper_missed:token:TokenMerge",
+        idempotency_key="paper_missed_signal_attribution:1",
+        payload={
+            "missed_attribution_id": 1,
+            "token_ca": "TokenMerge",
+            "symbol": "MERGE",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_dog_label_version": "legacy_missed_attribution_seed_v0.1",
+            "source_label_research_only": True,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["telegram_signal_seen_events"] == 1
+    assert projection["mirrored_missed_attribution_events"] == 1
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["metrics"]["telegram_realtime_observable_gold_silver_D1"] == 1
+    assert projection["metrics"]["telegram_realtime_clean_gold_silver_D2"] == 0
+    assert projection["records"][0]["merged_decision_event_ids"] == [None, None]
+    assert projection["records"][0]["source_dog_label"] == "gold"
+
+
+def test_denominator_projection_does_not_count_backfilled_signal_as_d1(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenBackfill:unknown_pool:0",
+        idempotency_key="premium_signals:1",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenBackfill",
+            "symbol": "BACK",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": False,
+            "realtime_observable_quality": "backfilled",
+            "source_dog_label": "silver",
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["metrics"]["telegram_realtime_observable_gold_silver_D1"] == 0
+    assert projection["records"][0]["realtime_observable"] is False

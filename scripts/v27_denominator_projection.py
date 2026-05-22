@@ -23,7 +23,8 @@ from v27_event_log import V27EventLog, V27EventLogError, sha256_hex  # noqa: E40
 DEFAULT_EVENT_LOG_DIR = PROJECT_ROOT / "data" / "v27_event_log"
 MIRRORED_DECISION_EVENT_TYPE = "paper_decision_event_recorded"
 MIRRORED_MISSED_EVENT_TYPE = "paper_missed_signal_attribution_recorded"
-DENOMINATOR_SEED_EVENT_TYPES = {MIRRORED_DECISION_EVENT_TYPE, MIRRORED_MISSED_EVENT_TYPE}
+TELEGRAM_SIGNAL_EVENT_TYPE = "telegram_signal_seen"
+DENOMINATOR_SEED_EVENT_TYPES = {MIRRORED_DECISION_EVENT_TYPE, MIRRORED_MISSED_EVENT_TYPE, TELEGRAM_SIGNAL_EVENT_TYPE}
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
 
@@ -339,6 +340,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "event_log_verify": None,
         "event_log_error": None,
         "input_events": 0,
+        "telegram_signal_seen_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -383,6 +385,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["mirrored_decision_events"] += 1
         if event.get("event_type") == MIRRORED_MISSED_EVENT_TYPE:
             projection["mirrored_missed_attribution_events"] += 1
+        if event.get("event_type") == TELEGRAM_SIGNAL_EVENT_TYPE:
+            projection["telegram_signal_seen_events"] += 1
         fact = _extract_decision_fact(event)
         if not fact.get("token_ca"):
             projection["dirty_events"].append(

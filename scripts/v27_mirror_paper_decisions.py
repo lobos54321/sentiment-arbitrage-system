@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -244,12 +245,16 @@ def _missed_payload(row):
     baseline_price = _as_float(row.get("baseline_price"))
     telegram_seen = bool(row.get("signal_id") is not None or row.get("signal_ts") is not None)
     realtime_observable = baseline_price is not None and baseline_price > 0
+    chain = row.get("chain") or os.environ.get("V27_DEFAULT_CHAIN", "solana")
     return {
         "missed_attribution_id": row.get("id"),
         "decision_event_id": row.get("decision_event_id"),
         "event_ts": row.get("created_event_ts"),
         "token_ca": row.get("token_ca"),
         "symbol": row.get("symbol"),
+        "chain": chain,
+        "canonical_pool_group": row.get("canonical_pool_group") or "unknown_pool",
+        "lifecycle_epoch": row.get("lifecycle_epoch") or 0,
         "lifecycle_id": row.get("lifecycle_id"),
         "signal_id": row.get("signal_id"),
         "signal_ts": row.get("signal_ts"),
