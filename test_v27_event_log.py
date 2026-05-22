@@ -64,6 +64,51 @@ def test_v27_event_log_returns_existing_event_for_duplicate_idempotency_key(tmp_
     assert log.verify()["event_count"] == 1
 
 
+def test_v27_event_log_rebuilds_stale_sequencer_state_before_append(tmp_path):
+    log = V27EventLog(tmp_path)
+    first = log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="sol:TOKEN1:pool:epoch0",
+        payload={"token_ca": "TOKEN1"},
+        idempotency_key="sig-1",
+    )["event"]
+
+    state_path = tmp_path / "sequencer-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "last_global_seq": 0,
+                "aggregate_last_seq": {},
+                "idempotency_index": {},
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    second = log.append_event(
+        event_type="quote_observed",
+        aggregate_id="sol:TOKEN1:pool:epoch0",
+        payload={"price": "1.23"},
+        idempotency_key="quote-1",
+    )["event"]
+
+    assert first["global_seq"] == 1
+    assert second["global_seq"] == 2
+    assert second["aggregate_seq"] == 2
+    assert log.verify() == {
+        "event_count": 2,
+        "last_global_seq": 2,
+        "aggregate_count": 1,
+        "idempotency_count": 2,
+    }
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_global_seq"] == 2
+    assert state["event_file_size_bytes"] == (tmp_path / "events.jsonl").stat().st_size
+    assert state["event_file_mtime_ns"] == (tmp_path / "events.jsonl").stat().st_mtime_ns
+
+
 def test_v27_event_log_rejects_missing_required_event_semantics(tmp_path):
     log = V27EventLog(tmp_path)
 

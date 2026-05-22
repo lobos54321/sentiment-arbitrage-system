@@ -135,6 +135,7 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
 
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-paper-trade-source-label-mirror.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-read-model-refresh.log').exists, false);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-event-log-recovery.log').exists, false);
 });
 
 test('boundedIntParam clamps oversized live query parameters', () => {

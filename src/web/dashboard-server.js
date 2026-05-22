@@ -643,6 +643,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     'v27-paper-decision-mirror.log',
     'v27-lifecycle-mirror.log',
     'v27-read-model-refresh.log',
+    'v27-event-log-recovery.log',
     'lifecycle.log',
     'preflight.log',
   ].map((name) => describeFile([name, join(dataDir, name)]));
@@ -8020,6 +8021,7 @@ const server = http.createServer(async (req, res) => {
     || url.pathname === '/api/logs/v27-paper-decision-mirror'
     || url.pathname === '/api/logs/v27-lifecycle-mirror'
     || url.pathname === '/api/logs/v27-read-model-refresh'
+    || url.pathname === '/api/logs/v27-event-log-recovery'
   ) {
     if (!checkAuth(req, url, res)) return;
     let logPath = process.env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log';
@@ -8039,6 +8041,8 @@ const server = http.createServer(async (req, res) => {
       logPath = process.env.V27_LIFECYCLE_MIRROR_LOG || '/app/data/v27-lifecycle-mirror.log';
     } else if (url.pathname.endsWith('/v27-read-model-refresh')) {
       logPath = process.env.V27_READ_MODEL_REFRESH_LOG || '/app/data/v27-read-model-refresh.log';
+    } else if (url.pathname.endsWith('/v27-event-log-recovery')) {
+      logPath = process.env.V27_EVENT_LOG_RECOVERY_LOG || '/app/data/v27-event-log-recovery.log';
     }
     const tailLines = boundedIntParam(url, 'lines', 500, 1, 5000);
     if (fs.existsSync(logPath)) {

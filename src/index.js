@@ -87,6 +87,41 @@ function runVolumePreflightOnce() {
   }
 }
 
+function runV27EventLogRecoveryPreflightOnce() {
+  if (!envFlag('V27_EVENT_LOG_RECOVERY_PREFLIGHT_ENABLED', true)) return;
+  const script = join(process.cwd(), 'scripts', 'v27_event_log_recover.py');
+  if (!fs.existsSync(script)) return;
+  const dataDir = process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const recoveryDir = process.env.V27_EVENT_LOG_RECOVERY_DIR || join(dataDir, 'recovery', 'v27_event_log');
+  const logPath = process.env.V27_EVENT_LOG_RECOVERY_LOG || join(dataDir, 'v27-event-log-recovery.log');
+  try {
+    fs.mkdirSync(dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, `[node-v27-recovery] ${new Date().toISOString()} starting ${script}\n`);
+    const result = spawnSync('python3', [
+      script,
+      '--event-log-dir', eventLogDir,
+      '--recovery-dir', recoveryDir,
+      '--quarantine-invalid',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        V27_EVENT_LOG_DIR: eventLogDir,
+      },
+      encoding: 'utf8',
+      timeout: Number(process.env.V27_EVENT_LOG_RECOVERY_TIMEOUT_MS || 30000),
+      maxBuffer: 1024 * 1024,
+    });
+    if (result.stdout) fs.appendFileSync(logPath, result.stdout);
+    if (result.stderr) fs.appendFileSync(logPath, result.stderr);
+    fs.appendFileSync(logPath, `[node-v27-recovery] ${new Date().toISOString()} exit status=${result.status} signal=${result.signal || ''} error=${result.error?.message || ''}\n`);
+  } catch (error) {
+    console.error('[node-v27-recovery] failed:', error?.message || error);
+  }
+}
+
 function premiumLiveExecutionEnabled(config = {}) {
   return process.env.SHADOW_MODE === 'false'
     && Boolean(config.PREMIUM_LIVE_EXECUTION_ENABLED);
@@ -1228,6 +1263,7 @@ class PremiumChannelSystem {
 
 async function main() {
   runVolumePreflightOnce();
+  runV27EventLogRecoveryPreflightOnce();
 
   const mode = process.argv.includes('--premium') || process.env.PREMIUM_MODE_ENABLED === 'true'
     ? 'premium'

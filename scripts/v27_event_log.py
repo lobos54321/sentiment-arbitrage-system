@@ -47,11 +47,7 @@ class V27EventLog:
 
     def _load_state(self):
         if not self.state_path.exists():
-            return {
-                "last_global_seq": 0,
-                "aggregate_last_seq": {},
-                "idempotency_index": {},
-            }
+            return self._empty_state()
         with self.state_path.open("r", encoding="utf-8") as fh:
             state = json.load(fh)
         state.setdefault("last_global_seq", 0)
@@ -59,7 +55,35 @@ class V27EventLog:
         state.setdefault("idempotency_index", {})
         return state
 
+    def _empty_state(self):
+        return {
+            "last_global_seq": 0,
+            "aggregate_last_seq": {},
+            "idempotency_index": {},
+        }
+
+    def _event_file_metadata(self):
+        if not self.event_path.exists():
+            return {
+                "event_file_size_bytes": 0,
+                "event_file_mtime_ns": None,
+            }
+        stat = self.event_path.stat()
+        return {
+            "event_file_size_bytes": stat.st_size,
+            "event_file_mtime_ns": stat.st_mtime_ns,
+        }
+
+    def _state_matches_event_file(self, state):
+        metadata = self._event_file_metadata()
+        return (
+            state.get("event_file_size_bytes") == metadata["event_file_size_bytes"]
+            and state.get("event_file_mtime_ns") == metadata["event_file_mtime_ns"]
+        )
+
     def _write_state(self, state):
+        state = dict(state)
+        state.update(self._event_file_metadata())
         tmp = self.state_path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(state, fh, sort_keys=True, separators=(",", ":"))
@@ -79,6 +103,54 @@ class V27EventLog:
                 if event.get("event_id") == event_id:
                     return event
         return None
+
+    def _build_state_from_events(self):
+        state = self._empty_state()
+        event_count = 0
+
+        for event in self.iter_events() or []:
+            event_count += 1
+            if event.get("global_seq") != event_count:
+                raise V27EventLogError(
+                    f"global_seq gap or reorder detected: expected {event_count}, got {event.get('global_seq')}"
+                )
+
+            aggregate_id = event.get("aggregate_id")
+            if not aggregate_id:
+                raise V27EventLogError(f"missing aggregate_id: {event.get('event_id')}")
+            aggregate_seq = event.get("aggregate_seq")
+            expected_aggregate_seq = int(state["aggregate_last_seq"].get(aggregate_id, 0)) + 1
+            if aggregate_seq != expected_aggregate_seq:
+                raise V27EventLogError(f"aggregate_seq gap for {aggregate_id}")
+            state["aggregate_last_seq"][aggregate_id] = aggregate_seq
+
+            idempotency_key = event.get("idempotency_key")
+            if not idempotency_key:
+                raise V27EventLogError(f"missing idempotency key: {event.get('event_id')}")
+            if idempotency_key in state["idempotency_index"]:
+                raise V27EventLogError(f"duplicate idempotency key: {idempotency_key}")
+            state["idempotency_index"][idempotency_key] = event.get("event_id")
+
+            expected_hash = sha256_hex({key: value for key, value in event.items() if key != "event_hash"})
+            if event.get("event_hash") != expected_hash:
+                raise V27EventLogError(f"event_hash mismatch: {event.get('event_id')}")
+
+        state["last_global_seq"] = event_count
+        return {
+            "state": state,
+            "event_count": event_count,
+            "last_global_seq": event_count,
+            "aggregate_count": len(state["aggregate_last_seq"]),
+            "idempotency_count": len(state["idempotency_index"]),
+        }
+
+    def _load_reconciled_state(self):
+        stored_state = self._load_state()
+        if self._state_matches_event_file(stored_state):
+            return stored_state
+        event_state = self._build_state_from_events()["state"]
+        self._write_state(event_state)
+        return self._load_state()
 
     def append_event(
         self,
@@ -109,7 +181,7 @@ class V27EventLog:
 
         with self.lock_path.open("a+", encoding="utf-8") as lock_fh:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-            state = self._load_state()
+            state = self._load_reconciled_state()
 
             existing_event_id = state["idempotency_index"].get(idempotency_key)
             if existing_event_id:
@@ -170,38 +242,12 @@ class V27EventLog:
                     yield json.loads(line)
 
     def verify(self):
-        expected_global_seq = 0
-        aggregate_last = {}
-        seen_idempotency = {}
-        event_count = 0
-
-        for event in self.iter_events():
-            event_count += 1
-            expected_global_seq += 1
-            if event.get("global_seq") != expected_global_seq:
-                raise V27EventLogError("global_seq gap or reorder detected")
-
-            aggregate_id = event.get("aggregate_id")
-            aggregate_seq = event.get("aggregate_seq")
-            expected_aggregate_seq = aggregate_last.get(aggregate_id, 0) + 1
-            if aggregate_seq != expected_aggregate_seq:
-                raise V27EventLogError(f"aggregate_seq gap for {aggregate_id}")
-            aggregate_last[aggregate_id] = aggregate_seq
-
-            idempotency_key = event.get("idempotency_key")
-            if idempotency_key in seen_idempotency:
-                raise V27EventLogError(f"duplicate idempotency key: {idempotency_key}")
-            seen_idempotency[idempotency_key] = event.get("event_id")
-
-            expected_hash = sha256_hex({key: value for key, value in event.items() if key != "event_hash"})
-            if event.get("event_hash") != expected_hash:
-                raise V27EventLogError(f"event_hash mismatch: {event.get('event_id')}")
-
+        summary = self._build_state_from_events()
         return {
-            "event_count": event_count,
-            "last_global_seq": expected_global_seq,
-            "aggregate_count": len(aggregate_last),
-            "idempotency_count": len(seen_idempotency),
+            "event_count": summary["event_count"],
+            "last_global_seq": summary["last_global_seq"],
+            "aggregate_count": summary["aggregate_count"],
+            "idempotency_count": summary["idempotency_count"],
         }
 
 

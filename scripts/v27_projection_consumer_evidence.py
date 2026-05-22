@@ -152,7 +152,8 @@ def write_projection_consumer_evidence(
     health_path = output_dir / CONSUMER_HEALTH_FILE
 
     latest_seq = int(snapshot.get("read_model", {}).get("event_log_latest_seq") or projection.get("event_log_latest_seq") or 0)
-    processed_event_count = int(projection.get("event_log_verify", {}).get("event_count") or 0)
+    event_log_verify = projection.get("event_log_verify") if isinstance(projection.get("event_log_verify"), dict) else {}
+    processed_event_count = int(event_log_verify.get("event_count") or 0)
     projection_hash = snapshot.get("projection_hash") or sha256_hex(projection)
     snapshot_hash = snapshot.get("snapshot_hash") or sha256_hex(snapshot)
     artifact_hashes = {

@@ -115,6 +115,33 @@ def test_refresh_health_report_blocks_invalid_spec_manifest(tmp_path):
     assert mode_readiness["contract_statuses"]["CanonicalSpecIntegrityContract"]["status"] == "fail"
 
 
+def test_refresh_writes_fail_closed_health_for_invalid_event_log(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    log = V27EventLog(event_log_dir)
+    append_signal(log, "TokenA")
+    event_path = event_log_dir / "events.jsonl"
+    original_line = event_path.read_text(encoding="utf-8").strip()
+    event_path.write_text(original_line + "\n" + original_line + "\n", encoding="utf-8")
+
+    report = refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    projection = read_json(out_dir / "denominator_projection.json")
+    health = read_json(out_dir / "denominator_freshness.json")
+    assert projection["health"]["status"] == "event_log_invalid"
+    assert report["dashboard_safe"] is False
+    assert report["health"]["status"] == "read_model_refresh_not_ready"
+    assert "projection_status_event_log_invalid" in report["blocking_reasons"]
+    assert "event_log_empty" in report["blocking_reasons"]
+    assert health["verifier_report"]["projection_status"] == "event_log_invalid"
+
+
 def test_refresh_projection_outbox_is_idempotent_for_same_batch(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
