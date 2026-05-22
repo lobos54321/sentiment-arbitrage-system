@@ -30,6 +30,7 @@ TELEGRAM_SIGNAL_EVENT_TYPE = "telegram_signal_seen"
 SOURCE_DOG_LABEL_EVENT_TYPE = "source_dog_label_recorded"
 LIFECYCLE_IDENTITY_EVENT_TYPE = "token_lifecycle_identity_resolved"
 TRADE_OUTCOME_LABEL_EVENT_TYPE = "trade_outcome_label_recorded"
+STANDARDIZED_STOP_EVENT_TYPE = "standardized_stop_contract_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -37,6 +38,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     SOURCE_DOG_LABEL_EVENT_TYPE,
     LIFECYCLE_IDENTITY_EVENT_TYPE,
     TRADE_OUTCOME_LABEL_EVENT_TYPE,
+    STANDARDIZED_STOP_EVENT_TYPE,
 }
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
@@ -360,6 +362,59 @@ def _extract_trade_outcome_label_contract(event, bags):
     }
 
 
+def _extract_standardized_stop_contract(event, bags):
+    version = _extract_scalar(bags, [("stop_contract_version",)])
+    if event.get("event_type") != STANDARDIZED_STOP_EVENT_TYPE and not version:
+        return None
+    stop_threshold_pct = _as_float(_extract_scalar(bags, [("stop_threshold_pct",)]))
+    stop_executable_required = _extract_scalar(bags, [("stop_executable_required",)])
+    stop_available_at = _extract_scalar(
+        bags,
+        [("stop_available_at",), ("counterfactual_entry_ts",), ("simulated_fill_ts",), ("entry_ts")],
+        default=event.get("available_at"),
+    )
+    stop_type = _extract_scalar(bags, [("stop_type",)])
+    stop_window = _extract_scalar(bags, [("stop_window",)])
+    stop_price_type = _extract_scalar(bags, [("stop_price_type",)])
+    stop_friction_model_version = _extract_scalar(bags, [("stop_friction_model_version",)])
+    if not version and stop_threshold_pct is None and stop_type is None:
+        return None
+    missing_fields = []
+    if not version:
+        missing_fields.append("stop_contract_version")
+    if not stop_type:
+        missing_fields.append("stop_type")
+    if stop_threshold_pct is None or not math.isfinite(stop_threshold_pct) or stop_threshold_pct >= 0:
+        missing_fields.append("stop_threshold_pct")
+    if not stop_window:
+        missing_fields.append("stop_window")
+    if not stop_price_type:
+        missing_fields.append("stop_price_type")
+    if stop_executable_required is None:
+        missing_fields.append("stop_executable_required")
+    elif _as_bool(stop_executable_required) is not True:
+        missing_fields.append("stop_executable_required_true")
+    if not stop_friction_model_version:
+        missing_fields.append("stop_friction_model_version")
+    if stop_available_at is None:
+        missing_fields.append("stop_available_at")
+    return {
+        "stop_contract_version": version,
+        "stop_type": stop_type,
+        "stop_threshold_pct": stop_threshold_pct,
+        "stop_window": stop_window,
+        "stop_price_type": stop_price_type,
+        "stop_executable_required": _as_bool(stop_executable_required),
+        "stop_friction_model_version": stop_friction_model_version,
+        "stop_available_at": stop_available_at,
+        "standardized_stop_quality": _extract_scalar(bags, [("standardized_stop_quality",)], default="legacy_seed"),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+        "missing_fields": missing_fields,
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -450,6 +505,7 @@ def _extract_decision_fact(event):
         "source_label_research_only": _extract_flag(bags, [("source_label_research_only",), ("source_dog_label_research_only",)]),
         "reference_price_contract": _extract_reference_price_contract(event, bags),
         "trade_outcome_label_contract": _extract_trade_outcome_label_contract(event, bags),
+        "standardized_stop_contract": _extract_standardized_stop_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -487,12 +543,14 @@ def _new_record(fact):
         "reference_price_ignored_late_candidates": [],
         "reference_price_compatible_alias_candidates": [],
         "trade_outcome_label_candidates": [],
+        "standardized_stop_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
         "signal_credit_assignment": None,
         "reference_price_contract": None,
         "trade_outcome_label": None,
+        "standardized_stop_contract": None,
         "captured": False,
     }
 
@@ -554,6 +612,9 @@ def _merge_fact(record, fact):
     trade_outcome_label = fact.get("trade_outcome_label_contract")
     if trade_outcome_label:
         record["trade_outcome_label_candidates"].append(trade_outcome_label)
+    standardized_stop = fact.get("standardized_stop_contract")
+    if standardized_stop:
+        record["standardized_stop_candidates"].append(standardized_stop)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -667,6 +728,15 @@ def _finalize_trade_outcome_label(record):
     record["trade_outcome_label"] = candidates[0] if candidates else None
 
 
+def _finalize_standardized_stop(record):
+    candidates = sorted(
+        record.get("standardized_stop_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["standardized_stop_candidates"] = candidates
+    record["standardized_stop_contract"] = candidates[0] if candidates else None
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -696,6 +766,8 @@ def _record_missing_evidence(record):
             missing.append("ReferencePriceContract")
     if record.get("captured") and not record.get("trade_outcome_label"):
         missing.append("TradeOutcomeLabelContract")
+    if record.get("captured") and not record.get("standardized_stop_contract"):
+        missing.append("StandardizedStopContract")
     record["missing_evidence"] = missing
     return missing
 
@@ -801,6 +873,26 @@ def _contract_evidence_from_records(record_list):
                     "missing_fields": sorted({field for label in malformed for field in label.get("missing_fields", [])}),
                 }
             )
+    standardized_stop_records = [
+        record
+        for record in record_list
+        if record.get("standardized_stop_candidates")
+    ]
+    malformed_standardized_stops = []
+    for record in standardized_stop_records:
+        malformed = [
+            stop
+            for stop in record.get("standardized_stop_candidates") or []
+            if stop.get("missing_fields")
+        ]
+        if malformed:
+            malformed_standardized_stops.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for stop in malformed for field in stop.get("missing_fields", [])}),
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -829,6 +921,21 @@ def _contract_evidence_from_records(record_list):
             "malformed_labels": malformed_trade_labels,
             "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
         },
+        "StandardizedStopContract": {
+            "eligible_standardized_stop_records": len(standardized_stop_records),
+            "standardized_stop_contract_count": sum(len(record.get("standardized_stop_candidates") or []) for record in standardized_stop_records),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_standardized_stops),
+            "malformed_stops": malformed_standardized_stops,
+            "stop_contract_versions": sorted(
+                {
+                    stop.get("stop_contract_version")
+                    for record in standardized_stop_records
+                    for stop in record.get("standardized_stop_candidates") or []
+                    if stop.get("stop_contract_version")
+                }
+            ),
+            "stop_contract_projection_version": "v2.7.0.standardized_stop.v1",
+        },
     }
 
 
@@ -850,6 +957,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "source_dog_label_events": 0,
         "lifecycle_identity_events": 0,
         "trade_outcome_label_recorded_events": 0,
+        "standardized_stop_contract_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -874,6 +982,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "ReferencePriceContract": {},
             "MetricsWindowContract": {},
             "TradeOutcomeLabelContract": {},
+            "StandardizedStopContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -884,6 +993,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "reference_price_ok": False,
             "metrics_window_ok": False,
             "trade_outcome_label_ok": False,
+            "standardized_stop_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -924,6 +1034,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["lifecycle_identity_events"] += 1
         if event.get("event_type") == TRADE_OUTCOME_LABEL_EVENT_TYPE:
             projection["trade_outcome_label_recorded_events"] += 1
+        if event.get("event_type") == STANDARDIZED_STOP_EVENT_TYPE:
+            projection["standardized_stop_contract_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -959,6 +1071,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_signal_credit(record)
         _finalize_reference_price(record)
         _finalize_trade_outcome_label(record)
+        _finalize_standardized_stop(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -1043,6 +1156,10 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     projection["health"]["trade_outcome_label_ok"] = (
         contract_evidence["TradeOutcomeLabelContract"]["eligible_trade_outcome_records"] > 0
         and contract_evidence["TradeOutcomeLabelContract"]["malformed_count"] == 0
+    )
+    projection["health"]["standardized_stop_ok"] = (
+        contract_evidence["StandardizedStopContract"]["eligible_standardized_stop_records"] > 0
+        and contract_evidence["StandardizedStopContract"]["malformed_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

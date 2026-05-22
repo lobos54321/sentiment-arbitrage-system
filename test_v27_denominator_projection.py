@@ -711,6 +711,78 @@ def test_denominator_projection_does_not_treat_source_label_legacy_trade_as_trad
     assert projection["records"][0]["trade_outcome_label"] is None
 
 
+def test_denominator_projection_consumes_standardized_stop_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="standardized_stop_contract_recorded",
+        aggregate_id="standardized_stop:solana:TokenStop:unknown_pool:0:1",
+        idempotency_key="standardized_stop_contract:1:legacy_standardized_stop_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenStop",
+            "symbol": "STOP",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "stop_contract_version": "legacy_standardized_stop_v0.1",
+            "stop_type": "standardized_counterfactual_stop",
+            "stop_threshold_pct": -30.0,
+            "stop_window": "60m",
+            "stop_price_type": "delayed_executable_exit_quote_proxy",
+            "stop_executable_required": True,
+            "stop_friction_model_version": "legacy_round_trip_friction_v0.1",
+            "stop_available_at": 1_700_000_003,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["StandardizedStopContract"]
+    assert projection["standardized_stop_contract_recorded_events"] == 1
+    assert evidence["eligible_standardized_stop_records"] == 1
+    assert evidence["standardized_stop_contract_count"] == 1
+    assert evidence["malformed_count"] == 0
+    assert evidence["stop_contract_versions"] == ["legacy_standardized_stop_v0.1"]
+    assert projection["health"]["standardized_stop_ok"] is True
+    assert projection["records"][0]["standardized_stop_contract"]["stop_threshold_pct"] == -30.0
+
+
+def test_denominator_projection_rejects_malformed_standardized_stop_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="standardized_stop_contract_recorded",
+        aggregate_id="standardized_stop:solana:TokenBadStop:unknown_pool:0:1",
+        idempotency_key="standardized_stop_contract:1:bad",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenBadStop",
+            "symbol": "BADSTOP",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "stop_contract_version": "legacy_standardized_stop_v0.1",
+            "stop_type": "standardized_counterfactual_stop",
+            "stop_threshold_pct": 30.0,
+            "stop_window": "60m",
+            "stop_price_type": "delayed_executable_exit_quote_proxy",
+            "stop_executable_required": False,
+            "stop_friction_model_version": "legacy_round_trip_friction_v0.1",
+            "stop_available_at": 1_700_000_003,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["StandardizedStopContract"]
+    assert evidence["eligible_standardized_stop_records"] == 1
+    assert evidence["malformed_count"] == 1
+    assert evidence["malformed_stops"][0]["missing_fields"] == [
+        "stop_executable_required_true",
+        "stop_threshold_pct",
+    ]
+    assert projection["health"]["standardized_stop_ok"] is False
+
+
 def test_denominator_projection_keeps_unresolved_source_label_as_gap(tmp_path):
     log = V27EventLog(tmp_path)
     log.append_event(

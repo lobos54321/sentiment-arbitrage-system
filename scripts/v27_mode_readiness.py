@@ -315,6 +315,13 @@ def build_contract_statuses(
         "trade_outcome_label_missing_or_malformed",
         trade_outcome_evidence,
     )
+    standardized_stop_evidence = contract_evidence.get("StandardizedStopContract") or {}
+    statuses["StandardizedStopContract"] = _status(
+        "StandardizedStopContract",
+        "pass" if projection_built and projection_health.get("standardized_stop_ok") else "missing_evidence",
+        "standardized_stop_missing_or_malformed",
+        standardized_stop_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

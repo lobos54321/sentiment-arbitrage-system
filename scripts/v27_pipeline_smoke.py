@@ -23,6 +23,7 @@ from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
 from v27_mirror_paper_trade_source_labels import run_mirror_once as run_paper_trade_source_label_mirror_once  # noqa: E402
+from v27_mirror_standardized_stops import run_mirror_once as run_standardized_stop_mirror_once  # noqa: E402
 from v27_mirror_trade_outcomes import run_mirror_once as run_trade_outcome_mirror_once  # noqa: E402
 from v27_mirror_source_labels import DEFAULT_DB as DEFAULT_SIGNAL_DB, run_mirror_once as run_source_label_mirror_once  # noqa: E402
 from v27_mirror_telegram_signals import run_mirror_once as run_telegram_signal_mirror_once  # noqa: E402
@@ -76,6 +77,7 @@ def run_pipeline_smoke(
     include_missed=True,
     include_paper_trade_source_labels=False,
     include_trade_outcomes=False,
+    include_standardized_stops=False,
     paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
@@ -154,6 +156,31 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_standardized_stops:
+        steps["standardized_stops"] = _run_step(
+            "standardized_stops",
+            run_standardized_stop_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                stop_contract_version="legacy_standardized_stop_v0.1",
+                stop_type="standardized_counterfactual_stop",
+                stop_threshold_pct=-30.0,
+                stop_window="60m",
+                stop_price_type="delayed_executable_exit_quote_proxy",
+                stop_executable_required=True,
+                stop_friction_model_version="legacy_round_trip_friction_v0.1",
+                new_only=True,
+            ),
+        )
     steps["paper_decisions"] = _run_step(
         "paper_decisions",
         run_paper_decision_mirror_once,
@@ -219,6 +246,7 @@ def run_pipeline_smoke(
         "include_missed": bool(include_missed),
         "include_paper_trade_source_labels": bool(include_paper_trade_source_labels),
         "include_trade_outcomes": bool(include_trade_outcomes),
+        "include_standardized_stops": bool(include_standardized_stops),
         "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
@@ -243,6 +271,7 @@ def main():
     parser.add_argument("--include-missed", action="store_true")
     parser.add_argument("--include-paper-trade-source-labels", action="store_true")
     parser.add_argument("--include-trade-outcomes", action="store_true")
+    parser.add_argument("--include-standardized-stops", action="store_true")
     parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
@@ -258,6 +287,7 @@ def main():
         include_missed=args.include_missed,
         include_paper_trade_source_labels=args.include_paper_trade_source_labels,
         include_trade_outcomes=args.include_trade_outcomes,
+        include_standardized_stops=args.include_standardized_stops,
         paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )

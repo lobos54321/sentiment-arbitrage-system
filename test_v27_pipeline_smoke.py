@@ -188,3 +188,34 @@ def test_pipeline_smoke_can_seed_d0_from_paper_trade_source_labels(tmp_path, mon
     assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
     assert projection["health"]["signal_credit_assignment_ok"] is True
     assert projection["health"]["reference_price_ok"] is True
+
+
+def test_pipeline_smoke_can_seed_trade_outcome_and_standardized_stop(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    signal_db = tmp_path / "signals.db"
+    paper_db = tmp_path / "paper.db"
+    lifecycle_db = tmp_path / "lifecycle.db"
+    output_dir = tmp_path / "read_models"
+    with create_signal_db(signal_db), create_paper_db(paper_db), create_lifecycle_db(lifecycle_db):
+        report = run_pipeline_smoke(
+            signal_db=signal_db,
+            paper_db=paper_db,
+            lifecycle_db=lifecycle_db,
+            event_log_dir=tmp_path / "events",
+            output_dir=output_dir,
+            limit=1,
+            include_missed=False,
+            include_trade_outcomes=True,
+            include_standardized_stops=True,
+        )
+
+    projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
+
+    assert report["health"]["status"] == "v27_pipeline_smoke_ok"
+    assert report["blocking_reasons"] == []
+    assert report["steps"]["trade_outcomes"]["ok"] is True
+    assert report["steps"]["standardized_stops"]["ok"] is True
+    assert projection["health"]["trade_outcome_label_ok"] is True
+    assert projection["health"]["standardized_stop_ok"] is True
+    assert "TradeOutcomeLabelContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "StandardizedStopContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]

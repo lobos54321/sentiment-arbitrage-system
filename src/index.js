@@ -201,6 +201,7 @@ function startShadowDataSidecars(config) {
   const v27SourceLabelMirrorLog = process.env.V27_SOURCE_LABEL_MIRROR_LOG || './data/v27-source-label-mirror.log';
   const v27PaperTradeSourceLabelMirrorLog = process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_LOG || './data/v27-paper-trade-source-label-mirror.log';
   const v27TradeOutcomeMirrorLog = process.env.V27_TRADE_OUTCOME_MIRROR_LOG || './data/v27-trade-outcome-mirror.log';
+  const v27StandardizedStopMirrorLog = process.env.V27_STANDARDIZED_STOP_MIRROR_LOG || './data/v27-standardized-stop-mirror.log';
   const v27PaperDecisionMirrorLog = process.env.V27_PAPER_DECISION_MIRROR_LOG || './data/v27-paper-decision-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
@@ -374,6 +375,36 @@ function startShadowDataSidecars(config) {
         DB_PATH: signalDb,
         SENTIMENT_DB: signalDb,
         V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+      },
+    }));
+  }
+  if (envFlag('V27_STANDARDIZED_STOP_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-standardized-stop-mirror',
+      logPath: v27StandardizedStopMirrorLog,
+      args: [
+        'scripts/v27_mirror_standardized_stops.py',
+        '--loop',
+        '--new-only',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_STANDARDIZED_STOP_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_STANDARDIZED_STOP_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_STANDARDIZED_STOP_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_STANDARDIZED_STOP_MIRROR_LOCK_FILE || '/tmp/v27_standardized_stop_mirror.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_STANDARDIZED_STOP_VERSION: process.env.V27_STANDARDIZED_STOP_VERSION || 'legacy_standardized_stop_v0.1',
+        V27_STANDARDIZED_STOP_THRESHOLD_PCT: process.env.V27_STANDARDIZED_STOP_THRESHOLD_PCT || '-30',
+        V27_STANDARDIZED_STOP_WINDOW: process.env.V27_STANDARDIZED_STOP_WINDOW || '60m',
+        V27_STANDARDIZED_STOP_PRICE_TYPE: process.env.V27_STANDARDIZED_STOP_PRICE_TYPE || 'delayed_executable_exit_quote_proxy',
+        V27_STANDARDIZED_STOP_EXECUTABLE_REQUIRED: process.env.V27_STANDARDIZED_STOP_EXECUTABLE_REQUIRED || 'true',
+        V27_STANDARDIZED_STOP_FRICTION_MODEL_VERSION: process.env.V27_STANDARDIZED_STOP_FRICTION_MODEL_VERSION || 'legacy_round_trip_friction_v0.1',
       },
     }));
   }
