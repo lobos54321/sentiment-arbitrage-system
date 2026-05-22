@@ -428,6 +428,7 @@ def _new_record(fact):
         "source_label_conflicts": [],
         "reference_price_candidates": [],
         "reference_price_conflicts": [],
+        "reference_price_ignored_late_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -503,13 +504,27 @@ def _finalize_signal_credit(record):
     )
     record["telegram_signal_stack"] = stack
     if not stack:
-        record["signal_credit_assignment"] = None
+        legacy_signal_ids = [signal_id for signal_id in record.get("decision_signal_ids") or [] if signal_id is not None]
+        if not legacy_signal_ids:
+            record["signal_credit_assignment"] = None
+            return
+        credited_signal_id = sorted(legacy_signal_ids, key=lambda value: str(value))[0]
+        record["signal_credit_assignment"] = {
+            "credited_signal_id": credited_signal_id,
+            "credited_signal_event_id": None,
+            "credit_assignment_reason": "legacy_embedded_signal_anchor",
+            "credit_assignment_quality": "shadow_legacy_embedded",
+            "signal_stack_before_entry": [],
+            "signal_stack_after_entry": [],
+            "credit_policy_version": "v2.7.0.signal_credit.v1",
+        }
         return
     credited = stack[0]
     record["signal_credit_assignment"] = {
         "credited_signal_id": credited.get("telegram_signal_id"),
         "credited_signal_event_id": credited.get("event_id"),
         "credit_assignment_reason": "first_valid_telegram_anchor",
+        "credit_assignment_quality": "telegram_lifecycle_event",
         "signal_stack_before_entry": stack,
         "signal_stack_after_entry": [],
         "credit_policy_version": "v2.7.0.signal_credit.v1",
@@ -527,16 +542,24 @@ def _finalize_reference_price(record):
         return
     selected = candidates[0]
     for candidate in candidates[1:]:
-        if (
-            candidate.get("reference_price_type") != selected.get("reference_price_type")
-            or candidate.get("reference_price") != selected.get("reference_price")
-        ):
+        if candidate.get("reference_price_type") != selected.get("reference_price_type"):
             record["reference_price_conflicts"].append(
                 {
                     "selected_source_event_id": selected.get("source_event_id"),
                     "incoming_source_event_id": candidate.get("source_event_id"),
                     "selected_type": selected.get("reference_price_type"),
                     "incoming_type": candidate.get("reference_price_type"),
+                }
+            )
+        elif candidate.get("reference_price") != selected.get("reference_price"):
+            record["reference_price_ignored_late_candidates"].append(
+                {
+                    "selected_source_event_id": selected.get("source_event_id"),
+                    "incoming_source_event_id": candidate.get("source_event_id"),
+                    "reference_price_type": selected.get("reference_price_type"),
+                    "selected_price": selected.get("reference_price"),
+                    "incoming_price": candidate.get("reference_price"),
+                    "ignore_reason": "same_type_late_candidate_does_not_reset_reference_price",
                 }
             )
     record["reference_price_contract"] = {
@@ -643,11 +666,26 @@ def _contract_evidence_from_records(record_list):
         for record in d0_records
         if record.get("reference_price_conflicts")
     ]
+    ignored_late_reference_price_candidates = [
+        {
+            "denominator_dedup_key": record.get("denominator_dedup_key"),
+            "ignored_late_candidate_count": len(record.get("reference_price_ignored_late_candidates") or []),
+        }
+        for record in d0_records
+        if record.get("reference_price_ignored_late_candidates")
+    ]
+    legacy_embedded_signal_credit = [
+        record.get("denominator_dedup_key")
+        for record in d0_records
+        if (record.get("signal_credit_assignment") or {}).get("credit_assignment_quality") == "shadow_legacy_embedded"
+    ]
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
             "missing_count": len(signal_credit_missing),
             "missing_denominator_keys": signal_credit_missing,
+            "legacy_embedded_credit_count": len(legacy_embedded_signal_credit),
+            "legacy_embedded_denominator_keys": legacy_embedded_signal_credit,
             "credit_policy_version": "v2.7.0.signal_credit.v1",
         },
         "ReferencePriceContract": {
@@ -656,6 +694,8 @@ def _contract_evidence_from_records(record_list):
             "missing_denominator_keys": reference_price_missing,
             "conflict_count": len(reference_price_conflicts),
             "conflicts": reference_price_conflicts,
+            "ignored_late_candidate_count": sum(item["ignored_late_candidate_count"] for item in ignored_late_reference_price_candidates),
+            "ignored_late_candidates": ignored_late_reference_price_candidates,
             "reference_price_contract_version": "v2.7.0.reference_price.v1",
         },
     }

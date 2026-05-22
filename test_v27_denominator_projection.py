@@ -428,6 +428,135 @@ def test_denominator_projection_rejects_non_positive_reference_price_for_d0(tmp_
     assert projection["health"]["reference_price_ok"] is False
 
 
+def test_denominator_projection_uses_legacy_embedded_signal_anchor_for_shadow_credit(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="paper_missed_signal_attribution_recorded",
+        aggregate_id="paper_missed:token:TokenEmbeddedSignal",
+        idempotency_key="paper_missed_signal_attribution:embedded-signal",
+        payload={
+            "missed_attribution_id": 1,
+            "decision_event_id": 10,
+            "token_ca": "TokenEmbeddedSignal",
+            "symbol": "EMB",
+            "signal_id": 77,
+            "signal_ts": 1_700_000_000,
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+            "telegram_seen": True,
+            "realtime_observable": True,
+            "baseline_price": 0.001,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    credit = projection["records"][0]["signal_credit_assignment"]
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert credit["credited_signal_id"] == 77
+    assert credit["credit_assignment_reason"] == "legacy_embedded_signal_anchor"
+    assert credit["credit_assignment_quality"] == "shadow_legacy_embedded"
+    assert projection["contract_evidence"]["SignalCreditAssignmentContract"]["missing_count"] == 0
+    assert projection["contract_evidence"]["SignalCreditAssignmentContract"]["legacy_embedded_credit_count"] == 1
+    assert projection["health"]["signal_credit_assignment_ok"] is True
+
+
+def test_denominator_projection_ignores_late_same_type_reference_price_candidate(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenLateRef:unknown_pool:0",
+        idempotency_key="premium_signals:late-ref",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenLateRef",
+            "symbol": "LATE",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    for idx, price in enumerate((0.001, 0.002), start=1):
+        log.append_event(
+            event_type="source_dog_label_recorded",
+            aggregate_id=f"source_label:solana:TokenLateRef:unknown_pool:0:{idx}",
+            idempotency_key=f"signal_features_source_label:late-ref:{idx}",
+            payload={
+                "source_label_id": idx,
+                "token_ca": "TokenLateRef",
+                "symbol": "LATE",
+                "chain": "solana",
+                "canonical_pool_group": "unknown_pool",
+                "lifecycle_epoch": 0,
+                "source_dog_label": "gold",
+                "source_label_research_only": True,
+                "source_reference_price_type": "legacy_entry_price",
+                "source_reference_price": price,
+                "source_label_available_at": "2026-01-15T00:00:00Z",
+            },
+        )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    record = projection["records"][0]
+    evidence = projection["contract_evidence"]["ReferencePriceContract"]
+    assert record["reference_price_contract"]["reference_price"] == 0.001
+    assert evidence["missing_count"] == 0
+    assert evidence["conflict_count"] == 0
+    assert evidence["ignored_late_candidate_count"] == 1
+    assert record["reference_price_ignored_late_candidates"][0]["ignore_reason"] == "same_type_late_candidate_does_not_reset_reference_price"
+    assert projection["health"]["reference_price_ok"] is True
+
+
+def test_denominator_projection_keeps_different_reference_price_type_as_conflict(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenRefConflict:unknown_pool:0",
+        idempotency_key="premium_signals:ref-conflict",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenRefConflict",
+            "symbol": "REF",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    for idx, ref_type in enumerate(("legacy_entry_price", "simulated_fill_price"), start=1):
+        log.append_event(
+            event_type="source_dog_label_recorded",
+            aggregate_id=f"source_label:solana:TokenRefConflict:unknown_pool:0:{idx}",
+            idempotency_key=f"signal_features_source_label:ref-conflict:{idx}",
+            payload={
+                "source_label_id": idx,
+                "token_ca": "TokenRefConflict",
+                "symbol": "REF",
+                "chain": "solana",
+                "canonical_pool_group": "unknown_pool",
+                "lifecycle_epoch": 0,
+                "source_dog_label": "gold",
+                "source_label_research_only": True,
+                "source_reference_price_type": ref_type,
+                "source_reference_price": 0.001,
+                "source_label_available_at": "2026-01-15T00:00:00Z",
+            },
+        )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["ReferencePriceContract"]
+    assert evidence["missing_count"] == 0
+    assert evidence["conflict_count"] == 1
+    assert projection["health"]["reference_price_ok"] is False
+
+
 def test_denominator_projection_keeps_unresolved_source_label_as_gap(tmp_path):
     log = V27EventLog(tmp_path)
     log.append_event(
