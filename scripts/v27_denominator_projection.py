@@ -248,6 +248,8 @@ def _denominator_key(fields):
 
 
 def _extract_reference_price_contract(event, bags):
+    if event.get("event_type") == TRADE_OUTCOME_LABEL_EVENT_TYPE:
+        return None
     explicit_price = _as_float(
         _extract_scalar(
             bags,

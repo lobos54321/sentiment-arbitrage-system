@@ -744,7 +744,72 @@ def test_denominator_projection_consumes_trade_outcome_label_contract(tmp_path):
     assert evidence["trade_outcome_label_count"] == 1
     assert evidence["malformed_count"] == 0
     assert projection["health"]["trade_outcome_label_ok"] is True
+    assert projection["health"]["reference_price_ok"] is True
+    assert projection["contract_evidence"]["ReferencePriceContract"]["conflict_count"] == 0
     assert projection["records"][0]["trade_outcome_label"]["counterfactual_entry_ts"] == 1_700_000_003
+
+
+def test_denominator_projection_does_not_mix_trade_fill_with_source_reference_price(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenFillRef:unknown_pool:0",
+        idempotency_key="premium_signals:fill-ref",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenFillRef",
+            "symbol": "FILL",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenFillRef:unknown_pool:0",
+        idempotency_key="source_label:fill-ref",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenFillRef",
+            "symbol": "FILL",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+            "source_reference_price_type": "legacy_entry_price",
+            "source_reference_price": 0.001,
+            "source_label_available_at": "2026-01-15T00:00:00Z",
+        },
+    )
+    log.append_event(
+        event_type="trade_outcome_label_recorded",
+        aggregate_id="trade_outcome:solana:TokenFillRef:unknown_pool:0:1",
+        idempotency_key="paper_trade_outcome_label:fill-ref:1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenFillRef",
+            "symbol": "FILL",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
+            "counterfactual_entry_ts": 1_700_000_003,
+            "simulated_fill_price": 0.002,
+            "trade_label_available_at": 1_700_000_120,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["ReferencePriceContract"]
+    assert evidence["missing_count"] == 0
+    assert evidence["conflict_count"] == 0
+    assert projection["health"]["reference_price_ok"] is True
+    assert projection["records"][0]["reference_price_contract"]["reference_price"] == 0.001
+    assert projection["records"][0]["trade_outcome_label"]["simulated_fill_price"] == 0.002
 
 
 def test_denominator_projection_does_not_treat_source_label_legacy_trade_as_trade_outcome(tmp_path):
