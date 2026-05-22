@@ -637,6 +637,12 @@ export function buildStorageHealthSnapshot(options = {}) {
     'paper-review-snapshot.log',
     'source-resonance.log',
     'gmgn-scout.log',
+    'v27-telegram-signal-mirror.log',
+    'v27-source-label-mirror.log',
+    'v27-paper-trade-source-label-mirror.log',
+    'v27-paper-decision-mirror.log',
+    'v27-lifecycle-mirror.log',
+    'v27-read-model-refresh.log',
     'lifecycle.log',
     'preflight.log',
   ].map((name) => describeFile([name, join(dataDir, name)]));
@@ -931,7 +937,17 @@ export function readV27DenominatorReadModelHealth(options = {}) {
   }
   try {
     const payload = JSON.parse(fs.readFileSync(path, 'utf8'));
-    const dashboardSafe = Boolean(payload.dashboard_safe || payload.health?.dashboard_safe);
+    const projectionStatus = payload.projection_status || payload.verifier_report?.projection_status || payload.projection?.health?.status || null;
+    const eventLogLatestSeq = payload.event_log_latest_seq ?? payload.verifier_report?.event_log_latest_seq ?? payload.read_model?.event_log_latest_seq ?? null;
+    const unsafeProjectionStatuses = new Set(['event_log_invalid', 'not_built', 'seed_empty']);
+    const derivedBlockingReasons = [];
+    if (unsafeProjectionStatuses.has(projectionStatus)) {
+      derivedBlockingReasons.push(`projection_status_${projectionStatus}`);
+    }
+    if (Number.isFinite(Number(eventLogLatestSeq)) && Number(eventLogLatestSeq) <= 0) {
+      derivedBlockingReasons.push('event_log_empty');
+    }
+    const dashboardSafe = Boolean(payload.dashboard_safe || payload.health?.dashboard_safe) && derivedBlockingReasons.length === 0;
     const blockingReasons = Array.isArray(payload.blocking_reasons)
       ? payload.blocking_reasons
       : Array.isArray(payload.verifier_report?.blocking_reasons)
@@ -944,7 +960,7 @@ export function readV27DenominatorReadModelHealth(options = {}) {
       path,
       ...payload,
       dashboard_safe: dashboardSafe,
-      blocking_reasons: blockingReasons,
+      blocking_reasons: [...new Set([...blockingReasons, ...derivedBlockingReasons])],
       health: {
         ...(payload.health || {}),
         dashboard_safe: dashboardSafe,
@@ -7994,13 +8010,35 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: `paper-trader.log not found at ${paperTraderLogPath}` }));
     }
     return;
-  } else if (url.pathname === '/api/logs/gmgn-scout' || url.pathname === '/api/logs/source-resonance' || url.pathname === '/api/logs/paper-fast-lane') {
+  } else if (
+    url.pathname === '/api/logs/gmgn-scout'
+    || url.pathname === '/api/logs/source-resonance'
+    || url.pathname === '/api/logs/paper-fast-lane'
+    || url.pathname === '/api/logs/v27-telegram-signal-mirror'
+    || url.pathname === '/api/logs/v27-source-label-mirror'
+    || url.pathname === '/api/logs/v27-paper-trade-source-label-mirror'
+    || url.pathname === '/api/logs/v27-paper-decision-mirror'
+    || url.pathname === '/api/logs/v27-lifecycle-mirror'
+    || url.pathname === '/api/logs/v27-read-model-refresh'
+  ) {
     if (!checkAuth(req, url, res)) return;
     let logPath = process.env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log';
     if (url.pathname.endsWith('/gmgn-scout')) {
       logPath = process.env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log';
     } else if (url.pathname.endsWith('/paper-fast-lane')) {
       logPath = process.env.PAPER_FAST_LANE_LOG || '/app/data/paper-fast-lane.log';
+    } else if (url.pathname.endsWith('/v27-telegram-signal-mirror')) {
+      logPath = process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || '/app/data/v27-telegram-signal-mirror.log';
+    } else if (url.pathname.endsWith('/v27-source-label-mirror')) {
+      logPath = process.env.V27_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-source-label-mirror.log';
+    } else if (url.pathname.endsWith('/v27-paper-trade-source-label-mirror')) {
+      logPath = process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-paper-trade-source-label-mirror.log';
+    } else if (url.pathname.endsWith('/v27-paper-decision-mirror')) {
+      logPath = process.env.V27_PAPER_DECISION_MIRROR_LOG || '/app/data/v27-paper-decision-mirror.log';
+    } else if (url.pathname.endsWith('/v27-lifecycle-mirror')) {
+      logPath = process.env.V27_LIFECYCLE_MIRROR_LOG || '/app/data/v27-lifecycle-mirror.log';
+    } else if (url.pathname.endsWith('/v27-read-model-refresh')) {
+      logPath = process.env.V27_READ_MODEL_REFRESH_LOG || '/app/data/v27-read-model-refresh.log';
     }
     const tailLines = boundedIntParam(url, 'lines', 500, 1, 5000);
     if (fs.existsSync(logPath)) {

@@ -91,6 +91,52 @@ test('v27 read model health exposes materialized verifier result', () => {
   assert.equal(health.verifier_report.spec_valid, true);
 });
 
+test('v27 read model health blocks unsafe projection statuses even if stale payload says safe', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'v27-health-unsafe-projection-'));
+  const healthPath = join(dir, 'denominator_freshness.json');
+  fs.writeFileSync(healthPath, JSON.stringify({
+    refresh_schema_version: 'v2.7.0.read_model_refresh.v1',
+    dashboard_safe: true,
+    event_log_latest_seq: 0,
+    projection_status: 'event_log_invalid',
+    health: {
+      dashboard_safe: true,
+      normal_tiny_ready: false,
+      status: 'read_model_refresh_ok',
+    },
+    verifier_report: {
+      blocking_reasons: [],
+      event_log_latest_seq: 0,
+      projection_status: 'event_log_invalid',
+    },
+  }));
+
+  const health = readV27DenominatorReadModelHealth({ healthPath });
+
+  assert.equal(health.available, true);
+  assert.equal(health.dashboard_safe, false);
+  assert.deepEqual(health.blocking_reasons, ['projection_status_event_log_invalid', 'event_log_empty']);
+  assert.equal(health.health.dashboard_safe, false);
+});
+
+test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'storage-health-v27-logs-'));
+  fs.writeFileSync(join(dir, 'v27-paper-trade-source-label-mirror.log'), 'mirror failed');
+
+  const snapshot = buildStorageHealthSnapshot({
+    projectRoot: dir,
+    dataDir: dir,
+    includeFileStats: true,
+    paperDbPath: join(dir, 'paper_trades.db'),
+    signalDbPath: join(dir, 'sentiment_arb.db'),
+    klineDbPath: join(dir, 'kline_cache.db'),
+    lifecycleDbPath: join(dir, 'lifecycle_tracks.db'),
+  });
+
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-paper-trade-source-label-mirror.log').exists, true);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-read-model-refresh.log').exists, false);
+});
+
 test('boundedIntParam clamps oversized live query parameters', () => {
   const url = new URL('https://example.test/api?event_limit=40000&limit=999');
 

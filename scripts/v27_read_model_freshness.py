@@ -18,6 +18,11 @@ from v27_event_log import sha256_hex  # noqa: E402
 
 DEFAULT_DENOMINATOR_SNAPSHOT = PROJECT_ROOT / "data" / "v27_read_models" / "denominator_snapshot.json"
 DENOMINATOR_SNAPSHOT_SCHEMA_VERSION = "v2.7.0.denominator_read_model.v1"
+PROJECTION_DASHBOARD_UNSAFE_STATUSES = {
+    "event_log_invalid",
+    "not_built",
+    "seed_empty",
+}
 
 
 def _load_json(path):
@@ -86,13 +91,14 @@ def validate_snapshot_file(snapshot_path=DEFAULT_DENOMINATOR_SNAPSHOT, *, max_sn
     spec = snapshot.get("spec") if isinstance(snapshot.get("spec"), dict) else {}
     read_model = snapshot.get("read_model") if isinstance(snapshot.get("read_model"), dict) else {}
     projection = snapshot.get("projection") if isinstance(snapshot.get("projection"), dict) else {}
+    projection_health = projection.get("health") if isinstance(projection.get("health"), dict) else {}
     report["spec_valid"] = bool(spec.get("spec_valid"))
     report["read_model_fresh_enough"] = bool(read_model.get("read_model_fresh_enough"))
     report["snapshot_age_ms"] = _lag_ms(snapshot.get("generated_at"), now_iso)
     report["snapshot_age_ok"] = report["snapshot_age_ms"] is not None and report["snapshot_age_ms"] <= max_snapshot_age_ms
     report["read_model_seq"] = read_model.get("read_model_seq")
     report["event_log_latest_seq"] = read_model.get("event_log_latest_seq")
-    report["projection_status"] = (projection.get("health") or {}).get("status")
+    report["projection_status"] = projection_health.get("status")
 
     if not report["snapshot_schema_ok"]:
         report["blocking_reasons"].append("snapshot_schema_mismatch")
@@ -106,6 +112,14 @@ def validate_snapshot_file(snapshot_path=DEFAULT_DENOMINATOR_SNAPSHOT, *, max_sn
         report["blocking_reasons"].append("read_model_stale")
     if not report["snapshot_age_ok"]:
         report["blocking_reasons"].append("snapshot_file_stale")
+    if not projection_health.get("event_log_ok"):
+        report["blocking_reasons"].append("projection_event_log_not_ok")
+    if not projection_health.get("projection_built"):
+        report["blocking_reasons"].append("projection_not_built")
+    if report["projection_status"] in PROJECTION_DASHBOARD_UNSAFE_STATUSES:
+        report["blocking_reasons"].append(f"projection_status_{report['projection_status']}")
+    if not isinstance(report["event_log_latest_seq"], int) or report["event_log_latest_seq"] <= 0:
+        report["blocking_reasons"].append("event_log_empty")
 
     dashboard_safe = not report["blocking_reasons"]
     report["health"] = {

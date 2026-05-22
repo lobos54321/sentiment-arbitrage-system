@@ -98,3 +98,20 @@ def test_read_model_freshness_blocks_tampered_snapshot_hash(tmp_path):
     assert report["snapshot_hash_ok"] is False
     assert "snapshot_hash_mismatch" in report["blocking_reasons"]
     assert report["health"]["dashboard_safe"] is False
+
+
+def test_read_model_freshness_blocks_empty_event_log_snapshot(tmp_path):
+    log = V27EventLog(tmp_path / "events")
+    assert log.verify()["event_count"] == 0
+    projection = build_denominator_projection(tmp_path / "events")
+    snapshot = build_denominator_read_model_snapshot(projection, max_allowed_lag_seq=0, max_allowed_lag_ms=300_000)
+    snapshot_path = tmp_path / "denominator_snapshot.json"
+    write_snapshot(snapshot_path, snapshot)
+
+    report = validate_snapshot_file(snapshot_path, max_snapshot_age_ms=300_000)
+
+    assert report["projection_status"] == "seed_empty"
+    assert report["event_log_latest_seq"] == 0
+    assert "projection_status_seed_empty" in report["blocking_reasons"]
+    assert "event_log_empty" in report["blocking_reasons"]
+    assert report["health"]["dashboard_safe"] is False
