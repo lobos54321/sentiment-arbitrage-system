@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import sys
 
@@ -56,6 +57,20 @@ def create_paper_db(db_path):
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     init_decision_audit(db)
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            premium_signal_id INTEGER,
+            entry_price REAL,
+            entry_ts INTEGER,
+            exit_ts INTEGER,
+            peak_pnl REAL
+        )
+        """
+    )
     record_decision_event(
         db,
         component="unit_gate",
@@ -77,6 +92,14 @@ def create_paper_db(db_path):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (999, 1_700_000_010, "TokenPipe", "PIPE", "unit_gate", "skip", 0.001, 0.75, "resolved"),
+    )
+    db.execute(
+        """
+        INSERT INTO paper_trades
+            (id, token_ca, symbol, premium_signal_id, entry_price, entry_ts, exit_ts, peak_pnl)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (1, "TokenPipe", "PIPE", 1, 0.001, 1_700_000_004_000, 1_700_000_300_000, 1.25),
     )
     db.commit()
     return db
@@ -136,3 +159,32 @@ def test_pipeline_smoke_runs_mirrors_and_refreshes_read_model(tmp_path, monkeypa
     assert report["steps"]["source_labels"]["ok"] is True
     assert report["steps"]["paper_decisions"]["ok"] is True
     assert report["steps"]["lifecycle_tracks"]["ok"] is True
+
+
+def test_pipeline_smoke_can_seed_d0_from_paper_trade_source_labels(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    signal_db = tmp_path / "signals.db"
+    paper_db = tmp_path / "paper.db"
+    lifecycle_db = tmp_path / "lifecycle.db"
+    output_dir = tmp_path / "read_models"
+    with create_signal_db(signal_db), create_paper_db(paper_db), create_lifecycle_db(lifecycle_db):
+        report = run_pipeline_smoke(
+            signal_db=signal_db,
+            paper_db=paper_db,
+            lifecycle_db=lifecycle_db,
+            event_log_dir=tmp_path / "events",
+            output_dir=output_dir,
+            limit=1,
+            include_missed=False,
+            include_paper_trade_source_labels=True,
+        )
+
+    projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
+
+    assert report["health"]["status"] == "v27_pipeline_smoke_ok"
+    assert report["blocking_reasons"] == []
+    assert report["event_log_verify"]["event_count"] == 5
+    assert report["steps"]["paper_trade_source_labels"]["ok"] is True
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["health"]["signal_credit_assignment_ok"] is True
+    assert projection["health"]["reference_price_ok"] is True

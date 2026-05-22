@@ -22,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
+from v27_mirror_paper_trade_source_labels import run_mirror_once as run_paper_trade_source_label_mirror_once  # noqa: E402
 from v27_mirror_source_labels import DEFAULT_DB as DEFAULT_SIGNAL_DB, run_mirror_once as run_source_label_mirror_once  # noqa: E402
 from v27_mirror_telegram_signals import run_mirror_once as run_telegram_signal_mirror_once  # noqa: E402
 from v27_read_model_refresh import refresh_denominator_read_model  # noqa: E402
@@ -72,6 +73,8 @@ def run_pipeline_smoke(
     output_dir=None,
     limit=5,
     include_missed=True,
+    include_paper_trade_source_labels=False,
+    paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
     smoke_root = _default_smoke_root()
@@ -112,6 +115,25 @@ def run_pipeline_smoke(
             new_only=True,
         ),
     )
+    if include_paper_trade_source_labels:
+        steps["paper_trade_source_labels"] = _run_step(
+            "paper_trade_source_labels",
+            run_paper_trade_source_label_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                min_peak_pnl=paper_trade_source_label_min_peak_pnl,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                new_only=True,
+            ),
+        )
     steps["paper_decisions"] = _run_step(
         "paper_decisions",
         run_paper_decision_mirror_once,
@@ -175,6 +197,8 @@ def run_pipeline_smoke(
         "output_dir": str(output_dir),
         "limit": limit,
         "include_missed": bool(include_missed),
+        "include_paper_trade_source_labels": bool(include_paper_trade_source_labels),
+        "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
         "refresh": refresh,
@@ -196,6 +220,8 @@ def main():
     parser.add_argument("--output-dir")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--include-missed", action="store_true")
+    parser.add_argument("--include-paper-trade-source-labels", action="store_true")
+    parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
@@ -208,6 +234,8 @@ def main():
         output_dir=args.output_dir,
         limit=args.limit,
         include_missed=args.include_missed,
+        include_paper_trade_source_labels=args.include_paper_trade_source_labels,
+        paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
