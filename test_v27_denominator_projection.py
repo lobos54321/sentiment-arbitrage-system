@@ -351,3 +351,86 @@ def test_denominator_projection_does_not_count_source_label_without_telegram_anc
     assert projection["metrics"]["telegram_gold_silver_total_D0"] == 0
     assert projection["evidence_gaps"]["TelegramLifecycleEvent"] == 1
     assert projection["evidence_gaps"]["ProductionSourceDogLabelContract"] == 1
+
+
+def test_denominator_projection_rekeys_unknown_pool_records_from_lifecycle_identity(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenLife:unknown_pool:0",
+        idempotency_key="premium_signals:1",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenLife",
+            "symbol": "LIFE",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenLife:unknown_pool:0",
+        idempotency_key="signal_features_source_label:1",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenLife",
+            "symbol": "LIFE",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+        },
+    )
+    log.append_event(
+        event_type="token_lifecycle_identity_resolved",
+        aggregate_id="token_lifecycle:solana:TokenLife:PoolA:0",
+        idempotency_key="lifecycle_tracks:1",
+        payload={
+            "lifecycle_track_id": 1,
+            "token_ca": "TokenLife",
+            "symbol": "LIFE",
+            "chain": "solana",
+            "canonical_pool_group": "PoolA",
+            "lifecycle_epoch": 0,
+            "lifecycle_id": "TokenLife:1700000000",
+            "pool_address": "PoolA",
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["lifecycle_identity_events"] == 1
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["records"][0]["denominator_dedup_key"] == "solana:TokenLife:PoolA:0"
+    assert projection["records"][0]["canonical_pool_group"] == "PoolA"
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 1
+    assert projection["metrics"]["telegram_realtime_observable_gold_silver_D1"] == 1
+
+
+def test_denominator_projection_lifecycle_identity_alone_does_not_prove_d0(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="token_lifecycle_identity_resolved",
+        aggregate_id="token_lifecycle:solana:TokenOnlyLife:PoolA:0",
+        idempotency_key="lifecycle_tracks:1",
+        payload={
+            "lifecycle_track_id": 1,
+            "token_ca": "TokenOnlyLife",
+            "symbol": "ONLY",
+            "chain": "solana",
+            "canonical_pool_group": "PoolA",
+            "lifecycle_epoch": 0,
+            "pool_address": "PoolA",
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["metrics"]["denominator_seed_records"] == 1
+    assert projection["metrics"]["telegram_gold_silver_total_D0"] == 0
+    assert projection["evidence_gaps"]["TelegramLifecycleEvent"] == 1
+    assert projection["evidence_gaps"]["SourceDogLabelContract"] == 1

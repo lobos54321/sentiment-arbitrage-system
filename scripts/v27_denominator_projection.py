@@ -25,7 +25,14 @@ MIRRORED_DECISION_EVENT_TYPE = "paper_decision_event_recorded"
 MIRRORED_MISSED_EVENT_TYPE = "paper_missed_signal_attribution_recorded"
 TELEGRAM_SIGNAL_EVENT_TYPE = "telegram_signal_seen"
 SOURCE_DOG_LABEL_EVENT_TYPE = "source_dog_label_recorded"
-DENOMINATOR_SEED_EVENT_TYPES = {MIRRORED_DECISION_EVENT_TYPE, MIRRORED_MISSED_EVENT_TYPE, TELEGRAM_SIGNAL_EVENT_TYPE, SOURCE_DOG_LABEL_EVENT_TYPE}
+LIFECYCLE_IDENTITY_EVENT_TYPE = "token_lifecycle_identity_resolved"
+DENOMINATOR_SEED_EVENT_TYPES = {
+    MIRRORED_DECISION_EVENT_TYPE,
+    MIRRORED_MISSED_EVENT_TYPE,
+    TELEGRAM_SIGNAL_EVENT_TYPE,
+    SOURCE_DOG_LABEL_EVENT_TYPE,
+    LIFECYCLE_IDENTITY_EVENT_TYPE,
+}
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
 
@@ -348,6 +355,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "input_events": 0,
         "telegram_signal_seen_events": 0,
         "source_dog_label_events": 0,
+        "lifecycle_identity_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -383,7 +391,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         projection["health"]["status"] = "event_log_invalid"
         return projection
 
-    records = {}
+    facts = []
+    resolved_pool_by_identity = {}
     for event in event_log.iter_events() or []:
         projection["input_events"] += 1
         if event.get("event_type") not in DENOMINATOR_SEED_EVENT_TYPES:
@@ -396,7 +405,10 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["telegram_signal_seen_events"] += 1
         if event.get("event_type") == SOURCE_DOG_LABEL_EVENT_TYPE:
             projection["source_dog_label_events"] += 1
+        if event.get("event_type") == LIFECYCLE_IDENTITY_EVENT_TYPE:
+            projection["lifecycle_identity_events"] += 1
         fact = _extract_decision_fact(event)
+        fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
             projection["dirty_events"].append(
                 {
@@ -407,6 +419,18 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             )
             projection["evidence_gaps"]["TokenIdentityContract"] = projection["evidence_gaps"].get("TokenIdentityContract", 0) + 1
             continue
+        identity = (fact.get("chain"), fact.get("token_ca"), fact.get("lifecycle_epoch", 0))
+        pool = fact.get("canonical_pool_group")
+        if event.get("event_type") == LIFECYCLE_IDENTITY_EVENT_TYPE and pool and pool != "unknown_pool":
+            resolved_pool_by_identity.setdefault(identity, pool)
+        facts.append(fact)
+
+    records = {}
+    for fact in facts:
+        identity = (fact.get("chain"), fact.get("token_ca"), fact.get("lifecycle_epoch", 0))
+        if fact.get("canonical_pool_group") == "unknown_pool" and identity in resolved_pool_by_identity:
+            fact["canonical_pool_group"] = resolved_pool_by_identity[identity]
+            fact["denominator_dedup_key"] = _denominator_key(fact)
         key = fact["denominator_dedup_key"]
         if key not in records:
             records[key] = _new_record(fact)
