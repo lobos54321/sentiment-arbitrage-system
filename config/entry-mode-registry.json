@@ -108,20 +108,20 @@
       "reason": "Small live newborn path; explicitly registered so it cannot bypass governance."
     },
     "source_resonance_tiny_probe": {
-      "tier": "live",
+      "tier": "hard_shadow",
       "route": "MIXED",
       "family": "small_live_probe",
-      "paper_enabled": true,
+      "paper_enabled": false,
       "size_class": "tiny",
-      "reason": "Tiny paper-only probe for Telegram + GMGN pre-seen resonance; explicitly registered for attribution."
+      "reason": "M0 freeze for v2.7.0: source_resonance direct paper entry is disabled; keep shadow attribution only."
     },
     "hard_gate_pass_tiny_probe": {
-      "tier": "live",
+      "tier": "hard_shadow",
       "route": "MIXED",
       "family": "paper_baseline_probe",
-      "paper_enabled": true,
+      "paper_enabled": false,
       "size_class": "tiny",
-      "reason": "Baseline paper-only probe for every hard-gate PASS + quote-executable unique token; used for coverage attribution without opening blocked modes."
+      "reason": "M0 freeze for v2.7.0: hard_gate direct paper entry is disabled; keep denominator/coverage attribution only."
     },
     "pre_pass_resonance_tiny_probe": {
       "tier": "live",
