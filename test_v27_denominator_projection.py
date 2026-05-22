@@ -2,7 +2,7 @@ import sys
 
 sys.path.insert(0, "scripts")
 
-from v27_denominator_projection import build_denominator_projection  # noqa: E402
+from v27_denominator_projection import build_denominator_projection, build_denominator_read_model_snapshot  # noqa: E402
 from v27_event_log import V27EventLog  # noqa: E402
 
 
@@ -97,6 +97,50 @@ def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(
     token_a = [record for record in projection["records"] if record["token_ca"] == "TokenA"][0]
     assert token_a["merged_decision_event_ids"] == [1, 2]
     assert token_a["denominator_membership"]["D3b_policy_actionable_gold_silver"] is True
+
+
+def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    snapshot = build_denominator_read_model_snapshot(
+        projection,
+        max_allowed_lag_seq=0,
+        max_allowed_lag_ms=300_000,
+    )
+
+    assert snapshot["snapshot_schema_version"] == "v2.7.0.denominator_read_model.v1"
+    assert snapshot["snapshot_id"].startswith("v27denom_")
+    assert len(snapshot["projection_hash"]) == 64
+    assert len(snapshot["snapshot_hash"]) == 64
+    assert snapshot["spec"]["spec_version"] == "2.7.0"
+    assert len(snapshot["spec"]["spec_hash"]) == 64
+    assert snapshot["read_model"]["event_log_latest_seq"] == 1
+    assert snapshot["read_model"]["read_model_seq"] == 1
+    assert snapshot["read_model"]["lag_seq"] == 0
+    assert snapshot["read_model"]["read_model_fresh_enough"] is True
+    assert snapshot["health"]["status"] == "snapshot_ready"
+
+
+def test_denominator_read_model_snapshot_blocks_stale_seq(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
+    append_decision(log, decision_id=2, token_ca="TokenB", captured=True, **FULL_D3B_FLAGS)
+
+    projection = build_denominator_projection(tmp_path, include_records=False)
+    snapshot = build_denominator_read_model_snapshot(
+        projection,
+        max_allowed_lag_seq=0,
+        read_model_seq=1,
+    )
+
+    assert snapshot["read_model"]["event_log_latest_seq"] == 2
+    assert snapshot["read_model"]["read_model_seq"] == 1
+    assert snapshot["read_model"]["lag_seq"] == 1
+    assert snapshot["read_model"]["read_model_fresh_enough"] is False
+    assert snapshot["read_model"]["staleness_reasons"] == ["read_model_seq_lag"]
+    assert snapshot["health"]["status"] == "snapshot_not_ready"
 
 
 def test_denominator_projection_marks_source_label_conflict_dirty(tmp_path):

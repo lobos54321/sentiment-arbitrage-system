@@ -9,6 +9,7 @@ contract fields. Missing evidence is reported instead of inferred.
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -21,6 +22,7 @@ from v27_event_log import V27EventLog, V27EventLogError, sha256_hex  # noqa: E40
 
 
 DEFAULT_EVENT_LOG_DIR = PROJECT_ROOT / "data" / "v27_event_log"
+DEFAULT_SPEC_MANIFEST = PROJECT_ROOT / "spec" / "telegram_dog_regime_capture" / "v2.7.0" / "spec.manifest.json"
 MIRRORED_DECISION_EVENT_TYPE = "paper_decision_event_recorded"
 MIRRORED_MISSED_EVENT_TYPE = "paper_missed_signal_attribution_recorded"
 TELEGRAM_SIGNAL_EVENT_TYPE = "telegram_signal_seen"
@@ -35,6 +37,62 @@ DENOMINATOR_SEED_EVENT_TYPES = {
 }
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_ts(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _lag_ms(older_ts, newer_ts):
+    older = _parse_iso_ts(older_ts)
+    newer = _parse_iso_ts(newer_ts)
+    if older is None or newer is None:
+        return None
+    return max(0, int((newer - older).total_seconds() * 1000))
+
+
+def _load_spec_metadata(spec_manifest_path=DEFAULT_SPEC_MANIFEST):
+    spec_manifest_path = Path(spec_manifest_path)
+    try:
+        with spec_manifest_path.open("r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        catalog_path = spec_manifest_path.parent / manifest.get("contract_catalog_file", "contract-catalog.json")
+        from v27_spec_validate import validate_all  # noqa: WPS433
+
+        validation = validate_all(manifest_path=spec_manifest_path, catalog_path=catalog_path)
+        return {
+            "spec_id": validation["spec_id"],
+            "spec_version": validation["spec_version"],
+            "spec_hash": validation["spec_hash"],
+            "spec_valid": True,
+            "spec_manifest_path": str(spec_manifest_path),
+        }
+    except Exception as exc:  # pragma: no cover - exercised by integration failures.
+        return {
+            "spec_id": None,
+            "spec_version": None,
+            "spec_hash": None,
+            "spec_valid": False,
+            "spec_manifest_path": str(spec_manifest_path),
+            "spec_error": str(exc),
+        }
 
 
 def _nested_get(mapping, path, default=None):
@@ -351,6 +409,9 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "spec_version": "v2.7.0",
         "event_log_dir": str(event_log_dir),
         "event_log_verify": None,
+        "event_log_latest_seq": 0,
+        "event_log_latest_at": None,
+        "event_log_latest_event_id": None,
         "event_log_error": None,
         "input_events": 0,
         "telegram_signal_seen_events": 0,
@@ -385,6 +446,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
 
     try:
         projection["event_log_verify"] = event_log.verify()
+        projection["event_log_latest_seq"] = projection["event_log_verify"]["last_global_seq"]
         projection["health"]["event_log_ok"] = True
     except V27EventLogError as exc:
         projection["event_log_error"] = str(exc)
@@ -395,6 +457,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     resolved_pool_by_identity = {}
     for event in event_log.iter_events() or []:
         projection["input_events"] += 1
+        projection["event_log_latest_event_id"] = event.get("event_id")
+        projection["event_log_latest_at"] = event.get("ingested_at")
         if event.get("event_type") not in DENOMINATOR_SEED_EVENT_TYPES:
             continue
         if event.get("event_type") == MIRRORED_DECISION_EVENT_TYPE:
@@ -493,22 +557,120 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     return projection
 
 
+def build_denominator_read_model_snapshot(
+    projection,
+    *,
+    max_allowed_lag_seq=0,
+    max_allowed_lag_ms=300_000,
+    read_model_seq=None,
+    now_iso=None,
+    spec_manifest_path=DEFAULT_SPEC_MANIFEST,
+):
+    """Wrap a projection with freshness, spec, and stable hash metadata."""
+
+    now_iso = now_iso or _utc_now_iso()
+    latest_seq = int(projection.get("event_log_latest_seq") or _nested_get(projection, ("event_log_verify", "last_global_seq"), default=0) or 0)
+    read_model_seq = latest_seq if read_model_seq is None else int(read_model_seq)
+    lag_seq = max(0, latest_seq - read_model_seq)
+    lag_ms = _lag_ms(projection.get("event_log_latest_at"), now_iso)
+
+    stale_reasons = []
+    if lag_seq > max_allowed_lag_seq:
+        stale_reasons.append("read_model_seq_lag")
+    if lag_ms is not None and lag_ms > max_allowed_lag_ms:
+        stale_reasons.append("read_model_time_lag")
+
+    projection_hash_payload = {key: value for key, value in projection.items() if key != "event_log_dir"}
+    projection_hash = sha256_hex(projection_hash_payload)
+    spec_metadata = _load_spec_metadata(spec_manifest_path)
+
+    snapshot = {
+        "snapshot_schema_version": "v2.7.0.denominator_read_model.v1",
+        "snapshot_id": "v27denom_"
+        + sha256_hex(
+            {
+                "projection_hash": projection_hash,
+                "read_model_seq": read_model_seq,
+                "spec_hash": spec_metadata.get("spec_hash"),
+            }
+        )[:16],
+        "generated_at": now_iso,
+        "projection_name": projection.get("projection_name"),
+        "projection_version": projection.get("projection_version"),
+        "projection_hash": projection_hash,
+        "spec": spec_metadata,
+        "read_model": {
+            "read_model_seq": read_model_seq,
+            "event_log_latest_seq": latest_seq,
+            "event_log_latest_at": projection.get("event_log_latest_at"),
+            "read_model_updated_at": now_iso,
+            "max_allowed_lag_seq": max_allowed_lag_seq,
+            "max_allowed_lag_ms": max_allowed_lag_ms,
+            "lag_seq": lag_seq,
+            "lag_ms": lag_ms,
+            "read_model_fresh_enough": not stale_reasons,
+            "staleness_reasons": stale_reasons,
+        },
+        "health": {
+            "projection_built": bool(_nested_get(projection, ("health", "projection_built"), default=False)),
+            "event_log_ok": bool(_nested_get(projection, ("health", "event_log_ok"), default=False)),
+            "denominator_clean": bool(_nested_get(projection, ("health", "denominator_clean"), default=False)),
+            "read_model_fresh_enough": not stale_reasons,
+            "spec_valid": bool(spec_metadata.get("spec_valid")),
+            "normal_tiny_ready": False,
+        },
+        "projection": projection,
+    }
+    snapshot["health"]["status"] = (
+        "snapshot_ready"
+        if snapshot["health"]["projection_built"]
+        and snapshot["health"]["event_log_ok"]
+        and snapshot["health"]["denominator_clean"]
+        and snapshot["health"]["read_model_fresh_enough"]
+        and snapshot["health"]["spec_valid"]
+        else "snapshot_not_ready"
+    )
+    snapshot["snapshot_hash"] = sha256_hex(snapshot)
+    return snapshot
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--event-log-dir", default=str(DEFAULT_EVENT_LOG_DIR))
     parser.add_argument("--output")
+    parser.add_argument("--snapshot-output")
     parser.add_argument("--include-records", action="store_true")
+    parser.add_argument("--max-allowed-lag-seq", type=int, default=0)
+    parser.add_argument("--max-allowed-lag-ms", type=int, default=300_000)
+    parser.add_argument("--read-model-seq", type=int)
+    parser.add_argument("--spec-manifest", default=str(DEFAULT_SPEC_MANIFEST))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
     projection = build_denominator_projection(args.event_log_dir, include_records=args.include_records)
+    snapshot = build_denominator_read_model_snapshot(
+        projection,
+        max_allowed_lag_seq=args.max_allowed_lag_seq,
+        max_allowed_lag_ms=args.max_allowed_lag_ms,
+        read_model_seq=args.read_model_seq,
+        spec_manifest_path=args.spec_manifest,
+    )
     rendered = json.dumps(projection, ensure_ascii=False, sort_keys=True, indent=2)
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(rendered + "\n", encoding="utf-8")
+    if args.snapshot_output:
+        snapshot_output_path = Path(args.snapshot_output)
+        snapshot_output_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_output_path.write_text(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     print(rendered)
-    if args.strict and (projection.get("event_log_error") or not projection["health"].get("denominator_clean")):
+    if args.strict and (
+        projection.get("event_log_error")
+        or not projection["health"].get("denominator_clean")
+        or not snapshot["read_model"].get("read_model_fresh_enough")
+        or not snapshot["spec"].get("spec_valid")
+    ):
         raise SystemExit(1)
 
 
