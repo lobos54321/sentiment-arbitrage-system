@@ -1,13 +1,16 @@
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, "scripts")
 
 from paper_decision_audit import init_decision_audit, record_decision_event  # noqa: E402
 from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_paper_decisions import (  # noqa: E402
+    acquire_loop_lock,
     mirror_missed_attributions,
     mirror_paper_decisions,
+    run_mirror_once,
     verify_missed_mirror_parity,
     verify_mirror_parity,
 )
@@ -156,3 +159,109 @@ def test_backfill_mirrors_missed_attribution_as_legacy_source_label_seed(tmp_pat
     assert event["payload"]["source_label_research_only"] is True
     assert event["payload"]["telegram_seen"] is True
     assert event["payload"]["realtime_observable"] is True
+
+
+def test_decision_scoped_parity_does_not_treat_previous_ids_as_orphans(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    db_path = tmp_path / "paper_trades.db"
+    event_log_dir = tmp_path / "v27"
+
+    with new_db(db_path) as db:
+        insert_decision(db, "TokenOne", 1_700_000_010)
+        insert_decision(db, "TokenTwo", 1_700_000_011)
+
+    mirror_paper_decisions(db_path, event_log_dir)
+    scoped = verify_mirror_parity(db_path, event_log_dir, since_id=2, limit=1)
+
+    assert scoped["db_rows"] == 1
+    assert scoped["mirrored_events"] == 1
+    assert scoped["orphan_mirrored_decision_event_ids"] == []
+    assert scoped["parity_ok"] is True
+
+
+def test_missed_scoped_parity_does_not_treat_previous_ids_as_orphans(tmp_path):
+    db_path = tmp_path / "paper_trades.db"
+    event_log_dir = tmp_path / "v27"
+    with new_db(db_path) as db:
+        for missed_id in (1, 2):
+            db.execute(
+                """
+                INSERT INTO paper_missed_signal_attribution
+                    (id, decision_event_id, created_event_ts, token_ca, symbol,
+                     component, decision, baseline_price, tradable_peak_pnl, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (missed_id, 100 + missed_id, 1_700_000_020 + missed_id, f"TokenMiss{missed_id}", f"M{missed_id}", "unit_gate", "skip", 0.001, 0.75, "resolved"),
+            )
+        db.commit()
+
+    mirror_missed_attributions(db_path, event_log_dir)
+    scoped = verify_missed_mirror_parity(db_path, event_log_dir, since_id=2, limit=1)
+
+    assert scoped["db_rows"] == 1
+    assert scoped["mirrored_events"] == 1
+    assert scoped["orphan_mirrored_missed_attribution_ids"] == []
+    assert scoped["parity_ok"] is True
+
+
+def test_paper_decision_mirror_new_only_uses_independent_missed_cursor(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    db_path = tmp_path / "paper_trades.db"
+    event_log_dir = tmp_path / "v27"
+    with new_db(db_path) as db:
+        insert_decision(db, "TokenOne", 1_700_000_030)
+        insert_decision(db, "TokenTwo", 1_700_000_031)
+        for missed_id in (10, 20):
+            db.execute(
+                """
+                INSERT INTO paper_missed_signal_attribution
+                    (id, decision_event_id, created_event_ts, token_ca, symbol,
+                     component, decision, baseline_price, tradable_peak_pnl, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (missed_id, 200 + missed_id, 1_700_000_040 + missed_id, f"TokenMiss{missed_id}", f"M{missed_id}", "unit_gate", "skip", 0.001, 0.75, "resolved"),
+            )
+        db.commit()
+
+    args = SimpleNamespace(
+        db=str(db_path),
+        event_log_dir=str(event_log_dir),
+        since_id=None,
+        until_id=None,
+        limit=1,
+        missed_since_id=None,
+        missed_until_id=None,
+        missed_limit=1,
+        dry_run=False,
+        include_missed=True,
+        new_only=True,
+    )
+    first = run_mirror_once(args)
+    second = run_mirror_once(args)
+
+    assert first["cursor"]["decision_since_id"] is None
+    assert first["cursor"]["missed_since_id"] is None
+    assert first["mirror"]["appended"] == 1
+    assert first["missed_mirror"]["appended"] == 1
+    assert first["cursor"]["max_mirrored_decision_id"] == 1
+    assert first["cursor"]["max_mirrored_missed_id"] == 10
+    assert second["cursor"]["decision_since_id"] == 2
+    assert second["cursor"]["missed_since_id"] == 11
+    assert second["mirror"]["appended"] == 1
+    assert second["missed_mirror"]["appended"] == 1
+    assert second["cursor"]["max_mirrored_decision_id"] == 2
+    assert second["cursor"]["max_mirrored_missed_id"] == 20
+
+
+def test_paper_decision_mirror_loop_lock_rejects_duplicate_worker(tmp_path):
+    lock_path = tmp_path / "v27_paper_decision.lock"
+    first = acquire_loop_lock(lock_path)
+    assert first is not None
+    try:
+        assert acquire_loop_lock(lock_path) is None
+    finally:
+        first.close()
+
+    second = acquire_loop_lock(lock_path)
+    assert second is not None
+    second.close()
