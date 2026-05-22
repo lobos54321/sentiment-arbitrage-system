@@ -200,6 +200,7 @@ function startShadowDataSidecars(config) {
   const v27TelegramMirrorLog = process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || './data/v27-telegram-signal-mirror.log';
   const v27SourceLabelMirrorLog = process.env.V27_SOURCE_LABEL_MIRROR_LOG || './data/v27-source-label-mirror.log';
   const v27PaperTradeSourceLabelMirrorLog = process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_LOG || './data/v27-paper-trade-source-label-mirror.log';
+  const v27TradeOutcomeMirrorLog = process.env.V27_TRADE_OUTCOME_MIRROR_LOG || './data/v27-trade-outcome-mirror.log';
   const v27PaperDecisionMirrorLog = process.env.V27_PAPER_DECISION_MIRROR_LOG || './data/v27-paper-decision-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
@@ -343,6 +344,30 @@ function startShadowDataSidecars(config) {
         '--min-peak-pnl', process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIN_PEAK_PNL || '0.5',
         '--initial-delay', process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_INITIAL_DELAY_SEC || '0',
         '--lock-file', process.env.V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_LOCK_FILE || '/tmp/v27_paper_trade_source_label_mirror.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+      },
+    }));
+  }
+  if (envFlag('V27_TRADE_OUTCOME_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-trade-outcome-mirror',
+      logPath: v27TradeOutcomeMirrorLog,
+      args: [
+        'scripts/v27_mirror_trade_outcomes.py',
+        '--loop',
+        '--new-only',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_TRADE_OUTCOME_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_TRADE_OUTCOME_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_TRADE_OUTCOME_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_TRADE_OUTCOME_MIRROR_LOCK_FILE || '/tmp/v27_trade_outcome_mirror.lock',
       ],
       env: {
         PAPER_DB: paperDb,

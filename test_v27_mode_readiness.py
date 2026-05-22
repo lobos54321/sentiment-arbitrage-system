@@ -101,6 +101,50 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["health"]["normal_tiny_ready"] is False
 
 
+def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    V27EventLog(event_log_dir).append_event(
+        event_type="trade_outcome_label_recorded",
+        aggregate_id="trade_outcome:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="paper_trade_outcome_label:1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
+            "counterfactual_entry_ts": 1_700_000_003,
+            "fill_time_anchor": "simulated_fill_ts",
+            "simulated_fill_ts": 1_700_000_003,
+            "simulated_fill_price": 0.001,
+            "net_delayed_executable_peak_3s": 0.75,
+            "realized_pnl": 0.3,
+            "trade_label_available_at": 1_700_000_120,
+        },
+    )
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["TradeOutcomeLabelContract"]["status"] == "pass"
+    assert "TradeOutcomeLabelContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "StandardizedStopContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
 def test_mode_readiness_blocks_when_snapshot_missing(tmp_path):
     matrix = build_mode_readiness_matrix(
         event_log_dir=tmp_path / "events",

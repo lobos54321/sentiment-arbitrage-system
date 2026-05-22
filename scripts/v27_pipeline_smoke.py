@@ -23,6 +23,7 @@ from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
 from v27_mirror_paper_trade_source_labels import run_mirror_once as run_paper_trade_source_label_mirror_once  # noqa: E402
+from v27_mirror_trade_outcomes import run_mirror_once as run_trade_outcome_mirror_once  # noqa: E402
 from v27_mirror_source_labels import DEFAULT_DB as DEFAULT_SIGNAL_DB, run_mirror_once as run_source_label_mirror_once  # noqa: E402
 from v27_mirror_telegram_signals import run_mirror_once as run_telegram_signal_mirror_once  # noqa: E402
 from v27_read_model_refresh import refresh_denominator_read_model  # noqa: E402
@@ -74,6 +75,7 @@ def run_pipeline_smoke(
     limit=5,
     include_missed=True,
     include_paper_trade_source_labels=False,
+    include_trade_outcomes=False,
     paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
@@ -127,6 +129,24 @@ def run_pipeline_smoke(
                 until_id=None,
                 limit=limit,
                 min_peak_pnl=paper_trade_source_label_min_peak_pnl,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                new_only=True,
+            ),
+        )
+    if include_trade_outcomes:
+        steps["trade_outcomes"] = _run_step(
+            "trade_outcomes",
+            run_trade_outcome_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
                 dry_run=False,
                 table="paper_trades",
                 signal_table="premium_signals",
@@ -198,6 +218,7 @@ def run_pipeline_smoke(
         "limit": limit,
         "include_missed": bool(include_missed),
         "include_paper_trade_source_labels": bool(include_paper_trade_source_labels),
+        "include_trade_outcomes": bool(include_trade_outcomes),
         "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
@@ -221,6 +242,7 @@ def main():
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--include-missed", action="store_true")
     parser.add_argument("--include-paper-trade-source-labels", action="store_true")
+    parser.add_argument("--include-trade-outcomes", action="store_true")
     parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
@@ -235,6 +257,7 @@ def main():
         limit=args.limit,
         include_missed=args.include_missed,
         include_paper_trade_source_labels=args.include_paper_trade_source_labels,
+        include_trade_outcomes=args.include_trade_outcomes,
         paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )

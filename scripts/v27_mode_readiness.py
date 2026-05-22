@@ -308,6 +308,13 @@ def build_contract_statuses(
         "metrics_window_missing_or_invalid",
         metrics_window_evidence,
     )
+    trade_outcome_evidence = contract_evidence.get("TradeOutcomeLabelContract") or {}
+    statuses["TradeOutcomeLabelContract"] = _status(
+        "TradeOutcomeLabelContract",
+        "pass" if projection_built and projection_health.get("trade_outcome_label_ok") else "missing_evidence",
+        "trade_outcome_label_missing_or_malformed",
+        trade_outcome_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

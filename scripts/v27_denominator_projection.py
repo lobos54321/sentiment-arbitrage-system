@@ -29,12 +29,14 @@ MIRRORED_MISSED_EVENT_TYPE = "paper_missed_signal_attribution_recorded"
 TELEGRAM_SIGNAL_EVENT_TYPE = "telegram_signal_seen"
 SOURCE_DOG_LABEL_EVENT_TYPE = "source_dog_label_recorded"
 LIFECYCLE_IDENTITY_EVENT_TYPE = "token_lifecycle_identity_resolved"
+TRADE_OUTCOME_LABEL_EVENT_TYPE = "trade_outcome_label_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
     TELEGRAM_SIGNAL_EVENT_TYPE,
     SOURCE_DOG_LABEL_EVENT_TYPE,
     LIFECYCLE_IDENTITY_EVENT_TYPE,
+    TRADE_OUTCOME_LABEL_EVENT_TYPE,
 }
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
@@ -314,6 +316,50 @@ def _extract_reference_price_contract(event, bags):
     }
 
 
+def _extract_trade_outcome_label_contract(event, bags):
+    version = _extract_scalar(bags, [("trade_outcome_label_version",)])
+    if event.get("event_type") != TRADE_OUTCOME_LABEL_EVENT_TYPE and not version:
+        return None
+    counterfactual_entry_ts = _extract_scalar(bags, [("counterfactual_entry_ts",), ("entry_ts",)])
+    simulated_fill_price = _as_float(_extract_scalar(bags, [("simulated_fill_price",), ("entry_price",)]))
+    trade_label_available_at = _extract_scalar(
+        bags,
+        [("trade_label_available_at",), ("exit_ts",), ("updated_at")],
+        default=event.get("available_at"),
+    )
+    if not version and counterfactual_entry_ts is None and simulated_fill_price is None:
+        return None
+    missing_fields = []
+    if not version:
+        missing_fields.append("trade_outcome_label_version")
+    if counterfactual_entry_ts is None:
+        missing_fields.append("counterfactual_entry_ts")
+    if simulated_fill_price is None or not math.isfinite(simulated_fill_price) or simulated_fill_price <= 0:
+        missing_fields.append("simulated_fill_price")
+    if trade_label_available_at is None:
+        missing_fields.append("trade_label_available_at")
+    return {
+        "trade_outcome_label_version": version,
+        "counterfactual_entry_ts": counterfactual_entry_ts,
+        "counterfactual_entry_reason": _extract_scalar(bags, [("counterfactual_entry_reason",)]),
+        "fill_time_anchor": _extract_scalar(bags, [("fill_time_anchor",)], default="simulated_fill_ts"),
+        "simulated_fill_ts": _extract_scalar(bags, [("simulated_fill_ts",), ("entry_ts",)]),
+        "simulated_fill_price": simulated_fill_price,
+        "net_delayed_executable_peak_1s": _as_float(_extract_scalar(bags, [("net_delayed_executable_peak_1s",)])),
+        "net_delayed_executable_peak_3s": _as_float(_extract_scalar(bags, [("net_delayed_executable_peak_3s",), ("peak_pnl",)])),
+        "net_delayed_executable_peak_5s": _as_float(_extract_scalar(bags, [("net_delayed_executable_peak_5s",)])),
+        "realized_pnl": _as_float(_extract_scalar(bags, [("realized_pnl",), ("pnl_pct",)])),
+        "exit_capture_ratio": _as_float(_extract_scalar(bags, [("exit_capture_ratio",)])),
+        "trade_label_available_at": trade_label_available_at,
+        "trade_outcome_label_quality": _extract_scalar(bags, [("trade_outcome_label_quality",)], default="legacy_seed"),
+        "ledger_authority_proven": bool(_extract_scalar(bags, [("ledger_authority_proven",)], default=False)),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+        "missing_fields": missing_fields,
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -403,6 +449,7 @@ def _extract_decision_fact(event):
         "source_dog_label": source_label,
         "source_label_research_only": _extract_flag(bags, [("source_label_research_only",), ("source_dog_label_research_only",)]),
         "reference_price_contract": _extract_reference_price_contract(event, bags),
+        "trade_outcome_label_contract": _extract_trade_outcome_label_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -439,11 +486,13 @@ def _new_record(fact):
         "reference_price_conflicts": [],
         "reference_price_ignored_late_candidates": [],
         "reference_price_compatible_alias_candidates": [],
+        "trade_outcome_label_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
         "signal_credit_assignment": None,
         "reference_price_contract": None,
+        "trade_outcome_label": None,
         "captured": False,
     }
 
@@ -502,6 +551,9 @@ def _merge_fact(record, fact):
     reference_price = fact.get("reference_price_contract")
     if reference_price:
         record["reference_price_candidates"].append(reference_price)
+    trade_outcome_label = fact.get("trade_outcome_label_contract")
+    if trade_outcome_label:
+        record["trade_outcome_label_candidates"].append(trade_outcome_label)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -606,6 +658,15 @@ def _finalize_reference_price(record):
     }
 
 
+def _finalize_trade_outcome_label(record):
+    candidates = sorted(
+        record.get("trade_outcome_label_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["trade_outcome_label_candidates"] = candidates
+    record["trade_outcome_label"] = candidates[0] if candidates else None
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -633,6 +694,8 @@ def _record_missing_evidence(record):
             missing.append("SignalCreditAssignmentContract")
         if not record.get("reference_price_contract"):
             missing.append("ReferencePriceContract")
+    if record.get("captured") and not record.get("trade_outcome_label"):
+        missing.append("TradeOutcomeLabelContract")
     record["missing_evidence"] = missing
     return missing
 
@@ -718,6 +781,26 @@ def _contract_evidence_from_records(record_list):
         for record in d0_records
         if (record.get("signal_credit_assignment") or {}).get("credit_assignment_quality") == "shadow_legacy_embedded"
     ]
+    trade_label_records = [
+        record
+        for record in record_list
+        if record.get("trade_outcome_label_candidates")
+    ]
+    malformed_trade_labels = []
+    for record in trade_label_records:
+        malformed = [
+            label
+            for label in record.get("trade_outcome_label_candidates") or []
+            if label.get("missing_fields")
+        ]
+        if malformed:
+            malformed_trade_labels.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for label in malformed for field in label.get("missing_fields", [])}),
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -739,6 +822,13 @@ def _contract_evidence_from_records(record_list):
             "compatible_alias_candidates": compatible_alias_reference_price_candidates,
             "reference_price_contract_version": "v2.7.0.reference_price.v1",
         },
+        "TradeOutcomeLabelContract": {
+            "eligible_trade_outcome_records": len(trade_label_records),
+            "trade_outcome_label_count": sum(len(record.get("trade_outcome_label_candidates") or []) for record in trade_label_records),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_trade_labels),
+            "malformed_labels": malformed_trade_labels,
+            "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
+        },
     }
 
 
@@ -759,6 +849,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "telegram_signal_seen_events": 0,
         "source_dog_label_events": 0,
         "lifecycle_identity_events": 0,
+        "trade_outcome_label_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -782,6 +873,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "SignalCreditAssignmentContract": {},
             "ReferencePriceContract": {},
             "MetricsWindowContract": {},
+            "TradeOutcomeLabelContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -791,6 +883,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "signal_credit_assignment_ok": False,
             "reference_price_ok": False,
             "metrics_window_ok": False,
+            "trade_outcome_label_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -829,6 +922,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["source_dog_label_events"] += 1
         if event.get("event_type") == LIFECYCLE_IDENTITY_EVENT_TYPE:
             projection["lifecycle_identity_events"] += 1
+        if event.get("event_type") == TRADE_OUTCOME_LABEL_EVENT_TYPE:
+            projection["trade_outcome_label_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -863,6 +958,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         record = records[key]
         _finalize_signal_credit(record)
         _finalize_reference_price(record)
+        _finalize_trade_outcome_label(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -944,6 +1040,10 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["ReferencePriceContract"]["conflict_count"] == 0
     )
     projection["health"]["metrics_window_ok"] = metrics_window_valid
+    projection["health"]["trade_outcome_label_ok"] = (
+        contract_evidence["TradeOutcomeLabelContract"]["eligible_trade_outcome_records"] > 0
+        and contract_evidence["TradeOutcomeLabelContract"]["malformed_count"] == 0
+    )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
     elif projection["dirty_records"]:
