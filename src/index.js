@@ -150,6 +150,7 @@ function startShadowDataSidecars(config) {
   const resonanceLog = process.env.SOURCE_RESONANCE_LOG || './data/source-resonance.log';
   const fastLaneLog = process.env.PAPER_FAST_LANE_LOG || './data/paper-fast-lane.log';
   const reviewSnapshotLog = process.env.PAPER_REVIEW_SNAPSHOT_LOG || './data/paper-review-snapshot.log';
+  const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
 
   const workers = [
     startPythonSidecar({
@@ -226,6 +227,25 @@ function startShadowDataSidecars(config) {
       env: {
         PAPER_DB: paperDb,
         PAPER_REVIEW_LIVE_DIR: process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
+      },
+    }));
+  }
+  if (envFlag('V27_READ_MODEL_REFRESH_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-read-model-refresh',
+      logPath: v27ReadModelLog,
+      args: [
+        'scripts/v27_read_model_refresh.py',
+        '--loop',
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--output-dir', process.env.V27_READ_MODEL_DIR || './data/v27_read_models',
+        '--interval', process.env.V27_READ_MODEL_REFRESH_INTERVAL_SEC || '60',
+        '--initial-delay', process.env.V27_READ_MODEL_REFRESH_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_READ_MODEL_REFRESH_LOCK_FILE || '/tmp/v27_read_model_refresh.lock',
+      ],
+      env: {
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_READ_MODEL_DIR: process.env.V27_READ_MODEL_DIR || './data/v27_read_models',
       },
     }));
   }

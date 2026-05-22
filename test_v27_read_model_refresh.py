@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, "scripts")
 
 from v27_event_log import V27EventLog  # noqa: E402
-from v27_read_model_refresh import refresh_denominator_read_model  # noqa: E402
+from v27_read_model_refresh import acquire_loop_lock, refresh_denominator_read_model  # noqa: E402
 
 
 def append_signal(log, token_ca="TokenA"):
@@ -80,3 +80,17 @@ def test_refresh_health_report_blocks_invalid_spec_manifest(tmp_path):
     assert "spec_invalid" in report["blocking_reasons"]
     assert health["dashboard_safe"] is False
     assert "spec_invalid" in health["verifier_report"]["blocking_reasons"]
+
+
+def test_refresh_loop_lock_rejects_duplicate_worker(tmp_path):
+    lock_path = tmp_path / "v27_refresh.lock"
+    first = acquire_loop_lock(lock_path)
+    assert first is not None
+    try:
+        assert acquire_loop_lock(lock_path) is None
+    finally:
+        first.close()
+
+    second = acquire_loop_lock(lock_path)
+    assert second is not None
+    second.close()

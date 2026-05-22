@@ -7,10 +7,13 @@ that dashboard/health checks are allowed to consume.
 """
 
 import argparse
+import fcntl
 import json
 import os
+import signal
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -31,6 +34,7 @@ from v27_read_model_freshness import DEFAULT_DENOMINATOR_SNAPSHOT, validate_snap
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "v27_read_models"
 DEFAULT_DENOMINATOR_PROJECTION = DEFAULT_OUTPUT_DIR / "denominator_projection.json"
 DEFAULT_REFRESH_HEALTH = DEFAULT_OUTPUT_DIR / "denominator_freshness.json"
+DEFAULT_LOCK_FILE = Path("/tmp/v27_read_model_refresh.lock")
 
 
 def write_json_atomic(path, data):
@@ -101,6 +105,89 @@ def refresh_denominator_read_model(
     return refresh_report
 
 
+def acquire_loop_lock(lock_path):
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh
+
+
+def run_refresh_loop(args):
+    interval = max(5, int(args.interval))
+    stop_requested = False
+
+    def request_stop(_signum, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    lock_fh = acquire_loop_lock(args.lock_file)
+    if lock_fh is None:
+        print(f"v2.7 read-model refresh lock held at {args.lock_file}; duplicate worker idling", flush=True)
+        while not stop_requested:
+            time.sleep(interval)
+        return {"status": "duplicate_worker_stopped", "lock_file": str(args.lock_file)}
+
+    if args.initial_delay:
+        time.sleep(max(0, int(args.initial_delay)))
+
+    last_report = None
+    try:
+        while not stop_requested:
+            try:
+                last_report = run_refresh_once(args)
+                print(json.dumps(last_report, ensure_ascii=False, sort_keys=True), flush=True)
+            except Exception as exc:
+                print(json.dumps({
+                    "refresh_schema_version": "v2.7.0.read_model_refresh.v1",
+                    "health": {
+                        "status": "read_model_refresh_exception",
+                        "dashboard_safe": False,
+                        "normal_tiny_ready": False,
+                    },
+                    "blocking_reasons": ["read_model_refresh_exception"],
+                    "error": str(exc),
+                }, ensure_ascii=False, sort_keys=True), flush=True)
+            slept = 0
+            while slept < interval and not stop_requested:
+                time.sleep(min(1, interval - slept))
+                slept += 1
+    finally:
+        try:
+            lock_fh.close()
+        except Exception:
+            pass
+    return last_report or {"status": "stopped_before_first_refresh"}
+
+
+def run_refresh_once(args):
+    output_dir = Path(args.output_dir)
+    projection_path = Path(args.projection_path) if args.projection_path else output_dir / "denominator_projection.json"
+    snapshot_path = Path(args.snapshot_path) if args.snapshot_path else output_dir / "denominator_snapshot.json"
+    health_path = Path(args.health_path) if args.health_path else output_dir / "denominator_freshness.json"
+
+    return refresh_denominator_read_model(
+        event_log_dir=Path(args.event_log_dir),
+        projection_path=projection_path,
+        snapshot_path=snapshot_path,
+        health_path=health_path,
+        spec_manifest_path=Path(args.spec_manifest),
+        include_records=args.include_records,
+        max_allowed_lag_seq=args.max_allowed_lag_seq,
+        max_allowed_lag_ms=args.max_allowed_lag_ms,
+        max_snapshot_age_ms=args.max_snapshot_age_ms,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--event-log-dir", default=str(DEFAULT_EVENT_LOG_DIR))
@@ -113,27 +200,16 @@ def main():
     parser.add_argument("--max-allowed-lag-seq", type=int, default=0)
     parser.add_argument("--max-allowed-lag-ms", type=int, default=300_000)
     parser.add_argument("--max-snapshot-age-ms", type=int, default=300_000)
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--initial-delay", type=int, default=0)
+    parser.add_argument("--lock-file", default=str(DEFAULT_LOCK_FILE))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
-    projection_path = Path(args.projection_path) if args.projection_path else output_dir / "denominator_projection.json"
-    snapshot_path = Path(args.snapshot_path) if args.snapshot_path else output_dir / "denominator_snapshot.json"
-    health_path = Path(args.health_path) if args.health_path else output_dir / "denominator_freshness.json"
-
-    report = refresh_denominator_read_model(
-        event_log_dir=Path(args.event_log_dir),
-        projection_path=projection_path,
-        snapshot_path=snapshot_path,
-        health_path=health_path,
-        spec_manifest_path=Path(args.spec_manifest),
-        include_records=args.include_records,
-        max_allowed_lag_seq=args.max_allowed_lag_seq,
-        max_allowed_lag_ms=args.max_allowed_lag_ms,
-        max_snapshot_age_ms=args.max_snapshot_age_ms,
-    )
+    report = run_refresh_loop(args) if args.loop else run_refresh_once(args)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
-    if args.strict and not report["health"]["dashboard_safe"]:
+    if args.strict and not report.get("health", {}).get("dashboard_safe"):
         raise SystemExit(1)
 
 
