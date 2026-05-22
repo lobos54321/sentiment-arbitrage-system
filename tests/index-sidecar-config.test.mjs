@@ -5,6 +5,11 @@ import { test } from 'node:test';
 test('startup supervises v27 read model refresh worker', () => {
   const source = fs.readFileSync('src/index.js', 'utf8');
 
+  assert.match(source, /V27_TELEGRAM_SIGNAL_MIRROR_WORKER_ENABLED/);
+  assert.match(source, /name:\s*'v27-telegram-signal-mirror'/);
+  assert.match(source, /scripts\/v27_mirror_telegram_signals\.py/);
+  assert.match(source, /'--new-only'/);
+  assert.match(source, /V27_TELEGRAM_SIGNAL_MIRROR_LOCK_FILE/);
   assert.match(source, /V27_READ_MODEL_REFRESH_WORKER_ENABLED/);
   assert.match(source, /name:\s*'v27-read-model-refresh'/);
   assert.match(source, /scripts\/v27_read_model_refresh\.py/);

@@ -1,11 +1,14 @@
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, "scripts")
 
 from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_telegram_signals import (  # noqa: E402
+    acquire_loop_lock,
     mirror_premium_signals,
+    run_mirror_once,
     verify_signal_mirror_parity,
 )
 
@@ -120,3 +123,102 @@ def test_premium_signal_mirror_marks_backfilled_rows_not_realtime_observable(tmp
     assert event["payload"]["telegram_seen"] is True
     assert event["payload"]["realtime_observable"] is False
     assert event["payload"]["realtime_observable_quality"] == "backfilled"
+
+
+def test_premium_signal_scoped_parity_does_not_treat_previous_ids_as_orphans(tmp_path):
+    signal_db = tmp_path / "signals.db"
+    event_log_dir = tmp_path / "v27"
+    with create_signal_db(signal_db) as db:
+        for signal_id in (1, 2):
+            db.execute(
+                """
+                INSERT INTO premium_signals
+                    (id, token_ca, symbol, timestamp, source_message_ts, receive_ts,
+                     signal_type, parse_status, gate_result, raw_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    f"Token{signal_id}",
+                    f"T{signal_id}",
+                    1_700_000_000_000 + signal_id,
+                    1_700_000_000_000 + signal_id,
+                    1_700_000_003_000 + signal_id,
+                    "NOT_ATH",
+                    "parsed",
+                    '{"status":"PASS"}',
+                    f"signal {signal_id}",
+                ),
+            )
+        db.commit()
+
+    mirror_premium_signals(signal_db, event_log_dir)
+    scoped = verify_signal_mirror_parity(signal_db, event_log_dir, since_id=2, limit=1)
+
+    assert scoped["db_rows"] == 1
+    assert scoped["mirrored_events"] == 1
+    assert scoped["orphan_mirrored_signal_ids"] == []
+    assert scoped["parity_ok"] is True
+
+
+def test_premium_signal_mirror_new_only_cursor_advances_from_event_log(tmp_path):
+    signal_db = tmp_path / "signals.db"
+    event_log_dir = tmp_path / "v27"
+    with create_signal_db(signal_db) as db:
+        for signal_id in (1, 2):
+            db.execute(
+                """
+                INSERT INTO premium_signals
+                    (id, token_ca, symbol, timestamp, source_message_ts, receive_ts,
+                     signal_type, parse_status, gate_result, raw_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    f"Token{signal_id}",
+                    f"T{signal_id}",
+                    1_700_000_000_000 + signal_id,
+                    1_700_000_000_000 + signal_id,
+                    1_700_000_003_000 + signal_id,
+                    "NOT_ATH",
+                    "parsed",
+                    '{"status":"PASS"}',
+                    f"signal {signal_id}",
+                ),
+            )
+        db.commit()
+
+    args = SimpleNamespace(
+        signal_db=str(signal_db),
+        event_log_dir=str(event_log_dir),
+        since_id=None,
+        until_id=None,
+        limit=1,
+        dry_run=False,
+        table="premium_signals",
+        default_chain="solana",
+        new_only=True,
+    )
+    first = run_mirror_once(args)
+    second = run_mirror_once(args)
+
+    assert first["cursor"]["since_id"] is None
+    assert first["mirror"]["appended"] == 1
+    assert first["cursor"]["max_mirrored_signal_id"] == 1
+    assert second["cursor"]["since_id"] == 2
+    assert second["mirror"]["appended"] == 1
+    assert second["cursor"]["max_mirrored_signal_id"] == 2
+
+
+def test_premium_signal_mirror_loop_lock_rejects_duplicate_worker(tmp_path):
+    lock_path = tmp_path / "v27_telegram.lock"
+    first = acquire_loop_lock(lock_path)
+    assert first is not None
+    try:
+        assert acquire_loop_lock(lock_path) is None
+    finally:
+        first.close()
+
+    second = acquire_loop_lock(lock_path)
+    assert second is not None
+    second.close()

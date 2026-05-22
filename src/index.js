@@ -150,6 +150,7 @@ function startShadowDataSidecars(config) {
   const resonanceLog = process.env.SOURCE_RESONANCE_LOG || './data/source-resonance.log';
   const fastLaneLog = process.env.PAPER_FAST_LANE_LOG || './data/paper-fast-lane.log';
   const reviewSnapshotLog = process.env.PAPER_REVIEW_SNAPSHOT_LOG || './data/paper-review-snapshot.log';
+  const v27TelegramMirrorLog = process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || './data/v27-telegram-signal-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
 
   const workers = [
@@ -227,6 +228,28 @@ function startShadowDataSidecars(config) {
       env: {
         PAPER_DB: paperDb,
         PAPER_REVIEW_LIVE_DIR: process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
+      },
+    }));
+  }
+  if (envFlag('V27_TELEGRAM_SIGNAL_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-telegram-signal-mirror',
+      logPath: v27TelegramMirrorLog,
+      args: [
+        'scripts/v27_mirror_telegram_signals.py',
+        '--loop',
+        '--new-only',
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_TELEGRAM_SIGNAL_MIRROR_INTERVAL_SEC || '10',
+        '--limit', process.env.V27_TELEGRAM_SIGNAL_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_TELEGRAM_SIGNAL_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOCK_FILE || '/tmp/v27_telegram_signal_mirror.lock',
+      ],
+      env: {
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
       },
     }));
   }
