@@ -29,6 +29,7 @@ from v27_denominator_projection import (  # noqa: E402
     build_denominator_read_model_snapshot,
 )
 from v27_mode_readiness import build_mode_readiness_matrix  # noqa: E402
+from v27_projection_consumer_evidence import write_projection_consumer_evidence  # noqa: E402
 from v27_read_model_freshness import DEFAULT_DENOMINATOR_SNAPSHOT, validate_snapshot_file  # noqa: E402
 
 
@@ -81,6 +82,13 @@ def refresh_denominator_read_model(
     write_json_atomic(projection_path, projection)
     write_json_atomic(snapshot_path, snapshot)
     verifier_report = validate_snapshot_file(snapshot_path, max_snapshot_age_ms=max_snapshot_age_ms)
+    consumer_evidence = write_projection_consumer_evidence(
+        output_dir=Path(health_path).parent,
+        projection=projection,
+        snapshot=snapshot,
+        projection_path=projection_path,
+        snapshot_path=snapshot_path,
+    )
     mode_readiness_path = Path(mode_readiness_path) if mode_readiness_path else Path(health_path).parent / "mode_readiness.json"
     mode_readiness = build_mode_readiness_matrix(
         event_log_dir=Path(event_log_dir),
@@ -99,11 +107,17 @@ def refresh_denominator_read_model(
         "projection_hash": snapshot.get("projection_hash"),
         "snapshot_hash": snapshot.get("snapshot_hash"),
         "snapshot_id": snapshot.get("snapshot_id"),
+        "projection_consumer_health_path": consumer_evidence.get("health_path"),
         "read_model_seq": verifier_report.get("read_model_seq"),
         "event_log_latest_seq": verifier_report.get("event_log_latest_seq"),
         "projection_status": verifier_report.get("projection_status"),
         "dashboard_safe": bool(verifier_report.get("health", {}).get("dashboard_safe")),
         "blocking_reasons": verifier_report.get("blocking_reasons") or [],
+        "projection_consumer": {
+            "status": consumer_evidence.get("health", {}).get("health", {}).get("status"),
+            "shadow_consumer_ready": consumer_evidence.get("health", {}).get("health", {}).get("shadow_consumer_ready"),
+            "blocking_contracts": consumer_evidence.get("health", {}).get("blocking_contracts") or [],
+        },
         "mode_readiness": {
             "highest_allowed_mode": mode_readiness.get("highest_allowed_mode"),
             "observe_only_ready": mode_readiness.get("health", {}).get("observe_only_ready"),

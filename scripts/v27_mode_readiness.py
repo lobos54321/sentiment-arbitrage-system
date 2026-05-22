@@ -15,6 +15,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from v27_event_log import V27EventLog, V27EventLogError  # noqa: E402
 from v27_basic_contract_readiness import build_basic_contract_readiness  # noqa: E402
+from v27_projection_consumer_evidence import CONSUMER_HEALTH_FILE, read_projection_consumer_health  # noqa: E402
 from v27_read_model_freshness import validate_snapshot_file  # noqa: E402
 from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_PATH, validate_all  # noqa: E402
 
@@ -22,6 +23,7 @@ from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_P
 DEFAULT_EVENT_LOG_DIR = PROJECT_ROOT / "data" / "v27_event_log"
 DEFAULT_READ_MODEL_DIR = PROJECT_ROOT / "data" / "v27_read_models"
 DEFAULT_SNAPSHOT_PATH = DEFAULT_READ_MODEL_DIR / "denominator_snapshot.json"
+DEFAULT_CONSUMER_HEALTH_PATH = DEFAULT_READ_MODEL_DIR / CONSUMER_HEALTH_FILE
 DEFAULT_OUTPUT_PATH = DEFAULT_READ_MODEL_DIR / "mode_readiness.json"
 
 MODE_ORDER = ["observe_only", "shadow", "ultra_tiny", "normal_tiny"]
@@ -166,7 +168,47 @@ def _m0_route_registry_ok(registry_path):
     return all(item["frozen"] for item in frozen.values()), {"registry_present": True, "m0_freeze": frozen}
 
 
-def build_contract_statuses(*, spec_report, spec_error, event_log, snapshot_report, snapshot, registry_path, basic_readiness):
+def _consumer_contract_status(projection_consumer_health, contract_id):
+    contracts = projection_consumer_health.get("contracts") if isinstance(projection_consumer_health, dict) else {}
+    item = contracts.get(contract_id) if isinstance(contracts, dict) else None
+    if not item:
+        return _status(
+            contract_id,
+            "missing_evidence",
+            f"{contract_id}_projection_consumer_health_missing",
+            {
+                "projection_consumer_health_path": projection_consumer_health.get("path") if isinstance(projection_consumer_health, dict) else None,
+                "projection_consumer_status": projection_consumer_health.get("health", {}).get("status") if isinstance(projection_consumer_health, dict) else None,
+            },
+        )
+    hash_ok = projection_consumer_health.get("consumer_health_hash_ok", True)
+    passed = item.get("status") == "pass" and hash_ok
+    status = "pass" if passed else item.get("status", "missing_evidence")
+    if item.get("status") == "pass" and not hash_ok:
+        status = "fail"
+    return _status(
+        contract_id,
+        status,
+        item.get("blocking_reason") or "projection_consumer_contract_not_proven",
+        {
+            **(item.get("evidence") or {}),
+            "projection_consumer_health_path": projection_consumer_health.get("path"),
+            "consumer_health_hash_ok": hash_ok,
+        },
+    )
+
+
+def build_contract_statuses(
+    *,
+    spec_report,
+    spec_error,
+    event_log,
+    snapshot_report,
+    snapshot,
+    registry_path,
+    basic_readiness,
+    projection_consumer_health,
+):
     projection = snapshot.get("projection") if isinstance(snapshot, dict) else {}
     if not isinstance(projection, dict):
         projection = {}
@@ -244,6 +286,14 @@ def build_contract_statuses(*, spec_report, spec_error, event_log, snapshot_repo
         "source_dog_label_events_missing",
         {"source_dog_label_events": projection.get("source_dog_label_events")},
     )
+    for contract_id in (
+        "TransactionalOutboxContract",
+        "DeadLetterQueueContract",
+        "ConsumerCheckpointContract",
+        "ProjectionHandlerIdempotencyContract",
+        "CacheInvalidationContract",
+    ):
+        statuses[contract_id] = _consumer_contract_status(projection_consumer_health, contract_id)
 
     # Seed implementation has not yet produced proof for these contracts. They
     # must remain explicitly blocked rather than inferred from adjacent checks.
@@ -326,6 +376,7 @@ def build_mode_readiness_matrix(
     manifest_path=MANIFEST_PATH,
     catalog_path=CATALOG_PATH,
     registry_path=ENTRY_MODE_REGISTRY_PATH,
+    consumer_health_path=None,
     max_snapshot_age_ms=300_000,
 ):
     spec_report = None
@@ -344,6 +395,8 @@ def build_mode_readiness_matrix(
     snapshot_report = validate_snapshot_file(snapshot_path, max_snapshot_age_ms=max_snapshot_age_ms)
     snapshot = _snapshot_payload(snapshot_path) or {}
     event_log = _event_log_report(event_log_dir)
+    consumer_health_path = Path(consumer_health_path) if consumer_health_path else Path(snapshot_path).parent / CONSUMER_HEALTH_FILE
+    projection_consumer_health = read_projection_consumer_health(consumer_health_path)
     contract_statuses = build_contract_statuses(
         spec_report=spec_report,
         spec_error=spec_error,
@@ -352,6 +405,7 @@ def build_mode_readiness_matrix(
         snapshot=snapshot,
         registry_path=registry_path,
         basic_readiness=basic_readiness,
+        projection_consumer_health=projection_consumer_health,
     )
 
     catalog_contracts = catalog.get("contracts") or {}
@@ -391,6 +445,7 @@ def build_mode_readiness_matrix(
         "event_log": event_log,
         "read_model": snapshot_report,
         "basic_readiness": basic_readiness,
+        "projection_consumer": projection_consumer_health,
         "contract_statuses": contract_statuses,
         "modes": modes,
         "highest_allowed_mode": highest_allowed,
@@ -418,6 +473,7 @@ def main():
     parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     parser.add_argument("--catalog", default=str(CATALOG_PATH))
     parser.add_argument("--registry", default=str(ENTRY_MODE_REGISTRY_PATH))
+    parser.add_argument("--consumer-health-path")
     parser.add_argument("--max-snapshot-age-ms", type=int, default=300_000)
     parser.add_argument("--output")
     parser.add_argument("--strict-mode", choices=MODE_ORDER)
@@ -429,6 +485,7 @@ def main():
         manifest_path=Path(args.manifest),
         catalog_path=Path(args.catalog),
         registry_path=Path(args.registry),
+        consumer_health_path=Path(args.consumer_health_path) if args.consumer_health_path else None,
         max_snapshot_age_ms=args.max_snapshot_age_ms,
     )
     if args.output:
