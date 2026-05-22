@@ -13,6 +13,7 @@ import {
   boundedWindowedSinceTs,
   dogCatchGoalFromLiveSnapshot,
   missedRecoverySummaryFromLiveSnapshot,
+  readV27DenominatorReadModelHealth,
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
@@ -39,6 +40,55 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   assert.equal(snapshot.db_files.find((row) => row.label === 'paper_trades').exists, true);
   assert.match(snapshot.integrity_error, /malformed page/);
   assert.match(snapshot.preflight_tail, /checkpoint failed/);
+});
+
+test('v27 read model health reports missing materialized snapshot as unsafe', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'v27-health-missing-'));
+  const health = readV27DenominatorReadModelHealth({
+    projectRoot: dir,
+    healthPath: join(dir, 'data', 'v27_read_models', 'denominator_freshness.json'),
+  });
+
+  assert.equal(health.available, false);
+  assert.equal(health.dashboard_safe, false);
+  assert.deepEqual(health.blocking_reasons, ['v27_read_model_health_missing']);
+  assert.equal(health.health.status, 'v27_read_model_health_missing');
+});
+
+test('v27 read model health exposes materialized verifier result', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'v27-health-ready-'));
+  const healthPath = join(dir, 'denominator_freshness.json');
+  fs.writeFileSync(healthPath, JSON.stringify({
+    refresh_schema_version: 'v2.7.0.read_model_refresh.v1',
+    snapshot_id: 'v27denom_test',
+    snapshot_hash: 'abc',
+    projection_hash: 'def',
+    read_model_seq: 7,
+    event_log_latest_seq: 7,
+    dashboard_safe: true,
+    blocking_reasons: [],
+    health: {
+      dashboard_safe: true,
+      normal_tiny_ready: false,
+      status: 'read_model_refresh_ok',
+    },
+    verifier_report: {
+      snapshot_hash_ok: true,
+      projection_hash_ok: true,
+      spec_valid: true,
+      read_model_fresh_enough: true,
+      blocking_reasons: [],
+    },
+  }));
+
+  const health = readV27DenominatorReadModelHealth({ healthPath });
+
+  assert.equal(health.available, true);
+  assert.equal(health.dashboard_safe, true);
+  assert.equal(health.read_model_seq, 7);
+  assert.equal(health.event_log_latest_seq, 7);
+  assert.equal(health.health.status, 'read_model_refresh_ok');
+  assert.equal(health.verifier_report.spec_valid, true);
 });
 
 test('boundedIntParam clamps oversized live query parameters', () => {

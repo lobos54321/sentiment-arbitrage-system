@@ -899,6 +899,77 @@ function readLivePaperReview(hours) {
   }
 }
 
+function v27ReadModelDir(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.readModelDir || process.env.V27_READ_MODEL_DIR || join(root, 'data', 'v27_read_models');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+function v27DenominatorFreshnessPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.healthPath || process.env.V27_DENOMINATOR_FRESHNESS_PATH || join(v27ReadModelDir(options), 'denominator_freshness.json');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+export function readV27DenominatorReadModelHealth(options = {}) {
+  const path = v27DenominatorFreshnessPath(options);
+  const generatedAt = new Date().toISOString();
+  if (!fs.existsSync(path)) {
+    return {
+      generated_at: generatedAt,
+      available: false,
+      materialized: true,
+      path,
+      dashboard_safe: false,
+      blocking_reasons: ['v27_read_model_health_missing'],
+      health: {
+        dashboard_safe: false,
+        normal_tiny_ready: false,
+        status: 'v27_read_model_health_missing',
+      },
+    };
+  }
+  try {
+    const payload = JSON.parse(fs.readFileSync(path, 'utf8'));
+    const dashboardSafe = Boolean(payload.dashboard_safe || payload.health?.dashboard_safe);
+    const blockingReasons = Array.isArray(payload.blocking_reasons)
+      ? payload.blocking_reasons
+      : Array.isArray(payload.verifier_report?.blocking_reasons)
+        ? payload.verifier_report.blocking_reasons
+        : [];
+    return {
+      generated_at: generatedAt,
+      available: true,
+      materialized: true,
+      path,
+      ...payload,
+      dashboard_safe: dashboardSafe,
+      blocking_reasons: blockingReasons,
+      health: {
+        ...(payload.health || {}),
+        dashboard_safe: dashboardSafe,
+        normal_tiny_ready: false,
+        status: payload.health?.status || (dashboardSafe ? 'read_model_refresh_ok' : 'read_model_refresh_not_ready'),
+      },
+    };
+  } catch (error) {
+    return {
+      generated_at: generatedAt,
+      available: false,
+      materialized: true,
+      path,
+      dashboard_safe: false,
+      blocking_reasons: ['v27_read_model_health_parse_failed'],
+      error: error.message,
+      health: {
+        dashboard_safe: false,
+        normal_tiny_ready: false,
+        status: 'v27_read_model_health_parse_failed',
+      },
+    };
+  }
+}
+
 function missedRecoveryRowFromLiveSnapshot(row = {}, section = 'overall') {
   const uniqueTokens = Number(row.unique_tokens || 0);
   const gold = Number(row.gold_unique || row.gold_n || 0);
@@ -7387,6 +7458,18 @@ const server = http.createServer(async (req, res) => {
       includeFileStats: ['1', 'true', 'yes'].includes(String(url.searchParams.get('files') || '').toLowerCase()),
       includePreflightTail: ['1', 'true', 'yes'].includes(String(url.searchParams.get('tail') || '').toLowerCase()),
     }), null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-read-model-health') {
+    if (!checkAuth(req, url, res)) return;
+    const health = readV27DenominatorReadModelHealth();
+    const strict = ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase());
+    const status = health.available
+      ? strict && !health.dashboard_safe
+        ? 503
+        : 200
+      : 202;
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(health, null, 2));
     return;
   } else if (url.pathname === '/api/paper/dog-catch-goal') {
     if (!checkAuth(req, url, res)) return;
