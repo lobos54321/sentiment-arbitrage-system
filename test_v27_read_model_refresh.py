@@ -46,6 +46,7 @@ def test_refresh_writes_projection_snapshot_and_health_atomically_consumable(tmp
     projection = read_json(out_dir / "denominator_projection.json")
     snapshot = read_json(out_dir / "denominator_snapshot.json")
     health = read_json(out_dir / "denominator_freshness.json")
+    mode_readiness = read_json(out_dir / "mode_readiness.json")
     assert report["health"]["status"] == "read_model_refresh_ok"
     assert report["dashboard_safe"] is True
     assert report["read_model_seq"] == 1
@@ -53,6 +54,11 @@ def test_refresh_writes_projection_snapshot_and_health_atomically_consumable(tmp
     assert report["snapshot_hash"] == snapshot["snapshot_hash"]
     assert health["snapshot_hash"] == snapshot["snapshot_hash"]
     assert health["projection_hash"] == snapshot["projection_hash"]
+    assert report["mode_readiness_path"] == str(out_dir / "mode_readiness.json")
+    assert report["mode_readiness"]["normal_tiny_ready"] is False
+    assert "SourceRegistryContract" in report["mode_readiness"]["blocking_contracts"]["observe_only"]
+    assert mode_readiness["matrix_schema_version"] == "v2.7.0.mode_readiness.v1"
+    assert mode_readiness["modes"]["normal_tiny"]["status"] == "blocked"
     assert projection["event_log_latest_seq"] == 1
     assert snapshot["read_model"]["read_model_seq"] == 1
     assert health["verifier_report"]["blocking_reasons"] == []
@@ -75,11 +81,13 @@ def test_refresh_health_report_blocks_invalid_spec_manifest(tmp_path):
     )
 
     health = read_json(out_dir / "denominator_freshness.json")
+    mode_readiness = read_json(out_dir / "mode_readiness.json")
     assert report["dashboard_safe"] is False
     assert report["health"]["status"] == "read_model_refresh_not_ready"
     assert "spec_invalid" in report["blocking_reasons"]
     assert health["dashboard_safe"] is False
     assert "spec_invalid" in health["verifier_report"]["blocking_reasons"]
+    assert mode_readiness["contract_statuses"]["CanonicalSpecIntegrityContract"]["status"] == "fail"
 
 
 def test_refresh_loop_lock_rejects_duplicate_worker(tmp_path):

@@ -28,6 +28,7 @@ from v27_denominator_projection import (  # noqa: E402
     build_denominator_projection,
     build_denominator_read_model_snapshot,
 )
+from v27_mode_readiness import build_mode_readiness_matrix  # noqa: E402
 from v27_read_model_freshness import DEFAULT_DENOMINATOR_SNAPSHOT, validate_snapshot_file  # noqa: E402
 
 
@@ -62,6 +63,7 @@ def refresh_denominator_read_model(
     projection_path=DEFAULT_DENOMINATOR_PROJECTION,
     snapshot_path=DEFAULT_DENOMINATOR_SNAPSHOT,
     health_path=DEFAULT_REFRESH_HEALTH,
+    mode_readiness_path=None,
     spec_manifest_path=DEFAULT_SPEC_MANIFEST,
     include_records=False,
     max_allowed_lag_seq=0,
@@ -79,6 +81,13 @@ def refresh_denominator_read_model(
     write_json_atomic(projection_path, projection)
     write_json_atomic(snapshot_path, snapshot)
     verifier_report = validate_snapshot_file(snapshot_path, max_snapshot_age_ms=max_snapshot_age_ms)
+    mode_readiness_path = Path(mode_readiness_path) if mode_readiness_path else Path(health_path).parent / "mode_readiness.json"
+    mode_readiness = build_mode_readiness_matrix(
+        event_log_dir=Path(event_log_dir),
+        snapshot_path=Path(snapshot_path),
+        manifest_path=Path(spec_manifest_path),
+        max_snapshot_age_ms=max_snapshot_age_ms,
+    )
 
     refresh_report = {
         "refresh_schema_version": "v2.7.0.read_model_refresh.v1",
@@ -86,6 +95,7 @@ def refresh_denominator_read_model(
         "projection_path": str(projection_path),
         "snapshot_path": str(snapshot_path),
         "health_path": str(health_path),
+        "mode_readiness_path": str(mode_readiness_path),
         "projection_hash": snapshot.get("projection_hash"),
         "snapshot_hash": snapshot.get("snapshot_hash"),
         "snapshot_id": snapshot.get("snapshot_id"),
@@ -94,6 +104,17 @@ def refresh_denominator_read_model(
         "projection_status": verifier_report.get("projection_status"),
         "dashboard_safe": bool(verifier_report.get("health", {}).get("dashboard_safe")),
         "blocking_reasons": verifier_report.get("blocking_reasons") or [],
+        "mode_readiness": {
+            "highest_allowed_mode": mode_readiness.get("highest_allowed_mode"),
+            "observe_only_ready": mode_readiness.get("health", {}).get("observe_only_ready"),
+            "shadow_ready": mode_readiness.get("health", {}).get("shadow_ready"),
+            "ultra_tiny_ready": mode_readiness.get("health", {}).get("ultra_tiny_ready"),
+            "normal_tiny_ready": mode_readiness.get("health", {}).get("normal_tiny_ready"),
+            "blocking_contracts": {
+                mode: (mode_readiness.get("modes", {}).get(mode, {}) or {}).get("blocking_contracts", [])
+                for mode in ("observe_only", "shadow", "ultra_tiny", "normal_tiny")
+            },
+        },
         "verifier_report": verifier_report,
         "health": {
             "status": "read_model_refresh_ok" if verifier_report.get("health", {}).get("dashboard_safe") else "read_model_refresh_not_ready",
@@ -101,6 +122,7 @@ def refresh_denominator_read_model(
             "normal_tiny_ready": False,
         },
     }
+    write_json_atomic(mode_readiness_path, mode_readiness)
     write_json_atomic(health_path, refresh_report)
     return refresh_report
 
@@ -174,12 +196,14 @@ def run_refresh_once(args):
     projection_path = Path(args.projection_path) if args.projection_path else output_dir / "denominator_projection.json"
     snapshot_path = Path(args.snapshot_path) if args.snapshot_path else output_dir / "denominator_snapshot.json"
     health_path = Path(args.health_path) if args.health_path else output_dir / "denominator_freshness.json"
+    mode_readiness_path = Path(args.mode_readiness_path) if args.mode_readiness_path else output_dir / "mode_readiness.json"
 
     return refresh_denominator_read_model(
         event_log_dir=Path(args.event_log_dir),
         projection_path=projection_path,
         snapshot_path=snapshot_path,
         health_path=health_path,
+        mode_readiness_path=mode_readiness_path,
         spec_manifest_path=Path(args.spec_manifest),
         include_records=args.include_records,
         max_allowed_lag_seq=args.max_allowed_lag_seq,
@@ -195,6 +219,7 @@ def main():
     parser.add_argument("--projection-path")
     parser.add_argument("--snapshot-path")
     parser.add_argument("--health-path")
+    parser.add_argument("--mode-readiness-path")
     parser.add_argument("--spec-manifest", default=str(DEFAULT_SPEC_MANIFEST))
     parser.add_argument("--include-records", action="store_true")
     parser.add_argument("--max-allowed-lag-seq", type=int, default=0)
