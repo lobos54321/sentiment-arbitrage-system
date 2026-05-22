@@ -512,6 +512,55 @@ def test_denominator_projection_ignores_late_same_type_reference_price_candidate
     assert projection["health"]["reference_price_ok"] is True
 
 
+def test_denominator_projection_treats_legacy_entry_and_baseline_as_shadow_aliases(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenLegacyAlias:unknown_pool:0",
+        idempotency_key="premium_signals:legacy-alias",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenLegacyAlias",
+            "symbol": "ALIAS",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    for idx, ref_type in enumerate(("legacy_entry_price", "legacy_baseline_price"), start=1):
+        log.append_event(
+            event_type="source_dog_label_recorded",
+            aggregate_id=f"source_label:solana:TokenLegacyAlias:unknown_pool:0:{idx}",
+            idempotency_key=f"signal_features_source_label:legacy-alias:{idx}",
+            payload={
+                "source_label_id": idx,
+                "token_ca": "TokenLegacyAlias",
+                "symbol": "ALIAS",
+                "chain": "solana",
+                "canonical_pool_group": "unknown_pool",
+                "lifecycle_epoch": 0,
+                "source_dog_label": "gold",
+                "source_label_research_only": True,
+                "source_reference_price_type": ref_type,
+                "source_reference_price": 0.001 + (idx / 10000),
+                "source_label_available_at": "2026-01-15T00:00:00Z",
+            },
+        )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    record = projection["records"][0]
+    evidence = projection["contract_evidence"]["ReferencePriceContract"]
+    assert record["reference_price_contract"]["reference_price_type"] == "legacy_entry_price"
+    assert evidence["missing_count"] == 0
+    assert evidence["conflict_count"] == 0
+    assert evidence["compatible_alias_candidate_count"] == 1
+    assert record["reference_price_compatible_alias_candidates"][0]["compatible_alias_group"] == "legacy_source_reference_price"
+    assert projection["health"]["reference_price_ok"] is True
+
+
 def test_denominator_projection_keeps_different_reference_price_type_as_conflict(tmp_path):
     log = V27EventLog(tmp_path)
     log.append_event(

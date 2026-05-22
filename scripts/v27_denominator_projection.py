@@ -314,6 +314,15 @@ def _extract_reference_price_contract(event, bags):
     }
 
 
+LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
+
+
+def _reference_price_alias_group(price_type):
+    if price_type in LEGACY_SOURCE_REFERENCE_PRICE_TYPES:
+        return "legacy_source_reference_price"
+    return None
+
+
 def _extract_decision_fact(event):
     bags = _payload_bags(event)
     outer = bags["outer"]
@@ -429,6 +438,7 @@ def _new_record(fact):
         "reference_price_candidates": [],
         "reference_price_conflicts": [],
         "reference_price_ignored_late_candidates": [],
+        "reference_price_compatible_alias_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -542,13 +552,34 @@ def _finalize_reference_price(record):
         return
     selected = candidates[0]
     for candidate in candidates[1:]:
-        if candidate.get("reference_price_type") != selected.get("reference_price_type"):
+        selected_type = selected.get("reference_price_type")
+        candidate_type = candidate.get("reference_price_type")
+        selected_alias_group = _reference_price_alias_group(selected_type)
+        candidate_alias_group = _reference_price_alias_group(candidate_type)
+        if (
+            selected_type != candidate_type
+            and selected_alias_group
+            and selected_alias_group == candidate_alias_group
+        ):
+            record["reference_price_compatible_alias_candidates"].append(
+                {
+                    "selected_source_event_id": selected.get("source_event_id"),
+                    "incoming_source_event_id": candidate.get("source_event_id"),
+                    "selected_type": selected_type,
+                    "incoming_type": candidate_type,
+                    "selected_price": selected.get("reference_price"),
+                    "incoming_price": candidate.get("reference_price"),
+                    "compatible_alias_group": selected_alias_group,
+                    "ignore_reason": "legacy_source_reference_alias_does_not_reset_reference_price",
+                }
+            )
+        elif candidate.get("reference_price_type") != selected.get("reference_price_type"):
             record["reference_price_conflicts"].append(
                 {
                     "selected_source_event_id": selected.get("source_event_id"),
                     "incoming_source_event_id": candidate.get("source_event_id"),
-                    "selected_type": selected.get("reference_price_type"),
-                    "incoming_type": candidate.get("reference_price_type"),
+                    "selected_type": selected_type,
+                    "incoming_type": candidate_type,
                 }
             )
         elif candidate.get("reference_price") != selected.get("reference_price"):
@@ -674,6 +705,14 @@ def _contract_evidence_from_records(record_list):
         for record in d0_records
         if record.get("reference_price_ignored_late_candidates")
     ]
+    compatible_alias_reference_price_candidates = [
+        {
+            "denominator_dedup_key": record.get("denominator_dedup_key"),
+            "compatible_alias_candidate_count": len(record.get("reference_price_compatible_alias_candidates") or []),
+        }
+        for record in d0_records
+        if record.get("reference_price_compatible_alias_candidates")
+    ]
     legacy_embedded_signal_credit = [
         record.get("denominator_dedup_key")
         for record in d0_records
@@ -696,6 +735,8 @@ def _contract_evidence_from_records(record_list):
             "conflicts": reference_price_conflicts,
             "ignored_late_candidate_count": sum(item["ignored_late_candidate_count"] for item in ignored_late_reference_price_candidates),
             "ignored_late_candidates": ignored_late_reference_price_candidates,
+            "compatible_alias_candidate_count": sum(item["compatible_alias_candidate_count"] for item in compatible_alias_reference_price_candidates),
+            "compatible_alias_candidates": compatible_alias_reference_price_candidates,
             "reference_price_contract_version": "v2.7.0.reference_price.v1",
         },
     }
