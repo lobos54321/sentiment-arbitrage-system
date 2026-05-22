@@ -151,6 +151,7 @@ function startShadowDataSidecars(config) {
   const fastLaneLog = process.env.PAPER_FAST_LANE_LOG || './data/paper-fast-lane.log';
   const reviewSnapshotLog = process.env.PAPER_REVIEW_SNAPSHOT_LOG || './data/paper-review-snapshot.log';
   const v27TelegramMirrorLog = process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || './data/v27-telegram-signal-mirror.log';
+  const v27SourceLabelMirrorLog = process.env.V27_SOURCE_LABEL_MIRROR_LOG || './data/v27-source-label-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
   const lifecycleDb = process.env.LIFECYCLE_DB || './data/lifecycle_tracks.db';
@@ -247,6 +248,28 @@ function startShadowDataSidecars(config) {
         '--limit', process.env.V27_TELEGRAM_SIGNAL_MIRROR_LIMIT || '500',
         '--initial-delay', process.env.V27_TELEGRAM_SIGNAL_MIRROR_INITIAL_DELAY_SEC || '0',
         '--lock-file', process.env.V27_TELEGRAM_SIGNAL_MIRROR_LOCK_FILE || '/tmp/v27_telegram_signal_mirror.lock',
+      ],
+      env: {
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+      },
+    }));
+  }
+  if (envFlag('V27_SOURCE_LABEL_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-source-label-mirror',
+      logPath: v27SourceLabelMirrorLog,
+      args: [
+        'scripts/v27_mirror_source_labels.py',
+        '--loop',
+        '--new-only',
+        '--db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_SOURCE_LABEL_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_SOURCE_LABEL_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_SOURCE_LABEL_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_SOURCE_LABEL_MIRROR_LOCK_FILE || '/tmp/v27_source_label_mirror.lock',
       ],
       env: {
         DB_PATH: signalDb,
