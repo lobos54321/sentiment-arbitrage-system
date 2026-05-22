@@ -121,9 +121,9 @@ def test_v27_spec_validator_computes_stable_hash_and_contract_coverage():
     assert result["spec_version"] == "2.7.0"
     assert result["section_count"] == 24
     assert result["required_contract_count"] == 77
-    assert result["catalog_contract_count"] == 77
+    assert result["catalog_contract_count"] == 104
     assert result["gap_register_count"] == 175
-    assert result["spec_hash"] == "575db4a61a7040bc148d575f4a9ae39436bde3d917cba93c6262500b729244a1"
+    assert result["spec_hash"] == "80a41076c47f0a19bd9890a8c6babd173004df889e52a47a80c3fb43a78a3c83"
 
 
 def test_v27_spec_validator_rejects_reopened_m0_direct_probe_modes(tmp_path):
