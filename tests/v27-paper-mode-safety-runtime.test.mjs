@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   buildV27PaperModeSafetyRuntimeEvidence,
   defaultV27PaperModeSafetyPath,
+  quarantineLiveSecretsForPaperMode,
   writeV27PaperModeSafetyRuntimeEvidence,
 } from '../src/runtime/v27-paper-mode-safety.js';
 
@@ -47,6 +48,50 @@ test('v27 paper mode safety runtime evidence detects live capability without exp
   assert.ok(evidence.violations.includes('live_private_key_present'));
   assert.ok(evidence.violations.includes('network_transaction_signing_enabled'));
   assert.ok(evidence.violations.includes('jupiter_executor_initialized'));
+});
+
+test('v27 paper mode safety quarantines live secrets before paper runtime evidence', () => {
+  const env = {
+    PREMIUM_LIVE_EXECUTION_ENABLED: 'false',
+    TRADE_WALLET_PRIVATE_KEY: 'secret-value',
+  };
+
+  const quarantine = quarantineLiveSecretsForPaperMode({
+    env,
+    reason: 'unit_test',
+  });
+  const evidence = buildV27PaperModeSafetyRuntimeEvidence({
+    config: { PAPER_ONLY_MODE: true, PREMIUM_LIVE_EXECUTION_ENABLED: false },
+    env,
+  });
+
+  assert.equal(quarantine.quarantine_applied, true);
+  assert.equal(env.TRADE_WALLET_PRIVATE_KEY, '');
+  assert.equal(env.V27_QUARANTINED_LIVE_SECRET_NAMES, 'TRADE_WALLET_PRIVATE_KEY');
+  assert.equal(evidence.paper_live_boundary_ok, true);
+  assert.equal(evidence.live_private_key_present, false);
+  assert.deepEqual(evidence.quarantined_live_secret_names, ['TRADE_WALLET_PRIVATE_KEY']);
+  assert.equal(JSON.stringify(evidence).includes('secret-value'), false);
+});
+
+test('v27 paper mode safety does not quarantine when live execution is explicit', () => {
+  const env = {
+    PREMIUM_LIVE_EXECUTION_ENABLED: 'true',
+    TRADE_WALLET_PRIVATE_KEY: 'secret-value',
+  };
+
+  const quarantine = quarantineLiveSecretsForPaperMode({ env });
+  const evidence = buildV27PaperModeSafetyRuntimeEvidence({
+    config: { PREMIUM_LIVE_EXECUTION_ENABLED: true },
+    env,
+  });
+
+  assert.equal(quarantine.quarantine_applied, false);
+  assert.equal(quarantine.skipped_reason, 'premium_live_execution_enabled');
+  assert.equal(env.TRADE_WALLET_PRIVATE_KEY, 'secret-value');
+  assert.equal(evidence.paper_live_boundary_ok, false);
+  assert.ok(evidence.violations.includes('premium_live_execution_enabled'));
+  assert.ok(evidence.violations.includes('live_private_key_present'));
 });
 
 test('v27 paper mode safety runtime evidence writes to configured read model directory', () => {

@@ -19,6 +19,18 @@ function boolFlag(value, defaultValue = false) {
   return TRUE_VALUES.has(String(value).trim().toLowerCase());
 }
 
+function splitEnvList(value) {
+  if (!value) return [];
+  return String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function mergeEnvList(existing, additions) {
+  return [...new Set([...splitEnvList(existing), ...additions])].sort();
+}
+
 function resolvePath(raw, projectRoot) {
   const path = raw || join(projectRoot, 'data', 'v27_read_models', 'paper_mode_safety.json');
   return isAbsolute(path) ? path : join(projectRoot, path);
@@ -41,6 +53,44 @@ function secretPresenceHash(presentNames) {
     .digest('hex');
 }
 
+export function quarantineLiveSecretsForPaperMode({
+  env = process.env,
+  enabled = boolFlag(env.V27_PAPER_MODE_SECRET_QUARANTINE_ENABLED, true),
+  reason = 'paper_mode_startup',
+} = {}) {
+  const liveExecutionEnabled = boolFlag(env.PREMIUM_LIVE_EXECUTION_ENABLED, false);
+  if (!enabled || liveExecutionEnabled) {
+    return {
+      quarantine_applied: false,
+      skipped_reason: enabled ? 'premium_live_execution_enabled' : 'quarantine_disabled',
+      quarantined_live_secret_names: splitEnvList(env.V27_QUARANTINED_LIVE_SECRET_NAMES),
+    };
+  }
+  const presentNames = LIVE_SECRET_ENV_NAMES.filter((name) => Boolean(env[name]));
+  if (!presentNames.length) {
+    return {
+      quarantine_applied: false,
+      skipped_reason: 'no_live_secret_present',
+      quarantined_live_secret_names: splitEnvList(env.V27_QUARANTINED_LIVE_SECRET_NAMES),
+    };
+  }
+  for (const name of presentNames) {
+    env[name] = '';
+  }
+  const quarantined = mergeEnvList(env.V27_QUARANTINED_LIVE_SECRET_NAMES, presentNames);
+  env.V27_QUARANTINED_LIVE_SECRET_NAMES = quarantined.join(',');
+  env.V27_LIVE_SECRET_QUARANTINE_APPLIED = 'true';
+  env.V27_LIVE_SECRET_QUARANTINE_REASON = reason;
+  env.V27_LIVE_SECRET_QUARANTINE_HASH = secretPresenceHash(quarantined);
+  return {
+    quarantine_applied: true,
+    skipped_reason: null,
+    quarantined_live_secret_names: quarantined,
+    quarantine_reason: reason,
+    quarantine_hash: env.V27_LIVE_SECRET_QUARANTINE_HASH,
+  };
+}
+
 export function buildV27PaperModeSafetyRuntimeEvidence({
   config = {},
   env = process.env,
@@ -57,6 +107,7 @@ export function buildV27PaperModeSafetyRuntimeEvidence({
     ? config.PAPER_ONLY_MODE
     : !premiumLiveExecutionEnabled;
   const presentLiveSecretNames = LIVE_SECRET_ENV_NAMES.filter((name) => Boolean(env[name]));
+  const quarantinedLiveSecretNames = splitEnvList(env.V27_QUARANTINED_LIVE_SECRET_NAMES);
   const evidence = {
     runtime_evidence_schema_version: PAPER_MODE_SAFETY_RUNTIME_SCHEMA_VERSION,
     generated_at: now.toISOString(),
@@ -71,6 +122,10 @@ export function buildV27PaperModeSafetyRuntimeEvidence({
     live_private_key_present: presentLiveSecretNames.length > 0,
     present_live_secret_names: presentLiveSecretNames,
     live_secret_presence_hash: secretPresenceHash(presentLiveSecretNames),
+    live_secret_quarantine_applied: boolFlag(env.V27_LIVE_SECRET_QUARANTINE_APPLIED, false),
+    live_secret_quarantine_reason: env.V27_LIVE_SECRET_QUARANTINE_REASON || null,
+    quarantined_live_secret_names: quarantinedLiveSecretNames,
+    live_secret_quarantine_hash: env.V27_LIVE_SECRET_QUARANTINE_HASH || secretPresenceHash(quarantinedLiveSecretNames),
     live_swap_endpoint_enabled: boolFlag(env.LIVE_SWAP_ENDPOINT_ENABLED, false),
     real_order_router_enabled: boolFlag(env.REAL_ORDER_ROUTER_ENABLED, false),
     network_transaction_signing_enabled: boolFlag(env.NETWORK_TRANSACTION_SIGNING_ENABLED, false),

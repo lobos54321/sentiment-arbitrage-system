@@ -66,6 +66,11 @@ def resolve_runtime_evidence_path(env=None, path=None):
 def env_boundary_evidence(env=None):
     env = env or os.environ
     present_live_secret_names = [name for name in LIVE_SECRET_NAMES if env.get(name)]
+    quarantined_live_secret_names = [
+        name.strip()
+        for name in str(env.get("V27_QUARANTINED_LIVE_SECRET_NAMES") or "").split(",")
+        if name.strip()
+    ]
     switches = {name: bool_flag(env.get(name), False) for name in LIVE_SWITCH_NAMES}
     violations = []
     if switches["PREMIUM_LIVE_EXECUTION_ENABLED"]:
@@ -83,6 +88,10 @@ def env_boundary_evidence(env=None):
         "premium_live_execution_enabled": switches["PREMIUM_LIVE_EXECUTION_ENABLED"],
         "live_private_key_present": bool(present_live_secret_names),
         "present_live_secret_names": present_live_secret_names,
+        "live_secret_quarantine_applied": bool_flag(env.get("V27_LIVE_SECRET_QUARANTINE_APPLIED"), False),
+        "live_secret_quarantine_reason": env.get("V27_LIVE_SECRET_QUARANTINE_REASON"),
+        "quarantined_live_secret_names": quarantined_live_secret_names,
+        "live_secret_quarantine_hash": env.get("V27_LIVE_SECRET_QUARANTINE_HASH"),
         "live_swap_endpoint_enabled": switches["LIVE_SWAP_ENDPOINT_ENABLED"],
         "real_order_router_enabled": switches["REAL_ORDER_ROUTER_ENABLED"],
         "network_transaction_signing_enabled": switches["NETWORK_TRANSACTION_SIGNING_ENABLED"],

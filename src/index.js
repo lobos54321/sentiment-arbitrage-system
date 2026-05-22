@@ -39,9 +39,20 @@ import { applyMarketDataProcessOverride, isMarketDataProcessEnabled } from './ma
 import { KlineCollector } from './tracking/kline-collector.js';
 import { startDashboardServer } from './web/dashboard-server.js';
 import { LivePositionMonitor } from './execution/live-position-monitor.js';
-import { writeV27PaperModeSafetyRuntimeEvidence } from './runtime/v27-paper-mode-safety.js';
+import {
+  quarantineLiveSecretsForPaperMode,
+  writeV27PaperModeSafetyRuntimeEvidence,
+} from './runtime/v27-paper-mode-safety.js';
 
-dotenv.config();
+if (process.env.V27_DOTENV_ALREADY_LOADED !== '1') {
+  dotenv.config();
+}
+quarantineLiveSecretsForPaperMode({
+  env: process.env,
+  reason: process.env.V27_DOTENV_ALREADY_LOADED === '1'
+    ? 'index_start_after_preload'
+    : 'index_start_after_dotenv',
+});
 
 // 全局兜底：防止 async EventEmitter 回调的未捕获 rejection 导致进程崩溃
 process.on('unhandledRejection', (reason, promise) => {
