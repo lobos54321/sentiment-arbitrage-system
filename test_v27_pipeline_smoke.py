@@ -64,11 +64,19 @@ def create_paper_db(db_path):
             token_ca TEXT,
             symbol TEXT,
             premium_signal_id INTEGER,
+            signal_ts INTEGER,
             entry_price REAL,
             entry_ts INTEGER,
-            execution_availability TEXT,
+            exit_price REAL,
             exit_ts INTEGER,
-            peak_pnl REAL
+            execution_availability TEXT,
+            peak_pnl REAL,
+            position_size_sol REAL,
+            entry_execution_audit_json TEXT,
+            exit_execution_audit_json TEXT,
+            monitor_state_json TEXT,
+            entry_mode TEXT,
+            signal_route TEXT
         )
         """
     )
@@ -97,10 +105,67 @@ def create_paper_db(db_path):
     db.execute(
         """
         INSERT INTO paper_trades
-            (id, token_ca, symbol, premium_signal_id, entry_price, entry_ts, execution_availability, exit_ts, peak_pnl)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, token_ca, symbol, premium_signal_id, signal_ts, entry_price, entry_ts,
+             exit_price, exit_ts, execution_availability, peak_pnl, position_size_sol,
+             entry_execution_audit_json, exit_execution_audit_json, monitor_state_json,
+             entry_mode, signal_route)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (1, "TokenPipe", "PIPE", 1, 0.001, 1_700_000_004_000, "available", 1_700_000_300_000, 1.25),
+        (
+            1,
+            "TokenPipe",
+            "PIPE",
+            1,
+            1_700_000_000_000,
+            0.001,
+            1_700_000_004_000,
+            0.0012,
+            1_700_000_300_000,
+            "available",
+            1.25,
+            0.01,
+            json.dumps(
+                {
+                    "success": True,
+                    "quoteTs": 1_700_000_002_000,
+                    "effectivePrice": 0.001,
+                    "slippageBps": 25,
+                    "inputMint": "SOL",
+                    "outputMint": "TokenPipe",
+                    "entryLatencyAudit": {
+                        "signal_to_quote_latency_ms": 2000,
+                        "quote_spread_pct": 0.25,
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "success": True,
+                    "quoteTs": 1_700_000_300_000,
+                    "effectivePrice": 0.0012,
+                    "slippageBps": 18,
+                    "inputMint": "TokenPipe",
+                    "outputMint": "SOL",
+                    "quoteFreshness": {
+                        "quote_ts": 1_700_000_300,
+                        "now_ts": 1_700_000_301,
+                        "quote_age_sec": 1,
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "entryExecutionEligibility": {
+                        "observed": {
+                            "liquidity_usd": 12345,
+                        }
+                    },
+                    "signalRoute": "unit_signal",
+                }
+            ),
+            "unit_entry",
+            "unit_signal",
+        ),
     )
     db.commit()
     return db
@@ -257,3 +322,32 @@ def test_pipeline_smoke_can_seed_ex_ante_feasibility(tmp_path, monkeypatch):
     assert "StandardizedStopContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "ExAnteFeasibility" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "EarliestActionableTime" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+
+
+def test_pipeline_smoke_can_seed_realtime_clean_detector(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    signal_db = tmp_path / "signals.db"
+    paper_db = tmp_path / "paper.db"
+    lifecycle_db = tmp_path / "lifecycle.db"
+    output_dir = tmp_path / "read_models"
+    with create_signal_db(signal_db), create_paper_db(paper_db), create_lifecycle_db(lifecycle_db):
+        report = run_pipeline_smoke(
+            signal_db=signal_db,
+            paper_db=paper_db,
+            lifecycle_db=lifecycle_db,
+            event_log_dir=tmp_path / "events",
+            output_dir=output_dir,
+            limit=1,
+            include_missed=False,
+            include_realtime_clean=True,
+        )
+
+    projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
+
+    assert report["health"]["status"] == "v27_pipeline_smoke_ok"
+    assert report["blocking_reasons"] == []
+    assert report["steps"]["realtime_clean"]["ok"] is True
+    assert projection["realtime_clean_detector_recorded_events"] == 1
+    assert projection["health"]["realtime_clean_detector_ok"] is True
+    assert projection["contract_evidence"]["RealtimeCleanDetector"]["realtime_clean_observed_count"] == 1
+    assert "RealtimeCleanDetector" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]

@@ -179,6 +179,7 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-standardized-stop-mirror.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-ex-ante-feasibility-mirror.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-earliest-actionable-mirror.log').exists, true);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-realtime-clean-mirror.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-read-model-refresh.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-event-log-recovery.log').exists, false);
 });
@@ -189,12 +190,14 @@ test('dashboard log resolver exposes v27 mirror sidecar logs', () => {
     V27_STANDARDIZED_STOP_MIRROR_LOG: '/tmp/standardized-stop.log',
     V27_EX_ANTE_FEASIBILITY_MIRROR_LOG: '/tmp/ex-ante.log',
     V27_EARLIEST_ACTIONABLE_MIRROR_LOG: '/tmp/earliest-actionable.log',
+    V27_REALTIME_CLEAN_MIRROR_LOG: '/tmp/realtime-clean.log',
   };
 
   assert.equal(resolveDashboardLogPath('/api/logs/v27-trade-outcome-mirror', env), '/tmp/trade-outcome.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-standardized-stop-mirror', env), '/tmp/standardized-stop.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-ex-ante-feasibility-mirror', env), '/tmp/ex-ante.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-earliest-actionable-mirror', env), '/tmp/earliest-actionable.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-realtime-clean-mirror', env), '/tmp/realtime-clean.log');
   assert.equal(resolveDashboardLogPath('/api/logs/not-registered', env), null);
 });
 

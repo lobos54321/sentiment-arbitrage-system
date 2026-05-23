@@ -204,6 +204,7 @@ function startShadowDataSidecars(config) {
   const v27StandardizedStopMirrorLog = process.env.V27_STANDARDIZED_STOP_MIRROR_LOG || './data/v27-standardized-stop-mirror.log';
   const v27ExAnteFeasibilityMirrorLog = process.env.V27_EX_ANTE_FEASIBILITY_MIRROR_LOG || './data/v27-ex-ante-feasibility-mirror.log';
   const v27EarliestActionableMirrorLog = process.env.V27_EARLIEST_ACTIONABLE_MIRROR_LOG || './data/v27-earliest-actionable-mirror.log';
+  const v27RealtimeCleanMirrorLog = process.env.V27_REALTIME_CLEAN_MIRROR_LOG || './data/v27-realtime-clean-mirror.log';
   const v27PaperDecisionMirrorLog = process.env.V27_PAPER_DECISION_MIRROR_LOG || './data/v27-paper-decision-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
@@ -457,6 +458,32 @@ function startShadowDataSidecars(config) {
         SENTIMENT_DB: signalDb,
         V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
         V27_EARLIEST_ACTIONABLE_POLICY_VERSION: process.env.V27_EARLIEST_ACTIONABLE_POLICY_VERSION || 'legacy_actual_paper_entry_actionable_time_v0.1',
+      },
+    }));
+  }
+  if (envFlag('V27_REALTIME_CLEAN_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-realtime-clean-mirror',
+      logPath: v27RealtimeCleanMirrorLog,
+      args: [
+        'scripts/v27_mirror_realtime_clean.py',
+        '--loop',
+        '--new-only',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_REALTIME_CLEAN_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_REALTIME_CLEAN_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_REALTIME_CLEAN_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_REALTIME_CLEAN_MIRROR_LOCK_FILE || '/tmp/v27_realtime_clean_mirror.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_REALTIME_CLEAN_STANDARD_VERSION: process.env.V27_REALTIME_CLEAN_STANDARD_VERSION || 'legacy_round_trip_quote_clean_v0.1',
+        V27_REALTIME_CLEAN_QUOTE_SOURCE: process.env.V27_REALTIME_CLEAN_QUOTE_SOURCE || 'paper_trade_round_trip_quote',
       },
     }));
   }

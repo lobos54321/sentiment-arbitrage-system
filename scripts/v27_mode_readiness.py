@@ -336,6 +336,13 @@ def build_contract_statuses(
         "earliest_actionable_missing_malformed_or_invariant_violation",
         earliest_actionable_evidence,
     )
+    realtime_clean_evidence = contract_evidence.get("RealtimeCleanDetector") or {}
+    statuses["RealtimeCleanDetector"] = _status(
+        "RealtimeCleanDetector",
+        "pass" if projection_built and projection_health.get("realtime_clean_detector_ok") else "missing_evidence",
+        "realtime_clean_missing_malformed_or_future_leakage",
+        realtime_clean_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

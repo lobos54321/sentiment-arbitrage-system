@@ -33,6 +33,7 @@ TRADE_OUTCOME_LABEL_EVENT_TYPE = "trade_outcome_label_recorded"
 STANDARDIZED_STOP_EVENT_TYPE = "standardized_stop_contract_recorded"
 EX_ANTE_FEASIBILITY_EVENT_TYPE = "ex_ante_feasibility_recorded"
 EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
+REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -43,6 +44,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     STANDARDIZED_STOP_EVENT_TYPE,
     EX_ANTE_FEASIBILITY_EVENT_TYPE,
     EARLIEST_ACTIONABLE_EVENT_TYPE,
+    REALTIME_CLEAN_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -579,6 +581,164 @@ def _extract_earliest_actionable_time_contract(event, bags):
     }
 
 
+def _extract_realtime_clean_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("clean_standard_version",),
+            ("realtime_clean_detector_version",),
+            ("realtime_clean_standard_version",),
+        ],
+    )
+    if event.get("event_type") != REALTIME_CLEAN_EVENT_TYPE and not version:
+        return None
+
+    clean_observation_type = _extract_scalar(
+        bags,
+        [
+            ("clean_observation_type",),
+            ("realtime_clean_observation_type",),
+            ("quote_clean_observation_type",),
+        ],
+    )
+    quote_source = _extract_scalar(
+        bags,
+        [
+            ("quote_source",),
+            ("realtime_clean_quote_source",),
+            ("entry_quote_source",),
+        ],
+        default=event.get("source"),
+    )
+    quote_age_sec = _as_float(
+        _extract_scalar(
+            bags,
+            [
+                ("quote_age_sec",),
+                ("realtime_quote_age_sec",),
+            ],
+        )
+    )
+    decision_available_at = _extract_scalar(
+        bags,
+        [
+            ("decision_available_at",),
+            ("quote_available_at",),
+            ("available_at",),
+        ],
+        default=event.get("available_at"),
+    )
+    entry_quote_available = _extract_flag(
+        bags,
+        [
+            ("entry_quote_available",),
+            ("entry_quote_clean_available",),
+        ],
+    )
+    exit_quote_available = _extract_flag(
+        bags,
+        [
+            ("exit_quote_available",),
+            ("exit_quote_clean_available",),
+        ],
+    )
+    entry_quote_available_at = _extract_scalar(
+        bags,
+        [
+            ("entry_quote_available_at",),
+            ("entry_quote_ts",),
+            ("entry_quote_time",),
+        ],
+    )
+    exit_quote_available_at = _extract_scalar(
+        bags,
+        [
+            ("exit_quote_available_at",),
+            ("exit_quote_ts",),
+            ("exit_quote_time",),
+        ],
+    )
+    missing_fields = []
+    if not version:
+        missing_fields.append("clean_standard_version")
+    if quote_age_sec is None:
+        missing_fields.append("quote_age_sec")
+    if entry_quote_available is None:
+        missing_fields.append("entry_quote_available")
+    if exit_quote_available is None:
+        missing_fields.append("exit_quote_available")
+    if not decision_available_at:
+        missing_fields.append("decision_available_at")
+    if not quote_source:
+        missing_fields.append("quote_source")
+    used_future_peak = _extract_flag(bags, [("used_future_peak",)]) is True
+    used_future_outcome = _extract_flag(bags, [("used_future_outcome",)]) is True
+    used_posthoc_label = _extract_flag(bags, [("used_posthoc_label",)]) is True
+    future_leakage_fields = []
+    for field, used in (
+        ("used_future_peak", used_future_peak),
+        ("used_future_outcome", used_future_outcome),
+        ("used_posthoc_label", used_posthoc_label),
+    ):
+        if used:
+            future_leakage_fields.append(field)
+    forbidden_future_fields_used = _extract_scalar(bags, [("forbidden_future_fields_used",)], default=[])
+    if forbidden_future_fields_used is None:
+        forbidden_future_fields_used = []
+    if not isinstance(forbidden_future_fields_used, list):
+        forbidden_future_fields_used = [forbidden_future_fields_used]
+    future_leakage_fields.extend(str(field) for field in forbidden_future_fields_used if field)
+    realtime_clean = (
+        clean_observation_type in {"TRADABLE_CLEAN_OBSERVED", "QUOTE_CLEAN_OBSERVED"}
+        and not missing_fields
+        and not future_leakage_fields
+        and entry_quote_available is True
+        and exit_quote_available is True
+    )
+    if clean_observation_type is None:
+        clean_observation_type = "TRADABLE_CLEAN_OBSERVED" if realtime_clean else "QUOTE_DIRTY_OBSERVED"
+    intent_size = _extract_scalar(bags, [("size",), ("position_size_sol",), ("entry_size",)])
+    if intent_size is not None:
+        intent_size = _as_float(intent_size)
+    quote_mint = _extract_scalar(
+        bags,
+        [
+            ("quote_mint",),
+            ("inputMint",),
+            ("quote_asset",),
+        ],
+        default="SOL",
+    )
+    return {
+        "realtime_clean_detector_version": str(version) if version else None,
+        "clean_standard_version": str(version) if version else None,
+        "clean_observation_type": clean_observation_type,
+        "quote_source": quote_source,
+        "quote_age_sec": quote_age_sec,
+        "decision_available_at": decision_available_at,
+        "entry_quote_available": entry_quote_available,
+        "exit_quote_available": exit_quote_available,
+        "entry_quote_available_at": entry_quote_available_at,
+        "exit_quote_available_at": exit_quote_available_at,
+        "quote_intent_id": _extract_scalar(bags, [("quote_intent_id",), ("paper_trade_id",), ("trade_id",), ("id",)]),
+        "side": _extract_scalar(bags, [("side",)], default="buy"),
+        "size": intent_size,
+        "route": _extract_scalar(bags, [("route",), ("signal_route",), ("entry_mode",)]),
+        "pool": _extract_scalar(bags, [("pool",), ("canonical_pool_group",), ("lifecycle_id",)]),
+        "quote_mint": quote_mint,
+        "slippage_bps": _extract_scalar(bags, [("slippage_bps",), ("entry_quote_slippage_bps",), ("exit_quote_slippage_bps",)]),
+        "used_future_peak": used_future_peak,
+        "used_future_outcome": used_future_outcome,
+        "used_posthoc_label": used_posthoc_label,
+        "forbidden_future_fields_used": forbidden_future_fields_used,
+        "missing_fields": sorted(set(missing_fields)),
+        "future_leakage_fields": sorted(set(future_leakage_fields)),
+        "realtime_clean": bool(realtime_clean),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -672,6 +832,7 @@ def _extract_decision_fact(event):
         "standardized_stop_contract": _extract_standardized_stop_contract(event, bags),
         "ex_ante_feasibility_contract": _extract_ex_ante_feasibility_contract(event, bags),
         "earliest_actionable_time_contract": _extract_earliest_actionable_time_contract(event, bags),
+        "realtime_clean_contract": _extract_realtime_clean_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -712,6 +873,7 @@ def _new_record(fact):
         "standardized_stop_candidates": [],
         "ex_ante_feasibility_candidates": [],
         "earliest_actionable_time_candidates": [],
+        "realtime_clean_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -721,6 +883,7 @@ def _new_record(fact):
         "standardized_stop_contract": None,
         "ex_ante_feasibility_contract": None,
         "earliest_actionable_time": None,
+        "realtime_clean_contract": None,
         "captured": False,
     }
 
@@ -791,6 +954,9 @@ def _merge_fact(record, fact):
     earliest_actionable_time = fact.get("earliest_actionable_time_contract")
     if earliest_actionable_time:
         record["earliest_actionable_time_candidates"].append(earliest_actionable_time)
+    realtime_clean = fact.get("realtime_clean_contract")
+    if realtime_clean:
+        record["realtime_clean_candidates"].append(realtime_clean)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -934,6 +1100,21 @@ def _finalize_earliest_actionable_time(record):
     )
     record["earliest_actionable_time_candidates"] = candidates
     record["earliest_actionable_time"] = candidates[0] if candidates else None
+
+
+def _finalize_realtime_clean(record):
+    candidates = sorted(
+        record.get("realtime_clean_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["realtime_clean_candidates"] = candidates
+    if not candidates:
+        record["realtime_clean_contract"] = None
+        return
+    clean_candidates = [candidate for candidate in candidates if candidate.get("realtime_clean") is True]
+    selected = clean_candidates[0] if clean_candidates else candidates[0]
+    record["realtime_clean_contract"] = selected
+    record["realtime_clean"] = bool(selected and selected.get("realtime_clean") is True)
 
 
 def _record_missing_evidence(record):
@@ -1160,6 +1341,40 @@ def _contract_evidence_from_records(record_list):
                     "invariant_violations": sorted({field for item in violated for field in item.get("invariant_violations", [])}),
                 }
             )
+    realtime_clean_records = [
+        record
+        for record in record_list
+        if record.get("realtime_clean_candidates")
+    ]
+    malformed_realtime_clean = []
+    future_leakage_realtime_clean = []
+    for record in realtime_clean_records:
+        malformed = [
+            item
+            for item in record.get("realtime_clean_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_realtime_clean.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        leaky = [
+            item
+            for item in record.get("realtime_clean_candidates") or []
+            if item.get("future_leakage_fields")
+        ]
+        if leaky:
+            future_leakage_realtime_clean.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "future_leakage_count": len(leaky),
+                    "future_leakage_fields": sorted({field for item in leaky for field in item.get("future_leakage_fields", [])}),
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -1252,6 +1467,33 @@ def _contract_evidence_from_records(record_list):
             ),
             "earliest_actionable_projection_version": "v2.7.0.earliest_actionable_time.v1",
         },
+        "RealtimeCleanDetector": {
+            "eligible_realtime_clean_records": len(realtime_clean_records),
+            "realtime_clean_observation_count": sum(len(record.get("realtime_clean_candidates") or []) for record in realtime_clean_records),
+            "realtime_clean_observed_count": sum(1 for record in realtime_clean_records if record.get("realtime_clean") is True),
+            "dirty_observed_count": sum(1 for record in realtime_clean_records if record.get("realtime_clean") is False),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_realtime_clean),
+            "malformed_realtime_clean": malformed_realtime_clean,
+            "future_leakage_count": sum(item["future_leakage_count"] for item in future_leakage_realtime_clean),
+            "future_leakage_realtime_clean": future_leakage_realtime_clean,
+            "clean_standard_versions": sorted(
+                {
+                    item.get("clean_standard_version")
+                    for record in realtime_clean_records
+                    for item in record.get("realtime_clean_candidates") or []
+                    if item.get("clean_standard_version")
+                }
+            ),
+            "quote_sources": sorted(
+                {
+                    item.get("quote_source")
+                    for record in realtime_clean_records
+                    for item in record.get("realtime_clean_candidates") or []
+                    if item.get("quote_source")
+                }
+            ),
+            "realtime_clean_projection_version": "v2.7.0.realtime_clean.v1",
+        },
     }
 
 
@@ -1276,6 +1518,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "standardized_stop_contract_recorded_events": 0,
         "ex_ante_feasibility_recorded_events": 0,
         "earliest_actionable_time_recorded_events": 0,
+        "realtime_clean_detector_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -1303,6 +1546,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "StandardizedStopContract": {},
             "ExAnteFeasibility": {},
             "EarliestActionableTime": {},
+            "RealtimeCleanDetector": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -1316,6 +1560,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "standardized_stop_ok": False,
             "ex_ante_feasibility_ok": False,
             "earliest_actionable_time_ok": False,
+            "realtime_clean_detector_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -1362,6 +1607,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["ex_ante_feasibility_recorded_events"] += 1
         if event.get("event_type") == EARLIEST_ACTIONABLE_EVENT_TYPE:
             projection["earliest_actionable_time_recorded_events"] += 1
+        if event.get("event_type") == REALTIME_CLEAN_EVENT_TYPE:
+            projection["realtime_clean_detector_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -1400,6 +1647,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_standardized_stop(record)
         _finalize_ex_ante_feasibility(record)
         _finalize_earliest_actionable_time(record)
+        _finalize_realtime_clean(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -1500,6 +1748,12 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["EarliestActionableTime"]["actionable_before_peak_count"] > 0
         and contract_evidence["EarliestActionableTime"]["malformed_count"] == 0
         and contract_evidence["EarliestActionableTime"]["invariant_violation_count"] == 0
+    )
+    projection["health"]["realtime_clean_detector_ok"] = (
+        contract_evidence["RealtimeCleanDetector"]["eligible_realtime_clean_records"] > 0
+        and contract_evidence["RealtimeCleanDetector"]["realtime_clean_observed_count"] > 0
+        and contract_evidence["RealtimeCleanDetector"]["malformed_count"] == 0
+        and contract_evidence["RealtimeCleanDetector"]["future_leakage_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

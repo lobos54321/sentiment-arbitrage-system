@@ -49,6 +49,46 @@ def append_seed_events(event_log_dir):
     )
 
 
+def append_realtime_clean_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="realtime_clean_detector_recorded",
+        aggregate_id="realtime_clean:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="realtime_clean_detector:1:legacy_round_trip_quote_clean_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "quote_intent_id": 1,
+            "side": "buy",
+            "size": 1.0,
+            "route": "unit_route",
+            "pool": "unknown_pool",
+            "quote_mint": "SOL",
+            "slippage_bps": 25,
+            "quote_source": "paper_trade_round_trip_quote",
+            "quote_age_sec": 1.0,
+            "decision_available_at": 1_700_000_003,
+            "entry_quote_available": True,
+            "entry_quote_available_at": 1_700_000_002,
+            "entry_quote_price": 0.001,
+            "exit_quote_available": True,
+            "exit_quote_available_at": 1_700_000_004,
+            "exit_quote_price": 0.0012,
+            "clean_standard_version": "legacy_round_trip_quote_clean_v0.1",
+            "clean_observation_type": "TRADABLE_CLEAN_OBSERVED",
+            "realtime_clean": True,
+            "realtime_clean_detector_version": "legacy_round_trip_quote_clean_v0.1",
+            "used_future_peak": False,
+            "used_future_outcome": False,
+            "used_posthoc_label": False,
+            "forbidden_future_fields_used": [],
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
@@ -99,6 +139,30 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["health"]["observe_only_ready"] is True
     assert matrix["health"]["shadow_ready"] is True
     assert matrix["health"]["normal_tiny_ready"] is False
+
+
+def test_mode_readiness_consumes_realtime_clean_detector_evidence(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["RealtimeCleanDetector"]["status"] == "pass"
+    assert matrix["contract_statuses"]["RealtimeCleanDetector"]["evidence"]["realtime_clean_observed_count"] == 1
+    assert "RealtimeCleanDetector" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):

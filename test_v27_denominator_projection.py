@@ -130,6 +130,47 @@ def append_earliest_actionable(log, *, token_ca, paper_trade_id=1, pool="pool-a"
     )
 
 
+def append_realtime_clean(log, *, token_ca, paper_trade_id=1, pool="pool-a", clean=True, missing_version=False):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "quote_intent_id": paper_trade_id,
+        "side": "buy",
+        "size": 1.0,
+        "route": "unit_route",
+        "pool": pool,
+        "quote_mint": "SOL",
+        "slippage_bps": 25,
+        "quote_source": "paper_trade_round_trip_quote",
+        "quote_age_sec": 1.0 if clean else 0.0,
+        "decision_available_at": 1_700_000_003,
+        "entry_quote_available": True if clean else False,
+        "entry_quote_available_at": 1_700_000_002,
+        "entry_quote_price": 0.001,
+        "exit_quote_available": True if clean else False,
+        "exit_quote_available_at": 1_700_000_004,
+        "exit_quote_price": 0.0012,
+        "clean_standard_version": None if missing_version else "legacy_round_trip_quote_clean_v0.1",
+        "clean_observation_type": "TRADABLE_CLEAN_OBSERVED" if clean else "QUOTE_DIRTY_OBSERVED",
+        "realtime_clean": clean,
+        "realtime_clean_detector_version": None if missing_version else "legacy_round_trip_quote_clean_v0.1",
+        "used_future_peak": False,
+        "used_future_outcome": False,
+        "used_posthoc_label": False,
+        "forbidden_future_fields_used": [],
+    }
+    return log.append_event(
+        event_type="realtime_clean_detector_recorded",
+        aggregate_id=f"realtime_clean:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"realtime_clean_detector:{paper_trade_id}:legacy_round_trip_quote_clean_v0.1",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -168,6 +209,28 @@ def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(
     token_a = [record for record in projection["records"] if record["token_ca"] == "TokenA"][0]
     assert token_a["merged_decision_event_ids"] == [1, 2]
     assert token_a["denominator_membership"]["D3b_policy_actionable_gold_silver"] is True
+
+
+def test_denominator_projection_consumes_realtime_clean_detector_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenClean", captured=True, **flags)
+    append_realtime_clean(log, token_ca="TokenClean")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    evidence = projection["contract_evidence"]["RealtimeCleanDetector"]
+
+    assert projection["realtime_clean_detector_recorded_events"] == 1
+    assert projection["health"]["realtime_clean_detector_ok"] is True
+    assert evidence["eligible_realtime_clean_records"] == 1
+    assert evidence["realtime_clean_observed_count"] == 1
+    assert evidence["dirty_observed_count"] == 0
+    assert evidence["malformed_count"] == 0
+    assert evidence["future_leakage_count"] == 0
+    assert evidence["clean_standard_versions"] == ["legacy_round_trip_quote_clean_v0.1"]
+    assert projection["metrics"]["telegram_realtime_clean_gold_silver_D2"] == 1
+    assert projection["records"][0]["realtime_clean_contract"]["clean_observation_type"] == "TRADABLE_CLEAN_OBSERVED"
 
 
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):
