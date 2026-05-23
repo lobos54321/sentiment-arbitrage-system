@@ -1798,22 +1798,33 @@ def _contract_evidence_from_records(record_list):
                 }
             )
 
-    lifecycle_actions = {}
+    idempotent_actions = {}
     duplicate_action_conflicts = []
     for item in all_idempotency_candidates:
-        key = (item.get("environment_id"), item.get("namespace"), item.get("token_lifecycle_key"), item.get("action"))
+        key = (item.get("environment_id"), item.get("namespace"), item.get("decision_id"), item.get("action"))
         if not all(key):
             continue
-        existing = lifecycle_actions.setdefault(key, item.get("execution_id"))
-        if existing != item.get("execution_id"):
+        existing = idempotent_actions.setdefault(
+            key,
+            {
+                "execution_id": item.get("execution_id"),
+                "idempotency_key": item.get("idempotency_key"),
+                "token_lifecycle_key": item.get("token_lifecycle_key"),
+            },
+        )
+        if existing.get("execution_id") != item.get("execution_id"):
             duplicate_action_conflicts.append(
                 {
                     "environment_id": item.get("environment_id"),
                     "namespace": item.get("namespace"),
+                    "decision_id": item.get("decision_id"),
                     "token_lifecycle_key": item.get("token_lifecycle_key"),
+                    "existing_token_lifecycle_key": existing.get("token_lifecycle_key"),
                     "action": item.get("action"),
-                    "existing_execution_id": existing,
+                    "existing_execution_id": existing.get("execution_id"),
                     "incoming_execution_id": item.get("execution_id"),
+                    "existing_idempotency_key": existing.get("idempotency_key"),
+                    "incoming_idempotency_key": item.get("idempotency_key"),
                     "source_event_id": item.get("source_event_id"),
                 }
             )
@@ -2094,6 +2105,7 @@ def _contract_evidence_from_records(record_list):
             "malformed_idempotency": malformed_idempotency,
             "idempotency_collision_count": len(idempotency_collisions),
             "idempotency_collisions": idempotency_collisions,
+            "duplicate_action_conflict_key": "environment_id:namespace:decision_id:action",
             "duplicate_action_conflict_count": len(duplicate_action_conflicts),
             "duplicate_action_conflicts": duplicate_action_conflicts,
             "contract_versions": sorted(

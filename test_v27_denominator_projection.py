@@ -211,8 +211,25 @@ def append_quote_intent_binding(log, *, token_ca, paper_trade_id=1, pool="pool-a
     )
 
 
-def append_idempotency_contract(log, *, token_ca, paper_trade_id=1, pool="pool-a", namespace="paper_entry_execution", environment_id="unit"):
-    key_material_hash = f"intent-{paper_trade_id}"
+def append_idempotency_contract(
+    log,
+    *,
+    token_ca,
+    paper_trade_id=1,
+    pool="pool-a",
+    namespace="paper_entry_execution",
+    environment_id="unit",
+    decision_id=None,
+    execution_id=None,
+    idempotency_key=None,
+    intent_hash=None,
+    token_lifecycle_key=None,
+):
+    key_material_hash = intent_hash or f"intent-{paper_trade_id}"
+    decision_id = decision_id or f"paper_trade:{paper_trade_id}:entry_decision"
+    execution_id = execution_id or f"paper_trade:{paper_trade_id}:entry_execution"
+    idempotency_key = idempotency_key or f"{environment_id}:{namespace}:{key_material_hash}"
+    token_lifecycle_key = token_lifecycle_key or f"solana:{token_ca}:{pool}:0:{paper_trade_id}"
     payload = {
         "paper_trade_id": paper_trade_id,
         "token_ca": token_ca,
@@ -221,10 +238,10 @@ def append_idempotency_contract(log, *, token_ca, paper_trade_id=1, pool="pool-a
         "canonical_pool_group": pool,
         "lifecycle_epoch": 0,
         "idempotency_contract_version": "legacy_paper_entry_idempotency_v0.1",
-        "decision_id": f"paper_trade:{paper_trade_id}:entry_decision",
-        "execution_id": f"paper_trade:{paper_trade_id}:entry_execution",
-        "idempotency_key": f"{environment_id}:{namespace}:{key_material_hash}",
-        "token_lifecycle_key": f"solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        "decision_id": decision_id,
+        "execution_id": execution_id,
+        "idempotency_key": idempotency_key,
+        "token_lifecycle_key": token_lifecycle_key,
         "action": "paper_entry",
         "namespace": namespace,
         "environment_id": environment_id,
@@ -396,6 +413,68 @@ def test_denominator_projection_consumes_idempotency_contracts(tmp_path):
     assert namespace["namespace_policy_violation_count"] == 0
     assert namespace["namespaces"] == ["paper_entry_execution"]
     assert projection["records"][0]["idempotency_contract"]["action"] == "paper_entry"
+
+
+def test_idempotency_allows_distinct_decisions_on_same_lifecycle_action(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenMultiEntry", captured=True, **flags)
+    lifecycle_key = "solana:TokenMultiEntry:pool-a:0:premium-signal-1"
+    append_idempotency_contract(
+        log,
+        token_ca="TokenMultiEntry",
+        paper_trade_id=1,
+        token_lifecycle_key=lifecycle_key,
+    )
+    append_idempotency_contract(
+        log,
+        token_ca="TokenMultiEntry",
+        paper_trade_id=2,
+        token_lifecycle_key=lifecycle_key,
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    idempotency = projection["contract_evidence"]["IdempotencyContract"]
+
+    assert projection["health"]["idempotency_contract_ok"] is True
+    assert idempotency["idempotency_observation_count"] == 2
+    assert idempotency["duplicate_action_conflict_key"] == "environment_id:namespace:decision_id:action"
+    assert idempotency["duplicate_action_conflict_count"] == 0
+
+
+def test_idempotency_rejects_same_decision_action_with_multiple_executions(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenDuplicateDecision", captured=True, **flags)
+    decision_id = "paper_trade:shared:entry_decision"
+    lifecycle_key = "solana:TokenDuplicateDecision:pool-a:0:premium-signal-1"
+    append_idempotency_contract(
+        log,
+        token_ca="TokenDuplicateDecision",
+        paper_trade_id=1,
+        decision_id=decision_id,
+        execution_id="paper_trade:1:entry_execution",
+        token_lifecycle_key=lifecycle_key,
+    )
+    append_idempotency_contract(
+        log,
+        token_ca="TokenDuplicateDecision",
+        paper_trade_id=2,
+        decision_id=decision_id,
+        execution_id="paper_trade:2:entry_execution",
+        token_lifecycle_key=lifecycle_key,
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    idempotency = projection["contract_evidence"]["IdempotencyContract"]
+
+    assert projection["health"]["idempotency_contract_ok"] is False
+    assert idempotency["duplicate_action_conflict_count"] == 1
+    assert idempotency["duplicate_action_conflicts"][0]["decision_id"] == decision_id
+    assert idempotency["duplicate_action_conflicts"][0]["existing_execution_id"] == "paper_trade:1:entry_execution"
+    assert idempotency["duplicate_action_conflicts"][0]["incoming_execution_id"] == "paper_trade:2:entry_execution"
 
 
 def test_denominator_projection_consumes_execution_control_contracts(tmp_path):
