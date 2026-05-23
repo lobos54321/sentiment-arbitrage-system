@@ -413,6 +413,27 @@ def build_contract_statuses(
         "capital_reservation_policy_missing_malformed_or_violated",
         reservation_evidence,
     )
+    no_fill_evidence = contract_evidence.get("NoFillOutcome") or {}
+    statuses["NoFillOutcome"] = _status(
+        "NoFillOutcome",
+        "pass" if projection_built and projection_health.get("no_fill_outcome_ok") else "missing_evidence",
+        "no_fill_outcome_missing_malformed_or_invalid",
+        no_fill_evidence,
+    )
+    recovery_evidence = contract_evidence.get("CrashRecoveryStateMachine") or {}
+    statuses["CrashRecoveryStateMachine"] = _status(
+        "CrashRecoveryStateMachine",
+        "pass" if projection_built and projection_health.get("crash_recovery_state_machine_ok") else "missing_evidence",
+        "crash_recovery_missing_malformed_or_invalid",
+        recovery_evidence,
+    )
+    resume_drain_evidence = contract_evidence.get("ResumeDrainPolicy") or {}
+    statuses["ResumeDrainPolicy"] = _status(
+        "ResumeDrainPolicy",
+        "pass" if projection_built and projection_health.get("resume_drain_policy_ok") else "missing_evidence",
+        "resume_drain_missing_malformed_or_invalid",
+        resume_drain_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",
@@ -453,9 +474,6 @@ def build_contract_statuses(
         "PaperCapitalLedgerContract",
         "DoubleEntryLedgerInvariantContract",
         "CapitalReservationPolicy",
-        "NoFillOutcome",
-        "CrashRecoveryStateMachine",
-        "ResumeDrainPolicy",
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "RandomnessControlContract",

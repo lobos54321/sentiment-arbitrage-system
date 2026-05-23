@@ -379,6 +379,76 @@ def append_paper_ledger(log, *, token_ca, paper_trade_id=1, pool="pool-a", envir
     )
 
 
+def append_no_fill_outcome(log, *, token_ca, paper_trade_id=1, pool="pool-a", environment_id="unit", outcome_state="filled_paper"):
+    required = outcome_state in {"no_fill", "skipped", "rejected", "failed", "cancelled"}
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "recovery_control_version": "legacy_paper_recovery_control_v0.1",
+        "no_fill_outcome_version": "legacy_paper_recovery_control_v0.1",
+        "attempt_id": f"paper_trade:{paper_trade_id}:attempt",
+        "decision_id": f"paper_trade:{paper_trade_id}:entry_decision",
+        "execution_id": f"paper_trade:{paper_trade_id}:entry_execution",
+        "token_lifecycle_key": f"solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        "environment_id": environment_id,
+        "route": "unit_route",
+        "outcome_state": outcome_state,
+        "terminal_state": True,
+        "no_fill_record_required": required,
+        "no_fill_reason": "quote_unavailable" if required else "none_filled_paper",
+        "missed_net_peak30": 0.42 if required else 0.0,
+        "missed_net_peak30_source": "unit_peak",
+        "no_fill_cost": 0.42 if required else 0.0,
+        "no_fill_saved_loss": 0.11 if required else 0.0,
+        "no_fill_cost_model": "unit_no_fill_cost_model",
+        "outcome_source": "unit",
+        "outcome_available_at": "2026-01-15T00:00:02Z",
+    }
+    return log.append_event(
+        event_type="no_fill_outcome_recorded",
+        aggregate_id=f"no_fill_outcome:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"no_fill_outcome:{environment_id}:{paper_trade_id}:legacy_paper_recovery_control_v0.1",
+        payload=payload,
+    )
+
+
+def append_runtime_recovery_control(log, *, environment_id="unit", state="clean_start"):
+    payload = {
+        "recovery_control_version": "legacy_paper_recovery_control_v0.1",
+        "recovery_id": f"recovery:{environment_id}:unit",
+        "state": state,
+        "environment_id": environment_id,
+        "orphan_scan_result": {
+            "status": "ok",
+            "event_log_ok": True,
+            "orphaned_execution_count": 0,
+            "non_terminal_execution_count": 0,
+        },
+        "reconcile_result": {
+            "status": "ok",
+            "event_log_ok": True,
+            "malformed_no_fill_count": 0,
+        },
+        "drain_id": f"drain:{environment_id}:unit",
+        "queued_candidates_revalidated": 1,
+        "expired_candidates_emitted": 0,
+        "resume_drain_completed_at": "2026-01-15T00:00:03Z",
+        "drain_status": "completed",
+        "new_entries_blocked_until_drain": True,
+        "resume_allowed": True,
+    }
+    return log.append_event(
+        event_type="runtime_recovery_control_recorded",
+        aggregate_id=f"runtime_recovery:{environment_id}",
+        idempotency_key=f"runtime_recovery_control:{environment_id}:legacy_paper_recovery_control_v0.1",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -616,6 +686,35 @@ def test_denominator_projection_consumes_paper_ledger_contracts(tmp_path):
     assert reservation["eligible_reservation_records"] == 1
     assert reservation["reservation_policy_violation_count"] == 0
     assert projection["records"][0]["paper_ledger_contract"]["position_status"] == "closed"
+
+
+def test_denominator_projection_consumes_no_fill_and_recovery_controls(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenRecovery", captured=True, **flags)
+    append_execution_control(log, token_ca="TokenRecovery")
+    append_no_fill_outcome(log, token_ca="TokenRecovery", outcome_state="no_fill")
+    append_runtime_recovery_control(log)
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    no_fill = projection["contract_evidence"]["NoFillOutcome"]
+    recovery = projection["contract_evidence"]["CrashRecoveryStateMachine"]
+    resume = projection["contract_evidence"]["ResumeDrainPolicy"]
+
+    assert projection["no_fill_outcome_recorded_events"] == 1
+    assert projection["runtime_recovery_control_recorded_events"] == 1
+    assert projection["health"]["no_fill_outcome_ok"] is True
+    assert projection["health"]["crash_recovery_state_machine_ok"] is True
+    assert projection["health"]["resume_drain_policy_ok"] is True
+    assert no_fill["eligible_no_fill_records"] == 1
+    assert no_fill["no_fill_terminal_count"] == 1
+    assert no_fill["no_fill_outcome_violation_count"] == 0
+    assert recovery["eligible_recovery_records"] == 1
+    assert recovery["recovery_violation_count"] == 0
+    assert resume["eligible_resume_drain_records"] == 1
+    assert resume["resume_drain_violation_count"] == 0
+    assert projection["records"][0]["no_fill_outcome"]["no_fill_reason"] == "quote_unavailable"
 
 
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):

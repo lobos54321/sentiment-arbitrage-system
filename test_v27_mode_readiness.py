@@ -272,6 +272,73 @@ def append_paper_ledger_event(event_log_dir):
     )
 
 
+def append_no_fill_outcome_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="no_fill_outcome_recorded",
+        aggregate_id="no_fill_outcome:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="no_fill_outcome:unit:1:legacy_paper_recovery_control_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "recovery_control_version": "legacy_paper_recovery_control_v0.1",
+            "no_fill_outcome_version": "legacy_paper_recovery_control_v0.1",
+            "attempt_id": "paper_trade:1:attempt",
+            "decision_id": "paper_trade:1:entry_decision",
+            "execution_id": "paper_trade:1:entry_execution",
+            "token_lifecycle_key": "solana:TokenReady:unknown_pool:0:1",
+            "environment_id": "unit",
+            "route": "unit_route",
+            "outcome_state": "filled_paper",
+            "terminal_state": True,
+            "no_fill_record_required": False,
+            "no_fill_reason": "none_filled_paper",
+            "missed_net_peak30": 0.0,
+            "missed_net_peak30_source": "not_applicable_filled_paper",
+            "no_fill_cost": 0.0,
+            "no_fill_saved_loss": 0.0,
+            "no_fill_cost_model": "unit_no_fill_cost_model",
+            "outcome_source": "unit",
+            "outcome_available_at": "2026-01-15T00:00:02Z",
+        },
+    )
+
+
+def append_runtime_recovery_control_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="runtime_recovery_control_recorded",
+        aggregate_id="runtime_recovery:unit",
+        idempotency_key="runtime_recovery_control:unit:legacy_paper_recovery_control_v0.1",
+        payload={
+            "recovery_control_version": "legacy_paper_recovery_control_v0.1",
+            "recovery_id": "recovery:unit:ready",
+            "state": "clean_start",
+            "environment_id": "unit",
+            "orphan_scan_result": {
+                "status": "ok",
+                "event_log_ok": True,
+                "orphaned_execution_count": 0,
+                "non_terminal_execution_count": 0,
+            },
+            "reconcile_result": {
+                "status": "ok",
+                "event_log_ok": True,
+                "malformed_no_fill_count": 0,
+            },
+            "drain_id": "drain:unit:ready",
+            "queued_candidates_revalidated": 1,
+            "expired_candidates_emitted": 0,
+            "resume_drain_completed_at": "2026-01-15T00:00:03Z",
+            "drain_status": "completed",
+            "new_entries_blocked_until_drain": True,
+            "resume_allowed": True,
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
@@ -469,6 +536,40 @@ def test_mode_readiness_consumes_paper_ledger_evidence(tmp_path):
         assert matrix["contract_statuses"][contract_id]["status"] == "pass"
         assert contract_id not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "NoFillOutcome" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_no_fill_and_recovery_controls(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_idempotency_contract_event(event_log_dir)
+    append_execution_control_event(event_log_dir)
+    append_paper_ledger_event(event_log_dir)
+    append_no_fill_outcome_event(event_log_dir)
+    append_runtime_recovery_control_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "NoFillOutcome",
+        "CrashRecoveryStateMachine",
+        "ResumeDrainPolicy",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):

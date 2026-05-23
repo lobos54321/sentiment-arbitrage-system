@@ -209,6 +209,7 @@ function startShadowDataSidecars(config) {
   const v27IdempotencyContractMirrorLog = process.env.V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG || './data/v27-idempotency-contract-mirror.log';
   const v27ExecutionControlMirrorLog = process.env.V27_EXECUTION_CONTROL_MIRROR_LOG || './data/v27-execution-control-mirror.log';
   const v27PaperLedgerMirrorLog = process.env.V27_PAPER_LEDGER_MIRROR_LOG || './data/v27-paper-ledger-mirror.log';
+  const v27RecoveryControlMirrorLog = process.env.V27_RECOVERY_CONTROL_MIRROR_LOG || './data/v27-recovery-control-mirror.log';
   const v27PaperDecisionMirrorLog = process.env.V27_PAPER_DECISION_MIRROR_LOG || './data/v27-paper-decision-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
@@ -602,6 +603,33 @@ function startShadowDataSidecars(config) {
         V27_PAPER_LEDGER_CAPITAL_BASIS_SOL: process.env.V27_PAPER_LEDGER_CAPITAL_BASIS_SOL || '100',
         V27_PAPER_LEDGER_DEFAULT_POSITION_SIZE_SOL: process.env.V27_PAPER_LEDGER_DEFAULT_POSITION_SIZE_SOL || '0.06',
         V27_PAPER_LEDGER_RESERVATION_TTL_SEC: process.env.V27_PAPER_LEDGER_RESERVATION_TTL_SEC || '20',
+      },
+    }));
+  }
+  if (envFlag('V27_RECOVERY_CONTROL_MIRROR_WORKER_ENABLED', false)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-recovery-control-mirror',
+      logPath: v27RecoveryControlMirrorLog,
+      args: [
+        'scripts/v27_mirror_recovery_controls.py',
+        '--loop',
+        '--new-only',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_RECOVERY_CONTROL_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_RECOVERY_CONTROL_MIRROR_LIMIT || '100',
+        '--missed-limit', process.env.V27_RECOVERY_CONTROL_MISSED_LIMIT || process.env.V27_RECOVERY_CONTROL_MIRROR_LIMIT || '100',
+        '--initial-delay', process.env.V27_RECOVERY_CONTROL_MIRROR_INITIAL_DELAY_SEC || '60',
+        '--lock-file', process.env.V27_RECOVERY_CONTROL_MIRROR_LOCK_FILE || '/tmp/v27_recovery_control_mirror.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_ENVIRONMENT_ID: process.env.V27_ENVIRONMENT_ID || process.env.NODE_ENV || 'production',
+        V27_RECOVERY_CONTROL_VERSION: process.env.V27_RECOVERY_CONTROL_VERSION || 'legacy_paper_recovery_control_v0.1',
       },
     }));
   }

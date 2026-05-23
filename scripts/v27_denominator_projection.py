@@ -38,6 +38,8 @@ QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
+NO_FILL_OUTCOME_EVENT_TYPE = "no_fill_outcome_recorded"
+RUNTIME_RECOVERY_EVENT_TYPE = "runtime_recovery_control_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -53,6 +55,8 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     IDEMPOTENCY_EVENT_TYPE,
     EXECUTION_CONTROL_EVENT_TYPE,
     PAPER_LEDGER_EVENT_TYPE,
+    NO_FILL_OUTCOME_EVENT_TYPE,
+    RUNTIME_RECOVERY_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1114,6 +1118,158 @@ def _extract_paper_ledger_contract(event, bags):
     }
 
 
+def _extract_no_fill_outcome_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("no_fill_outcome_version",),
+            ("recovery_control_version",),
+        ],
+    )
+    if event.get("event_type") != NO_FILL_OUTCOME_EVENT_TYPE and not version:
+        return None
+    values = {
+        "no_fill_outcome_version": str(version) if version else None,
+        "attempt_id": _extract_scalar(bags, [("attempt_id",)]),
+        "decision_id": _extract_scalar(bags, [("decision_id",)]),
+        "execution_id": _extract_scalar(bags, [("execution_id",)]),
+        "token_lifecycle_key": _extract_scalar(bags, [("token_lifecycle_key",)]),
+        "outcome_state": _extract_scalar(bags, [("outcome_state",), ("state",)]),
+        "terminal_state": _extract_flag(bags, [("terminal_state",)]),
+        "no_fill_record_required": _extract_flag(bags, [("no_fill_record_required",)]),
+        "no_fill_reason": _extract_scalar(bags, [("no_fill_reason",)]),
+        "missed_net_peak30": _as_float(_extract_scalar(bags, [("missed_net_peak30",)])),
+        "missed_net_peak30_source": _extract_scalar(bags, [("missed_net_peak30_source",)]),
+        "no_fill_cost": _as_float(_extract_scalar(bags, [("no_fill_cost",)])),
+        "no_fill_saved_loss": _as_float(_extract_scalar(bags, [("no_fill_saved_loss",)])),
+        "no_fill_cost_model": _extract_scalar(bags, [("no_fill_cost_model",)]),
+        "no_fill_outcome_hash": _extract_scalar(bags, [("no_fill_outcome_hash",)]),
+        "outcome_source": _extract_scalar(bags, [("outcome_source",)], default=event.get("source")),
+        "outcome_available_at": _extract_scalar(bags, [("outcome_available_at",)], default=event.get("available_at")),
+    }
+    required_fields = ["no_fill_reason", "missed_net_peak30", "no_fill_cost", "no_fill_saved_loss"]
+    missing_fields = []
+    for field in required_fields:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not version:
+        missing_fields.append("no_fill_outcome_version")
+    if not values.get("attempt_id"):
+        missing_fields.append("attempt_id")
+    if not values.get("outcome_state"):
+        missing_fields.append("outcome_state")
+    if values.get("terminal_state") is None:
+        missing_fields.append("terminal_state")
+    invalid_numeric_fields = [
+        field
+        for field in ("no_fill_cost", "no_fill_saved_loss")
+        if values.get(field) is not None and (not math.isfinite(values.get(field)) or values.get(field) < 0)
+    ]
+    if values.get("missed_net_peak30") is not None and not math.isfinite(values.get("missed_net_peak30")):
+        invalid_numeric_fields.append("missed_net_peak30")
+    if values.get("no_fill_record_required") is True and str(values.get("outcome_state") or "").lower() not in {"no_fill", "skipped", "rejected", "failed", "cancelled"}:
+        invalid_numeric_fields.append("no_fill_record_required_state_mismatch")
+    terminal_states = {"filled_paper", "rejected", "failed", "cancelled", "no_fill", "skipped"}
+    terminal_outcome_ok = bool(
+        values.get("terminal_state") is True
+        and str(values.get("outcome_state") or "").lower() in terminal_states
+        and not missing_fields
+        and not invalid_numeric_fields
+    )
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "invalid_numeric_fields": sorted(set(invalid_numeric_fields)),
+        "terminal_outcome_ok": terminal_outcome_ok,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _dict_status_ok(value):
+    if isinstance(value, dict):
+        status = str(value.get("status") or "").strip().lower()
+        if status and status not in {"ok", "clean", "completed", "recovered"}:
+            return False
+        for field in ("event_log_ok", "resume_allowed"):
+            if field in value and value.get(field) is not True:
+                return False
+        for field in ("orphaned_execution_count", "non_terminal_execution_count", "malformed_no_fill_count"):
+            if field in value and _as_int(value.get(field), default=0) != 0:
+                return False
+        return True
+    status = str(value or "").strip().lower()
+    return status in {"ok", "clean", "completed", "recovered"}
+
+
+def _extract_runtime_recovery_control(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("recovery_control_version",),
+            ("recovery_version",),
+        ],
+    )
+    if event.get("event_type") != RUNTIME_RECOVERY_EVENT_TYPE and not version:
+        return None
+    values = {
+        "recovery_control_version": str(version) if version else None,
+        "recovery_id": _extract_scalar(bags, [("recovery_id",)]),
+        "state": _extract_scalar(bags, [("state",)]),
+        "orphan_scan_result": _extract_scalar(bags, [("orphan_scan_result",)]),
+        "reconcile_result": _extract_scalar(bags, [("reconcile_result",)]),
+        "drain_id": _extract_scalar(bags, [("drain_id",)]),
+        "queued_candidates_revalidated": _as_int(_extract_scalar(bags, [("queued_candidates_revalidated",)]), default=None),
+        "expired_candidates_emitted": _as_int(_extract_scalar(bags, [("expired_candidates_emitted",)]), default=None),
+        "resume_drain_completed_at": _extract_scalar(bags, [("resume_drain_completed_at",)]),
+        "drain_status": _extract_scalar(bags, [("drain_status",)]),
+        "new_entries_blocked_until_drain": _extract_flag(bags, [("new_entries_blocked_until_drain",)]),
+        "resume_allowed": _extract_flag(bags, [("resume_allowed",)]),
+        "source_cursor": _extract_scalar(bags, [("source_cursor",)], default={}),
+    }
+    recovery_required = ["recovery_id", "state", "orphan_scan_result", "reconcile_result"]
+    drain_required = ["drain_id", "queued_candidates_revalidated", "expired_candidates_emitted", "resume_drain_completed_at"]
+    missing_recovery_fields = []
+    for field in recovery_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_recovery_fields.append(field)
+    missing_drain_fields = []
+    for field in drain_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_drain_fields.append(field)
+    if not version:
+        missing_recovery_fields.append("recovery_control_version")
+    recovery_state_ok = str(values.get("state") or "").lower() in {"clean_start", "recovered", "drained_clean"}
+    orphan_scan_ok = _dict_status_ok(values.get("orphan_scan_result"))
+    reconcile_ok = _dict_status_ok(values.get("reconcile_result"))
+    drain_counts_ok = (
+        values.get("queued_candidates_revalidated") is not None
+        and values.get("queued_candidates_revalidated") >= 0
+        and values.get("expired_candidates_emitted") is not None
+        and values.get("expired_candidates_emitted") >= 0
+    )
+    drain_completed_at_ok = _timestamp_epoch_seconds(values.get("resume_drain_completed_at")) is not None
+    drain_status_ok = str(values.get("drain_status") or "").lower() in {"completed", "clean", "ok"}
+    resume_allowed_ok = values.get("resume_allowed") is True
+    return {
+        **values,
+        "missing_recovery_fields": sorted(set(missing_recovery_fields)),
+        "missing_drain_fields": sorted(set(missing_drain_fields)),
+        "recovery_state_ok": recovery_state_ok,
+        "orphan_scan_ok": orphan_scan_ok,
+        "reconcile_ok": reconcile_ok,
+        "drain_counts_ok": drain_counts_ok,
+        "drain_completed_at_ok": drain_completed_at_ok,
+        "drain_status_ok": drain_status_ok,
+        "resume_allowed_ok": resume_allowed_ok,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -1212,6 +1368,7 @@ def _extract_decision_fact(event):
         "idempotency_contract": _extract_idempotency_contract(event, bags),
         "execution_control": _extract_execution_control(event, bags),
         "paper_ledger_contract": _extract_paper_ledger_contract(event, bags),
+        "no_fill_outcome_contract": _extract_no_fill_outcome_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -1257,6 +1414,7 @@ def _new_record(fact):
         "idempotency_contract_candidates": [],
         "execution_control_candidates": [],
         "paper_ledger_candidates": [],
+        "no_fill_outcome_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -1271,6 +1429,7 @@ def _new_record(fact):
         "idempotency_contract": None,
         "execution_control": None,
         "paper_ledger_contract": None,
+        "no_fill_outcome": None,
         "captured": False,
     }
 
@@ -1356,6 +1515,9 @@ def _merge_fact(record, fact):
     paper_ledger = fact.get("paper_ledger_contract")
     if paper_ledger:
         record["paper_ledger_candidates"].append(paper_ledger)
+    no_fill_outcome = fact.get("no_fill_outcome_contract")
+    if no_fill_outcome:
+        record["no_fill_outcome_candidates"].append(no_fill_outcome)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -1557,6 +1719,19 @@ def _finalize_paper_ledger(record):
     record["paper_ledger_contract"] = candidates[-1] if candidates else None
 
 
+def _finalize_no_fill_outcome(record):
+    candidates = sorted(
+        record.get("no_fill_outcome_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["no_fill_outcome_candidates"] = candidates
+    if not candidates:
+        record["no_fill_outcome"] = None
+        return
+    valid_candidates = [candidate for candidate in candidates if candidate.get("terminal_outcome_ok") is True]
+    record["no_fill_outcome"] = valid_candidates[-1] if valid_candidates else candidates[-1]
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -1602,6 +1777,8 @@ def _record_missing_evidence(record):
         missing.append("PaperCapitalLedgerContract")
         missing.append("DoubleEntryLedgerInvariantContract")
         missing.append("CapitalReservationPolicy")
+    if record.get("execution_control") and not record.get("no_fill_outcome"):
+        missing.append("NoFillOutcome")
     record["missing_evidence"] = missing
     return missing
 
@@ -1646,7 +1823,8 @@ def _metric_definitions(metrics, metrics_window):
     return definitions
 
 
-def _contract_evidence_from_records(record_list):
+def _contract_evidence_from_records(record_list, runtime_recovery_controls=None):
+    runtime_recovery_controls = runtime_recovery_controls or []
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -2203,6 +2381,74 @@ def _contract_evidence_from_records(record_list):
                     "source_event_ids": [item.get("source_event_id") for item in bad_reservation],
                 }
             )
+    no_fill_records = [
+        record
+        for record in record_list
+        if record.get("no_fill_outcome_candidates")
+    ]
+    all_no_fill_candidates = [
+        item
+        for record in no_fill_records
+        for item in record.get("no_fill_outcome_candidates") or []
+    ]
+    malformed_no_fill_outcomes = []
+    no_fill_outcome_violations = []
+    for record in no_fill_records:
+        malformed = [
+            item
+            for item in record.get("no_fill_outcome_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_no_fill_outcomes.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        bad_no_fill = [
+            item
+            for item in record.get("no_fill_outcome_candidates") or []
+            if item.get("terminal_outcome_ok") is not True or item.get("invalid_numeric_fields")
+        ]
+        if bad_no_fill:
+            no_fill_outcome_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_no_fill),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_no_fill],
+                    "invalid_numeric_fields": sorted({field for item in bad_no_fill for field in item.get("invalid_numeric_fields", [])}),
+                }
+            )
+
+    malformed_recovery_controls = [
+        item
+        for item in runtime_recovery_controls
+        if item.get("missing_recovery_fields")
+    ]
+    recovery_violations = [
+        item
+        for item in runtime_recovery_controls
+        if item.get("missing_recovery_fields")
+        or item.get("recovery_state_ok") is not True
+        or item.get("orphan_scan_ok") is not True
+        or item.get("reconcile_ok") is not True
+    ]
+    malformed_resume_drains = [
+        item
+        for item in runtime_recovery_controls
+        if item.get("missing_drain_fields")
+    ]
+    resume_drain_violations = [
+        item
+        for item in runtime_recovery_controls
+        if item.get("missing_drain_fields")
+        or item.get("drain_counts_ok") is not True
+        or item.get("drain_completed_at_ok") is not True
+        or item.get("drain_status_ok") is not True
+        or item.get("resume_allowed_ok") is not True
+    ]
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -2480,6 +2726,74 @@ def _contract_evidence_from_records(record_list):
             "reservation_statuses": sorted({item.get("reservation_status") for item in all_paper_ledger_candidates if item.get("reservation_status")}),
             "capital_reservation_projection_version": "v2.7.0.capital_reservation_policy.v1",
         },
+        "NoFillOutcome": {
+            "eligible_no_fill_records": len(no_fill_records),
+            "no_fill_outcome_observation_count": len(all_no_fill_candidates),
+            "terminal_outcome_count": sum(1 for item in all_no_fill_candidates if item.get("terminal_outcome_ok") is True),
+            "no_fill_terminal_count": sum(1 for item in all_no_fill_candidates if str(item.get("outcome_state") or "").lower() in {"no_fill", "skipped", "rejected", "failed", "cancelled"}),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_no_fill_outcomes),
+            "malformed_no_fill_outcomes": malformed_no_fill_outcomes,
+            "no_fill_outcome_violation_count": sum(item["violation_count"] for item in no_fill_outcome_violations),
+            "no_fill_outcome_violations": no_fill_outcome_violations,
+            "outcome_states": sorted({item.get("outcome_state") for item in all_no_fill_candidates if item.get("outcome_state")}),
+            "no_fill_reasons": sorted({item.get("no_fill_reason") for item in all_no_fill_candidates if item.get("no_fill_reason")}),
+            "no_fill_cost_models": sorted({item.get("no_fill_cost_model") for item in all_no_fill_candidates if item.get("no_fill_cost_model")}),
+            "no_fill_outcome_projection_version": "v2.7.0.no_fill_outcome.v1",
+        },
+        "CrashRecoveryStateMachine": {
+            "eligible_recovery_records": len(runtime_recovery_controls),
+            "recovery_observation_count": len(runtime_recovery_controls),
+            "malformed_count": len(malformed_recovery_controls),
+            "malformed_recovery_controls": [
+                {
+                    "recovery_id": item.get("recovery_id"),
+                    "missing_fields": item.get("missing_recovery_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_recovery_controls
+            ],
+            "recovery_violation_count": len(recovery_violations),
+            "recovery_violations": [
+                {
+                    "recovery_id": item.get("recovery_id"),
+                    "state": item.get("state"),
+                    "orphan_scan_ok": item.get("orphan_scan_ok"),
+                    "reconcile_ok": item.get("reconcile_ok"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in recovery_violations
+            ],
+            "recovery_states": sorted({item.get("state") for item in runtime_recovery_controls if item.get("state")}),
+            "recovery_control_versions": sorted({item.get("recovery_control_version") for item in runtime_recovery_controls if item.get("recovery_control_version")}),
+            "crash_recovery_projection_version": "v2.7.0.crash_recovery_state_machine.v1",
+        },
+        "ResumeDrainPolicy": {
+            "eligible_resume_drain_records": len(runtime_recovery_controls),
+            "resume_drain_observation_count": len(runtime_recovery_controls),
+            "malformed_count": len(malformed_resume_drains),
+            "malformed_resume_drains": [
+                {
+                    "drain_id": item.get("drain_id"),
+                    "missing_fields": item.get("missing_drain_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_resume_drains
+            ],
+            "resume_drain_violation_count": len(resume_drain_violations),
+            "resume_drain_violations": [
+                {
+                    "drain_id": item.get("drain_id"),
+                    "drain_status": item.get("drain_status"),
+                    "resume_allowed": item.get("resume_allowed"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in resume_drain_violations
+            ],
+            "queued_candidates_revalidated": sum(item.get("queued_candidates_revalidated") or 0 for item in runtime_recovery_controls),
+            "expired_candidates_emitted": sum(item.get("expired_candidates_emitted") or 0 for item in runtime_recovery_controls),
+            "drain_statuses": sorted({item.get("drain_status") for item in runtime_recovery_controls if item.get("drain_status")}),
+            "resume_drain_projection_version": "v2.7.0.resume_drain_policy.v1",
+        },
     }
 
 
@@ -2509,6 +2823,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "idempotency_contract_recorded_events": 0,
         "execution_control_recorded_events": 0,
         "paper_ledger_recorded_events": 0,
+        "no_fill_outcome_recorded_events": 0,
+        "runtime_recovery_control_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -2547,6 +2863,9 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "PaperCapitalLedgerContract": {},
             "DoubleEntryLedgerInvariantContract": {},
             "CapitalReservationPolicy": {},
+            "NoFillOutcome": {},
+            "CrashRecoveryStateMachine": {},
+            "ResumeDrainPolicy": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -2571,6 +2890,9 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "paper_capital_ledger_ok": False,
             "double_entry_ledger_invariant_ok": False,
             "capital_reservation_policy_ok": False,
+            "no_fill_outcome_ok": False,
+            "crash_recovery_state_machine_ok": False,
+            "resume_drain_policy_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -2587,6 +2909,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         return projection
 
     facts = []
+    runtime_recovery_controls = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -2627,6 +2950,14 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["execution_control_recorded_events"] += 1
         if event.get("event_type") == PAPER_LEDGER_EVENT_TYPE:
             projection["paper_ledger_recorded_events"] += 1
+        if event.get("event_type") == NO_FILL_OUTCOME_EVENT_TYPE:
+            projection["no_fill_outcome_recorded_events"] += 1
+        if event.get("event_type") == RUNTIME_RECOVERY_EVENT_TYPE:
+            projection["runtime_recovery_control_recorded_events"] += 1
+            recovery_control = _extract_runtime_recovery_control(event, _payload_bags(event))
+            if recovery_control:
+                runtime_recovery_controls.append(recovery_control)
+            continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -2670,6 +3001,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_idempotency_contract(record)
         _finalize_execution_control(record)
         _finalize_paper_ledger(record)
+        _finalize_no_fill_outcome(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -2719,7 +3051,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     projection["metrics_window"] = metrics_window
     projection["metric_definitions"] = _metric_definitions(metrics, metrics_window)
     projection["metric_definitions_hash"] = sha256_hex(projection["metric_definitions"])
-    contract_evidence = _contract_evidence_from_records(record_list)
+    contract_evidence = _contract_evidence_from_records(record_list, runtime_recovery_controls=runtime_recovery_controls)
     metrics_window_valid = bool(
         metrics_window.get("window_id")
         and metrics_window.get("window_start")
@@ -2830,6 +3162,22 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         contract_evidence["CapitalReservationPolicy"]["eligible_reservation_records"] > 0
         and contract_evidence["CapitalReservationPolicy"]["malformed_count"] == 0
         and contract_evidence["CapitalReservationPolicy"]["reservation_policy_violation_count"] == 0
+    )
+    projection["health"]["no_fill_outcome_ok"] = (
+        contract_evidence["NoFillOutcome"]["eligible_no_fill_records"] > 0
+        and contract_evidence["NoFillOutcome"]["terminal_outcome_count"] > 0
+        and contract_evidence["NoFillOutcome"]["malformed_count"] == 0
+        and contract_evidence["NoFillOutcome"]["no_fill_outcome_violation_count"] == 0
+    )
+    projection["health"]["crash_recovery_state_machine_ok"] = (
+        contract_evidence["CrashRecoveryStateMachine"]["eligible_recovery_records"] > 0
+        and contract_evidence["CrashRecoveryStateMachine"]["malformed_count"] == 0
+        and contract_evidence["CrashRecoveryStateMachine"]["recovery_violation_count"] == 0
+    )
+    projection["health"]["resume_drain_policy_ok"] = (
+        contract_evidence["ResumeDrainPolicy"]["eligible_resume_drain_records"] > 0
+        and contract_evidence["ResumeDrainPolicy"]["malformed_count"] == 0
+        and contract_evidence["ResumeDrainPolicy"]["resume_drain_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
