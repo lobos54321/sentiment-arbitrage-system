@@ -292,7 +292,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_TELEGRAM_SIGNAL_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_TELEGRAM_SIGNAL_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-telegram-signal-mirror',
       logPath: v27TelegramMirrorLog,
@@ -314,7 +314,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_SOURCE_LABEL_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_SOURCE_LABEL_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-source-label-mirror',
       logPath: v27SourceLabelMirrorLog,
@@ -336,7 +336,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_PAPER_TRADE_SOURCE_LABEL_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-paper-trade-source-label-mirror',
       logPath: v27PaperTradeSourceLabelMirrorLog,
@@ -361,7 +361,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_TRADE_OUTCOME_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_TRADE_OUTCOME_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-trade-outcome-mirror',
       logPath: v27TradeOutcomeMirrorLog,
@@ -385,7 +385,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_STANDARDIZED_STOP_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_STANDARDIZED_STOP_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-standardized-stop-mirror',
       logPath: v27StandardizedStopMirrorLog,
@@ -415,7 +415,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_EX_ANTE_FEASIBILITY_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_EX_ANTE_FEASIBILITY_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-ex-ante-feasibility-mirror',
       logPath: v27ExAnteFeasibilityMirrorLog,
@@ -440,7 +440,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_EARLIEST_ACTIONABLE_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_EARLIEST_ACTIONABLE_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-earliest-actionable-mirror',
       logPath: v27EarliestActionableMirrorLog,
@@ -465,7 +465,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_REALTIME_CLEAN_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_REALTIME_CLEAN_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-realtime-clean-mirror',
       logPath: v27RealtimeCleanMirrorLog,
@@ -491,7 +491,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_QUOTE_INTENT_BINDING_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_QUOTE_INTENT_BINDING_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-quote-intent-binding-mirror',
       logPath: v27QuoteIntentBindingMirrorLog,
@@ -519,7 +519,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_IDEMPOTENCY_CONTRACT_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_IDEMPOTENCY_CONTRACT_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-idempotency-contract-mirror',
       logPath: v27IdempotencyContractMirrorLog,
@@ -548,7 +548,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_EXECUTION_CONTROL_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_EXECUTION_CONTROL_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-execution-control-mirror',
       logPath: v27ExecutionControlMirrorLog,
@@ -605,7 +605,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_PAPER_DECISION_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_PAPER_DECISION_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-paper-decision-mirror',
       logPath: v27PaperDecisionMirrorLog,
@@ -628,7 +628,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_LIFECYCLE_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_LIFECYCLE_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-lifecycle-mirror',
       logPath: v27LifecycleMirrorLog,
