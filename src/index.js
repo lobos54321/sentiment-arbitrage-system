@@ -575,7 +575,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_PAPER_LEDGER_MIRROR_WORKER_ENABLED', true)) {
+  if (envFlag('V27_PAPER_LEDGER_MIRROR_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-paper-ledger-mirror',
       logPath: v27PaperLedgerMirrorLog,
@@ -649,7 +649,7 @@ function startShadowDataSidecars(config) {
       },
     }));
   }
-  if (envFlag('V27_READ_MODEL_REFRESH_WORKER_ENABLED', true)) {
+  if (envFlag('V27_READ_MODEL_REFRESH_WORKER_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'v27-read-model-refresh',
       logPath: v27ReadModelLog,
