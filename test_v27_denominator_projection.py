@@ -884,6 +884,144 @@ def test_denominator_projection_does_not_mix_trade_fill_with_source_reference_pr
     assert projection["records"][0]["trade_outcome_label"]["simulated_fill_price"] == 0.002
 
 
+def test_denominator_projection_does_not_mix_execution_contract_prices_with_source_reference_price(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="telegram_signal_seen",
+        aggregate_id="telegram_signal:solana:TokenExecutionRef:unknown_pool:0",
+        idempotency_key="premium_signals:execution-ref",
+        payload={
+            "telegram_signal_id": 1,
+            "token_ca": "TokenExecutionRef",
+            "symbol": "EXEC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "telegram_seen": True,
+            "realtime_observable": True,
+        },
+    )
+    log.append_event(
+        event_type="source_dog_label_recorded",
+        aggregate_id="source_label:solana:TokenExecutionRef:unknown_pool:0",
+        idempotency_key="source_label:execution-ref",
+        payload={
+            "source_label_id": 1,
+            "token_ca": "TokenExecutionRef",
+            "symbol": "EXEC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "source_dog_label": "gold",
+            "source_label_research_only": True,
+            "source_reference_price_type": "legacy_entry_price",
+            "source_reference_price": 0.001,
+            "source_label_available_at": "2026-01-15T00:00:00Z",
+        },
+    )
+    log.append_event(
+        event_type="standardized_stop_contract_recorded",
+        aggregate_id="standardized_stop:solana:TokenExecutionRef:unknown_pool:0:1",
+        idempotency_key="standardized_stop_contract:execution-ref",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenExecutionRef",
+            "symbol": "EXEC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "counterfactual_entry_ts": 1_700_000_003,
+            "simulated_fill_ts": 1_700_000_003,
+            "simulated_fill_price": 0.004,
+            "stop_contract_version": "legacy_standardized_stop_v0.1",
+            "stop_type": "standardized_counterfactual_stop",
+            "stop_threshold_pct": -0.3,
+            "stop_window": "5m",
+            "stop_price_type": "delayed_executable_exit_quote",
+            "stop_executable_required": True,
+            "stop_friction_model_version": "legacy_round_trip_friction_v0.1",
+            "stop_available_at": 1_700_000_003,
+        },
+    )
+    log.append_event(
+        event_type="ex_ante_feasibility_recorded",
+        aggregate_id="ex_ante_feasibility:solana:TokenExecutionRef:unknown_pool:0:1",
+        idempotency_key="ex_ante_feasibility:execution-ref",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenExecutionRef",
+            "symbol": "EXEC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "decision_ts": 1_700_000_002,
+            "decision_available_at": 1_700_000_002,
+            "counterfactual_entry_ts": 1_700_000_003,
+            "feasibility_policy_version": "legacy_actual_paper_entry_feasibility_v0.1",
+            "ex_ante_feasible": True,
+            "feasibility_class": "legacy_actual_paper_entry",
+            "entry_quote_available": True,
+            "entry_quote_available_at": 1_700_000_002,
+            "entry_quote_price": 0.004,
+            "current_quote_availability": True,
+            "current_pool_resolution": "unknown_pool",
+            "current_provider_health": "legacy_not_recorded",
+            "current_risk_availability": "legacy_not_recorded",
+            "current_queue_delay_sec": 0,
+            "feature_max_available_at": 1_700_000_002,
+            "used_future_peak": False,
+            "used_future_outcome": False,
+            "used_posthoc_label": False,
+            "forbidden_future_fields_used": [],
+        },
+    )
+    log.append_event(
+        event_type="earliest_actionable_time_recorded",
+        aggregate_id="earliest_actionable_time:solana:TokenExecutionRef:unknown_pool:0:1",
+        idempotency_key="earliest_actionable_time:execution-ref",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenExecutionRef",
+            "symbol": "EXEC",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "earliest_actionable_policy_version": "legacy_actual_paper_entry_actionable_time_v0.1",
+            "earliest_actionable_ts": 1_700_000_003,
+            "required_inputs_available_at": {
+                "telegram_anchor_available_at": 1_700_000_000,
+                "pool_resolved_available_at": 1_700_000_002,
+                "entry_quote_executable_available_at": 1_700_000_002,
+                "exit_quote_executable_available_at": 1_700_000_002,
+                "critical_risk_not_bad_available_at": 1_700_000_002,
+                "liquidity_ok_available_at": 1_700_000_002,
+                "decision_engine_available_at": 1_700_000_002,
+            },
+            "missing_inputs_before_ts": [],
+            "peak_ts": 1_700_000_120,
+            "peak_ts_quality": "legacy_outcome_window_close_proxy",
+            "counterfactual_entry_ts": 1_700_000_003,
+            "actionable_before_peak": True,
+            "earliest_actionable_reason": "legacy_actual_paper_entry_inputs_available_by_decision",
+            "actionability_quality": "legacy_actual_paper_entry_window_proof",
+            "entry_quote_price": 0.004,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    evidence = projection["contract_evidence"]["ReferencePriceContract"]
+    record = projection["records"][0]
+    assert evidence["missing_count"] == 0
+    assert evidence["conflict_count"] == 0
+    assert evidence["ignored_late_candidate_count"] == 0
+    assert evidence["compatible_alias_candidate_count"] == 0
+    assert len(record["reference_price_candidates"]) == 1
+    assert record["reference_price_contract"]["reference_price"] == 0.001
+    assert record["reference_price_contract"]["reference_price_source_event_id"].startswith("v27evt_")
+    assert projection["health"]["reference_price_ok"] is True
+
+
 def test_denominator_projection_does_not_treat_source_label_legacy_trade_as_trade_outcome(tmp_path):
     log = V27EventLog(tmp_path)
     log.append_event(

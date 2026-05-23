@@ -44,6 +44,12 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     EX_ANTE_FEASIBILITY_EVENT_TYPE,
     EARLIEST_ACTIONABLE_EVENT_TYPE,
 }
+SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
+    MIRRORED_DECISION_EVENT_TYPE,
+    MIRRORED_MISSED_EVENT_TYPE,
+    TELEGRAM_SIGNAL_EVENT_TYPE,
+    SOURCE_DOG_LABEL_EVENT_TYPE,
+}
 GOLD_SILVER_LABELS = {"gold", "silver"}
 DOG_LABELS = {"gold", "silver", "copper", "bronze", "sub25", "none", "unknown"}
 
@@ -270,7 +276,7 @@ def _denominator_key(fields):
 
 
 def _extract_reference_price_contract(event, bags):
-    if event.get("event_type") == TRADE_OUTCOME_LABEL_EVENT_TYPE:
+    if event.get("event_type") not in SOURCE_REFERENCE_PRICE_EVENT_TYPES:
         return None
     explicit_price = _as_float(
         _extract_scalar(
@@ -278,9 +284,6 @@ def _extract_reference_price_contract(event, bags):
             [
                 ("source_reference_price",),
                 ("reference_price",),
-                ("counterfactual_entry_quote",),
-                ("simulated_fill_price",),
-                ("entry_quote_price",),
                 ("entry_price",),
                 ("baseline_price",),
             ],
@@ -304,10 +307,6 @@ def _extract_reference_price_contract(event, bags):
             explicit_type = "legacy_baseline_price"
         elif _as_float(_extract_scalar(bags, [("entry_price",)])) is not None:
             explicit_type = "legacy_entry_price"
-        elif _as_float(_extract_scalar(bags, [("simulated_fill_price",)])) is not None:
-            explicit_type = "simulated_fill_price"
-        elif _as_float(_extract_scalar(bags, [("counterfactual_entry_quote",), ("entry_quote_price",)])) is not None:
-            explicit_type = "counterfactual_entry_quote"
         else:
             explicit_type = "legacy_reference_price"
     reference_ts = _extract_scalar(
