@@ -27,6 +27,7 @@ from v27_mirror_idempotency_contracts import DEFAULT_CONTRACT_VERSION as DEFAULT
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
 from v27_mirror_paper_ledgers import DEFAULT_LEDGER_VERSION as DEFAULT_PAPER_LEDGER_VERSION, run_mirror_once as run_paper_ledger_mirror_once  # noqa: E402
 from v27_mirror_quote_intent_bindings import DEFAULT_BINDING_POLICY_VERSION, run_mirror_once as run_quote_intent_binding_mirror_once  # noqa: E402
+from v27_mirror_raw_provider_evidence import DEFAULT_RAW_PROVIDER_EVIDENCE_VERSION, run_mirror_once as run_raw_provider_evidence_mirror_once  # noqa: E402
 from v27_mirror_realtime_clean import DEFAULT_CLEAN_STANDARD_VERSION, run_mirror_once as run_realtime_clean_mirror_once  # noqa: E402
 from v27_mirror_recovery_controls import DEFAULT_RECOVERY_VERSION, run_mirror_once as run_recovery_control_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
@@ -90,6 +91,7 @@ def run_pipeline_smoke(
     include_earliest_actionable_times=False,
     include_realtime_clean=False,
     include_quote_intent_bindings=False,
+    include_raw_provider_evidence=False,
     include_idempotency_contracts=False,
     include_execution_control=False,
     include_paper_ledgers=False,
@@ -277,6 +279,28 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_raw_provider_evidence:
+        steps["raw_provider_evidence"] = _run_step(
+            "raw_provider_evidence",
+            run_raw_provider_evidence_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                evidence_version=DEFAULT_RAW_PROVIDER_EVIDENCE_VERSION,
+                default_provider="jupiter_ultra",
+                default_endpoint="/ultra/v1/order",
+                cursor_overlap_ids=100,
+                new_only=True,
+            ),
+        )
     if include_idempotency_contracts:
         steps["idempotency_contracts"] = _run_step(
             "idempotency_contracts",
@@ -438,6 +462,7 @@ def run_pipeline_smoke(
         "include_earliest_actionable_times": bool(include_earliest_actionable_times),
         "include_realtime_clean": bool(include_realtime_clean),
         "include_quote_intent_bindings": bool(include_quote_intent_bindings),
+        "include_raw_provider_evidence": bool(include_raw_provider_evidence),
         "include_idempotency_contracts": bool(include_idempotency_contracts),
         "include_execution_control": bool(include_execution_control),
         "include_paper_ledgers": bool(include_paper_ledgers),
@@ -471,6 +496,7 @@ def main():
     parser.add_argument("--include-earliest-actionable-times", action="store_true")
     parser.add_argument("--include-realtime-clean", action="store_true")
     parser.add_argument("--include-quote-intent-bindings", action="store_true")
+    parser.add_argument("--include-raw-provider-evidence", action="store_true")
     parser.add_argument("--include-idempotency-contracts", action="store_true")
     parser.add_argument("--include-execution-control", action="store_true")
     parser.add_argument("--include-paper-ledgers", action="store_true")
@@ -495,6 +521,7 @@ def main():
         include_earliest_actionable_times=args.include_earliest_actionable_times,
         include_realtime_clean=args.include_realtime_clean,
         include_quote_intent_bindings=args.include_quote_intent_bindings,
+        include_raw_provider_evidence=args.include_raw_provider_evidence,
         include_idempotency_contracts=args.include_idempotency_contracts,
         include_execution_control=args.include_execution_control,
         include_paper_ledgers=args.include_paper_ledgers,

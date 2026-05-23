@@ -350,6 +350,13 @@ def build_contract_statuses(
         "quote_intent_binding_missing_malformed_mismatched_or_future_leakage",
         quote_intent_evidence,
     )
+    raw_provider_evidence = contract_evidence.get("RawProviderEvidenceContract") or {}
+    statuses["RawProviderEvidenceContract"] = _status(
+        "RawProviderEvidenceContract",
+        "pass" if projection_built and projection_health.get("raw_provider_evidence_ok") else "missing_evidence",
+        "raw_provider_evidence_missing_malformed_or_untrusted",
+        raw_provider_evidence,
+    )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",

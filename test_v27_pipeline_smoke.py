@@ -72,7 +72,9 @@ def create_paper_db(db_path):
             execution_availability TEXT,
             peak_pnl REAL,
             position_size_sol REAL,
+            entry_execution_json TEXT,
             entry_execution_audit_json TEXT,
+            exit_execution_json TEXT,
             exit_execution_audit_json TEXT,
             monitor_state_json TEXT,
             entry_mode TEXT,
@@ -107,9 +109,10 @@ def create_paper_db(db_path):
         INSERT INTO paper_trades
             (id, token_ca, symbol, premium_signal_id, signal_ts, entry_price, entry_ts,
              exit_price, exit_ts, execution_availability, peak_pnl, position_size_sol,
-             entry_execution_audit_json, exit_execution_audit_json, monitor_state_json,
+             entry_execution_json, entry_execution_audit_json, exit_execution_json,
+             exit_execution_audit_json, monitor_state_json,
              entry_mode, signal_route)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             1,
@@ -127,6 +130,27 @@ def create_paper_db(db_path):
             json.dumps(
                 {
                     "success": True,
+                    "requestId": "entry-provider-request-pipe",
+                    "provider": "jupiter_ultra",
+                    "endpoint": "/ultra/v1/order",
+                    "quoteTs": 1_700_000_002_000,
+                    "effectivePrice": 0.001,
+                    "slippageBps": 25,
+                    "inputAmount": 0.01,
+                    "inputMint": "SOL",
+                    "outputMint": "TokenPipe",
+                    "latencyMs": 2000,
+                    "_rawOrder": {
+                        "requestId": "entry-provider-request-pipe",
+                        "transaction": "entry-base64-tx",
+                        "outAmount": "1000000",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "success": True,
+                    "requestId": "entry-provider-request-pipe",
                     "quoteTs": 1_700_000_002_000,
                     "effectivePrice": 0.001,
                     "slippageBps": 25,
@@ -141,6 +165,26 @@ def create_paper_db(db_path):
             json.dumps(
                 {
                     "success": True,
+                    "requestId": "exit-provider-request-pipe",
+                    "provider": "jupiter_ultra",
+                    "endpoint": "/ultra/v1/order",
+                    "quoteTs": 1_700_000_300_000,
+                    "effectivePrice": 0.0012,
+                    "slippageBps": 18,
+                    "inputMint": "TokenPipe",
+                    "outputMint": "SOL",
+                    "latencyMs": 1000,
+                    "_rawOrder": {
+                        "requestId": "exit-provider-request-pipe",
+                        "transaction": "exit-base64-tx",
+                        "outAmount": "100000",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "success": True,
+                    "requestId": "exit-provider-request-pipe",
                     "quoteTs": 1_700_000_300_000,
                     "effectivePrice": 0.0012,
                     "slippageBps": 18,
@@ -382,6 +426,37 @@ def test_pipeline_smoke_can_seed_quote_intent_binding_contract(tmp_path, monkeyp
     assert projection["contract_evidence"]["QuoteIntentBindingContract"]["quote_intent_bound_count"] == 1
     assert "RealtimeCleanDetector" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "QuoteIntentBindingContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+
+
+def test_pipeline_smoke_can_seed_raw_provider_evidence_contract(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    signal_db = tmp_path / "signals.db"
+    paper_db = tmp_path / "paper.db"
+    lifecycle_db = tmp_path / "lifecycle.db"
+    output_dir = tmp_path / "read_models"
+    with create_signal_db(signal_db), create_paper_db(paper_db), create_lifecycle_db(lifecycle_db):
+        report = run_pipeline_smoke(
+            signal_db=signal_db,
+            paper_db=paper_db,
+            lifecycle_db=lifecycle_db,
+            event_log_dir=tmp_path / "events",
+            output_dir=output_dir,
+            limit=1,
+            include_missed=False,
+            include_realtime_clean=True,
+            include_quote_intent_bindings=True,
+            include_raw_provider_evidence=True,
+        )
+
+    projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
+
+    assert report["health"]["status"] == "v27_pipeline_smoke_ok"
+    assert report["blocking_reasons"] == []
+    assert report["steps"]["raw_provider_evidence"]["ok"] is True
+    assert projection["raw_provider_evidence_recorded_events"] == 2
+    assert projection["health"]["raw_provider_evidence_ok"] is True
+    assert projection["contract_evidence"]["RawProviderEvidenceContract"]["trusted_raw_provider_evidence_count"] == 2
+    assert "RawProviderEvidenceContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["normal_tiny"]
 
 
 def test_pipeline_smoke_can_seed_idempotency_contracts(tmp_path, monkeypatch):

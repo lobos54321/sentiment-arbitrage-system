@@ -35,6 +35,7 @@ EX_ANTE_FEASIBILITY_EVENT_TYPE = "ex_ante_feasibility_recorded"
 EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
 REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
 QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
+RAW_PROVIDER_EVIDENCE_EVENT_TYPE = "raw_provider_evidence_recorded"
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
@@ -52,6 +53,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     EARLIEST_ACTIONABLE_EVENT_TYPE,
     REALTIME_CLEAN_EVENT_TYPE,
     QUOTE_INTENT_BINDING_EVENT_TYPE,
+    RAW_PROVIDER_EVIDENCE_EVENT_TYPE,
     IDEMPOTENCY_EVENT_TYPE,
     EXECUTION_CONTROL_EVENT_TYPE,
     PAPER_LEDGER_EVENT_TYPE,
@@ -843,6 +845,87 @@ def _extract_quote_intent_binding_contract(event, bags):
     }
 
 
+def _valid_sha256_hex(value):
+    if not isinstance(value, str):
+        return False
+    if len(value) != 64:
+        return False
+    return all(ch in "0123456789abcdef" for ch in value.lower())
+
+
+def _extract_raw_provider_evidence_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("raw_provider_evidence_version",),
+            ("provider_evidence_version",),
+        ],
+    )
+    if event.get("event_type") != RAW_PROVIDER_EVIDENCE_EVENT_TYPE and not version:
+        return None
+    values = {
+        "raw_provider_evidence_version": str(version) if version else None,
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "endpoint": _extract_scalar(bags, [("endpoint",)]),
+        "request_hash": _extract_scalar(bags, [("request_hash",)]),
+        "response_hash": _extract_scalar(bags, [("response_hash",)]),
+        "request_id": _extract_scalar(bags, [("request_id",), ("provider_request_id",)]),
+        "provider_request_id": _extract_scalar(bags, [("provider_request_id",), ("request_id",)]),
+        "latency_ms": _as_float(_extract_scalar(bags, [("latency_ms",), ("provider_latency_ms",)])),
+        "side": _extract_scalar(bags, [("side",)]),
+        "request_metadata_hash": _extract_scalar(bags, [("request_metadata_hash",)]),
+        "request_metadata": _extract_scalar(bags, [("request_metadata",)], default={}),
+        "request_parameters": _extract_scalar(bags, [("request_parameters",)], default={}),
+        "request_metadata_available": _extract_flag(bags, [("request_metadata_available",)]),
+        "raw_response_hash": _extract_scalar(bags, [("raw_response_hash",)]),
+        "raw_response_available": _extract_flag(bags, [("raw_response_available",)]),
+        "response_material_type": _extract_scalar(bags, [("response_material_type",)]),
+        "hash_algorithm": _extract_scalar(bags, [("hash_algorithm",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)]),
+        "provider_evidence_proof_level": _extract_scalar(bags, [("provider_evidence_proof_level",)], default="unknown"),
+        "provider_evidence_trusted": _extract_flag(bags, [("provider_evidence_trusted",)]),
+        "decision_available_at": _extract_scalar(bags, [("decision_available_at",)], default=event.get("available_at")),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+    }
+    missing_fields = []
+    for field in ("provider", "endpoint", "request_hash", "response_hash", "request_id", "latency_ms"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not version:
+        missing_fields.append("raw_provider_evidence_version")
+    if values.get("latency_ms") is not None and (not math.isfinite(values["latency_ms"]) or values["latency_ms"] < 0):
+        missing_fields.append("latency_ms_nonnegative")
+    violation_fields = []
+    if not _valid_sha256_hex(values.get("request_hash")):
+        violation_fields.append("request_hash_sha256")
+    if not _valid_sha256_hex(values.get("response_hash")):
+        violation_fields.append("response_hash_sha256")
+    if values.get("request_metadata_hash") and not _valid_sha256_hex(values.get("request_metadata_hash")):
+        violation_fields.append("request_metadata_hash_sha256")
+    if values.get("raw_response_hash") and not _valid_sha256_hex(values.get("raw_response_hash")):
+        violation_fields.append("raw_response_hash_sha256")
+    if values.get("hash_algorithm") != "sha256(canonical_json)":
+        violation_fields.append("hash_algorithm")
+    if values.get("request_metadata_available") is not True:
+        violation_fields.append("request_metadata_available")
+    if values.get("raw_response_available") is not True:
+        violation_fields.append("raw_response_available")
+    if values.get("provider_evidence_trusted") is not True:
+        violation_fields.append("provider_evidence_trusted")
+    if values.get("provider_request_id") is None:
+        violation_fields.append("provider_request_id")
+    trusted = bool(not missing_fields and not violation_fields)
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_evidence_valid": trusted,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _extract_idempotency_contract(event, bags):
     version = _extract_scalar(
         bags,
@@ -1365,6 +1448,7 @@ def _extract_decision_fact(event):
         "earliest_actionable_time_contract": _extract_earliest_actionable_time_contract(event, bags),
         "realtime_clean_contract": _extract_realtime_clean_contract(event, bags),
         "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
+        "raw_provider_evidence_contract": _extract_raw_provider_evidence_contract(event, bags),
         "idempotency_contract": _extract_idempotency_contract(event, bags),
         "execution_control": _extract_execution_control(event, bags),
         "paper_ledger_contract": _extract_paper_ledger_contract(event, bags),
@@ -1411,6 +1495,7 @@ def _new_record(fact):
         "earliest_actionable_time_candidates": [],
         "realtime_clean_candidates": [],
         "quote_intent_binding_candidates": [],
+        "raw_provider_evidence_candidates": [],
         "idempotency_contract_candidates": [],
         "execution_control_candidates": [],
         "paper_ledger_candidates": [],
@@ -1426,6 +1511,7 @@ def _new_record(fact):
         "earliest_actionable_time": None,
         "realtime_clean_contract": None,
         "quote_intent_binding_contract": None,
+        "raw_provider_evidence_contract": None,
         "idempotency_contract": None,
         "execution_control": None,
         "paper_ledger_contract": None,
@@ -1506,6 +1592,9 @@ def _merge_fact(record, fact):
     quote_intent_binding = fact.get("quote_intent_binding_contract")
     if quote_intent_binding:
         record["quote_intent_binding_candidates"].append(quote_intent_binding)
+    raw_provider_evidence = fact.get("raw_provider_evidence_contract")
+    if raw_provider_evidence:
+        record["raw_provider_evidence_candidates"].append(raw_provider_evidence)
     idempotency_contract = fact.get("idempotency_contract")
     if idempotency_contract:
         record["idempotency_contract_candidates"].append(idempotency_contract)
@@ -1692,6 +1781,19 @@ def _finalize_quote_intent_binding(record):
     record["quote_intent_binding_contract"] = selected
 
 
+def _finalize_raw_provider_evidence(record):
+    candidates = sorted(
+        record.get("raw_provider_evidence_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["raw_provider_evidence_candidates"] = candidates
+    if not candidates:
+        record["raw_provider_evidence_contract"] = None
+        return
+    trusted_candidates = [candidate for candidate in candidates if candidate.get("provider_evidence_valid") is True]
+    record["raw_provider_evidence_contract"] = trusted_candidates[0] if trusted_candidates else candidates[0]
+
+
 def _finalize_idempotency_contract(record):
     candidates = sorted(
         record.get("idempotency_contract_candidates") or [],
@@ -1765,6 +1867,8 @@ def _record_missing_evidence(record):
         missing.append("StandardizedStopContract")
     if record.get("realtime_clean_contract") and not record.get("quote_intent_binding_contract"):
         missing.append("QuoteIntentBindingContract")
+    if record.get("quote_intent_binding_contract") and not record.get("raw_provider_evidence_contract"):
+        missing.append("RawProviderEvidenceContract")
     if record.get("quote_intent_binding_contract") and not record.get("idempotency_contract"):
         missing.append("IdempotencyContract")
         missing.append("IdempotencyKeyNamespaceContract")
@@ -2053,6 +2157,46 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
                     "denominator_dedup_key": record.get("denominator_dedup_key"),
                     "future_leakage_count": len(leaky),
                     "future_leakage_fields": sorted({field for item in leaky for field in item.get("future_leakage_fields", [])}),
+                }
+            )
+    raw_provider_evidence_records = [
+        record
+        for record in record_list
+        if record.get("raw_provider_evidence_candidates")
+    ]
+    all_raw_provider_candidates = [
+        item
+        for record in raw_provider_evidence_records
+        for item in record.get("raw_provider_evidence_candidates") or []
+    ]
+    malformed_raw_provider_evidence = []
+    raw_provider_evidence_violations = []
+    for record in raw_provider_evidence_records:
+        malformed = [
+            item
+            for item in record.get("raw_provider_evidence_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_raw_provider_evidence.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        violated = [
+            item
+            for item in record.get("raw_provider_evidence_candidates") or []
+            if item.get("violation_fields")
+        ]
+        if violated:
+            raw_provider_evidence_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(violated),
+                    "violation_fields": sorted({field for item in violated for field in item.get("violation_fields", [])}),
+                    "source_event_ids": [item.get("source_event_id") for item in violated],
                 }
             )
     idempotency_records = [
@@ -2605,6 +2749,25 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
             ),
             "quote_intent_binding_projection_version": "v2.7.0.quote_intent_binding.v1",
         },
+        "RawProviderEvidenceContract": {
+            "eligible_raw_provider_records": len(raw_provider_evidence_records),
+            "raw_provider_evidence_observation_count": len(all_raw_provider_candidates),
+            "trusted_raw_provider_evidence_count": sum(1 for item in all_raw_provider_candidates if item.get("provider_evidence_valid") is True),
+            "untrusted_raw_provider_evidence_count": sum(1 for item in all_raw_provider_candidates if item.get("provider_evidence_valid") is not True),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_raw_provider_evidence),
+            "malformed_raw_provider_evidence": malformed_raw_provider_evidence,
+            "provider_evidence_violation_count": sum(item["violation_count"] for item in raw_provider_evidence_violations),
+            "provider_evidence_violations": raw_provider_evidence_violations,
+            "providers": sorted({item.get("provider") for item in all_raw_provider_candidates if item.get("provider")}),
+            "endpoints": sorted({item.get("endpoint") for item in all_raw_provider_candidates if item.get("endpoint")}),
+            "sides": sorted({item.get("side") for item in all_raw_provider_candidates if item.get("side")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in all_raw_provider_candidates if item.get("evidence_source")}),
+            "provider_evidence_proof_levels": sorted({item.get("provider_evidence_proof_level") for item in all_raw_provider_candidates if item.get("provider_evidence_proof_level")}),
+            "response_material_types": sorted({item.get("response_material_type") for item in all_raw_provider_candidates if item.get("response_material_type")}),
+            "hash_algorithms": sorted({item.get("hash_algorithm") for item in all_raw_provider_candidates if item.get("hash_algorithm")}),
+            "raw_provider_evidence_versions": sorted({item.get("raw_provider_evidence_version") for item in all_raw_provider_candidates if item.get("raw_provider_evidence_version")}),
+            "raw_provider_evidence_projection_version": "v2.7.0.raw_provider_evidence.v1",
+        },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
             "idempotency_observation_count": len(all_idempotency_candidates),
@@ -2820,6 +2983,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "earliest_actionable_time_recorded_events": 0,
         "realtime_clean_detector_recorded_events": 0,
         "quote_intent_binding_recorded_events": 0,
+        "raw_provider_evidence_recorded_events": 0,
         "idempotency_contract_recorded_events": 0,
         "execution_control_recorded_events": 0,
         "paper_ledger_recorded_events": 0,
@@ -2854,6 +3018,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "EarliestActionableTime": {},
             "RealtimeCleanDetector": {},
             "QuoteIntentBindingContract": {},
+            "RawProviderEvidenceContract": {},
             "IdempotencyContract": {},
             "IdempotencyKeyNamespaceContract": {},
             "ExecutionLeaseContract": {},
@@ -2881,6 +3046,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "earliest_actionable_time_ok": False,
             "realtime_clean_detector_ok": False,
             "quote_intent_binding_ok": False,
+            "raw_provider_evidence_ok": False,
             "idempotency_contract_ok": False,
             "idempotency_key_namespace_ok": False,
             "execution_lease_ok": False,
@@ -2944,6 +3110,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["realtime_clean_detector_recorded_events"] += 1
         if event.get("event_type") == QUOTE_INTENT_BINDING_EVENT_TYPE:
             projection["quote_intent_binding_recorded_events"] += 1
+        if event.get("event_type") == RAW_PROVIDER_EVIDENCE_EVENT_TYPE:
+            projection["raw_provider_evidence_recorded_events"] += 1
         if event.get("event_type") == IDEMPOTENCY_EVENT_TYPE:
             projection["idempotency_contract_recorded_events"] += 1
         if event.get("event_type") == EXECUTION_CONTROL_EVENT_TYPE:
@@ -2998,6 +3166,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_earliest_actionable_time(record)
         _finalize_realtime_clean(record)
         _finalize_quote_intent_binding(record)
+        _finalize_raw_provider_evidence(record)
         _finalize_idempotency_contract(record)
         _finalize_execution_control(record)
         _finalize_paper_ledger(record)
@@ -3115,6 +3284,12 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["QuoteIntentBindingContract"]["malformed_count"] == 0
         and contract_evidence["QuoteIntentBindingContract"]["mismatch_count"] == 0
         and contract_evidence["QuoteIntentBindingContract"]["future_leakage_count"] == 0
+    )
+    projection["health"]["raw_provider_evidence_ok"] = (
+        contract_evidence["RawProviderEvidenceContract"]["eligible_raw_provider_records"] > 0
+        and contract_evidence["RawProviderEvidenceContract"]["trusted_raw_provider_evidence_count"] > 0
+        and contract_evidence["RawProviderEvidenceContract"]["malformed_count"] == 0
+        and contract_evidence["RawProviderEvidenceContract"]["provider_evidence_violation_count"] == 0
     )
     projection["health"]["idempotency_contract_ok"] = (
         contract_evidence["IdempotencyContract"]["eligible_idempotency_records"] > 0

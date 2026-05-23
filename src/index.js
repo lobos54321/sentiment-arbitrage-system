@@ -206,6 +206,7 @@ function startShadowDataSidecars(config) {
   const v27EarliestActionableMirrorLog = process.env.V27_EARLIEST_ACTIONABLE_MIRROR_LOG || './data/v27-earliest-actionable-mirror.log';
   const v27RealtimeCleanMirrorLog = process.env.V27_REALTIME_CLEAN_MIRROR_LOG || './data/v27-realtime-clean-mirror.log';
   const v27QuoteIntentBindingMirrorLog = process.env.V27_QUOTE_INTENT_BINDING_MIRROR_LOG || './data/v27-quote-intent-binding-mirror.log';
+  const v27RawProviderEvidenceMirrorLog = process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG || './data/v27-raw-provider-evidence-mirror.log';
   const v27IdempotencyContractMirrorLog = process.env.V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG || './data/v27-idempotency-contract-mirror.log';
   const v27ExecutionControlMirrorLog = process.env.V27_EXECUTION_CONTROL_MIRROR_LOG || './data/v27-execution-control-mirror.log';
   const v27PaperLedgerMirrorLog = process.env.V27_PAPER_LEDGER_MIRROR_LOG || './data/v27-paper-ledger-mirror.log';
@@ -517,6 +518,34 @@ function startShadowDataSidecars(config) {
         V27_QUOTE_INTENT_BINDING_QUOTE_SOURCE: process.env.V27_QUOTE_INTENT_BINDING_QUOTE_SOURCE || 'paper_trade_entry_quote_or_legacy_proxy',
         V27_QUOTE_INTENT_LEGACY_SIZE_SOL: process.env.V27_QUOTE_INTENT_LEGACY_SIZE_SOL || '0.003',
         V27_QUOTE_INTENT_LEGACY_SLIPPAGE_BPS: process.env.V27_QUOTE_INTENT_LEGACY_SLIPPAGE_BPS || '500',
+      },
+    }));
+  }
+  if (envFlag('V27_RAW_PROVIDER_EVIDENCE_MIRROR_WORKER_ENABLED', false)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-raw-provider-evidence-mirror',
+      logPath: v27RawProviderEvidenceMirrorLog,
+      args: [
+        'scripts/v27_mirror_raw_provider_evidence.py',
+        '--loop',
+        '--new-only',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LIMIT || '500',
+        '--cursor-overlap-ids', process.env.V27_RAW_PROVIDER_CURSOR_OVERLAP_IDS || '100',
+        '--initial-delay', process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOCK_FILE || '/tmp/v27_raw_provider_evidence_mirror.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_RAW_PROVIDER_EVIDENCE_VERSION: process.env.V27_RAW_PROVIDER_EVIDENCE_VERSION || 'legacy_paper_raw_provider_evidence_v0.1',
+        V27_RAW_PROVIDER_DEFAULT_PROVIDER: process.env.V27_RAW_PROVIDER_DEFAULT_PROVIDER || 'jupiter_ultra',
+        V27_RAW_PROVIDER_DEFAULT_ENDPOINT: process.env.V27_RAW_PROVIDER_DEFAULT_ENDPOINT || '/ultra/v1/order',
       },
     }));
   }

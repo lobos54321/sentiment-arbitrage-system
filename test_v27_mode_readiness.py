@@ -128,6 +128,62 @@ def append_quote_intent_binding_event(event_log_dir):
     )
 
 
+def append_raw_provider_evidence_event(event_log_dir):
+    request_metadata = {
+        "paper_trade_id": 1,
+        "side": "entry",
+        "provider": "jupiter_ultra",
+        "endpoint": "/ultra/v1/order",
+        "request_id": "provider-request-ready",
+        "request_parameters": {
+            "input_mint": "SOL",
+            "output_mint": "TokenReady",
+            "input_amount": 0.01,
+            "slippage_bps": 25,
+        },
+    }
+    raw_response = {
+        "requestId": "provider-request-ready",
+        "transaction": "base64-tx",
+        "outAmount": "1000000",
+    }
+    V27EventLog(event_log_dir).append_event(
+        event_type="raw_provider_evidence_recorded",
+        aggregate_id="raw_provider_evidence:solana:TokenReady:unknown_pool:0:1:entry",
+        idempotency_key="raw_provider_evidence:1:entry:legacy_paper_raw_provider_evidence_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "raw_provider_evidence_version": "legacy_paper_raw_provider_evidence_v0.1",
+            "provider_evidence_version": "legacy_paper_raw_provider_evidence_v0.1",
+            "provider": "jupiter_ultra",
+            "endpoint": "/ultra/v1/order",
+            "request_id": "provider-request-ready",
+            "provider_request_id": "provider-request-ready",
+            "side": "entry",
+            "latency_ms": 123,
+            "request_parameters": request_metadata["request_parameters"],
+            "request_metadata": request_metadata,
+            "request_metadata_available": True,
+            "request_metadata_hash": sha256_hex(request_metadata),
+            "request_hash": sha256_hex(request_metadata),
+            "response_hash": sha256_hex(raw_response),
+            "raw_response_hash": sha256_hex(raw_response),
+            "raw_response_available": True,
+            "response_material_type": "execution._rawOrder",
+            "hash_algorithm": "sha256(canonical_json)",
+            "evidence_source": "unit",
+            "provider_evidence_proof_level": "provider_request_id_with_raw_response_hash",
+            "provider_evidence_trusted": True,
+            "decision_available_at": "2026-01-15T00:00:02Z",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -441,6 +497,33 @@ def test_mode_readiness_consumes_quote_intent_binding_evidence(tmp_path):
     assert "RealtimeCleanDetector" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "QuoteIntentBindingContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "IdempotencyContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_raw_provider_evidence_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_raw_provider_evidence_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["RawProviderEvidenceContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["RawProviderEvidenceContract"]["evidence"]["trusted_raw_provider_evidence_count"] == 1
+    assert "RawProviderEvidenceContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "LabelFinalizationContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_idempotency_contract_evidence(tmp_path):

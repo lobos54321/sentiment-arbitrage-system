@@ -211,6 +211,63 @@ def append_quote_intent_binding(log, *, token_ca, paper_trade_id=1, pool="pool-a
     )
 
 
+def append_raw_provider_evidence(log, *, token_ca, paper_trade_id=1, pool="pool-a", trusted=True, missing_version=False):
+    request_metadata = {
+        "paper_trade_id": paper_trade_id,
+        "side": "entry",
+        "provider": "jupiter_ultra",
+        "endpoint": "/ultra/v1/order",
+        "request_id": f"provider-request-{paper_trade_id}",
+        "request_parameters": {
+            "input_mint": "SOL",
+            "output_mint": token_ca,
+            "input_amount": 0.01,
+            "slippage_bps": 25,
+        },
+    }
+    raw_response = {
+        "requestId": f"provider-request-{paper_trade_id}",
+        "transaction": "base64-tx",
+        "outAmount": "1000000",
+    }
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "raw_provider_evidence_version": None if missing_version else "legacy_paper_raw_provider_evidence_v0.1",
+        "provider_evidence_version": None if missing_version else "legacy_paper_raw_provider_evidence_v0.1",
+        "provider": "jupiter_ultra",
+        "endpoint": "/ultra/v1/order",
+        "request_id": f"provider-request-{paper_trade_id}",
+        "provider_request_id": f"provider-request-{paper_trade_id}",
+        "side": "entry",
+        "latency_ms": 123,
+        "request_parameters": request_metadata["request_parameters"],
+        "request_metadata": request_metadata,
+        "request_metadata_available": True,
+        "request_metadata_hash": sha256_hex(request_metadata),
+        "request_hash": sha256_hex(request_metadata),
+        "response_hash": sha256_hex(raw_response),
+        "raw_response_hash": sha256_hex(raw_response) if trusted else None,
+        "raw_response_available": trusted,
+        "response_material_type": "execution._rawOrder" if trusted else "execution_audit_projection",
+        "hash_algorithm": "sha256(canonical_json)",
+        "evidence_source": "unit",
+        "provider_evidence_proof_level": "provider_request_id_with_raw_response_hash" if trusted else "legacy_execution_projection_without_raw_provider_response",
+        "provider_evidence_trusted": trusted,
+        "decision_available_at": "2026-01-15T00:00:02Z",
+    }
+    return log.append_event(
+        event_type="raw_provider_evidence_recorded",
+        aggregate_id=f"raw_provider_evidence:solana:{token_ca}:{pool}:0:{paper_trade_id}:entry",
+        idempotency_key=f"raw_provider_evidence:{paper_trade_id}:entry:legacy_paper_raw_provider_evidence_v0.1",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -532,6 +589,52 @@ def test_denominator_projection_consumes_quote_intent_binding_contract(tmp_path)
     assert evidence["binding_policy_versions"] == ["legacy_paper_trade_quote_intent_binding_v0.1"]
     assert evidence["quote_binding_proof_levels"] == ["entry_execution_audit"]
     assert projection["records"][0]["quote_intent_binding_contract"]["quote_intent_bound"] is True
+
+
+def test_denominator_projection_consumes_raw_provider_evidence_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenProvider", captured=True, **flags)
+    append_realtime_clean(log, token_ca="TokenProvider")
+    append_quote_intent_binding(log, token_ca="TokenProvider")
+    append_raw_provider_evidence(log, token_ca="TokenProvider")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    evidence = projection["contract_evidence"]["RawProviderEvidenceContract"]
+
+    assert projection["raw_provider_evidence_recorded_events"] == 1
+    assert projection["health"]["raw_provider_evidence_ok"] is True
+    assert evidence["eligible_raw_provider_records"] == 1
+    assert evidence["raw_provider_evidence_observation_count"] == 1
+    assert evidence["trusted_raw_provider_evidence_count"] == 1
+    assert evidence["untrusted_raw_provider_evidence_count"] == 0
+    assert evidence["malformed_count"] == 0
+    assert evidence["provider_evidence_violation_count"] == 0
+    assert evidence["providers"] == ["jupiter_ultra"]
+    assert evidence["endpoints"] == ["/ultra/v1/order"]
+    assert evidence["provider_evidence_proof_levels"] == ["provider_request_id_with_raw_response_hash"]
+    assert projection["records"][0]["raw_provider_evidence_contract"]["provider_evidence_valid"] is True
+
+
+def test_denominator_projection_rejects_untrusted_raw_provider_evidence(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenProviderBad", captured=True, **flags)
+    append_raw_provider_evidence(log, token_ca="TokenProviderBad", trusted=False)
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    evidence = projection["contract_evidence"]["RawProviderEvidenceContract"]
+
+    assert projection["health"]["raw_provider_evidence_ok"] is False
+    assert evidence["trusted_raw_provider_evidence_count"] == 0
+    assert evidence["untrusted_raw_provider_evidence_count"] == 1
+    assert evidence["provider_evidence_violation_count"] == 1
+    assert evidence["provider_evidence_violations"][0]["violation_fields"] == [
+        "provider_evidence_trusted",
+        "raw_response_available",
+    ]
 
 
 def test_denominator_projection_consumes_idempotency_contracts(tmp_path):
