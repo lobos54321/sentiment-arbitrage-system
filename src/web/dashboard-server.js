@@ -962,6 +962,86 @@ function v27ModeReadinessPath(options = {}) {
   return isAbsolute(raw) ? raw : join(root, raw);
 }
 
+let v27ReadModelManualRefresh = {
+  running: false,
+  started_at: null,
+  pid: null,
+};
+
+function triggerV27ReadModelRefresh(options = {}) {
+  if (v27ReadModelManualRefresh.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      ...v27ReadModelManualRefresh,
+    };
+  }
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const outputDir = process.env.V27_READ_MODEL_DIR || './data/v27_read_models';
+  const lockFile = process.env.V27_READ_MODEL_REFRESH_LOCK_FILE || '/tmp/v27_read_model_refresh.lock';
+  const timeoutMs = Number(options.timeoutMs || process.env.V27_READ_MODEL_MANUAL_REFRESH_TIMEOUT_MS || 600000);
+  const logPathRaw = process.env.V27_READ_MODEL_REFRESH_LOG || join(outputDir, '..', 'v27-read-model-refresh.log');
+  const logPath = isAbsolute(logPathRaw) ? logPathRaw : join(projectRoot, logPathRaw);
+  const args = [
+    'scripts/v27_read_model_refresh.py',
+    '--event-log-dir', eventLogDir,
+    '--output-dir', outputDir,
+    '--lock-file', lockFile,
+  ];
+  if (options.includeRecords) args.push('--include-records');
+  if (options.strict) args.push('--strict');
+
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const startedAt = new Date().toISOString();
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-read-model-refresh-once: python3 ${args.join(' ')}\n`);
+
+  const child = execFile('python3', args, {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+      V27_EVENT_LOG_DIR: eventLogDir,
+      V27_READ_MODEL_DIR: outputDir,
+    },
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 1024 * 1024 * 50,
+  }, (error, stdout, stderr) => {
+    if (stdout) logStream.write(stdout);
+    if (stderr) logStream.write(stderr);
+    const finishedAt = new Date().toISOString();
+    if (error) {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+    } else {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once completed\n`);
+    }
+    v27ReadModelManualRefresh = {
+      running: false,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      pid: child.pid,
+      error: error ? error.message : null,
+    };
+    try { logStream.end(); } catch {}
+  });
+
+  v27ReadModelManualRefresh = {
+    running: true,
+    started_at: startedAt,
+    pid: child.pid,
+    event_log_dir: eventLogDir,
+    output_dir: outputDir,
+    log_path: logPath,
+    timeout_ms: timeoutMs,
+  };
+  return {
+    accepted: true,
+    status: 'started',
+    ...v27ReadModelManualRefresh,
+  };
+}
+
 export function readV27ModeReadiness(options = {}) {
   const path = v27ModeReadinessPath(options);
   const generatedAt = new Date().toISOString();
@@ -7580,6 +7660,21 @@ const server = http.createServer(async (req, res) => {
       : 202;
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(health, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-read-model-refresh') {
+    if (!checkAuth(req, url, res)) return;
+    const refresh = triggerV27ReadModelRefresh({
+      includeRecords: ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_records') || '').toLowerCase()),
+      strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
+    });
+    res.writeHead(refresh.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      materialized: false,
+      refresh_schema_version: 'v2.7.0.manual_read_model_refresh.v1',
+      ...refresh,
+    }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-mode-readiness') {
     if (!checkAuth(req, url, res)) return;
