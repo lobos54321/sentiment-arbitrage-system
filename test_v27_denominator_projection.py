@@ -820,6 +820,20 @@ def test_denominator_projection_consumes_no_fill_and_recovery_controls(tmp_path)
     assert projection["records"][0]["no_fill_outcome"]["no_fill_reason"] == "quote_unavailable"
 
 
+def test_denominator_projection_keeps_standalone_no_fill_outcomes_out_of_denominator_records(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_no_fill_outcome(log, token_ca="TokenStandalone", outcome_state="no_fill")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    no_fill = projection["contract_evidence"]["NoFillOutcome"]
+    assert projection["no_fill_outcome_recorded_events"] == 1
+    assert projection["metrics"]["denominator_seed_records"] == 0
+    assert no_fill["eligible_no_fill_records"] == 1
+    assert no_fill["standalone_no_fill_outcome_count"] == 1
+    assert projection["records"] == []
+
+
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)

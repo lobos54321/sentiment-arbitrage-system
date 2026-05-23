@@ -2028,8 +2028,9 @@ def _metric_definitions(metrics, metrics_window):
     return definitions
 
 
-def _contract_evidence_from_records(record_list, runtime_recovery_controls=None):
+def _contract_evidence_from_records(record_list, runtime_recovery_controls=None, standalone_no_fill_outcomes=None):
     runtime_recovery_controls = runtime_recovery_controls or []
+    standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -2696,6 +2697,13 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
         for record in record_list
         if record.get("no_fill_outcome_candidates")
     ]
+    no_fill_records = no_fill_records + [
+        {
+            "denominator_dedup_key": item.get("denominator_dedup_key"),
+            "no_fill_outcome_candidates": [item],
+        }
+        for item in standalone_no_fill_outcomes
+    ]
     all_no_fill_candidates = [
         item
         for record in no_fill_records
@@ -3089,6 +3097,7 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
         },
         "NoFillOutcome": {
             "eligible_no_fill_records": len(no_fill_records),
+            "standalone_no_fill_outcome_count": len(standalone_no_fill_outcomes),
             "no_fill_outcome_observation_count": len(all_no_fill_candidates),
             "terminal_outcome_count": sum(1 for item in all_no_fill_candidates if item.get("terminal_outcome_ok") is True),
             "no_fill_terminal_count": sum(1 for item in all_no_fill_candidates if str(item.get("outcome_state") or "").lower() in {"no_fill", "skipped", "rejected", "failed", "cancelled"}),
@@ -3294,6 +3303,7 @@ def build_denominator_projection(
         return projection
 
     facts = []
+    no_fill_facts = []
     runtime_recovery_controls = []
     resolved_pool_by_identity = {}
     window_start = None
@@ -3312,6 +3322,7 @@ def build_denominator_projection(
                     "global_seq": event.get("global_seq"),
                     "event_type": event.get("event_type"),
                     "facts": len(facts),
+                    "no_fill_facts": len(no_fill_facts),
                     "runtime_recovery_controls": len(runtime_recovery_controls),
                 }
             )
@@ -3372,6 +3383,9 @@ def build_denominator_projection(
             )
             projection["evidence_gaps"]["TokenIdentityContract"] = projection["evidence_gaps"].get("TokenIdentityContract", 0) + 1
             continue
+        if event.get("event_type") == NO_FILL_OUTCOME_EVENT_TYPE:
+            no_fill_facts.append(fact)
+            continue
         identity = (fact.get("chain"), fact.get("token_ca"), fact.get("lifecycle_epoch", 0))
         pool = fact.get("canonical_pool_group")
         if event.get("event_type") == LIFECYCLE_IDENTITY_EVENT_TYPE and pool and pool != "unknown_pool":
@@ -3384,6 +3398,7 @@ def build_denominator_projection(
                 "stage": "event_replay_complete",
                 "input_events": projection["input_events"],
                 "facts": len(facts),
+                "no_fill_facts": len(no_fill_facts),
                 "runtime_recovery_controls": len(runtime_recovery_controls),
             }
         )
@@ -3398,6 +3413,32 @@ def build_denominator_projection(
         if key not in records:
             records[key] = _new_record(fact)
         _merge_fact(records[key], fact)
+
+    standalone_no_fill_outcomes = []
+    for fact in no_fill_facts:
+        key = fact["denominator_dedup_key"]
+        if key in records:
+            _merge_fact(records[key], fact)
+            continue
+        no_fill_outcome = fact.get("no_fill_outcome_contract")
+        if no_fill_outcome:
+            standalone_no_fill_outcomes.append(
+                {
+                    **no_fill_outcome,
+                    "denominator_dedup_key": key,
+                }
+            )
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "records_merged",
+                "facts": len(facts),
+                "no_fill_facts": len(no_fill_facts),
+                "records": len(records),
+                "standalone_no_fill_outcomes": len(standalone_no_fill_outcomes),
+            }
+        )
 
     record_list = []
     for key in sorted(records):
@@ -3466,7 +3507,11 @@ def build_denominator_projection(
     projection["metrics_window"] = metrics_window
     projection["metric_definitions"] = _metric_definitions(metrics, metrics_window)
     projection["metric_definitions_hash"] = sha256_hex(projection["metric_definitions"])
-    contract_evidence = _contract_evidence_from_records(record_list, runtime_recovery_controls=runtime_recovery_controls)
+    contract_evidence = _contract_evidence_from_records(
+        record_list,
+        runtime_recovery_controls=runtime_recovery_controls,
+        standalone_no_fill_outcomes=standalone_no_fill_outcomes,
+    )
     metrics_window_valid = bool(
         metrics_window.get("window_id")
         and metrics_window.get("window_start")
