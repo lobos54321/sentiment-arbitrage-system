@@ -89,6 +89,45 @@ def append_realtime_clean_event(event_log_dir):
     )
 
 
+def append_quote_intent_binding_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="quote_intent_binding_recorded",
+        aggregate_id="quote_intent_binding:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="quote_intent_binding:1:legacy_paper_trade_quote_intent_binding_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "binding_policy_version": "legacy_paper_trade_quote_intent_binding_v0.1",
+            "quote_intent_binding_version": "legacy_paper_trade_quote_intent_binding_v0.1",
+            "quote_intent_id": 1,
+            "side": "buy",
+            "size": 0.01,
+            "route": "unit_route",
+            "pool": "unknown_pool",
+            "quote_mint": "SOL",
+            "slippage_bps": 25,
+            "quote_ts": 1_700_000_002,
+            "quote_source": "paper_trade_entry_quote_or_legacy_proxy",
+            "quote_binding_proof_level": "entry_execution_audit",
+            "quote_intent_binding_quality": "entry_execution_audit_bound",
+            "quote_intent_bound": True,
+            "intent_hash": "intent-hash",
+            "quote_hash": "quote-hash",
+            "quote_binding_hash": "binding-hash",
+            "missing_fields": [],
+            "mismatch_fields": [],
+            "used_future_peak": False,
+            "used_future_outcome": False,
+            "used_posthoc_label": False,
+            "forbidden_future_fields_used": [],
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
@@ -163,6 +202,34 @@ def test_mode_readiness_consumes_realtime_clean_detector_evidence(tmp_path):
     assert matrix["contract_statuses"]["RealtimeCleanDetector"]["status"] == "pass"
     assert matrix["contract_statuses"]["RealtimeCleanDetector"]["evidence"]["realtime_clean_observed_count"] == 1
     assert "RealtimeCleanDetector" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_quote_intent_binding_evidence(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["RealtimeCleanDetector"]["status"] == "pass"
+    assert matrix["contract_statuses"]["QuoteIntentBindingContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["QuoteIntentBindingContract"]["evidence"]["quote_intent_bound_count"] == 1
+    assert "RealtimeCleanDetector" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "QuoteIntentBindingContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "IdempotencyContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):

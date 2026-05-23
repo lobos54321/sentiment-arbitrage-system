@@ -205,6 +205,7 @@ function startShadowDataSidecars(config) {
   const v27ExAnteFeasibilityMirrorLog = process.env.V27_EX_ANTE_FEASIBILITY_MIRROR_LOG || './data/v27-ex-ante-feasibility-mirror.log';
   const v27EarliestActionableMirrorLog = process.env.V27_EARLIEST_ACTIONABLE_MIRROR_LOG || './data/v27-earliest-actionable-mirror.log';
   const v27RealtimeCleanMirrorLog = process.env.V27_REALTIME_CLEAN_MIRROR_LOG || './data/v27-realtime-clean-mirror.log';
+  const v27QuoteIntentBindingMirrorLog = process.env.V27_QUOTE_INTENT_BINDING_MIRROR_LOG || './data/v27-quote-intent-binding-mirror.log';
   const v27PaperDecisionMirrorLog = process.env.V27_PAPER_DECISION_MIRROR_LOG || './data/v27-paper-decision-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
   const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
@@ -484,6 +485,34 @@ function startShadowDataSidecars(config) {
         V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
         V27_REALTIME_CLEAN_STANDARD_VERSION: process.env.V27_REALTIME_CLEAN_STANDARD_VERSION || 'legacy_round_trip_quote_clean_v0.1',
         V27_REALTIME_CLEAN_QUOTE_SOURCE: process.env.V27_REALTIME_CLEAN_QUOTE_SOURCE || 'paper_trade_round_trip_quote',
+      },
+    }));
+  }
+  if (envFlag('V27_QUOTE_INTENT_BINDING_MIRROR_WORKER_ENABLED', true)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-quote-intent-binding-mirror',
+      logPath: v27QuoteIntentBindingMirrorLog,
+      args: [
+        'scripts/v27_mirror_quote_intent_bindings.py',
+        '--loop',
+        '--new-only',
+        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_QUOTE_INTENT_BINDING_MIRROR_INTERVAL_SEC || '30',
+        '--limit', process.env.V27_QUOTE_INTENT_BINDING_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_QUOTE_INTENT_BINDING_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_QUOTE_INTENT_BINDING_MIRROR_LOCK_FILE || '/tmp/v27_quote_intent_binding_mirror.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_QUOTE_INTENT_BINDING_VERSION: process.env.V27_QUOTE_INTENT_BINDING_VERSION || 'legacy_paper_trade_quote_intent_binding_v0.1',
+        V27_QUOTE_INTENT_BINDING_QUOTE_SOURCE: process.env.V27_QUOTE_INTENT_BINDING_QUOTE_SOURCE || 'paper_trade_entry_quote_or_legacy_proxy',
+        V27_QUOTE_INTENT_LEGACY_SIZE_SOL: process.env.V27_QUOTE_INTENT_LEGACY_SIZE_SOL || '0.003',
+        V27_QUOTE_INTENT_LEGACY_SLIPPAGE_BPS: process.env.V27_QUOTE_INTENT_LEGACY_SLIPPAGE_BPS || '500',
       },
     }));
   }

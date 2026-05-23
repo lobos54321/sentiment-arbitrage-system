@@ -171,6 +171,46 @@ def append_realtime_clean(log, *, token_ca, paper_trade_id=1, pool="pool-a", cle
     )
 
 
+def append_quote_intent_binding(log, *, token_ca, paper_trade_id=1, pool="pool-a", bound=True, missing_version=False):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "binding_policy_version": None if missing_version else "legacy_paper_trade_quote_intent_binding_v0.1",
+        "quote_intent_binding_version": None if missing_version else "legacy_paper_trade_quote_intent_binding_v0.1",
+        "quote_intent_id": paper_trade_id,
+        "side": "buy",
+        "size": 0.01,
+        "route": "unit_route",
+        "pool": pool,
+        "quote_mint": "SOL",
+        "slippage_bps": 25,
+        "quote_ts": 1_700_000_002,
+        "quote_source": "paper_trade_entry_quote_or_legacy_proxy",
+        "quote_binding_proof_level": "entry_execution_audit",
+        "quote_intent_binding_quality": "entry_execution_audit_bound",
+        "quote_intent_bound": bound,
+        "intent_hash": "intent-hash",
+        "quote_hash": "quote-hash",
+        "quote_binding_hash": "binding-hash",
+        "missing_fields": [] if not missing_version else ["binding_policy_version"],
+        "mismatch_fields": [] if bound else ["size"],
+        "used_future_peak": False,
+        "used_future_outcome": False,
+        "used_posthoc_label": False,
+        "forbidden_future_fields_used": [],
+    }
+    return log.append_event(
+        event_type="quote_intent_binding_recorded",
+        aggregate_id=f"quote_intent_binding:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"quote_intent_binding:{paper_trade_id}:legacy_paper_trade_quote_intent_binding_v0.1",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -231,6 +271,29 @@ def test_denominator_projection_consumes_realtime_clean_detector_contract(tmp_pa
     assert evidence["clean_standard_versions"] == ["legacy_round_trip_quote_clean_v0.1"]
     assert projection["metrics"]["telegram_realtime_clean_gold_silver_D2"] == 1
     assert projection["records"][0]["realtime_clean_contract"]["clean_observation_type"] == "TRADABLE_CLEAN_OBSERVED"
+
+
+def test_denominator_projection_consumes_quote_intent_binding_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenQuote", captured=True, **flags)
+    append_realtime_clean(log, token_ca="TokenQuote")
+    append_quote_intent_binding(log, token_ca="TokenQuote")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    evidence = projection["contract_evidence"]["QuoteIntentBindingContract"]
+
+    assert projection["quote_intent_binding_recorded_events"] == 1
+    assert projection["health"]["quote_intent_binding_ok"] is True
+    assert evidence["eligible_quote_intent_binding_records"] == 1
+    assert evidence["quote_intent_bound_count"] == 1
+    assert evidence["malformed_count"] == 0
+    assert evidence["mismatch_count"] == 0
+    assert evidence["future_leakage_count"] == 0
+    assert evidence["binding_policy_versions"] == ["legacy_paper_trade_quote_intent_binding_v0.1"]
+    assert evidence["quote_binding_proof_levels"] == ["entry_execution_audit"]
+    assert projection["records"][0]["quote_intent_binding_contract"]["quote_intent_bound"] is True
 
 
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):

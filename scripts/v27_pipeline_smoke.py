@@ -23,6 +23,7 @@ from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_earliest_actionable_times import DEFAULT_EARLIEST_ACTIONABLE_POLICY_VERSION, run_mirror_once as run_earliest_actionable_mirror_once  # noqa: E402
 from v27_mirror_ex_ante_feasibility import DEFAULT_FEASIBILITY_POLICY_VERSION, run_mirror_once as run_ex_ante_feasibility_mirror_once  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
+from v27_mirror_quote_intent_bindings import DEFAULT_BINDING_POLICY_VERSION, run_mirror_once as run_quote_intent_binding_mirror_once  # noqa: E402
 from v27_mirror_realtime_clean import DEFAULT_CLEAN_STANDARD_VERSION, run_mirror_once as run_realtime_clean_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
 from v27_mirror_paper_trade_source_labels import run_mirror_once as run_paper_trade_source_label_mirror_once  # noqa: E402
@@ -84,6 +85,7 @@ def run_pipeline_smoke(
     include_ex_ante_feasibility=False,
     include_earliest_actionable_times=False,
     include_realtime_clean=False,
+    include_quote_intent_bindings=False,
     paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
@@ -245,6 +247,28 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_quote_intent_bindings:
+        steps["quote_intent_bindings"] = _run_step(
+            "quote_intent_bindings",
+            run_quote_intent_binding_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                binding_policy_version=DEFAULT_BINDING_POLICY_VERSION,
+                quote_source="paper_trade_entry_quote_or_legacy_proxy",
+                legacy_size_sol=0.003,
+                legacy_slippage_bps=500,
+                new_only=True,
+            ),
+        )
     steps["paper_decisions"] = _run_step(
         "paper_decisions",
         run_paper_decision_mirror_once,
@@ -314,6 +338,7 @@ def run_pipeline_smoke(
         "include_ex_ante_feasibility": bool(include_ex_ante_feasibility),
         "include_earliest_actionable_times": bool(include_earliest_actionable_times),
         "include_realtime_clean": bool(include_realtime_clean),
+        "include_quote_intent_bindings": bool(include_quote_intent_bindings),
         "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
@@ -342,6 +367,7 @@ def main():
     parser.add_argument("--include-ex-ante-feasibility", action="store_true")
     parser.add_argument("--include-earliest-actionable-times", action="store_true")
     parser.add_argument("--include-realtime-clean", action="store_true")
+    parser.add_argument("--include-quote-intent-bindings", action="store_true")
     parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
@@ -361,6 +387,7 @@ def main():
         include_ex_ante_feasibility=args.include_ex_ante_feasibility,
         include_earliest_actionable_times=args.include_earliest_actionable_times,
         include_realtime_clean=args.include_realtime_clean,
+        include_quote_intent_bindings=args.include_quote_intent_bindings,
         paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )

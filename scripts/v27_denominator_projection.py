@@ -34,6 +34,7 @@ STANDARDIZED_STOP_EVENT_TYPE = "standardized_stop_contract_recorded"
 EX_ANTE_FEASIBILITY_EVENT_TYPE = "ex_ante_feasibility_recorded"
 EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
 REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
+QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -45,6 +46,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     EX_ANTE_FEASIBILITY_EVENT_TYPE,
     EARLIEST_ACTIONABLE_EVENT_TYPE,
     REALTIME_CLEAN_EVENT_TYPE,
+    QUOTE_INTENT_BINDING_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -739,6 +741,98 @@ def _extract_realtime_clean_contract(event, bags):
     }
 
 
+def _extract_quote_intent_binding_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("binding_policy_version",),
+            ("quote_intent_binding_version",),
+        ],
+    )
+    if event.get("event_type") != QUOTE_INTENT_BINDING_EVENT_TYPE and not version:
+        return None
+    required_fields = [
+        "quote_intent_id",
+        "side",
+        "size",
+        "route",
+        "pool",
+        "quote_mint",
+        "slippage_bps",
+        "quote_ts",
+    ]
+    values = {
+        "quote_intent_id": _extract_scalar(bags, [("quote_intent_id",), ("paper_trade_id",), ("trade_id",), ("id",)]),
+        "side": _extract_scalar(bags, [("side",)], default="buy"),
+        "size": _as_float(_extract_scalar(bags, [("size",), ("position_size_sol",), ("entry_size",)])),
+        "route": _extract_scalar(bags, [("route",), ("signal_route",), ("entry_mode",)]),
+        "pool": _extract_scalar(bags, [("pool",), ("canonical_pool_group",), ("lifecycle_id",)]),
+        "quote_mint": _extract_scalar(bags, [("quote_mint",), ("inputMint",), ("quote_asset",)], default="SOL"),
+        "slippage_bps": _as_float(_extract_scalar(bags, [("slippage_bps",), ("entry_quote_slippage_bps",), ("exit_quote_slippage_bps")])),
+        "quote_ts": _extract_scalar(bags, [("quote_ts",), ("quoteTs",), ("quote_time",)]),
+        "token_ca": _extract_scalar(bags, [("token_ca",), ("tokenCA",)]),
+    }
+    missing_fields = []
+    for field in required_fields:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not values.get("token_ca"):
+        missing_fields.append("token_ca")
+    if values.get("size") is not None and values.get("size") <= 0:
+        missing_fields.append("size_positive")
+    if values.get("slippage_bps") is not None and values.get("slippage_bps") < 0:
+        missing_fields.append("slippage_bps_nonnegative")
+    if not version:
+        missing_fields.append("binding_policy_version")
+    mismatch_fields = _extract_scalar(bags, [("mismatch_fields",)], default=[])
+    if mismatch_fields is None:
+        mismatch_fields = []
+    if not isinstance(mismatch_fields, list):
+        mismatch_fields = [mismatch_fields]
+    used_future_peak = _extract_flag(bags, [("used_future_peak",)]) is True
+    used_future_outcome = _extract_flag(bags, [("used_future_outcome",)]) is True
+    used_posthoc_label = _extract_flag(bags, [("used_posthoc_label",)]) is True
+    future_leakage_fields = []
+    for field, used in (
+        ("used_future_peak", used_future_peak),
+        ("used_future_outcome", used_future_outcome),
+        ("used_posthoc_label", used_posthoc_label),
+    ):
+        if used:
+            future_leakage_fields.append(field)
+    forbidden_future_fields_used = _extract_scalar(bags, [("forbidden_future_fields_used",)], default=[])
+    if forbidden_future_fields_used is None:
+        forbidden_future_fields_used = []
+    if not isinstance(forbidden_future_fields_used, list):
+        forbidden_future_fields_used = [forbidden_future_fields_used]
+    future_leakage_fields.extend(str(field) for field in forbidden_future_fields_used if field)
+    quote_intent_bound = _extract_flag(bags, [("quote_intent_bound",), ("quote_bound",)])
+    if quote_intent_bound is None:
+        quote_intent_bound = not missing_fields and not mismatch_fields and not future_leakage_fields
+    return {
+        "binding_policy_version": str(version) if version else None,
+        "quote_intent_binding_version": str(version) if version else None,
+        **values,
+        "quote_source": _extract_scalar(bags, [("quote_source",)], default=event.get("source")),
+        "quote_binding_proof_level": _extract_scalar(bags, [("quote_binding_proof_level",)], default="unknown"),
+        "quote_intent_binding_quality": _extract_scalar(bags, [("quote_intent_binding_quality",)], default="unknown"),
+        "quote_intent_bound": bool(quote_intent_bound),
+        "intent_hash": _extract_scalar(bags, [("intent_hash",)]),
+        "quote_hash": _extract_scalar(bags, [("quote_hash",)]),
+        "quote_binding_hash": _extract_scalar(bags, [("quote_binding_hash",)]),
+        "missing_fields": sorted(set(missing_fields)),
+        "mismatch_fields": sorted({str(field) for field in mismatch_fields if field}),
+        "future_leakage_fields": sorted(set(future_leakage_fields)),
+        "used_future_peak": used_future_peak,
+        "used_future_outcome": used_future_outcome,
+        "used_posthoc_label": used_posthoc_label,
+        "forbidden_future_fields_used": forbidden_future_fields_used,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -833,6 +927,7 @@ def _extract_decision_fact(event):
         "ex_ante_feasibility_contract": _extract_ex_ante_feasibility_contract(event, bags),
         "earliest_actionable_time_contract": _extract_earliest_actionable_time_contract(event, bags),
         "realtime_clean_contract": _extract_realtime_clean_contract(event, bags),
+        "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -874,6 +969,7 @@ def _new_record(fact):
         "ex_ante_feasibility_candidates": [],
         "earliest_actionable_time_candidates": [],
         "realtime_clean_candidates": [],
+        "quote_intent_binding_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -884,6 +980,7 @@ def _new_record(fact):
         "ex_ante_feasibility_contract": None,
         "earliest_actionable_time": None,
         "realtime_clean_contract": None,
+        "quote_intent_binding_contract": None,
         "captured": False,
     }
 
@@ -957,6 +1054,9 @@ def _merge_fact(record, fact):
     realtime_clean = fact.get("realtime_clean_contract")
     if realtime_clean:
         record["realtime_clean_candidates"].append(realtime_clean)
+    quote_intent_binding = fact.get("quote_intent_binding_contract")
+    if quote_intent_binding:
+        record["quote_intent_binding_candidates"].append(quote_intent_binding)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -1117,6 +1217,20 @@ def _finalize_realtime_clean(record):
     record["realtime_clean"] = bool(selected and selected.get("realtime_clean") is True)
 
 
+def _finalize_quote_intent_binding(record):
+    candidates = sorted(
+        record.get("quote_intent_binding_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["quote_intent_binding_candidates"] = candidates
+    if not candidates:
+        record["quote_intent_binding_contract"] = None
+        return
+    bound_candidates = [candidate for candidate in candidates if candidate.get("quote_intent_bound") is True]
+    selected = bound_candidates[0] if bound_candidates else candidates[0]
+    record["quote_intent_binding_contract"] = selected
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -1148,6 +1262,8 @@ def _record_missing_evidence(record):
         missing.append("TradeOutcomeLabelContract")
     if record.get("captured") and not record.get("standardized_stop_contract"):
         missing.append("StandardizedStopContract")
+    if record.get("realtime_clean_contract") and not record.get("quote_intent_binding_contract"):
+        missing.append("QuoteIntentBindingContract")
     record["missing_evidence"] = missing
     return missing
 
@@ -1375,6 +1491,54 @@ def _contract_evidence_from_records(record_list):
                     "future_leakage_fields": sorted({field for item in leaky for field in item.get("future_leakage_fields", [])}),
                 }
             )
+    quote_intent_binding_records = [
+        record
+        for record in record_list
+        if record.get("quote_intent_binding_candidates")
+    ]
+    malformed_quote_intent_bindings = []
+    mismatched_quote_intent_bindings = []
+    future_leakage_quote_intent_bindings = []
+    for record in quote_intent_binding_records:
+        malformed = [
+            item
+            for item in record.get("quote_intent_binding_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_quote_intent_bindings.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        mismatched = [
+            item
+            for item in record.get("quote_intent_binding_candidates") or []
+            if item.get("mismatch_fields")
+        ]
+        if mismatched:
+            mismatched_quote_intent_bindings.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "mismatch_count": len(mismatched),
+                    "mismatch_fields": sorted({field for item in mismatched for field in item.get("mismatch_fields", [])}),
+                }
+            )
+        leaky = [
+            item
+            for item in record.get("quote_intent_binding_candidates") or []
+            if item.get("future_leakage_fields")
+        ]
+        if leaky:
+            future_leakage_quote_intent_bindings.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "future_leakage_count": len(leaky),
+                    "future_leakage_fields": sorted({field for item in leaky for field in item.get("future_leakage_fields", [])}),
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -1494,6 +1658,43 @@ def _contract_evidence_from_records(record_list):
             ),
             "realtime_clean_projection_version": "v2.7.0.realtime_clean.v1",
         },
+        "QuoteIntentBindingContract": {
+            "eligible_quote_intent_binding_records": len(quote_intent_binding_records),
+            "quote_intent_binding_observation_count": sum(len(record.get("quote_intent_binding_candidates") or []) for record in quote_intent_binding_records),
+            "quote_intent_bound_count": sum(1 for record in quote_intent_binding_records if (record.get("quote_intent_binding_contract") or {}).get("quote_intent_bound") is True),
+            "quote_intent_unbound_count": sum(1 for record in quote_intent_binding_records if (record.get("quote_intent_binding_contract") or {}).get("quote_intent_bound") is False),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_quote_intent_bindings),
+            "malformed_quote_intent_bindings": malformed_quote_intent_bindings,
+            "mismatch_count": sum(item["mismatch_count"] for item in mismatched_quote_intent_bindings),
+            "mismatched_quote_intent_bindings": mismatched_quote_intent_bindings,
+            "future_leakage_count": sum(item["future_leakage_count"] for item in future_leakage_quote_intent_bindings),
+            "future_leakage_quote_intent_bindings": future_leakage_quote_intent_bindings,
+            "binding_policy_versions": sorted(
+                {
+                    item.get("binding_policy_version")
+                    for record in quote_intent_binding_records
+                    for item in record.get("quote_intent_binding_candidates") or []
+                    if item.get("binding_policy_version")
+                }
+            ),
+            "quote_binding_proof_levels": sorted(
+                {
+                    item.get("quote_binding_proof_level")
+                    for record in quote_intent_binding_records
+                    for item in record.get("quote_intent_binding_candidates") or []
+                    if item.get("quote_binding_proof_level")
+                }
+            ),
+            "quote_sources": sorted(
+                {
+                    item.get("quote_source")
+                    for record in quote_intent_binding_records
+                    for item in record.get("quote_intent_binding_candidates") or []
+                    if item.get("quote_source")
+                }
+            ),
+            "quote_intent_binding_projection_version": "v2.7.0.quote_intent_binding.v1",
+        },
     }
 
 
@@ -1519,6 +1720,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "ex_ante_feasibility_recorded_events": 0,
         "earliest_actionable_time_recorded_events": 0,
         "realtime_clean_detector_recorded_events": 0,
+        "quote_intent_binding_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -1547,6 +1749,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "ExAnteFeasibility": {},
             "EarliestActionableTime": {},
             "RealtimeCleanDetector": {},
+            "QuoteIntentBindingContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -1561,6 +1764,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "ex_ante_feasibility_ok": False,
             "earliest_actionable_time_ok": False,
             "realtime_clean_detector_ok": False,
+            "quote_intent_binding_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -1609,6 +1813,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["earliest_actionable_time_recorded_events"] += 1
         if event.get("event_type") == REALTIME_CLEAN_EVENT_TYPE:
             projection["realtime_clean_detector_recorded_events"] += 1
+        if event.get("event_type") == QUOTE_INTENT_BINDING_EVENT_TYPE:
+            projection["quote_intent_binding_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -1648,6 +1854,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_ex_ante_feasibility(record)
         _finalize_earliest_actionable_time(record)
         _finalize_realtime_clean(record)
+        _finalize_quote_intent_binding(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -1754,6 +1961,13 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["RealtimeCleanDetector"]["realtime_clean_observed_count"] > 0
         and contract_evidence["RealtimeCleanDetector"]["malformed_count"] == 0
         and contract_evidence["RealtimeCleanDetector"]["future_leakage_count"] == 0
+    )
+    projection["health"]["quote_intent_binding_ok"] = (
+        contract_evidence["QuoteIntentBindingContract"]["eligible_quote_intent_binding_records"] > 0
+        and contract_evidence["QuoteIntentBindingContract"]["quote_intent_bound_count"] > 0
+        and contract_evidence["QuoteIntentBindingContract"]["malformed_count"] == 0
+        and contract_evidence["QuoteIntentBindingContract"]["mismatch_count"] == 0
+        and contract_evidence["QuoteIntentBindingContract"]["future_leakage_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

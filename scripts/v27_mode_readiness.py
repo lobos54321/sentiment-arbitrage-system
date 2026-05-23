@@ -343,6 +343,13 @@ def build_contract_statuses(
         "realtime_clean_missing_malformed_or_future_leakage",
         realtime_clean_evidence,
     )
+    quote_intent_evidence = contract_evidence.get("QuoteIntentBindingContract") or {}
+    statuses["QuoteIntentBindingContract"] = _status(
+        "QuoteIntentBindingContract",
+        "pass" if projection_built and projection_health.get("quote_intent_binding_ok") else "missing_evidence",
+        "quote_intent_binding_missing_malformed_mismatched_or_future_leakage",
+        quote_intent_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",
