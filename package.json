@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "prestart": "mkdir -p ${ZEABUR_DATA_DIR:-./data} && ZEABUR_DATA_DIR=${ZEABUR_DATA_DIR:-./data} python3 scripts/run_with_timeout.py --timeout-sec ${ZEABUR_PREFLIGHT_TIMEOUT_SEC:-45} --log ${ZEABUR_DATA_DIR:-./data}/preflight.log -- python3 scripts/zeabur_preflight_cleanup.py || true",
-    "start": "node --import ./src/runtime/v27-paper-mode-preload.js src/index.js --premium",
-    "premium": "node --import ./src/runtime/v27-paper-mode-preload.js src/index.js --premium",
-    "premium:shadow": "SHADOW_MODE=true node --import ./src/runtime/v27-paper-mode-preload.js src/index.js --premium",
+    "start": "node --import ./src/runtime/v27-paper-mode-preload.js src/health-bootstrap.js --premium",
+    "premium": "node --import ./src/runtime/v27-paper-mode-preload.js src/health-bootstrap.js --premium",
+    "premium:shadow": "SHADOW_MODE=true node --import ./src/runtime/v27-paper-mode-preload.js src/health-bootstrap.js --premium",
     "shadow": "node src/index.js --shadow-mode",
     "dev": "nodemon src/index.js",
     "test": "jest",

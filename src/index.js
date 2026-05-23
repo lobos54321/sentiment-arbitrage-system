@@ -1552,7 +1552,7 @@ class PremiumChannelSystem {
 // MAIN EXECUTION
 // ==========================================
 
-async function main() {
+export async function main() {
   runVolumePreflightOnce();
   runV27EventLogRecoveryPreflightOnce();
 
