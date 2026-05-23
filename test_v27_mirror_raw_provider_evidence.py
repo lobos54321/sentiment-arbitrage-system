@@ -1,6 +1,8 @@
 import json
 import sqlite3
+import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, "scripts")
@@ -183,6 +185,72 @@ def test_raw_provider_evidence_mirror_records_trusted_and_untrusted_provider_evi
     assert untrusted["raw_response_available"] is False
     assert untrusted["provider_evidence_trusted"] is False
     assert untrusted["provider_evidence_proof_level"] == "legacy_execution_projection_without_raw_provider_response"
+
+
+def test_raw_provider_evidence_trusted_only_skips_untrusted_provider_evidence(tmp_path):
+    paper_db = tmp_path / "paper.db"
+    signal_db = tmp_path / "signal.db"
+    event_log_dir = tmp_path / "events"
+    with new_paper_db(paper_db) as db:
+        insert_trade(db, trade_id=1)
+        insert_trade(db, trade_id=2, entry_execution=None, entry_audit=audit_only("legacy-request-2"))
+    with new_signal_db(signal_db) as db:
+        insert_signal(db)
+
+    result = mirror_raw_provider_evidence(paper_db, signal_db, event_log_dir, trusted_only=True)
+    parity = verify_raw_provider_evidence_mirror_parity(
+        paper_db,
+        event_log_dir,
+        signal_db_path=signal_db,
+        trusted_only=True,
+    )
+
+    events = list(V27EventLog(event_log_dir).iter_events())
+    assert result["candidate_provider_evidence"] == 2
+    assert result["trusted_provider_evidence"] == 1
+    assert result["skipped_untrusted_provider_evidence"] == 1
+    assert result["appended"] == 1
+    assert parity["db_provider_evidence"] == 1
+    assert parity["parity_ok"] is True
+    assert len(events) == 1
+    assert events[0]["payload"]["paper_trade_id"] == 1
+    assert events[0]["payload"]["provider_evidence_trusted"] is True
+
+
+def test_raw_provider_evidence_dry_run_cli_exits_cleanly_without_verify(tmp_path):
+    paper_db = tmp_path / "paper.db"
+    signal_db = tmp_path / "signal.db"
+    event_log_dir = tmp_path / "events"
+    with new_paper_db(paper_db) as db:
+        insert_trade(db, trade_id=1)
+    with new_signal_db(signal_db) as db:
+        insert_signal(db)
+
+    script = Path(__file__).resolve().parent / "scripts" / "v27_mirror_raw_provider_evidence.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--dry-run",
+            "--paper-db",
+            str(paper_db),
+            "--signal-db",
+            str(signal_db),
+            "--event-log-dir",
+            str(event_log_dir),
+            "--lock-file",
+            str(tmp_path / "raw-provider.lock"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    payload = json.loads(completed.stdout)
+    assert payload["mirror"]["dry_run"] is True
+    assert payload["verify"] is None
 
 
 def test_raw_provider_evidence_new_only_uses_overlap_cursor_for_late_exit_audits(tmp_path):

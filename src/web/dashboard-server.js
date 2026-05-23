@@ -1158,6 +1158,116 @@ function triggerV27RecoveryControlMirror(options = {}) {
   };
 }
 
+let v27RawProviderEvidenceManualMirror = {
+  running: false,
+  started_at: null,
+  pid: null,
+};
+
+function triggerV27RawProviderEvidenceMirror(options = {}) {
+  if (v27RawProviderEvidenceManualMirror.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      ...v27RawProviderEvidenceManualMirror,
+    };
+  }
+  const paperDbPath = getPaperDbPath();
+  const signalDbPath = resolvedDbPath;
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const evidenceVersion = options.evidenceVersion || process.env.V27_RAW_PROVIDER_EVIDENCE_VERSION || 'legacy_paper_raw_provider_evidence_v0.1';
+  const defaultProvider = options.defaultProvider || process.env.V27_RAW_PROVIDER_DEFAULT_PROVIDER || 'jupiter_ultra';
+  const defaultEndpoint = options.defaultEndpoint || process.env.V27_RAW_PROVIDER_DEFAULT_ENDPOINT || '/ultra/v1/order';
+  const cursorOverlapIdsRaw = options.cursorOverlapIds ?? process.env.V27_RAW_PROVIDER_CURSOR_OVERLAP_IDS ?? 100;
+  const cursorOverlapIds = Math.max(0, Number(cursorOverlapIdsRaw) || 0);
+  const limitRaw = options.limit ?? process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LIMIT ?? 500;
+  const limit = limitRaw === null ? null : Math.max(1, Number(limitRaw) || 500);
+  const timeoutMs = Math.max(30000, Math.min(options.timeoutMs || Number(process.env.V27_RAW_PROVIDER_EVIDENCE_MANUAL_TIMEOUT_MS || 600000) || 600000, 1800000));
+  const logPathRaw = process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG || join(projectRoot, 'data', 'v27-raw-provider-evidence-mirror.log');
+  const logPath = isAbsolute(logPathRaw) ? logPathRaw : join(projectRoot, logPathRaw);
+  const args = [
+    'scripts/v27_mirror_raw_provider_evidence.py',
+    '--new-only',
+    '--paper-db',
+    paperDbPath,
+    '--signal-db',
+    signalDbPath,
+    '--event-log-dir',
+    eventLogDir,
+    '--evidence-version',
+    evidenceVersion,
+    '--default-provider',
+    defaultProvider,
+    '--default-endpoint',
+    defaultEndpoint,
+    '--cursor-overlap-ids',
+    String(cursorOverlapIds),
+  ];
+  if (options.sinceId !== undefined && options.sinceId !== null) args.push('--since-id', String(options.sinceId));
+  if (options.untilId !== undefined && options.untilId !== null) args.push('--until-id', String(options.untilId));
+  if (limit !== null) args.push('--limit', String(limit));
+  if (options.dryRun) args.push('--dry-run');
+  if (options.strict) args.push('--strict');
+  if (options.trustedOnly) args.push('--trusted-only');
+  const env = {
+    ...process.env,
+    V27_EVENT_LOG_DIR: eventLogDir,
+    V27_RAW_PROVIDER_EVIDENCE_VERSION: evidenceVersion,
+    V27_RAW_PROVIDER_DEFAULT_PROVIDER: defaultProvider,
+    V27_RAW_PROVIDER_DEFAULT_ENDPOINT: defaultEndpoint,
+  };
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const startedAt = new Date().toISOString();
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-raw-provider-evidence-mirror-once: python3 ${args.join(' ')}\n`);
+  v27RawProviderEvidenceManualMirror = {
+    running: true,
+    started_at: startedAt,
+    pid: null,
+  };
+  const child = execFile('python3', args, {
+    cwd: projectRoot,
+    env,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 50 * 1024 * 1024,
+  }, (error, stdout, stderr) => {
+    const finishedAt = new Date().toISOString();
+    if (stdout) logStream.write(String(stdout));
+    if (stderr) logStream.write(String(stderr));
+    if (error) {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-evidence-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+    } else {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-evidence-mirror-once completed\n`);
+    }
+    v27RawProviderEvidenceManualMirror = {
+      running: false,
+      started_at: startedAt,
+      pid: child?.pid || null,
+      completed_at: finishedAt,
+      exit_code: error ? error.code ?? null : 0,
+      exit_signal: error ? error.signal ?? null : null,
+      error: error ? error.message : null,
+      log_path: logPath,
+    };
+    logStream.end();
+  });
+  v27RawProviderEvidenceManualMirror = {
+    ...v27RawProviderEvidenceManualMirror,
+    pid: child.pid,
+    log_path: logPath,
+    timeout_ms: timeoutMs,
+    limit,
+    dry_run: Boolean(options.dryRun),
+    trusted_only: Boolean(options.trustedOnly),
+  };
+  return {
+    accepted: true,
+    status: 'started',
+    ...v27RawProviderEvidenceManualMirror,
+  };
+}
+
 export function readV27ModeReadiness(options = {}) {
   const path = v27ModeReadinessPath(options);
   const generatedAt = new Date().toISOString();
@@ -7805,6 +7915,29 @@ const server = http.createServer(async (req, res) => {
       materialized: false,
       refresh_schema_version: 'v2.7.0.manual_recovery_control_mirror.v1',
       ...refresh,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-raw-provider-evidence-mirror') {
+    if (!checkAuth(req, url, res)) return;
+    const mirror = triggerV27RawProviderEvidenceMirror({
+      timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
+      limit: url.searchParams.has('limit') ? boundedIntParam(url, 'limit', 500, 1, 5000) : undefined,
+      sinceId: url.searchParams.has('since_id') ? boundedIntParam(url, 'since_id', 1, 1, 1000000000) : undefined,
+      untilId: url.searchParams.has('until_id') ? boundedIntParam(url, 'until_id', 1, 1, 1000000000) : undefined,
+      cursorOverlapIds: url.searchParams.has('cursor_overlap_ids') ? boundedIntParam(url, 'cursor_overlap_ids', 100, 0, 1000000) : undefined,
+      dryRun: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+      strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      trustedOnly: ['1', 'true', 'yes'].includes(String(url.searchParams.get('trusted_only') || '').toLowerCase()),
+      evidenceVersion: url.searchParams.get('evidence_version') || undefined,
+      defaultProvider: url.searchParams.get('default_provider') || undefined,
+      defaultEndpoint: url.searchParams.get('default_endpoint') || undefined,
+    });
+    res.writeHead(mirror.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      materialized: false,
+      refresh_schema_version: 'v2.7.0.manual_raw_provider_evidence_mirror.v1',
+      ...mirror,
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-mode-readiness') {

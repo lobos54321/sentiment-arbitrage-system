@@ -333,6 +333,7 @@ def mirror_raw_provider_evidence(
     evidence_version=DEFAULT_RAW_PROVIDER_EVIDENCE_VERSION,
     default_provider=DEFAULT_PROVIDER,
     default_endpoint=DEFAULT_ENDPOINT,
+    trusted_only=False,
 ):
     summary = {
         "paper_db": str(paper_db_path),
@@ -342,12 +343,14 @@ def mirror_raw_provider_evidence(
         "read_rows": 0,
         "candidate_provider_evidence": 0,
         "trusted_provider_evidence": 0,
+        "skipped_untrusted_provider_evidence": 0,
         "appended": 0,
         "duplicate": 0,
         "failed": 0,
         "dry_run": bool(dry_run),
         "failures": [],
         "raw_provider_evidence_version": evidence_version,
+        "trusted_only": bool(trusted_only),
     }
     with _connect(paper_db_path) as paper_db, _connect(signal_db_path) as signal_db:
         schema_error = _paper_trade_schema_error(paper_db, table)
@@ -379,7 +382,13 @@ def mirror_raw_provider_evidence(
             if not payloads:
                 continue
             summary["candidate_provider_evidence"] += len(payloads)
-            summary["trusted_provider_evidence"] += sum(1 for payload in payloads if payload.get("provider_evidence_trusted") is True)
+            trusted_payloads = [payload for payload in payloads if payload.get("provider_evidence_trusted") is True]
+            summary["trusted_provider_evidence"] += len(trusted_payloads)
+            if trusted_only:
+                summary["skipped_untrusted_provider_evidence"] += len(payloads) - len(trusted_payloads)
+                payloads = trusted_payloads
+                if not payloads:
+                    continue
             if dry_run:
                 continue
             for payload in payloads:
@@ -419,19 +428,49 @@ def mirror_raw_provider_evidence(
     return summary
 
 
-def _paper_trade_provider_keys(db, *, since_id=None, until_id=None, limit=None, table="paper_trades"):
+def _paper_trade_provider_keys(
+    db,
+    *,
+    signal_db=None,
+    since_id=None,
+    until_id=None,
+    limit=None,
+    table="paper_trades",
+    signal_table="premium_signals",
+    default_chain="solana",
+    evidence_version=DEFAULT_RAW_PROVIDER_EVIDENCE_VERSION,
+    default_provider=DEFAULT_PROVIDER,
+    default_endpoint=DEFAULT_ENDPOINT,
+    trusted_only=False,
+):
     keys = []
     for row in iter_paper_trade_rows(db, since_id=since_id, until_id=until_id, limit=limit, table=table):
         row = _row_dict(row)
+        signal_context = (
+            _signal_context(signal_db, row, signal_table=signal_table, default_chain=default_chain)
+            if signal_db is not None
+            else {}
+        )
         for side, config in SIDES.items():
             audit = _parse_json_object(_available_row_value(row, config["audit_field"]))
             execution = _parse_json_object(_available_row_value(row, config["execution_field"]))
             if audit or execution:
+                if trusted_only:
+                    payload = _raw_provider_evidence_payload(
+                        row,
+                        signal_context,
+                        side=side,
+                        evidence_version=evidence_version,
+                        default_provider=default_provider,
+                        default_endpoint=default_endpoint,
+                    )
+                    if not payload or payload.get("provider_evidence_trusted") is not True:
+                        continue
                 keys.append((int(row["id"]), side))
     return keys
 
 
-def _mirrored_raw_provider_keys(event_log_dir, *, evidence_version=None):
+def _mirrored_raw_provider_keys(event_log_dir, *, evidence_version=None, trusted_only=False):
     counts = {}
     if not (Path(event_log_dir) / "events.jsonl").exists():
         return counts
@@ -440,6 +479,8 @@ def _mirrored_raw_provider_keys(event_log_dir, *, evidence_version=None):
             continue
         payload = event.get("payload") or {}
         if evidence_version and payload.get("raw_provider_evidence_version") != evidence_version:
+            continue
+        if trusted_only and payload.get("provider_evidence_trusted") is not True:
             continue
         paper_trade_id = payload.get("paper_trade_id")
         side = payload.get("side")
@@ -469,11 +510,17 @@ def verify_raw_provider_evidence_mirror_parity(
     paper_db_path,
     event_log_dir,
     *,
+    signal_db_path=None,
     since_id=None,
     until_id=None,
     limit=None,
     table="paper_trades",
+    signal_table="premium_signals",
+    default_chain="solana",
     evidence_version=DEFAULT_RAW_PROVIDER_EVIDENCE_VERSION,
+    default_provider=DEFAULT_PROVIDER,
+    default_endpoint=DEFAULT_ENDPOINT,
+    trusted_only=False,
 ):
     summary = {
         "paper_db": str(paper_db_path),
@@ -488,10 +535,42 @@ def verify_raw_provider_evidence_mirror_parity(
         "event_log_error": None,
         "parity_ok": False,
         "raw_provider_evidence_version": evidence_version,
+        "trusted_only": bool(trusted_only),
     }
     with _connect(paper_db_path) as db:
-        db_keys = _paper_trade_provider_keys(db, since_id=since_id, until_id=until_id, limit=limit, table=table)
-    mirrored_counts = _mirrored_raw_provider_keys(event_log_dir, evidence_version=evidence_version)
+        if trusted_only and signal_db_path:
+            with _connect(signal_db_path) as signal_db:
+                db_keys = _paper_trade_provider_keys(
+                    db,
+                    signal_db=signal_db,
+                    since_id=since_id,
+                    until_id=until_id,
+                    limit=limit,
+                    table=table,
+                    signal_table=signal_table,
+                    default_chain=default_chain,
+                    evidence_version=evidence_version,
+                    default_provider=default_provider,
+                    default_endpoint=default_endpoint,
+                    trusted_only=True,
+                )
+        else:
+            db_keys = _paper_trade_provider_keys(
+                db,
+                since_id=since_id,
+                until_id=until_id,
+                limit=limit,
+                table=table,
+                evidence_version=evidence_version,
+                default_provider=default_provider,
+                default_endpoint=default_endpoint,
+                trusted_only=trusted_only,
+            )
+    mirrored_counts = _mirrored_raw_provider_keys(
+        event_log_dir,
+        evidence_version=evidence_version,
+        trusted_only=trusted_only,
+    )
     db_key_set = set(db_keys)
     mirrored_key_set = set(mirrored_counts)
     scoped = since_id is not None or until_id is not None or limit is not None
@@ -556,17 +635,24 @@ def run_mirror_once(args):
         evidence_version=args.evidence_version,
         default_provider=args.default_provider,
         default_endpoint=args.default_endpoint,
+        trusted_only=getattr(args, "trusted_only", False),
     )
     verify_summary = None
     if not args.dry_run:
         verify_summary = verify_raw_provider_evidence_mirror_parity(
             args.paper_db,
             args.event_log_dir,
+            signal_db_path=args.signal_db,
             since_id=since_id,
             until_id=args.until_id,
             limit=args.limit,
             table=args.table,
+            signal_table=args.signal_table,
+            default_chain=args.default_chain,
             evidence_version=args.evidence_version,
+            default_provider=args.default_provider,
+            default_endpoint=args.default_endpoint,
+            trusted_only=getattr(args, "trusted_only", False),
         )
     return {
         "cursor": {
@@ -609,6 +695,7 @@ def main():
     parser.add_argument("--default-provider", default=os.environ.get("V27_RAW_PROVIDER_DEFAULT_PROVIDER", DEFAULT_PROVIDER))
     parser.add_argument("--default-endpoint", default=os.environ.get("V27_RAW_PROVIDER_DEFAULT_ENDPOINT", DEFAULT_ENDPOINT))
     parser.add_argument("--cursor-overlap-ids", type=int, default=int(os.environ.get("V27_RAW_PROVIDER_CURSOR_OVERLAP_IDS", DEFAULT_CURSOR_OVERLAP_IDS)))
+    parser.add_argument("--trusted-only", action="store_true")
     parser.add_argument("--new-only", action="store_true")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=float, default=30.0)
@@ -631,7 +718,7 @@ def main():
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             sys.stdout.flush()
             failed = result.get("mirror", {}).get("failed", 0)
-            failed += 0 if result.get("verify", {}).get("parity_ok", True) else 1
+            failed += 0 if (result.get("verify") or {}).get("parity_ok", True) else 1
             if args.strict and failed:
                 raise SystemExit(1)
             if not args.loop or stop["stop"]:
