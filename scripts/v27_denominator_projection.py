@@ -35,6 +35,7 @@ EX_ANTE_FEASIBILITY_EVENT_TYPE = "ex_ante_feasibility_recorded"
 EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
 REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
 QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
+IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -47,6 +48,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     EARLIEST_ACTIONABLE_EVENT_TYPE,
     REALTIME_CLEAN_EVENT_TYPE,
     QUOTE_INTENT_BINDING_EVENT_TYPE,
+    IDEMPOTENCY_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -833,6 +835,68 @@ def _extract_quote_intent_binding_contract(event, bags):
     }
 
 
+def _extract_idempotency_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("idempotency_contract_version",),
+            ("contract_version",),
+        ],
+    )
+    if event.get("event_type") != IDEMPOTENCY_EVENT_TYPE and not version:
+        return None
+    values = {
+        "decision_id": _extract_scalar(bags, [("decision_id",)]),
+        "execution_id": _extract_scalar(bags, [("execution_id",)]),
+        "idempotency_key": _extract_scalar(bags, [("idempotency_key",)]),
+        "token_lifecycle_key": _extract_scalar(bags, [("token_lifecycle_key",)]),
+        "action": _extract_scalar(bags, [("action",)]),
+        "namespace": _extract_scalar(bags, [("namespace",)]),
+        "environment_id": _extract_scalar(bags, [("environment_id",)]),
+        "route": _extract_scalar(bags, [("route",), ("signal_route",), ("entry_mode",)]),
+        "hash_algorithm": _extract_scalar(bags, [("hash_algorithm",)]),
+        "collision_policy": _extract_scalar(bags, [("collision_policy",)]),
+        "idempotency_intent_hash": _extract_scalar(bags, [("idempotency_intent_hash",), ("key_material_hash",)]),
+        "namespace_isolation_prefix": _extract_scalar(bags, [("namespace_isolation_prefix",)]),
+        "cross_environment_isolated": _extract_flag(bags, [("cross_environment_isolated",)]),
+        "idempotency_proof_level": _extract_scalar(bags, [("idempotency_proof_level",)], default="unknown"),
+    }
+    idempotency_required = ["decision_id", "execution_id", "idempotency_key", "token_lifecycle_key", "action"]
+    namespace_required = ["namespace", "environment_id", "route", "hash_algorithm", "collision_policy"]
+    missing_idempotency_fields = []
+    for field in idempotency_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_idempotency_fields.append(field)
+    missing_namespace_fields = []
+    for field in namespace_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_namespace_fields.append(field)
+    if not version:
+        missing_idempotency_fields.append("idempotency_contract_version")
+    if not values.get("idempotency_intent_hash"):
+        missing_idempotency_fields.append("idempotency_intent_hash")
+    expected_prefix = f"{values.get('environment_id')}:{values.get('namespace')}:"
+    namespace_prefix_ok = bool(
+        values.get("environment_id")
+        and values.get("namespace")
+        and values.get("idempotency_key")
+        and str(values.get("idempotency_key")).startswith(expected_prefix)
+    )
+    if values.get("cross_environment_isolated") is None:
+        values["cross_environment_isolated"] = namespace_prefix_ok
+    return {
+        "idempotency_contract_version": str(version) if version else None,
+        **values,
+        "namespace_prefix_ok": namespace_prefix_ok,
+        "missing_idempotency_fields": sorted(set(missing_idempotency_fields)),
+        "missing_namespace_fields": sorted(set(missing_namespace_fields)),
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -928,6 +992,7 @@ def _extract_decision_fact(event):
         "earliest_actionable_time_contract": _extract_earliest_actionable_time_contract(event, bags),
         "realtime_clean_contract": _extract_realtime_clean_contract(event, bags),
         "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
+        "idempotency_contract": _extract_idempotency_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -970,6 +1035,7 @@ def _new_record(fact):
         "earliest_actionable_time_candidates": [],
         "realtime_clean_candidates": [],
         "quote_intent_binding_candidates": [],
+        "idempotency_contract_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -981,6 +1047,7 @@ def _new_record(fact):
         "earliest_actionable_time": None,
         "realtime_clean_contract": None,
         "quote_intent_binding_contract": None,
+        "idempotency_contract": None,
         "captured": False,
     }
 
@@ -1057,6 +1124,9 @@ def _merge_fact(record, fact):
     quote_intent_binding = fact.get("quote_intent_binding_contract")
     if quote_intent_binding:
         record["quote_intent_binding_candidates"].append(quote_intent_binding)
+    idempotency_contract = fact.get("idempotency_contract")
+    if idempotency_contract:
+        record["idempotency_contract_candidates"].append(idempotency_contract)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -1231,6 +1301,15 @@ def _finalize_quote_intent_binding(record):
     record["quote_intent_binding_contract"] = selected
 
 
+def _finalize_idempotency_contract(record):
+    candidates = sorted(
+        record.get("idempotency_contract_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["idempotency_contract_candidates"] = candidates
+    record["idempotency_contract"] = candidates[0] if candidates else None
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -1264,6 +1343,9 @@ def _record_missing_evidence(record):
         missing.append("StandardizedStopContract")
     if record.get("realtime_clean_contract") and not record.get("quote_intent_binding_contract"):
         missing.append("QuoteIntentBindingContract")
+    if record.get("quote_intent_binding_contract") and not record.get("idempotency_contract"):
+        missing.append("IdempotencyContract")
+        missing.append("IdempotencyKeyNamespaceContract")
     record["missing_evidence"] = missing
     return missing
 
@@ -1539,6 +1621,100 @@ def _contract_evidence_from_records(record_list):
                     "future_leakage_fields": sorted({field for item in leaky for field in item.get("future_leakage_fields", [])}),
                 }
             )
+    idempotency_records = [
+        record
+        for record in record_list
+        if record.get("idempotency_contract_candidates")
+    ]
+    malformed_idempotency = []
+    malformed_namespaces = []
+    all_idempotency_candidates = [
+        item
+        for record in idempotency_records
+        for item in record.get("idempotency_contract_candidates") or []
+    ]
+    for record in idempotency_records:
+        malformed = [
+            item
+            for item in record.get("idempotency_contract_candidates") or []
+            if item.get("missing_idempotency_fields")
+        ]
+        if malformed:
+            malformed_idempotency.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_idempotency_fields", [])}),
+                }
+            )
+        malformed_namespace = [
+            item
+            for item in record.get("idempotency_contract_candidates") or []
+            if item.get("missing_namespace_fields") or item.get("namespace_prefix_ok") is not True
+        ]
+        if malformed_namespace:
+            malformed_namespaces.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed_namespace),
+                    "missing_fields": sorted({field for item in malformed_namespace for field in item.get("missing_namespace_fields", [])}),
+                    "namespace_prefix_violations": sum(1 for item in malformed_namespace if item.get("namespace_prefix_ok") is not True),
+                }
+            )
+
+    idempotency_key_hashes = {}
+    idempotency_collisions = []
+    for item in all_idempotency_candidates:
+        key = (item.get("environment_id"), item.get("namespace"), item.get("idempotency_key"))
+        if not all(key):
+            continue
+        existing = idempotency_key_hashes.setdefault(key, item.get("idempotency_intent_hash"))
+        if existing != item.get("idempotency_intent_hash"):
+            idempotency_collisions.append(
+                {
+                    "environment_id": item.get("environment_id"),
+                    "namespace": item.get("namespace"),
+                    "idempotency_key": item.get("idempotency_key"),
+                    "existing_intent_hash": existing,
+                    "incoming_intent_hash": item.get("idempotency_intent_hash"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+            )
+
+    lifecycle_actions = {}
+    duplicate_action_conflicts = []
+    for item in all_idempotency_candidates:
+        key = (item.get("environment_id"), item.get("namespace"), item.get("token_lifecycle_key"), item.get("action"))
+        if not all(key):
+            continue
+        existing = lifecycle_actions.setdefault(key, item.get("execution_id"))
+        if existing != item.get("execution_id"):
+            duplicate_action_conflicts.append(
+                {
+                    "environment_id": item.get("environment_id"),
+                    "namespace": item.get("namespace"),
+                    "token_lifecycle_key": item.get("token_lifecycle_key"),
+                    "action": item.get("action"),
+                    "existing_execution_id": existing,
+                    "incoming_execution_id": item.get("execution_id"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+            )
+
+    allowed_collision_policies = {"reject_same_namespace_key_with_different_intent_hash"}
+    namespace_policy_violations = [
+        {
+            "environment_id": item.get("environment_id"),
+            "namespace": item.get("namespace"),
+            "collision_policy": item.get("collision_policy"),
+            "hash_algorithm": item.get("hash_algorithm"),
+            "source_event_id": item.get("source_event_id"),
+        }
+        for item in all_idempotency_candidates
+        if item.get("collision_policy") not in allowed_collision_policies
+        or item.get("hash_algorithm") != "sha256(canonical_json)"
+        or item.get("cross_environment_isolated") is not True
+    ]
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -1695,6 +1871,47 @@ def _contract_evidence_from_records(record_list):
             ),
             "quote_intent_binding_projection_version": "v2.7.0.quote_intent_binding.v1",
         },
+        "IdempotencyContract": {
+            "eligible_idempotency_records": len(idempotency_records),
+            "idempotency_observation_count": len(all_idempotency_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_idempotency),
+            "malformed_idempotency": malformed_idempotency,
+            "idempotency_collision_count": len(idempotency_collisions),
+            "idempotency_collisions": idempotency_collisions,
+            "duplicate_action_conflict_count": len(duplicate_action_conflicts),
+            "duplicate_action_conflicts": duplicate_action_conflicts,
+            "contract_versions": sorted(
+                {
+                    item.get("idempotency_contract_version")
+                    for item in all_idempotency_candidates
+                    if item.get("idempotency_contract_version")
+                }
+            ),
+            "actions": sorted({item.get("action") for item in all_idempotency_candidates if item.get("action")}),
+            "idempotency_proof_levels": sorted(
+                {
+                    item.get("idempotency_proof_level")
+                    for item in all_idempotency_candidates
+                    if item.get("idempotency_proof_level")
+                }
+            ),
+            "idempotency_projection_version": "v2.7.0.idempotency.v1",
+        },
+        "IdempotencyKeyNamespaceContract": {
+            "eligible_namespace_records": len(idempotency_records),
+            "namespace_observation_count": len(all_idempotency_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_namespaces),
+            "malformed_namespaces": malformed_namespaces,
+            "namespace_policy_violation_count": len(namespace_policy_violations),
+            "namespace_policy_violations": namespace_policy_violations,
+            "idempotency_collision_count": len(idempotency_collisions),
+            "environment_ids": sorted({item.get("environment_id") for item in all_idempotency_candidates if item.get("environment_id")}),
+            "namespaces": sorted({item.get("namespace") for item in all_idempotency_candidates if item.get("namespace")}),
+            "routes": sorted({item.get("route") for item in all_idempotency_candidates if item.get("route")}),
+            "hash_algorithms": sorted({item.get("hash_algorithm") for item in all_idempotency_candidates if item.get("hash_algorithm")}),
+            "collision_policies": sorted({item.get("collision_policy") for item in all_idempotency_candidates if item.get("collision_policy")}),
+            "namespace_projection_version": "v2.7.0.idempotency_namespace.v1",
+        },
     }
 
 
@@ -1721,6 +1938,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "earliest_actionable_time_recorded_events": 0,
         "realtime_clean_detector_recorded_events": 0,
         "quote_intent_binding_recorded_events": 0,
+        "idempotency_contract_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -1750,6 +1968,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "EarliestActionableTime": {},
             "RealtimeCleanDetector": {},
             "QuoteIntentBindingContract": {},
+            "IdempotencyContract": {},
+            "IdempotencyKeyNamespaceContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -1765,6 +1985,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "earliest_actionable_time_ok": False,
             "realtime_clean_detector_ok": False,
             "quote_intent_binding_ok": False,
+            "idempotency_contract_ok": False,
+            "idempotency_key_namespace_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -1815,6 +2037,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["realtime_clean_detector_recorded_events"] += 1
         if event.get("event_type") == QUOTE_INTENT_BINDING_EVENT_TYPE:
             projection["quote_intent_binding_recorded_events"] += 1
+        if event.get("event_type") == IDEMPOTENCY_EVENT_TYPE:
+            projection["idempotency_contract_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -1855,6 +2079,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_earliest_actionable_time(record)
         _finalize_realtime_clean(record)
         _finalize_quote_intent_binding(record)
+        _finalize_idempotency_contract(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -1968,6 +2193,18 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["QuoteIntentBindingContract"]["malformed_count"] == 0
         and contract_evidence["QuoteIntentBindingContract"]["mismatch_count"] == 0
         and contract_evidence["QuoteIntentBindingContract"]["future_leakage_count"] == 0
+    )
+    projection["health"]["idempotency_contract_ok"] = (
+        contract_evidence["IdempotencyContract"]["eligible_idempotency_records"] > 0
+        and contract_evidence["IdempotencyContract"]["malformed_count"] == 0
+        and contract_evidence["IdempotencyContract"]["idempotency_collision_count"] == 0
+        and contract_evidence["IdempotencyContract"]["duplicate_action_conflict_count"] == 0
+    )
+    projection["health"]["idempotency_key_namespace_ok"] = (
+        contract_evidence["IdempotencyKeyNamespaceContract"]["eligible_namespace_records"] > 0
+        and contract_evidence["IdempotencyKeyNamespaceContract"]["malformed_count"] == 0
+        and contract_evidence["IdempotencyKeyNamespaceContract"]["namespace_policy_violation_count"] == 0
+        and contract_evidence["IdempotencyKeyNamespaceContract"]["idempotency_collision_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

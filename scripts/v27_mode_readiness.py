@@ -350,6 +350,20 @@ def build_contract_statuses(
         "quote_intent_binding_missing_malformed_mismatched_or_future_leakage",
         quote_intent_evidence,
     )
+    idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
+    statuses["IdempotencyContract"] = _status(
+        "IdempotencyContract",
+        "pass" if projection_built and projection_health.get("idempotency_contract_ok") else "missing_evidence",
+        "idempotency_missing_malformed_collision_or_duplicate_action_conflict",
+        idempotency_evidence,
+    )
+    idempotency_namespace_evidence = contract_evidence.get("IdempotencyKeyNamespaceContract") or {}
+    statuses["IdempotencyKeyNamespaceContract"] = _status(
+        "IdempotencyKeyNamespaceContract",
+        "pass" if projection_built and projection_health.get("idempotency_key_namespace_ok") else "missing_evidence",
+        "idempotency_namespace_missing_malformed_collision_or_policy_violation",
+        idempotency_namespace_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

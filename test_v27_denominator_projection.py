@@ -211,6 +211,40 @@ def append_quote_intent_binding(log, *, token_ca, paper_trade_id=1, pool="pool-a
     )
 
 
+def append_idempotency_contract(log, *, token_ca, paper_trade_id=1, pool="pool-a", namespace="paper_entry_execution", environment_id="unit"):
+    key_material_hash = f"intent-{paper_trade_id}"
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "idempotency_contract_version": "legacy_paper_entry_idempotency_v0.1",
+        "decision_id": f"paper_trade:{paper_trade_id}:entry_decision",
+        "execution_id": f"paper_trade:{paper_trade_id}:entry_execution",
+        "idempotency_key": f"{environment_id}:{namespace}:{key_material_hash}",
+        "token_lifecycle_key": f"solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        "action": "paper_entry",
+        "namespace": namespace,
+        "environment_id": environment_id,
+        "route": "unit_route",
+        "hash_algorithm": "sha256(canonical_json)",
+        "collision_policy": "reject_same_namespace_key_with_different_intent_hash",
+        "idempotency_intent_hash": key_material_hash,
+        "key_material_hash": key_material_hash,
+        "namespace_isolation_prefix": f"{environment_id}:{namespace}:",
+        "cross_environment_isolated": True,
+        "idempotency_proof_level": "legacy_paper_trade_entry_execution",
+    }
+    return log.append_event(
+        event_type="idempotency_contract_recorded",
+        aggregate_id=f"idempotency_contract:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"idempotency_contract:{environment_id}:{paper_trade_id}:legacy_paper_entry_idempotency_v0.1",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -294,6 +328,34 @@ def test_denominator_projection_consumes_quote_intent_binding_contract(tmp_path)
     assert evidence["binding_policy_versions"] == ["legacy_paper_trade_quote_intent_binding_v0.1"]
     assert evidence["quote_binding_proof_levels"] == ["entry_execution_audit"]
     assert projection["records"][0]["quote_intent_binding_contract"]["quote_intent_bound"] is True
+
+
+def test_denominator_projection_consumes_idempotency_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenIdem", captured=True, **flags)
+    append_realtime_clean(log, token_ca="TokenIdem")
+    append_quote_intent_binding(log, token_ca="TokenIdem")
+    append_idempotency_contract(log, token_ca="TokenIdem")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    idempotency = projection["contract_evidence"]["IdempotencyContract"]
+    namespace = projection["contract_evidence"]["IdempotencyKeyNamespaceContract"]
+
+    assert projection["idempotency_contract_recorded_events"] == 1
+    assert projection["health"]["idempotency_contract_ok"] is True
+    assert projection["health"]["idempotency_key_namespace_ok"] is True
+    assert idempotency["eligible_idempotency_records"] == 1
+    assert idempotency["idempotency_observation_count"] == 1
+    assert idempotency["malformed_count"] == 0
+    assert idempotency["idempotency_collision_count"] == 0
+    assert idempotency["duplicate_action_conflict_count"] == 0
+    assert namespace["eligible_namespace_records"] == 1
+    assert namespace["malformed_count"] == 0
+    assert namespace["namespace_policy_violation_count"] == 0
+    assert namespace["namespaces"] == ["paper_entry_execution"]
+    assert projection["records"][0]["idempotency_contract"]["action"] == "paper_entry"
 
 
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):

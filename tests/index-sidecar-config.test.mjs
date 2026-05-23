@@ -45,6 +45,10 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /name:\s*'v27-quote-intent-binding-mirror'/);
   assert.match(source, /scripts\/v27_mirror_quote_intent_bindings\.py/);
   assert.match(source, /V27_QUOTE_INTENT_BINDING_MIRROR_LOCK_FILE/);
+  assert.match(source, /V27_IDEMPOTENCY_CONTRACT_MIRROR_WORKER_ENABLED/);
+  assert.match(source, /name:\s*'v27-idempotency-contract-mirror'/);
+  assert.match(source, /scripts\/v27_mirror_idempotency_contracts\.py/);
+  assert.match(source, /V27_IDEMPOTENCY_CONTRACT_MIRROR_LOCK_FILE/);
   assert.match(source, /V27_PAPER_DECISION_MIRROR_WORKER_ENABLED/);
   assert.match(source, /name:\s*'v27-paper-decision-mirror'/);
   assert.match(source, /scripts\/v27_mirror_paper_decisions\.py/);

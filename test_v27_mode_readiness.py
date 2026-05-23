@@ -128,6 +128,38 @@ def append_quote_intent_binding_event(event_log_dir):
     )
 
 
+def append_idempotency_contract_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="idempotency_contract_recorded",
+        aggregate_id="idempotency_contract:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="idempotency_contract:unit:1:legacy_paper_entry_idempotency_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "idempotency_contract_version": "legacy_paper_entry_idempotency_v0.1",
+            "decision_id": "paper_trade:1:entry_decision",
+            "execution_id": "paper_trade:1:entry_execution",
+            "idempotency_key": "unit:paper_entry_execution:intent-1",
+            "token_lifecycle_key": "solana:TokenReady:unknown_pool:0:1",
+            "action": "paper_entry",
+            "namespace": "paper_entry_execution",
+            "environment_id": "unit",
+            "route": "unit_route",
+            "hash_algorithm": "sha256(canonical_json)",
+            "collision_policy": "reject_same_namespace_key_with_different_intent_hash",
+            "idempotency_intent_hash": "intent-1",
+            "key_material_hash": "intent-1",
+            "namespace_isolation_prefix": "unit:paper_entry_execution:",
+            "cross_environment_isolated": True,
+            "idempotency_proof_level": "legacy_paper_trade_entry_execution",
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
@@ -230,6 +262,35 @@ def test_mode_readiness_consumes_quote_intent_binding_evidence(tmp_path):
     assert "RealtimeCleanDetector" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "QuoteIntentBindingContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "IdempotencyContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_idempotency_contract_evidence(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_idempotency_contract_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["IdempotencyContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["IdempotencyKeyNamespaceContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["IdempotencyContract"]["evidence"]["idempotency_collision_count"] == 0
+    assert "IdempotencyContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "IdempotencyKeyNamespaceContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "ExecutionLeaseContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):

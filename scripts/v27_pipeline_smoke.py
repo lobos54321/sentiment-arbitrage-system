@@ -22,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from v27_event_log import V27EventLog  # noqa: E402
 from v27_mirror_earliest_actionable_times import DEFAULT_EARLIEST_ACTIONABLE_POLICY_VERSION, run_mirror_once as run_earliest_actionable_mirror_once  # noqa: E402
 from v27_mirror_ex_ante_feasibility import DEFAULT_FEASIBILITY_POLICY_VERSION, run_mirror_once as run_ex_ante_feasibility_mirror_once  # noqa: E402
+from v27_mirror_idempotency_contracts import DEFAULT_CONTRACT_VERSION as DEFAULT_IDEMPOTENCY_CONTRACT_VERSION, run_mirror_once as run_idempotency_contract_mirror_once  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
 from v27_mirror_quote_intent_bindings import DEFAULT_BINDING_POLICY_VERSION, run_mirror_once as run_quote_intent_binding_mirror_once  # noqa: E402
 from v27_mirror_realtime_clean import DEFAULT_CLEAN_STANDARD_VERSION, run_mirror_once as run_realtime_clean_mirror_once  # noqa: E402
@@ -86,6 +87,7 @@ def run_pipeline_smoke(
     include_earliest_actionable_times=False,
     include_realtime_clean=False,
     include_quote_intent_bindings=False,
+    include_idempotency_contracts=False,
     paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
@@ -269,6 +271,29 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_idempotency_contracts:
+        steps["idempotency_contracts"] = _run_step(
+            "idempotency_contracts",
+            run_idempotency_contract_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                contract_version=DEFAULT_IDEMPOTENCY_CONTRACT_VERSION,
+                namespace="paper_entry_execution",
+                environment_id="local_smoke",
+                collision_policy="reject_same_namespace_key_with_different_intent_hash",
+                hash_algorithm="sha256(canonical_json)",
+                new_only=True,
+            ),
+        )
     steps["paper_decisions"] = _run_step(
         "paper_decisions",
         run_paper_decision_mirror_once,
@@ -339,6 +364,7 @@ def run_pipeline_smoke(
         "include_earliest_actionable_times": bool(include_earliest_actionable_times),
         "include_realtime_clean": bool(include_realtime_clean),
         "include_quote_intent_bindings": bool(include_quote_intent_bindings),
+        "include_idempotency_contracts": bool(include_idempotency_contracts),
         "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
@@ -368,6 +394,7 @@ def main():
     parser.add_argument("--include-earliest-actionable-times", action="store_true")
     parser.add_argument("--include-realtime-clean", action="store_true")
     parser.add_argument("--include-quote-intent-bindings", action="store_true")
+    parser.add_argument("--include-idempotency-contracts", action="store_true")
     parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
@@ -388,6 +415,7 @@ def main():
         include_earliest_actionable_times=args.include_earliest_actionable_times,
         include_realtime_clean=args.include_realtime_clean,
         include_quote_intent_bindings=args.include_quote_intent_bindings,
+        include_idempotency_contracts=args.include_idempotency_contracts,
         paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )

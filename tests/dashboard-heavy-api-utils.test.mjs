@@ -163,6 +163,7 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   const dir = fs.mkdtempSync(join(os.tmpdir(), 'storage-health-v27-logs-'));
   fs.writeFileSync(join(dir, 'v27-paper-trade-source-label-mirror.log'), 'mirror failed');
   fs.writeFileSync(join(dir, 'v27-earliest-actionable-mirror.log'), 'earliest actionable failed');
+  fs.writeFileSync(join(dir, 'v27-idempotency-contract-mirror.log'), 'idempotency failed');
 
   const snapshot = buildStorageHealthSnapshot({
     projectRoot: dir,
@@ -181,6 +182,7 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-earliest-actionable-mirror.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-realtime-clean-mirror.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-quote-intent-binding-mirror.log').exists, false);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-idempotency-contract-mirror.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-read-model-refresh.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-event-log-recovery.log').exists, false);
 });
@@ -193,6 +195,7 @@ test('dashboard log resolver exposes v27 mirror sidecar logs', () => {
     V27_EARLIEST_ACTIONABLE_MIRROR_LOG: '/tmp/earliest-actionable.log',
     V27_REALTIME_CLEAN_MIRROR_LOG: '/tmp/realtime-clean.log',
     V27_QUOTE_INTENT_BINDING_MIRROR_LOG: '/tmp/quote-intent-binding.log',
+    V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG: '/tmp/idempotency-contract.log',
   };
 
   assert.equal(resolveDashboardLogPath('/api/logs/v27-trade-outcome-mirror', env), '/tmp/trade-outcome.log');
@@ -201,6 +204,7 @@ test('dashboard log resolver exposes v27 mirror sidecar logs', () => {
   assert.equal(resolveDashboardLogPath('/api/logs/v27-earliest-actionable-mirror', env), '/tmp/earliest-actionable.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-realtime-clean-mirror', env), '/tmp/realtime-clean.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-quote-intent-binding-mirror', env), '/tmp/quote-intent-binding.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-idempotency-contract-mirror', env), '/tmp/idempotency-contract.log');
   assert.equal(resolveDashboardLogPath('/api/logs/not-registered', env), null);
 });
 
