@@ -41,6 +41,8 @@ EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
 NO_FILL_OUTCOME_EVENT_TYPE = "no_fill_outcome_recorded"
 RUNTIME_RECOVERY_EVENT_TYPE = "runtime_recovery_control_recorded"
+OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
+LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -1797,9 +1799,19 @@ def _finalize_outcome_window_close(record):
     if window_closed_at is None:
         missing_fields.append("window_closed_at")
     window_order_ok = True
+    window_order_delta_sec = None
+    window_order_tolerance_applied_sec = 0.0
     try:
         if window_start is not None and window_end is not None:
-            window_order_ok = float(window_end) >= float(window_start)
+            window_order_delta_sec = float(window_end) - float(window_start)
+            window_order_ok = window_order_delta_sec >= 0
+            if (
+                not window_order_ok
+                and trade_outcome_label.get("trade_outcome_label_quality") == "legacy_paper_trade_view"
+                and abs(window_order_delta_sec) <= LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC
+            ):
+                window_order_ok = True
+                window_order_tolerance_applied_sec = abs(window_order_delta_sec)
     except (TypeError, ValueError):
         window_order_ok = True
     record["outcome_window_close_contract"] = {
@@ -1807,12 +1819,15 @@ def _finalize_outcome_window_close(record):
         "window_start": window_start,
         "window_end": window_end,
         "window_closed_at": window_closed_at,
-        "outcome_window_close_version": "v2.7.0.outcome_window_close.v1",
+        "outcome_window_close_version": OUTCOME_WINDOW_CLOSE_VERSION,
         "outcome_window_close_quality": "trade_outcome_label_window_close_proxy",
         "paper_trade_id": paper_trade_id,
         "trade_outcome_label_source_event_id": trade_outcome_label.get("source_event_id"),
         "trade_outcome_label_global_seq": trade_outcome_label.get("global_seq"),
         "window_order_ok": window_order_ok,
+        "window_order_delta_sec": window_order_delta_sec,
+        "window_order_tolerance_sec": LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC,
+        "window_order_tolerance_applied_sec": window_order_tolerance_applied_sec,
         "missing_fields": missing_fields,
     }
 
@@ -2825,7 +2840,7 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
             "malformed_outcome_window_closes": malformed_outcome_window_closes,
             "window_order_violation_count": len(outcome_window_close_violations),
             "window_order_violations": outcome_window_close_violations,
-            "outcome_window_close_projection_version": "v2.7.0.outcome_window_close.v1",
+            "outcome_window_close_projection_version": OUTCOME_WINDOW_CLOSE_VERSION,
         },
         "StandardizedStopContract": {
             "eligible_standardized_stop_records": len(standardized_stop_records),
