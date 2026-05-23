@@ -364,6 +364,27 @@ def build_contract_statuses(
         "idempotency_namespace_missing_malformed_collision_or_policy_violation",
         idempotency_namespace_evidence,
     )
+    execution_lease_evidence = contract_evidence.get("ExecutionLeaseContract") or {}
+    statuses["ExecutionLeaseContract"] = _status(
+        "ExecutionLeaseContract",
+        "pass" if projection_built and projection_health.get("execution_lease_ok") else "missing_evidence",
+        "execution_lease_missing_malformed_or_invalid",
+        execution_lease_evidence,
+    )
+    state_fencing_evidence = contract_evidence.get("StateVersionFencing") or {}
+    statuses["StateVersionFencing"] = _status(
+        "StateVersionFencing",
+        "pass" if projection_built and projection_health.get("state_version_fencing_ok") else "missing_evidence",
+        "state_version_fencing_missing_malformed_or_invalid",
+        state_fencing_evidence,
+    )
+    entry_execution_evidence = contract_evidence.get("EntryExecutionStateMachine") or {}
+    statuses["EntryExecutionStateMachine"] = _status(
+        "EntryExecutionStateMachine",
+        "pass" if projection_built and projection_health.get("entry_execution_state_machine_ok") else "missing_evidence",
+        "entry_execution_state_machine_missing_malformed_or_invalid",
+        entry_execution_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

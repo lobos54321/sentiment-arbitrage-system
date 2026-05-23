@@ -36,6 +36,7 @@ EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
 REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
 QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
+EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -49,6 +50,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     REALTIME_CLEAN_EVENT_TYPE,
     QUOTE_INTENT_BINDING_EVENT_TYPE,
     IDEMPOTENCY_EVENT_TYPE,
+    EXECUTION_CONTROL_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -897,6 +899,102 @@ def _extract_idempotency_contract(event, bags):
     }
 
 
+def _extract_execution_control(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("execution_control_version",),
+            ("control_version",),
+        ],
+    )
+    if event.get("event_type") != EXECUTION_CONTROL_EVENT_TYPE and not version:
+        return None
+    values = {
+        "execution_control_version": str(version) if version else None,
+        "decision_id": _extract_scalar(bags, [("decision_id",)]),
+        "execution_id": _extract_scalar(bags, [("execution_id",)]),
+        "token_lifecycle_key": _extract_scalar(bags, [("token_lifecycle_key",)]),
+        "environment_id": _extract_scalar(bags, [("environment_id",)]),
+        "route": _extract_scalar(bags, [("route",), ("signal_route",), ("entry_mode",)]),
+        "lease_id": _extract_scalar(bags, [("lease_id",)]),
+        "fencing_token": _extract_scalar(bags, [("fencing_token",)]),
+        "acquired_at": _extract_scalar(bags, [("acquired_at",)]),
+        "expires_at": _extract_scalar(bags, [("expires_at",)]),
+        "released_at": _extract_scalar(bags, [("released_at",)]),
+        "lease_status": _extract_scalar(bags, [("lease_status",)]),
+        "lease_valid_at_execution": _extract_flag(bags, [("lease_valid_at_execution",)]),
+        "state_version_at_decision": _as_int(_extract_scalar(bags, [("state_version_at_decision",)]), default=None),
+        "state_version_at_execution": _as_int(_extract_scalar(bags, [("state_version_at_execution",)]), default=None),
+        "requires_revalidation_before_fill": _extract_flag(bags, [("requires_revalidation_before_fill",)]),
+        "revalidation_passed": _extract_flag(bags, [("revalidation_passed",)]),
+        "state": _extract_scalar(bags, [("state",)]),
+        "state_version": _as_int(_extract_scalar(bags, [("state_version",)]), default=None),
+        "failure_reason": _extract_scalar(bags, [("failure_reason",)]),
+        "terminal_state": _extract_flag(bags, [("terminal_state",)]),
+        "execution_control_proof_level": _extract_scalar(bags, [("execution_control_proof_level",)], default="unknown"),
+        "state_version_source": _extract_scalar(bags, [("state_version_source",)], default="unknown"),
+    }
+    lease_required = ["lease_id", "fencing_token", "acquired_at", "expires_at", "lease_status"]
+    fencing_required = ["state_version_at_decision", "state_version_at_execution", "requires_revalidation_before_fill"]
+    state_required = ["execution_id", "state", "state_version", "failure_reason"]
+    missing_lease_fields = []
+    for field in lease_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_lease_fields.append(field)
+    missing_fencing_fields = []
+    for field in fencing_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fencing_fields.append(field)
+    missing_state_fields = []
+    for field in state_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_state_fields.append(field)
+    if not version:
+        missing_lease_fields.append("execution_control_version")
+    acquired_ts = _timestamp_epoch_seconds(values.get("acquired_at"))
+    expires_ts = _timestamp_epoch_seconds(values.get("expires_at"))
+    released_ts = _timestamp_epoch_seconds(values.get("released_at"))
+    lease_time_order_ok = bool(acquired_ts is not None and expires_ts is not None and acquired_ts <= expires_ts)
+    lease_terminal_ok = str(values.get("lease_status") or "").lower() in {"released", "expired", "cancelled"}
+    lease_valid_at_execution = values.get("lease_valid_at_execution")
+    if lease_valid_at_execution is None:
+        lease_valid_at_execution = bool(
+            acquired_ts is not None
+            and expires_ts is not None
+            and released_ts is not None
+            and acquired_ts <= released_ts <= expires_ts
+        )
+        values["lease_valid_at_execution"] = lease_valid_at_execution
+    decision_version = values.get("state_version_at_decision")
+    execution_version = values.get("state_version_at_execution")
+    state_version = values.get("state_version")
+    state_version_order_ok = bool(
+        decision_version is not None
+        and execution_version is not None
+        and state_version is not None
+        and decision_version <= execution_version <= state_version
+    )
+    revalidation_ok = values.get("requires_revalidation_before_fill") is True and values.get("revalidation_passed") is True
+    terminal_states = {"filled_paper", "rejected", "failed", "cancelled", "no_fill", "skipped"}
+    terminal_state_ok = bool(values.get("terminal_state") is True and str(values.get("state") or "").lower() in terminal_states)
+    return {
+        **values,
+        "missing_lease_fields": sorted(set(missing_lease_fields)),
+        "missing_fencing_fields": sorted(set(missing_fencing_fields)),
+        "missing_state_fields": sorted(set(missing_state_fields)),
+        "lease_time_order_ok": lease_time_order_ok,
+        "lease_terminal_ok": lease_terminal_ok,
+        "state_version_order_ok": state_version_order_ok,
+        "revalidation_ok": revalidation_ok,
+        "terminal_state_ok": terminal_state_ok,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -993,6 +1091,7 @@ def _extract_decision_fact(event):
         "realtime_clean_contract": _extract_realtime_clean_contract(event, bags),
         "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
         "idempotency_contract": _extract_idempotency_contract(event, bags),
+        "execution_control": _extract_execution_control(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -1036,6 +1135,7 @@ def _new_record(fact):
         "realtime_clean_candidates": [],
         "quote_intent_binding_candidates": [],
         "idempotency_contract_candidates": [],
+        "execution_control_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -1048,6 +1148,7 @@ def _new_record(fact):
         "realtime_clean_contract": None,
         "quote_intent_binding_contract": None,
         "idempotency_contract": None,
+        "execution_control": None,
         "captured": False,
     }
 
@@ -1127,6 +1228,9 @@ def _merge_fact(record, fact):
     idempotency_contract = fact.get("idempotency_contract")
     if idempotency_contract:
         record["idempotency_contract_candidates"].append(idempotency_contract)
+    execution_control = fact.get("execution_control")
+    if execution_control:
+        record["execution_control_candidates"].append(execution_control)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -1310,6 +1414,15 @@ def _finalize_idempotency_contract(record):
     record["idempotency_contract"] = candidates[0] if candidates else None
 
 
+def _finalize_execution_control(record):
+    candidates = sorted(
+        record.get("execution_control_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["execution_control_candidates"] = candidates
+    record["execution_control"] = candidates[0] if candidates else None
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -1346,6 +1459,10 @@ def _record_missing_evidence(record):
     if record.get("quote_intent_binding_contract") and not record.get("idempotency_contract"):
         missing.append("IdempotencyContract")
         missing.append("IdempotencyKeyNamespaceContract")
+    if record.get("idempotency_contract") and not record.get("execution_control"):
+        missing.append("ExecutionLeaseContract")
+        missing.append("StateVersionFencing")
+        missing.append("EntryExecutionStateMachine")
     record["missing_evidence"] = missing
     return missing
 
@@ -1715,6 +1832,105 @@ def _contract_evidence_from_records(record_list):
         or item.get("hash_algorithm") != "sha256(canonical_json)"
         or item.get("cross_environment_isolated") is not True
     ]
+    execution_control_records = [
+        record
+        for record in record_list
+        if record.get("execution_control_candidates")
+    ]
+    all_execution_control_candidates = [
+        item
+        for record in execution_control_records
+        for item in record.get("execution_control_candidates") or []
+    ]
+    malformed_leases = []
+    malformed_fencing = []
+    malformed_state_machines = []
+    lease_violations = []
+    fencing_violations = []
+    state_machine_violations = []
+    for record in execution_control_records:
+        malformed = [
+            item
+            for item in record.get("execution_control_candidates") or []
+            if item.get("missing_lease_fields")
+        ]
+        if malformed:
+            malformed_leases.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_lease_fields", [])}),
+                }
+            )
+        bad_leases = [
+            item
+            for item in record.get("execution_control_candidates") or []
+            if item.get("lease_time_order_ok") is not True
+            or item.get("lease_terminal_ok") is not True
+            or item.get("lease_valid_at_execution") is not True
+        ]
+        if bad_leases:
+            lease_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_leases),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_leases],
+                }
+            )
+        malformed_fence = [
+            item
+            for item in record.get("execution_control_candidates") or []
+            if item.get("missing_fencing_fields")
+        ]
+        if malformed_fence:
+            malformed_fencing.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed_fence),
+                    "missing_fields": sorted({field for item in malformed_fence for field in item.get("missing_fencing_fields", [])}),
+                }
+            )
+        bad_fencing = [
+            item
+            for item in record.get("execution_control_candidates") or []
+            if item.get("state_version_order_ok") is not True
+            or item.get("revalidation_ok") is not True
+        ]
+        if bad_fencing:
+            fencing_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_fencing),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_fencing],
+                }
+            )
+        malformed_state = [
+            item
+            for item in record.get("execution_control_candidates") or []
+            if item.get("missing_state_fields")
+        ]
+        if malformed_state:
+            malformed_state_machines.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed_state),
+                    "missing_fields": sorted({field for item in malformed_state for field in item.get("missing_state_fields", [])}),
+                }
+            )
+        bad_state = [
+            item
+            for item in record.get("execution_control_candidates") or []
+            if item.get("terminal_state_ok") is not True
+            or item.get("state_version_order_ok") is not True
+        ]
+        if bad_state:
+            state_machine_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_state),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_state],
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -1912,6 +2128,41 @@ def _contract_evidence_from_records(record_list):
             "collision_policies": sorted({item.get("collision_policy") for item in all_idempotency_candidates if item.get("collision_policy")}),
             "namespace_projection_version": "v2.7.0.idempotency_namespace.v1",
         },
+        "ExecutionLeaseContract": {
+            "eligible_execution_lease_records": len(execution_control_records),
+            "execution_control_observation_count": len(all_execution_control_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_leases),
+            "malformed_leases": malformed_leases,
+            "lease_violation_count": sum(item["violation_count"] for item in lease_violations),
+            "lease_violations": lease_violations,
+            "lease_statuses": sorted({item.get("lease_status") for item in all_execution_control_candidates if item.get("lease_status")}),
+            "execution_control_versions": sorted({item.get("execution_control_version") for item in all_execution_control_candidates if item.get("execution_control_version")}),
+            "execution_control_proof_levels": sorted({item.get("execution_control_proof_level") for item in all_execution_control_candidates if item.get("execution_control_proof_level")}),
+            "execution_lease_projection_version": "v2.7.0.execution_lease.v1",
+        },
+        "StateVersionFencing": {
+            "eligible_state_fencing_records": len(execution_control_records),
+            "state_fencing_observation_count": len(all_execution_control_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_fencing),
+            "malformed_fencing": malformed_fencing,
+            "fencing_violation_count": sum(item["violation_count"] for item in fencing_violations),
+            "fencing_violations": fencing_violations,
+            "state_version_sources": sorted({item.get("state_version_source") for item in all_execution_control_candidates if item.get("state_version_source")}),
+            "requires_revalidation_count": sum(1 for item in all_execution_control_candidates if item.get("requires_revalidation_before_fill") is True),
+            "revalidation_passed_count": sum(1 for item in all_execution_control_candidates if item.get("revalidation_passed") is True),
+            "state_fencing_projection_version": "v2.7.0.state_fencing.v1",
+        },
+        "EntryExecutionStateMachine": {
+            "eligible_entry_execution_records": len(execution_control_records),
+            "entry_execution_observation_count": len(all_execution_control_candidates),
+            "terminal_state_count": sum(1 for item in all_execution_control_candidates if item.get("terminal_state_ok") is True),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_state_machines),
+            "malformed_state_machines": malformed_state_machines,
+            "state_machine_violation_count": sum(item["violation_count"] for item in state_machine_violations),
+            "state_machine_violations": state_machine_violations,
+            "states": sorted({item.get("state") for item in all_execution_control_candidates if item.get("state")}),
+            "entry_execution_projection_version": "v2.7.0.entry_execution_state_machine.v1",
+        },
     }
 
 
@@ -1939,6 +2190,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "realtime_clean_detector_recorded_events": 0,
         "quote_intent_binding_recorded_events": 0,
         "idempotency_contract_recorded_events": 0,
+        "execution_control_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -1970,6 +2222,9 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "QuoteIntentBindingContract": {},
             "IdempotencyContract": {},
             "IdempotencyKeyNamespaceContract": {},
+            "ExecutionLeaseContract": {},
+            "StateVersionFencing": {},
+            "EntryExecutionStateMachine": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -1987,6 +2242,9 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "quote_intent_binding_ok": False,
             "idempotency_contract_ok": False,
             "idempotency_key_namespace_ok": False,
+            "execution_lease_ok": False,
+            "state_version_fencing_ok": False,
+            "entry_execution_state_machine_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -2039,6 +2297,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["quote_intent_binding_recorded_events"] += 1
         if event.get("event_type") == IDEMPOTENCY_EVENT_TYPE:
             projection["idempotency_contract_recorded_events"] += 1
+        if event.get("event_type") == EXECUTION_CONTROL_EVENT_TYPE:
+            projection["execution_control_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -2080,6 +2340,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_realtime_clean(record)
         _finalize_quote_intent_binding(record)
         _finalize_idempotency_contract(record)
+        _finalize_execution_control(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -2205,6 +2466,22 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["IdempotencyKeyNamespaceContract"]["malformed_count"] == 0
         and contract_evidence["IdempotencyKeyNamespaceContract"]["namespace_policy_violation_count"] == 0
         and contract_evidence["IdempotencyKeyNamespaceContract"]["idempotency_collision_count"] == 0
+    )
+    projection["health"]["execution_lease_ok"] = (
+        contract_evidence["ExecutionLeaseContract"]["eligible_execution_lease_records"] > 0
+        and contract_evidence["ExecutionLeaseContract"]["malformed_count"] == 0
+        and contract_evidence["ExecutionLeaseContract"]["lease_violation_count"] == 0
+    )
+    projection["health"]["state_version_fencing_ok"] = (
+        contract_evidence["StateVersionFencing"]["eligible_state_fencing_records"] > 0
+        and contract_evidence["StateVersionFencing"]["malformed_count"] == 0
+        and contract_evidence["StateVersionFencing"]["fencing_violation_count"] == 0
+    )
+    projection["health"]["entry_execution_state_machine_ok"] = (
+        contract_evidence["EntryExecutionStateMachine"]["eligible_entry_execution_records"] > 0
+        and contract_evidence["EntryExecutionStateMachine"]["terminal_state_count"] > 0
+        and contract_evidence["EntryExecutionStateMachine"]["malformed_count"] == 0
+        and contract_evidence["EntryExecutionStateMachine"]["state_machine_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

@@ -419,3 +419,43 @@ def test_pipeline_smoke_can_seed_idempotency_contracts(tmp_path, monkeypatch):
     assert "QuoteIntentBindingContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "IdempotencyContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
     assert "IdempotencyKeyNamespaceContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+
+
+def test_pipeline_smoke_can_seed_execution_control_contracts(tmp_path, monkeypatch):
+    monkeypatch.delenv("V27_EVENT_LOG_MIRROR_ENABLED", raising=False)
+    signal_db = tmp_path / "signals.db"
+    paper_db = tmp_path / "paper.db"
+    lifecycle_db = tmp_path / "lifecycle.db"
+    output_dir = tmp_path / "read_models"
+    with create_signal_db(signal_db), create_paper_db(paper_db), create_lifecycle_db(lifecycle_db):
+        report = run_pipeline_smoke(
+            signal_db=signal_db,
+            paper_db=paper_db,
+            lifecycle_db=lifecycle_db,
+            event_log_dir=tmp_path / "events",
+            output_dir=output_dir,
+            limit=1,
+            include_missed=False,
+            include_realtime_clean=True,
+            include_quote_intent_bindings=True,
+            include_idempotency_contracts=True,
+            include_execution_control=True,
+        )
+
+    projection = json.loads((output_dir / "denominator_projection.json").read_text(encoding="utf-8"))
+
+    assert report["health"]["status"] == "v27_pipeline_smoke_ok"
+    assert report["blocking_reasons"] == []
+    assert report["steps"]["execution_control"]["ok"] is True
+    assert projection["execution_control_recorded_events"] == 1
+    assert projection["health"]["execution_lease_ok"] is True
+    assert projection["health"]["state_version_fencing_ok"] is True
+    assert projection["health"]["entry_execution_state_machine_ok"] is True
+    assert projection["contract_evidence"]["ExecutionLeaseContract"]["lease_violation_count"] == 0
+    assert projection["contract_evidence"]["StateVersionFencing"]["fencing_violation_count"] == 0
+    assert projection["contract_evidence"]["EntryExecutionStateMachine"]["state_machine_violation_count"] == 0
+    assert "IdempotencyContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "IdempotencyKeyNamespaceContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "ExecutionLeaseContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "StateVersionFencing" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "EntryExecutionStateMachine" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]

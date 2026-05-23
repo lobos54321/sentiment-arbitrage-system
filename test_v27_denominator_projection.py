@@ -245,6 +245,46 @@ def append_idempotency_contract(log, *, token_ca, paper_trade_id=1, pool="pool-a
     )
 
 
+def append_execution_control(log, *, token_ca, paper_trade_id=1, pool="pool-a", environment_id="unit"):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "execution_control_version": "legacy_paper_entry_execution_control_v0.1",
+        "decision_id": f"paper_trade:{paper_trade_id}:entry_decision",
+        "execution_id": f"paper_trade:{paper_trade_id}:entry_execution",
+        "token_lifecycle_key": f"solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        "environment_id": environment_id,
+        "route": "unit_route",
+        "lease_id": f"lease:{environment_id}:abc-{paper_trade_id}",
+        "fencing_token": f"fence-{paper_trade_id}",
+        "acquired_at": "2026-01-15T00:00:00Z",
+        "expires_at": "2026-01-15T00:00:20Z",
+        "released_at": "2026-01-15T00:00:01Z",
+        "lease_status": "released",
+        "lease_valid_at_execution": True,
+        "state_version_at_decision": 1,
+        "state_version_at_execution": 2,
+        "requires_revalidation_before_fill": True,
+        "revalidation_passed": True,
+        "state": "filled_paper",
+        "state_version": 2,
+        "failure_reason": "none",
+        "terminal_state": True,
+        "execution_control_proof_level": "unit_execution_control",
+        "state_version_source": "unit",
+    }
+    return log.append_event(
+        event_type="execution_control_recorded",
+        aggregate_id=f"execution_control:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"execution_control:{environment_id}:{paper_trade_id}:legacy_paper_entry_execution_control_v0.1",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -356,6 +396,37 @@ def test_denominator_projection_consumes_idempotency_contracts(tmp_path):
     assert namespace["namespace_policy_violation_count"] == 0
     assert namespace["namespaces"] == ["paper_entry_execution"]
     assert projection["records"][0]["idempotency_contract"]["action"] == "paper_entry"
+
+
+def test_denominator_projection_consumes_execution_control_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenLease", captured=True, **flags)
+    append_realtime_clean(log, token_ca="TokenLease")
+    append_quote_intent_binding(log, token_ca="TokenLease")
+    append_idempotency_contract(log, token_ca="TokenLease")
+    append_execution_control(log, token_ca="TokenLease")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    lease = projection["contract_evidence"]["ExecutionLeaseContract"]
+    fencing = projection["contract_evidence"]["StateVersionFencing"]
+    state_machine = projection["contract_evidence"]["EntryExecutionStateMachine"]
+
+    assert projection["execution_control_recorded_events"] == 1
+    assert projection["health"]["execution_lease_ok"] is True
+    assert projection["health"]["state_version_fencing_ok"] is True
+    assert projection["health"]["entry_execution_state_machine_ok"] is True
+    assert lease["eligible_execution_lease_records"] == 1
+    assert lease["malformed_count"] == 0
+    assert lease["lease_violation_count"] == 0
+    assert fencing["eligible_state_fencing_records"] == 1
+    assert fencing["fencing_violation_count"] == 0
+    assert fencing["requires_revalidation_count"] == 1
+    assert state_machine["eligible_entry_execution_records"] == 1
+    assert state_machine["terminal_state_count"] == 1
+    assert state_machine["state_machine_violation_count"] == 0
+    assert projection["records"][0]["execution_control"]["state"] == "filled_paper"
 
 
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):

@@ -49,6 +49,10 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /name:\s*'v27-idempotency-contract-mirror'/);
   assert.match(source, /scripts\/v27_mirror_idempotency_contracts\.py/);
   assert.match(source, /V27_IDEMPOTENCY_CONTRACT_MIRROR_LOCK_FILE/);
+  assert.match(source, /V27_EXECUTION_CONTROL_MIRROR_WORKER_ENABLED/);
+  assert.match(source, /name:\s*'v27-execution-control-mirror'/);
+  assert.match(source, /scripts\/v27_mirror_execution_control\.py/);
+  assert.match(source, /V27_EXECUTION_CONTROL_MIRROR_LOCK_FILE/);
   assert.match(source, /V27_PAPER_DECISION_MIRROR_WORKER_ENABLED/);
   assert.match(source, /name:\s*'v27-paper-decision-mirror'/);
   assert.match(source, /scripts\/v27_mirror_paper_decisions\.py/);

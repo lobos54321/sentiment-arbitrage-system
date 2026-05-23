@@ -160,6 +160,45 @@ def append_idempotency_contract_event(event_log_dir):
     )
 
 
+def append_execution_control_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="execution_control_recorded",
+        aggregate_id="execution_control:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="execution_control:unit:1:legacy_paper_entry_execution_control_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "execution_control_version": "legacy_paper_entry_execution_control_v0.1",
+            "decision_id": "paper_trade:1:entry_decision",
+            "execution_id": "paper_trade:1:entry_execution",
+            "token_lifecycle_key": "solana:TokenReady:unknown_pool:0:1",
+            "environment_id": "unit",
+            "route": "unit_route",
+            "lease_id": "lease:unit:ready",
+            "fencing_token": "fence-ready",
+            "acquired_at": "2026-01-15T00:00:00Z",
+            "expires_at": "2026-01-15T00:00:20Z",
+            "released_at": "2026-01-15T00:00:01Z",
+            "lease_status": "released",
+            "lease_valid_at_execution": True,
+            "state_version_at_decision": 1,
+            "state_version_at_execution": 2,
+            "requires_revalidation_before_fill": True,
+            "revalidation_passed": True,
+            "state": "filled_paper",
+            "state_version": 2,
+            "failure_reason": "none",
+            "terminal_state": True,
+            "execution_control_proof_level": "unit_execution_control",
+            "state_version_source": "unit",
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
@@ -291,6 +330,38 @@ def test_mode_readiness_consumes_idempotency_contract_evidence(tmp_path):
     assert "IdempotencyContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "IdempotencyKeyNamespaceContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "ExecutionLeaseContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_execution_control_evidence(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_idempotency_contract_event(event_log_dir)
+    append_execution_control_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["ExecutionLeaseContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["StateVersionFencing"]["status"] == "pass"
+    assert matrix["contract_statuses"]["EntryExecutionStateMachine"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ExecutionLeaseContract"]["evidence"]["lease_violation_count"] == 0
+    assert "ExecutionLeaseContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "StateVersionFencing" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "EntryExecutionStateMachine" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "PaperPositionLedgerContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):
