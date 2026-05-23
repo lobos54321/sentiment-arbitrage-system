@@ -39,6 +39,19 @@ DEFAULT_REFRESH_HEALTH = DEFAULT_OUTPUT_DIR / "denominator_freshness.json"
 DEFAULT_LOCK_FILE = Path("/tmp/v27_read_model_refresh.lock")
 
 
+def _progress_record(stage, **fields):
+    return {
+        "refresh_schema_version": "v2.7.0.read_model_refresh.progress.v1",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "stage": stage,
+        **fields,
+    }
+
+
+def print_progress(record):
+    print(json.dumps(record, ensure_ascii=False, sort_keys=True), flush=True)
+
+
 def write_json_atomic(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,8 +83,31 @@ def refresh_denominator_read_model(
     max_allowed_lag_seq=0,
     max_allowed_lag_ms=300_000,
     max_snapshot_age_ms=300_000,
+    progress_callback=None,
 ):
-    projection = build_denominator_projection(event_log_dir, include_records=include_records)
+    def projection_progress(record):
+        if not progress_callback:
+            return
+        record = dict(record or {})
+        stage = record.pop("stage", "projection")
+        progress_callback(_progress_record(stage, **record))
+
+    if progress_callback:
+        progress_callback(_progress_record("projection_start", event_log_dir=str(event_log_dir)))
+    projection = build_denominator_projection(
+        event_log_dir,
+        include_records=include_records,
+        progress_callback=projection_progress if progress_callback else None,
+    )
+    if progress_callback:
+        progress_callback(
+            _progress_record(
+                "projection_complete",
+                input_events=projection.get("input_events"),
+                event_log_latest_seq=projection.get("event_log_latest_seq"),
+                status=projection.get("health", {}).get("status"),
+            )
+        )
     snapshot = build_denominator_read_model_snapshot(
         projection,
         max_allowed_lag_seq=max_allowed_lag_seq,
@@ -79,9 +115,15 @@ def refresh_denominator_read_model(
         spec_manifest_path=spec_manifest_path,
     )
 
+    if progress_callback:
+        progress_callback(_progress_record("write_projection_snapshot_start"))
     write_json_atomic(projection_path, projection)
     write_json_atomic(snapshot_path, snapshot)
+    if progress_callback:
+        progress_callback(_progress_record("validate_snapshot_start", snapshot_path=str(snapshot_path)))
     verifier_report = validate_snapshot_file(snapshot_path, max_snapshot_age_ms=max_snapshot_age_ms)
+    if progress_callback:
+        progress_callback(_progress_record("consumer_evidence_start"))
     consumer_evidence = write_projection_consumer_evidence(
         output_dir=Path(health_path).parent,
         projection=projection,
@@ -90,6 +132,8 @@ def refresh_denominator_read_model(
         snapshot_path=snapshot_path,
     )
     mode_readiness_path = Path(mode_readiness_path) if mode_readiness_path else Path(health_path).parent / "mode_readiness.json"
+    if progress_callback:
+        progress_callback(_progress_record("mode_readiness_start"))
     mode_readiness = build_mode_readiness_matrix(
         event_log_dir=Path(event_log_dir),
         snapshot_path=Path(snapshot_path),
@@ -136,8 +180,19 @@ def refresh_denominator_read_model(
             "normal_tiny_ready": False,
         },
     }
+    if progress_callback:
+        progress_callback(
+            _progress_record(
+                "write_health_start",
+                read_model_seq=refresh_report.get("read_model_seq"),
+                event_log_latest_seq=refresh_report.get("event_log_latest_seq"),
+                dashboard_safe=refresh_report.get("dashboard_safe"),
+            )
+        )
     write_json_atomic(mode_readiness_path, mode_readiness)
     write_json_atomic(health_path, refresh_report)
+    if progress_callback:
+        progress_callback(_progress_record("refresh_complete", dashboard_safe=refresh_report.get("dashboard_safe")))
     return refresh_report
 
 
@@ -223,6 +278,7 @@ def run_refresh_once(args):
         max_allowed_lag_seq=args.max_allowed_lag_seq,
         max_allowed_lag_ms=args.max_allowed_lag_ms,
         max_snapshot_age_ms=args.max_snapshot_age_ms,
+        progress_callback=print_progress if args.progress else None,
     )
 
 
@@ -243,6 +299,7 @@ def main():
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--initial-delay", type=int, default=0)
     parser.add_argument("--lock-file", default=str(DEFAULT_LOCK_FILE))
+    parser.add_argument("--progress", action="store_true")
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 

@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -94,37 +95,85 @@ def _json_value_end(raw, start):
     return index
 
 
-def strip_json_fields(raw, field_names):
-    stripped = raw
-    for field_name in field_names or []:
-        key = json.dumps(str(field_name), ensure_ascii=False, separators=(",", ":"))
-        search_from = 0
-        while True:
-            key_start = stripped.find(key, search_from)
-            if key_start < 0:
-                break
-            colon = stripped.find(":", key_start + len(key))
-            if colon < 0:
-                break
-            value_end = _json_value_end(stripped, colon + 1)
-            left = key_start - 1
-            while left >= 0 and stripped[left].isspace():
-                left -= 1
-            right = value_end
-            while right < len(stripped) and stripped[right].isspace():
-                right += 1
-            if left >= 0 and stripped[left] == ",":
-                remove_start = left
-                remove_end = right
-            elif right < len(stripped) and stripped[right] == ",":
-                remove_start = key_start
-                remove_end = right + 1
-            else:
-                remove_start = key_start
-                remove_end = right
-            stripped = stripped[:remove_start] + stripped[remove_end:]
-            search_from = max(0, remove_start - 1)
-    return stripped
+def _json_field_pattern(field_names):
+    keys = [
+        json.dumps(str(field_name), ensure_ascii=False, separators=(",", ":"))
+        for field_name in field_names or []
+    ]
+    if not keys:
+        return None
+    return re.compile(rf"(?:{'|'.join(re.escape(key) for key in keys)})\s*:")
+
+
+def strip_json_fields(raw, field_names, *, field_pattern=None):
+    pattern = field_pattern or _json_field_pattern(field_names)
+    if pattern is None:
+        return raw
+    spans = []
+    for match in pattern.finditer(raw):
+        key_start = match.start()
+        colon = raw.rfind(":", match.start(), match.end())
+        if colon < 0:
+            continue
+        value_end = _json_value_end(raw, colon + 1)
+        right = value_end
+        while right < len(raw) and raw[right].isspace():
+            right += 1
+        spans.append((key_start, right))
+    if not spans:
+        return raw
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    adjusted = []
+    for start, end in merged:
+        left = start - 1
+        while left >= 0 and raw[left].isspace():
+            left -= 1
+        right = end
+        while right < len(raw) and raw[right].isspace():
+            right += 1
+        if left >= 0 and raw[left] == ",":
+            adjusted.append((left, end))
+        elif right < len(raw) and raw[right] == ",":
+            adjusted.append((start, right + 1))
+        else:
+            adjusted.append((start, end))
+    adjusted.sort()
+    merged_adjusted = []
+    for start, end in adjusted:
+        if merged_adjusted and start <= merged_adjusted[-1][1]:
+            merged_adjusted[-1] = (merged_adjusted[-1][0], max(merged_adjusted[-1][1], end))
+        else:
+            merged_adjusted.append((start, end))
+    final_spans = []
+    for start, end in merged_adjusted:
+        if (start < len(raw) and raw[start] == ",") or (end > start and raw[end - 1] == ","):
+            final_spans.append((start, end))
+            continue
+        left = start - 1
+        while left >= 0 and raw[left].isspace():
+            left -= 1
+        right = end
+        while right < len(raw) and raw[right].isspace():
+            right += 1
+        if left >= 0 and raw[left] == ",":
+            final_spans.append((left, end))
+        elif right < len(raw) and raw[right] == ",":
+            final_spans.append((start, right + 1))
+        else:
+            final_spans.append((start, end))
+    parts = []
+    cursor = 0
+    for start, end in final_spans:
+        parts.append(raw[cursor:start])
+        cursor = end
+    parts.append(raw[cursor:])
+    return "".join(parts)
 
 
 class V27EventLog:
@@ -361,12 +410,13 @@ class V27EventLog:
     def iter_events(self, prune_payload_fields=None):
         if not self.event_path.exists():
             return
+        field_pattern = _json_field_pattern(prune_payload_fields)
         with self.event_path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if line:
-                    if prune_payload_fields:
-                        line = strip_json_fields(line, prune_payload_fields)
+                    if field_pattern is not None:
+                        line = strip_json_fields(line, prune_payload_fields, field_pattern=field_pattern)
                     yield json.loads(line)
 
     def verify(self):

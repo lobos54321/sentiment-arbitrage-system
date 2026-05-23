@@ -3158,7 +3158,13 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
     }
 
 
-def build_denominator_projection(event_log_dir, *, include_records=False):
+def build_denominator_projection(
+    event_log_dir,
+    *,
+    include_records=False,
+    progress_callback=None,
+    progress_interval_events=10_000,
+):
     event_log_dir = Path(event_log_dir)
     event_log = V27EventLog(event_log_dir)
     projection = {
@@ -3274,6 +3280,14 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         projection["event_log_verify"] = event_log_summary
         projection["event_log_latest_seq"] = projection["event_log_verify"]["last_global_seq"]
         projection["health"]["event_log_ok"] = True
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "event_log_summary",
+                    "event_log_latest_seq": projection["event_log_latest_seq"],
+                    "event_log_verify_mode": projection.get("event_log_verify_mode"),
+                }
+            )
     except V27EventLogError as exc:
         projection["event_log_error"] = str(exc)
         projection["health"]["status"] = "event_log_invalid"
@@ -3286,6 +3300,21 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     window_end = None
     for event in event_log.iter_events(prune_payload_fields=HEAVY_PAYLOAD_FIELDS) or []:
         projection["input_events"] += 1
+        if (
+            progress_callback
+            and progress_interval_events
+            and projection["input_events"] % int(progress_interval_events) == 0
+        ):
+            progress_callback(
+                {
+                    "stage": "event_replay",
+                    "input_events": projection["input_events"],
+                    "global_seq": event.get("global_seq"),
+                    "event_type": event.get("event_type"),
+                    "facts": len(facts),
+                    "runtime_recovery_controls": len(runtime_recovery_controls),
+                }
+            )
         projection["event_log_latest_event_id"] = event.get("event_id")
         projection["event_log_latest_at"] = event.get("ingested_at")
         event_window_ts = event.get("available_at") or event.get("ingested_at") or event.get("observed_at")
@@ -3348,6 +3377,16 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         if event.get("event_type") == LIFECYCLE_IDENTITY_EVENT_TYPE and pool and pool != "unknown_pool":
             resolved_pool_by_identity.setdefault(identity, pool)
         facts.append(fact)
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "event_replay_complete",
+                "input_events": projection["input_events"],
+                "facts": len(facts),
+                "runtime_recovery_controls": len(runtime_recovery_controls),
+            }
+        )
 
     records = {}
     for fact in facts:

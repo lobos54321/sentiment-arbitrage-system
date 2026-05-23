@@ -11,7 +11,7 @@ import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
-import { exec, execFile } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import {
   applyFinalBlocker,
   chooseFinalBlocker,
@@ -987,6 +987,7 @@ function triggerV27ReadModelRefresh(options = {}) {
     '--event-log-dir', eventLogDir,
     '--output-dir', outputDir,
     '--lock-file', lockFile,
+    '--progress',
   ];
   if (options.includeRecords) args.push('--include-records');
   if (options.strict) args.push('--strict');
@@ -996,7 +997,7 @@ function triggerV27ReadModelRefresh(options = {}) {
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
   logStream.write(`[dashboard-trigger] ${startedAt} starting v27-read-model-refresh-once: python3 ${args.join(' ')}\n`);
 
-  const child = execFile('python3', args, {
+  const child = spawn('python3', args, {
     cwd: projectRoot,
     env: {
       ...process.env,
@@ -1004,15 +1005,22 @@ function triggerV27ReadModelRefresh(options = {}) {
       V27_EVENT_LOG_DIR: eventLogDir,
       V27_READ_MODEL_DIR: outputDir,
     },
-    timeout: timeoutMs,
-    killSignal: 'SIGTERM',
-    maxBuffer: 1024 * 1024 * 50,
-  }, (error, stdout, stderr) => {
-    if (stdout) logStream.write(stdout);
-    if (stderr) logStream.write(stderr);
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let timedOut = false;
+  let finished = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    try { child.kill('SIGTERM'); } catch {}
+  }, timeoutMs);
+  const finish = (error, code, signal) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeoutHandle);
     const finishedAt = new Date().toISOString();
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once failed code=${code || ''} signal=${signal || ''} error=${error.message}\n`);
     } else {
       logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once completed\n`);
     }
@@ -1024,6 +1032,24 @@ function triggerV27ReadModelRefresh(options = {}) {
       error: error ? error.message : null,
     };
     try { logStream.end(); } catch {}
+  };
+
+  child.stdout.on('data', (chunk) => {
+    logStream.write(chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    logStream.write(chunk);
+  });
+  child.on('error', (error) => {
+    finish(error, null, null);
+  });
+  child.on('close', (code, signal) => {
+    if (code === 0 && !signal && !timedOut) {
+      finish(null, code, signal);
+      return;
+    }
+    const reason = timedOut ? `v27-read-model-refresh timed out after ${timeoutMs}ms` : `v27-read-model-refresh exited code=${code || ''} signal=${signal || ''}`;
+    finish(new Error(reason), code, signal);
   });
 
   v27ReadModelManualRefresh = {

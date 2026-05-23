@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from scripts.v27_event_log import HEAVY_PAYLOAD_FIELDS, V27EventLog, V27EventLogError
+from scripts.v27_event_log import HEAVY_PAYLOAD_FIELDS, V27EventLog, V27EventLogError, strip_json_fields
 
 
 def test_v27_event_log_assigns_global_and_aggregate_sequences(tmp_path):
@@ -76,6 +76,25 @@ def test_v27_event_log_can_prune_heavy_payload_fields_for_projection(tmp_path):
     assert "legacy_paper_trade" not in pruned_event["payload"]
     assert pruned_event["payload"]["token_ca"] == "TOKEN1"
     assert log.verify()["event_count"] == 1
+
+
+def test_strip_json_fields_removes_adjacent_heavy_payloads_once():
+    raw = json.dumps(
+        {
+            "payload": {
+                "before": 1,
+                "legacy_missed_attribution": {"nested": [{"value": "x"}]},
+                "legacy_paper_trade": {"nested": [{"value": "y"}]},
+                "after": 2,
+            }
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    stripped = json.loads(strip_json_fields(raw, HEAVY_PAYLOAD_FIELDS))
+
+    assert stripped == {"payload": {"before": 1, "after": 2}}
 
 
 def test_v27_event_log_returns_existing_event_for_duplicate_idempotency_key(tmp_path):
