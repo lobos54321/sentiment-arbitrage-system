@@ -83,6 +83,7 @@ MODE_REQUIREMENTS = {
     "normal_tiny": [
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
+        "OutcomeWindowCloseContract",
         "RandomnessControlContract",
         "DeploymentRolloutStateMachine",
         "WorkerFleetConsistencyContract",
@@ -315,6 +316,20 @@ def build_contract_statuses(
         "trade_outcome_label_missing_or_malformed",
         trade_outcome_evidence,
     )
+    label_finalization_evidence = contract_evidence.get("LabelFinalizationContract") or {}
+    statuses["LabelFinalizationContract"] = _status(
+        "LabelFinalizationContract",
+        "pass" if projection_built and projection_health.get("label_finalization_ok") else "missing_evidence",
+        "label_finalization_missing_or_malformed",
+        label_finalization_evidence,
+    )
+    outcome_window_close_evidence = contract_evidence.get("OutcomeWindowCloseContract") or {}
+    statuses["OutcomeWindowCloseContract"] = _status(
+        "OutcomeWindowCloseContract",
+        "pass" if projection_built and projection_health.get("outcome_window_close_ok") else "missing_evidence",
+        "outcome_window_close_missing_or_malformed",
+        outcome_window_close_evidence,
+    )
     standardized_stop_evidence = contract_evidence.get("StandardizedStopContract") or {}
     statuses["StandardizedStopContract"] = _status(
         "StandardizedStopContract",
@@ -483,6 +498,7 @@ def build_contract_statuses(
         "CapitalReservationPolicy",
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
+        "OutcomeWindowCloseContract",
         "RandomnessControlContract",
         "DeploymentRolloutStateMachine",
         "WorkerFleetConsistencyContract",

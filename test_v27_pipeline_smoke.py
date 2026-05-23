@@ -326,8 +326,12 @@ def test_pipeline_smoke_can_seed_trade_outcome_and_standardized_stop(tmp_path, m
     assert report["steps"]["trade_outcomes"]["ok"] is True
     assert report["steps"]["standardized_stops"]["ok"] is True
     assert projection["health"]["trade_outcome_label_ok"] is True
+    assert projection["health"]["label_finalization_ok"] is True
+    assert projection["health"]["outcome_window_close_ok"] is True
     assert projection["health"]["standardized_stop_ok"] is True
     assert "TradeOutcomeLabelContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
+    assert "LabelFinalizationContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["normal_tiny"]
+    assert "OutcomeWindowCloseContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["normal_tiny"]
     assert "StandardizedStopContract" not in report["refresh"]["mode_readiness"]["blocking_contracts"]["ultra_tiny"]
 
 

@@ -524,6 +524,7 @@ def test_mode_readiness_consumes_raw_provider_evidence_for_normal_tiny(tmp_path)
     assert matrix["contract_statuses"]["RawProviderEvidenceContract"]["evidence"]["trusted_raw_provider_evidence_count"] == 1
     assert "RawProviderEvidenceContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "LabelFinalizationContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "OutcomeWindowCloseContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_idempotency_contract_evidence(tmp_path):
@@ -695,7 +696,11 @@ def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):
     )
 
     assert matrix["contract_statuses"]["TradeOutcomeLabelContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["LabelFinalizationContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["OutcomeWindowCloseContract"]["status"] == "pass"
     assert "TradeOutcomeLabelContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "LabelFinalizationContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "OutcomeWindowCloseContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "StandardizedStopContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 

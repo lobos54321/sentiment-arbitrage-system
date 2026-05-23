@@ -1439,6 +1439,7 @@ def _extract_decision_fact(event):
         "component": outer.get("component"),
         "decision": outer.get("decision"),
         "reason": outer.get("reason"),
+        "source_label_id": outer.get("source_label_id") or _extract_scalar(bags, [("source_label_id",)]),
         "source_dog_label": source_label,
         "source_label_research_only": _extract_flag(bags, [("source_label_research_only",), ("source_dog_label_research_only",)]),
         "reference_price_contract": _extract_reference_price_contract(event, bags),
@@ -1503,9 +1504,13 @@ def _new_record(fact):
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
+        "source_label_id": None,
+        "source_label_ids": [],
         "signal_credit_assignment": None,
         "reference_price_contract": None,
         "trade_outcome_label": None,
+        "label_finalization_contract": None,
+        "outcome_window_close_contract": None,
         "standardized_stop_contract": None,
         "ex_ante_feasibility_contract": None,
         "earliest_actionable_time": None,
@@ -1561,6 +1566,12 @@ def _merge_fact(record, fact):
 
     label = fact.get("source_dog_label")
     record["source_label_research_only"] = bool(record.get("source_label_research_only") or fact.get("source_label_research_only"))
+    source_label_id = fact.get("source_label_id")
+    if source_label_id is not None:
+        if source_label_id not in record["source_label_ids"]:
+            record["source_label_ids"].append(source_label_id)
+        if record.get("source_label_id") is None:
+            record["source_label_id"] = source_label_id
     if label:
         if record["source_dog_label"] and record["source_dog_label"] != label:
             conflict = {"existing": record["source_dog_label"], "incoming": label, "event_id": fact.get("event_id")}
@@ -1720,6 +1731,94 @@ def _finalize_trade_outcome_label(record):
     record["trade_outcome_label"] = candidates[0] if candidates else None
 
 
+def _finalize_label_finalization(record):
+    trade_outcome_label = record.get("trade_outcome_label")
+    if not trade_outcome_label:
+        record["label_finalization_contract"] = None
+        return
+    paper_trade_id = trade_outcome_label.get("paper_trade_id")
+    label_id = f"paper_trade:{paper_trade_id}:trade_outcome_label" if paper_trade_id is not None else None
+    source_label_ids = sorted(
+        {
+            source_label_id
+            for source_label_id in (record.get("source_label_ids") or [])
+            if source_label_id is not None
+        },
+        key=lambda value: str(value),
+    )
+    supersedes_label_id = None
+    if source_label_ids:
+        supersedes_label_id = f"source_label:{source_label_ids[0]}"
+    elif paper_trade_id is not None:
+        supersedes_label_id = f"source_label:{paper_trade_id}"
+    outcome_window_closed_at = trade_outcome_label.get("trade_label_available_at") or trade_outcome_label.get("exit_ts")
+    label_status = "final" if outcome_window_closed_at is not None else None
+    missing_fields = []
+    if not label_id:
+        missing_fields.append("label_id")
+    if not label_status:
+        missing_fields.append("label_status")
+    if outcome_window_closed_at is None:
+        missing_fields.append("outcome_window_closed_at")
+    if not supersedes_label_id:
+        missing_fields.append("supersedes_label_id")
+    record["label_finalization_contract"] = {
+        "label_id": label_id,
+        "label_status": label_status,
+        "outcome_window_closed_at": outcome_window_closed_at,
+        "supersedes_label_id": supersedes_label_id,
+        "label_finalization_version": "v2.7.0.label_finalization.v1",
+        "label_finalization_quality": "trade_outcome_label_finalized_from_paper_trade",
+        "paper_trade_id": paper_trade_id,
+        "source_label_id": source_label_ids[0] if source_label_ids else record.get("source_label_id"),
+        "trade_outcome_label_source_event_id": trade_outcome_label.get("source_event_id"),
+        "trade_outcome_label_global_seq": trade_outcome_label.get("global_seq"),
+        "missing_fields": missing_fields,
+    }
+
+
+def _finalize_outcome_window_close(record):
+    trade_outcome_label = record.get("trade_outcome_label")
+    if not trade_outcome_label:
+        record["outcome_window_close_contract"] = None
+        return
+    paper_trade_id = trade_outcome_label.get("paper_trade_id")
+    label_id = f"paper_trade:{paper_trade_id}:trade_outcome_label" if paper_trade_id is not None else None
+    window_start = trade_outcome_label.get("counterfactual_entry_ts") or trade_outcome_label.get("simulated_fill_ts")
+    window_end = trade_outcome_label.get("trade_label_available_at") or trade_outcome_label.get("exit_ts")
+    window_closed_at = window_end
+    missing_fields = []
+    if not label_id:
+        missing_fields.append("label_id")
+    if window_start is None:
+        missing_fields.append("window_start")
+    if window_end is None:
+        missing_fields.append("window_end")
+    if window_closed_at is None:
+        missing_fields.append("window_closed_at")
+    window_order_ok = True
+    try:
+        if window_start is not None and window_end is not None:
+            window_order_ok = float(window_end) >= float(window_start)
+    except (TypeError, ValueError):
+        window_order_ok = True
+    if not window_order_ok:
+        missing_fields.append("window_order_ok")
+    record["outcome_window_close_contract"] = {
+        "label_id": label_id,
+        "window_start": window_start,
+        "window_end": window_end,
+        "window_closed_at": window_closed_at,
+        "outcome_window_close_version": "v2.7.0.outcome_window_close.v1",
+        "outcome_window_close_quality": "trade_outcome_label_window_close_proxy",
+        "paper_trade_id": paper_trade_id,
+        "trade_outcome_label_source_event_id": trade_outcome_label.get("source_event_id"),
+        "trade_outcome_label_global_seq": trade_outcome_label.get("global_seq"),
+        "window_order_ok": window_order_ok,
+        "missing_fields": missing_fields,
+    }
+
+
 def _finalize_standardized_stop(record):
     candidates = sorted(
         record.get("standardized_stop_candidates") or [],
@@ -1863,6 +1962,10 @@ def _record_missing_evidence(record):
             missing.append("ReferencePriceContract")
     if record.get("captured") and not record.get("trade_outcome_label"):
         missing.append("TradeOutcomeLabelContract")
+    if record.get("trade_outcome_label") and not record.get("label_finalization_contract"):
+        missing.append("LabelFinalizationContract")
+    if record.get("trade_outcome_label") and not record.get("outcome_window_close_contract"):
+        missing.append("OutcomeWindowCloseContract")
     if record.get("captured") and not record.get("standardized_stop_contract"):
         missing.append("StandardizedStopContract")
     if record.get("realtime_clean_contract") and not record.get("quote_intent_binding_contract"):
@@ -1987,6 +2090,61 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
                     "denominator_dedup_key": record.get("denominator_dedup_key"),
                     "malformed_count": len(malformed),
                     "missing_fields": sorted({field for label in malformed for field in label.get("missing_fields", [])}),
+                }
+            )
+    label_finalization_records = [
+        record
+        for record in record_list
+        if record.get("label_finalization_contract")
+    ]
+    malformed_label_finalizations = []
+    for record in label_finalization_records:
+        malformed = [
+            item
+            for item in [record.get("label_finalization_contract")]
+            if item and (item.get("missing_fields") or item.get("label_status") != "final")
+        ]
+        if malformed:
+            malformed_label_finalizations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                    "label_statuses": sorted({item.get("label_status") for item in malformed if item.get("label_status")}),
+                }
+            )
+    outcome_window_close_records = [
+        record
+        for record in record_list
+        if record.get("outcome_window_close_contract")
+    ]
+    malformed_outcome_window_closes = []
+    outcome_window_close_violations = []
+    for record in outcome_window_close_records:
+        malformed = [
+            item
+            for item in [record.get("outcome_window_close_contract")]
+            if item and item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_outcome_window_closes.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        violated = [
+            item
+            for item in [record.get("outcome_window_close_contract")]
+            if item and item.get("window_order_ok") is not True
+        ]
+        if violated:
+            outcome_window_close_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(violated),
+                    "source_event_ids": [item.get("trade_outcome_label_source_event_id") for item in violated],
                 }
             )
     standardized_stop_records = [
@@ -2621,6 +2779,38 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
             "malformed_labels": malformed_trade_labels,
             "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
         },
+        "LabelFinalizationContract": {
+            "eligible_label_finalization_records": len(label_finalization_records),
+            "label_finalization_count": len(label_finalization_records),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_label_finalizations),
+            "malformed_label_finalizations": malformed_label_finalizations,
+            "label_statuses": sorted(
+                {
+                    item.get("label_status")
+                    for record in label_finalization_records
+                    for item in [record.get("label_finalization_contract")]
+                    if item and item.get("label_status")
+                }
+            ),
+            "supersedes_label_ids": sorted(
+                {
+                    item.get("supersedes_label_id")
+                    for record in label_finalization_records
+                    for item in [record.get("label_finalization_contract")]
+                    if item and item.get("supersedes_label_id")
+                }
+            ),
+            "label_finalization_projection_version": "v2.7.0.label_finalization.v1",
+        },
+        "OutcomeWindowCloseContract": {
+            "eligible_outcome_window_close_records": len(outcome_window_close_records),
+            "outcome_window_close_count": len(outcome_window_close_records),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_outcome_window_closes),
+            "malformed_outcome_window_closes": malformed_outcome_window_closes,
+            "window_order_violation_count": len(outcome_window_close_violations),
+            "window_order_violations": outcome_window_close_violations,
+            "outcome_window_close_projection_version": "v2.7.0.outcome_window_close.v1",
+        },
         "StandardizedStopContract": {
             "eligible_standardized_stop_records": len(standardized_stop_records),
             "standardized_stop_contract_count": sum(len(record.get("standardized_stop_candidates") or []) for record in standardized_stop_records),
@@ -3013,6 +3203,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "ReferencePriceContract": {},
             "MetricsWindowContract": {},
             "TradeOutcomeLabelContract": {},
+            "LabelFinalizationContract": {},
+            "OutcomeWindowCloseContract": {},
             "StandardizedStopContract": {},
             "ExAnteFeasibility": {},
             "EarliestActionableTime": {},
@@ -3041,6 +3233,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "reference_price_ok": False,
             "metrics_window_ok": False,
             "trade_outcome_label_ok": False,
+            "label_finalization_ok": False,
+            "outcome_window_close_ok": False,
             "standardized_stop_ok": False,
             "ex_ante_feasibility_ok": False,
             "earliest_actionable_time_ok": False,
@@ -3161,6 +3355,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_signal_credit(record)
         _finalize_reference_price(record)
         _finalize_trade_outcome_label(record)
+        _finalize_label_finalization(record)
+        _finalize_outcome_window_close(record)
         _finalize_standardized_stop(record)
         _finalize_ex_ante_feasibility(record)
         _finalize_earliest_actionable_time(record)
@@ -3255,6 +3451,15 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     projection["health"]["trade_outcome_label_ok"] = (
         contract_evidence["TradeOutcomeLabelContract"]["eligible_trade_outcome_records"] > 0
         and contract_evidence["TradeOutcomeLabelContract"]["malformed_count"] == 0
+    )
+    projection["health"]["label_finalization_ok"] = (
+        contract_evidence["LabelFinalizationContract"]["eligible_label_finalization_records"] > 0
+        and contract_evidence["LabelFinalizationContract"]["malformed_count"] == 0
+    )
+    projection["health"]["outcome_window_close_ok"] = (
+        contract_evidence["OutcomeWindowCloseContract"]["eligible_outcome_window_close_records"] > 0
+        and contract_evidence["OutcomeWindowCloseContract"]["malformed_count"] == 0
+        and contract_evidence["OutcomeWindowCloseContract"]["window_order_violation_count"] == 0
     )
     projection["health"]["standardized_stop_ok"] = (
         contract_evidence["StandardizedStopContract"]["eligible_standardized_stop_records"] > 0
