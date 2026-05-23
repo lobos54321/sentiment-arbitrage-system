@@ -3441,7 +3441,7 @@ def build_denominator_projection(
         )
 
     record_list = []
-    for key in sorted(records):
+    for index, key in enumerate(sorted(records), start=1):
         record = records[key]
         _finalize_signal_credit(record)
         _finalize_reference_price(record)
@@ -3487,6 +3487,24 @@ def build_denominator_projection(
                 }
             )
         record_list.append(record)
+        if progress_callback and progress_interval_events and index % 1000 == 0:
+            progress_callback(
+                {
+                    "stage": "records_finalize",
+                    "records_finalized": index,
+                    "records": len(records),
+                    "dirty_records": len(projection["dirty_records"]),
+                }
+            )
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "records_finalize_complete",
+                "records": len(record_list),
+                "dirty_records": len(projection["dirty_records"]),
+            }
+        )
 
     metrics = projection["metrics"]
     if metrics["telegram_externally_actionable_gold_silver_D3a"]:
@@ -3507,11 +3525,27 @@ def build_denominator_projection(
     projection["metrics_window"] = metrics_window
     projection["metric_definitions"] = _metric_definitions(metrics, metrics_window)
     projection["metric_definitions_hash"] = sha256_hex(projection["metric_definitions"])
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "contract_evidence_start",
+                "records": len(record_list),
+                "standalone_no_fill_outcomes": len(standalone_no_fill_outcomes),
+            }
+        )
     contract_evidence = _contract_evidence_from_records(
         record_list,
         runtime_recovery_controls=runtime_recovery_controls,
         standalone_no_fill_outcomes=standalone_no_fill_outcomes,
     )
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "contract_evidence_complete",
+                "records": len(record_list),
+                "standalone_no_fill_outcomes": len(standalone_no_fill_outcomes),
+            }
+        )
     metrics_window_valid = bool(
         metrics_window.get("window_id")
         and metrics_window.get("window_start")
@@ -3530,7 +3564,11 @@ def build_denominator_projection(
         "metrics_window_valid": metrics_window_valid,
     }
     projection["contract_evidence"] = contract_evidence
+    if progress_callback:
+        progress_callback({"stage": "records_hash_start", "records": len(record_list)})
     projection["records_hash"] = sha256_hex(record_list)
+    if progress_callback:
+        progress_callback({"stage": "records_hash_complete", "records": len(record_list)})
     projection["health"]["projection_built"] = True
     projection["health"]["denominator_clean"] = not projection["dirty_events"] and not projection["dirty_records"]
     projection["health"]["signal_credit_assignment_ok"] = (
