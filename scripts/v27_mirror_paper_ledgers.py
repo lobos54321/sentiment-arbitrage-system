@@ -327,6 +327,8 @@ def mirror_paper_ledgers(
     }
     latest = _latest_ledger_events(event_log_dir, ledger_version=ledger_version)
     capital_state = _initial_capital_state(event_log_dir, capital_basis_sol=capital_basis_sol, ledger_version=ledger_version)
+    pending_appends = []
+    pending_paper_trade_ids = []
     with _connect(paper_db_path) as paper_db, _connect(signal_db_path) as signal_db:
         for row in iter_paper_trade_rows(paper_db, since_id=since_id, until_id=until_id, limit=limit, table=table):
             row = _row_dict(row)
@@ -358,27 +360,39 @@ def mirror_paper_ledgers(
                         str(payload.get("paper_trade_id")),
                     ]
                 )
-                result = V27EventLog(event_log_dir).append_event(
-                    event_type=PAPER_LEDGER_EVENT_TYPE,
-                    aggregate_id=aggregate_id,
-                    payload=payload,
-                    source="paper_trades",
-                    idempotency_key=f"paper_ledger:{environment_id}:{paper_trade_id_key(row)}:{payload.get('row_state_hash')}:{ledger_version}",
-                    observed_at=payload.get("observed_at"),
-                    available_at=payload.get("observed_at"),
+                pending_appends.append(
+                    {
+                        "event_type": PAPER_LEDGER_EVENT_TYPE,
+                        "aggregate_id": aggregate_id,
+                        "payload": payload,
+                        "source": "paper_trades",
+                        "idempotency_key": f"paper_ledger:{environment_id}:{paper_trade_id_key(row)}:{payload.get('row_state_hash')}:{ledger_version}",
+                        "observed_at": payload.get("observed_at"),
+                        "available_at": payload.get("observed_at"),
+                    }
                 )
+                pending_paper_trade_ids.append(row.get("id"))
             except Exception as exc:
                 summary["failed"] += 1
                 summary["failures"].append({"paper_trade_id": row.get("id"), "reason": str(exc)})
                 continue
-            status = result.get("status")
-            if status == "appended":
-                summary["appended"] += 1
-            elif status == "duplicate":
-                summary["duplicate"] += 1
-            else:
-                summary["failed"] += 1
-                summary["failures"].append({"paper_trade_id": row.get("id"), "reason": f"unexpected status {status}"})
+    if dry_run or not pending_appends:
+        return summary
+    try:
+        results = V27EventLog(event_log_dir).append_events(pending_appends)
+    except Exception as exc:
+        summary["failed"] += len(pending_appends)
+        summary["failures"].append({"paper_trade_id": pending_paper_trade_ids, "reason": str(exc)})
+        return summary
+    for paper_trade_id, result in zip(pending_paper_trade_ids, results):
+        status = result.get("status")
+        if status == "appended":
+            summary["appended"] += 1
+        elif status == "duplicate":
+            summary["duplicate"] += 1
+        else:
+            summary["failed"] += 1
+            summary["failures"].append({"paper_trade_id": paper_trade_id, "reason": f"unexpected status {status}"})
     return summary
 
 

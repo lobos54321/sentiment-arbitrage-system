@@ -164,73 +164,109 @@ class V27EventLog:
         available_at=None,
         causal_parent_event_id=None,
     ):
-        if not event_type:
-            raise V27EventLogError("event_type is required")
-        if not aggregate_id:
-            raise V27EventLogError("aggregate_id is required")
-        if not isinstance(payload, dict):
-            raise V27EventLogError("payload must be a dict")
+        return self.append_events(
+            [
+                {
+                    "event_type": event_type,
+                    "aggregate_id": aggregate_id,
+                    "payload": payload,
+                    "source": source,
+                    "idempotency_key": idempotency_key,
+                    "observed_at": observed_at,
+                    "available_at": available_at,
+                    "causal_parent_event_id": causal_parent_event_id,
+                }
+            ]
+        )[0]
 
-        idempotency_key = idempotency_key or sha256_hex(
-            {
-                "event_type": event_type,
-                "aggregate_id": aggregate_id,
-                "payload": payload,
-            }
-        )
+    def append_events(self, event_specs):
+        if not event_specs:
+            return []
+
+        normalized = []
+        for spec in event_specs:
+            event_type = spec.get("event_type")
+            aggregate_id = spec.get("aggregate_id")
+            payload = spec.get("payload")
+            if not event_type:
+                raise V27EventLogError("event_type is required")
+            if not aggregate_id:
+                raise V27EventLogError("aggregate_id is required")
+            if not isinstance(payload, dict):
+                raise V27EventLogError("payload must be a dict")
+            idempotency_key = spec.get("idempotency_key") or sha256_hex(
+                {
+                    "event_type": event_type,
+                    "aggregate_id": aggregate_id,
+                    "payload": payload,
+                }
+            )
+            normalized.append({**spec, "idempotency_key": idempotency_key})
 
         with self.lock_path.open("a+", encoding="utf-8") as lock_fh:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
             state = self._load_reconciled_state()
+            results = []
+            appended = []
+            appended_by_key = {}
 
-            existing_event_id = state["idempotency_index"].get(idempotency_key)
-            if existing_event_id:
-                existing = self._read_event_by_id(existing_event_id)
-                if existing is None:
-                    raise V27EventLogError(f"idempotency index points to missing event: {existing_event_id}")
-                return {
-                    "status": "duplicate",
-                    "event": existing,
+            for spec in normalized:
+                idempotency_key = spec["idempotency_key"]
+                duplicate_event = appended_by_key.get(idempotency_key)
+                if duplicate_event is not None:
+                    results.append({"status": "duplicate", "event": duplicate_event})
+                    continue
+
+                existing_event_id = state["idempotency_index"].get(idempotency_key)
+                if existing_event_id:
+                    existing = self._read_event_by_id(existing_event_id)
+                    if existing is None:
+                        raise V27EventLogError(f"idempotency index points to missing event: {existing_event_id}")
+                    results.append({"status": "duplicate", "event": existing})
+                    continue
+
+                aggregate_id = spec["aggregate_id"]
+                global_seq = int(state["last_global_seq"]) + 1
+                aggregate_last = int(state["aggregate_last_seq"].get(aggregate_id, 0))
+                aggregate_seq = aggregate_last + 1
+                event_id = f"v27evt_{global_seq:012d}_{uuid.uuid4().hex[:12]}"
+                now = _now_iso()
+                observed_at = spec.get("observed_at")
+                available_at = spec.get("available_at")
+                event = {
+                    "event_id": event_id,
+                    "event_type": spec["event_type"],
+                    "source": spec.get("source") or "v27_mirror",
+                    "global_seq": global_seq,
+                    "aggregate_id": aggregate_id,
+                    "aggregate_seq": aggregate_seq,
+                    "observed_at": observed_at or now,
+                    "ingested_at": now,
+                    "available_at": available_at or observed_at or now,
+                    "causal_parent_event_id": spec.get("causal_parent_event_id"),
+                    "idempotency_key": idempotency_key,
+                    "event_schema_version": "v2.7.0.seed",
+                    "payload": spec["payload"],
                 }
+                event["event_hash"] = sha256_hex({key: value for key, value in event.items() if key != "event_hash"})
 
-            global_seq = int(state["last_global_seq"]) + 1
-            aggregate_last = int(state["aggregate_last_seq"].get(aggregate_id, 0))
-            aggregate_seq = aggregate_last + 1
-            event_id = f"v27evt_{global_seq:012d}_{uuid.uuid4().hex[:12]}"
-            now = _now_iso()
+                state["last_global_seq"] = global_seq
+                state["aggregate_last_seq"][aggregate_id] = aggregate_seq
+                state["idempotency_index"][idempotency_key] = event_id
+                appended.append(event)
+                appended_by_key[idempotency_key] = event
+                results.append({"status": "appended", "event": event})
 
-            event = {
-                "event_id": event_id,
-                "event_type": event_type,
-                "source": source,
-                "global_seq": global_seq,
-                "aggregate_id": aggregate_id,
-                "aggregate_seq": aggregate_seq,
-                "observed_at": observed_at or now,
-                "ingested_at": now,
-                "available_at": available_at or observed_at or now,
-                "causal_parent_event_id": causal_parent_event_id,
-                "idempotency_key": idempotency_key,
-                "event_schema_version": "v2.7.0.seed",
-                "payload": payload,
-            }
-            event["event_hash"] = sha256_hex({key: value for key, value in event.items() if key != "event_hash"})
+            if appended:
+                with self.event_path.open("a", encoding="utf-8") as event_fh:
+                    for event in appended:
+                        event_fh.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
+                        event_fh.write("\n")
+                    event_fh.flush()
+                    os.fsync(event_fh.fileno())
+                self._write_state(state)
 
-            with self.event_path.open("a", encoding="utf-8") as event_fh:
-                event_fh.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
-                event_fh.write("\n")
-                event_fh.flush()
-                os.fsync(event_fh.fileno())
-
-            state["last_global_seq"] = global_seq
-            state["aggregate_last_seq"][aggregate_id] = aggregate_seq
-            state["idempotency_index"][idempotency_key] = event_id
-            self._write_state(state)
-
-            return {
-                "status": "appended",
-                "event": event,
-            }
+            return results
 
     def iter_events(self):
         if not self.event_path.exists():

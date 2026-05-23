@@ -64,6 +64,82 @@ def test_v27_event_log_returns_existing_event_for_duplicate_idempotency_key(tmp_
     assert log.verify()["event_count"] == 1
 
 
+def test_v27_event_log_appends_batch_with_monotonic_sequences(tmp_path):
+    log = V27EventLog(tmp_path)
+
+    results = log.append_events(
+        [
+            {
+                "event_type": "paper_ledger_recorded",
+                "aggregate_id": "paper:1",
+                "payload": {"paper_trade_id": 1},
+                "idempotency_key": "ledger-1",
+            },
+            {
+                "event_type": "paper_ledger_recorded",
+                "aggregate_id": "paper:1",
+                "payload": {"paper_trade_id": 2},
+                "idempotency_key": "ledger-2",
+            },
+            {
+                "event_type": "paper_ledger_recorded",
+                "aggregate_id": "paper:2",
+                "payload": {"paper_trade_id": 3},
+                "idempotency_key": "ledger-3",
+            },
+        ]
+    )
+
+    events = [result["event"] for result in results]
+    assert [result["status"] for result in results] == ["appended", "appended", "appended"]
+    assert [event["global_seq"] for event in events] == [1, 2, 3]
+    assert [event["aggregate_seq"] for event in events] == [1, 2, 1]
+    assert log.verify() == {
+        "event_count": 3,
+        "last_global_seq": 3,
+        "aggregate_count": 2,
+        "idempotency_count": 3,
+    }
+
+
+def test_v27_event_log_batch_dedupes_existing_and_in_batch_keys(tmp_path):
+    log = V27EventLog(tmp_path)
+    first = log.append_event(
+        event_type="decision_recorded",
+        aggregate_id="decision:1",
+        payload={"action": "shadow"},
+        idempotency_key="decision-1",
+    )["event"]
+
+    results = log.append_events(
+        [
+            {
+                "event_type": "decision_recorded",
+                "aggregate_id": "decision:1",
+                "payload": {"action": "shadow"},
+                "idempotency_key": "decision-1",
+            },
+            {
+                "event_type": "decision_recorded",
+                "aggregate_id": "decision:2",
+                "payload": {"action": "shadow"},
+                "idempotency_key": "decision-2",
+            },
+            {
+                "event_type": "decision_recorded",
+                "aggregate_id": "decision:2",
+                "payload": {"action": "shadow"},
+                "idempotency_key": "decision-2",
+            },
+        ]
+    )
+
+    assert [result["status"] for result in results] == ["duplicate", "appended", "duplicate"]
+    assert results[0]["event"]["event_id"] == first["event_id"]
+    assert results[2]["event"]["event_id"] == results[1]["event"]["event_id"]
+    assert log.verify()["event_count"] == 2
+
+
 def test_v27_event_log_rebuilds_stale_sequencer_state_before_append(tmp_path):
     log = V27EventLog(tmp_path)
     first = log.append_event(
