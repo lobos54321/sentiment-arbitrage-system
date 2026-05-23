@@ -3167,6 +3167,71 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
     }
 
 
+RECORD_HASH_CONTRACT_FIELDS = {
+    "reference_price": "reference_price_contract",
+    "trade_outcome_label": "trade_outcome_label",
+    "label_finalization": "label_finalization_contract",
+    "outcome_window_close": "outcome_window_close_contract",
+    "standardized_stop": "standardized_stop_contract",
+    "ex_ante_feasibility": "ex_ante_feasibility_contract",
+    "earliest_actionable_time": "earliest_actionable_time_contract",
+    "realtime_clean": "realtime_clean_contract",
+    "quote_intent_binding": "quote_intent_binding_contract",
+    "raw_provider_evidence": "raw_provider_evidence_contract",
+    "idempotency": "idempotency_contract",
+    "execution_control": "execution_control",
+    "paper_ledger": "paper_ledger_contract",
+    "no_fill_outcome": "no_fill_outcome",
+}
+
+
+def _compact_contract_ref(value):
+    if not isinstance(value, dict):
+        return None
+    ref = {
+        key: value.get(key)
+        for key in (
+            "source_event_id",
+            "global_seq",
+            "source",
+            "label_status",
+            "outcome_state",
+            "state",
+            "contract_version",
+            "no_fill_outcome_version",
+        )
+        if value.get(key) is not None
+    }
+    for key, item in value.items():
+        if key.endswith("_version") and item is not None:
+            ref[key] = item
+    return ref
+
+
+def _records_hash_material(record_list):
+    material = []
+    for record in record_list:
+        material.append(
+            {
+                "denominator_dedup_key": record.get("denominator_dedup_key"),
+                "token_ca": record.get("token_ca"),
+                "chain": record.get("chain"),
+                "canonical_pool_group": record.get("canonical_pool_group"),
+                "lifecycle_epoch": record.get("lifecycle_epoch"),
+                "source_dog_label": record.get("source_dog_label"),
+                "captured": record.get("captured"),
+                "denominator_membership": record.get("denominator_membership"),
+                "denominator_dirty_reasons": record.get("denominator_dirty_reasons") or [],
+                "contracts": {
+                    name: _compact_contract_ref(record.get(field))
+                    for name, field in RECORD_HASH_CONTRACT_FIELDS.items()
+                    if _compact_contract_ref(record.get(field))
+                },
+            }
+        )
+    return material
+
+
 def build_denominator_projection(
     event_log_dir,
     *,
@@ -3280,6 +3345,7 @@ def build_denominator_projection(
             "normal_tiny_ready": False,
             "status": "not_built",
         },
+        "records_hash_material_version": None,
         "records_hash": None,
     }
 
@@ -3566,7 +3632,8 @@ def build_denominator_projection(
     projection["contract_evidence"] = contract_evidence
     if progress_callback:
         progress_callback({"stage": "records_hash_start", "records": len(record_list)})
-    projection["records_hash"] = sha256_hex(record_list)
+    projection["records_hash_material_version"] = "v2.7.0.compact_record_contract_summary.v1"
+    projection["records_hash"] = sha256_hex(_records_hash_material(record_list))
     if progress_callback:
         progress_callback({"stage": "records_hash_complete", "records": len(record_list)})
     projection["health"]["projection_built"] = True
