@@ -187,3 +187,40 @@ def test_paper_ledger_new_only_uses_versioned_cursor(tmp_path):
     assert second["cursor"]["since_id"] == 2
     assert second["mirror"]["appended"] == 1
     assert second["cursor"]["max_mirrored_paper_trade_id"] == 2
+
+
+def test_paper_ledger_skip_verify_keeps_hot_loop_bounded(tmp_path):
+    paper_db = tmp_path / "paper.db"
+    signal_db = tmp_path / "signal.db"
+    event_log_dir = tmp_path / "events"
+    with new_paper_db(paper_db) as db:
+        insert_trade(db, trade_id=1)
+    with new_signal_db(signal_db) as db:
+        insert_signal(db)
+
+    args = SimpleNamespace(
+        paper_db=str(paper_db),
+        signal_db=str(signal_db),
+        event_log_dir=str(event_log_dir),
+        since_id=None,
+        until_id=None,
+        limit=1,
+        dry_run=False,
+        table="paper_trades",
+        signal_table="premium_signals",
+        default_chain="solana",
+        ledger_version=DEFAULT_LEDGER_VERSION,
+        environment_id="unit",
+        capital_basis_sol="1",
+        default_position_size_sol="0.06",
+        reservation_ttl_sec="20",
+        new_only=True,
+        skip_verify=True,
+    )
+
+    result = run_mirror_once(args)
+
+    assert result["mirror"]["appended"] == 1
+    assert result["verify"] is None
+    assert result["cursor"]["verify_skipped"] is True
+    assert result["cursor"]["max_mirrored_paper_trade_id"] == 1

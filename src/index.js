@@ -587,9 +587,10 @@ function startShadowDataSidecars(config) {
         '--signal-db', signalDb,
         '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
         '--interval', process.env.V27_PAPER_LEDGER_MIRROR_INTERVAL_SEC || '30',
-        '--limit', process.env.V27_PAPER_LEDGER_MIRROR_LIMIT || '500',
-        '--initial-delay', process.env.V27_PAPER_LEDGER_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--limit', process.env.V27_PAPER_LEDGER_MIRROR_LIMIT || '100',
+        '--initial-delay', process.env.V27_PAPER_LEDGER_MIRROR_INITIAL_DELAY_SEC || '45',
         '--lock-file', process.env.V27_PAPER_LEDGER_MIRROR_LOCK_FILE || '/tmp/v27_paper_ledger_mirror.lock',
+        '--skip-verify',
       ],
       env: {
         PAPER_DB: paperDb,
@@ -658,7 +659,7 @@ function startShadowDataSidecars(config) {
         '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
         '--output-dir', process.env.V27_READ_MODEL_DIR || './data/v27_read_models',
         '--interval', process.env.V27_READ_MODEL_REFRESH_INTERVAL_SEC || '60',
-        '--initial-delay', process.env.V27_READ_MODEL_REFRESH_INITIAL_DELAY_SEC || '0',
+        '--initial-delay', process.env.V27_READ_MODEL_REFRESH_INITIAL_DELAY_SEC || '120',
         '--lock-file', process.env.V27_READ_MODEL_REFRESH_LOCK_FILE || '/tmp/v27_read_model_refresh.lock',
       ],
       env: {

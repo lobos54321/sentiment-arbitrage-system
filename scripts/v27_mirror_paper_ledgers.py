@@ -118,8 +118,8 @@ def _latest_ledger_events(event_log_dir, *, ledger_version=DEFAULT_LEDGER_VERSIO
     return latest
 
 
-def _initial_capital_state(event_log_dir, *, capital_basis_sol, ledger_version=DEFAULT_LEDGER_VERSION):
-    latest = _latest_ledger_events(event_log_dir, ledger_version=ledger_version)
+def _initial_capital_state(event_log_dir, *, capital_basis_sol, ledger_version=DEFAULT_LEDGER_VERSION, latest=None):
+    latest = latest if latest is not None else _latest_ledger_events(event_log_dir, ledger_version=ledger_version)
     if not latest:
         return {
             "capital_basis_sol": Decimal(capital_basis_sol),
@@ -308,6 +308,7 @@ def mirror_paper_ledgers(
     capital_basis_sol=DEFAULT_CAPITAL_BASIS_SOL,
     default_position_size_sol=DEFAULT_POSITION_SIZE_SOL,
     reservation_ttl_sec=DEFAULT_RESERVATION_TTL_SEC,
+    existing_latest=None,
 ):
     summary = {
         "paper_db": str(paper_db_path),
@@ -324,15 +325,26 @@ def mirror_paper_ledgers(
         "environment_id": environment_id,
         "capital_basis_sol": _money(capital_basis_sol),
         "default_position_size_sol": _money(default_position_size_sol),
+        "max_paper_trade_id_seen": None,
+        "max_mirrored_paper_trade_id": max(existing_latest) if existing_latest else None,
     }
-    latest = _latest_ledger_events(event_log_dir, ledger_version=ledger_version)
-    capital_state = _initial_capital_state(event_log_dir, capital_basis_sol=capital_basis_sol, ledger_version=ledger_version)
+    latest = dict(existing_latest) if existing_latest is not None else _latest_ledger_events(event_log_dir, ledger_version=ledger_version)
+    capital_state = _initial_capital_state(
+        event_log_dir,
+        capital_basis_sol=capital_basis_sol,
+        ledger_version=ledger_version,
+        latest=latest,
+    )
     pending_appends = []
     pending_paper_trade_ids = []
     with _connect(paper_db_path) as paper_db, _connect(signal_db_path) as signal_db:
         for row in iter_paper_trade_rows(paper_db, since_id=since_id, until_id=until_id, limit=limit, table=table):
             row = _row_dict(row)
             summary["read_rows"] += 1
+            paper_trade_id_int = _as_int(row.get("id"))
+            if paper_trade_id_int is not None:
+                previous_max_seen = summary.get("max_paper_trade_id_seen")
+                summary["max_paper_trade_id_seen"] = paper_trade_id_int if previous_max_seen is None else max(previous_max_seen, paper_trade_id_int)
             try:
                 signal_context = _signal_context(signal_db, row, signal_table=signal_table, default_chain=default_chain)
                 previous_payload = latest.get(int(row.get("id")))
@@ -388,8 +400,16 @@ def mirror_paper_ledgers(
         status = result.get("status")
         if status == "appended":
             summary["appended"] += 1
+            parsed_id = _as_int(paper_trade_id)
+            if parsed_id is not None:
+                previous_max = summary.get("max_mirrored_paper_trade_id")
+                summary["max_mirrored_paper_trade_id"] = parsed_id if previous_max is None else max(previous_max, parsed_id)
         elif status == "duplicate":
             summary["duplicate"] += 1
+            parsed_id = _as_int(paper_trade_id)
+            if parsed_id is not None:
+                previous_max = summary.get("max_mirrored_paper_trade_id")
+                summary["max_mirrored_paper_trade_id"] = parsed_id if previous_max is None else max(previous_max, parsed_id)
         else:
             summary["failed"] += 1
             summary["failures"].append({"paper_trade_id": paper_trade_id, "reason": f"unexpected status {status}"})
@@ -500,12 +520,13 @@ def acquire_loop_lock(lock_file):
 
 def run_mirror_once(args):
     since_id = args.since_id
+    existing_latest = None
     if getattr(args, "new_only", False):
-        since_id = next_unmirrored_paper_ledger_since_id(
-            args.event_log_dir,
-            configured_since_id=since_id,
-            ledger_version=args.ledger_version,
-        )
+        existing_latest = _latest_ledger_events(args.event_log_dir, ledger_version=args.ledger_version)
+        max_id = max(existing_latest) if existing_latest else None
+        if max_id is not None:
+            next_id = int(max_id) + 1
+            since_id = max(next_id, int(since_id)) if since_id is not None else next_id
     mirror_summary = mirror_paper_ledgers(
         args.paper_db,
         args.signal_db,
@@ -522,9 +543,10 @@ def run_mirror_once(args):
         capital_basis_sol=Decimal(str(args.capital_basis_sol)),
         default_position_size_sol=Decimal(str(args.default_position_size_sol)),
         reservation_ttl_sec=Decimal(str(args.reservation_ttl_sec)),
+        existing_latest=existing_latest,
     )
     verify_summary = None
-    if not args.dry_run:
+    if not args.dry_run and not getattr(args, "skip_verify", False):
         verify_summary = verify_paper_ledger_mirror_parity(
             args.paper_db,
             args.event_log_dir,
@@ -541,7 +563,8 @@ def run_mirror_once(args):
             "since_id": since_id,
             "until_id": args.until_id,
             "limit": args.limit,
-            "max_mirrored_paper_trade_id": max_mirrored_paper_ledger_id(args.event_log_dir, ledger_version=args.ledger_version),
+            "max_mirrored_paper_trade_id": mirror_summary.get("max_mirrored_paper_trade_id"),
+            "verify_skipped": bool(getattr(args, "skip_verify", False)),
         },
         "mirror": mirror_summary,
         "verify": verify_summary,
@@ -578,6 +601,7 @@ def main():
     parser.add_argument("--interval", type=float, default=30.0)
     parser.add_argument("--initial-delay", type=float, default=0.0)
     parser.add_argument("--lock-file", default=str(DEFAULT_LOCK_FILE))
+    parser.add_argument("--skip-verify", action="store_true")
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -591,11 +615,20 @@ def main():
         if args.initial_delay > 0:
             time.sleep(args.initial_delay)
         while True:
+            print(json.dumps({
+                "status": "paper_ledger_mirror_starting_batch",
+                "event_log_dir": args.event_log_dir,
+                "limit": args.limit,
+                "new_only": bool(args.new_only),
+                "skip_verify": bool(args.skip_verify),
+            }, ensure_ascii=False, sort_keys=True))
+            sys.stdout.flush()
             result = run_mirror_once(args)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             sys.stdout.flush()
             failed = result.get("mirror", {}).get("failed", 0)
-            failed += 0 if result.get("verify", {}).get("parity_ok", True) else 1
+            verify = result.get("verify") or {}
+            failed += 0 if verify.get("parity_ok", True) else 1
             if args.strict and failed:
                 raise SystemExit(1)
             if not args.loop or stop["stop"]:
