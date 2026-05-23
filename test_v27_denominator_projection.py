@@ -864,6 +864,48 @@ def test_denominator_read_model_snapshot_blocks_stale_seq(tmp_path):
     assert snapshot["health"]["status"] == "snapshot_not_ready"
 
 
+def test_denominator_read_model_snapshot_does_not_treat_quiescent_log_as_stale(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
+
+    projection = build_denominator_projection(tmp_path, include_records=False)
+    snapshot = build_denominator_read_model_snapshot(
+        projection,
+        max_allowed_lag_seq=0,
+        max_allowed_lag_ms=1,
+        now_iso="2099-01-01T00:00:00Z",
+    )
+
+    assert snapshot["read_model"]["event_log_latest_seq"] == 1
+    assert snapshot["read_model"]["read_model_seq"] == 1
+    assert snapshot["read_model"]["lag_seq"] == 0
+    assert snapshot["read_model"]["lag_ms"] == 0
+    assert snapshot["read_model"]["read_model_fresh_enough"] is True
+    assert snapshot["read_model"]["staleness_reasons"] == []
+
+
+def test_denominator_read_model_snapshot_blocks_old_unprocessed_event_lag(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
+    append_decision(log, decision_id=2, token_ca="TokenB", captured=True, **FULL_D3B_FLAGS)
+
+    projection = build_denominator_projection(tmp_path, include_records=False)
+    snapshot = build_denominator_read_model_snapshot(
+        projection,
+        max_allowed_lag_seq=10,
+        max_allowed_lag_ms=1,
+        read_model_seq=1,
+        now_iso="2099-01-01T00:00:00Z",
+    )
+
+    assert snapshot["read_model"]["event_log_latest_seq"] == 2
+    assert snapshot["read_model"]["read_model_seq"] == 1
+    assert snapshot["read_model"]["lag_seq"] == 1
+    assert snapshot["read_model"]["lag_ms"] > 1
+    assert snapshot["read_model"]["read_model_fresh_enough"] is False
+    assert snapshot["read_model"]["staleness_reasons"] == ["read_model_time_lag"]
+
+
 def test_denominator_projection_marks_source_label_conflict_dirty(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", source_dog_label="gold", **FULL_D3B_FLAGS)
@@ -1548,9 +1590,16 @@ def test_denominator_projection_rejects_outcome_window_close_rollback(tmp_path):
     assert projection["health"]["label_finalization_ok"] is True
     assert projection["health"]["outcome_window_close_ok"] is False
     assert evidence["eligible_outcome_window_close_records"] == 1
-    assert evidence["malformed_count"] == 1
+    assert evidence["malformed_count"] == 0
     assert evidence["window_order_violation_count"] == 1
-    assert evidence["malformed_outcome_window_closes"][0]["missing_fields"] == ["window_order_ok"]
+    assert evidence["malformed_outcome_window_closes"] == []
+    assert evidence["window_order_violations"][0]["windows"] == [
+        {
+            "window_start": 1_700_000_120,
+            "window_end": 1_700_000_003,
+            "window_closed_at": 1_700_000_003,
+        }
+    ]
 
 
 def test_denominator_projection_does_not_mix_trade_fill_with_source_reference_price(tmp_path):

@@ -1802,8 +1802,6 @@ def _finalize_outcome_window_close(record):
             window_order_ok = float(window_end) >= float(window_start)
     except (TypeError, ValueError):
         window_order_ok = True
-    if not window_order_ok:
-        missing_fields.append("window_order_ok")
     record["outcome_window_close_contract"] = {
         "label_id": label_id,
         "window_start": window_start,
@@ -2144,7 +2142,17 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None)
                 {
                     "denominator_dedup_key": record.get("denominator_dedup_key"),
                     "violation_count": len(violated),
+                    "paper_trade_ids": [item.get("paper_trade_id") for item in violated],
                     "source_event_ids": [item.get("trade_outcome_label_source_event_id") for item in violated],
+                    "trade_outcome_label_global_seqs": [item.get("trade_outcome_label_global_seq") for item in violated],
+                    "windows": [
+                        {
+                            "window_start": item.get("window_start"),
+                            "window_end": item.get("window_end"),
+                            "window_closed_at": item.get("window_closed_at"),
+                        }
+                        for item in violated
+                    ],
                 }
             )
     standardized_stop_records = [
@@ -3589,12 +3597,12 @@ def build_denominator_read_model_snapshot(
     latest_seq = int(projection.get("event_log_latest_seq") or _nested_get(projection, ("event_log_verify", "last_global_seq"), default=0) or 0)
     read_model_seq = latest_seq if read_model_seq is None else int(read_model_seq)
     lag_seq = max(0, latest_seq - read_model_seq)
-    lag_ms = _lag_ms(projection.get("event_log_latest_at"), now_iso)
+    lag_ms = 0 if lag_seq == 0 else _lag_ms(projection.get("event_log_latest_at"), now_iso)
 
     stale_reasons = []
     if lag_seq > max_allowed_lag_seq:
         stale_reasons.append("read_model_seq_lag")
-    if lag_ms is not None and lag_ms > max_allowed_lag_ms:
+    if lag_seq > 0 and lag_ms is not None and lag_ms > max_allowed_lag_ms:
         stale_reasons.append("read_model_time_lag")
 
     projection_hash_payload = {key: value for key, value in projection.items() if key != "event_log_dir"}

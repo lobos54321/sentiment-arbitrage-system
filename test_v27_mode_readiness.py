@@ -704,6 +704,61 @@ def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):
     assert "StandardizedStopContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
+def test_mode_readiness_fails_outcome_window_close_order_violation(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    V27EventLog(event_log_dir).append_event(
+        event_type="trade_outcome_label_recorded",
+        aggregate_id="trade_outcome:solana:TokenRollback:unknown_pool:0:1",
+        idempotency_key="paper_trade_outcome_label:rollback",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenRollback",
+            "symbol": "ROLL",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
+            "counterfactual_entry_ts": 1_700_000_120,
+            "fill_time_anchor": "simulated_fill_ts",
+            "simulated_fill_ts": 1_700_000_120,
+            "simulated_fill_price": 0.001,
+            "net_delayed_executable_peak_3s": 0.75,
+            "realized_pnl": 0.3,
+            "trade_label_available_at": 1_700_000_003,
+        },
+    )
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    outcome = matrix["contract_statuses"]["OutcomeWindowCloseContract"]
+    assert matrix["contract_statuses"]["LabelFinalizationContract"]["status"] == "pass"
+    assert outcome["status"] == "fail"
+    assert outcome["blocking_reason"] == "outcome_window_close_malformed_or_order_violation"
+    assert outcome["evidence"]["malformed_count"] == 0
+    assert outcome["evidence"]["window_order_violation_count"] == 1
+    assert outcome["evidence"]["window_order_violations"][0]["windows"] == [
+        {
+            "window_start": 1_700_000_120,
+            "window_end": 1_700_000_003,
+            "window_closed_at": 1_700_000_003,
+        }
+    ]
+    assert "OutcomeWindowCloseContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
 def test_mode_readiness_consumes_standardized_stop_evidence(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"

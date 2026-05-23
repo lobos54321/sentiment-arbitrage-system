@@ -317,17 +317,35 @@ def build_contract_statuses(
         trade_outcome_evidence,
     )
     label_finalization_evidence = contract_evidence.get("LabelFinalizationContract") or {}
+    label_finalization_eligible = int(label_finalization_evidence.get("eligible_label_finalization_records") or 0) > 0
+    label_finalization_status = (
+        "pass"
+        if projection_built and projection_health.get("label_finalization_ok")
+        else "fail"
+        if projection_built and label_finalization_eligible
+        else "missing_evidence"
+    )
     statuses["LabelFinalizationContract"] = _status(
         "LabelFinalizationContract",
-        "pass" if projection_built and projection_health.get("label_finalization_ok") else "missing_evidence",
-        "label_finalization_missing_or_malformed",
+        label_finalization_status,
+        "label_finalization_malformed" if label_finalization_status == "fail" else "label_finalization_missing_or_malformed",
         label_finalization_evidence,
     )
     outcome_window_close_evidence = contract_evidence.get("OutcomeWindowCloseContract") or {}
+    outcome_window_close_eligible = int(outcome_window_close_evidence.get("eligible_outcome_window_close_records") or 0) > 0
+    outcome_window_close_status = (
+        "pass"
+        if projection_built and projection_health.get("outcome_window_close_ok")
+        else "fail"
+        if projection_built and outcome_window_close_eligible
+        else "missing_evidence"
+    )
     statuses["OutcomeWindowCloseContract"] = _status(
         "OutcomeWindowCloseContract",
-        "pass" if projection_built and projection_health.get("outcome_window_close_ok") else "missing_evidence",
-        "outcome_window_close_missing_or_malformed",
+        outcome_window_close_status,
+        "outcome_window_close_malformed_or_order_violation"
+        if outcome_window_close_status == "fail"
+        else "outcome_window_close_missing_or_malformed",
         outcome_window_close_evidence,
     )
     standardized_stop_evidence = contract_evidence.get("StandardizedStopContract") or {}
