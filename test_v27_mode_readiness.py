@@ -2,7 +2,7 @@ import sys
 
 sys.path.insert(0, "scripts")
 
-from v27_event_log import V27EventLog  # noqa: E402
+from v27_event_log import V27EventLog, sha256_hex  # noqa: E402
 from v27_mode_readiness import build_mode_readiness_matrix  # noqa: E402
 from v27_read_model_refresh import refresh_denominator_read_model  # noqa: E402
 
@@ -199,6 +199,79 @@ def append_execution_control_event(event_log_dir):
     )
 
 
+def append_paper_ledger_event(event_log_dir):
+    position_material = {
+        "position_id": "paper_trade:1:position",
+        "decision_id": "paper_trade:1:entry_decision",
+        "execution_id": "paper_trade:1:entry_execution",
+        "entry_size_sol": "0.010000000000",
+        "remaining_size": "0.000000000000",
+        "position_status": "closed",
+        "row_state_hash": "row-state-ready",
+    }
+    capital_material = {
+        "capital_ledger_id": "capital_ledger:unit:paper:1",
+        "capital_basis_sol": "1.000000000000",
+        "available_capital": "1.001000000000",
+        "reserved_capital": "0.000000000000",
+        "open_exposure": "0.000000000000",
+        "realized_pnl_sol": "0.001000000000",
+        "fees_sol": "0.000000000000",
+    }
+    ledger_material = {
+        **capital_material,
+        "ledger_checkpoint_id": "ledger_checkpoint:unit:paper:1",
+        "invariant_formula": "available_capital + reserved_capital + open_exposure - realized_pnl_sol + fees_sol == capital_basis_sol",
+        "invariant_lhs": "1.000000000000",
+        "invariant_rhs": "1.000000000000",
+    }
+    V27EventLog(event_log_dir).append_event(
+        event_type="paper_ledger_recorded",
+        aggregate_id="paper_ledger:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="paper_ledger:unit:1:legacy_paper_position_capital_ledger_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "paper_ledger_version": "legacy_paper_position_capital_ledger_v0.1",
+            "decision_id": "paper_trade:1:entry_decision",
+            "execution_id": "paper_trade:1:entry_execution",
+            "token_lifecycle_key": "solana:TokenReady:unknown_pool:0:1",
+            "environment_id": "unit",
+            "route": "unit_route",
+            "position_id": "paper_trade:1:position",
+            "position_status": "closed",
+            "entry_size_sol": "0.010000000000",
+            "remaining_size": "0.000000000000",
+            "position_realized_pnl_sol": "0.001000000000",
+            "size_source": "unit",
+            "position_ledger_material": position_material,
+            "position_ledger_hash": sha256_hex(position_material),
+            "capital_ledger_material": capital_material,
+            "capital_ledger_hash": sha256_hex(capital_material),
+            **capital_material,
+            "ledger_checkpoint_id": ledger_material["ledger_checkpoint_id"],
+            "ledger_hash_material": ledger_material,
+            "ledger_hash": sha256_hex(ledger_material),
+            "invariant_formula": ledger_material["invariant_formula"],
+            "invariant_lhs": "1.000000000000",
+            "invariant_rhs": "1.000000000000",
+            "invariant_delta": "0.000000000000",
+            "invariant_ok": True,
+            "reservation_id": "reservation:unit:1",
+            "reservation_status": "released",
+            "reservation_ttl_sec": "20.000000000000",
+            "release_reason": "position_closed",
+            "reserved_capital_at_entry": "0.010000000000",
+            "ledger_scope": "paper_global_capital_reconstruction",
+            "ledger_proof_level": "unit_paper_ledger",
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
@@ -362,6 +435,40 @@ def test_mode_readiness_consumes_execution_control_evidence(tmp_path):
     assert "StateVersionFencing" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "EntryExecutionStateMachine" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert "PaperPositionLedgerContract" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_paper_ledger_evidence(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_idempotency_contract_event(event_log_dir)
+    append_execution_control_event(event_log_dir)
+    append_paper_ledger_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "PaperPositionLedgerContract",
+        "PaperCapitalLedgerContract",
+        "DoubleEntryLedgerInvariantContract",
+        "CapitalReservationPolicy",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "NoFillOutcome" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):

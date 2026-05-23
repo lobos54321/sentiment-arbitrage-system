@@ -3,7 +3,7 @@ import sys
 sys.path.insert(0, "scripts")
 
 from v27_denominator_projection import build_denominator_projection, build_denominator_read_model_snapshot  # noqa: E402
-from v27_event_log import V27EventLog  # noqa: E402
+from v27_event_log import V27EventLog, sha256_hex  # noqa: E402
 
 
 def append_decision(
@@ -302,6 +302,83 @@ def append_execution_control(log, *, token_ca, paper_trade_id=1, pool="pool-a", 
     )
 
 
+def append_paper_ledger(log, *, token_ca, paper_trade_id=1, pool="pool-a", environment_id="unit"):
+    position_id = f"paper_trade:{paper_trade_id}:position"
+    decision_id = f"paper_trade:{paper_trade_id}:entry_decision"
+    execution_id = f"paper_trade:{paper_trade_id}:entry_execution"
+    position_material = {
+        "position_id": position_id,
+        "decision_id": decision_id,
+        "execution_id": execution_id,
+        "entry_size_sol": "0.010000000000",
+        "remaining_size": "0.000000000000",
+        "position_status": "closed",
+        "row_state_hash": f"row-state-{paper_trade_id}",
+    }
+    capital_material = {
+        "capital_ledger_id": f"capital_ledger:{environment_id}:paper:{paper_trade_id}",
+        "capital_basis_sol": "1.000000000000",
+        "available_capital": "1.001000000000",
+        "reserved_capital": "0.000000000000",
+        "open_exposure": "0.000000000000",
+        "realized_pnl_sol": "0.001000000000",
+        "fees_sol": "0.000000000000",
+    }
+    ledger_material = {
+        **capital_material,
+        "ledger_checkpoint_id": f"ledger_checkpoint:{environment_id}:paper:{paper_trade_id}",
+        "invariant_formula": "available_capital + reserved_capital + open_exposure - realized_pnl_sol + fees_sol == capital_basis_sol",
+        "invariant_lhs": "1.000000000000",
+        "invariant_rhs": "1.000000000000",
+    }
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "paper_ledger_version": "legacy_paper_position_capital_ledger_v0.1",
+        "decision_id": decision_id,
+        "execution_id": execution_id,
+        "token_lifecycle_key": f"solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        "environment_id": environment_id,
+        "route": "unit_route",
+        "position_id": position_id,
+        "position_status": "closed",
+        "entry_size_sol": "0.010000000000",
+        "remaining_size": "0.000000000000",
+        "position_realized_pnl_sol": "0.001000000000",
+        "size_source": "paper_trades.position_size_sol",
+        "position_ledger_material": position_material,
+        "position_ledger_hash": sha256_hex(position_material),
+        "capital_ledger_material": capital_material,
+        "capital_ledger_hash": sha256_hex(capital_material),
+        **capital_material,
+        "ledger_checkpoint_id": ledger_material["ledger_checkpoint_id"],
+        "ledger_hash_material": ledger_material,
+        "ledger_hash": sha256_hex(ledger_material),
+        "invariant_formula": ledger_material["invariant_formula"],
+        "invariant_lhs": "1.000000000000",
+        "invariant_rhs": "1.000000000000",
+        "invariant_delta": "0.000000000000",
+        "invariant_ok": True,
+        "reservation_id": f"reservation:{environment_id}:{paper_trade_id}",
+        "reservation_status": "released",
+        "reservation_ttl_sec": "20.000000000000",
+        "release_reason": "position_closed",
+        "reserved_capital_at_entry": "0.010000000000",
+        "ledger_scope": "paper_global_capital_reconstruction",
+        "ledger_proof_level": "unit_paper_ledger",
+    }
+    return log.append_event(
+        event_type="paper_ledger_recorded",
+        aggregate_id=f"paper_ledger:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"paper_ledger:{environment_id}:{paper_trade_id}:legacy_paper_position_capital_ledger_v0.1",
+        payload=payload,
+    )
+
+
 def test_denominator_projection_counts_d_buckets_and_dedups_by_token_pool_epoch(tmp_path):
     log = V27EventLog(tmp_path)
     append_decision(log, decision_id=1, token_ca="TokenA", captured=True, **FULL_D3B_FLAGS)
@@ -506,6 +583,39 @@ def test_denominator_projection_consumes_execution_control_contracts(tmp_path):
     assert state_machine["terminal_state_count"] == 1
     assert state_machine["state_machine_violation_count"] == 0
     assert projection["records"][0]["execution_control"]["state"] == "filled_paper"
+
+
+def test_denominator_projection_consumes_paper_ledger_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    flags = dict(FULL_D3B_FLAGS)
+    flags["realtime_clean"] = False
+    append_decision(log, decision_id=1, token_ca="TokenLedger", captured=True, **flags)
+    append_realtime_clean(log, token_ca="TokenLedger")
+    append_quote_intent_binding(log, token_ca="TokenLedger")
+    append_idempotency_contract(log, token_ca="TokenLedger")
+    append_execution_control(log, token_ca="TokenLedger")
+    append_paper_ledger(log, token_ca="TokenLedger")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    position = projection["contract_evidence"]["PaperPositionLedgerContract"]
+    capital = projection["contract_evidence"]["PaperCapitalLedgerContract"]
+    double_entry = projection["contract_evidence"]["DoubleEntryLedgerInvariantContract"]
+    reservation = projection["contract_evidence"]["CapitalReservationPolicy"]
+
+    assert projection["paper_ledger_recorded_events"] == 1
+    assert projection["health"]["paper_position_ledger_ok"] is True
+    assert projection["health"]["paper_capital_ledger_ok"] is True
+    assert projection["health"]["double_entry_ledger_invariant_ok"] is True
+    assert projection["health"]["capital_reservation_policy_ok"] is True
+    assert position["eligible_position_ledger_records"] == 1
+    assert position["position_ledger_violation_count"] == 0
+    assert capital["eligible_capital_ledger_records"] == 1
+    assert capital["capital_ledger_violation_count"] == 0
+    assert double_entry["eligible_double_entry_records"] == 1
+    assert double_entry["invariant_violation_count"] == 0
+    assert reservation["eligible_reservation_records"] == 1
+    assert reservation["reservation_policy_violation_count"] == 0
+    assert projection["records"][0]["paper_ledger_contract"]["position_status"] == "closed"
 
 
 def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):

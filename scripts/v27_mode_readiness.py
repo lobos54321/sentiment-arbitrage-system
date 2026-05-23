@@ -385,6 +385,34 @@ def build_contract_statuses(
         "entry_execution_state_machine_missing_malformed_or_invalid",
         entry_execution_evidence,
     )
+    position_ledger_evidence = contract_evidence.get("PaperPositionLedgerContract") or {}
+    statuses["PaperPositionLedgerContract"] = _status(
+        "PaperPositionLedgerContract",
+        "pass" if projection_built and projection_health.get("paper_position_ledger_ok") else "missing_evidence",
+        "paper_position_ledger_missing_malformed_or_invalid",
+        position_ledger_evidence,
+    )
+    capital_ledger_evidence = contract_evidence.get("PaperCapitalLedgerContract") or {}
+    statuses["PaperCapitalLedgerContract"] = _status(
+        "PaperCapitalLedgerContract",
+        "pass" if projection_built and projection_health.get("paper_capital_ledger_ok") else "missing_evidence",
+        "paper_capital_ledger_missing_malformed_or_invalid",
+        capital_ledger_evidence,
+    )
+    double_entry_evidence = contract_evidence.get("DoubleEntryLedgerInvariantContract") or {}
+    statuses["DoubleEntryLedgerInvariantContract"] = _status(
+        "DoubleEntryLedgerInvariantContract",
+        "pass" if projection_built and projection_health.get("double_entry_ledger_invariant_ok") else "missing_evidence",
+        "double_entry_ledger_invariant_missing_or_violated",
+        double_entry_evidence,
+    )
+    reservation_evidence = contract_evidence.get("CapitalReservationPolicy") or {}
+    statuses["CapitalReservationPolicy"] = _status(
+        "CapitalReservationPolicy",
+        "pass" if projection_built and projection_health.get("capital_reservation_policy_ok") else "missing_evidence",
+        "capital_reservation_policy_missing_malformed_or_violated",
+        reservation_evidence,
+    )
     for contract_id in (
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",

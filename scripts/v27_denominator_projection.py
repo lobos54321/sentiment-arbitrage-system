@@ -37,6 +37,7 @@ REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
 QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
+PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
 DENOMINATOR_SEED_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
     MIRRORED_MISSED_EVENT_TYPE,
@@ -51,6 +52,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     QUOTE_INTENT_BINDING_EVENT_TYPE,
     IDEMPOTENCY_EVENT_TYPE,
     EXECUTION_CONTROL_EVENT_TYPE,
+    PAPER_LEDGER_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -995,6 +997,123 @@ def _extract_execution_control(event, bags):
     }
 
 
+def _hash_matches(material, expected_hash):
+    if not material or not expected_hash:
+        return bool(expected_hash)
+    try:
+        return sha256_hex(material) == expected_hash
+    except TypeError:
+        return False
+
+
+def _extract_paper_ledger_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("paper_ledger_version",),
+            ("position_ledger_version",),
+            ("capital_ledger_version",),
+        ],
+    )
+    if event.get("event_type") != PAPER_LEDGER_EVENT_TYPE and not version:
+        return None
+    values = {
+        "paper_ledger_version": str(version) if version else None,
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",)]),
+        "decision_id": _extract_scalar(bags, [("decision_id",)]),
+        "execution_id": _extract_scalar(bags, [("execution_id",)]),
+        "position_id": _extract_scalar(bags, [("position_id",)]),
+        "position_status": _extract_scalar(bags, [("position_status",)]),
+        "entry_size_sol": _as_float(_extract_scalar(bags, [("entry_size_sol",), ("position_size_sol",)])),
+        "remaining_size": _as_float(_extract_scalar(bags, [("remaining_size",)])),
+        "position_ledger_hash": _extract_scalar(bags, [("position_ledger_hash",), ("ledger_hash",)]),
+        "position_ledger_material": _extract_scalar(bags, [("position_ledger_material",)]),
+        "capital_ledger_id": _extract_scalar(bags, [("capital_ledger_id",)]),
+        "capital_basis_sol": _as_float(_extract_scalar(bags, [("capital_basis_sol",)])),
+        "available_capital": _as_float(_extract_scalar(bags, [("available_capital",)])),
+        "reserved_capital": _as_float(_extract_scalar(bags, [("reserved_capital",)])),
+        "open_exposure": _as_float(_extract_scalar(bags, [("open_exposure",)])),
+        "realized_pnl_sol": _as_float(_extract_scalar(bags, [("realized_pnl_sol",)])),
+        "unrealized_pnl_sol": _as_float(_extract_scalar(bags, [("unrealized_pnl_sol",)])),
+        "fees_sol": _as_float(_extract_scalar(bags, [("fees_sol",)])),
+        "capital_ledger_hash": _extract_scalar(bags, [("capital_ledger_hash",)]),
+        "capital_ledger_material": _extract_scalar(bags, [("capital_ledger_material",)]),
+        "ledger_checkpoint_id": _extract_scalar(bags, [("ledger_checkpoint_id",)]),
+        "ledger_hash": _extract_scalar(bags, [("ledger_hash",), ("double_entry_ledger_hash",)]),
+        "ledger_hash_material": _extract_scalar(bags, [("ledger_hash_material",)]),
+        "invariant_lhs": _as_float(_extract_scalar(bags, [("invariant_lhs",)])),
+        "invariant_rhs": _as_float(_extract_scalar(bags, [("invariant_rhs",)])),
+        "invariant_delta": _as_float(_extract_scalar(bags, [("invariant_delta",)])),
+        "invariant_ok": _extract_flag(bags, [("invariant_ok",)]),
+        "reservation_id": _extract_scalar(bags, [("reservation_id",)]),
+        "reservation_status": _extract_scalar(bags, [("reservation_status",)]),
+        "reservation_ttl_sec": _as_float(_extract_scalar(bags, [("reservation_ttl_sec",), ("reservation_ttl",)])),
+        "release_reason": _extract_scalar(bags, [("release_reason",)]),
+        "size_source": _extract_scalar(bags, [("size_source",)]),
+        "ledger_scope": _extract_scalar(bags, [("ledger_scope",)]),
+        "ledger_proof_level": _extract_scalar(bags, [("ledger_proof_level",)], default="unknown"),
+    }
+    if values.get("realized_pnl_sol") is None:
+        values["realized_pnl_sol"] = 0.0
+    if values.get("unrealized_pnl_sol") is None:
+        values["unrealized_pnl_sol"] = 0.0
+    if values.get("fees_sol") is None:
+        values["fees_sol"] = 0.0
+    position_required = ["position_id", "execution_id", "decision_id", "remaining_size", "position_ledger_hash"]
+    capital_required = ["capital_ledger_id", "available_capital", "reserved_capital", "open_exposure", "capital_ledger_hash"]
+    double_entry_required = ["ledger_checkpoint_id", "available_capital", "reserved_capital", "open_exposure", "ledger_hash"]
+    reservation_required = ["reservation_id", "position_id", "reserved_capital", "reservation_ttl_sec", "release_reason"]
+    missing_position_fields = []
+    for field in position_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_position_fields.append(field)
+    missing_capital_fields = []
+    for field in capital_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_capital_fields.append(field)
+    missing_double_entry_fields = []
+    for field in double_entry_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_double_entry_fields.append(field)
+    missing_reservation_fields = []
+    for field in reservation_required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_reservation_fields.append(field)
+    if not version:
+        missing_position_fields.append("paper_ledger_version")
+        missing_capital_fields.append("paper_ledger_version")
+        missing_double_entry_fields.append("paper_ledger_version")
+        missing_reservation_fields.append("paper_ledger_version")
+    nonnegative_fields = ["entry_size_sol", "remaining_size", "available_capital", "reserved_capital", "open_exposure", "fees_sol"]
+    negative_fields = [field for field in nonnegative_fields if values.get(field) is not None and values.get(field) < 0]
+    position_hash_ok = _hash_matches(values.get("position_ledger_material"), values.get("position_ledger_hash"))
+    capital_hash_ok = _hash_matches(values.get("capital_ledger_material"), values.get("capital_ledger_hash"))
+    ledger_hash_ok = _hash_matches(values.get("ledger_hash_material"), values.get("ledger_hash"))
+    if values.get("invariant_ok") is None and values.get("invariant_delta") is not None:
+        values["invariant_ok"] = abs(values.get("invariant_delta")) <= 0.000000001
+    reservation_ttl_ok = values.get("reservation_ttl_sec") is not None and values.get("reservation_ttl_sec") > 0
+    release_reason_ok = bool(str(values.get("release_reason") or "").strip())
+    return {
+        **values,
+        "position_hash_ok": position_hash_ok,
+        "capital_hash_ok": capital_hash_ok,
+        "ledger_hash_ok": ledger_hash_ok,
+        "negative_fields": negative_fields,
+        "missing_position_fields": sorted(set(missing_position_fields)),
+        "missing_capital_fields": sorted(set(missing_capital_fields)),
+        "missing_double_entry_fields": sorted(set(missing_double_entry_fields)),
+        "missing_reservation_fields": sorted(set(missing_reservation_fields)),
+        "reservation_ttl_ok": reservation_ttl_ok,
+        "release_reason_ok": release_reason_ok,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 LEGACY_SOURCE_REFERENCE_PRICE_TYPES = {"legacy_entry_price", "legacy_baseline_price"}
 
 
@@ -1092,6 +1211,7 @@ def _extract_decision_fact(event):
         "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
         "idempotency_contract": _extract_idempotency_contract(event, bags),
         "execution_control": _extract_execution_control(event, bags),
+        "paper_ledger_contract": _extract_paper_ledger_contract(event, bags),
         "captured": captured_flag,
         **flags,
     }
@@ -1136,6 +1256,7 @@ def _new_record(fact):
         "quote_intent_binding_candidates": [],
         "idempotency_contract_candidates": [],
         "execution_control_candidates": [],
+        "paper_ledger_candidates": [],
         "source_label_research_only": False,
         "denominator_dirty_reasons": [],
         "source_dog_label": None,
@@ -1149,6 +1270,7 @@ def _new_record(fact):
         "quote_intent_binding_contract": None,
         "idempotency_contract": None,
         "execution_control": None,
+        "paper_ledger_contract": None,
         "captured": False,
     }
 
@@ -1231,6 +1353,9 @@ def _merge_fact(record, fact):
     execution_control = fact.get("execution_control")
     if execution_control:
         record["execution_control_candidates"].append(execution_control)
+    paper_ledger = fact.get("paper_ledger_contract")
+    if paper_ledger:
+        record["paper_ledger_candidates"].append(paper_ledger)
 
     for flag in DENOMINATOR_FLAGS:
         record[flag] = _merge_bool(record.get(flag), fact.get(flag))
@@ -1423,6 +1548,15 @@ def _finalize_execution_control(record):
     record["execution_control"] = candidates[0] if candidates else None
 
 
+def _finalize_paper_ledger(record):
+    candidates = sorted(
+        record.get("paper_ledger_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["paper_ledger_candidates"] = candidates
+    record["paper_ledger_contract"] = candidates[-1] if candidates else None
+
+
 def _record_missing_evidence(record):
     missing = []
     if not record.get("source_dog_label"):
@@ -1463,6 +1597,11 @@ def _record_missing_evidence(record):
         missing.append("ExecutionLeaseContract")
         missing.append("StateVersionFencing")
         missing.append("EntryExecutionStateMachine")
+    if record.get("execution_control") and not record.get("paper_ledger_contract"):
+        missing.append("PaperPositionLedgerContract")
+        missing.append("PaperCapitalLedgerContract")
+        missing.append("DoubleEntryLedgerInvariantContract")
+        missing.append("CapitalReservationPolicy")
     record["missing_evidence"] = missing
     return missing
 
@@ -1942,6 +2081,128 @@ def _contract_evidence_from_records(record_list):
                     "source_event_ids": [item.get("source_event_id") for item in bad_state],
                 }
             )
+    paper_ledger_records = [
+        record
+        for record in record_list
+        if record.get("paper_ledger_candidates")
+    ]
+    all_paper_ledger_candidates = [
+        item
+        for record in paper_ledger_records
+        for item in record.get("paper_ledger_candidates") or []
+    ]
+    malformed_position_ledgers = []
+    malformed_capital_ledgers = []
+    malformed_reservations = []
+    position_ledger_violations = []
+    capital_ledger_violations = []
+    double_entry_violations = []
+    reservation_policy_violations = []
+    for record in paper_ledger_records:
+        malformed_position = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("missing_position_fields")
+        ]
+        if malformed_position:
+            malformed_position_ledgers.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed_position),
+                    "missing_fields": sorted({field for item in malformed_position for field in item.get("missing_position_fields", [])}),
+                }
+            )
+        bad_position = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("negative_fields") or item.get("position_hash_ok") is not True
+        ]
+        if bad_position:
+            position_ledger_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_position),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_position],
+                    "negative_fields": sorted({field for item in bad_position for field in item.get("negative_fields", [])}),
+                }
+            )
+        malformed_capital = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("missing_capital_fields")
+        ]
+        if malformed_capital:
+            malformed_capital_ledgers.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed_capital),
+                    "missing_fields": sorted({field for item in malformed_capital for field in item.get("missing_capital_fields", [])}),
+                }
+            )
+        bad_capital = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("negative_fields") or item.get("capital_hash_ok") is not True
+        ]
+        if bad_capital:
+            capital_ledger_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_capital),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_capital],
+                    "negative_fields": sorted({field for item in bad_capital for field in item.get("negative_fields", [])}),
+                }
+            )
+        malformed_double_entry = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("missing_double_entry_fields")
+        ]
+        bad_double_entry = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("missing_double_entry_fields")
+            or item.get("invariant_ok") is not True
+            or item.get("ledger_hash_ok") is not True
+        ]
+        if bad_double_entry:
+            double_entry_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_double_entry),
+                    "malformed_count": len(malformed_double_entry),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_double_entry],
+                    "max_abs_invariant_delta": max(abs(item.get("invariant_delta") or 0.0) for item in bad_double_entry),
+                }
+            )
+        malformed_reservation = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("missing_reservation_fields")
+        ]
+        if malformed_reservation:
+            malformed_reservations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed_reservation),
+                    "missing_fields": sorted({field for item in malformed_reservation for field in item.get("missing_reservation_fields", [])}),
+                }
+            )
+        bad_reservation = [
+            item
+            for item in record.get("paper_ledger_candidates") or []
+            if item.get("missing_reservation_fields")
+            or item.get("reservation_ttl_ok") is not True
+            or item.get("release_reason_ok") is not True
+        ]
+        if bad_reservation:
+            reservation_policy_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(bad_reservation),
+                    "source_event_ids": [item.get("source_event_id") for item in bad_reservation],
+                }
+            )
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -2175,6 +2436,50 @@ def _contract_evidence_from_records(record_list):
             "states": sorted({item.get("state") for item in all_execution_control_candidates if item.get("state")}),
             "entry_execution_projection_version": "v2.7.0.entry_execution_state_machine.v1",
         },
+        "PaperPositionLedgerContract": {
+            "eligible_position_ledger_records": len(paper_ledger_records),
+            "position_ledger_observation_count": len(all_paper_ledger_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_position_ledgers),
+            "malformed_position_ledgers": malformed_position_ledgers,
+            "position_ledger_violation_count": sum(item["violation_count"] for item in position_ledger_violations),
+            "position_ledger_violations": position_ledger_violations,
+            "position_statuses": sorted({item.get("position_status") for item in all_paper_ledger_candidates if item.get("position_status")}),
+            "size_sources": sorted({item.get("size_source") for item in all_paper_ledger_candidates if item.get("size_source")}),
+            "ledger_proof_levels": sorted({item.get("ledger_proof_level") for item in all_paper_ledger_candidates if item.get("ledger_proof_level")}),
+            "position_ledger_projection_version": "v2.7.0.paper_position_ledger.v1",
+        },
+        "PaperCapitalLedgerContract": {
+            "eligible_capital_ledger_records": len(paper_ledger_records),
+            "capital_ledger_observation_count": len(all_paper_ledger_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_capital_ledgers),
+            "malformed_capital_ledgers": malformed_capital_ledgers,
+            "capital_ledger_violation_count": sum(item["violation_count"] for item in capital_ledger_violations),
+            "capital_ledger_violations": capital_ledger_violations,
+            "latest_available_capital": all_paper_ledger_candidates[-1].get("available_capital") if all_paper_ledger_candidates else None,
+            "latest_reserved_capital": all_paper_ledger_candidates[-1].get("reserved_capital") if all_paper_ledger_candidates else None,
+            "latest_open_exposure": all_paper_ledger_candidates[-1].get("open_exposure") if all_paper_ledger_candidates else None,
+            "capital_ledger_projection_version": "v2.7.0.paper_capital_ledger.v1",
+        },
+        "DoubleEntryLedgerInvariantContract": {
+            "eligible_double_entry_records": len(paper_ledger_records),
+            "double_entry_observation_count": len(all_paper_ledger_candidates),
+            "invariant_violation_count": sum(item["violation_count"] for item in double_entry_violations),
+            "double_entry_violations": double_entry_violations,
+            "max_abs_invariant_delta": max([abs(item.get("invariant_delta") or 0.0) for item in all_paper_ledger_candidates] or [None]),
+            "ledger_scopes": sorted({item.get("ledger_scope") for item in all_paper_ledger_candidates if item.get("ledger_scope")}),
+            "double_entry_projection_version": "v2.7.0.double_entry_ledger.v1",
+        },
+        "CapitalReservationPolicy": {
+            "eligible_reservation_records": len(paper_ledger_records),
+            "reservation_observation_count": len(all_paper_ledger_candidates),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_reservations),
+            "malformed_reservations": malformed_reservations,
+            "reservation_policy_violation_count": sum(item["violation_count"] for item in reservation_policy_violations),
+            "reservation_policy_violations": reservation_policy_violations,
+            "release_reasons": sorted({item.get("release_reason") for item in all_paper_ledger_candidates if item.get("release_reason")}),
+            "reservation_statuses": sorted({item.get("reservation_status") for item in all_paper_ledger_candidates if item.get("reservation_status")}),
+            "capital_reservation_projection_version": "v2.7.0.capital_reservation_policy.v1",
+        },
     }
 
 
@@ -2203,6 +2508,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "quote_intent_binding_recorded_events": 0,
         "idempotency_contract_recorded_events": 0,
         "execution_control_recorded_events": 0,
+        "paper_ledger_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -2237,6 +2543,10 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "ExecutionLeaseContract": {},
             "StateVersionFencing": {},
             "EntryExecutionStateMachine": {},
+            "PaperPositionLedgerContract": {},
+            "PaperCapitalLedgerContract": {},
+            "DoubleEntryLedgerInvariantContract": {},
+            "CapitalReservationPolicy": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -2257,6 +2567,10 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             "execution_lease_ok": False,
             "state_version_fencing_ok": False,
             "entry_execution_state_machine_ok": False,
+            "paper_position_ledger_ok": False,
+            "paper_capital_ledger_ok": False,
+            "double_entry_ledger_invariant_ok": False,
+            "capital_reservation_policy_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -2311,6 +2625,8 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
             projection["idempotency_contract_recorded_events"] += 1
         if event.get("event_type") == EXECUTION_CONTROL_EVENT_TYPE:
             projection["execution_control_recorded_events"] += 1
+        if event.get("event_type") == PAPER_LEDGER_EVENT_TYPE:
+            projection["paper_ledger_recorded_events"] += 1
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -2353,6 +2669,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         _finalize_quote_intent_binding(record)
         _finalize_idempotency_contract(record)
         _finalize_execution_control(record)
+        _finalize_paper_ledger(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -2494,6 +2811,25 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         and contract_evidence["EntryExecutionStateMachine"]["terminal_state_count"] > 0
         and contract_evidence["EntryExecutionStateMachine"]["malformed_count"] == 0
         and contract_evidence["EntryExecutionStateMachine"]["state_machine_violation_count"] == 0
+    )
+    projection["health"]["paper_position_ledger_ok"] = (
+        contract_evidence["PaperPositionLedgerContract"]["eligible_position_ledger_records"] > 0
+        and contract_evidence["PaperPositionLedgerContract"]["malformed_count"] == 0
+        and contract_evidence["PaperPositionLedgerContract"]["position_ledger_violation_count"] == 0
+    )
+    projection["health"]["paper_capital_ledger_ok"] = (
+        contract_evidence["PaperCapitalLedgerContract"]["eligible_capital_ledger_records"] > 0
+        and contract_evidence["PaperCapitalLedgerContract"]["malformed_count"] == 0
+        and contract_evidence["PaperCapitalLedgerContract"]["capital_ledger_violation_count"] == 0
+    )
+    projection["health"]["double_entry_ledger_invariant_ok"] = (
+        contract_evidence["DoubleEntryLedgerInvariantContract"]["eligible_double_entry_records"] > 0
+        and contract_evidence["DoubleEntryLedgerInvariantContract"]["invariant_violation_count"] == 0
+    )
+    projection["health"]["capital_reservation_policy_ok"] = (
+        contract_evidence["CapitalReservationPolicy"]["eligible_reservation_records"] > 0
+        and contract_evidence["CapitalReservationPolicy"]["malformed_count"] == 0
+        and contract_evidence["CapitalReservationPolicy"]["reservation_policy_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

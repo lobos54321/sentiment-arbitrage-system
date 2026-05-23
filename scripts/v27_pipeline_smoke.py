@@ -25,6 +25,7 @@ from v27_mirror_execution_control import DEFAULT_CONTROL_VERSION as DEFAULT_EXEC
 from v27_mirror_ex_ante_feasibility import DEFAULT_FEASIBILITY_POLICY_VERSION, run_mirror_once as run_ex_ante_feasibility_mirror_once  # noqa: E402
 from v27_mirror_idempotency_contracts import DEFAULT_CONTRACT_VERSION as DEFAULT_IDEMPOTENCY_CONTRACT_VERSION, run_mirror_once as run_idempotency_contract_mirror_once  # noqa: E402
 from v27_mirror_lifecycle_tracks import DEFAULT_LIFECYCLE_DB, run_mirror_once as run_lifecycle_mirror_once  # noqa: E402
+from v27_mirror_paper_ledgers import DEFAULT_LEDGER_VERSION as DEFAULT_PAPER_LEDGER_VERSION, run_mirror_once as run_paper_ledger_mirror_once  # noqa: E402
 from v27_mirror_quote_intent_bindings import DEFAULT_BINDING_POLICY_VERSION, run_mirror_once as run_quote_intent_binding_mirror_once  # noqa: E402
 from v27_mirror_realtime_clean import DEFAULT_CLEAN_STANDARD_VERSION, run_mirror_once as run_realtime_clean_mirror_once  # noqa: E402
 from v27_mirror_paper_decisions import DEFAULT_DB as DEFAULT_PAPER_DB, run_mirror_once as run_paper_decision_mirror_once  # noqa: E402
@@ -90,6 +91,7 @@ def run_pipeline_smoke(
     include_quote_intent_bindings=False,
     include_idempotency_contracts=False,
     include_execution_control=False,
+    include_paper_ledgers=False,
     paper_trade_source_label_min_peak_pnl=0.5,
     spec_manifest=None,
 ):
@@ -317,6 +319,29 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_paper_ledgers:
+        steps["paper_ledgers"] = _run_step(
+            "paper_ledgers",
+            run_paper_ledger_mirror_once,
+            SimpleNamespace(
+                paper_db=str(paper_db),
+                signal_db=str(signal_db),
+                event_log_dir=str(event_log_dir),
+                since_id=None,
+                until_id=None,
+                limit=limit,
+                dry_run=False,
+                table="paper_trades",
+                signal_table="premium_signals",
+                default_chain="solana",
+                ledger_version=DEFAULT_PAPER_LEDGER_VERSION,
+                environment_id="local_smoke",
+                capital_basis_sol="100",
+                default_position_size_sol="0.06",
+                reservation_ttl_sec="20",
+                new_only=True,
+            ),
+        )
     steps["paper_decisions"] = _run_step(
         "paper_decisions",
         run_paper_decision_mirror_once,
@@ -389,6 +414,7 @@ def run_pipeline_smoke(
         "include_quote_intent_bindings": bool(include_quote_intent_bindings),
         "include_idempotency_contracts": bool(include_idempotency_contracts),
         "include_execution_control": bool(include_execution_control),
+        "include_paper_ledgers": bool(include_paper_ledgers),
         "paper_trade_source_label_min_peak_pnl": paper_trade_source_label_min_peak_pnl,
         "steps": steps,
         "event_log_verify": event_log_verify,
@@ -420,6 +446,7 @@ def main():
     parser.add_argument("--include-quote-intent-bindings", action="store_true")
     parser.add_argument("--include-idempotency-contracts", action="store_true")
     parser.add_argument("--include-execution-control", action="store_true")
+    parser.add_argument("--include-paper-ledgers", action="store_true")
     parser.add_argument("--paper-trade-source-label-min-peak-pnl", type=float, default=0.5)
     parser.add_argument("--spec-manifest")
     parser.add_argument("--strict", action="store_true")
@@ -442,6 +469,7 @@ def main():
         include_quote_intent_bindings=args.include_quote_intent_bindings,
         include_idempotency_contracts=args.include_idempotency_contracts,
         include_execution_control=args.include_execution_control,
+        include_paper_ledgers=args.include_paper_ledgers,
         paper_trade_source_label_min_peak_pnl=args.paper_trade_source_label_min_peak_pnl,
         spec_manifest=args.spec_manifest,
     )
