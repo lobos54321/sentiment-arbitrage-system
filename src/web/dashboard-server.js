@@ -1042,6 +1042,96 @@ function triggerV27ReadModelRefresh(options = {}) {
   };
 }
 
+let v27RecoveryControlManualMirror = {
+  running: false,
+  started_at: null,
+  pid: null,
+};
+
+function triggerV27RecoveryControlMirror(options = {}) {
+  if (v27RecoveryControlManualMirror.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      ...v27RecoveryControlManualMirror,
+    };
+  }
+  const paperDbPath = getPaperDbPath();
+  const signalDbPath = resolvedDbPath;
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const environmentId = options.environmentId || process.env.V27_ENVIRONMENT_ID || process.env.NODE_ENV || 'local';
+  const recoveryVersion = options.recoveryVersion || process.env.V27_RECOVERY_CONTROL_VERSION || 'legacy_paper_recovery_control_v0.1';
+  const timeoutMs = Math.max(30000, Math.min(options.timeoutMs || Number(process.env.V27_RECOVERY_CONTROL_MANUAL_TIMEOUT_MS || 600000) || 600000, 1800000));
+  const logPathRaw = process.env.V27_RECOVERY_CONTROL_MIRROR_LOG || join(projectRoot, 'data', 'v27-recovery-control-mirror.log');
+  const logPath = isAbsolute(logPathRaw) ? logPathRaw : join(projectRoot, logPathRaw);
+  const args = [
+    'scripts/v27_mirror_recovery_controls.py',
+    '--new-only',
+    '--paper-db',
+    paperDbPath,
+    '--signal-db',
+    signalDbPath,
+    '--event-log-dir',
+    eventLogDir,
+    '--recovery-version',
+    recoveryVersion,
+    '--environment-id',
+    environmentId,
+  ];
+  const env = {
+    ...process.env,
+    V27_EVENT_LOG_DIR: eventLogDir,
+    V27_ENVIRONMENT_ID: environmentId,
+    V27_RECOVERY_CONTROL_VERSION: recoveryVersion,
+  };
+  const startedAt = new Date().toISOString();
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-recovery-control-mirror-once: python3 ${args.join(' ')}\n`);
+  v27RecoveryControlManualMirror = {
+    running: true,
+    started_at: startedAt,
+    pid: null,
+  };
+  const child = execFile('python3', args, {
+    cwd: projectRoot,
+    env,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 50 * 1024 * 1024,
+  }, (error, stdout, stderr) => {
+    const finishedAt = new Date().toISOString();
+    if (stdout) logStream.write(String(stdout));
+    if (stderr) logStream.write(String(stderr));
+    if (error) {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-recovery-control-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+    } else {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-recovery-control-mirror-once completed\n`);
+    }
+    v27RecoveryControlManualMirror = {
+      running: false,
+      started_at: startedAt,
+      pid: child?.pid || null,
+      completed_at: finishedAt,
+      exit_code: error ? error.code ?? null : 0,
+      exit_signal: error ? error.signal ?? null : null,
+      error: error ? error.message : null,
+      log_path: logPath,
+    };
+    logStream.end();
+  });
+  v27RecoveryControlManualMirror = {
+    ...v27RecoveryControlManualMirror,
+    pid: child.pid,
+    log_path: logPath,
+    timeout_ms: timeoutMs,
+  };
+  return {
+    accepted: true,
+    status: 'started',
+    ...v27RecoveryControlManualMirror,
+  };
+}
+
 export function readV27ModeReadiness(options = {}) {
   const path = v27ModeReadinessPath(options);
   const generatedAt = new Date().toISOString();
@@ -7673,6 +7763,21 @@ const server = http.createServer(async (req, res) => {
       generated_at: new Date().toISOString(),
       materialized: false,
       refresh_schema_version: 'v2.7.0.manual_read_model_refresh.v1',
+      ...refresh,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-recovery-control-mirror') {
+    if (!checkAuth(req, url, res)) return;
+    const refresh = triggerV27RecoveryControlMirror({
+      timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
+      environmentId: url.searchParams.get('environment_id') || undefined,
+      recoveryVersion: url.searchParams.get('recovery_version') || undefined,
+    });
+    res.writeHead(refresh.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      materialized: false,
+      refresh_schema_version: 'v2.7.0.manual_recovery_control_mirror.v1',
       ...refresh,
     }, null, 2));
     return;
