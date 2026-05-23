@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from scripts.v27_event_log import V27EventLog, V27EventLogError
+from scripts.v27_event_log import HEAVY_PAYLOAD_FIELDS, V27EventLog, V27EventLogError
 
 
 def test_v27_event_log_assigns_global_and_aggregate_sequences(tmp_path):
@@ -47,6 +47,35 @@ def test_v27_event_log_assigns_global_and_aggregate_sequences(tmp_path):
         "idempotency_count": 3,
         "verify_mode": "cached_state_metadata",
     }
+
+
+def test_v27_event_log_can_prune_heavy_payload_fields_for_projection(tmp_path):
+    log = V27EventLog(tmp_path)
+    log.append_event(
+        event_type="no_fill_outcome_recorded",
+        aggregate_id="no_fill:1",
+        payload={
+            "token_ca": "TOKEN1",
+            "no_fill_reason": "quote_unavailable",
+            "legacy_missed_attribution": {
+                "large_blob": {"nested": ["x" * 1000]},
+            },
+            "legacy_paper_trade": {
+                "large_blob": {"nested": ["y" * 1000]},
+            },
+        },
+        idempotency_key="no-fill-1",
+    )
+
+    full_event = list(log.iter_events())[0]
+    pruned_event = list(log.iter_events(prune_payload_fields=HEAVY_PAYLOAD_FIELDS))[0]
+
+    assert "legacy_missed_attribution" in full_event["payload"]
+    assert "legacy_paper_trade" in full_event["payload"]
+    assert "legacy_missed_attribution" not in pruned_event["payload"]
+    assert "legacy_paper_trade" not in pruned_event["payload"]
+    assert pruned_event["payload"]["token_ca"] == "TOKEN1"
+    assert log.verify()["event_count"] == 1
 
 
 def test_v27_event_log_returns_existing_event_for_duplicate_idempotency_key(tmp_path):

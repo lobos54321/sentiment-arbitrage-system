@@ -19,6 +19,10 @@ from pathlib import Path
 STATE_FILE = "sequencer-state.json"
 EVENT_FILE = "events.jsonl"
 LOCK_FILE = "sequencer.lock"
+HEAVY_PAYLOAD_FIELDS = {
+    "legacy_missed_attribution",
+    "legacy_paper_trade",
+}
 
 
 class V27EventLogError(RuntimeError):
@@ -35,6 +39,92 @@ def sha256_hex(value):
 
 def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _json_value_end(raw, start):
+    index = start
+    while index < len(raw) and raw[index].isspace():
+        index += 1
+    if index >= len(raw):
+        return index
+    opener = raw[index]
+    if opener == '"':
+        index += 1
+        escaped = False
+        while index < len(raw):
+            char = raw[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                return index + 1
+            index += 1
+        return len(raw)
+    if opener in "{[":
+        stack = [opener]
+        index += 1
+        in_string = False
+        escaped = False
+        while index < len(raw):
+            char = raw[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char in "{[":
+                stack.append(char)
+            elif char in "}]":
+                if not stack:
+                    return index
+                expected = "{" if char == "}" else "["
+                if stack[-1] == expected:
+                    stack.pop()
+                    if not stack:
+                        return index + 1
+            index += 1
+        return len(raw)
+    while index < len(raw) and raw[index] not in ",}]":
+        index += 1
+    return index
+
+
+def strip_json_fields(raw, field_names):
+    stripped = raw
+    for field_name in field_names or []:
+        key = json.dumps(str(field_name), ensure_ascii=False, separators=(",", ":"))
+        search_from = 0
+        while True:
+            key_start = stripped.find(key, search_from)
+            if key_start < 0:
+                break
+            colon = stripped.find(":", key_start + len(key))
+            if colon < 0:
+                break
+            value_end = _json_value_end(stripped, colon + 1)
+            left = key_start - 1
+            while left >= 0 and stripped[left].isspace():
+                left -= 1
+            right = value_end
+            while right < len(stripped) and stripped[right].isspace():
+                right += 1
+            if left >= 0 and stripped[left] == ",":
+                remove_start = left
+                remove_end = right
+            elif right < len(stripped) and stripped[right] == ",":
+                remove_start = key_start
+                remove_end = right + 1
+            else:
+                remove_start = key_start
+                remove_end = right
+            stripped = stripped[:remove_start] + stripped[remove_end:]
+            search_from = max(0, remove_start - 1)
+    return stripped
 
 
 class V27EventLog:
@@ -268,13 +358,15 @@ class V27EventLog:
 
             return results
 
-    def iter_events(self):
+    def iter_events(self, prune_payload_fields=None):
         if not self.event_path.exists():
             return
         with self.event_path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if line:
+                    if prune_payload_fields:
+                        line = strip_json_fields(line, prune_payload_fields)
                     yield json.loads(line)
 
     def verify(self):

@@ -19,7 +19,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from v27_event_log import V27EventLog, V27EventLogError, sha256_hex  # noqa: E402
+from v27_event_log import HEAVY_PAYLOAD_FIELDS, V27EventLog, V27EventLogError, sha256_hex  # noqa: E402
 
 
 DEFAULT_EVENT_LOG_DIR = PROJECT_ROOT / "data" / "v27_event_log"
@@ -3284,7 +3284,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
-    for event in event_log.iter_events() or []:
+    for event in event_log.iter_events(prune_payload_fields=HEAVY_PAYLOAD_FIELDS) or []:
         projection["input_events"] += 1
         projection["event_log_latest_event_id"] = event.get("event_id")
         projection["event_log_latest_at"] = event.get("ingested_at")
