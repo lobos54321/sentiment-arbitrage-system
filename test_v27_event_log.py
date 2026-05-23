@@ -40,6 +40,13 @@ def test_v27_event_log_assigns_global_and_aggregate_sequences(tmp_path):
         "aggregate_count": 2,
         "idempotency_count": 3,
     }
+    assert log.summary() == {
+        "event_count": 3,
+        "last_global_seq": 3,
+        "aggregate_count": 2,
+        "idempotency_count": 3,
+        "verify_mode": "cached_state_metadata",
+    }
 
 
 def test_v27_event_log_returns_existing_event_for_duplicate_idempotency_key(tmp_path):

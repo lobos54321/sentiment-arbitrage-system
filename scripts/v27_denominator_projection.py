@@ -3167,6 +3167,7 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
         "spec_version": "v2.7.0",
         "event_log_dir": str(event_log_dir),
         "event_log_verify": None,
+        "event_log_verify_mode": None,
         "event_log_latest_seq": 0,
         "event_log_latest_at": None,
         "event_log_latest_event_id": None,
@@ -3268,7 +3269,9 @@ def build_denominator_projection(event_log_dir, *, include_records=False):
     }
 
     try:
-        projection["event_log_verify"] = event_log.verify()
+        event_log_summary = event_log.summary()
+        projection["event_log_verify_mode"] = event_log_summary.pop("verify_mode", None)
+        projection["event_log_verify"] = event_log_summary
         projection["event_log_latest_seq"] = projection["event_log_verify"]["last_global_seq"]
         projection["health"]["event_log_ok"] = True
     except V27EventLogError as exc:

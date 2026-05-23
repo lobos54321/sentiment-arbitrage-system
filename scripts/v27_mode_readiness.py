@@ -125,7 +125,7 @@ def _status(contract_id, status, reason, evidence=None):
 
 def _event_log_report(event_log_dir):
     try:
-        verify = V27EventLog(event_log_dir).verify()
+        verify = V27EventLog(event_log_dir).summary()
         return {
             "ok": True,
             "verify": verify,

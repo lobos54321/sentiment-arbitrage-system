@@ -79,6 +79,16 @@ def _text(value, default=None):
     return text or default
 
 
+def _source_row_reference(row, *, table, row_id):
+    material = dict(row or {})
+    return {
+        "source_table": table,
+        "source_row_id": row_id,
+        "source_row_hash": sha256_hex(material),
+        "source_row_field_count": len(material),
+    }
+
+
 def _row_filters(since_id=None, until_id=None):
     clauses = []
     params = []
@@ -172,7 +182,7 @@ def _paper_trade_no_fill_payload(
         "outcome_source": "paper_trades",
         "outcome_available_at": observed_at,
         "observed_at": observed_at,
-        "legacy_paper_trade": row,
+        "legacy_paper_trade_ref": _source_row_reference(row, table="paper_trades", row_id=paper_trade_id),
     }
 
 
@@ -263,7 +273,11 @@ def _missed_no_fill_payload(
         "outcome_source": "paper_missed_signal_attribution",
         "outcome_available_at": observed_at,
         "observed_at": observed_at,
-        "legacy_missed_attribution": row,
+        "legacy_missed_attribution_ref": _source_row_reference(
+            row,
+            table="paper_missed_signal_attribution",
+            row_id=missed_id,
+        ),
     }
 
 

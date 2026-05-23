@@ -114,6 +114,12 @@ def test_recovery_control_mirror_appends_no_fill_and_recovery_events(tmp_path):
     assert len(no_fill_events) == 2
     assert len(recovery_events) == 1
     assert {event["payload"]["outcome_state"] for event in no_fill_events} == {"filled_paper", "no_fill"}
+    assert all("legacy_paper_trade" not in event["payload"] for event in no_fill_events)
+    assert all("legacy_missed_attribution" not in event["payload"] for event in no_fill_events)
+    assert all(
+        event["payload"].get("legacy_paper_trade_ref") or event["payload"].get("legacy_missed_attribution_ref")
+        for event in no_fill_events
+    )
     missed_payload = [event["payload"] for event in no_fill_events if event["payload"]["outcome_state"] == "no_fill"][0]
     assert missed_payload["no_fill_reason"] == "quote_unavailable"
     assert missed_payload["no_fill_cost"] == 0.75

@@ -831,6 +831,7 @@ def test_denominator_read_model_snapshot_pins_freshness_and_spec_hash(tmp_path):
         max_allowed_lag_ms=300_000,
     )
 
+    assert projection["event_log_verify_mode"] == "cached_state_metadata"
     assert snapshot["snapshot_schema_version"] == "v2.7.0.denominator_read_model.v1"
     assert snapshot["snapshot_id"].startswith("v27denom_")
     assert len(snapshot["projection_hash"]) == 64

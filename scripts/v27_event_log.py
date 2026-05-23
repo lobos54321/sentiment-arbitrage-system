@@ -286,6 +286,24 @@ class V27EventLog:
             "idempotency_count": summary["idempotency_count"],
         }
 
+    def summary(self):
+        stored_state = self._load_state()
+        if self._state_matches_event_file(stored_state):
+            state = stored_state
+            verify_mode = "cached_state_metadata"
+        else:
+            rebuilt = self._build_state_from_events()
+            self._write_state(rebuilt["state"])
+            state = self._load_state()
+            verify_mode = "rebuilt_full_verify"
+        return {
+            "event_count": int(state.get("last_global_seq") or 0),
+            "last_global_seq": int(state.get("last_global_seq") or 0),
+            "aggregate_count": len(state.get("aggregate_last_seq") or {}),
+            "idempotency_count": len(state.get("idempotency_index") or {}),
+            "verify_mode": verify_mode,
+        }
+
 
 def main():
     parser = argparse.ArgumentParser()
