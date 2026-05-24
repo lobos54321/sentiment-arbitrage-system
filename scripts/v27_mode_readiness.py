@@ -43,6 +43,7 @@ MODE_REQUIREMENTS = {
         "WritePathRegistryContract",
         "DirectDatabaseMutationBan",
         "BackgroundJobRegistryContract",
+        "EntryPointInventoryContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

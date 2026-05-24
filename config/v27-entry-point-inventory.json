@@ -1,0 +1,369 @@
+{
+  "schema_version": "v2.7.0.entry_point_inventory.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "runtime_route_script_cron_deploy_entry_points",
+  "owner": "v27_runtime_governance",
+  "entry_points": [
+    {
+      "entry_point_id": "dashboard_public_health_routes",
+      "entry_type": "route_group",
+      "code_location": {
+        "file": "src/web/dashboard-server.js",
+        "anchor": "url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping'"
+      },
+      "route_group": {
+        "endpoints": ["/", "/health", "/ping", "/dashboard"],
+        "public": true
+      },
+      "route_registry_required": false,
+      "route_registry_reason": "public health and dashboard redirect do not create trading entry candidates",
+      "arbiter_required": false,
+      "arbiter_reason": "read-only liveness and redirect surface"
+    },
+    {
+      "entry_point_id": "dashboard_protected_route_surface",
+      "entry_type": "route_group",
+      "code_location": {
+        "file": "src/web/dashboard-server.js",
+        "anchor": "const server = http.createServer(async (req, res) =>"
+      },
+      "route_group": {
+        "kind": "all_dashboard_literal_routes",
+        "expected_literal_route_count": 63,
+        "expected_protected_route_count": 58
+      },
+      "route_registry_required": false,
+      "route_registry_reason": "HTTP routing coverage is governed by AccessControlContract, not entry-mode route registry",
+      "arbiter_required": false,
+      "arbiter_reason": "read/export/log routes are access controlled but do not directly arm entry candidates"
+    },
+    {
+      "entry_point_id": "dashboard_admin_mutation_routes",
+      "entry_type": "route_group",
+      "code_location": {
+        "file": "src/web/dashboard-server.js",
+        "anchor": "url.pathname === '/api/close-position'"
+      },
+      "route_group": {
+        "endpoints": [
+          "/api/close-position",
+          "/api/pause-trading",
+          "/api/resume-trading",
+          "/api/reset-daily-loss",
+          "/api/reset-live-data",
+          "/api/paper-trades/cleanup"
+        ],
+        "require_post": true,
+        "require_access_control": true,
+        "require_audit": true
+      },
+      "route_registry_required": false,
+      "route_registry_reason": "manual admin mutation routes do not create autonomous entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "AccessControlContract, AuditLogIntegrityContract, DirectDatabaseMutationBan, and WritePathRegistryContract arbitrate these mutations"
+    },
+    {
+      "entry_point_id": "dashboard_v27_manual_evidence_routes",
+      "entry_type": "route_group",
+      "code_location": {
+        "file": "src/web/dashboard-server.js",
+        "anchor": "url.pathname === '/api/paper/v27-read-model-refresh'"
+      },
+      "route_group": {
+        "endpoints": [
+          "/api/paper/v27-read-model-refresh",
+          "/api/paper/v27-recovery-control-mirror",
+          "/api/paper/v27-raw-provider-evidence-mirror",
+          "/api/paper/v27-raw-provider-probe-evidence",
+          "/api/paper/v27-randomness-control-mirror",
+          "/api/paper/v27-normal-tiny-ops-evidence"
+        ],
+        "require_post": true,
+        "require_access_control": true,
+        "require_audit": true
+      },
+      "route_registry_required": false,
+      "route_registry_reason": "manual evidence routes refresh governance evidence, not trading entry mode routing",
+      "arbiter_required": true,
+      "arbiter_reason": "AccessControlContract and AuditLogIntegrityContract arbitrate manual evidence mutation attempts"
+    },
+    {
+      "entry_point_id": "dashboard_dynamic_log_routes",
+      "entry_type": "route_group",
+      "code_location": {
+        "file": "src/web/dashboard-server.js",
+        "anchor": "resolveDashboardLogPath(url.pathname)"
+      },
+      "dynamic_route_group": {
+        "source_anchor": "resolveDashboardLogPath(url.pathname)",
+        "require_access_control": true
+      },
+      "route_registry_required": false,
+      "route_registry_reason": "dynamic log routes are diagnostic read surfaces",
+      "arbiter_required": false,
+      "arbiter_reason": "diagnostic log read surfaces are access controlled"
+    },
+    {
+      "entry_point_id": "health_bootstrap_server",
+      "entry_type": "server",
+      "code_location": {"file": "src/health-bootstrap.js", "anchor": "startDashboardServer();"},
+      "route_registry_required": false,
+      "route_registry_reason": "bootstrap starts the dashboard before runtime import and delegates route governance",
+      "arbiter_required": true,
+      "arbiter_reason": "paper-mode preload and health bootstrap gate runtime startup"
+    },
+    {
+      "entry_point_id": "premium_runtime_main",
+      "entry_type": "server",
+      "code_location": {"file": "src/index.js", "anchor": "export async function main()"},
+      "route_registry_required": false,
+      "route_registry_reason": "runtime delegates entry candidate routing to registered entry modes and sidecar workers",
+      "arbiter_required": true,
+      "arbiter_reason": "PaperModeSafetyBoundary and mode readiness contracts gate startup"
+    },
+    {
+      "entry_point_id": "dashboard_http_server",
+      "entry_type": "server",
+      "code_location": {"file": "src/web/dashboard-server.js", "anchor": "export function startDashboardServer"},
+      "route_registry_required": false,
+      "route_registry_reason": "dashboard HTTP routes are governed by AccessControlContract",
+      "arbiter_required": true,
+      "arbiter_reason": "AccessControlContract, AuditLogIntegrityContract, and write-path governance arbitrate dashboard mutations"
+    },
+    {
+      "entry_point_id": "node_shadow_data_sidecar_launcher",
+      "entry_type": "server",
+      "code_location": {"file": "src/index.js", "anchor": "function startShadowDataSidecars(config)"},
+      "route_registry_required": false,
+      "route_registry_reason": "launcher starts sidecar entry points registered separately",
+      "arbiter_required": true,
+      "arbiter_reason": "feature flags and worker-specific lock files arbitrate sidecar startup"
+    },
+    {
+      "entry_point_id": "zeabur_preflight_cleanup_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/zeabur_preflight_cleanup.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/zeabur_preflight_cleanup.py"},
+      "route_registry_required": false,
+      "route_registry_reason": "preflight cleanup does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "filesystem cleanup is constrained by preflight cleanup policy"
+    },
+    {
+      "entry_point_id": "paper_trade_monitor_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/paper_trade_monitor.py", "anchor": "if __name__ == '__main__'"},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/paper_trade_monitor.py"},
+      "route_registry_required": true,
+      "route_registry_reason": "paper trade monitor can arm and close paper positions through registered entry modes",
+      "arbiter_required": true,
+      "arbiter_reason": "entry-mode registry, paper-mode safety, SQLite single-writer lock, and mode readiness govern this worker"
+    },
+    {
+      "entry_point_id": "lifecycle_24h_tracker_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/lifecycle_24h_tracker.py", "anchor": "if __name__ == '__main__'"},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/lifecycle_24h_tracker.py --track"},
+      "route_registry_required": false,
+      "route_registry_reason": "lifecycle tracker records outcomes and does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "lifecycle output feeds evidence and label governance"
+    },
+    {
+      "entry_point_id": "gmgn_candidate_scout_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/gmgn_candidate_scout.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/gmgn_candidate_scout.py"},
+      "route_registry_required": false,
+      "route_registry_reason": "external alpha scout records candidates for downstream gated workers",
+      "arbiter_required": true,
+      "arbiter_reason": "external alpha evidence policy and worker lock file arbitrate writes"
+    },
+    {
+      "entry_point_id": "source_resonance_shadow_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/source_resonance_shadow.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/source_resonance_shadow.py"},
+      "route_registry_required": false,
+      "route_registry_reason": "source resonance records evidence for gated entry paths",
+      "arbiter_required": true,
+      "arbiter_reason": "external alpha evidence policy and worker lock file arbitrate writes"
+    },
+    {
+      "entry_point_id": "social_signal_service_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/social_signal_service.py", "anchor": "if __name__ == '__main__'"},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/social_signal_service.py"},
+      "route_registry_required": false,
+      "route_registry_reason": "social signal service is an enrichment service",
+      "arbiter_required": true,
+      "arbiter_reason": "service output is consumed by downstream evidence and entry gates"
+    },
+    {
+      "entry_point_id": "paper_fast_lane_sidecar",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/paper_fast_lane.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/index.js", "anchor": "'scripts/paper_fast_lane.py'"},
+      "route_registry_required": true,
+      "route_registry_reason": "paper fast lane can insert paper entries and must stay bound to registered entry modes",
+      "arbiter_required": true,
+      "arbiter_reason": "feature flags, paper-mode safety, and SQLite single-writer lock arbitrate this sidecar"
+    },
+    {
+      "entry_point_id": "paper_review_snapshot_sidecar",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/paper_review_snapshot_worker.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/index.js", "anchor": "'scripts/paper_review_snapshot_worker.py'"},
+      "route_registry_required": false,
+      "route_registry_reason": "review snapshot worker materializes read models and does not create entries",
+      "arbiter_required": true,
+      "arbiter_reason": "read model freshness and snapshot governance arbitrate this worker"
+    },
+    {
+      "entry_point_id": "v27_read_model_refresh_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_read_model_refresh.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "v27-read-model-refresh-once"},
+      "route_registry_required": false,
+      "route_registry_reason": "read model refresh updates governance evidence",
+      "arbiter_required": true,
+      "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "v27_recovery_control_mirror_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_mirror_recovery_controls.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "triggerV27RecoveryControlMirror"},
+      "route_registry_required": false,
+      "route_registry_reason": "recovery control mirror updates governance evidence",
+      "arbiter_required": true,
+      "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "v27_raw_provider_evidence_mirror_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_mirror_raw_provider_evidence.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "triggerV27RawProviderEvidenceMirror"},
+      "route_registry_required": false,
+      "route_registry_reason": "raw provider mirror updates governance evidence",
+      "arbiter_required": true,
+      "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "v27_raw_provider_probe_evidence_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_record_raw_provider_probe_evidence.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "triggerV27RawProviderProbeEvidence"},
+      "route_registry_required": false,
+      "route_registry_reason": "raw provider probe records governance evidence",
+      "arbiter_required": true,
+      "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "v27_randomness_control_mirror_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_mirror_randomness_controls.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "triggerV27RandomnessControlMirror"},
+      "route_registry_required": false,
+      "route_registry_reason": "randomness control mirror updates governance evidence",
+      "arbiter_required": true,
+      "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "v27_normal_tiny_ops_evidence_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_record_normal_tiny_ops_evidence.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "triggerV27NormalTinyOpsEvidence"},
+      "route_registry_required": false,
+      "route_registry_reason": "normal tiny ops evidence records governance evidence",
+      "arbiter_required": true,
+      "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "v27_basic_contract_readiness_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_basic_contract_readiness.py", "anchor": "if __name__ == \"__main__\""},
+      "route_registry_required": false,
+      "route_registry_reason": "readiness verifier does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "verifier controls promotion evidence"
+    },
+    {
+      "entry_point_id": "v27_mode_readiness_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_mode_readiness.py", "anchor": "if __name__ == \"__main__\""},
+      "route_registry_required": false,
+      "route_registry_reason": "mode readiness verifier does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "verifier controls promotion evidence"
+    },
+    {
+      "entry_point_id": "v27_spec_validate_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_spec_validate.py", "anchor": "if __name__ == \"__main__\""},
+      "route_registry_required": false,
+      "route_registry_reason": "spec validator does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "validator controls canonical spec evidence"
+    },
+    {
+      "entry_point_id": "v27_mode_gate_scope_audit_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/v27_mode_gate_scope_audit.py", "anchor": "if __name__ == \"__main__\""},
+      "route_registry_required": false,
+      "route_registry_reason": "scope audit does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "scope audit controls gap visibility"
+    },
+    {
+      "entry_point_id": "weekly_maintenance_cron",
+      "entry_type": "cron",
+      "code_location": {"file": "scripts/setup-cron.sh", "anchor": "weekly-maintenance.js"},
+      "target_location": {"file": "scripts/weekly-maintenance.js", "anchor": "async function main()"},
+      "route_registry_required": false,
+      "route_registry_reason": "maintenance cron does not create trading entry candidates",
+      "arbiter_required": true,
+      "arbiter_reason": "maintenance scope is explicitly scheduled and owner governed"
+    },
+    {
+      "entry_point_id": "docker_zeabur_cmd",
+      "entry_type": "deploy",
+      "code_location": {"file": "Dockerfile", "anchor": "CMD [\"bash\", \"scripts/run_zeabur_services.sh\"]"},
+      "target_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "set -e"},
+      "route_registry_required": false,
+      "route_registry_reason": "deploy command starts registered runtime and job entry points",
+      "arbiter_required": true,
+      "arbiter_reason": "deployment command is the production process root"
+    },
+    {
+      "entry_point_id": "npm_start_health_bootstrap",
+      "entry_type": "deploy",
+      "code_location": {"file": "package.json", "anchor": "\"start\": \"node --import ./src/runtime/v27-paper-mode-preload.js src/health-bootstrap.js --premium\""},
+      "target_location": {"file": "src/health-bootstrap.js", "anchor": "startDashboardServer();"},
+      "route_registry_required": false,
+      "route_registry_reason": "npm start delegates to health bootstrap and runtime entry points",
+      "arbiter_required": true,
+      "arbiter_reason": "paper-mode preload and bootstrap guard local startup"
+    },
+    {
+      "entry_point_id": "pm2_legacy_runtime_config",
+      "entry_type": "deploy",
+      "code_location": {"file": "ecosystem.config.cjs", "anchor": "script: 'src/index.js'"},
+      "target_location": {"file": "src/index.js", "anchor": "export async function main()"},
+      "route_registry_required": false,
+      "route_registry_reason": "PM2 config delegates to runtime entry point",
+      "arbiter_required": true,
+      "arbiter_reason": "legacy PM2 runtime config remains an explicit launch surface"
+    },
+    {
+      "entry_point_id": "pm2_local_autonomy_daemon_config",
+      "entry_type": "deploy",
+      "code_location": {"file": "ecosystem.config.json", "anchor": "\"script\": \"scripts/run-autonomy-daemon.js\""},
+      "target_location": {"file": "scripts/run-autonomy-daemon.js", "anchor": "async function main()"},
+      "route_registry_required": false,
+      "route_registry_reason": "autonomy daemon evaluates data and does not create trading entry candidates directly",
+      "arbiter_required": true,
+      "arbiter_reason": "local autonomy daemon is a privileged operational launch surface"
+    }
+  ]
+}

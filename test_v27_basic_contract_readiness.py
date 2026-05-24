@@ -8,6 +8,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_audit_log_integrity,
     verify_background_job_registry,
     verify_direct_database_mutation_ban,
+    verify_entry_point_inventory,
     verify_evidence_eligibility_matrix,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -43,6 +44,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "WritePathRegistryContract",
         "DirectDatabaseMutationBan",
         "BackgroundJobRegistryContract",
+        "EntryPointInventoryContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -561,6 +563,65 @@ def test_background_job_registry_blocks_missing_entry_point(tmp_path):
     assert report["blocking_reason"] == "background_job_registry_missing_malformed_or_incomplete"
     assert report["evidence"]["missing_entry_point_files"] == [
         {"job_name": "missing_worker", "entry_point_file": str(tmp_path / "missing_worker.py")}
+    ]
+
+
+def test_entry_point_inventory_covers_runtime_routes_scripts_and_deploy():
+    report = verify_entry_point_inventory()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["entry_point_count"] == 32
+    assert report["evidence"]["entry_type_counts"]["route_group"] == 5
+    assert report["evidence"]["entry_type_counts"]["script"] == 18
+    assert report["evidence"]["dashboard_literal_route_count"] == 63
+    assert report["evidence"]["dashboard_protected_route_count"] == 58
+    assert report["evidence"]["route_registry_required_count"] == 2
+    assert report["evidence"]["arbiter_required_count"] == 29
+    assert report["evidence"]["uncovered_audit_required_routes"] == []
+    assert report["evidence"]["location_violations"] == []
+
+
+def test_entry_point_inventory_blocks_missing_anchor(tmp_path):
+    source_path = tmp_path / "server.js"
+    source_path.write_text("if (url.pathname === '/health') { res.end('ok'); }\n", encoding="utf-8")
+    access_policy_path = tmp_path / "access-policy.json"
+    write_access_policy(access_policy_path, source_path)
+    inventory_path = tmp_path / "entry-points.json"
+    inventory_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.entry_point_inventory.v1",
+                "entry_points": [
+                    {
+                        "entry_point_id": "unit_missing_anchor",
+                        "entry_type": "server",
+                        "code_location": {
+                            "file": str(source_path),
+                            "anchor": "definitely_missing_anchor",
+                        },
+                        "route_registry_required": False,
+                        "route_registry_reason": "unit test",
+                        "arbiter_required": False,
+                        "arbiter_reason": "unit test",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_entry_point_inventory(inventory_path, access_policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "entry_point_inventory_missing_malformed_or_incomplete"
+    assert report["evidence"]["location_violations"] == [
+        {
+            "entry_point_id": "unit_missing_anchor",
+            "location": "code_location",
+            "file": str(source_path),
+            "anchor": "definitely_missing_anchor",
+            "reason": "anchor_not_found",
+        }
     ]
 
 

@@ -32,6 +32,7 @@ DEFAULT_ACCESS_CONTROL_POLICY = PROJECT_ROOT / "config" / "v27-access-control-po
 DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
 DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
+DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -74,6 +75,13 @@ BACKGROUND_JOB_REQUIRED_FIELDS = (
     "owner",
 )
 BACKGROUND_JOB_ALLOWED_MODES = {"observe_only", "shadow", "ultra_tiny", "normal_tiny"}
+ENTRY_POINT_REQUIRED_FIELDS = (
+    "entry_point_id",
+    "code_location",
+    "route_registry_required",
+    "arbiter_required",
+)
+ENTRY_POINT_ALLOWED_TYPES = {"route_group", "server", "script", "cron", "deploy"}
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
     "shadow",
@@ -936,6 +944,209 @@ def verify_background_job_registry(registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY
     )
 
 
+def _verify_code_location(location, label):
+    violations = []
+    if not isinstance(location, dict):
+        return [{"location": label, "reason": "location_not_object"}]
+    raw_file = location.get("file")
+    anchor = location.get("anchor")
+    if not raw_file:
+        violations.append({"location": label, "reason": "file_missing"})
+        return violations
+    path = _resolve_project_file(raw_file)
+    if not path.exists():
+        violations.append({"location": label, "file": str(raw_file), "reason": "file_not_found"})
+        return violations
+    if anchor:
+        text = path.read_text(encoding="utf-8")
+        if str(anchor) not in text:
+            violations.append({"location": label, "file": str(raw_file), "anchor": str(anchor), "reason": "anchor_not_found"})
+    return violations
+
+
+def verify_entry_point_inventory(
+    inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
+    access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
+):
+    try:
+        inventory = _load_json(inventory_path)
+        access_policy = _load_json(access_control_policy_path)
+    except Exception as exc:
+        return _contract("EntryPointInventoryContract", False, "entry_point_inventory_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(inventory, dict) or not isinstance(access_policy, dict):
+        return _contract(
+            "EntryPointInventoryContract",
+            False,
+            "entry_point_inventory_not_object",
+            {
+                "inventory_path": str(inventory_path),
+                "access_control_policy_path": str(access_control_policy_path),
+            },
+        )
+
+    source_lines, source_error = _source_lines(access_policy.get("source_file"))
+    if source_error:
+        return _contract("EntryPointInventoryContract", False, "entry_point_source_missing", {"inventory_path": str(inventory_path), **source_error})
+    routes = _extract_dashboard_routes(source_lines)
+    route_by_endpoint = {route["endpoint"]: route for route in routes}
+    public_endpoints = set(str(item) for item in (access_policy.get("public_endpoints") or []))
+    protected_route_count = sum(1 for route in routes if route.get("endpoint") not in public_endpoints)
+    overrides = {
+        str(item.get("endpoint")): item
+        for item in (access_policy.get("endpoint_overrides") or [])
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+    audit_required_endpoints = {
+        endpoint
+        for endpoint, item in overrides.items()
+        if item.get("audit_log_required") is True
+    }
+    dynamic_source_anchors = {
+        str(item.get("source_anchor"))
+        for item in (access_policy.get("dynamic_protected_routes") or [])
+        if isinstance(item, dict) and item.get("source_anchor")
+    }
+
+    entries = inventory.get("entry_points") if isinstance(inventory.get("entry_points"), list) else []
+    malformed_entries = []
+    duplicate_entry_point_ids = []
+    location_violations = []
+    route_group_violations = []
+    dynamic_route_violations = []
+    seen_ids = set()
+    covered_route_endpoints = set()
+    route_registry_required_count = 0
+    arbiter_required_count = 0
+    entry_type_counts = {}
+
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            malformed_entries.append({"index": index, "entry_point_id": None, "missing_fields": list(ENTRY_POINT_REQUIRED_FIELDS), "violations": ["entry_not_object"]})
+            continue
+        entry_id = str(entry.get("entry_point_id") or "")
+        entry_type = str(entry.get("entry_type") or "")
+        missing = _missing_required_fields(entry, ENTRY_POINT_REQUIRED_FIELDS)
+        violations = []
+        if entry_id in seen_ids:
+            duplicate_entry_point_ids.append(entry_id)
+        if entry_id:
+            seen_ids.add(entry_id)
+        if entry_type not in ENTRY_POINT_ALLOWED_TYPES:
+            violations.append("entry_type_invalid_or_missing")
+        else:
+            entry_type_counts[entry_type] = entry_type_counts.get(entry_type, 0) + 1
+        for bool_field in ("route_registry_required", "arbiter_required"):
+            if not isinstance(entry.get(bool_field), bool):
+                violations.append(f"{bool_field}_must_be_bool")
+        if entry.get("route_registry_required") is True:
+            route_registry_required_count += 1
+            if not entry.get("route_registry_reason"):
+                violations.append("route_registry_reason_required")
+        if entry.get("arbiter_required") is True:
+            arbiter_required_count += 1
+            if not entry.get("arbiter_reason"):
+                violations.append("arbiter_reason_required")
+
+        location_violations.extend(
+            {"entry_point_id": entry_id, **violation}
+            for violation in _verify_code_location(entry.get("code_location"), "code_location")
+        )
+        for optional_location in ("launcher_location", "target_location"):
+            if optional_location in entry:
+                location_violations.extend(
+                    {"entry_point_id": entry_id, **violation}
+                    for violation in _verify_code_location(entry.get(optional_location), optional_location)
+                )
+
+        route_group = entry.get("route_group") if isinstance(entry.get("route_group"), dict) else None
+        if route_group:
+            endpoints = [str(endpoint) for endpoint in (route_group.get("endpoints") or [])]
+            covered_route_endpoints.update(endpoints)
+            for endpoint in endpoints:
+                if endpoint not in route_by_endpoint:
+                    route_group_violations.append({"entry_point_id": entry_id, "endpoint": endpoint, "reason": "route_not_found"})
+            expected_literal = route_group.get("expected_literal_route_count")
+            if expected_literal is not None and int(expected_literal) != len(routes):
+                route_group_violations.append(
+                    {
+                        "entry_point_id": entry_id,
+                        "expected_literal_route_count": expected_literal,
+                        "actual_literal_route_count": len(routes),
+                        "reason": "literal_route_count_mismatch",
+                    }
+                )
+            expected_protected = route_group.get("expected_protected_route_count")
+            if expected_protected is not None and int(expected_protected) != protected_route_count:
+                route_group_violations.append(
+                    {
+                        "entry_point_id": entry_id,
+                        "expected_protected_route_count": expected_protected,
+                        "actual_protected_route_count": protected_route_count,
+                        "reason": "protected_route_count_mismatch",
+                    }
+                )
+            if route_group.get("require_access_control") or route_group.get("require_post") or route_group.get("require_audit"):
+                for endpoint in endpoints:
+                    policy = overrides.get(endpoint)
+                    if not policy:
+                        route_group_violations.append({"entry_point_id": entry_id, "endpoint": endpoint, "reason": "access_policy_override_missing"})
+                        continue
+                    if route_group.get("require_post"):
+                        allowed = [str(value).upper() for value in (policy.get("allowed_methods") or [])]
+                        if policy.get("method_guard_required") is not True or "POST" not in allowed:
+                            route_group_violations.append({"entry_point_id": entry_id, "endpoint": endpoint, "reason": "post_guard_missing"})
+                    if route_group.get("require_audit") and policy.get("audit_log_required") is not True:
+                        route_group_violations.append({"entry_point_id": entry_id, "endpoint": endpoint, "reason": "audit_requirement_missing"})
+
+        dynamic_group = entry.get("dynamic_route_group") if isinstance(entry.get("dynamic_route_group"), dict) else None
+        if dynamic_group:
+            source_anchor = str(dynamic_group.get("source_anchor") or "")
+            if dynamic_group.get("require_access_control") and source_anchor not in dynamic_source_anchors:
+                dynamic_route_violations.append({"entry_point_id": entry_id, "source_anchor": source_anchor, "reason": "dynamic_access_policy_missing"})
+
+        if missing or violations:
+            malformed_entries.append({"index": index, "entry_point_id": entry_id or None, "missing_fields": missing, "violations": violations})
+
+    uncovered_audit_required_routes = sorted(audit_required_endpoints - covered_route_endpoints)
+    passed = (
+        inventory.get("schema_version") == "v2.7.0.entry_point_inventory.v1"
+        and bool(entries)
+        and len(routes) >= 60
+        and protected_route_count >= 50
+        and route_registry_required_count >= 2
+        and arbiter_required_count >= 20
+        and not malformed_entries
+        and not duplicate_entry_point_ids
+        and not location_violations
+        and not route_group_violations
+        and not dynamic_route_violations
+        and not uncovered_audit_required_routes
+    )
+    return _contract(
+        "EntryPointInventoryContract",
+        passed,
+        "entry_point_inventory_missing_malformed_or_incomplete",
+        {
+            "inventory_path": str(inventory_path),
+            "access_control_policy_path": str(access_control_policy_path),
+            "schema_version": inventory.get("schema_version"),
+            "entry_point_count": len(entries),
+            "entry_type_counts": entry_type_counts,
+            "dashboard_literal_route_count": len(routes),
+            "dashboard_protected_route_count": protected_route_count,
+            "route_registry_required_count": route_registry_required_count,
+            "arbiter_required_count": arbiter_required_count,
+            "duplicate_entry_point_ids": sorted(str(item) for item in duplicate_entry_point_ids),
+            "malformed_entries": malformed_entries,
+            "location_violations": location_violations,
+            "route_group_violations": route_group_violations,
+            "dynamic_route_violations": dynamic_route_violations,
+            "audit_required_route_count": len(audit_required_endpoints),
+            "uncovered_audit_required_routes": uncovered_audit_required_routes,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -1346,6 +1557,7 @@ def build_basic_contract_readiness(
     write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
     direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
+    entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     env=None,
 ):
     contracts = {
@@ -1374,6 +1586,10 @@ def build_basic_contract_readiness(
                 access_control_policy_path=access_control_policy_path,
             ),
             verify_background_job_registry(registry_path=background_job_registry_path),
+            verify_entry_point_inventory(
+                inventory_path=entry_point_inventory_path,
+                access_control_policy_path=access_control_policy_path,
+            ),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -1404,6 +1620,7 @@ def main():
     parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
     parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
+    parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -1420,6 +1637,7 @@ def main():
         write_path_registry_path=Path(args.write_path_registry),
         direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
         background_job_registry_path=Path(args.background_job_registry),
+        entry_point_inventory_path=Path(args.entry_point_inventory),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:
