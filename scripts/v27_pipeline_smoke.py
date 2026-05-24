@@ -298,6 +298,7 @@ def run_pipeline_smoke(
                 default_provider="jupiter_ultra",
                 default_endpoint="/ultra/v1/order",
                 cursor_overlap_ids=100,
+                trusted_only=True,
                 new_only=True,
             ),
         )

@@ -89,6 +89,30 @@ def trusted_execution(request_id="provider-request-1"):
     )
 
 
+def trusted_provider_response_execution(request_id="provider-response-request-1"):
+    return json.dumps(
+        {
+            "success": True,
+            "requestId": request_id,
+            "provider": "jupiter_ultra",
+            "endpoint": "/ultra/v1/order",
+            "quoteTs": 1_700_000_002_000,
+            "effectivePrice": 0.001,
+            "slippageBps": 25,
+            "inputAmount": 0.01,
+            "inputMint": "SOL",
+            "outputMint": "TokenRaw",
+            "latencyMs": 123,
+            "providerResponse": {
+                "requestId": request_id,
+                "outAmount": "1000000",
+                "routePlan": [{"swapInfo": {"ammKey": "pool-raw"}}],
+                "slippageBps": 25,
+            },
+        }
+    )
+
+
 def audit_only(request_id="legacy-request-1"):
     return json.dumps(
         {
@@ -185,6 +209,29 @@ def test_raw_provider_evidence_mirror_records_trusted_and_untrusted_provider_evi
     assert untrusted["raw_response_available"] is False
     assert untrusted["provider_evidence_trusted"] is False
     assert untrusted["provider_evidence_proof_level"] == "legacy_execution_projection_without_raw_provider_response"
+
+
+def test_raw_provider_evidence_mirror_trusts_runtime_provider_response_material(tmp_path):
+    paper_db = tmp_path / "paper.db"
+    signal_db = tmp_path / "signal.db"
+    event_log_dir = tmp_path / "events"
+    with new_paper_db(paper_db) as db:
+        insert_trade(db, trade_id=1, entry_execution=trusted_provider_response_execution(), entry_audit=None)
+    with new_signal_db(signal_db) as db:
+        insert_signal(db)
+
+    result = mirror_raw_provider_evidence(paper_db, signal_db, event_log_dir, trusted_only=True)
+
+    events = list(V27EventLog(event_log_dir).iter_events())
+    assert result["candidate_provider_evidence"] == 1
+    assert result["trusted_provider_evidence"] == 1
+    assert result["appended"] == 1
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["provider_request_id"] == "provider-response-request-1"
+    assert payload["response_material_type"] == "execution.providerResponse"
+    assert payload["raw_response_available"] is True
+    assert payload["provider_evidence_trusted"] is True
 
 
 def test_raw_provider_evidence_trusted_only_skips_untrusted_provider_evidence(tmp_path):

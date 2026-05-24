@@ -139,8 +139,8 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const quote = await this._getLiteSwapQuote(SOL_MINT, tokenCA, amountLamports, opts);
-      return await this._normalizeQuoteResult('buy', quote, {
+      const order = await this._getPublicOrder(SOL_MINT, tokenCA, amountLamports, opts);
+      return await this._normalizeQuoteResult('buy', order, {
         tokenCA,
         inputMint: SOL_MINT,
         outputMint: tokenCA,
@@ -211,8 +211,8 @@ export class JupiterUltraExecutor {
     }
 
     try {
-      const quote = await this._getLiteSwapQuote(tokenCA, SOL_MINT, rawAmount, opts);
-      return await this._normalizeQuoteResult('sell', quote, {
+      const order = await this._getPublicOrder(tokenCA, SOL_MINT, rawAmount, opts);
+      return await this._normalizeQuoteResult('sell', order, {
         tokenCA,
         inputMint: tokenCA,
         outputMint: SOL_MINT,
@@ -441,6 +441,9 @@ export class JupiterUltraExecutor {
       const taker = options?.taker;
       if (taker) {
         params.set('taker', taker);
+      }
+      if (options.slippageBps != null) {
+        params.append('slippageBps', String(options.slippageBps));
       }
 
       const res = await axios.get(`${this.ultraApiBase}/order?${params.toString()}`, {

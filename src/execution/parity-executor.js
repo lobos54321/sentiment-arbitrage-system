@@ -1,7 +1,12 @@
 import JupiterUltraExecutor from './jupiter-ultra-executor.js';
 
-function stripInternalFields(result = {}) {
+function stripInternalFields(result = {}, options = {}) {
   const { _rawOrder, ...rest } = result || {};
+  if (options.preserveProviderResponse && _rawOrder && !rest.providerResponse) {
+    rest.provider = rest.provider || 'jupiter_ultra';
+    rest.endpoint = rest.endpoint || '/ultra/v1/order';
+    rest.providerResponse = _rawOrder;
+  }
   return rest;
 }
 
@@ -41,7 +46,7 @@ export class ParityExecutor {
       ? await this.executor.getPublicBuyQuote(tokenCA, amountSol, opts)
       : await this.executor.getBuyQuote(tokenCA, amountSol, opts);
     const adjusted = this._applyPaperPenalty('buy', quote, opts);
-    return stripInternalFields({ ...adjusted, mode: 'paper' });
+    return stripInternalFields({ ...adjusted, mode: 'paper' }, { preserveProviderResponse: true });
   }
 
   async simulateSell(tokenCA, tokenAmountRaw, opts = {}) {
@@ -49,7 +54,7 @@ export class ParityExecutor {
       ? await this.executor.getPublicSellQuote(tokenCA, tokenAmountRaw, opts)
       : await this.executor.getSellQuote(tokenCA, tokenAmountRaw, opts);
     const adjusted = this._applyPaperPenalty('sell', quote, opts);
-    return stripInternalFields({ ...adjusted, mode: 'paper' });
+    return stripInternalFields({ ...adjusted, mode: 'paper' }, { preserveProviderResponse: true });
   }
 
   async buy(tokenCA, amountSol, opts = {}) {

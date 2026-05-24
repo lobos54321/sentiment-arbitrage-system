@@ -50,6 +50,8 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /scripts\/v27_mirror_raw_provider_evidence\.py/);
   assert.match(source, /V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOCK_FILE/);
   assert.match(source, /V27_RAW_PROVIDER_CURSOR_OVERLAP_IDS/);
+  assert.match(source, /V27_RAW_PROVIDER_EVIDENCE_TRUSTED_ONLY/);
+  assert.match(source, /'--trusted-only'/);
   assert.match(source, /V27_IDEMPOTENCY_CONTRACT_MIRROR_WORKER_ENABLED/);
   assert.match(source, /name:\s*'v27-idempotency-contract-mirror'/);
   assert.match(source, /scripts\/v27_mirror_idempotency_contracts\.py/);

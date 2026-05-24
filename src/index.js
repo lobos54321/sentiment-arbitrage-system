@@ -537,6 +537,7 @@ function startShadowDataSidecars(config) {
         '--cursor-overlap-ids', process.env.V27_RAW_PROVIDER_CURSOR_OVERLAP_IDS || '100',
         '--initial-delay', process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_INITIAL_DELAY_SEC || '0',
         '--lock-file', process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOCK_FILE || '/tmp/v27_raw_provider_evidence_mirror.lock',
+        ...(envFlag('V27_RAW_PROVIDER_EVIDENCE_TRUSTED_ONLY', true) ? ['--trusted-only'] : []),
       ],
       env: {
         PAPER_DB: paperDb,

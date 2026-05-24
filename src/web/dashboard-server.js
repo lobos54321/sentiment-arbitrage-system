@@ -7927,7 +7927,9 @@ const server = http.createServer(async (req, res) => {
       cursorOverlapIds: url.searchParams.has('cursor_overlap_ids') ? boundedIntParam(url, 'cursor_overlap_ids', 100, 0, 1000000) : undefined,
       dryRun: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
       strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
-      trustedOnly: ['1', 'true', 'yes'].includes(String(url.searchParams.get('trusted_only') || '').toLowerCase()),
+      trustedOnly: url.searchParams.has('trusted_only')
+        ? ['1', 'true', 'yes'].includes(String(url.searchParams.get('trusted_only') || '').toLowerCase())
+        : true,
       evidenceVersion: url.searchParams.get('evidence_version') || undefined,
       defaultProvider: url.searchParams.get('default_provider') || undefined,
       defaultEndpoint: url.searchParams.get('default_endpoint') || undefined,
