@@ -22,6 +22,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "AccessControlContract" not in normal["missing_contracts"]
     assert "AuditLogIntegrityContract" not in normal["missing_contracts"]
     assert "DirectDatabaseMutationBan" not in normal["missing_contracts"]
+    assert "BackgroundJobRegistryContract" not in normal["missing_contracts"]
     assert "EntryPointInventoryContract" in normal["missing_contracts"]
     assert "ReplaySideEffectIsolationContract" not in normal["missing_contracts"]
     assert "WritePathRegistryContract" not in normal["missing_contracts"]

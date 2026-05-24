@@ -31,6 +31,7 @@ DEFAULT_GOVERNANCE_READINESS = PROJECT_ROOT / "config" / "v27-governance-readine
 DEFAULT_ACCESS_CONTROL_POLICY = PROJECT_ROOT / "config" / "v27-access-control-policy.json"
 DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
 DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
+DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -65,6 +66,14 @@ DIRECT_DB_MUTATION_REQUIRED_FIELDS = (
     "approved_mutation_path",
     "break_glass_id",
 )
+BACKGROUND_JOB_REQUIRED_FIELDS = (
+    "job_name",
+    "entry_point",
+    "allowed_modes",
+    "lease_policy",
+    "owner",
+)
+BACKGROUND_JOB_ALLOWED_MODES = {"observe_only", "shadow", "ultra_tiny", "normal_tiny"}
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
     "shadow",
@@ -831,6 +840,102 @@ def verify_direct_database_mutation_ban(
     )
 
 
+def _resolve_project_file(raw_path):
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def verify_background_job_registry(registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY):
+    try:
+        registry = _load_json(registry_path)
+    except Exception as exc:
+        return _contract("BackgroundJobRegistryContract", False, "background_job_registry_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(registry, dict):
+        return _contract("BackgroundJobRegistryContract", False, "background_job_registry_not_object", {"registry_path": str(registry_path)})
+
+    jobs = registry.get("jobs") if isinstance(registry.get("jobs"), list) else []
+    malformed_jobs = []
+    duplicate_job_names = []
+    missing_entry_point_files = []
+    missing_source_anchors = []
+    seen_job_names = set()
+    restart_loop_jobs = 0
+    for index, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            malformed_jobs.append({"index": index, "job_name": None, "missing_fields": list(BACKGROUND_JOB_REQUIRED_FIELDS), "violations": ["job_not_object"]})
+            continue
+        job_name = str(job.get("job_name") or "")
+        missing = _missing_required_fields(job, BACKGROUND_JOB_REQUIRED_FIELDS)
+        violations = []
+        if job_name in seen_job_names:
+            duplicate_job_names.append(job_name)
+        if job_name:
+            seen_job_names.add(job_name)
+        allowed_modes = job.get("allowed_modes")
+        if not isinstance(allowed_modes, list) or not allowed_modes:
+            violations.append("allowed_modes_non_empty_list_required")
+        else:
+            invalid_modes = sorted(str(mode) for mode in allowed_modes if str(mode) not in BACKGROUND_JOB_ALLOWED_MODES)
+            if invalid_modes:
+                violations.append(f"allowed_modes_invalid:{','.join(invalid_modes)}")
+        lease_policy = job.get("lease_policy")
+        if not isinstance(lease_policy, dict) or not lease_policy.get("kind"):
+            violations.append("lease_policy_kind_required")
+        elif str(lease_policy.get("kind")) == "supervised_restart_loop":
+            restart_loop_jobs += 1
+            if not lease_policy.get("pid_env"):
+                violations.append("supervised_restart_loop_pid_env_required")
+            try:
+                if int(lease_policy.get("restart_delay_sec", 0)) <= 0:
+                    violations.append("supervised_restart_loop_restart_delay_positive")
+            except (TypeError, ValueError):
+                violations.append("supervised_restart_loop_restart_delay_positive")
+        entry_point_file = _resolve_project_file(job.get("entry_point_file"))
+        if entry_point_file and not entry_point_file.exists():
+            missing_entry_point_files.append({"job_name": job_name, "entry_point_file": job.get("entry_point_file")})
+        source_file = _resolve_project_file(job.get("source_file"))
+        source_anchor = str(job.get("source_anchor") or "")
+        if not source_file or not source_anchor:
+            violations.append("source_file_and_anchor_required")
+        elif not source_file.exists():
+            missing_source_anchors.append({"job_name": job_name, "source_file": job.get("source_file"), "source_anchor": source_anchor, "reason": "source_file_missing"})
+        else:
+            source_text = source_file.read_text(encoding="utf-8")
+            if source_anchor not in source_text:
+                missing_source_anchors.append({"job_name": job_name, "source_file": job.get("source_file"), "source_anchor": source_anchor, "reason": "source_anchor_missing"})
+        if missing or violations:
+            malformed_jobs.append({"index": index, "job_name": job_name or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        registry.get("schema_version") == "v2.7.0.background_job_registry.v1"
+        and bool(jobs)
+        and restart_loop_jobs >= 5
+        and not malformed_jobs
+        and not duplicate_job_names
+        and not missing_entry_point_files
+        and not missing_source_anchors
+    )
+    return _contract(
+        "BackgroundJobRegistryContract",
+        passed,
+        "background_job_registry_missing_malformed_or_incomplete",
+        {
+            "registry_path": str(registry_path),
+            "schema_version": registry.get("schema_version"),
+            "scope": registry.get("scope"),
+            "job_count": len(jobs),
+            "restart_loop_job_count": restart_loop_jobs,
+            "job_names": sorted(str(job.get("job_name")) for job in jobs if isinstance(job, dict) and job.get("job_name")),
+            "duplicate_job_names": sorted(str(item) for item in duplicate_job_names),
+            "malformed_jobs": malformed_jobs,
+            "missing_entry_point_files": missing_entry_point_files,
+            "missing_source_anchors": missing_source_anchors,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -1240,6 +1345,7 @@ def build_basic_contract_readiness(
     access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
     write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
     direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
+    background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     env=None,
 ):
     contracts = {
@@ -1267,6 +1373,7 @@ def build_basic_contract_readiness(
                 registry_path=write_path_registry_path,
                 access_control_policy_path=access_control_policy_path,
             ),
+            verify_background_job_registry(registry_path=background_job_registry_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -1296,6 +1403,7 @@ def main():
     parser.add_argument("--access-control-policy", default=str(DEFAULT_ACCESS_CONTROL_POLICY))
     parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
     parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
+    parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -1311,6 +1419,7 @@ def main():
         access_control_policy_path=Path(args.access_control_policy),
         write_path_registry_path=Path(args.write_path_registry),
         direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
+        background_job_registry_path=Path(args.background_job_registry),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

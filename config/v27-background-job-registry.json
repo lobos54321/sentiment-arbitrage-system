@@ -1,0 +1,133 @@
+{
+  "schema_version": "v2.7.0.background_job_registry.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "zeabur_runtime_and_local_maintenance_background_jobs",
+  "owner": "v27_runtime_governance",
+  "jobs": [
+    {
+      "job_name": "zeabur_supervisor",
+      "entry_point": "bash scripts/run_zeabur_services.sh",
+      "entry_point_file": "scripts/run_zeabur_services.sh",
+      "source_file": "Dockerfile",
+      "source_anchor": "CMD [\"bash\", \"scripts/run_zeabur_services.sh\"]",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "container_singleton",
+        "owner_pid": "container_pid_1",
+        "restart_policy": "platform_restart"
+      },
+      "owner": "platform_ops"
+    },
+    {
+      "job_name": "redis_sidecar",
+      "entry_point": "redis-server --bind 127.0.0.1 --port 6379",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "redis-server --bind 127.0.0.1 --port 6379",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_process",
+        "pid_env": "REDIS_PID",
+        "restart_policy": "container_restart_on_startup_failure"
+      },
+      "owner": "platform_ops"
+    },
+    {
+      "job_name": "premium_node_server",
+      "entry_point": "node src/index.js --premium",
+      "entry_point_file": "src/index.js",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "node src/index.js --premium",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "NODE_PID",
+        "restart_delay_sec": 15
+      },
+      "owner": "runtime_ops"
+    },
+    {
+      "job_name": "lifecycle_24h_tracker",
+      "entry_point": "python3 scripts/lifecycle_24h_tracker.py --track",
+      "entry_point_file": "scripts/lifecycle_24h_tracker.py",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/lifecycle_24h_tracker.py --track",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "LIFECYCLE_PID",
+        "restart_delay_sec": 15
+      },
+      "owner": "data_lifecycle_ops"
+    },
+    {
+      "job_name": "paper_trade_monitor",
+      "entry_point": "python3 scripts/paper_trade_monitor.py",
+      "entry_point_file": "scripts/paper_trade_monitor.py",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/paper_trade_monitor.py",
+      "allowed_modes": ["shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "PAPER_PID",
+        "restart_delay_sec": 15
+      },
+      "owner": "paper_trading_ops"
+    },
+    {
+      "job_name": "gmgn_candidate_scout",
+      "entry_point": "python3 scripts/gmgn_candidate_scout.py --loop",
+      "entry_point_file": "scripts/gmgn_candidate_scout.py",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/gmgn_candidate_scout.py",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "SCOUT_PID",
+        "restart_delay_sec": 15
+      },
+      "owner": "external_alpha_ops"
+    },
+    {
+      "job_name": "source_resonance_shadow",
+      "entry_point": "python3 scripts/source_resonance_shadow.py --loop",
+      "entry_point_file": "scripts/source_resonance_shadow.py",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/source_resonance_shadow.py",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "RESONANCE_PID",
+        "restart_delay_sec": 15
+      },
+      "owner": "external_alpha_ops"
+    },
+    {
+      "job_name": "social_signal_service",
+      "entry_point": "python3 scripts/social_signal_service.py",
+      "entry_point_file": "scripts/social_signal_service.py",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/social_signal_service.py",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "SOCIAL_PID",
+        "restart_delay_sec": 10
+      },
+      "owner": "external_alpha_ops"
+    },
+    {
+      "job_name": "weekly_maintenance_cron",
+      "entry_point": "node scripts/weekly-maintenance.js",
+      "entry_point_file": "scripts/weekly-maintenance.js",
+      "source_file": "scripts/setup-cron.sh",
+      "source_anchor": "weekly-maintenance.js",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "host_cron",
+        "schedule": "0 0 * * 0",
+        "restart_policy": "next_cron_tick"
+      },
+      "owner": "maintenance_ops"
+    }
+  ]
+}

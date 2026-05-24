@@ -6,6 +6,7 @@ sys.path.insert(0, "scripts")
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
     verify_audit_log_integrity,
+    verify_background_job_registry,
     verify_direct_database_mutation_ban,
     verify_evidence_eligibility_matrix,
     verify_access_control_policy,
@@ -41,6 +42,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "AuditLogIntegrityContract",
         "WritePathRegistryContract",
         "DirectDatabaseMutationBan",
+        "BackgroundJobRegistryContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -509,6 +511,56 @@ def test_direct_database_mutation_ban_blocks_unapproved_sqlite_mutation(tmp_path
             "target_store": "sqlite:demo",
             "entry_point": "POST /api/mutate",
         }
+    ]
+
+
+def test_background_job_registry_covers_supervised_runtime_jobs():
+    report = verify_background_job_registry()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["job_count"] == 9
+    assert report["evidence"]["restart_loop_job_count"] == 6
+    assert report["evidence"]["missing_entry_point_files"] == []
+    assert report["evidence"]["missing_source_anchors"] == []
+    assert "paper_trade_monitor" in report["evidence"]["job_names"]
+    assert "source_resonance_shadow" in report["evidence"]["job_names"]
+
+
+def test_background_job_registry_blocks_missing_entry_point(tmp_path):
+    registry_path = tmp_path / "background-jobs.json"
+    source_path = tmp_path / "runner.sh"
+    source_path.write_text("python3 scripts/missing_worker.py\n", encoding="utf-8")
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.background_job_registry.v1",
+                "jobs": [
+                    {
+                        "job_name": "missing_worker",
+                        "entry_point": "python3 scripts/missing_worker.py",
+                        "entry_point_file": str(tmp_path / "missing_worker.py"),
+                        "source_file": str(source_path),
+                        "source_anchor": "python3 scripts/missing_worker.py",
+                        "allowed_modes": ["observe_only"],
+                        "lease_policy": {
+                            "kind": "supervised_restart_loop",
+                            "pid_env": "MISSING_PID",
+                            "restart_delay_sec": 15,
+                        },
+                        "owner": "test",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_background_job_registry(registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "background_job_registry_missing_malformed_or_incomplete"
+    assert report["evidence"]["missing_entry_point_files"] == [
+        {"job_name": "missing_worker", "entry_point_file": str(tmp_path / "missing_worker.py")}
     ]
 
 
