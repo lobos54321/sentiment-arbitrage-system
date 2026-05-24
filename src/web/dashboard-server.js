@@ -80,6 +80,15 @@ function checkAuth(req, url, res) {
   return true;
 }
 
+function requirePost(req, res) {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Use POST' }));
+    return false;
+  }
+  return true;
+}
+
 function parseUnixishTime(value) {
   if (!value) return null;
   const trimmed = String(value).trim();
@@ -8210,6 +8219,7 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(health, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-read-model-refresh') {
+    if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
     const refresh = triggerV27ReadModelRefresh({
       includeRecords: ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_records') || '').toLowerCase()),
@@ -8225,6 +8235,7 @@ const server = http.createServer(async (req, res) => {
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-recovery-control-mirror') {
+    if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
     const refresh = triggerV27RecoveryControlMirror({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
@@ -8240,6 +8251,7 @@ const server = http.createServer(async (req, res) => {
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-raw-provider-evidence-mirror') {
+    if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
     const mirror = triggerV27RawProviderEvidenceMirror({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
@@ -8265,6 +8277,7 @@ const server = http.createServer(async (req, res) => {
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-raw-provider-probe-evidence') {
+    if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
     const record = triggerV27RawProviderProbeEvidence({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
@@ -8291,6 +8304,7 @@ const server = http.createServer(async (req, res) => {
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-randomness-control-mirror') {
+    if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
     const statusesRaw = url.searchParams.getAll('status')
       .flatMap((value) => String(value).split(','))
@@ -8317,6 +8331,7 @@ const server = http.createServer(async (req, res) => {
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-normal-tiny-ops-evidence') {
+    if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
     const record = triggerV27NormalTinyOpsEvidence({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),

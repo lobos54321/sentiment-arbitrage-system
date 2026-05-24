@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -27,7 +28,15 @@ DEFAULT_CHANNELS_CSV = PROJECT_ROOT / "config" / "channels.csv"
 DEFAULT_SYSTEM_CONFIG = PROJECT_ROOT / "config" / "system.config.json"
 DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.json"
 DEFAULT_GOVERNANCE_READINESS = PROJECT_ROOT / "config" / "v27-governance-readiness.json"
+DEFAULT_ACCESS_CONTROL_POLICY = PROJECT_ROOT / "config" / "v27-access-control-policy.json"
 DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
+ACCESS_CONTROL_REQUIRED_FIELDS = (
+    "endpoint",
+    "required_role",
+    "token_scope",
+    "audit_log_required",
+    "danger_level",
+)
 WRITE_PATH_REQUIRED_FIELDS = (
     "write_path_id",
     "module",
@@ -154,6 +163,267 @@ def _resolve_source_file(source_file):
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def _source_lines(source_file):
+    source_path = _resolve_source_file(source_file)
+    if not source_path.exists():
+        return None, {"source_file": str(source_file), "error": "source_file_missing"}
+    return source_path.read_text(encoding="utf-8").splitlines(), None
+
+
+def _extract_dashboard_routes(lines):
+    route_line_indexes = []
+    endpoints_by_line = {}
+    for index, line in enumerate(lines):
+        endpoints = re.findall(r"url\.pathname\s*===\s*['\"]([^'\"]+)['\"]", line)
+        if not endpoints:
+            continue
+        route_line_indexes.append(index)
+        endpoints_by_line[index] = endpoints
+
+    routes = []
+    for route_index, line_index in enumerate(route_line_indexes):
+        next_line_index = route_line_indexes[route_index + 1] if route_index + 1 < len(route_line_indexes) else len(lines)
+        block = lines[line_index:next_line_index]
+        check_auth_line = None
+        post_guard_line = None
+        mutation_markers = []
+        for offset, text in enumerate(block):
+            if check_auth_line is None and "checkAuth(req, url, res)" in text:
+                check_auth_line = line_index + offset + 1
+            if post_guard_line is None and ("req.method !== 'POST'" in text or "requirePost(req, res)" in text):
+                post_guard_line = line_index + offset + 1
+            if (
+                "triggerV27" in text
+                or "cleanupOpenPaperPositions(" in text
+                or ".run(" in text
+                or "manualPause(" in text
+                or "resumeTrading(" in text
+                or "resetDailyLoss(" in text
+            ):
+                mutation_markers.append({"line": line_index + offset + 1, "text": text.strip()})
+        for endpoint in endpoints_by_line.get(line_index, []):
+            routes.append(
+                {
+                    "endpoint": endpoint,
+                    "line": line_index + 1,
+                    "has_check_auth": check_auth_line is not None,
+                    "check_auth_line": check_auth_line,
+                    "has_post_guard": post_guard_line is not None,
+                    "post_guard_line": post_guard_line,
+                    "mutation_markers": mutation_markers[:5],
+                }
+            )
+    return routes
+
+
+def _resolve_access_policy(endpoint, defaults, overrides):
+    policy = {"endpoint": endpoint, **(defaults or {})}
+    policy.update(overrides.get(endpoint) or {})
+    policy["endpoint"] = endpoint
+    return policy
+
+
+def _write_registry_post_endpoints(write_path_registry_path):
+    try:
+        registry = _load_json(write_path_registry_path)
+    except Exception:
+        return set(), False
+    endpoints = set()
+    for item in registry.get("write_paths") or []:
+        if not isinstance(item, dict):
+            continue
+        entry_point = str(item.get("entry_point") or "")
+        if entry_point.startswith("POST "):
+            endpoints.add(entry_point.removeprefix("POST ").strip())
+    return endpoints, True
+
+
+def verify_access_control_policy(policy_path=DEFAULT_ACCESS_CONTROL_POLICY, write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("AccessControlContract", False, "access_control_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("AccessControlContract", False, "access_control_policy_not_object", {"policy_path": str(policy_path)})
+
+    lines, source_error = _source_lines(policy.get("source_file"))
+    if source_error:
+        return _contract("AccessControlContract", False, "access_control_source_missing", {"policy_path": str(policy_path), **source_error})
+
+    source_text = "\n".join(lines)
+    auth_boundary = {
+        "dashboard_token_required": "if (!DASHBOARD_TOKEN)" in source_text and "writeHead(403" in source_text,
+        "invalid_token_rejected": "token !== DASHBOARD_TOKEN" in source_text and "writeHead(401" in source_text,
+        "token_sources": sorted(
+            item
+            for item, present in {
+                "query_token": "url.searchParams.get('token')" in source_text,
+                "x_dashboard_token_header": "x-dashboard-token" in source_text,
+            }.items()
+            if present
+        ),
+    }
+    routes = _extract_dashboard_routes(lines)
+    public_endpoints = set(policy.get("public_endpoints") or [])
+    defaults = policy.get("protected_defaults") if isinstance(policy.get("protected_defaults"), dict) else {}
+    overrides_list = policy.get("endpoint_overrides") if isinstance(policy.get("endpoint_overrides"), list) else []
+    overrides = {}
+    malformed_policies = []
+    duplicate_policy_endpoints = []
+    for index, item in enumerate(overrides_list):
+        if not isinstance(item, dict):
+            malformed_policies.append({"index": index, "endpoint": None, "missing_fields": list(ACCESS_CONTROL_REQUIRED_FIELDS), "violations": ["policy_not_object"]})
+            continue
+        endpoint = item.get("endpoint")
+        if endpoint in overrides:
+            duplicate_policy_endpoints.append(endpoint)
+        overrides[endpoint] = item
+
+    danger_requires_post = set(policy.get("danger_levels_requiring_post") or [])
+    danger_requires_audit = set(policy.get("danger_levels_requiring_audit") or [])
+    route_by_endpoint = {route["endpoint"]: route for route in routes}
+    literal_endpoints = set(route_by_endpoint)
+    protected_routes = [route for route in routes if route["endpoint"] not in public_endpoints]
+    unauthenticated_routes = [
+        {"endpoint": route["endpoint"], "line": route["line"]}
+        for route in protected_routes
+        if not route["has_check_auth"]
+    ]
+
+    resolved_endpoint_policies = []
+    missing_policy_fields = []
+    mutation_without_post_guard = []
+    mutation_without_audit_requirement = []
+    mutation_like_routes_without_mutation_policy = []
+    for route in protected_routes:
+        endpoint = route["endpoint"]
+        resolved = _resolve_access_policy(endpoint, defaults, overrides)
+        missing = _missing_required_fields(resolved, ACCESS_CONTROL_REQUIRED_FIELDS)
+        violations = []
+        if not isinstance(resolved.get("audit_log_required"), bool):
+            violations.append("audit_log_required_bool")
+        danger = str(resolved.get("danger_level") or "")
+        if danger in danger_requires_post and not route["has_post_guard"]:
+            mutation_without_post_guard.append({"endpoint": endpoint, "line": route["line"], "danger_level": danger})
+        if danger in danger_requires_audit and resolved.get("audit_log_required") is not True:
+            mutation_without_audit_requirement.append({"endpoint": endpoint, "danger_level": danger})
+        if route["mutation_markers"] and danger not in danger_requires_post:
+            mutation_like_routes_without_mutation_policy.append(
+                {
+                    "endpoint": endpoint,
+                    "danger_level": danger,
+                    "markers": route["mutation_markers"],
+                }
+            )
+        if missing or violations:
+            missing_policy_fields.append({"endpoint": endpoint, "missing_fields": missing, "violations": violations})
+        resolved_endpoint_policies.append(
+            {
+                "endpoint": endpoint,
+                "required_role": resolved.get("required_role"),
+                "token_scope": resolved.get("token_scope"),
+                "audit_log_required": resolved.get("audit_log_required"),
+                "danger_level": resolved.get("danger_level"),
+            }
+        )
+
+    unknown_policy_endpoints = sorted(endpoint for endpoint in overrides if endpoint not in literal_endpoints)
+    write_path_endpoints, write_registry_loaded = _write_registry_post_endpoints(write_path_registry_path)
+    write_path_policy_gaps = []
+    for endpoint in sorted(write_path_endpoints):
+        resolved = _resolve_access_policy(endpoint, defaults, overrides)
+        route = route_by_endpoint.get(endpoint)
+        if (
+            endpoint not in literal_endpoints
+            or resolved.get("audit_log_required") is not True
+            or str(resolved.get("danger_level") or "") not in danger_requires_post
+            or not route
+            or not route.get("has_post_guard")
+            or not route.get("has_check_auth")
+        ):
+            write_path_policy_gaps.append(
+                {
+                    "endpoint": endpoint,
+                    "registered_route": endpoint in literal_endpoints,
+                    "audit_log_required": resolved.get("audit_log_required"),
+                    "danger_level": resolved.get("danger_level"),
+                    "has_post_guard": route.get("has_post_guard") if route else False,
+                    "has_check_auth": route.get("has_check_auth") if route else False,
+                }
+            )
+
+    dynamic_failures = []
+    for index, item in enumerate(policy.get("dynamic_protected_routes") or []):
+        if not isinstance(item, dict):
+            dynamic_failures.append({"index": index, "endpoint": None, "error": "dynamic_policy_not_object"})
+            continue
+        missing = _missing_required_fields(item, ACCESS_CONTROL_REQUIRED_FIELDS + ("source_anchor",))
+        anchor = str(item.get("source_anchor") or "")
+        anchor_indexes = [idx for idx, text in enumerate(lines) if anchor and anchor in text]
+        check_auth_near_anchor = any(
+            "checkAuth(req, url, res)" in text
+            for anchor_index in anchor_indexes
+            for text in lines[anchor_index:min(anchor_index + 12, len(lines))]
+        )
+        if missing or not anchor_indexes or not check_auth_near_anchor:
+            dynamic_failures.append(
+                {
+                    "index": index,
+                    "endpoint": item.get("endpoint"),
+                    "missing_fields": missing,
+                    "anchor_found": bool(anchor_indexes),
+                    "check_auth_near_anchor": check_auth_near_anchor,
+                }
+            )
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.access_control_policy.v1"
+        and all(auth_boundary.values())
+        and bool(routes)
+        and not malformed_policies
+        and not duplicate_policy_endpoints
+        and not unauthenticated_routes
+        and not missing_policy_fields
+        and not mutation_without_post_guard
+        and not mutation_without_audit_requirement
+        and not mutation_like_routes_without_mutation_policy
+        and not unknown_policy_endpoints
+        and write_registry_loaded
+        and not write_path_policy_gaps
+        and not dynamic_failures
+    )
+    return _contract(
+        "AccessControlContract",
+        passed,
+        "access_control_policy_missing_malformed_or_incomplete",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "source_file": policy.get("source_file"),
+            "auth_boundary": auth_boundary,
+            "literal_route_count": len(routes),
+            "public_route_count": len([route for route in routes if route["endpoint"] in public_endpoints]),
+            "protected_route_count": len(protected_routes),
+            "resolved_policy_count": len(resolved_endpoint_policies),
+            "mutation_policy_count": len(
+                [item for item in resolved_endpoint_policies if str(item.get("danger_level") or "") in danger_requires_post]
+            ),
+            "write_path_endpoint_count": len(write_path_endpoints),
+            "unauthenticated_routes": unauthenticated_routes,
+            "missing_policy_fields": missing_policy_fields,
+            "malformed_policies": malformed_policies,
+            "duplicate_policy_endpoints": sorted(str(item) for item in duplicate_policy_endpoints),
+            "unknown_policy_endpoints": unknown_policy_endpoints,
+            "mutation_without_post_guard": mutation_without_post_guard,
+            "mutation_without_audit_requirement": mutation_without_audit_requirement,
+            "mutation_like_routes_without_mutation_policy": mutation_like_routes_without_mutation_policy[:20],
+            "write_path_policy_gaps": write_path_policy_gaps,
+            "dynamic_failures": dynamic_failures,
+            "sample_resolved_policies": resolved_endpoint_policies[:20],
+        },
+    )
 
 
 def _scan_write_path_target(target):
@@ -721,6 +991,7 @@ def build_basic_contract_readiness(
     catalog_path=CATALOG_PATH,
     registry_path=ENTRY_MODE_REGISTRY_PATH,
     governance_path=DEFAULT_GOVERNANCE_READINESS,
+    access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
     write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
     env=None,
 ):
@@ -738,6 +1009,10 @@ def build_basic_contract_readiness(
             verify_top_fix_queue(governance_path=governance_path),
             verify_safety_case(governance_path=governance_path),
             verify_waiver_policy(governance_path=governance_path),
+            verify_access_control_policy(
+                policy_path=access_control_policy_path,
+                write_path_registry_path=write_path_registry_path,
+            ),
             verify_write_path_registry(registry_path=write_path_registry_path),
         ]
     }
@@ -765,6 +1040,7 @@ def main():
     parser.add_argument("--catalog", default=str(CATALOG_PATH))
     parser.add_argument("--entry-mode-registry", default=str(ENTRY_MODE_REGISTRY_PATH))
     parser.add_argument("--governance-readiness", default=str(DEFAULT_GOVERNANCE_READINESS))
+    parser.add_argument("--access-control-policy", default=str(DEFAULT_ACCESS_CONTROL_POLICY))
     parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
@@ -778,6 +1054,7 @@ def main():
         catalog_path=Path(args.catalog),
         registry_path=Path(args.entry_mode_registry),
         governance_path=Path(args.governance_readiness),
+        access_control_policy_path=Path(args.access_control_policy),
         write_path_registry_path=Path(args.write_path_registry),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))

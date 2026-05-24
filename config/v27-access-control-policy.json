@@ -1,0 +1,203 @@
+{
+  "schema_version": "v2.7.0.access_control_policy.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "source_file": "src/web/dashboard-server.js",
+  "public_endpoints": [
+    "/",
+    "/health",
+    "/ping",
+    "/dashboard"
+  ],
+  "protected_defaults": {
+    "required_role": "dashboard_reader",
+    "token_scope": "dashboard:read",
+    "audit_log_required": false,
+    "danger_level": "read"
+  },
+  "danger_levels_requiring_post": [
+    "operator_mutation",
+    "admin_mutation",
+    "critical"
+  ],
+  "danger_levels_requiring_audit": [
+    "operator_mutation",
+    "admin_mutation",
+    "critical"
+  ],
+  "endpoint_overrides": [
+    {
+      "endpoint": "/logs",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:logs",
+      "audit_log_required": false,
+      "danger_level": "logs"
+    },
+    {
+      "endpoint": "/api/logs",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:logs",
+      "audit_log_required": false,
+      "danger_level": "logs"
+    },
+    {
+      "endpoint": "/api/logs/download",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:logs",
+      "audit_log_required": false,
+      "danger_level": "logs"
+    },
+    {
+      "endpoint": "/api/logs/paper-trader",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:logs",
+      "audit_log_required": false,
+      "danger_level": "logs"
+    },
+    {
+      "endpoint": "/api/download/database",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:export",
+      "audit_log_required": false,
+      "danger_level": "export"
+    },
+    {
+      "endpoint": "/api/download/kline_cache",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:export",
+      "audit_log_required": false,
+      "danger_level": "export"
+    },
+    {
+      "endpoint": "/api/download/paper_trades",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:export",
+      "audit_log_required": false,
+      "danger_level": "export"
+    },
+    {
+      "endpoint": "/api/export",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:export",
+      "audit_log_required": false,
+      "danger_level": "export"
+    },
+    {
+      "endpoint": "/api/close-position",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:admin_mutation",
+      "audit_log_required": true,
+      "danger_level": "critical",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/pause-trading",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:risk_mutation",
+      "audit_log_required": true,
+      "danger_level": "admin_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/resume-trading",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:risk_mutation",
+      "audit_log_required": true,
+      "danger_level": "admin_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/reset-daily-loss",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:risk_mutation",
+      "audit_log_required": true,
+      "danger_level": "admin_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/reset-live-data",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:admin_mutation",
+      "audit_log_required": true,
+      "danger_level": "critical",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper-trades/cleanup",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:paper_mutation",
+      "audit_log_required": true,
+      "danger_level": "admin_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper/v27-read-model-refresh",
+      "required_role": "dashboard_operator",
+      "token_scope": "v27:evidence_mutation",
+      "audit_log_required": true,
+      "danger_level": "operator_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper/v27-recovery-control-mirror",
+      "required_role": "dashboard_operator",
+      "token_scope": "v27:evidence_mutation",
+      "audit_log_required": true,
+      "danger_level": "operator_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper/v27-raw-provider-evidence-mirror",
+      "required_role": "dashboard_operator",
+      "token_scope": "v27:evidence_mutation",
+      "audit_log_required": true,
+      "danger_level": "operator_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper/v27-raw-provider-probe-evidence",
+      "required_role": "dashboard_operator",
+      "token_scope": "v27:evidence_mutation",
+      "audit_log_required": true,
+      "danger_level": "operator_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper/v27-randomness-control-mirror",
+      "required_role": "dashboard_operator",
+      "token_scope": "v27:evidence_mutation",
+      "audit_log_required": true,
+      "danger_level": "operator_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    },
+    {
+      "endpoint": "/api/paper/v27-normal-tiny-ops-evidence",
+      "required_role": "dashboard_operator",
+      "token_scope": "v27:evidence_mutation",
+      "audit_log_required": true,
+      "danger_level": "operator_mutation",
+      "allowed_methods": ["POST"],
+      "method_guard_required": true
+    }
+  ],
+  "dynamic_protected_routes": [
+    {
+      "endpoint": "resolveDashboardLogPath(url.pathname)",
+      "required_role": "dashboard_operator",
+      "token_scope": "dashboard:logs",
+      "audit_log_required": false,
+      "danger_level": "logs",
+      "source_anchor": "resolveDashboardLogPath(url.pathname)"
+    }
+  ]
+}

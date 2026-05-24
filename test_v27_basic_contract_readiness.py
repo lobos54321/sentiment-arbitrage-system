@@ -6,6 +6,7 @@ sys.path.insert(0, "scripts")
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
     verify_evidence_eligibility_matrix,
+    verify_access_control_policy,
     verify_input_sanitization,
     verify_paper_mode_safety,
     verify_project_stop_loss,
@@ -34,6 +35,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "TopFixQueueContract",
         "SafetyCaseContract",
         "WaiverPolicyContract",
+        "AccessControlContract",
         "WritePathRegistryContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
@@ -218,6 +220,134 @@ def test_governance_readiness_contracts_pass_seed_artifact():
     assert verify_top_fix_queue()["status"] == "pass"
     assert verify_safety_case()["status"] == "pass"
     assert verify_waiver_policy()["status"] == "pass"
+
+
+def write_access_policy(path, source_file, overrides=None):
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.access_control_policy.v1",
+                "source_file": str(source_file),
+                "public_endpoints": ["/", "/health", "/ping", "/dashboard"],
+                "protected_defaults": {
+                    "required_role": "dashboard_reader",
+                    "token_scope": "dashboard:read",
+                    "audit_log_required": False,
+                    "danger_level": "read",
+                },
+                "danger_levels_requiring_post": ["operator_mutation", "admin_mutation", "critical"],
+                "danger_levels_requiring_audit": ["operator_mutation", "admin_mutation", "critical"],
+                "endpoint_overrides": overrides or [],
+                "dynamic_protected_routes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_write_registry(path, endpoints=None):
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.write_path_registry.v1",
+                "write_paths": [
+                    {
+                        "write_path_id": f"unit.write.{index}",
+                        "entry_point": f"POST {endpoint}",
+                    }
+                    for index, endpoint in enumerate(endpoints or [], start=1)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_access_control_policy_covers_dashboard_routes_and_mutations():
+    report = verify_access_control_policy()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["protected_route_count"] == 58
+    assert report["evidence"]["mutation_policy_count"] == 12
+    assert report["evidence"]["write_path_endpoint_count"] == 6
+    assert report["evidence"]["unauthenticated_routes"] == []
+    assert report["evidence"]["mutation_without_post_guard"] == []
+    assert report["evidence"]["write_path_policy_gaps"] == []
+
+
+def test_access_control_policy_blocks_unprotected_dashboard_route(tmp_path):
+    source_path = tmp_path / "server.js"
+    source_path.write_text(
+        """
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+function checkAuth(req, url, res) {
+  if (!DASHBOARD_TOKEN) { res.writeHead(403); return false; }
+  const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
+  if (token !== DASHBOARD_TOKEN) { res.writeHead(401); return false; }
+  return true;
+}
+if (url.pathname === '/api/open') {
+  res.end('ok');
+}
+""",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "access-policy.json"
+    registry_path = tmp_path / "write-registry.json"
+    write_access_policy(policy_path, source_path)
+    write_write_registry(registry_path)
+
+    report = verify_access_control_policy(policy_path, registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "access_control_policy_missing_malformed_or_incomplete"
+    assert report["evidence"]["unauthenticated_routes"] == [{"endpoint": "/api/open", "line": 9}]
+
+
+def test_access_control_policy_blocks_mutation_without_post_guard(tmp_path):
+    source_path = tmp_path / "server.js"
+    source_path.write_text(
+        """
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+function checkAuth(req, url, res) {
+  if (!DASHBOARD_TOKEN) { res.writeHead(403); return false; }
+  const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
+  if (token !== DASHBOARD_TOKEN) { res.writeHead(401); return false; }
+  return true;
+}
+if (url.pathname === '/api/mutate') {
+  if (!checkAuth(req, url, res)) return;
+  db.prepare('UPDATE demo SET value = 1').run();
+}
+""",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "access-policy.json"
+    registry_path = tmp_path / "write-registry.json"
+    write_access_policy(
+        policy_path,
+        source_path,
+        overrides=[
+            {
+                "endpoint": "/api/mutate",
+                "required_role": "dashboard_admin",
+                "token_scope": "dashboard:admin_mutation",
+                "audit_log_required": True,
+                "danger_level": "critical",
+                "allowed_methods": ["POST"],
+                "method_guard_required": True,
+            }
+        ],
+    )
+    write_write_registry(registry_path, ["/api/mutate"])
+
+    report = verify_access_control_policy(policy_path, registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["evidence"]["mutation_without_post_guard"] == [
+        {"endpoint": "/api/mutate", "line": 9, "danger_level": "critical"}
+    ]
+    assert report["evidence"]["write_path_policy_gaps"][0]["endpoint"] == "/api/mutate"
 
 
 def test_write_path_registry_covers_dashboard_write_paths():
