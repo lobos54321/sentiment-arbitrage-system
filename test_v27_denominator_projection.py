@@ -268,6 +268,29 @@ def append_raw_provider_evidence(log, *, token_ca, paper_trade_id=1, pool="pool-
     )
 
 
+def append_randomness_control(log, *, assignment_id="normal-tiny-policy-v1", missing_seed=False, bad_hash=False):
+    payload = {
+        "rng_seed": None if missing_seed else "sha256:normal-tiny-policy-seed",
+        "rng_version": "v2.7.0.randomness_control.v1",
+        "randomization_unit": "normal_tiny_promotion_policy",
+        "assignment_id": assignment_id,
+        "assignment_status": "deterministic_policy",
+        "randomization_enabled": False,
+        "deterministic_assignment": True,
+        "assignment_algorithm": "deterministic_no_randomized_assignment",
+        "assigned_bucket": "normal_tiny_candidate",
+        "assignment_hash": "not-a-sha" if bad_hash else sha256_hex({"assignment_id": assignment_id}),
+        "evidence_source": "unit",
+        "decision_available_at": "2026-01-15T00:00:00Z",
+    }
+    return log.append_event(
+        event_type="randomness_control_recorded",
+        aggregate_id=f"randomness_control:{assignment_id}",
+        idempotency_key=f"randomness_control:{assignment_id}:v2.7.0.randomness_control.v1",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -635,6 +658,38 @@ def test_denominator_projection_rejects_untrusted_raw_provider_evidence(tmp_path
         "provider_evidence_trusted",
         "raw_response_available",
     ]
+
+
+def test_denominator_projection_consumes_randomness_control_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_randomness_control(log)
+
+    projection = build_denominator_projection(tmp_path)
+    evidence = projection["contract_evidence"]["RandomnessControlContract"]
+
+    assert projection["randomness_control_recorded_events"] == 1
+    assert projection["health"]["randomness_control_ok"] is True
+    assert evidence["eligible_randomness_control_records"] == 1
+    assert evidence["valid_randomness_control_count"] == 1
+    assert evidence["malformed_count"] == 0
+    assert evidence["randomness_control_violation_count"] == 0
+    assert evidence["rng_versions"] == ["v2.7.0.randomness_control.v1"]
+    assert evidence["randomization_units"] == ["normal_tiny_promotion_policy"]
+
+
+def test_denominator_projection_rejects_malformed_randomness_control_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_randomness_control(log, missing_seed=True, bad_hash=True)
+
+    projection = build_denominator_projection(tmp_path)
+    evidence = projection["contract_evidence"]["RandomnessControlContract"]
+
+    assert projection["health"]["randomness_control_ok"] is False
+    assert evidence["valid_randomness_control_count"] == 0
+    assert evidence["malformed_count"] == 1
+    assert evidence["randomness_control_violation_count"] == 1
+    assert evidence["malformed_randomness_controls"][0]["missing_fields"] == ["rng_seed"]
+    assert evidence["randomness_control_violations"][0]["violation_fields"] == ["assignment_hash_sha256"]
 
 
 def test_denominator_projection_consumes_idempotency_contracts(tmp_path):

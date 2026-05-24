@@ -84,7 +84,6 @@ MODE_REQUIREMENTS = {
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "RandomnessControlContract",
         "DeploymentRolloutStateMachine",
         "WorkerFleetConsistencyContract",
         "BackupRestoreDrillContract",
@@ -389,6 +388,13 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("raw_provider_evidence_ok") else "missing_evidence",
         "raw_provider_evidence_missing_malformed_or_untrusted",
         raw_provider_evidence,
+    )
+    randomness_control_evidence = contract_evidence.get("RandomnessControlContract") or {}
+    statuses["RandomnessControlContract"] = _status(
+        "RandomnessControlContract",
+        "pass" if projection_built and projection_health.get("randomness_control_ok") else "missing_evidence",
+        "randomness_control_missing_malformed_or_invalid",
+        randomness_control_evidence,
     )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(

@@ -41,6 +41,7 @@ EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
 NO_FILL_OUTCOME_EVENT_TYPE = "no_fill_outcome_recorded"
 RUNTIME_RECOVERY_EVENT_TYPE = "runtime_recovery_control_recorded"
+RANDOMNESS_CONTROL_EVENT_TYPE = "randomness_control_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -61,6 +62,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     PAPER_LEDGER_EVENT_TYPE,
     NO_FILL_OUTCOME_EVENT_TYPE,
     RUNTIME_RECOVERY_EVENT_TYPE,
+    RANDOMNESS_CONTROL_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -923,6 +925,48 @@ def _extract_raw_provider_evidence_contract(event, bags):
         "missing_fields": sorted(set(missing_fields)),
         "violation_fields": sorted(set(violation_fields)),
         "provider_evidence_valid": trusted,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_randomness_control(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("rng_version",),
+            ("randomness_control_version",),
+        ],
+    )
+    if event.get("event_type") != RANDOMNESS_CONTROL_EVENT_TYPE and not version:
+        return None
+    values = {
+        "rng_seed": _extract_scalar(bags, [("rng_seed",)]),
+        "rng_version": str(version) if version else None,
+        "randomization_unit": _extract_scalar(bags, [("randomization_unit",)]),
+        "assignment_id": _extract_scalar(bags, [("assignment_id",)]),
+        "assignment_status": _extract_scalar(bags, [("assignment_status",), ("status",)]),
+        "randomization_enabled": _extract_flag(bags, [("randomization_enabled",)]),
+        "deterministic_assignment": _extract_flag(bags, [("deterministic_assignment",)]),
+        "assignment_algorithm": _extract_scalar(bags, [("assignment_algorithm",)]),
+        "assigned_bucket": _extract_scalar(bags, [("assigned_bucket",), ("experiment_bucket",)]),
+        "assignment_hash": _extract_scalar(bags, [("assignment_hash",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+        "decision_available_at": _extract_scalar(bags, [("decision_available_at",)], default=event.get("available_at")),
+    }
+    missing_fields = []
+    for field in ("rng_seed", "rng_version", "randomization_unit", "assignment_id"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("assignment_hash") and not _valid_sha256_hex(values.get("assignment_hash")):
+        violation_fields.append("assignment_hash_sha256")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "randomness_control_valid": not missing_fields and not violation_fields,
         "source_event_id": event.get("event_id"),
         "global_seq": event.get("global_seq"),
     }
@@ -2043,9 +2087,10 @@ def _metric_definitions(metrics, metrics_window):
     return definitions
 
 
-def _contract_evidence_from_records(record_list, runtime_recovery_controls=None, standalone_no_fill_outcomes=None):
+def _contract_evidence_from_records(record_list, runtime_recovery_controls=None, standalone_no_fill_outcomes=None, randomness_controls=None):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
+    randomness_controls = randomness_controls or []
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -2782,6 +2827,16 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
         or item.get("drain_status_ok") is not True
         or item.get("resume_allowed_ok") is not True
     ]
+    malformed_randomness_controls = [
+        item
+        for item in randomness_controls
+        if item.get("missing_fields")
+    ]
+    randomness_control_violations = [
+        item
+        for item in randomness_controls
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -2988,6 +3043,37 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
             "hash_algorithms": sorted({item.get("hash_algorithm") for item in all_raw_provider_candidates if item.get("hash_algorithm")}),
             "raw_provider_evidence_versions": sorted({item.get("raw_provider_evidence_version") for item in all_raw_provider_candidates if item.get("raw_provider_evidence_version")}),
             "raw_provider_evidence_projection_version": "v2.7.0.raw_provider_evidence.v1",
+        },
+        "RandomnessControlContract": {
+            "eligible_randomness_control_records": len(randomness_controls),
+            "randomness_control_observation_count": len(randomness_controls),
+            "valid_randomness_control_count": sum(1 for item in randomness_controls if item.get("randomness_control_valid") is True),
+            "malformed_count": len(malformed_randomness_controls),
+            "malformed_randomness_controls": [
+                {
+                    "assignment_id": item.get("assignment_id"),
+                    "randomization_unit": item.get("randomization_unit"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_randomness_controls
+            ],
+            "randomness_control_violation_count": len(randomness_control_violations),
+            "randomness_control_violations": [
+                {
+                    "assignment_id": item.get("assignment_id"),
+                    "randomization_unit": item.get("randomization_unit"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in randomness_control_violations
+            ],
+            "rng_versions": sorted({item.get("rng_version") for item in randomness_controls if item.get("rng_version")}),
+            "randomization_units": sorted({item.get("randomization_unit") for item in randomness_controls if item.get("randomization_unit")}),
+            "assignment_statuses": sorted({item.get("assignment_status") for item in randomness_controls if item.get("assignment_status")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in randomness_controls if item.get("evidence_source")}),
+            "randomness_control_projection_version": "v2.7.0.randomness_control.v1",
         },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
@@ -3283,6 +3369,7 @@ def build_denominator_projection(
         "paper_ledger_recorded_events": 0,
         "no_fill_outcome_recorded_events": 0,
         "runtime_recovery_control_recorded_events": 0,
+        "randomness_control_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -3315,6 +3402,7 @@ def build_denominator_projection(
             "RealtimeCleanDetector": {},
             "QuoteIntentBindingContract": {},
             "RawProviderEvidenceContract": {},
+            "RandomnessControlContract": {},
             "IdempotencyContract": {},
             "IdempotencyKeyNamespaceContract": {},
             "ExecutionLeaseContract": {},
@@ -3345,6 +3433,7 @@ def build_denominator_projection(
             "realtime_clean_detector_ok": False,
             "quote_intent_binding_ok": False,
             "raw_provider_evidence_ok": False,
+            "randomness_control_ok": False,
             "idempotency_contract_ok": False,
             "idempotency_key_namespace_ok": False,
             "execution_lease_ok": False,
@@ -3386,6 +3475,7 @@ def build_denominator_projection(
     facts = []
     no_fill_facts = []
     runtime_recovery_controls = []
+    randomness_controls = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -3452,6 +3542,12 @@ def build_denominator_projection(
             if recovery_control:
                 runtime_recovery_controls.append(recovery_control)
             continue
+        if event.get("event_type") == RANDOMNESS_CONTROL_EVENT_TYPE:
+            projection["randomness_control_recorded_events"] += 1
+            randomness_control = _extract_randomness_control(event, _payload_bags(event))
+            if randomness_control:
+                randomness_controls.append(randomness_control)
+            continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -3481,6 +3577,7 @@ def build_denominator_projection(
                 "facts": len(facts),
                 "no_fill_facts": len(no_fill_facts),
                 "runtime_recovery_controls": len(runtime_recovery_controls),
+                "randomness_controls": len(randomness_controls),
             }
         )
 
@@ -3618,6 +3715,7 @@ def build_denominator_projection(
         record_list,
         runtime_recovery_controls=runtime_recovery_controls,
         standalone_no_fill_outcomes=standalone_no_fill_outcomes,
+        randomness_controls=randomness_controls,
     )
     if progress_callback:
         progress_callback(
@@ -3710,6 +3808,12 @@ def build_denominator_projection(
         and contract_evidence["RawProviderEvidenceContract"]["trusted_raw_provider_evidence_count"] > 0
         and contract_evidence["RawProviderEvidenceContract"]["malformed_count"] == 0
         and contract_evidence["RawProviderEvidenceContract"]["provider_evidence_violation_count"] == 0
+    )
+    projection["health"]["randomness_control_ok"] = (
+        contract_evidence["RandomnessControlContract"]["eligible_randomness_control_records"] > 0
+        and contract_evidence["RandomnessControlContract"]["valid_randomness_control_count"] > 0
+        and contract_evidence["RandomnessControlContract"]["malformed_count"] == 0
+        and contract_evidence["RandomnessControlContract"]["randomness_control_violation_count"] == 0
     )
     projection["health"]["idempotency_contract_ok"] = (
         contract_evidence["IdempotencyContract"]["eligible_idempotency_records"] > 0

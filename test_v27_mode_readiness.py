@@ -184,6 +184,29 @@ def append_raw_provider_evidence_event(event_log_dir):
     )
 
 
+def append_randomness_control_event(event_log_dir):
+    assignment_id = "normal-tiny-policy-v1"
+    V27EventLog(event_log_dir).append_event(
+        event_type="randomness_control_recorded",
+        aggregate_id=f"randomness_control:{assignment_id}",
+        idempotency_key=f"randomness_control:{assignment_id}:v2.7.0.randomness_control.v1",
+        payload={
+            "rng_seed": "sha256:normal-tiny-policy-seed",
+            "rng_version": "v2.7.0.randomness_control.v1",
+            "randomization_unit": "normal_tiny_promotion_policy",
+            "assignment_id": assignment_id,
+            "assignment_status": "deterministic_policy",
+            "randomization_enabled": False,
+            "deterministic_assignment": True,
+            "assignment_algorithm": "deterministic_no_randomized_assignment",
+            "assigned_bucket": "normal_tiny_candidate",
+            "assignment_hash": sha256_hex({"assignment_id": assignment_id}),
+            "evidence_source": "unit",
+            "decision_available_at": "2026-01-15T00:00:00Z",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -525,6 +548,32 @@ def test_mode_readiness_consumes_raw_provider_evidence_for_normal_tiny(tmp_path)
     assert "RawProviderEvidenceContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "LabelFinalizationContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "OutcomeWindowCloseContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_randomness_control_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_randomness_control_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    evidence = matrix["contract_statuses"]["RandomnessControlContract"]["evidence"]
+    assert matrix["contract_statuses"]["RandomnessControlContract"]["status"] == "pass"
+    assert evidence["valid_randomness_control_count"] == 1
+    assert "RandomnessControlContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RawProviderEvidenceContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 
 def test_mode_readiness_consumes_idempotency_contract_evidence(tmp_path):
