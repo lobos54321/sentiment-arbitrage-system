@@ -50,6 +50,7 @@ MODE_REQUIREMENTS = {
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
         "ServiceReadinessProbeContract",
+        "DashboardActionSeparationContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

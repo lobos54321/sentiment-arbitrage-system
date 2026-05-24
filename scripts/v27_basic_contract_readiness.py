@@ -40,6 +40,7 @@ DEFAULT_API_RESPONSE_ENVELOPE_POLICY = PROJECT_ROOT / "config" / "v27-api-respon
 DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
 DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-policy.json"
 DEFAULT_SERVICE_READINESS_PROBES = PROJECT_ROOT / "config" / "v27-service-readiness-probes.json"
+DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-dashboard-action-separation-policy.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -143,6 +144,13 @@ SERVICE_READINESS_CONTRACT_FIELDS = (
     "health_status",
     "dependency_status",
     "checked_at",
+)
+DASHBOARD_ACTION_SEPARATION_REQUIRED_FIELDS = (
+    "action_id",
+    "view_route",
+    "mutation_route",
+    "separation_enforced",
+    "audit_required",
 )
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
@@ -2211,6 +2219,214 @@ def verify_service_readiness_probe_contract(policy_path=DEFAULT_SERVICE_READINES
     )
 
 
+def verify_dashboard_action_separation_contract(
+    policy_path=DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY,
+    access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
+    write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
+):
+    try:
+        policy = _load_json(policy_path)
+        access_policy = _load_json(access_control_policy_path)
+        write_registry = _load_json(write_path_registry_path)
+    except Exception as exc:
+        return _contract("DashboardActionSeparationContract", False, "dashboard_action_separation_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict) or not isinstance(access_policy, dict) or not isinstance(write_registry, dict):
+        return _contract(
+            "DashboardActionSeparationContract",
+            False,
+            "dashboard_action_separation_policy_not_object",
+            {
+                "policy_path": str(policy_path),
+                "access_control_policy_path": str(access_control_policy_path),
+                "write_path_registry_path": str(write_path_registry_path),
+            },
+        )
+
+    source_file = policy.get("source_file") or access_policy.get("source_file")
+    lines, source_error = _source_lines(source_file)
+    if source_error:
+        return _contract(
+            "DashboardActionSeparationContract",
+            False,
+            "dashboard_action_separation_missing_malformed_or_unenforced",
+            {"policy_path": str(policy_path), **source_error},
+        )
+
+    routes = _extract_dashboard_routes(lines)
+    route_by_endpoint = {route["endpoint"]: route for route in routes}
+    defaults = access_policy.get("protected_defaults") if isinstance(access_policy.get("protected_defaults"), dict) else {}
+    overrides = {
+        str(item.get("endpoint")): item
+        for item in (access_policy.get("endpoint_overrides") or [])
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+    danger_requires_post = set(access_policy.get("danger_levels_requiring_post") or [])
+    write_paths = {
+        str(item.get("write_path_id")): item
+        for item in (write_registry.get("write_paths") or [])
+        if isinstance(item, dict) and item.get("write_path_id")
+    }
+
+    required_fields = [str(item) for item in (policy.get("required_fields") or [])]
+    required_action_ids = [str(item) for item in (policy.get("required_action_ids") or [])]
+    actions = policy.get("actions") if isinstance(policy.get("actions"), list) else []
+    schema_violations = []
+    if policy.get("schema_version") != "v2.7.0.dashboard_action_separation.v1":
+        schema_violations.append("schema_version_invalid")
+    if policy.get("failure_action") != "dashboard_mutation_blocked":
+        schema_violations.append("failure_action_must_be_dashboard_mutation_blocked")
+    if set(required_fields) != set(DASHBOARD_ACTION_SEPARATION_REQUIRED_FIELDS):
+        schema_violations.append("required_fields_must_match_contract_catalog")
+    if not required_action_ids:
+        schema_violations.append("required_action_ids_required")
+
+    malformed_actions = []
+    route_violations = []
+    duplicate_action_ids = []
+    seen_action_ids = set()
+    action_ids = set()
+    action_evidence = []
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            malformed_actions.append({"index": index, "action_id": None, "missing_fields": list(DASHBOARD_ACTION_SEPARATION_REQUIRED_FIELDS), "violations": ["action_not_object"]})
+            continue
+
+        action_id = str(action.get("action_id") or "")
+        view_route = str(action.get("view_route") or "")
+        mutation_route = str(action.get("mutation_route") or "")
+        action_ids.add(action_id)
+        missing = _missing_required_fields(action, DASHBOARD_ACTION_SEPARATION_REQUIRED_FIELDS)
+        violations = []
+        if action_id in seen_action_ids:
+            duplicate_action_ids.append(action_id)
+        if action_id:
+            seen_action_ids.add(action_id)
+        if action.get("separation_enforced") is not True:
+            violations.append("separation_enforced_true_required")
+        if action.get("audit_required") is not True:
+            violations.append("audit_required_true_required")
+        if view_route and mutation_route and view_route == mutation_route:
+            violations.append("view_route_must_differ_from_mutation_route")
+
+        view = route_by_endpoint.get(view_route)
+        mutation = route_by_endpoint.get(mutation_route)
+        view_policy = _resolve_access_policy(view_route, defaults, overrides)
+        mutation_policy = _resolve_access_policy(mutation_route, defaults, overrides)
+        view_anchor = str(action.get("view_anchor") or "")
+        mutation_anchor = str(action.get("mutation_anchor") or "")
+        view_block = _dashboard_route_block(lines, view_route) if view_route else ""
+        mutation_block = _dashboard_route_block(lines, mutation_route) if mutation_route else ""
+        if not view:
+            route_violations.append({"action_id": action_id, "route": view_route, "reason": "view_route_missing"})
+        else:
+            if not view.get("has_check_auth"):
+                route_violations.append({"action_id": action_id, "route": view_route, "reason": "view_route_auth_missing"})
+            if view.get("has_post_guard") or view.get("has_audit_event") or view.get("mutation_markers"):
+                route_violations.append({"action_id": action_id, "route": view_route, "reason": "view_route_contains_mutation_surface"})
+            if view_anchor and view_anchor not in view_block:
+                route_violations.append({"action_id": action_id, "route": view_route, "reason": "view_anchor_missing", "view_anchor": view_anchor})
+        if not mutation:
+            route_violations.append({"action_id": action_id, "route": mutation_route, "reason": "mutation_route_missing"})
+        else:
+            if not mutation.get("has_check_auth"):
+                route_violations.append({"action_id": action_id, "route": mutation_route, "reason": "mutation_route_auth_missing"})
+            if not mutation.get("has_post_guard"):
+                route_violations.append({"action_id": action_id, "route": mutation_route, "reason": "mutation_route_post_guard_missing"})
+            if not mutation.get("has_audit_event"):
+                route_violations.append({"action_id": action_id, "route": mutation_route, "reason": "mutation_route_audit_missing"})
+            if mutation_anchor and mutation_anchor not in mutation_block:
+                route_violations.append({"action_id": action_id, "route": mutation_route, "reason": "mutation_anchor_missing", "mutation_anchor": mutation_anchor})
+
+        view_danger = str(view_policy.get("danger_level") or "")
+        mutation_danger = str(mutation_policy.get("danger_level") or "")
+        if view_danger in danger_requires_post or view_policy.get("audit_log_required") is True:
+            route_violations.append({"action_id": action_id, "route": view_route, "reason": "view_policy_must_not_be_mutation_policy", "danger_level": view_danger})
+        if (
+            mutation_policy.get("audit_log_required") is not True
+            or mutation_danger not in danger_requires_post
+            or mutation_policy.get("method_guard_required") is not True
+            or "POST" not in [str(value).upper() for value in (mutation_policy.get("allowed_methods") or [])]
+        ):
+            route_violations.append(
+                {
+                    "action_id": action_id,
+                    "route": mutation_route,
+                    "reason": "mutation_policy_missing_post_audit_or_danger",
+                    "audit_log_required": mutation_policy.get("audit_log_required"),
+                    "danger_level": mutation_danger,
+                    "method_guard_required": mutation_policy.get("method_guard_required"),
+                    "allowed_methods": mutation_policy.get("allowed_methods"),
+                }
+            )
+
+        write_path_ids = [str(item) for item in (action.get("mutation_write_path_ids") or [])]
+        if not write_path_ids:
+            violations.append("mutation_write_path_ids_required")
+        for write_path_id in write_path_ids:
+            write_path = write_paths.get(write_path_id)
+            method, endpoint = _entry_point_endpoint(write_path.get("entry_point") if isinstance(write_path, dict) else None)
+            if not write_path:
+                route_violations.append({"action_id": action_id, "write_path_id": write_path_id, "reason": "mutation_write_path_missing"})
+            elif method != "POST" or endpoint != mutation_route:
+                route_violations.append(
+                    {
+                        "action_id": action_id,
+                        "write_path_id": write_path_id,
+                        "reason": "mutation_write_path_route_mismatch",
+                        "entry_point": write_path.get("entry_point"),
+                        "mutation_route": mutation_route,
+                    }
+                )
+
+        action_evidence.append(
+            {
+                "action_id": action_id,
+                "view_route": view_route,
+                "mutation_route": mutation_route,
+                "separation_enforced": action.get("separation_enforced"),
+                "audit_required": action.get("audit_required"),
+            }
+        )
+        if missing or violations:
+            malformed_actions.append({"index": index, "action_id": action_id or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_action_ids = sorted(set(required_action_ids) - action_ids)
+    unexpected_action_ids = sorted(action_ids - set(required_action_ids))
+    passed = (
+        not schema_violations
+        and bool(actions)
+        and not malformed_actions
+        and not duplicate_action_ids
+        and not route_violations
+        and not missing_required_action_ids
+        and not unexpected_action_ids
+        and all(action.get("separation_enforced") is True and action.get("audit_required") is True for action in action_evidence)
+    )
+    return _contract(
+        "DashboardActionSeparationContract",
+        passed,
+        "dashboard_action_separation_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "access_control_policy_path": str(access_control_policy_path),
+            "write_path_registry_path": str(write_path_registry_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "required_fields": required_fields,
+            "action_count": len(actions),
+            "required_action_ids": required_action_ids,
+            "actions": action_evidence,
+            "schema_violations": schema_violations,
+            "malformed_actions": malformed_actions,
+            "duplicate_action_ids": sorted(str(item) for item in duplicate_action_ids),
+            "route_violations": route_violations,
+            "missing_required_action_ids": missing_required_action_ids,
+            "unexpected_action_ids": unexpected_action_ids,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -2628,6 +2844,7 @@ def build_basic_contract_readiness(
     error_taxonomy_path=DEFAULT_ERROR_TAXONOMY,
     log_redaction_policy_path=DEFAULT_LOG_REDACTION_POLICY,
     service_readiness_policy_path=DEFAULT_SERVICE_READINESS_PROBES,
+    dashboard_action_separation_policy_path=DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY,
     env=None,
 ):
     contracts = {
@@ -2669,6 +2886,7 @@ def build_basic_contract_readiness(
             verify_error_taxonomy(taxonomy_path=error_taxonomy_path),
             verify_log_redaction_verification(policy_path=log_redaction_policy_path),
             verify_service_readiness_probe_contract(policy_path=service_readiness_policy_path),
+            verify_dashboard_action_separation_contract(policy_path=dashboard_action_separation_policy_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -2706,6 +2924,7 @@ def main():
     parser.add_argument("--error-taxonomy", default=str(DEFAULT_ERROR_TAXONOMY))
     parser.add_argument("--log-redaction-policy", default=str(DEFAULT_LOG_REDACTION_POLICY))
     parser.add_argument("--service-readiness-policy", default=str(DEFAULT_SERVICE_READINESS_PROBES))
+    parser.add_argument("--dashboard-action-separation-policy", default=str(DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -2729,6 +2948,7 @@ def main():
         error_taxonomy_path=Path(args.error_taxonomy),
         log_redaction_policy_path=Path(args.log_redaction_policy),
         service_readiness_policy_path=Path(args.service_readiness_policy),
+        dashboard_action_separation_policy_path=Path(args.dashboard_action_separation_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

@@ -1,0 +1,80 @@
+{
+  "schema_version": "v2.7.0.dashboard_action_separation.v1",
+  "scope": "dashboard_read_routes_and_admin_mutation_routes",
+  "failure_action": "dashboard_mutation_blocked",
+  "source_file": "src/web/dashboard-server.js",
+  "required_fields": ["action_id", "view_route", "mutation_route", "separation_enforced", "audit_required"],
+  "required_action_ids": [
+    "close_position_route_split",
+    "pause_trading_route_split",
+    "resume_trading_route_split",
+    "reset_daily_loss_route_split",
+    "reset_live_data_route_split",
+    "paper_cleanup_route_split"
+  ],
+  "actions": [
+    {
+      "action_id": "close_position_route_split",
+      "view_route": "/api/live-positions",
+      "mutation_route": "/api/close-position",
+      "separation_enforced": true,
+      "audit_required": true,
+      "view_anchor": "SELECT token_ca, symbol, entry_mc",
+      "mutation_anchor": "action: 'close_position'",
+      "mutation_write_path_ids": ["dashboard.live_positions.manual_close"]
+    },
+    {
+      "action_id": "pause_trading_route_split",
+      "view_route": "/api/trading-status",
+      "mutation_route": "/api/pause-trading",
+      "separation_enforced": true,
+      "audit_required": true,
+      "view_anchor": "const status = rm.getStatus();",
+      "mutation_anchor": "action: 'pause_trading'",
+      "mutation_write_path_ids": ["dashboard.system_state.pause_trading"]
+    },
+    {
+      "action_id": "resume_trading_route_split",
+      "view_route": "/api/trading-status",
+      "mutation_route": "/api/resume-trading",
+      "separation_enforced": true,
+      "audit_required": true,
+      "view_anchor": "const status = rm.getStatus();",
+      "mutation_anchor": "action: 'resume_trading'",
+      "mutation_write_path_ids": ["dashboard.system_state.resume_trading"]
+    },
+    {
+      "action_id": "reset_daily_loss_route_split",
+      "view_route": "/api/trading-status",
+      "mutation_route": "/api/reset-daily-loss",
+      "separation_enforced": true,
+      "audit_required": true,
+      "view_anchor": "const status = rm.getStatus();",
+      "mutation_anchor": "action: 'reset_daily_loss'",
+      "mutation_write_path_ids": ["dashboard.system_state.reset_daily_loss"]
+    },
+    {
+      "action_id": "reset_live_data_route_split",
+      "view_route": "/api/live-positions",
+      "mutation_route": "/api/reset-live-data",
+      "separation_enforced": true,
+      "audit_required": true,
+      "view_anchor": "SELECT token_ca, symbol, entry_mc",
+      "mutation_anchor": "action: 'reset_live_data'",
+      "mutation_write_path_ids": [
+        "dashboard.live_positions.reset_live_data",
+        "dashboard.system_state.reset_live_data_clear_pause"
+      ]
+    },
+    {
+      "action_id": "paper_cleanup_route_split",
+      "view_route": "/api/paper/entry-mode-performance",
+      "mutation_route": "/api/paper-trades/cleanup",
+      "separation_enforced": true,
+      "audit_required": true,
+      "view_anchor": "entryModePerformanceFromLiveSnapshot",
+      "mutation_anchor": "action: 'paper_trades_cleanup'",
+      "mutation_write_path_ids": ["dashboard.paper_trades.cleanup_open_positions"]
+    }
+  ]
+}

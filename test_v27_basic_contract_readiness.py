@@ -9,6 +9,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_api_response_envelope_contract,
     verify_audit_log_integrity,
     verify_background_job_registry,
+    verify_dashboard_action_separation_contract,
     verify_direct_database_mutation_ban,
     verify_entry_point_inventory,
     verify_error_taxonomy,
@@ -57,6 +58,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
         "ServiceReadinessProbeContract",
+        "DashboardActionSeparationContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -1145,6 +1147,74 @@ def test_service_readiness_probe_contract_blocks_missing_dependency_anchor(tmp_p
             "reason": "dependency_anchor_missing",
             "missing_dependency_anchors": ["commit: runtimeCommitFingerprint()"],
         },
+    ]
+
+
+def test_dashboard_action_separation_contract_covers_admin_mutations():
+    report = verify_dashboard_action_separation_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.dashboard_action_separation.v1"
+    assert report["evidence"]["failure_action"] == "dashboard_mutation_blocked"
+    assert report["evidence"]["required_fields"] == ["action_id", "view_route", "mutation_route", "separation_enforced", "audit_required"]
+    assert report["evidence"]["action_count"] == 6
+    assert report["evidence"]["schema_violations"] == []
+    assert report["evidence"]["malformed_actions"] == []
+    assert report["evidence"]["route_violations"] == []
+    assert report["evidence"]["missing_required_action_ids"] == []
+    action_ids = {action["action_id"] for action in report["evidence"]["actions"]}
+    assert {
+        "close_position_route_split",
+        "pause_trading_route_split",
+        "resume_trading_route_split",
+        "reset_daily_loss_route_split",
+        "reset_live_data_route_split",
+        "paper_cleanup_route_split",
+    } <= action_ids
+    for action in report["evidence"]["actions"]:
+        assert action["view_route"] != action["mutation_route"]
+        assert action["separation_enforced"] is True
+        assert action["audit_required"] is True
+
+
+def test_dashboard_action_separation_contract_blocks_disabled_separation(tmp_path):
+    policy_path = tmp_path / "dashboard-action-separation.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.dashboard_action_separation.v1",
+                "failure_action": "dashboard_mutation_blocked",
+                "source_file": "src/web/dashboard-server.js",
+                "required_fields": ["action_id", "view_route", "mutation_route", "separation_enforced", "audit_required"],
+                "required_action_ids": ["pause_trading_route_split"],
+                "actions": [
+                    {
+                        "action_id": "pause_trading_route_split",
+                        "view_route": "/api/trading-status",
+                        "mutation_route": "/api/pause-trading",
+                        "separation_enforced": False,
+                        "audit_required": True,
+                        "view_anchor": "const status = rm.getStatus();",
+                        "mutation_anchor": "action: 'pause_trading'",
+                        "mutation_write_path_ids": ["dashboard.system_state.pause_trading"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_dashboard_action_separation_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "dashboard_action_separation_missing_malformed_or_unenforced"
+    assert report["evidence"]["malformed_actions"] == [
+        {
+            "index": 0,
+            "action_id": "pause_trading_route_split",
+            "missing_fields": [],
+            "violations": ["separation_enforced_true_required"],
+        }
     ]
 
 
