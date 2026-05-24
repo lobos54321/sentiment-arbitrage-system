@@ -498,6 +498,7 @@ const logsDir = join(projectRoot, 'logs');
 const runtimeLogPath = join(logsDir, 'runtime.log');
 const DASHBOARD_AUDIT_SCHEMA_VERSION = 'v2.7.0.audit_log_integrity.v1';
 const DASHBOARD_AUDIT_GENESIS_HASH = 'GENESIS';
+export const LOG_REDACTION_PATTERN_SET = 'v2.7.0.secret_pattern_set.dashboard_runtime.v1';
 
 // 确保日志目录存在
 try {
@@ -505,6 +506,43 @@ try {
     fs.mkdirSync(logsDir, { recursive: true });
   }
 } catch (e) { /* ignore */ }
+
+export function redactLogMessage(input) {
+  let text = String(input ?? '');
+  const secretNames = [
+    'dashboard_token',
+    'x-dashboard-token',
+    'telegram_bot_token',
+    'telegram_api_hash',
+    'gmgn_api_key',
+    'api_key',
+    'private_key',
+    'wallet_private_key',
+    'trade_wallet_private_key',
+    'live_private_key',
+    'solana_private_key',
+    'bsc_private_key',
+    'secret',
+  ];
+  const names = secretNames.join('|');
+  text = text.replace(
+    new RegExp(`(["']?(?:${names})["']?\\s*:\\s*["'])([^"']+)(["'])`, 'gi'),
+    '$1[REDACTED]$3',
+  );
+  text = text.replace(
+    /(authorization\s*[:=]\s*bearer\s+)([^\s"',;]+)/gi,
+    '$1[REDACTED]',
+  );
+  text = text.replace(
+    /([?&]token=)([^\s"',;&]+)/gi,
+    '$1[REDACTED]',
+  );
+  text = text.replace(
+    new RegExp(`((?:${names})\\s*[=:]\\s*)([^\\s"',;]+)`, 'gi'),
+    '$1[REDACTED]',
+  );
+  return text;
+}
 
 export function canonicalAuditJson(value) {
   if (value === undefined) {
@@ -667,7 +705,7 @@ function formatLogArg(arg) {
 
 function captureLog(level, args) {
   const timestamp = new Date().toISOString();
-  const message = args.map(formatLogArg).join(' ');
+  const message = redactLogMessage(args.map(formatLogArg).join(' '));
   const logLine = { timestamp, level, message };
 
   // 内存缓冲
@@ -680,6 +718,10 @@ function captureLog(level, args) {
   try {
     fs.appendFileSync(runtimeLogPath, `[${timestamp}] [${level}] ${message}\n`);
   } catch (e) { /* ignore */ }
+}
+
+function writeRedactedLogStream(logStream, chunk) {
+  logStream.write(redactLogMessage(chunk));
 }
 
 console.log = (...args) => {
@@ -1177,7 +1219,7 @@ function triggerV27ReadModelRefresh(options = {}) {
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const startedAt = new Date().toISOString();
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-read-model-refresh-once: python3 ${args.join(' ')}\n`);
+  writeRedactedLogStream(logStream, `[dashboard-trigger] ${startedAt} starting v27-read-model-refresh-once: python3 ${args.join(' ')}\n`);
 
   const child = spawn('python3', args, {
     cwd: projectRoot,
@@ -1202,9 +1244,9 @@ function triggerV27ReadModelRefresh(options = {}) {
     clearTimeout(timeoutHandle);
     const finishedAt = new Date().toISOString();
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once failed code=${code || ''} signal=${signal || ''} error=${error.message}\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once failed code=${code || ''} signal=${signal || ''} error=${error.message}\n`);
     } else {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once completed\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-read-model-refresh-once completed\n`);
     }
     v27ReadModelManualRefresh = {
       running: false,
@@ -1217,10 +1259,10 @@ function triggerV27ReadModelRefresh(options = {}) {
   };
 
   child.stdout.on('data', (chunk) => {
-    logStream.write(chunk);
+    writeRedactedLogStream(logStream, chunk);
   });
   child.stderr.on('data', (chunk) => {
-    logStream.write(chunk);
+    writeRedactedLogStream(logStream, chunk);
   });
   child.on('error', (error) => {
     finish(error, null, null);
@@ -1294,7 +1336,7 @@ function triggerV27RecoveryControlMirror(options = {}) {
   };
   const startedAt = new Date().toISOString();
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-recovery-control-mirror-once: python3 ${args.join(' ')}\n`);
+  writeRedactedLogStream(logStream, `[dashboard-trigger] ${startedAt} starting v27-recovery-control-mirror-once: python3 ${args.join(' ')}\n`);
   v27RecoveryControlManualMirror = {
     running: true,
     started_at: startedAt,
@@ -1308,12 +1350,12 @@ function triggerV27RecoveryControlMirror(options = {}) {
     maxBuffer: 50 * 1024 * 1024,
   }, (error, stdout, stderr) => {
     const finishedAt = new Date().toISOString();
-    if (stdout) logStream.write(String(stdout));
-    if (stderr) logStream.write(String(stderr));
+    if (stdout) writeRedactedLogStream(logStream, String(stdout));
+    if (stderr) writeRedactedLogStream(logStream, String(stderr));
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-recovery-control-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-recovery-control-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
     } else {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-recovery-control-mirror-once completed\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-recovery-control-mirror-once completed\n`);
     }
     v27RecoveryControlManualMirror = {
       running: false,
@@ -1413,7 +1455,7 @@ function triggerV27RawProviderEvidenceMirror(options = {}) {
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const startedAt = new Date().toISOString();
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-raw-provider-evidence-mirror-once: python3 ${args.join(' ')}\n`);
+  writeRedactedLogStream(logStream, `[dashboard-trigger] ${startedAt} starting v27-raw-provider-evidence-mirror-once: python3 ${args.join(' ')}\n`);
   v27RawProviderEvidenceManualMirror = {
     running: true,
     started_at: startedAt,
@@ -1427,12 +1469,12 @@ function triggerV27RawProviderEvidenceMirror(options = {}) {
     maxBuffer: 50 * 1024 * 1024,
   }, (error, stdout, stderr) => {
     const finishedAt = new Date().toISOString();
-    if (stdout) logStream.write(String(stdout));
-    if (stderr) logStream.write(String(stderr));
+    if (stdout) writeRedactedLogStream(logStream, String(stdout));
+    if (stderr) writeRedactedLogStream(logStream, String(stderr));
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-evidence-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-raw-provider-evidence-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
     } else {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-evidence-mirror-once completed\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-raw-provider-evidence-mirror-once completed\n`);
     }
     v27RawProviderEvidenceManualMirror = {
       running: false,
@@ -1508,7 +1550,7 @@ function triggerV27RawProviderProbeEvidence(options = {}) {
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const startedAt = new Date().toISOString();
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-raw-provider-probe-evidence-once: python3 ${args.join(' ')}\n`);
+  writeRedactedLogStream(logStream, `[dashboard-trigger] ${startedAt} starting v27-raw-provider-probe-evidence-once: python3 ${args.join(' ')}\n`);
   v27RawProviderProbeEvidenceManualRecord = {
     running: true,
     started_at: startedAt,
@@ -1522,12 +1564,12 @@ function triggerV27RawProviderProbeEvidence(options = {}) {
     maxBuffer: 50 * 1024 * 1024,
   }, (error, stdout, stderr) => {
     const finishedAt = new Date().toISOString();
-    if (stdout) logStream.write(String(stdout));
-    if (stderr) logStream.write(String(stderr));
+    if (stdout) writeRedactedLogStream(logStream, String(stdout));
+    if (stderr) writeRedactedLogStream(logStream, String(stderr));
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-probe-evidence-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-raw-provider-probe-evidence-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
     } else {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-probe-evidence-once completed\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-raw-provider-probe-evidence-once completed\n`);
     }
     v27RawProviderProbeEvidenceManualRecord = {
       running: false,
@@ -1610,7 +1652,7 @@ function triggerV27RandomnessControlMirror(options = {}) {
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const startedAt = new Date().toISOString();
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-randomness-control-mirror-once: python3 ${args.join(' ')}\n`);
+  writeRedactedLogStream(logStream, `[dashboard-trigger] ${startedAt} starting v27-randomness-control-mirror-once: python3 ${args.join(' ')}\n`);
   v27RandomnessControlManualMirror = {
     running: true,
     started_at: startedAt,
@@ -1624,12 +1666,12 @@ function triggerV27RandomnessControlMirror(options = {}) {
     maxBuffer: 50 * 1024 * 1024,
   }, (error, stdout, stderr) => {
     const finishedAt = new Date().toISOString();
-    if (stdout) logStream.write(String(stdout));
-    if (stderr) logStream.write(String(stderr));
+    if (stdout) writeRedactedLogStream(logStream, String(stdout));
+    if (stderr) writeRedactedLogStream(logStream, String(stderr));
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-randomness-control-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-randomness-control-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
     } else {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-randomness-control-mirror-once completed\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-randomness-control-mirror-once completed\n`);
     }
     v27RandomnessControlManualMirror = {
       running: false,
@@ -1698,7 +1740,7 @@ function triggerV27NormalTinyOpsEvidence(options = {}) {
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const startedAt = new Date().toISOString();
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-normal-tiny-ops-evidence-once: python3 ${args.join(' ')}\n`);
+  writeRedactedLogStream(logStream, `[dashboard-trigger] ${startedAt} starting v27-normal-tiny-ops-evidence-once: python3 ${args.join(' ')}\n`);
   v27NormalTinyOpsEvidenceManualRecord = {
     running: true,
     started_at: startedAt,
@@ -1712,12 +1754,12 @@ function triggerV27NormalTinyOpsEvidence(options = {}) {
     maxBuffer: 50 * 1024 * 1024,
   }, (error, stdout, stderr) => {
     const finishedAt = new Date().toISOString();
-    if (stdout) logStream.write(String(stdout));
-    if (stderr) logStream.write(String(stderr));
+    if (stdout) writeRedactedLogStream(logStream, String(stdout));
+    if (stderr) writeRedactedLogStream(logStream, String(stderr));
     if (error) {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-normal-tiny-ops-evidence-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-normal-tiny-ops-evidence-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
     } else {
-      logStream.write(`[dashboard-trigger] ${finishedAt} v27-normal-tiny-ops-evidence-once completed\n`);
+      writeRedactedLogStream(logStream, `[dashboard-trigger] ${finishedAt} v27-normal-tiny-ops-evidence-once completed\n`);
     }
     v27NormalTinyOpsEvidenceManualRecord = {
       running: false,

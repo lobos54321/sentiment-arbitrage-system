@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,7 @@ DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inven
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
 DEFAULT_API_RESPONSE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-policy.json"
 DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
+DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-policy.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -104,6 +106,14 @@ ERROR_TAXONOMY_REQUIRED_FIELDS = (
     "severity",
     "operator_action",
     "introduced_at",
+)
+LOG_REDACTION_STREAM_REQUIRED_FIELDS = (
+    "log_stream",
+    "secret_pattern_set",
+    "source_file",
+    "redaction_anchor",
+    "write_anchor",
+    "sample_case_ids",
 )
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
@@ -174,6 +184,10 @@ def _float_env(env, name, default):
         return float((env or {}).get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _sha256_json(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _missing_required_fields(record, fields):
@@ -1642,6 +1656,182 @@ def verify_error_taxonomy(
     )
 
 
+def _apply_log_redaction_patterns(raw, patterns):
+    text = str(raw)
+    for pattern in patterns:
+        regex = pattern.get("regex") if isinstance(pattern, dict) else None
+        replacement = pattern.get("replacement") if isinstance(pattern, dict) else None
+        if not regex or replacement is None:
+            continue
+        text = re.sub(str(regex), str(replacement), text, flags=re.IGNORECASE)
+    return text
+
+
+def verify_log_redaction_verification(policy_path=DEFAULT_LOG_REDACTION_POLICY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("LogRedactionVerificationContract", False, "log_redaction_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("LogRedactionVerificationContract", False, "log_redaction_policy_not_object", {"policy_path": str(policy_path)})
+
+    pattern_set = policy.get("secret_pattern_set") if isinstance(policy.get("secret_pattern_set"), dict) else {}
+    secret_pattern_set = str(pattern_set.get("secret_pattern_set") or "")
+    patterns = pattern_set.get("patterns") if isinstance(pattern_set.get("patterns"), list) else []
+    sample_cases = {
+        str(item.get("sample_id")): item
+        for item in (policy.get("sample_cases") or [])
+        if isinstance(item, dict) and item.get("sample_id")
+    }
+    streams = policy.get("streams") if isinstance(policy.get("streams"), list) else []
+
+    malformed_patterns = []
+    duplicate_pattern_ids = []
+    seen_pattern_ids = set()
+    for index, pattern in enumerate(patterns):
+        if not isinstance(pattern, dict):
+            malformed_patterns.append({"index": index, "pattern_id": None, "violations": ["pattern_not_object"]})
+            continue
+        pattern_id = str(pattern.get("pattern_id") or "")
+        violations = []
+        if pattern_id in seen_pattern_ids:
+            duplicate_pattern_ids.append(pattern_id)
+        if pattern_id:
+            seen_pattern_ids.add(pattern_id)
+        if not pattern_id:
+            violations.append("pattern_id_required")
+        if not pattern.get("regex"):
+            violations.append("regex_required")
+        else:
+            try:
+                re.compile(str(pattern.get("regex")), flags=re.IGNORECASE)
+            except re.error as exc:
+                violations.append(f"regex_invalid:{exc}")
+        if pattern.get("replacement") is None:
+            violations.append("replacement_required")
+        if violations:
+            malformed_patterns.append({"index": index, "pattern_id": pattern_id or None, "violations": violations})
+
+    malformed_samples = []
+    sample_results = {}
+    for sample_id, sample in sample_cases.items():
+        raw = str(sample.get("raw") or "")
+        redacted = _apply_log_redaction_patterns(raw, patterns)
+        absent_failures = [
+            fragment for fragment in (sample.get("expected_fragments_absent") or [])
+            if str(fragment) and str(fragment) in redacted
+        ]
+        present_failures = [
+            fragment for fragment in (sample.get("expected_fragments_present") or [])
+            if str(fragment) and str(fragment) not in redacted
+        ]
+        redaction_passed = not absent_failures and not present_failures and redacted != raw
+        if not raw or not redaction_passed:
+            malformed_samples.append(
+                {
+                    "sample_id": sample_id,
+                    "absent_failures": absent_failures,
+                    "present_failures": present_failures,
+                    "raw_present": bool(raw),
+                    "redaction_changed_sample": redacted != raw,
+                }
+            )
+        sample_results[sample_id] = {
+            "sample_hash": _sha256_json({"sample_id": sample_id, "raw": raw}),
+            "redaction_passed": redaction_passed,
+        }
+
+    checked_at = _utc_now_iso()
+    malformed_streams = []
+    source_violations = []
+    stream_evidence = []
+    for index, stream in enumerate(streams):
+        if not isinstance(stream, dict):
+            malformed_streams.append({"index": index, "log_stream": None, "missing_fields": list(LOG_REDACTION_STREAM_REQUIRED_FIELDS), "violations": ["stream_not_object"]})
+            continue
+        log_stream = str(stream.get("log_stream") or "")
+        missing = _missing_required_fields(stream, LOG_REDACTION_STREAM_REQUIRED_FIELDS)
+        violations = []
+        if stream.get("secret_pattern_set") != secret_pattern_set:
+            violations.append("secret_pattern_set_mismatch")
+        sample_case_ids = [str(item) for item in (stream.get("sample_case_ids") or [])]
+        unknown_samples = sorted(sample_id for sample_id in sample_case_ids if sample_id not in sample_cases)
+        if unknown_samples:
+            violations.append("unknown_sample_case_ids")
+        stream_sample_passed = all(sample_results.get(sample_id, {}).get("redaction_passed") for sample_id in sample_case_ids)
+        sample_hash = _sha256_json(
+            {
+                "log_stream": log_stream,
+                "secret_pattern_set": stream.get("secret_pattern_set"),
+                "sample_hashes": [sample_results.get(sample_id, {}).get("sample_hash") for sample_id in sample_case_ids],
+            }
+        )
+
+        source_text, source_error = _read_project_text(stream.get("source_file"))
+        if source_error:
+            source_violations.append({"log_stream": log_stream, **source_error})
+        else:
+            redaction_anchor = str(stream.get("redaction_anchor") or "")
+            write_anchor = str(stream.get("write_anchor") or "")
+            if redaction_anchor and redaction_anchor not in source_text:
+                source_violations.append({"log_stream": log_stream, "reason": "redaction_anchor_missing", "redaction_anchor": redaction_anchor})
+            if write_anchor and write_anchor not in source_text:
+                source_violations.append({"log_stream": log_stream, "reason": "write_anchor_missing", "write_anchor": write_anchor})
+            if log_stream == "v27_manual_evidence_child_process_logs":
+                raw_write_count = source_text.count("logStream.write(")
+                if raw_write_count != 1 or "logStream.write(redactLogMessage(chunk));" not in source_text:
+                    source_violations.append({"log_stream": log_stream, "reason": "raw_log_stream_write_bypass", "raw_log_stream_write_count": raw_write_count})
+
+        redaction_passed = stream_sample_passed and not unknown_samples and not missing and not violations
+        stream_evidence.append(
+            {
+                "log_stream": log_stream,
+                "secret_pattern_set": stream.get("secret_pattern_set"),
+                "sample_hash": sample_hash,
+                "redaction_passed": redaction_passed,
+                "checked_at": checked_at,
+                "sample_case_ids": sample_case_ids,
+            }
+        )
+        if missing or violations:
+            malformed_streams.append({"index": index, "log_stream": log_stream or None, "missing_fields": missing, "violations": violations, "unknown_sample_case_ids": unknown_samples})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.log_redaction_policy.v1"
+        and bool(secret_pattern_set)
+        and bool(patterns)
+        and bool(sample_cases)
+        and bool(streams)
+        and not malformed_patterns
+        and not duplicate_pattern_ids
+        and not malformed_samples
+        and not malformed_streams
+        and not source_violations
+        and all(item.get("redaction_passed") for item in stream_evidence)
+    )
+    return _contract(
+        "LogRedactionVerificationContract",
+        passed,
+        "log_redaction_verification_missing_malformed_or_failed",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "secret_pattern_set": secret_pattern_set,
+            "pattern_count": len(patterns),
+            "sample_case_count": len(sample_cases),
+            "stream_count": len(streams),
+            "streams": stream_evidence,
+            "malformed_patterns": malformed_patterns,
+            "duplicate_pattern_ids": sorted(str(item) for item in duplicate_pattern_ids),
+            "malformed_samples": malformed_samples,
+            "malformed_streams": malformed_streams,
+            "source_violations": source_violations,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -2056,6 +2246,7 @@ def build_basic_contract_readiness(
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
     api_response_policy_path=DEFAULT_API_RESPONSE_POLICY,
     error_taxonomy_path=DEFAULT_ERROR_TAXONOMY,
+    log_redaction_policy_path=DEFAULT_LOG_REDACTION_POLICY,
     env=None,
 ):
     contracts = {
@@ -2094,6 +2285,7 @@ def build_basic_contract_readiness(
                 access_control_policy_path=access_control_policy_path,
             ),
             verify_error_taxonomy(taxonomy_path=error_taxonomy_path),
+            verify_log_redaction_verification(policy_path=log_redaction_policy_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -2128,6 +2320,7 @@ def main():
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
     parser.add_argument("--api-response-policy", default=str(DEFAULT_API_RESPONSE_POLICY))
     parser.add_argument("--error-taxonomy", default=str(DEFAULT_ERROR_TAXONOMY))
+    parser.add_argument("--log-redaction-policy", default=str(DEFAULT_LOG_REDACTION_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -2148,6 +2341,7 @@ def main():
         static_policy_path=Path(args.static_policy),
         api_response_policy_path=Path(args.api_response_policy),
         error_taxonomy_path=Path(args.error_taxonomy),
+        log_redaction_policy_path=Path(args.log_redaction_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

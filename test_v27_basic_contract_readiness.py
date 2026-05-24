@@ -12,6 +12,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_entry_point_inventory,
     verify_error_taxonomy,
     verify_evidence_eligibility_matrix,
+    verify_log_redaction_verification,
     verify_static_policy_enforcement,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -51,6 +52,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "StaticPolicyEnforcementContract",
         "APIResponseContract",
         "ErrorTaxonomyContract",
+        "LogRedactionVerificationContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -873,6 +875,84 @@ def test_error_taxonomy_blocks_malformed_entry(tmp_path):
             "error_code": "classified_unit_error",
             "missing_fields": ["operator_action"],
             "violations": ["introduced_at_invalid_iso_timestamp"],
+        }
+    ]
+
+
+def test_log_redaction_verification_covers_runtime_and_manual_evidence_logs():
+    report = verify_log_redaction_verification()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.log_redaction_policy.v1"
+    assert report["evidence"]["secret_pattern_set"] == "v2.7.0.secret_pattern_set.dashboard_runtime.v1"
+    assert report["evidence"]["pattern_count"] == 4
+    assert report["evidence"]["sample_case_count"] == 3
+    assert report["evidence"]["stream_count"] == 3
+    assert report["evidence"]["malformed_samples"] == []
+    assert report["evidence"]["malformed_streams"] == []
+    assert report["evidence"]["source_violations"] == []
+    for stream in report["evidence"]["streams"]:
+        assert stream["redaction_passed"] is True
+        assert stream["sample_hash"]
+        assert stream["checked_at"]
+
+
+def test_log_redaction_verification_blocks_unredacted_sample(tmp_path):
+    source_path = tmp_path / "dashboard.js"
+    source_path.write_text(
+        "const message = args.map(formatLogArg).join(' ');\n"
+        "logBuffer.push(logLine);\n"
+        "fs.appendFileSync(runtimeLogPath, message);\n",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "log-redaction.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.log_redaction_policy.v1",
+                "secret_pattern_set": {
+                    "secret_pattern_set": "unit.secret_patterns.v1",
+                    "patterns": [
+                        {
+                            "pattern_id": "wrong_pattern",
+                            "regex": "(api_key=)(safe-value-only)",
+                            "replacement": "\\1[REDACTED]",
+                        }
+                    ],
+                },
+                "sample_cases": [
+                    {
+                        "sample_id": "leaky",
+                        "raw": "api_key=unit-secret-value",
+                        "expected_fragments_absent": ["unit-secret-value"],
+                        "expected_fragments_present": ["api_key=[REDACTED]"],
+                    }
+                ],
+                "streams": [
+                    {
+                        "log_stream": "dashboard_runtime_log",
+                        "secret_pattern_set": "unit.secret_patterns.v1",
+                        "source_file": str(source_path),
+                        "redaction_anchor": "redactLogMessage(args.map(formatLogArg).join(' '))",
+                        "write_anchor": "fs.appendFileSync(runtimeLogPath",
+                        "sample_case_ids": ["leaky"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_log_redaction_verification(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "log_redaction_verification_missing_malformed_or_failed"
+    assert report["evidence"]["malformed_samples"][0]["sample_id"] == "leaky"
+    assert report["evidence"]["source_violations"] == [
+        {
+            "log_stream": "dashboard_runtime_log",
+            "reason": "redaction_anchor_missing",
+            "redaction_anchor": "redactLogMessage(args.map(formatLogArg).join(' '))",
         }
     ]
 

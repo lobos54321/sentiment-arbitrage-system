@@ -19,12 +19,31 @@ import {
   missedRecoverySummaryFromLiveSnapshot,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
+  LOG_REDACTION_PATTERN_SET,
+  redactLogMessage,
   resolveDashboardLogPath,
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
   verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
+
+test('redactLogMessage masks dashboard secrets without hiding token addresses', () => {
+  const redacted = redactLogMessage([
+    'Authorization: Bearer unit-bearer-secret',
+    'GET /api/logs?token=unit-query-secret',
+    'dashboard_token=unit-dashboard-secret',
+    '{"wallet_private_key":"unit-wallet-secret","token_ca":"So11111111111111111111111111111111111111112"}',
+  ].join(' '));
+
+  assert.equal(LOG_REDACTION_PATTERN_SET, 'v2.7.0.secret_pattern_set.dashboard_runtime.v1');
+  assert.doesNotMatch(redacted, /unit-bearer-secret|unit-query-secret|unit-dashboard-secret|unit-wallet-secret/);
+  assert.match(redacted, /Authorization: Bearer \[REDACTED\]/);
+  assert.match(redacted, /\?token=\[REDACTED\]/);
+  assert.match(redacted, /dashboard_token=\[REDACTED\]/);
+  assert.match(redacted, /"wallet_private_key":"\[REDACTED\]"/);
+  assert.match(redacted, /So11111111111111111111111111111111111111112/);
+});
 
 test('apiJsonHeaders defaults JSON responses to no-store', () => {
   assert.deepEqual(apiJsonHeaders(), {

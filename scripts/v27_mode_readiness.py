@@ -47,6 +47,7 @@ MODE_REQUIREMENTS = {
         "StaticPolicyEnforcementContract",
         "APIResponseContract",
         "ErrorTaxonomyContract",
+        "LogRedactionVerificationContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

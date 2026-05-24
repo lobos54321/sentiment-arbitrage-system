@@ -1,0 +1,77 @@
+{
+  "schema_version": "v2.7.0.log_redaction_policy.v1",
+  "scope": "dashboard_runtime_and_v27_manual_evidence_logs",
+  "failure_action": "log_stream_blocked",
+  "secret_pattern_set": {
+    "secret_pattern_set": "v2.7.0.secret_pattern_set.dashboard_runtime.v1",
+    "replacement": "[REDACTED]",
+    "patterns": [
+      {
+        "pattern_id": "quoted_secret_field",
+        "regex": "([\"']?(?:dashboard_token|x-dashboard-token|telegram_bot_token|telegram_api_hash|gmgn_api_key|api_key|private_key|wallet_private_key|trade_wallet_private_key|live_private_key|solana_private_key|bsc_private_key|secret)[\"']?\\s*:\\s*[\"'])([^\"']+)([\"'])",
+        "replacement": "\\1[REDACTED]\\3"
+      },
+      {
+        "pattern_id": "authorization_bearer",
+        "regex": "(authorization\\s*[:=]\\s*bearer\\s+)([^\\s\"',;]+)",
+        "replacement": "\\1[REDACTED]"
+      },
+      {
+        "pattern_id": "dashboard_query_token",
+        "regex": "([?&]token=)([^\\s\"',;&]+)",
+        "replacement": "\\1[REDACTED]"
+      },
+      {
+        "pattern_id": "key_value_secret_field",
+        "regex": "((?:dashboard_token|x-dashboard-token|telegram_bot_token|telegram_api_hash|gmgn_api_key|api_key|private_key|wallet_private_key|trade_wallet_private_key|live_private_key|solana_private_key|bsc_private_key|secret)\\s*[=:]\\s*)([^\\s\"',;]+)",
+        "replacement": "\\1[REDACTED]"
+      }
+    ]
+  },
+  "sample_cases": [
+    {
+      "sample_id": "dashboard_token_query",
+      "raw": "GET /api/logs?token=unit-visible-token dashboard_token=unit-visible-token",
+      "expected_fragments_absent": ["unit-visible-token"],
+      "expected_fragments_present": ["?token=[REDACTED]", "dashboard_token=[REDACTED]"]
+    },
+    {
+      "sample_id": "authorization_header",
+      "raw": "Authorization: Bearer unit-bearer-secret x-dashboard-token: unit-dashboard-secret",
+      "expected_fragments_absent": ["unit-bearer-secret", "unit-dashboard-secret"],
+      "expected_fragments_present": ["Authorization: Bearer [REDACTED]", "x-dashboard-token: [REDACTED]"]
+    },
+    {
+      "sample_id": "json_private_key",
+      "raw": "{\"wallet_private_key\":\"unit-wallet-private-key\",\"token_ca\":\"So11111111111111111111111111111111111111112\"}",
+      "expected_fragments_absent": ["unit-wallet-private-key"],
+      "expected_fragments_present": ["\"wallet_private_key\":\"[REDACTED]\"", "So11111111111111111111111111111111111111112"]
+    }
+  ],
+  "streams": [
+    {
+      "log_stream": "dashboard_runtime_log",
+      "secret_pattern_set": "v2.7.0.secret_pattern_set.dashboard_runtime.v1",
+      "source_file": "src/web/dashboard-server.js",
+      "redaction_anchor": "const message = redactLogMessage(args.map(formatLogArg).join(' '));",
+      "write_anchor": "fs.appendFileSync(runtimeLogPath",
+      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key"]
+    },
+    {
+      "log_stream": "dashboard_memory_log_buffer",
+      "secret_pattern_set": "v2.7.0.secret_pattern_set.dashboard_runtime.v1",
+      "source_file": "src/web/dashboard-server.js",
+      "redaction_anchor": "const message = redactLogMessage(args.map(formatLogArg).join(' '));",
+      "write_anchor": "logBuffer.push(logLine)",
+      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key"]
+    },
+    {
+      "log_stream": "v27_manual_evidence_child_process_logs",
+      "secret_pattern_set": "v2.7.0.secret_pattern_set.dashboard_runtime.v1",
+      "source_file": "src/web/dashboard-server.js",
+      "redaction_anchor": "function writeRedactedLogStream(logStream, chunk)",
+      "write_anchor": "logStream.write(redactLogMessage(chunk));",
+      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key"]
+    }
+  ]
+}
