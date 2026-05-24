@@ -6,6 +6,7 @@ sys.path.insert(0, "scripts")
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
     verify_audit_log_integrity,
+    verify_direct_database_mutation_ban,
     verify_evidence_eligibility_matrix,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -39,6 +40,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "AccessControlContract",
         "AuditLogIntegrityContract",
         "WritePathRegistryContract",
+        "DirectDatabaseMutationBan",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -422,6 +424,92 @@ def test_write_path_registry_covers_dashboard_write_paths():
     assert report["evidence"]["registered_write_path_count"] == 9
     assert report["evidence"]["unregistered_mutation_count"] == 0
     assert "sqlite:paper_trades" in report["evidence"]["registered_targets"]
+
+
+def test_direct_database_mutation_ban_covers_break_glass_paths():
+    report = verify_direct_database_mutation_ban()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["direct_db_write_path_count"] == 7
+    assert report["evidence"]["approved_mutation_path_count"] == 7
+    assert report["evidence"]["unapproved_direct_db_mutations"] == []
+    assert report["evidence"]["registry_gate_violations"] == []
+    assert report["evidence"]["access_control_violations"] == []
+    assert "sqlite:live_positions" in report["evidence"]["direct_db_targets"]
+
+
+def test_direct_database_mutation_ban_blocks_unapproved_sqlite_mutation(tmp_path):
+    registry_path = tmp_path / "write-path-registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.write_path_registry.v1",
+                "write_paths": [
+                    {
+                        "write_path_id": "unit.direct_sqlite_update",
+                        "module": "unit",
+                        "entry_point": "POST /api/mutate",
+                        "target_store": "sqlite:demo",
+                        "write_target": "demo",
+                        "mutation_type": "update",
+                        "requires_outbox": False,
+                        "outbox_reason": "unit_test_break_glass_only",
+                        "owner": "test",
+                        "mode_gate": "admin_break_glass",
+                        "source_file": "server.js",
+                        "source_anchor": "UPDATE demo",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "direct-db-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.direct_database_mutation_ban.v1",
+                "rules": {
+                    "default_action": "ban_direct_database_mutation",
+                    "required_registry_mode_gate": "admin_break_glass",
+                    "require_access_control_policy": True,
+                    "require_audit_log": True,
+                    "require_post": True,
+                    "require_outbox_rationale": True,
+                },
+                "approved_mutation_paths": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    access_policy_path = tmp_path / "access-policy.json"
+    write_access_policy(
+        access_policy_path,
+        "server.js",
+        overrides=[
+            {
+                "endpoint": "/api/mutate",
+                "required_role": "dashboard_admin",
+                "token_scope": "dashboard:admin_mutation",
+                "audit_log_required": True,
+                "danger_level": "admin_mutation",
+                "allowed_methods": ["POST"],
+                "method_guard_required": True,
+            }
+        ],
+    )
+
+    report = verify_direct_database_mutation_ban(policy_path, registry_path, access_policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "direct_db_mutation_ban_missing_malformed_or_bypassed"
+    assert report["evidence"]["unapproved_direct_db_mutations"] == [
+        {
+            "write_path_id": "unit.direct_sqlite_update",
+            "target_store": "sqlite:demo",
+            "entry_point": "POST /api/mutate",
+        }
+    ]
 
 
 def test_write_path_registry_blocks_unregistered_static_write(tmp_path):

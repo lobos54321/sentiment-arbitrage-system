@@ -41,6 +41,7 @@ MODE_REQUIREMENTS = {
         "AccessControlContract",
         "AuditLogIntegrityContract",
         "WritePathRegistryContract",
+        "DirectDatabaseMutationBan",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

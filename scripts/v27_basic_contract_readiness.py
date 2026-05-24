@@ -30,6 +30,7 @@ DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.jso
 DEFAULT_GOVERNANCE_READINESS = PROJECT_ROOT / "config" / "v27-governance-readiness.json"
 DEFAULT_ACCESS_CONTROL_POLICY = PROJECT_ROOT / "config" / "v27-access-control-policy.json"
 DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
+DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -57,6 +58,12 @@ WRITE_PATH_SOURCE_FIELDS = (
     "mode_gate",
     "source_file",
     "source_anchor",
+)
+DIRECT_DB_MUTATION_REQUIRED_FIELDS = (
+    "write_path_id",
+    "target_store",
+    "approved_mutation_path",
+    "break_glass_id",
 )
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
@@ -667,6 +674,163 @@ def verify_write_path_registry(registry_path=DEFAULT_WRITE_PATH_REGISTRY):
     )
 
 
+def _entry_point_endpoint(entry_point):
+    parts = str(entry_point or "").split()
+    if len(parts) >= 2 and parts[0].upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        return parts[0].upper(), parts[1]
+    return None, None
+
+
+def verify_direct_database_mutation_ban(
+    policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
+    registry_path=DEFAULT_WRITE_PATH_REGISTRY,
+    access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
+):
+    try:
+        policy = _load_json(policy_path)
+        registry = _load_json(registry_path)
+        access_policy = _load_json(access_control_policy_path)
+    except Exception as exc:
+        return _contract("DirectDatabaseMutationBan", False, "direct_db_mutation_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict) or not isinstance(registry, dict) or not isinstance(access_policy, dict):
+        return _contract(
+            "DirectDatabaseMutationBan",
+            False,
+            "direct_db_mutation_policy_not_object",
+            {
+                "policy_path": str(policy_path),
+                "registry_path": str(registry_path),
+                "access_control_policy_path": str(access_control_policy_path),
+            },
+        )
+
+    write_paths = registry.get("write_paths") if isinstance(registry.get("write_paths"), list) else []
+    direct_db_paths = [
+        item for item in write_paths
+        if isinstance(item, dict) and str(item.get("target_store") or "").startswith("sqlite:")
+    ]
+    direct_by_id = {str(item.get("write_path_id")): item for item in direct_db_paths if item.get("write_path_id")}
+    approved_paths = policy.get("approved_mutation_paths") if isinstance(policy.get("approved_mutation_paths"), list) else []
+    rules = policy.get("rules") if isinstance(policy.get("rules"), dict) else {}
+    required_mode_gate = str(rules.get("required_registry_mode_gate") or "admin_break_glass")
+    access_by_endpoint = {
+        str(item.get("endpoint")): item
+        for item in (access_policy.get("endpoint_overrides") or [])
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+
+    malformed_policy_rows = []
+    duplicate_policy_write_path_ids = []
+    seen_policy_ids = set()
+    approved_by_id = {}
+    for index, item in enumerate(approved_paths):
+        if not isinstance(item, dict):
+            malformed_policy_rows.append({"index": index, "write_path_id": None, "missing_fields": list(DIRECT_DB_MUTATION_REQUIRED_FIELDS), "violations": ["policy_row_not_object"]})
+            continue
+        write_path_id = str(item.get("write_path_id") or "")
+        missing = _missing_required_fields(item, DIRECT_DB_MUTATION_REQUIRED_FIELDS)
+        violations = []
+        if write_path_id in seen_policy_ids:
+            duplicate_policy_write_path_ids.append(write_path_id)
+        if write_path_id:
+            seen_policy_ids.add(write_path_id)
+            approved_by_id[write_path_id] = item
+        method, endpoint = _entry_point_endpoint(item.get("approved_mutation_path"))
+        if method != "POST" or not endpoint:
+            violations.append("approved_mutation_path_must_be_post_endpoint")
+        if item.get("break_glass_id") and not str(item.get("break_glass_id")).startswith("BG-DDB-"):
+            violations.append("break_glass_id_prefix_invalid")
+        registry_item = direct_by_id.get(write_path_id)
+        if registry_item:
+            if item.get("target_store") != registry_item.get("target_store"):
+                violations.append("target_store_mismatch_registry")
+            if item.get("approved_mutation_path") != registry_item.get("entry_point"):
+                violations.append("approved_mutation_path_mismatch_registry")
+        elif write_path_id:
+            violations.append("approved_path_not_in_direct_db_registry")
+        if missing or violations:
+            malformed_policy_rows.append(
+                {
+                    "index": index,
+                    "write_path_id": write_path_id or None,
+                    "missing_fields": missing,
+                    "violations": violations,
+                }
+            )
+
+    unapproved_direct_db_mutations = [
+        {
+            "write_path_id": item.get("write_path_id"),
+            "target_store": item.get("target_store"),
+            "entry_point": item.get("entry_point"),
+        }
+        for item in direct_db_paths
+        if str(item.get("write_path_id")) not in approved_by_id
+    ]
+    registry_gate_violations = []
+    access_control_violations = []
+    outbox_rationale_violations = []
+    for item in direct_db_paths:
+        write_path_id = str(item.get("write_path_id") or "")
+        if str(item.get("mode_gate") or "") != required_mode_gate:
+            registry_gate_violations.append(
+                {
+                    "write_path_id": write_path_id,
+                    "mode_gate": item.get("mode_gate"),
+                    "required_mode_gate": required_mode_gate,
+                }
+            )
+        if rules.get("require_outbox_rationale", True) and item.get("requires_outbox") is False and not item.get("outbox_reason"):
+            outbox_rationale_violations.append({"write_path_id": write_path_id})
+        method, endpoint = _entry_point_endpoint(item.get("entry_point"))
+        endpoint_policy = access_by_endpoint.get(endpoint)
+        if not endpoint_policy:
+            access_control_violations.append({"write_path_id": write_path_id, "endpoint": endpoint, "reason": "missing_access_policy"})
+            continue
+        if rules.get("require_post", True) and (
+            method != "POST"
+            or endpoint_policy.get("method_guard_required") is not True
+            or "POST" not in [str(value).upper() for value in (endpoint_policy.get("allowed_methods") or [])]
+        ):
+            access_control_violations.append({"write_path_id": write_path_id, "endpoint": endpoint, "reason": "post_guard_missing"})
+        if rules.get("require_audit_log", True) and endpoint_policy.get("audit_log_required") is not True:
+            access_control_violations.append({"write_path_id": write_path_id, "endpoint": endpoint, "reason": "audit_requirement_missing"})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.direct_database_mutation_ban.v1"
+        and bool(direct_db_paths)
+        and len(approved_paths) == len(direct_db_paths)
+        and not malformed_policy_rows
+        and not duplicate_policy_write_path_ids
+        and not unapproved_direct_db_mutations
+        and not registry_gate_violations
+        and not access_control_violations
+        and not outbox_rationale_violations
+    )
+    return _contract(
+        "DirectDatabaseMutationBan",
+        passed,
+        "direct_db_mutation_ban_missing_malformed_or_bypassed",
+        {
+            "policy_path": str(policy_path),
+            "registry_path": str(registry_path),
+            "access_control_policy_path": str(access_control_policy_path),
+            "schema_version": policy.get("schema_version"),
+            "default_action": rules.get("default_action"),
+            "required_registry_mode_gate": required_mode_gate,
+            "direct_db_write_path_count": len(direct_db_paths),
+            "approved_mutation_path_count": len(approved_paths),
+            "direct_db_targets": sorted({str(item.get("target_store")) for item in direct_db_paths if item.get("target_store")}),
+            "malformed_policy_rows": malformed_policy_rows,
+            "duplicate_policy_write_path_ids": sorted(str(item) for item in duplicate_policy_write_path_ids),
+            "unapproved_direct_db_mutations": unapproved_direct_db_mutations,
+            "registry_gate_violations": registry_gate_violations,
+            "access_control_violations": access_control_violations,
+            "outbox_rationale_violations": outbox_rationale_violations,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -1075,6 +1239,7 @@ def build_basic_contract_readiness(
     governance_path=DEFAULT_GOVERNANCE_READINESS,
     access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
     write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
+    direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
     env=None,
 ):
     contracts = {
@@ -1097,6 +1262,11 @@ def build_basic_contract_readiness(
             ),
             verify_audit_log_integrity(policy_path=access_control_policy_path),
             verify_write_path_registry(registry_path=write_path_registry_path),
+            verify_direct_database_mutation_ban(
+                policy_path=direct_db_mutation_policy_path,
+                registry_path=write_path_registry_path,
+                access_control_policy_path=access_control_policy_path,
+            ),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -1125,6 +1295,7 @@ def main():
     parser.add_argument("--governance-readiness", default=str(DEFAULT_GOVERNANCE_READINESS))
     parser.add_argument("--access-control-policy", default=str(DEFAULT_ACCESS_CONTROL_POLICY))
     parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
+    parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -1139,6 +1310,7 @@ def main():
         governance_path=Path(args.governance_readiness),
         access_control_policy_path=Path(args.access_control_policy),
         write_path_registry_path=Path(args.write_path_registry),
+        direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

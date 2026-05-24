@@ -1,0 +1,66 @@
+{
+  "schema_version": "v2.7.0.direct_database_mutation_ban.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "dashboard_server_sqlite_direct_mutations",
+  "owner": "v27_safety_governance",
+  "source_registry": "config/v27-write-path-registry.json",
+  "rules": {
+    "default_action": "ban_direct_database_mutation",
+    "required_registry_mode_gate": "admin_break_glass",
+    "require_access_control_policy": true,
+    "require_audit_log": true,
+    "require_post": true,
+    "require_outbox_rationale": true
+  },
+  "approved_mutation_paths": [
+    {
+      "write_path_id": "dashboard.paper_trades.cleanup_open_positions",
+      "target_store": "sqlite:paper_trades",
+      "approved_mutation_path": "POST /api/paper-trades/cleanup",
+      "break_glass_id": "BG-DDB-PAPER-CLEANUP-001",
+      "approval_reason": "authenticated audited manual paper cleanup only"
+    },
+    {
+      "write_path_id": "dashboard.live_positions.manual_close",
+      "target_store": "sqlite:live_positions",
+      "approved_mutation_path": "POST /api/close-position",
+      "break_glass_id": "BG-DDB-LIVE-CLOSE-001",
+      "approval_reason": "authenticated audited manual live close only"
+    },
+    {
+      "write_path_id": "dashboard.system_state.pause_trading",
+      "target_store": "sqlite:system_state",
+      "approved_mutation_path": "POST /api/pause-trading",
+      "break_glass_id": "BG-DDB-RISK-PAUSE-001",
+      "approval_reason": "authenticated audited risk pause control only"
+    },
+    {
+      "write_path_id": "dashboard.system_state.resume_trading",
+      "target_store": "sqlite:system_state",
+      "approved_mutation_path": "POST /api/resume-trading",
+      "break_glass_id": "BG-DDB-RISK-RESUME-001",
+      "approval_reason": "authenticated audited risk resume control only"
+    },
+    {
+      "write_path_id": "dashboard.system_state.reset_daily_loss",
+      "target_store": "sqlite:system_state",
+      "approved_mutation_path": "POST /api/reset-daily-loss",
+      "break_glass_id": "BG-DDB-RISK-DAILY-RESET-001",
+      "approval_reason": "authenticated audited risk accounting window reset only"
+    },
+    {
+      "write_path_id": "dashboard.live_positions.reset_live_data",
+      "target_store": "sqlite:live_positions",
+      "approved_mutation_path": "POST /api/reset-live-data",
+      "break_glass_id": "BG-DDB-LIVE-RESET-001",
+      "approval_reason": "authenticated audited destructive live data reset only"
+    },
+    {
+      "write_path_id": "dashboard.system_state.reset_live_data_clear_pause",
+      "target_store": "sqlite:system_state",
+      "approved_mutation_path": "POST /api/reset-live-data",
+      "break_glass_id": "BG-DDB-LIVE-RESET-CLEAR-PAUSE-001",
+      "approval_reason": "paired authenticated audited pause-state cleanup for live reset"
+    }
+  ]
+}
