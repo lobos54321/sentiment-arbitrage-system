@@ -633,6 +633,9 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["SafetyCaseContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["WaiverPolicyContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["TransactionalOutboxContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ReplaySideEffectIsolationContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ReplaySideEffectIsolationContract"]["evidence"]["provider_call_count"] == 0
+    assert matrix["contract_statuses"]["ReplaySideEffectIsolationContract"]["evidence"]["unexpected_write_target_count"] == 0
     assert matrix["contract_statuses"]["DeadLetterQueueContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ConsumerCheckpointContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ProjectionHandlerIdempotencyContract"]["status"] == "pass"

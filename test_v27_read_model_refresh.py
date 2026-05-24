@@ -78,6 +78,7 @@ def test_refresh_writes_projection_snapshot_and_health_atomically_consumable(tmp
     assert snapshot["read_model"]["read_model_seq"] == 1
     assert health["verifier_report"]["blocking_reasons"] == []
     for contract_id in (
+        "ReplaySideEffectIsolationContract",
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",
         "ConsumerCheckpointContract",
@@ -85,6 +86,14 @@ def test_refresh_writes_projection_snapshot_and_health_atomically_consumable(tmp
         "CacheInvalidationContract",
     ):
         assert consumer_health["contracts"][contract_id]["status"] == "pass"
+    replay = consumer_health["contracts"]["ReplaySideEffectIsolationContract"]["evidence"]
+    assert replay["provider_calls_allowed"] is False
+    assert replay["provider_call_count"] == 0
+    assert replay["external_side_effect_count"] == 0
+    assert replay["unexpected_write_target_count"] == 0
+    assert replay["projection_hash_ok"] is True
+    assert replay["snapshot_hash_ok"] is True
+    assert "projection_consumer_health" in replay["write_targets_allowed"]
     assert checkpoint["processed_global_seq"] == 1
     assert checkpoint["projection_hash"] == snapshot["projection_hash"]
     assert cache_manifest["source_event_seq"] == 1

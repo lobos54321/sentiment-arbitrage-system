@@ -20,6 +20,15 @@ DLQ_FILE = "projection_dlq.jsonl"
 CHECKPOINT_FILE = "projection_consumer_checkpoint.json"
 CACHE_MANIFEST_FILE = "projection_cache_manifest.json"
 CONSUMER_HEALTH_FILE = "projection_consumer_health.json"
+REPLAY_SIDE_EFFECT_ALLOWED_TARGETS = [
+    "projection",
+    "snapshot",
+    "projection_outbox",
+    "projection_dlq",
+    "consumer_checkpoint",
+    "projection_cache_manifest",
+    "projection_consumer_health",
+]
 
 
 def _utc_now_iso():
@@ -122,6 +131,62 @@ def _idempotency_duplicate_count(records):
             duplicates += 1
         seen.add(key)
     return duplicates
+
+
+def _replay_side_effect_evidence(
+    *,
+    batch_id,
+    output_dir,
+    projection_path,
+    snapshot_path,
+    outbox_path,
+    dlq_path,
+    checkpoint_path,
+    cache_manifest_path,
+    health_path,
+    projection_hash_ok,
+    snapshot_hash_ok,
+):
+    write_target_paths = {
+        "projection": str(projection_path),
+        "snapshot": str(snapshot_path),
+        "projection_outbox": str(outbox_path),
+        "projection_dlq": str(dlq_path),
+        "consumer_checkpoint": str(checkpoint_path),
+        "projection_cache_manifest": str(cache_manifest_path),
+        "projection_consumer_health": str(health_path),
+    }
+    unexpected_write_targets = sorted(set(write_target_paths) - set(REPLAY_SIDE_EFFECT_ALLOWED_TARGETS))
+    evidence = {
+        "replay_id": batch_id,
+        "consumer_name": CONSUMER_NAME,
+        "side_effect_mode": "read_model_refresh_replay_artifact_allowlist",
+        "output_dir": str(output_dir),
+        "write_targets_allowed": REPLAY_SIDE_EFFECT_ALLOWED_TARGETS,
+        "write_target_paths": write_target_paths,
+        "write_target_allowlist_hash": sha256_hex(REPLAY_SIDE_EFFECT_ALLOWED_TARGETS),
+        "observed_write_target_count": len(write_target_paths),
+        "unexpected_write_target_count": len(unexpected_write_targets),
+        "unexpected_write_targets": unexpected_write_targets,
+        "provider_calls_allowed": False,
+        "provider_call_count": 0,
+        "external_side_effect_count": 0,
+        "projection_hash_ok": projection_hash_ok,
+        "snapshot_hash_ok": snapshot_hash_ok,
+    }
+    passed = (
+        evidence["unexpected_write_target_count"] == 0
+        and evidence["provider_call_count"] == 0
+        and evidence["external_side_effect_count"] == 0
+        and projection_hash_ok
+        and snapshot_hash_ok
+    )
+    return _contract(
+        "ReplaySideEffectIsolationContract",
+        passed,
+        "replay_side_effect_isolation_unverified",
+        evidence,
+    )
 
 
 def _unresolved_dlq_entries(records):
@@ -254,6 +319,19 @@ def write_projection_consumer_evidence(
         and int(cache_manifest.get("ttl_ms") or 0) > 0
     )
     contracts = {
+        "ReplaySideEffectIsolationContract": _replay_side_effect_evidence(
+            batch_id=batch_id,
+            output_dir=output_dir,
+            projection_path=projection_path,
+            snapshot_path=snapshot_path,
+            outbox_path=outbox_path,
+            dlq_path=dlq_path,
+            checkpoint_path=checkpoint_path,
+            cache_manifest_path=cache_manifest_path,
+            health_path=health_path,
+            projection_hash_ok=projection_hash_ok,
+            snapshot_hash_ok=snapshot_hash_ok,
+        ),
         "TransactionalOutboxContract": _contract(
             "TransactionalOutboxContract",
             outbox_stuck == 0 and idempotency_duplicates == 0 and projection_hash_ok and snapshot_hash_ok,
@@ -351,6 +429,7 @@ def read_projection_consumer_health(path):
             "available": False,
             "path": str(path),
             "blocking_contracts": [
+                "ReplaySideEffectIsolationContract",
                 "TransactionalOutboxContract",
                 "DeadLetterQueueContract",
                 "ConsumerCheckpointContract",
@@ -379,6 +458,7 @@ def read_projection_consumer_health(path):
             "available": False,
             "path": str(path),
             "blocking_contracts": [
+                "ReplaySideEffectIsolationContract",
                 "TransactionalOutboxContract",
                 "DeadLetterQueueContract",
                 "ConsumerCheckpointContract",

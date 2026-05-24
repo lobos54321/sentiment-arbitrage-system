@@ -50,6 +50,7 @@ MODE_REQUIREMENTS = {
         "EventSequencerContract",
         "TieBreakOrderingContract",
         "TransactionalOutboxContract",
+        "ReplaySideEffectIsolationContract",
         "DeadLetterQueueContract",
         "ProjectionOrderingContract",
         "ConsumerCheckpointContract",
@@ -554,6 +555,7 @@ def build_contract_statuses(
         resume_drain_evidence,
     )
     for contract_id in (
+        "ReplaySideEffectIsolationContract",
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",
         "ConsumerCheckpointContract",

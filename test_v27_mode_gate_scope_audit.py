@@ -20,7 +20,8 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert normal["scope_complete"] is False
     assert normal["missing_count"] > 100
     assert "AccessControlContract" in normal["missing_contracts"]
-    assert "ReplaySideEffectIsolationContract" in normal["missing_contracts"]
+    assert "ReplaySideEffectIsolationContract" not in normal["missing_contracts"]
+    assert "ManualReplaySafetyContract" in normal["missing_contracts"]
     assert "ProviderByzantineQuorumContract" in normal["missing_contracts"]
     assert "HumanReadableReasonContract" in normal["missing_contracts"]
     assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is False
