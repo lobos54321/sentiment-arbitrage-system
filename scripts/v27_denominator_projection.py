@@ -45,6 +45,8 @@ RANDOMNESS_CONTROL_EVENT_TYPE = "randomness_control_recorded"
 DEPLOYMENT_ROLLOUT_EVENT_TYPE = "deployment_rollout_state_recorded"
 WORKER_FLEET_EVENT_TYPE = "worker_fleet_heartbeat_recorded"
 BACKUP_RESTORE_DRILL_EVENT_TYPE = "backup_restore_drill_recorded"
+INCIDENT_EVIDENCE_FREEZE_EVENT_TYPE = "incident_evidence_freeze_recorded"
+CIRCUIT_BREAKER_RESUME_EVENT_TYPE = "circuit_breaker_resume_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -69,6 +71,8 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     DEPLOYMENT_ROLLOUT_EVENT_TYPE,
     WORKER_FLEET_EVENT_TYPE,
     BACKUP_RESTORE_DRILL_EVENT_TYPE,
+    INCIDENT_EVIDENCE_FREEZE_EVENT_TYPE,
+    CIRCUIT_BREAKER_RESUME_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1095,6 +1099,88 @@ def _extract_backup_restore_drill(event, bags):
         "missing_fields": sorted(set(missing_fields)),
         "violation_fields": sorted(set(violation_fields)),
         "backup_restore_drill_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_incident_evidence_freeze(event, bags):
+    if event.get("event_type") != INCIDENT_EVIDENCE_FREEZE_EVENT_TYPE:
+        return None
+    frozen_event_range = _extract_scalar(bags, [("frozen_event_range",)], default={})
+    values = {
+        "freeze_id": _extract_scalar(bags, [("freeze_id",)]),
+        "incident_id": _extract_scalar(bags, [("incident_id",)]),
+        "frozen_event_range": frozen_event_range,
+        "frozen_config_hash": _extract_scalar(bags, [("frozen_config_hash",)]),
+        "frozen_at": _extract_scalar(bags, [("frozen_at",)]),
+        "freeze_status": _extract_scalar(bags, [("freeze_status",), ("status",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("freeze_id", "incident_id", "frozen_event_range", "frozen_config_hash", "frozen_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()) or (field == "frozen_event_range" and not isinstance(value, dict)):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("frozen_config_hash") and not _valid_sha256_hex(values.get("frozen_config_hash")):
+        violation_fields.append("frozen_config_hash_sha256")
+    frozen_at_sec = _timestamp_epoch_seconds(values.get("frozen_at"))
+    if values.get("frozen_at") and frozen_at_sec is None:
+        violation_fields.append("frozen_at_parseable")
+    if isinstance(frozen_event_range, dict):
+        start_seq = _as_int(frozen_event_range.get("start_seq"), default=-1)
+        end_seq = _as_int(frozen_event_range.get("end_seq"), default=-1)
+        if start_seq < 0 or end_seq < 0:
+            violation_fields.append("frozen_event_range_seq_required")
+        elif end_seq < start_seq:
+            violation_fields.append("frozen_event_range_inverted")
+    if values.get("freeze_status") and str(values.get("freeze_status")).strip().lower() not in {"frozen", "sealed", "complete", "completed", "ok"}:
+        violation_fields.append("freeze_status_not_frozen")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "incident_evidence_freeze_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_circuit_breaker_resume(event, bags):
+    if event.get("event_type") != CIRCUIT_BREAKER_RESUME_EVENT_TYPE:
+        return None
+    root_cause_fixed = _extract_flag(bags, [("root_cause_fixed",)])
+    health_checks_passed = _extract_flag(bags, [("health_checks_passed",)])
+    values = {
+        "breaker_id": _extract_scalar(bags, [("breaker_id",)]),
+        "root_cause_fixed": root_cause_fixed,
+        "evidence_freeze_id": _extract_scalar(bags, [("evidence_freeze_id",), ("freeze_id",)]),
+        "health_checks_passed": health_checks_passed,
+        "resumed_at": _extract_scalar(bags, [("resumed_at",)]),
+        "resume_status": _extract_scalar(bags, [("resume_status",), ("status",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("breaker_id", "root_cause_fixed", "evidence_freeze_id", "health_checks_passed", "resumed_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if root_cause_fixed is False:
+        violation_fields.append("root_cause_not_fixed")
+    if health_checks_passed is False:
+        violation_fields.append("health_checks_not_passed")
+    resumed_at_sec = _timestamp_epoch_seconds(values.get("resumed_at"))
+    if values.get("resumed_at") and resumed_at_sec is None:
+        violation_fields.append("resumed_at_parseable")
+    if values.get("resume_status") and str(values.get("resume_status")).strip().lower() not in {"resumed", "complete", "completed", "ok"}:
+        violation_fields.append("resume_status_not_resumed")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "circuit_breaker_resume_valid": not missing_fields and not violation_fields,
         "source_event_id": event.get("event_id"),
         "global_seq": event.get("global_seq"),
     }
@@ -2237,6 +2323,8 @@ def _contract_evidence_from_records(
     deployment_rollouts=None,
     worker_fleet_heartbeats=None,
     backup_restore_drills=None,
+    incident_evidence_freezes=None,
+    circuit_breaker_resumes=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -2252,6 +2340,12 @@ def _contract_evidence_from_records(
     raw_backup_restore_drill_count = len(backup_restore_drills or [])
     backup_restore_drills = _latest_by_key(backup_restore_drills or [], "drill_id")
     superseded_backup_restore_drill_count = max(0, raw_backup_restore_drill_count - len(backup_restore_drills))
+    raw_incident_evidence_freeze_count = len(incident_evidence_freezes or [])
+    incident_evidence_freezes = _latest_by_key(incident_evidence_freezes or [], "freeze_id")
+    superseded_incident_evidence_freeze_count = max(0, raw_incident_evidence_freeze_count - len(incident_evidence_freezes))
+    raw_circuit_breaker_resume_count = len(circuit_breaker_resumes or [])
+    circuit_breaker_resumes = _latest_by_key(circuit_breaker_resumes or [], "breaker_id")
+    superseded_circuit_breaker_resume_count = max(0, raw_circuit_breaker_resume_count - len(circuit_breaker_resumes))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -3023,6 +3117,41 @@ def _contract_evidence_from_records(
         for item in backup_restore_drills
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_incident_evidence_freezes = [
+        item
+        for item in incident_evidence_freezes
+        if item.get("missing_fields")
+    ]
+    incident_evidence_freeze_violations = [
+        item
+        for item in incident_evidence_freezes
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    valid_freeze_ids = {
+        item.get("freeze_id")
+        for item in incident_evidence_freezes
+        if item.get("incident_evidence_freeze_valid") is True and item.get("freeze_id")
+    }
+    malformed_circuit_breaker_resumes = [
+        item
+        for item in circuit_breaker_resumes
+        if item.get("missing_fields")
+    ]
+    circuit_breaker_resume_violations = [
+        item
+        for item in circuit_breaker_resumes
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    circuit_breaker_resume_reference_violations = [
+        {
+            "breaker_id": item.get("breaker_id"),
+            "evidence_freeze_id": item.get("evidence_freeze_id"),
+            "violation_fields": ["evidence_freeze_id_not_frozen"],
+            "source_event_id": item.get("source_event_id"),
+        }
+        for item in circuit_breaker_resumes
+        if item.get("evidence_freeze_id") and item.get("evidence_freeze_id") not in valid_freeze_ids
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -3368,6 +3497,73 @@ def _contract_evidence_from_records(
             "evidence_sources": sorted({item.get("evidence_source") for item in backup_restore_drills if item.get("evidence_source")}),
             "backup_restore_drill_projection_version": "v2.7.0.backup_restore_drill.v1",
         },
+        "IncidentEvidenceFreezeContract": {
+            "eligible_incident_evidence_freeze_records": len(incident_evidence_freezes),
+            "incident_evidence_freeze_observation_count": raw_incident_evidence_freeze_count,
+            "current_incident_evidence_freeze_count": len(incident_evidence_freezes),
+            "superseded_incident_evidence_freeze_event_count": superseded_incident_evidence_freeze_count,
+            "valid_incident_evidence_freeze_count": sum(1 for item in incident_evidence_freezes if item.get("incident_evidence_freeze_valid") is True),
+            "malformed_count": len(malformed_incident_evidence_freezes),
+            "malformed_incident_evidence_freezes": [
+                {
+                    "freeze_id": item.get("freeze_id"),
+                    "incident_id": item.get("incident_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_incident_evidence_freezes
+            ],
+            "incident_evidence_freeze_violation_count": len(incident_evidence_freeze_violations),
+            "incident_evidence_freeze_violations": [
+                {
+                    "freeze_id": item.get("freeze_id"),
+                    "incident_id": item.get("incident_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in incident_evidence_freeze_violations
+            ],
+            "freeze_ids": sorted({item.get("freeze_id") for item in incident_evidence_freezes if item.get("freeze_id")}),
+            "incident_ids": sorted({item.get("incident_id") for item in incident_evidence_freezes if item.get("incident_id")}),
+            "freeze_statuses": sorted({item.get("freeze_status") for item in incident_evidence_freezes if item.get("freeze_status")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in incident_evidence_freezes if item.get("evidence_source")}),
+            "incident_evidence_freeze_projection_version": "v2.7.0.incident_evidence_freeze.v1",
+        },
+        "CircuitBreakerResumeContract": {
+            "eligible_circuit_breaker_resume_records": len(circuit_breaker_resumes),
+            "circuit_breaker_resume_observation_count": raw_circuit_breaker_resume_count,
+            "current_circuit_breaker_resume_count": len(circuit_breaker_resumes),
+            "superseded_circuit_breaker_resume_event_count": superseded_circuit_breaker_resume_count,
+            "valid_circuit_breaker_resume_count": sum(1 for item in circuit_breaker_resumes if item.get("circuit_breaker_resume_valid") is True),
+            "malformed_count": len(malformed_circuit_breaker_resumes),
+            "malformed_circuit_breaker_resumes": [
+                {
+                    "breaker_id": item.get("breaker_id"),
+                    "evidence_freeze_id": item.get("evidence_freeze_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_circuit_breaker_resumes
+            ],
+            "circuit_breaker_resume_violation_count": len(circuit_breaker_resume_violations) + len(circuit_breaker_resume_reference_violations),
+            "circuit_breaker_resume_violations": [
+                {
+                    "breaker_id": item.get("breaker_id"),
+                    "evidence_freeze_id": item.get("evidence_freeze_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in circuit_breaker_resume_violations
+            ]
+            + circuit_breaker_resume_reference_violations,
+            "breaker_ids": sorted({item.get("breaker_id") for item in circuit_breaker_resumes if item.get("breaker_id")}),
+            "evidence_freeze_ids": sorted({item.get("evidence_freeze_id") for item in circuit_breaker_resumes if item.get("evidence_freeze_id")}),
+            "resume_statuses": sorted({item.get("resume_status") for item in circuit_breaker_resumes if item.get("resume_status")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in circuit_breaker_resumes if item.get("evidence_source")}),
+            "circuit_breaker_resume_projection_version": "v2.7.0.circuit_breaker_resume.v1",
+        },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
             "idempotency_observation_count": len(all_idempotency_candidates),
@@ -3666,6 +3862,8 @@ def build_denominator_projection(
         "deployment_rollout_state_recorded_events": 0,
         "worker_fleet_heartbeat_recorded_events": 0,
         "backup_restore_drill_recorded_events": 0,
+        "incident_evidence_freeze_recorded_events": 0,
+        "circuit_breaker_resume_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -3714,6 +3912,8 @@ def build_denominator_projection(
             "DeploymentRolloutStateMachine": {},
             "WorkerFleetConsistencyContract": {},
             "BackupRestoreDrillContract": {},
+            "IncidentEvidenceFreezeContract": {},
+            "CircuitBreakerResumeContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -3748,6 +3948,8 @@ def build_denominator_projection(
             "deployment_rollout_state_machine_ok": False,
             "worker_fleet_consistency_ok": False,
             "backup_restore_drill_ok": False,
+            "incident_evidence_freeze_ok": False,
+            "circuit_breaker_resume_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -3781,6 +3983,8 @@ def build_denominator_projection(
     deployment_rollouts = []
     worker_fleet_heartbeats = []
     backup_restore_drills = []
+    incident_evidence_freezes = []
+    circuit_breaker_resumes = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -3870,6 +4074,18 @@ def build_denominator_projection(
             backup_restore_drill = _extract_backup_restore_drill(event, _payload_bags(event))
             if backup_restore_drill:
                 backup_restore_drills.append(backup_restore_drill)
+            continue
+        if event.get("event_type") == INCIDENT_EVIDENCE_FREEZE_EVENT_TYPE:
+            projection["incident_evidence_freeze_recorded_events"] += 1
+            incident_evidence_freeze = _extract_incident_evidence_freeze(event, _payload_bags(event))
+            if incident_evidence_freeze:
+                incident_evidence_freezes.append(incident_evidence_freeze)
+            continue
+        if event.get("event_type") == CIRCUIT_BREAKER_RESUME_EVENT_TYPE:
+            projection["circuit_breaker_resume_recorded_events"] += 1
+            circuit_breaker_resume = _extract_circuit_breaker_resume(event, _payload_bags(event))
+            if circuit_breaker_resume:
+                circuit_breaker_resumes.append(circuit_breaker_resume)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -4042,6 +4258,8 @@ def build_denominator_projection(
         deployment_rollouts=deployment_rollouts,
         worker_fleet_heartbeats=worker_fleet_heartbeats,
         backup_restore_drills=backup_restore_drills,
+        incident_evidence_freezes=incident_evidence_freezes,
+        circuit_breaker_resumes=circuit_breaker_resumes,
     )
     if progress_callback:
         progress_callback(
@@ -4221,6 +4439,18 @@ def build_denominator_projection(
         and contract_evidence["BackupRestoreDrillContract"]["valid_backup_restore_drill_count"] > 0
         and contract_evidence["BackupRestoreDrillContract"]["malformed_count"] == 0
         and contract_evidence["BackupRestoreDrillContract"]["backup_restore_drill_violation_count"] == 0
+    )
+    projection["health"]["incident_evidence_freeze_ok"] = (
+        contract_evidence["IncidentEvidenceFreezeContract"]["eligible_incident_evidence_freeze_records"] > 0
+        and contract_evidence["IncidentEvidenceFreezeContract"]["valid_incident_evidence_freeze_count"] > 0
+        and contract_evidence["IncidentEvidenceFreezeContract"]["malformed_count"] == 0
+        and contract_evidence["IncidentEvidenceFreezeContract"]["incident_evidence_freeze_violation_count"] == 0
+    )
+    projection["health"]["circuit_breaker_resume_ok"] = (
+        contract_evidence["CircuitBreakerResumeContract"]["eligible_circuit_breaker_resume_records"] > 0
+        and contract_evidence["CircuitBreakerResumeContract"]["valid_circuit_breaker_resume_count"] > 0
+        and contract_evidence["CircuitBreakerResumeContract"]["malformed_count"] == 0
+        and contract_evidence["CircuitBreakerResumeContract"]["circuit_breaker_resume_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

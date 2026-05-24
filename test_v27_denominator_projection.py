@@ -357,6 +357,60 @@ def append_backup_restore_drill(
     )
 
 
+def append_incident_evidence_freeze(
+    log,
+    *,
+    freeze_id="freeze-unit-v1",
+    incident_id="incident-unit-v1",
+    frozen_event_range=None,
+    frozen_config_hash=None,
+    frozen_at="2026-01-15T00:02:00Z",
+    freeze_status="frozen",
+):
+    payload = {
+        "freeze_id": freeze_id,
+        "incident_id": incident_id,
+        "frozen_event_range": frozen_event_range if frozen_event_range is not None else {"start_seq": 1, "end_seq": 42},
+        "frozen_config_hash": frozen_config_hash or sha256_hex({"config": "frozen", "incident_id": incident_id}),
+        "frozen_at": frozen_at,
+        "freeze_status": freeze_status,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="incident_evidence_freeze_recorded",
+        aggregate_id=f"incident_evidence_freeze:{freeze_id}",
+        idempotency_key=f"incident_evidence_freeze:{freeze_id}:{incident_id}",
+        payload=payload,
+    )
+
+
+def append_circuit_breaker_resume(
+    log,
+    *,
+    breaker_id="breaker-unit-v1",
+    evidence_freeze_id="freeze-unit-v1",
+    root_cause_fixed=True,
+    health_checks_passed=True,
+    resumed_at="2026-01-15T00:03:00Z",
+    resume_status="resumed",
+):
+    payload = {
+        "breaker_id": breaker_id,
+        "root_cause_fixed": root_cause_fixed,
+        "evidence_freeze_id": evidence_freeze_id,
+        "health_checks_passed": health_checks_passed,
+        "resumed_at": resumed_at,
+        "resume_status": resume_status,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="circuit_breaker_resume_recorded",
+        aggregate_id=f"circuit_breaker_resume:{breaker_id}",
+        idempotency_key=f"circuit_breaker_resume:{breaker_id}:{evidence_freeze_id}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -856,6 +910,70 @@ def test_denominator_projection_rejects_invalid_backup_restore_drill(tmp_path):
         "restore_completed_before_started",
         "restore_status_not_passed",
         "restored_world_hash_sha256",
+    ]
+
+
+def test_denominator_projection_consumes_incident_freeze_and_breaker_resume_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_incident_evidence_freeze(log)
+    append_circuit_breaker_resume(log)
+
+    projection = build_denominator_projection(tmp_path)
+    freeze = projection["contract_evidence"]["IncidentEvidenceFreezeContract"]
+    resume = projection["contract_evidence"]["CircuitBreakerResumeContract"]
+
+    assert projection["incident_evidence_freeze_recorded_events"] == 1
+    assert projection["circuit_breaker_resume_recorded_events"] == 1
+    assert projection["health"]["incident_evidence_freeze_ok"] is True
+    assert projection["health"]["circuit_breaker_resume_ok"] is True
+    assert freeze["valid_incident_evidence_freeze_count"] == 1
+    assert freeze["incident_evidence_freeze_violation_count"] == 0
+    assert freeze["freeze_ids"] == ["freeze-unit-v1"]
+    assert resume["valid_circuit_breaker_resume_count"] == 1
+    assert resume["circuit_breaker_resume_violation_count"] == 0
+    assert resume["evidence_freeze_ids"] == ["freeze-unit-v1"]
+
+
+def test_denominator_projection_rejects_bad_incident_freeze_and_unfrozen_resume(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_incident_evidence_freeze(
+        log,
+        frozen_event_range={"start_seq": 42, "end_seq": 1},
+        frozen_config_hash="not-a-sha",
+        frozen_at="not-a-time",
+        freeze_status="open",
+    )
+    append_circuit_breaker_resume(
+        log,
+        evidence_freeze_id="missing-freeze",
+        root_cause_fixed=False,
+        health_checks_passed=False,
+        resumed_at="not-a-time",
+        resume_status="blocked",
+    )
+
+    projection = build_denominator_projection(tmp_path)
+    freeze = projection["contract_evidence"]["IncidentEvidenceFreezeContract"]
+    resume = projection["contract_evidence"]["CircuitBreakerResumeContract"]
+
+    assert projection["health"]["incident_evidence_freeze_ok"] is False
+    assert projection["health"]["circuit_breaker_resume_ok"] is False
+    assert freeze["incident_evidence_freeze_violation_count"] == 1
+    assert freeze["incident_evidence_freeze_violations"][0]["violation_fields"] == [
+        "freeze_status_not_frozen",
+        "frozen_at_parseable",
+        "frozen_config_hash_sha256",
+        "frozen_event_range_inverted",
+    ]
+    assert resume["circuit_breaker_resume_violation_count"] == 2
+    assert resume["circuit_breaker_resume_violations"][0]["violation_fields"] == [
+        "health_checks_not_passed",
+        "resume_status_not_resumed",
+        "resumed_at_parseable",
+        "root_cause_not_fixed",
+    ]
+    assert resume["circuit_breaker_resume_violations"][1]["violation_fields"] == [
+        "evidence_freeze_id_not_frozen",
     ]
 
 

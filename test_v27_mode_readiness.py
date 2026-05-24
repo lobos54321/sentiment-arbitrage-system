@@ -263,6 +263,41 @@ def append_backup_restore_drill_event(event_log_dir):
     )
 
 
+def append_incident_evidence_freeze_event(event_log_dir):
+    freeze_id = "freeze-unit-v1"
+    V27EventLog(event_log_dir).append_event(
+        event_type="incident_evidence_freeze_recorded",
+        aggregate_id=f"incident_evidence_freeze:{freeze_id}",
+        idempotency_key=f"incident_evidence_freeze:{freeze_id}:incident-unit-v1",
+        payload={
+            "freeze_id": freeze_id,
+            "incident_id": "incident-unit-v1",
+            "frozen_event_range": {"start_seq": 1, "end_seq": 42},
+            "frozen_config_hash": sha256_hex({"config": "frozen", "incident_id": "incident-unit-v1"}),
+            "frozen_at": "2026-01-15T00:02:00Z",
+            "freeze_status": "frozen",
+            "evidence_source": "unit",
+        },
+    )
+
+
+def append_circuit_breaker_resume_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="circuit_breaker_resume_recorded",
+        aggregate_id="circuit_breaker_resume:breaker-unit-v1",
+        idempotency_key="circuit_breaker_resume:breaker-unit-v1:freeze-unit-v1",
+        payload={
+            "breaker_id": "breaker-unit-v1",
+            "root_cause_fixed": True,
+            "evidence_freeze_id": "freeze-unit-v1",
+            "health_checks_passed": True,
+            "resumed_at": "2026-01-15T00:03:00Z",
+            "resume_status": "resumed",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -710,6 +745,37 @@ def test_mode_readiness_consumes_backup_restore_drill_for_normal_tiny(tmp_path):
     assert backup_restore["status"] == "pass"
     assert backup_restore["evidence"]["valid_backup_restore_drill_count"] == 1
     assert "BackupRestoreDrillContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_incident_freeze_and_breaker_resume_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_incident_evidence_freeze_event(event_log_dir)
+    append_circuit_breaker_resume_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    freeze = matrix["contract_statuses"]["IncidentEvidenceFreezeContract"]
+    resume = matrix["contract_statuses"]["CircuitBreakerResumeContract"]
+    assert freeze["status"] == "pass"
+    assert resume["status"] == "pass"
+    assert freeze["evidence"]["valid_incident_evidence_freeze_count"] == 1
+    assert resume["evidence"]["valid_circuit_breaker_resume_count"] == 1
+    assert "IncidentEvidenceFreezeContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "CircuitBreakerResumeContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

@@ -418,6 +418,20 @@ def build_contract_statuses(
         "backup_restore_drill_missing_malformed_or_invalid",
         backup_restore_evidence,
     )
+    incident_freeze_evidence = contract_evidence.get("IncidentEvidenceFreezeContract") or {}
+    statuses["IncidentEvidenceFreezeContract"] = _status(
+        "IncidentEvidenceFreezeContract",
+        "pass" if projection_built and projection_health.get("incident_evidence_freeze_ok") else "missing_evidence",
+        "incident_evidence_freeze_missing_malformed_or_invalid",
+        incident_freeze_evidence,
+    )
+    circuit_breaker_resume_evidence = contract_evidence.get("CircuitBreakerResumeContract") or {}
+    statuses["CircuitBreakerResumeContract"] = _status(
+        "CircuitBreakerResumeContract",
+        "pass" if projection_built and projection_health.get("circuit_breaker_resume_ok") else "missing_evidence",
+        "circuit_breaker_resume_missing_malformed_or_invalid",
+        circuit_breaker_resume_evidence,
+    )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",
@@ -545,8 +559,6 @@ def build_contract_statuses(
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "IncidentEvidenceFreezeContract",
-        "CircuitBreakerResumeContract",
         "QueueDurabilityContract",
         "CandidateCancellationContract",
         "RetryStormControlContract",
