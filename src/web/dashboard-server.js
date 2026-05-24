@@ -55,6 +55,7 @@ const dbPath = process.env.DB_PATH || './data/sentiment_arb.db';
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
 const getExperimentLeaderboard = () => [];
 const listRecentExperiments = () => [];
+export const V27_API_RESPONSE_ENVELOPE_VERSION = 'v2.7.0.api_response_envelope.v1';
 const PAPER_REPORT_COOLDOWN_MS = Math.max(
   0,
   parseInt(process.env.PAPER_REPORT_COOLDOWN_MS || '5000', 10) || 5000
@@ -69,11 +70,29 @@ export function apiJsonHeaders(cacheControl = 'no-store') {
   };
 }
 
+export function buildApiResponseErrorShape(payload = {}) {
+  const hasError = Boolean(payload.error || payload.error_code || payload.accepted === false);
+  return {
+    has_error: hasError,
+    accepted: payload.accepted === undefined ? null : Boolean(payload.accepted),
+    error_field: payload.error ? 'error' : null,
+    error_code: payload.error_code || null,
+    status: payload.status || null,
+  };
+}
+
+export function apiEnvelopePayloadForHash(payload = {}) {
+  const { payload_hash, ...unsignedPayload } = payload || {};
+  return unsignedPayload;
+}
+
 export function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result = {}, options = {}) {
   const generatedAt = options.generatedAt || new Date().toISOString();
   const payload = {
     generated_at: generatedAt,
     materialized: false,
+    endpoint: options.endpoint || null,
+    envelope_version: V27_API_RESPONSE_ENVELOPE_VERSION,
     response_schema_version: responseSchemaVersion,
     refresh_schema_version: responseSchemaVersion,
     ...result,
@@ -84,6 +103,8 @@ export function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result 
   if (payload.accepted === false && !payload.error_code) {
     payload.error_code = payload.error || 'manual_evidence_request_rejected';
   }
+  payload.error_shape = buildApiResponseErrorShape(payload);
+  payload.payload_hash = auditSha256Hex(apiEnvelopePayloadForHash(payload));
   return payload;
 }
 
@@ -8488,7 +8509,7 @@ const server = http.createServer(async (req, res) => {
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
     });
     res.writeHead(refresh.accepted ? 202 : 409, apiJsonHeaders());
-    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh), null, 2));
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh, { endpoint: url.pathname }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-recovery-control-mirror') {
     if (!requirePost(req, res)) return;
@@ -8509,7 +8530,7 @@ const server = http.createServer(async (req, res) => {
       recoveryVersion: url.searchParams.get('recovery_version') || undefined,
     });
     res.writeHead(refresh.accepted ? 202 : 409, apiJsonHeaders());
-    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh), null, 2));
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh, { endpoint: url.pathname }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-raw-provider-evidence-mirror') {
     if (!requirePost(req, res)) return;
@@ -8541,7 +8562,7 @@ const server = http.createServer(async (req, res) => {
       defaultEndpoint: url.searchParams.get('default_endpoint') || undefined,
     });
     res.writeHead(mirror.accepted ? 202 : 409, apiJsonHeaders());
-    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror), null, 2));
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror, { endpoint: url.pathname }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-raw-provider-probe-evidence') {
     if (!requirePost(req, res)) return;
@@ -8574,7 +8595,7 @@ const server = http.createServer(async (req, res) => {
       endpoint: url.searchParams.get('endpoint') || undefined,
     });
     res.writeHead(record.accepted ? 202 : 409, apiJsonHeaders());
-    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record), null, 2));
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record, { endpoint: url.pathname }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-randomness-control-mirror') {
     if (!requirePost(req, res)) return;
@@ -8607,7 +8628,7 @@ const server = http.createServer(async (req, res) => {
       environmentId: url.searchParams.get('environment_id') || undefined,
     });
     res.writeHead(mirror.accepted ? 202 : 409, apiJsonHeaders());
-    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror), null, 2));
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror, { endpoint: url.pathname }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-normal-tiny-ops-evidence') {
     if (!requirePost(req, res)) return;
@@ -8633,7 +8654,7 @@ const server = http.createServer(async (req, res) => {
       workerRoles: url.searchParams.getAll('worker_role').flatMap((value) => String(value).split(',')).map((value) => value.trim()).filter(Boolean),
     });
     res.writeHead(record.accepted ? 202 : 409, apiJsonHeaders());
-    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record), null, 2));
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record, { endpoint: url.pathname }), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-mode-readiness') {
     if (!checkAuth(req, url, res)) return;

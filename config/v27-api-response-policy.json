@@ -20,7 +20,7 @@
         "rejected_response_error_required": true
       },
       "cache_control": "no-store",
-      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh)"
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh, { endpoint: url.pathname })"
     },
     {
       "endpoint": "/api/paper/v27-recovery-control-mirror",
@@ -39,7 +39,7 @@
         "rejected_response_error_required": true
       },
       "cache_control": "no-store",
-      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh)"
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh, { endpoint: url.pathname })"
     },
     {
       "endpoint": "/api/paper/v27-raw-provider-evidence-mirror",
@@ -58,7 +58,7 @@
         "rejected_response_error_required": true
       },
       "cache_control": "no-store",
-      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror)"
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror, { endpoint: url.pathname })"
     },
     {
       "endpoint": "/api/paper/v27-raw-provider-probe-evidence",
@@ -77,7 +77,7 @@
         "rejected_response_error_required": true
       },
       "cache_control": "no-store",
-      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record)"
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record, { endpoint: url.pathname })"
     },
     {
       "endpoint": "/api/paper/v27-randomness-control-mirror",
@@ -96,7 +96,7 @@
         "rejected_response_error_required": true
       },
       "cache_control": "no-store",
-      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror)"
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror, { endpoint: url.pathname })"
     },
     {
       "endpoint": "/api/paper/v27-normal-tiny-ops-evidence",
@@ -115,7 +115,7 @@
         "rejected_response_error_required": true
       },
       "cache_control": "no-store",
-      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record)"
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record, { endpoint: url.pathname })"
     }
   ]
 }

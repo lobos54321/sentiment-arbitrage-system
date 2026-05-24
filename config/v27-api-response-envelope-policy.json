@@ -1,0 +1,77 @@
+{
+  "schema_version": "v2.7.0.api_response_envelope_policy.v1",
+  "scope": "v27_manual_evidence_api_response_envelopes",
+  "source_file": "src/web/dashboard-server.js",
+  "base_response_policy_path": "config/v27-api-response-policy.json",
+  "failure_action": "api_envelope_invalid",
+  "envelope_version": "v2.7.0.api_response_envelope.v1",
+  "hash_algorithm": "sha256_canonical_json_without_payload_hash",
+  "required_fields": ["endpoint", "envelope_version", "payload_hash", "error_shape", "generated_at"],
+  "error_shape": {
+    "required_fields": ["has_error", "accepted", "error_field", "error_code", "status"],
+    "accepted_false_requires_error": true,
+    "accepted_false_requires_error_code": true
+  },
+  "sample_cases": [
+    {
+      "sample_id": "accepted_manual_evidence",
+      "endpoint": "/api/paper/v27-read-model-refresh",
+      "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+      "generated_at": "2026-05-25T00:00:00.000Z",
+      "result": {"accepted": true, "status": "started", "pid": 123},
+      "expected_error_shape": {
+        "has_error": false,
+        "accepted": true,
+        "error_field": null,
+        "error_code": null,
+        "status": "started"
+      }
+    },
+    {
+      "sample_id": "rejected_manual_evidence",
+      "endpoint": "/api/paper/v27-read-model-refresh",
+      "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+      "generated_at": "2026-05-25T00:00:01.000Z",
+      "result": {"accepted": false, "status": "already_running"},
+      "expected_error_shape": {
+        "has_error": true,
+        "accepted": false,
+        "error_field": "error",
+        "error_code": "already_running",
+        "status": "already_running"
+      }
+    }
+  ],
+  "response_envelopes": [
+    {
+      "endpoint": "/api/paper/v27-read-model-refresh",
+      "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh, { endpoint: url.pathname })"
+    },
+    {
+      "endpoint": "/api/paper/v27-recovery-control-mirror",
+      "response_schema_version": "v2.7.0.manual_recovery_control_mirror.v1",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh, { endpoint: url.pathname })"
+    },
+    {
+      "endpoint": "/api/paper/v27-raw-provider-evidence-mirror",
+      "response_schema_version": "v2.7.0.manual_raw_provider_evidence_mirror.v1",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror, { endpoint: url.pathname })"
+    },
+    {
+      "endpoint": "/api/paper/v27-raw-provider-probe-evidence",
+      "response_schema_version": "v2.7.0.manual_raw_provider_probe_evidence.v1",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record, { endpoint: url.pathname })"
+    },
+    {
+      "endpoint": "/api/paper/v27-randomness-control-mirror",
+      "response_schema_version": "v2.7.0.manual_randomness_control_mirror.v1",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror, { endpoint: url.pathname })"
+    },
+    {
+      "endpoint": "/api/paper/v27-normal-tiny-ops-evidence",
+      "response_schema_version": "v2.7.0.manual_normal_tiny_ops_evidence.v1",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record, { endpoint: url.pathname })"
+    }
+  ]
+}

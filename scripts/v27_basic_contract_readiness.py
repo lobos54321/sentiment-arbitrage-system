@@ -36,6 +36,7 @@ DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
 DEFAULT_API_RESPONSE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-policy.json"
+DEFAULT_API_RESPONSE_ENVELOPE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-envelope-policy.json"
 DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
 DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-policy.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
@@ -99,6 +100,18 @@ API_RESPONSE_REQUIRED_FIELDS = (
     "status_code_policy",
     "error_envelope",
     "cache_control",
+)
+API_RESPONSE_ENVELOPE_REQUIRED_FIELDS = (
+    "endpoint",
+    "response_schema_version",
+    "source_anchor",
+)
+API_RESPONSE_ENVELOPE_SPEC_FIELDS = (
+    "endpoint",
+    "envelope_version",
+    "payload_hash",
+    "error_shape",
+    "generated_at",
 )
 ERROR_TAXONOMY_REQUIRED_FIELDS = (
     "error_code",
@@ -1510,6 +1523,238 @@ def verify_api_response_contract(
     )
 
 
+def _api_response_error_shape(payload):
+    has_error = bool(payload.get("error") or payload.get("error_code") or payload.get("accepted") is False)
+    return {
+        "has_error": has_error,
+        "accepted": None if "accepted" not in payload else bool(payload.get("accepted")),
+        "error_field": "error" if payload.get("error") else None,
+        "error_code": payload.get("error_code") or None,
+        "status": payload.get("status") or None,
+    }
+
+
+def _build_api_response_envelope_sample(sample, envelope_version):
+    result = sample.get("result") if isinstance(sample.get("result"), dict) else {}
+    response_schema_version = str(sample.get("response_schema_version") or "")
+    payload = {
+        "generated_at": sample.get("generated_at"),
+        "materialized": False,
+        "endpoint": sample.get("endpoint"),
+        "envelope_version": envelope_version,
+        "response_schema_version": response_schema_version,
+        "refresh_schema_version": response_schema_version,
+        **result,
+    }
+    if payload.get("accepted") is False and not payload.get("error"):
+        payload["error"] = payload.get("status") or "manual_evidence_request_rejected"
+    if payload.get("accepted") is False and not payload.get("error_code"):
+        payload["error_code"] = payload.get("error") or "manual_evidence_request_rejected"
+    payload["error_shape"] = _api_response_error_shape(payload)
+    payload["payload_hash"] = _sha256_json({key: value for key, value in payload.items() if key != "payload_hash"})
+    return payload
+
+
+def verify_api_response_envelope_contract(
+    policy_path=DEFAULT_API_RESPONSE_ENVELOPE_POLICY,
+):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("APIResponseEnvelopeContract", False, "api_response_envelope_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("APIResponseEnvelopeContract", False, "api_response_envelope_policy_not_object", {"policy_path": str(policy_path)})
+
+    base_policy_path = _resolve_project_file(policy.get("base_response_policy_path")) or DEFAULT_API_RESPONSE_POLICY
+    try:
+        base_policy = _load_json(base_policy_path)
+    except Exception as exc:
+        return _contract(
+            "APIResponseEnvelopeContract",
+            False,
+            "api_response_envelope_policy_missing_or_invalid",
+            {
+                "policy_path": str(policy_path),
+                "base_response_policy_path": str(base_policy_path),
+                "error": str(exc),
+            },
+        )
+    if not isinstance(base_policy, dict):
+        return _contract(
+            "APIResponseEnvelopeContract",
+            False,
+            "api_response_envelope_policy_not_object",
+            {
+                "policy_path": str(policy_path),
+                "base_response_policy_path": str(base_policy_path),
+            },
+        )
+
+    source_lines, source_error = _source_lines(policy.get("source_file") or base_policy.get("source_file"))
+    if source_error:
+        return _contract("APIResponseEnvelopeContract", False, "api_response_envelope_source_missing", {"policy_path": str(policy_path), **source_error})
+    source_text = "\n".join(source_lines)
+
+    base_response_policies = base_policy.get("response_policies") if isinstance(base_policy.get("response_policies"), list) else []
+    base_endpoints = {
+        str(item.get("endpoint"))
+        for item in base_response_policies
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+    response_envelopes = policy.get("response_envelopes") if isinstance(policy.get("response_envelopes"), list) else []
+    envelope_version = str(policy.get("envelope_version") or "")
+    required_fields = [str(item) for item in (policy.get("required_fields") or [])]
+
+    schema_violations = []
+    if set(required_fields) != set(API_RESPONSE_ENVELOPE_SPEC_FIELDS):
+        schema_violations.append("required_fields_must_match_contract_catalog")
+    if policy.get("failure_action") != "api_envelope_invalid":
+        schema_violations.append("failure_action_must_be_api_envelope_invalid")
+    if policy.get("hash_algorithm") != "sha256_canonical_json_without_payload_hash":
+        schema_violations.append("hash_algorithm_must_exclude_payload_hash")
+    if not envelope_version:
+        schema_violations.append("envelope_version_required")
+
+    malformed_envelopes = []
+    duplicate_endpoints = []
+    source_violations = []
+    seen_endpoints = set()
+    for index, item in enumerate(response_envelopes):
+        if not isinstance(item, dict):
+            malformed_envelopes.append({"index": index, "endpoint": None, "missing_fields": list(API_RESPONSE_ENVELOPE_REQUIRED_FIELDS), "violations": ["envelope_policy_not_object"]})
+            continue
+        endpoint = str(item.get("endpoint") or "")
+        missing = _missing_required_fields(item, API_RESPONSE_ENVELOPE_REQUIRED_FIELDS)
+        violations = []
+        if endpoint in seen_endpoints:
+            duplicate_endpoints.append(endpoint)
+        if endpoint:
+            seen_endpoints.add(endpoint)
+        if endpoint not in base_endpoints:
+            violations.append("endpoint_not_in_base_response_policy")
+        route_block = _dashboard_route_block(source_lines, endpoint)
+        if not route_block:
+            source_violations.append({"endpoint": endpoint, "reason": "route_not_found"})
+        else:
+            response_schema_version = str(item.get("response_schema_version") or "")
+            source_anchor = str(item.get("source_anchor") or "")
+            if response_schema_version and response_schema_version not in route_block:
+                source_violations.append({"endpoint": endpoint, "reason": "response_schema_version_missing_in_route"})
+            if source_anchor and source_anchor not in route_block:
+                source_violations.append({"endpoint": endpoint, "reason": "source_anchor_missing", "source_anchor": source_anchor})
+            if "{ endpoint: url.pathname }" not in route_block:
+                source_violations.append({"endpoint": endpoint, "reason": "endpoint_binding_missing"})
+        if missing or violations:
+            malformed_envelopes.append({"index": index, "endpoint": endpoint or None, "missing_fields": missing, "violations": violations})
+
+    policy_endpoints = {
+        str(item.get("endpoint"))
+        for item in response_envelopes
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+    uncovered_base_response_endpoints = sorted(base_endpoints - policy_endpoints)
+    unknown_envelope_endpoints = sorted(policy_endpoints - base_endpoints)
+
+    error_shape_policy = policy.get("error_shape") if isinstance(policy.get("error_shape"), dict) else {}
+    error_shape_required_fields = [str(item) for item in (error_shape_policy.get("required_fields") or [])]
+    error_shape_violations = []
+    if set(error_shape_required_fields) != {"has_error", "accepted", "error_field", "error_code", "status"}:
+        error_shape_violations.append("error_shape_required_fields_incomplete")
+    if error_shape_policy.get("accepted_false_requires_error") is not True:
+        error_shape_violations.append("accepted_false_requires_error_must_be_true")
+    if error_shape_policy.get("accepted_false_requires_error_code") is not True:
+        error_shape_violations.append("accepted_false_requires_error_code_must_be_true")
+
+    malformed_samples = []
+    sample_evidence = []
+    sample_cases = policy.get("sample_cases") if isinstance(policy.get("sample_cases"), list) else []
+    for index, sample in enumerate(sample_cases):
+        if not isinstance(sample, dict):
+            malformed_samples.append({"index": index, "sample_id": None, "violations": ["sample_not_object"]})
+            continue
+        sample_id = str(sample.get("sample_id") or "")
+        violations = []
+        missing = _missing_required_fields(sample, ("sample_id", "endpoint", "response_schema_version", "generated_at", "result", "expected_error_shape"))
+        payload = _build_api_response_envelope_sample(sample, envelope_version)
+        payload_missing_fields = [field for field in API_RESPONSE_ENVELOPE_SPEC_FIELDS if payload.get(field) in (None, "", [], {})]
+        if payload_missing_fields:
+            violations.append("payload_missing_required_fields")
+        expected_error_shape = sample.get("expected_error_shape")
+        if expected_error_shape != payload.get("error_shape"):
+            violations.append("expected_error_shape_mismatch")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(payload.get("payload_hash") or "")):
+            violations.append("payload_hash_invalid")
+        if payload.get("payload_hash") != _sha256_json({key: value for key, value in payload.items() if key != "payload_hash"}):
+            violations.append("payload_hash_mismatch")
+        sample_evidence.append(
+            {
+                "sample_id": sample_id,
+                "endpoint": payload.get("endpoint"),
+                "envelope_version": payload.get("envelope_version"),
+                "payload_hash": payload.get("payload_hash"),
+                "error_shape": payload.get("error_shape"),
+                "generated_at": payload.get("generated_at"),
+            }
+        )
+        if missing or violations:
+            malformed_samples.append({"index": index, "sample_id": sample_id or None, "missing_fields": missing, "violations": violations, "payload_missing_fields": payload_missing_fields})
+
+    helper_fragments = {
+        "envelope_version_constant": f"V27_API_RESPONSE_ENVELOPE_VERSION = '{envelope_version}'" in source_text,
+        "endpoint_field": "endpoint: options.endpoint || null" in source_text,
+        "envelope_version_field": "envelope_version: V27_API_RESPONSE_ENVELOPE_VERSION" in source_text,
+        "error_shape_helper": "function buildApiResponseErrorShape(payload = {})" in source_text,
+        "payload_hash_helper": "function apiEnvelopePayloadForHash(payload = {})" in source_text,
+        "payload_hash_excludes_self": "const { payload_hash, ...unsignedPayload } = payload || {};" in source_text,
+        "payload_hash_assignment": "payload.payload_hash = auditSha256Hex(apiEnvelopePayloadForHash(payload));" in source_text,
+    }
+    missing_helper_fragments = sorted(key for key, present in helper_fragments.items() if not present)
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.api_response_envelope_policy.v1"
+        and bool(response_envelopes)
+        and bool(sample_cases)
+        and not schema_violations
+        and not error_shape_violations
+        and not malformed_envelopes
+        and not duplicate_endpoints
+        and not uncovered_base_response_endpoints
+        and not unknown_envelope_endpoints
+        and not source_violations
+        and not malformed_samples
+        and not missing_helper_fragments
+    )
+    return _contract(
+        "APIResponseEnvelopeContract",
+        passed,
+        "api_response_envelope_policy_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "base_response_policy_path": str(base_policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "envelope_version": envelope_version,
+            "hash_algorithm": policy.get("hash_algorithm"),
+            "required_fields": required_fields,
+            "endpoint_count": len(response_envelopes),
+            "base_response_endpoint_count": len(base_endpoints),
+            "sample_case_count": len(sample_cases),
+            "sample_evidence": sample_evidence,
+            "schema_violations": schema_violations,
+            "error_shape_violations": error_shape_violations,
+            "duplicate_endpoints": sorted(str(item) for item in duplicate_endpoints),
+            "malformed_envelopes": malformed_envelopes,
+            "uncovered_base_response_endpoints": uncovered_base_response_endpoints,
+            "unknown_envelope_endpoints": unknown_envelope_endpoints,
+            "source_violations": source_violations,
+            "malformed_samples": malformed_samples,
+            "helper_fragments": helper_fragments,
+            "missing_helper_fragments": missing_helper_fragments,
+        },
+    )
+
+
 def _read_project_text(path):
     resolved = _resolve_project_file(path)
     if not resolved or not resolved.exists():
@@ -2245,6 +2490,7 @@ def build_basic_contract_readiness(
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
     api_response_policy_path=DEFAULT_API_RESPONSE_POLICY,
+    api_response_envelope_policy_path=DEFAULT_API_RESPONSE_ENVELOPE_POLICY,
     error_taxonomy_path=DEFAULT_ERROR_TAXONOMY,
     log_redaction_policy_path=DEFAULT_LOG_REDACTION_POLICY,
     env=None,
@@ -2284,6 +2530,7 @@ def build_basic_contract_readiness(
                 policy_path=api_response_policy_path,
                 access_control_policy_path=access_control_policy_path,
             ),
+            verify_api_response_envelope_contract(policy_path=api_response_envelope_policy_path),
             verify_error_taxonomy(taxonomy_path=error_taxonomy_path),
             verify_log_redaction_verification(policy_path=log_redaction_policy_path),
         ]
@@ -2319,6 +2566,7 @@ def main():
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
     parser.add_argument("--api-response-policy", default=str(DEFAULT_API_RESPONSE_POLICY))
+    parser.add_argument("--api-response-envelope-policy", default=str(DEFAULT_API_RESPONSE_ENVELOPE_POLICY))
     parser.add_argument("--error-taxonomy", default=str(DEFAULT_ERROR_TAXONOMY))
     parser.add_argument("--log-redaction-policy", default=str(DEFAULT_LOG_REDACTION_POLICY))
     parser.add_argument("--strict", action="store_true")
@@ -2340,6 +2588,7 @@ def main():
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
         api_response_policy_path=Path(args.api_response_policy),
+        api_response_envelope_policy_path=Path(args.api_response_envelope_policy),
         error_taxonomy_path=Path(args.error_taxonomy),
         log_redaction_policy_path=Path(args.log_redaction_policy),
     )

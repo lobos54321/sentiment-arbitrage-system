@@ -6,6 +6,7 @@ sys.path.insert(0, "scripts")
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
     verify_api_response_contract,
+    verify_api_response_envelope_contract,
     verify_audit_log_integrity,
     verify_background_job_registry,
     verify_direct_database_mutation_ban,
@@ -51,6 +52,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "EntryPointInventoryContract",
         "StaticPolicyEnforcementContract",
         "APIResponseContract",
+        "APIResponseEnvelopeContract",
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
     ):
@@ -776,6 +778,122 @@ def test_api_response_contract_blocks_missing_response_builder_anchor(tmp_path):
     assert report["evidence"]["source_violations"] == [
         {"endpoint": endpoint, "reason": "response_builder_missing"}
     ]
+
+
+def test_api_response_envelope_contract_covers_v27_manual_evidence_routes():
+    report = verify_api_response_envelope_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.api_response_envelope_policy.v1"
+    assert report["evidence"]["failure_action"] == "api_envelope_invalid"
+    assert report["evidence"]["envelope_version"] == "v2.7.0.api_response_envelope.v1"
+    assert report["evidence"]["hash_algorithm"] == "sha256_canonical_json_without_payload_hash"
+    assert report["evidence"]["required_fields"] == ["endpoint", "envelope_version", "payload_hash", "error_shape", "generated_at"]
+    assert report["evidence"]["endpoint_count"] == 6
+    assert report["evidence"]["base_response_endpoint_count"] == 6
+    assert report["evidence"]["sample_case_count"] == 2
+    assert report["evidence"]["schema_violations"] == []
+    assert report["evidence"]["error_shape_violations"] == []
+    assert report["evidence"]["malformed_envelopes"] == []
+    assert report["evidence"]["uncovered_base_response_endpoints"] == []
+    assert report["evidence"]["source_violations"] == []
+    assert report["evidence"]["malformed_samples"] == []
+    assert report["evidence"]["missing_helper_fragments"] == []
+    for sample in report["evidence"]["sample_evidence"]:
+        assert sample["payload_hash"]
+        assert sample["endpoint"] == "/api/paper/v27-read-model-refresh"
+        assert sample["generated_at"]
+
+
+def test_api_response_envelope_contract_blocks_missing_hash_generation(tmp_path):
+    source_path = tmp_path / "dashboard.js"
+    endpoint = "/api/paper/v27-read-model-refresh"
+    source_path.write_text(
+        "\n".join(
+            [
+                "export const V27_API_RESPONSE_ENVELOPE_VERSION = 'v2.7.0.api_response_envelope.v1';",
+                "function buildApiResponseErrorShape(payload = {}) { return {}; }",
+                "function apiEnvelopePayloadForHash(payload = {}) { return payload; }",
+                f"if (url.pathname === '{endpoint}') {{",
+                "  res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh)));",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    base_policy_path = tmp_path / "api-response-policy.json"
+    base_policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.api_response_policy.v1",
+                "source_file": str(source_path),
+                "response_policies": [
+                    {
+                        "endpoint": endpoint,
+                        "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    envelope_policy_path = tmp_path / "api-response-envelope-policy.json"
+    envelope_policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.api_response_envelope_policy.v1",
+                "source_file": str(source_path),
+                "base_response_policy_path": str(base_policy_path),
+                "failure_action": "api_envelope_invalid",
+                "envelope_version": "v2.7.0.api_response_envelope.v1",
+                "hash_algorithm": "sha256_canonical_json_without_payload_hash",
+                "required_fields": ["endpoint", "envelope_version", "payload_hash", "error_shape", "generated_at"],
+                "error_shape": {
+                    "required_fields": ["has_error", "accepted", "error_field", "error_code", "status"],
+                    "accepted_false_requires_error": True,
+                    "accepted_false_requires_error_code": True,
+                },
+                "sample_cases": [
+                    {
+                        "sample_id": "accepted",
+                        "endpoint": endpoint,
+                        "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+                        "generated_at": "2026-05-25T00:00:00.000Z",
+                        "result": {"accepted": True, "status": "started"},
+                        "expected_error_shape": {
+                            "has_error": False,
+                            "accepted": True,
+                            "error_field": None,
+                            "error_code": None,
+                            "status": "started",
+                        },
+                    }
+                ],
+                "response_envelopes": [
+                    {
+                        "endpoint": endpoint,
+                        "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+                        "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh, { endpoint: url.pathname })",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_api_response_envelope_contract(envelope_policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "api_response_envelope_policy_missing_malformed_or_unenforced"
+    assert report["evidence"]["source_violations"] == [
+        {
+            "endpoint": endpoint,
+            "reason": "source_anchor_missing",
+            "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh, { endpoint: url.pathname })",
+        },
+        {"endpoint": endpoint, "reason": "endpoint_binding_missing"},
+    ]
+    assert "payload_hash_assignment" in report["evidence"]["missing_helper_fragments"]
 
 
 def test_error_taxonomy_covers_dashboard_and_readiness_error_codes():

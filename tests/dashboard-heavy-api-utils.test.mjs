@@ -6,6 +6,9 @@ import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import {
   apiJsonHeaders,
+  apiEnvelopePayloadForHash,
+  auditSha256Hex,
+  buildApiResponseErrorShape,
   buildV27ManualEvidenceApiResponse,
   buildDogCatchGoalProgress,
   buildStorageHealthSnapshot,
@@ -21,6 +24,7 @@ import {
   readV27ModeReadiness,
   LOG_REDACTION_PATTERN_SET,
   redactLogMessage,
+  V27_API_RESPONSE_ENVELOPE_VERSION,
   resolveDashboardLogPath,
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
@@ -57,24 +61,50 @@ test('buildV27ManualEvidenceApiResponse preserves legacy schema and rejected err
   const accepted = buildV27ManualEvidenceApiResponse(
     'v2.7.0.manual_read_model_refresh.v1',
     { accepted: true, status: 'started' },
-    { generatedAt: '2026-05-25T00:00:00.000Z' },
+    { endpoint: '/api/paper/v27-read-model-refresh', generatedAt: '2026-05-25T00:00:00.000Z' },
   );
 
   assert.equal(accepted.generated_at, '2026-05-25T00:00:00.000Z');
   assert.equal(accepted.materialized, false);
+  assert.equal(accepted.endpoint, '/api/paper/v27-read-model-refresh');
+  assert.equal(accepted.envelope_version, V27_API_RESPONSE_ENVELOPE_VERSION);
   assert.equal(accepted.response_schema_version, 'v2.7.0.manual_read_model_refresh.v1');
   assert.equal(accepted.refresh_schema_version, 'v2.7.0.manual_read_model_refresh.v1');
   assert.equal(accepted.accepted, true);
   assert.equal(accepted.status, 'started');
+  assert.deepEqual(accepted.error_shape, {
+    has_error: false,
+    accepted: true,
+    error_field: null,
+    error_code: null,
+    status: 'started',
+  });
+  assert.match(accepted.payload_hash, /^[a-f0-9]{64}$/);
+  assert.equal(accepted.payload_hash, auditSha256Hex(apiEnvelopePayloadForHash(accepted)));
 
   const rejected = buildV27ManualEvidenceApiResponse(
     'v2.7.0.manual_read_model_refresh.v1',
     { accepted: false, status: 'already_running' },
-    { generatedAt: '2026-05-25T00:00:01.000Z' },
+    { endpoint: '/api/paper/v27-read-model-refresh', generatedAt: '2026-05-25T00:00:01.000Z' },
   );
 
   assert.equal(rejected.error, 'already_running');
   assert.equal(rejected.error_code, 'already_running');
+  assert.deepEqual(rejected.error_shape, {
+    has_error: true,
+    accepted: false,
+    error_field: 'error',
+    error_code: 'already_running',
+    status: 'already_running',
+  });
+  assert.equal(rejected.payload_hash, auditSha256Hex(apiEnvelopePayloadForHash(rejected)));
+  assert.deepEqual(buildApiResponseErrorShape({ accepted: false, status: 'manual_evidence_request_rejected' }), {
+    has_error: true,
+    accepted: false,
+    error_field: null,
+    error_code: null,
+    status: 'manual_evidence_request_rejected',
+  });
 });
 
 test('storage health reports db markers and disk snapshot without opening sqlite', () => {

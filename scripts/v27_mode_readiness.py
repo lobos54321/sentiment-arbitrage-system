@@ -46,6 +46,7 @@ MODE_REQUIREMENTS = {
         "EntryPointInventoryContract",
         "StaticPolicyEnforcementContract",
         "APIResponseContract",
+        "APIResponseEnvelopeContract",
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
         "RouteRegistryContract",
