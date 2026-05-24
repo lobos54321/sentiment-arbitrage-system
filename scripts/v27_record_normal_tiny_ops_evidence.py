@@ -376,6 +376,33 @@ def build_event_specs(event_log_dir, *, run_id=None, env=None, scratch_dir=None,
             now,
         ),
         _spec(
+            "randomness_control_recorded",
+            "randomness_control:normal_tiny_deterministic_policy",
+            {
+                "rng_seed": f"sha256:{sha256_hex({'policy_bundle_id': policy_id, 'build_hash': build_hash})}",
+                "rng_version": "v2.7.0.normal_tiny_deterministic_policy.v1",
+                "randomization_unit": "normal_tiny_promotion_policy",
+                "assignment_id": "normal-tiny-deterministic-policy",
+                "assignment_status": "deterministic_policy",
+                "randomization_enabled": False,
+                "deterministic_assignment": True,
+                "assignment_algorithm": "deterministic_no_randomized_assignment",
+                "assigned_bucket": "normal_tiny_candidate",
+                "assignment_hash": sha256_hex(
+                    {
+                        "assignment_id": "normal-tiny-deterministic-policy",
+                        "policy_bundle_id": policy_id,
+                        "randomization_enabled": False,
+                    }
+                ),
+                "decision_available_at": now,
+                "evidence_source": SOURCE,
+            },
+            run_id,
+            "randomness_control",
+            now,
+        ),
+        _spec(
             "training_serving_skew_recorded",
             "training_serving_skew:normal_tiny_features:v27_denominator_projection",
             {

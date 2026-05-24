@@ -20,6 +20,7 @@ OPS_CONTRACTS = (
     "RetryStormControlContract",
     "ProviderCoverageMapContract",
     "TrainingServingSkewContract",
+    "RandomnessControlContract",
 )
 
 
@@ -30,9 +31,9 @@ def test_normal_tiny_ops_evidence_unblocks_operational_contracts(tmp_path):
     report = record_normal_tiny_ops_evidence(event_log_dir, run_id="unit", strict=True)
 
     assert report["health"]["status"] == "normal_tiny_ops_evidence_recorded"
-    assert report["planned_event_count"] == 15
-    assert report["append_status_counts"] == {"appended": 15}
-    assert report["event_log_summary_after"]["event_count"] == 15
+    assert report["planned_event_count"] == 16
+    assert report["append_status_counts"] == {"appended": 16}
+    assert report["event_log_summary_after"]["event_count"] == 16
 
     refresh_denominator_read_model(
         event_log_dir=event_log_dir,
@@ -50,7 +51,6 @@ def test_normal_tiny_ops_evidence_unblocks_operational_contracts(tmp_path):
         assert contract_id not in normal_tiny_blockers
 
     assert "RawProviderEvidenceContract" in normal_tiny_blockers
-    assert "RandomnessControlContract" in normal_tiny_blockers
 
 
 def test_normal_tiny_ops_evidence_dry_run_does_not_append(tmp_path):
