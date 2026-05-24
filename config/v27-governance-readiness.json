@@ -1,0 +1,263 @@
+{
+  "schema_version": "v2.7.0.governance_readiness.v1",
+  "updated_at": "2026-05-24T00:00:00Z",
+  "evidence_eligibility_matrix": [
+    {
+      "evidence_use": "normal_tiny_promotion",
+      "event_truth": ["append_only_event_log", "global_seq_verified", "event_hash_verified"],
+      "feature_truth": ["feature_code_hash_recorded", "normalization_version_recorded", "no_future_feature_fields"],
+      "label_truth": ["final_label_required", "outcome_window_closed", "superseded_labels_linked"],
+      "replay_truth": ["counterfactual_entry_ts_recorded", "replay_policy_version_recorded", "no_posthoc_peak_leakage"]
+    },
+    {
+      "evidence_use": "denominator_metrics",
+      "event_truth": ["telegram_signal_seen", "source_dog_label_recorded", "token_lifecycle_identity_resolved"],
+      "feature_truth": ["required_inputs_available_at_recorded", "quote_intent_bound", "raw_provider_hashes_recorded"],
+      "label_truth": ["source_label_research_only", "trade_outcome_label_versioned", "label_status_final"],
+      "replay_truth": ["metrics_window_versioned", "records_hash_material_versioned", "dedup_key_stable"]
+    },
+    {
+      "evidence_use": "runtime_safety",
+      "event_truth": ["projection_consumer_health_hash_ok", "read_model_fresh_enough", "mode_readiness_materialized"],
+      "feature_truth": ["safe_default_fail_closed", "project_stop_loss_enabled", "provider_coverage_declared"],
+      "label_truth": ["waivers_non_waivable_for_normal_tiny", "safety_case_hazards_mitigated", "top_fix_queue_owned"],
+      "replay_truth": ["refresh_rebuilds_from_event_log", "dashboard_uses_materialized_snapshot", "production_refresh_required"]
+    }
+  ],
+  "top_fix_queue": [
+    {
+      "fix_id": "fix-raw-provider-evidence",
+      "blocker_code": "RawProviderEvidenceContract",
+      "first_fix_that_would_change_decision": "Mirror trusted raw provider request and response hashes for normal-tiny candidate decisions.",
+      "owner": "v27-readiness",
+      "acceptance_test": "RawProviderEvidenceContract passes in mode_readiness after production mirror and refresh."
+    },
+    {
+      "fix_id": "fix-randomness-control",
+      "blocker_code": "RandomnessControlContract",
+      "first_fix_that_would_change_decision": "Record deterministic normal-tiny assignment policy with seed, unit, assignment id, and assignment hash.",
+      "owner": "v27-readiness",
+      "acceptance_test": "RandomnessControlContract passes in mode_readiness after mirror and refresh."
+    },
+    {
+      "fix_id": "fix-label-finalization",
+      "blocker_code": "LabelFinalizationContract",
+      "first_fix_that_would_change_decision": "Mirror final labels with label id, final status, outcome window closure, and supersession links.",
+      "owner": "v27-readiness",
+      "acceptance_test": "LabelFinalizationContract passes with zero malformed finalization records."
+    },
+    {
+      "fix_id": "fix-outcome-window-close",
+      "blocker_code": "OutcomeWindowCloseContract",
+      "first_fix_that_would_change_decision": "Mirror outcome window closure with window start, end, closed timestamp, and ordered lifecycle.",
+      "owner": "v27-readiness",
+      "acceptance_test": "OutcomeWindowCloseContract passes with zero malformed or order-violation records."
+    },
+    {
+      "fix_id": "fix-deployment-rollout",
+      "blocker_code": "DeploymentRolloutStateMachine",
+      "first_fix_that_would_change_decision": "Record completed rollout state with canary status and fleet hash map.",
+      "owner": "v27-readiness",
+      "acceptance_test": "DeploymentRolloutStateMachine passes and reports one valid rollout."
+    },
+    {
+      "fix_id": "fix-worker-fleet",
+      "blocker_code": "WorkerFleetConsistencyContract",
+      "first_fix_that_would_change_decision": "Record worker heartbeats with consistent build, runtime config, and policy bundle hashes.",
+      "owner": "v27-readiness",
+      "acceptance_test": "WorkerFleetConsistencyContract passes without mixed hash violations."
+    },
+    {
+      "fix_id": "fix-backup-restore",
+      "blocker_code": "BackupRestoreDrillContract",
+      "first_fix_that_would_change_decision": "Record a successful restore drill with backup set id and restored world hash.",
+      "owner": "v27-readiness",
+      "acceptance_test": "BackupRestoreDrillContract passes with valid restored_world_hash."
+    },
+    {
+      "fix_id": "fix-incident-freeze",
+      "blocker_code": "IncidentEvidenceFreezeContract",
+      "first_fix_that_would_change_decision": "Record incident evidence freeze with frozen event range, config hash, and frozen timestamp.",
+      "owner": "v27-readiness",
+      "acceptance_test": "IncidentEvidenceFreezeContract passes with no frozen range violations."
+    },
+    {
+      "fix_id": "fix-breaker-resume",
+      "blocker_code": "CircuitBreakerResumeContract",
+      "first_fix_that_would_change_decision": "Record breaker resume only after root cause fixed, health checks passed, and evidence freeze id exists.",
+      "owner": "v27-readiness",
+      "acceptance_test": "CircuitBreakerResumeContract passes and references a frozen incident id."
+    },
+    {
+      "fix_id": "fix-queue-durability",
+      "blocker_code": "QueueDurabilityContract",
+      "first_fix_that_would_change_decision": "Record durable queue tasks with durable state, ack state, task id, and creation time.",
+      "owner": "v27-readiness",
+      "acceptance_test": "QueueDurabilityContract passes with valid durable and ack states."
+    },
+    {
+      "fix_id": "fix-candidate-cancellation",
+      "blocker_code": "CandidateCancellationContract",
+      "first_fix_that_would_change_decision": "Record candidate cancellation events with cancellation reason, sequence, and timestamp.",
+      "owner": "v27-readiness",
+      "acceptance_test": "CandidateCancellationContract passes with nonnegative cancel_event_seq."
+    },
+    {
+      "fix_id": "fix-retry-storm",
+      "blocker_code": "RetryStormControlContract",
+      "first_fix_that_would_change_decision": "Record bounded retry policy with backoff family, max concurrent retries, and p0 reserved capacity.",
+      "owner": "v27-readiness",
+      "acceptance_test": "RetryStormControlContract passes with bounded backoff policy."
+    },
+    {
+      "fix_id": "fix-provider-coverage-map",
+      "blocker_code": "ProviderCoverageMapContract",
+      "first_fix_that_would_change_decision": "Record declared provider coverage by provider, chain, pool type, status, and unsupported reason.",
+      "owner": "v27-readiness",
+      "acceptance_test": "ProviderCoverageMapContract passes with at least one valid provider coverage map."
+    },
+    {
+      "fix_id": "fix-training-serving-skew",
+      "blocker_code": "TrainingServingSkewContract",
+      "first_fix_that_would_change_decision": "Record training and serving feature code hashes with normalization version and pass skew result.",
+      "owner": "v27-readiness",
+      "acceptance_test": "TrainingServingSkewContract passes with valid sha256 feature hashes."
+    },
+    {
+      "fix_id": "fix-evidence-eligibility",
+      "blocker_code": "EvidenceEligibilityMatrix",
+      "first_fix_that_would_change_decision": "Publish machine-readable matrix defining event, feature, label, and replay truth per evidence use.",
+      "owner": "v27-readiness",
+      "acceptance_test": "EvidenceEligibilityMatrix passes governance readiness validation."
+    },
+    {
+      "fix_id": "fix-top-fix-queue",
+      "blocker_code": "TopFixQueueContract",
+      "first_fix_that_would_change_decision": "Publish owned fix queue entries for every normal-tiny blocker with acceptance tests.",
+      "owner": "v27-readiness",
+      "acceptance_test": "TopFixQueueContract passes with no missing normal-tiny blocker entries."
+    },
+    {
+      "fix_id": "fix-safety-case",
+      "blocker_code": "SafetyCaseContract",
+      "first_fix_that_would_change_decision": "Publish normal-tiny safety case linking hazards, mitigations, and readiness evidence.",
+      "owner": "v27-readiness",
+      "acceptance_test": "SafetyCaseContract passes with evidence links for readiness, waiver policy, and stop loss."
+    },
+    {
+      "fix_id": "fix-waiver-policy",
+      "blocker_code": "WaiverPolicyContract",
+      "first_fix_that_would_change_decision": "Publish non-waivable policy for normal-tiny blocking contracts.",
+      "owner": "v27-readiness",
+      "acceptance_test": "WaiverPolicyContract passes and normal-tiny blockers are non-waivable."
+    },
+    {
+      "fix_id": "fix-safe-default",
+      "blocker_code": "SafeDefaultContract",
+      "first_fix_that_would_change_decision": "Verify unregistered and unsafe entry modes fail closed to observe-only or shadow.",
+      "owner": "v27-readiness",
+      "acceptance_test": "SafeDefaultContract passes and is absent from normal_tiny blockers."
+    },
+    {
+      "fix_id": "fix-project-stop-loss",
+      "blocker_code": "ProjectStopLossContract",
+      "first_fix_that_would_change_decision": "Verify project stop loss is enabled with automatic watch-only downgrade action.",
+      "owner": "v27-readiness",
+      "acceptance_test": "ProjectStopLossContract passes and reports stop_automatic_entry true."
+    }
+  ],
+  "safety_cases": [
+    {
+      "safety_case_id": "normal_tiny_readiness_safety_case_v1",
+      "scope": "normal_tiny",
+      "core_hazards": [
+        "silent_promotion_without_required_evidence",
+        "future_leakage_or_posthoc_label_use",
+        "coverage_gap_misclassified_as_no_quote",
+        "unbounded_runtime_loss_or_retry_storm",
+        "waiver_used_to_bypass_blocking_contract"
+      ],
+      "mitigations": [
+        "ModeReadinessMatrix blocks normal_tiny until every required contract passes.",
+        "EvidenceEligibilityMatrix separates event, feature, label, and replay truth.",
+        "ProviderCoverageMapContract requires explicit unsupported_reason instead of inferred no quote.",
+        "ProjectStopLossContract downgrades unsafe entry modes to watch-only.",
+        "WaiverPolicyContract marks normal-tiny blocking contracts non-waivable."
+      ],
+      "evidence_links": [
+        "SpecConsistencyLinterContract",
+        "ModeReadinessMatrix",
+        "EvidenceEligibilityMatrix",
+        "TopFixQueueContract",
+        "WaiverPolicyContract",
+        "SafeDefaultContract",
+        "ProjectStopLossContract"
+      ]
+    }
+  ],
+  "waiver_policy": [
+    {
+      "waiver_id": "normal_tiny_all_blockers_non_waivable",
+      "contract_id": "*",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_raw_provider_non_waivable",
+      "contract_id": "RawProviderEvidenceContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_randomness_non_waivable",
+      "contract_id": "RandomnessControlContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_label_finalization_non_waivable",
+      "contract_id": "LabelFinalizationContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_outcome_window_non_waivable",
+      "contract_id": "OutcomeWindowCloseContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_provider_coverage_non_waivable",
+      "contract_id": "ProviderCoverageMapContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_safe_default_non_waivable",
+      "contract_id": "SafeDefaultContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_project_stop_loss_non_waivable",
+      "contract_id": "ProjectStopLossContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    },
+    {
+      "waiver_id": "normal_tiny_training_skew_non_waivable",
+      "contract_id": "TrainingServingSkewContract",
+      "scope": "normal_tiny",
+      "expires_at": "9999-12-31T00:00:00Z",
+      "non_waivable": true
+    }
+  ]
+}

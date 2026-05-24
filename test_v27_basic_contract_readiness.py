@@ -5,10 +5,14 @@ sys.path.insert(0, "scripts")
 
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
+    verify_evidence_eligibility_matrix,
     verify_input_sanitization,
     verify_paper_mode_safety,
     verify_project_stop_loss,
     verify_safe_default,
+    verify_safety_case,
+    verify_top_fix_queue,
+    verify_waiver_policy,
 )
 
 
@@ -25,6 +29,10 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "InputSanitizationContract",
         "SafeDefaultContract",
         "ProjectStopLossContract",
+        "EvidenceEligibilityMatrix",
+        "TopFixQueueContract",
+        "SafetyCaseContract",
+        "WaiverPolicyContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -201,3 +209,60 @@ def test_project_stop_loss_passes_default_thresholds():
     assert report["evidence"]["scope"] == "entry_mode"
     assert report["evidence"]["stop_criteria"]["negative_ev_min_samples"] == 20
     assert report["evidence"]["action"]["action"] == "downgrade_to_watch_only"
+
+
+def test_governance_readiness_contracts_pass_seed_artifact():
+    assert verify_evidence_eligibility_matrix()["status"] == "pass"
+    assert verify_top_fix_queue()["status"] == "pass"
+    assert verify_safety_case()["status"] == "pass"
+    assert verify_waiver_policy()["status"] == "pass"
+
+
+def test_governance_readiness_blocks_incomplete_artifact(tmp_path):
+    governance_path = tmp_path / "governance.json"
+    governance_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "unit.bad",
+                "evidence_eligibility_matrix": [
+                    {
+                        "evidence_use": "normal_tiny_promotion",
+                        "event_truth": [],
+                        "feature_truth": [],
+                        "label_truth": [],
+                        "replay_truth": [],
+                    }
+                ],
+                "top_fix_queue": [
+                    {
+                        "fix_id": "fix-only-one",
+                        "blocker_code": "RawProviderEvidenceContract",
+                    }
+                ],
+                "safety_cases": [
+                    {
+                        "safety_case_id": "case-without-links",
+                        "scope": "normal_tiny",
+                        "core_hazards": ["hazard"],
+                        "mitigations": ["mitigation"],
+                        "evidence_links": [],
+                    }
+                ],
+                "waiver_policy": [
+                    {
+                        "waiver_id": "expired-waiver",
+                        "contract_id": "RawProviderEvidenceContract",
+                        "scope": "normal_tiny",
+                        "expires_at": "2020-01-01T00:00:00Z",
+                        "non_waivable": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert verify_evidence_eligibility_matrix(governance_path)["status"] == "missing_evidence"
+    assert verify_top_fix_queue(governance_path)["status"] == "missing_evidence"
+    assert verify_safety_case(governance_path)["status"] == "missing_evidence"
+    assert verify_waiver_policy(governance_path)["status"] == "missing_evidence"

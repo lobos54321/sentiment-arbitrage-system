@@ -594,10 +594,6 @@ def build_contract_statuses(
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "EvidenceEligibilityMatrix",
-        "TopFixQueueContract",
-        "SafetyCaseContract",
-        "WaiverPolicyContract",
     ]
     for contract_id in missing_contracts:
         statuses.setdefault(

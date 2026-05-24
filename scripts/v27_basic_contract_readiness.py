@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -25,6 +26,29 @@ DEFAULT_SOURCE_REGISTRY = PROJECT_ROOT / "config" / "v27-source-registry.json"
 DEFAULT_CHANNELS_CSV = PROJECT_ROOT / "config" / "channels.csv"
 DEFAULT_SYSTEM_CONFIG = PROJECT_ROOT / "config" / "system.config.json"
 DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.json"
+DEFAULT_GOVERNANCE_READINESS = PROJECT_ROOT / "config" / "v27-governance-readiness.json"
+NORMAL_TINY_BLOCKING_CONTRACTS = {
+    "RawProviderEvidenceContract",
+    "LabelFinalizationContract",
+    "OutcomeWindowCloseContract",
+    "RandomnessControlContract",
+    "DeploymentRolloutStateMachine",
+    "WorkerFleetConsistencyContract",
+    "BackupRestoreDrillContract",
+    "IncidentEvidenceFreezeContract",
+    "CircuitBreakerResumeContract",
+    "QueueDurabilityContract",
+    "CandidateCancellationContract",
+    "RetryStormControlContract",
+    "ProviderCoverageMapContract",
+    "TrainingServingSkewContract",
+    "EvidenceEligibilityMatrix",
+    "TopFixQueueContract",
+    "SafetyCaseContract",
+    "WaiverPolicyContract",
+    "SafeDefaultContract",
+    "ProjectStopLossContract",
+}
 
 
 def _utc_now_iso():
@@ -64,6 +88,42 @@ def _float_env(env, name, default):
         return float((env or {}).get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _missing_required_fields(record, fields):
+    missing = []
+    for field in fields:
+        value = record.get(field) if isinstance(record, dict) else None
+        if value is None or value == "" or value == [] or value == {}:
+            missing.append(field)
+    return missing
+
+
+def _parse_iso_ts(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_governance_readiness(governance_path):
+    try:
+        payload = _load_json(governance_path)
+    except Exception as exc:
+        return None, {"governance_path": str(governance_path), "error": str(exc)}
+    if not isinstance(payload, dict):
+        return None, {"governance_path": str(governance_path), "error": "governance_readiness_not_object"}
+    return payload, {"governance_path": str(governance_path), "schema_version": payload.get("schema_version"), "updated_at": payload.get("updated_at")}
 
 
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
@@ -298,6 +358,170 @@ def verify_project_stop_loss(env=None):
     )
 
 
+def verify_evidence_eligibility_matrix(governance_path=DEFAULT_GOVERNANCE_READINESS):
+    governance, base_evidence = _load_governance_readiness(governance_path)
+    if governance is None:
+        return _contract("EvidenceEligibilityMatrix", False, "evidence_eligibility_matrix_missing_or_invalid", base_evidence)
+    rows = governance.get("evidence_eligibility_matrix")
+    if not isinstance(rows, list):
+        rows = []
+    required = ("evidence_use", "event_truth", "feature_truth", "label_truth", "replay_truth")
+    malformed = []
+    for index, row in enumerate(rows):
+        missing = _missing_required_fields(row, required)
+        truth_fields = {
+            field: row.get(field)
+            for field in ("event_truth", "feature_truth", "label_truth", "replay_truth")
+            if isinstance(row, dict)
+        }
+        non_list_truth = sorted(field for field, value in truth_fields.items() if not isinstance(value, list))
+        if missing or non_list_truth:
+            malformed.append({"index": index, "evidence_use": row.get("evidence_use") if isinstance(row, dict) else None, "missing_fields": missing, "non_list_truth_fields": non_list_truth})
+    evidence_uses = sorted({row.get("evidence_use") for row in rows if isinstance(row, dict) and row.get("evidence_use")})
+    passed = bool(rows) and not malformed and "normal_tiny_promotion" in evidence_uses
+    return _contract(
+        "EvidenceEligibilityMatrix",
+        passed,
+        "evidence_eligibility_matrix_missing_malformed_or_incomplete",
+        {
+            **base_evidence,
+            "matrix_row_count": len(rows),
+            "evidence_uses": evidence_uses,
+            "malformed_rows": malformed,
+            "required_evidence_use_present": "normal_tiny_promotion" in evidence_uses,
+        },
+    )
+
+
+def verify_top_fix_queue(governance_path=DEFAULT_GOVERNANCE_READINESS):
+    governance, base_evidence = _load_governance_readiness(governance_path)
+    if governance is None:
+        return _contract("TopFixQueueContract", False, "top_fix_queue_missing_or_invalid", base_evidence)
+    queue = governance.get("top_fix_queue")
+    if not isinstance(queue, list):
+        queue = []
+    required = ("fix_id", "blocker_code", "first_fix_that_would_change_decision", "owner", "acceptance_test")
+    malformed = []
+    seen_fix_ids = set()
+    duplicate_fix_ids = []
+    blocker_codes = set()
+    for index, item in enumerate(queue):
+        missing = _missing_required_fields(item, required)
+        fix_id = item.get("fix_id") if isinstance(item, dict) else None
+        blocker_code = item.get("blocker_code") if isinstance(item, dict) else None
+        if fix_id in seen_fix_ids:
+            duplicate_fix_ids.append(fix_id)
+        if fix_id:
+            seen_fix_ids.add(fix_id)
+        if blocker_code:
+            blocker_codes.add(str(blocker_code))
+        if missing:
+            malformed.append({"index": index, "fix_id": fix_id, "blocker_code": blocker_code, "missing_fields": missing})
+    missing_blocker_codes = sorted(NORMAL_TINY_BLOCKING_CONTRACTS - blocker_codes)
+    passed = bool(queue) and not malformed and not duplicate_fix_ids and not missing_blocker_codes
+    return _contract(
+        "TopFixQueueContract",
+        passed,
+        "top_fix_queue_missing_malformed_or_incomplete",
+        {
+            **base_evidence,
+            "queue_count": len(queue),
+            "normal_tiny_contract_count": len(NORMAL_TINY_BLOCKING_CONTRACTS),
+            "covered_blocker_codes": sorted(blocker_codes),
+            "missing_blocker_codes": missing_blocker_codes,
+            "malformed_queue_items": malformed,
+            "duplicate_fix_ids": sorted(duplicate_fix_ids),
+        },
+    )
+
+
+def verify_safety_case(governance_path=DEFAULT_GOVERNANCE_READINESS):
+    governance, base_evidence = _load_governance_readiness(governance_path)
+    if governance is None:
+        return _contract("SafetyCaseContract", False, "safety_case_missing_or_invalid", base_evidence)
+    safety_cases = governance.get("safety_cases")
+    if not isinstance(safety_cases, list):
+        safety_cases = []
+    required = ("safety_case_id", "scope", "core_hazards", "mitigations", "evidence_links")
+    required_links = {"EvidenceEligibilityMatrix", "TopFixQueueContract", "WaiverPolicyContract", "SafeDefaultContract", "ProjectStopLossContract"}
+    malformed = []
+    normal_tiny_cases = []
+    link_coverage = set()
+    for index, item in enumerate(safety_cases):
+        missing = _missing_required_fields(item, required)
+        safety_case_id = item.get("safety_case_id") if isinstance(item, dict) else None
+        if isinstance(item, dict) and item.get("scope") == "normal_tiny":
+            normal_tiny_cases.append(item)
+            links = item.get("evidence_links")
+            if isinstance(links, list):
+                link_coverage.update(str(link) for link in links)
+        if missing:
+            malformed.append({"index": index, "safety_case_id": safety_case_id, "missing_fields": missing})
+    missing_links = sorted(required_links - link_coverage)
+    passed = bool(normal_tiny_cases) and not malformed and not missing_links
+    return _contract(
+        "SafetyCaseContract",
+        passed,
+        "safety_case_missing_malformed_or_unlinked",
+        {
+            **base_evidence,
+            "safety_case_count": len(safety_cases),
+            "normal_tiny_safety_case_count": len(normal_tiny_cases),
+            "malformed_safety_cases": malformed,
+            "required_evidence_links": sorted(required_links),
+            "missing_evidence_links": missing_links,
+        },
+    )
+
+
+def verify_waiver_policy(governance_path=DEFAULT_GOVERNANCE_READINESS):
+    governance, base_evidence = _load_governance_readiness(governance_path)
+    if governance is None:
+        return _contract("WaiverPolicyContract", False, "waiver_policy_missing_or_invalid", base_evidence)
+    policies = governance.get("waiver_policy")
+    if not isinstance(policies, list):
+        policies = []
+    required = ("waiver_id", "contract_id", "scope", "expires_at", "non_waivable")
+    malformed = []
+    non_waivable_contracts = set()
+    wildcard_non_waivable = False
+    now = datetime.now(timezone.utc)
+    for index, item in enumerate(policies):
+        missing = _missing_required_fields(item, required)
+        waiver_id = item.get("waiver_id") if isinstance(item, dict) else None
+        contract_id = item.get("contract_id") if isinstance(item, dict) else None
+        parsed_expires_at = _parse_iso_ts(item.get("expires_at")) if isinstance(item, dict) else None
+        violations = []
+        if parsed_expires_at is None:
+            violations.append("expires_at_parseable")
+        elif parsed_expires_at <= now:
+            violations.append("expires_at_future")
+        if isinstance(item, dict) and item.get("scope") == "normal_tiny" and item.get("non_waivable") is True:
+            if contract_id == "*":
+                wildcard_non_waivable = True
+            elif contract_id:
+                non_waivable_contracts.add(str(contract_id))
+        else:
+            violations.append("normal_tiny_non_waivable_true")
+        if missing or violations:
+            malformed.append({"index": index, "waiver_id": waiver_id, "contract_id": contract_id, "missing_fields": missing, "violations": violations})
+    missing_non_waivable = [] if wildcard_non_waivable else sorted(NORMAL_TINY_BLOCKING_CONTRACTS - non_waivable_contracts)
+    passed = bool(policies) and not malformed and not missing_non_waivable
+    return _contract(
+        "WaiverPolicyContract",
+        passed,
+        "waiver_policy_missing_malformed_or_bypassable",
+        {
+            **base_evidence,
+            "waiver_policy_count": len(policies),
+            "wildcard_non_waivable": wildcard_non_waivable,
+            "non_waivable_contracts": sorted(non_waivable_contracts),
+            "missing_non_waivable_contracts": missing_non_waivable,
+            "malformed_waiver_policies": malformed,
+        },
+    )
+
+
 def build_basic_contract_readiness(
     *,
     chain_config_path=DEFAULT_CHAIN_CONFIG,
@@ -307,6 +531,7 @@ def build_basic_contract_readiness(
     manifest_path=MANIFEST_PATH,
     catalog_path=CATALOG_PATH,
     registry_path=ENTRY_MODE_REGISTRY_PATH,
+    governance_path=DEFAULT_GOVERNANCE_READINESS,
     env=None,
 ):
     contracts = {
@@ -317,8 +542,12 @@ def build_basic_contract_readiness(
             verify_chain_config(chain_config_path, system_config_path),
             verify_source_registry(source_registry_path, channels_csv),
             verify_input_sanitization(),
-            verify_safe_default(registry_path=DEFAULT_ENTRY_MODE_REGISTRY),
+            verify_safe_default(registry_path=registry_path),
             verify_project_stop_loss(env=env),
+            verify_evidence_eligibility_matrix(governance_path=governance_path),
+            verify_top_fix_queue(governance_path=governance_path),
+            verify_safety_case(governance_path=governance_path),
+            verify_waiver_policy(governance_path=governance_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -344,6 +573,7 @@ def main():
     parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     parser.add_argument("--catalog", default=str(CATALOG_PATH))
     parser.add_argument("--entry-mode-registry", default=str(ENTRY_MODE_REGISTRY_PATH))
+    parser.add_argument("--governance-readiness", default=str(DEFAULT_GOVERNANCE_READINESS))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -355,6 +585,7 @@ def main():
         manifest_path=Path(args.manifest),
         catalog_path=Path(args.catalog),
         registry_path=Path(args.entry_mode_registry),
+        governance_path=Path(args.governance_readiness),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:
