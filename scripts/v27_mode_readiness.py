@@ -411,6 +411,13 @@ def build_contract_statuses(
         "worker_fleet_missing_malformed_or_inconsistent",
         worker_fleet_evidence,
     )
+    backup_restore_evidence = contract_evidence.get("BackupRestoreDrillContract") or {}
+    statuses["BackupRestoreDrillContract"] = _status(
+        "BackupRestoreDrillContract",
+        "pass" if projection_built and projection_health.get("backup_restore_drill_ok") else "missing_evidence",
+        "backup_restore_drill_missing_malformed_or_invalid",
+        backup_restore_evidence,
+    )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",
@@ -538,7 +545,6 @@ def build_contract_statuses(
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "BackupRestoreDrillContract",
         "IncidentEvidenceFreezeContract",
         "CircuitBreakerResumeContract",
         "QueueDurabilityContract",

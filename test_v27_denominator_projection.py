@@ -331,6 +331,32 @@ def append_worker_fleet_heartbeat(log, *, worker_id="dashboard", build_hash="bui
     )
 
 
+def append_backup_restore_drill(
+    log,
+    *,
+    drill_id="restore-drill-unit-v1",
+    restored_world_hash=None,
+    restore_started_at="2026-01-15T00:00:00Z",
+    restore_completed_at="2026-01-15T00:01:00Z",
+    restore_status="passed",
+):
+    payload = {
+        "drill_id": drill_id,
+        "backup_set_id": "backup-set-unit-v1",
+        "restored_world_hash": restored_world_hash or sha256_hex({"world": "restored", "drill_id": drill_id}),
+        "restore_started_at": restore_started_at,
+        "restore_completed_at": restore_completed_at,
+        "restore_status": restore_status,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="backup_restore_drill_recorded",
+        aggregate_id=f"backup_restore_drill:{drill_id}",
+        idempotency_key=f"backup_restore_drill:{drill_id}:{payload['backup_set_id']}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -792,6 +818,45 @@ def test_denominator_projection_rejects_bad_rollout_and_mixed_worker_fleet(tmp_p
     ]
     assert fleet["worker_fleet_violation_count"] == 1
     assert fleet["worker_fleet_violations"] == ["mixed_build_hash"]
+
+
+def test_denominator_projection_consumes_backup_restore_drill_contract(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_backup_restore_drill(log)
+
+    projection = build_denominator_projection(tmp_path)
+    evidence = projection["contract_evidence"]["BackupRestoreDrillContract"]
+
+    assert projection["backup_restore_drill_recorded_events"] == 1
+    assert projection["health"]["backup_restore_drill_ok"] is True
+    assert evidence["eligible_backup_restore_drill_records"] == 1
+    assert evidence["valid_backup_restore_drill_count"] == 1
+    assert evidence["backup_restore_drill_violation_count"] == 0
+    assert evidence["malformed_count"] == 0
+    assert evidence["restore_statuses"] == ["passed"]
+
+
+def test_denominator_projection_rejects_invalid_backup_restore_drill(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_backup_restore_drill(
+        log,
+        restored_world_hash="not-a-sha",
+        restore_started_at="2026-01-15T00:02:00Z",
+        restore_completed_at="2026-01-15T00:01:00Z",
+        restore_status="failed",
+    )
+
+    projection = build_denominator_projection(tmp_path)
+    evidence = projection["contract_evidence"]["BackupRestoreDrillContract"]
+
+    assert projection["health"]["backup_restore_drill_ok"] is False
+    assert evidence["valid_backup_restore_drill_count"] == 0
+    assert evidence["backup_restore_drill_violation_count"] == 1
+    assert evidence["backup_restore_drill_violations"][0]["violation_fields"] == [
+        "restore_completed_before_started",
+        "restore_status_not_passed",
+        "restored_world_hash_sha256",
+    ]
 
 
 def test_denominator_projection_consumes_idempotency_contracts(tmp_path):

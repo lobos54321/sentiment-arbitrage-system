@@ -245,6 +245,24 @@ def append_worker_fleet_heartbeat_event(event_log_dir, worker_id="dashboard", bu
     )
 
 
+def append_backup_restore_drill_event(event_log_dir):
+    drill_id = "restore-drill-unit-v1"
+    V27EventLog(event_log_dir).append_event(
+        event_type="backup_restore_drill_recorded",
+        aggregate_id=f"backup_restore_drill:{drill_id}",
+        idempotency_key=f"backup_restore_drill:{drill_id}:backup-set-unit-v1",
+        payload={
+            "drill_id": drill_id,
+            "backup_set_id": "backup-set-unit-v1",
+            "restored_world_hash": sha256_hex({"world": "restored", "drill_id": drill_id}),
+            "restore_started_at": "2026-01-15T00:00:00Z",
+            "restore_completed_at": "2026-01-15T00:01:00Z",
+            "restore_status": "passed",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -666,6 +684,32 @@ def test_mode_readiness_consumes_deployment_and_worker_fleet_for_normal_tiny(tmp
     assert fleet["evidence"]["valid_worker_fleet_count"] == 2
     assert "DeploymentRolloutStateMachine" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "WorkerFleetConsistencyContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_backup_restore_drill_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_backup_restore_drill_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    backup_restore = matrix["contract_statuses"]["BackupRestoreDrillContract"]
+    assert backup_restore["status"] == "pass"
+    assert backup_restore["evidence"]["valid_backup_restore_drill_count"] == 1
+    assert "BackupRestoreDrillContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

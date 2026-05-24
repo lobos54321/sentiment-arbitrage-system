@@ -44,6 +44,7 @@ RUNTIME_RECOVERY_EVENT_TYPE = "runtime_recovery_control_recorded"
 RANDOMNESS_CONTROL_EVENT_TYPE = "randomness_control_recorded"
 DEPLOYMENT_ROLLOUT_EVENT_TYPE = "deployment_rollout_state_recorded"
 WORKER_FLEET_EVENT_TYPE = "worker_fleet_heartbeat_recorded"
+BACKUP_RESTORE_DRILL_EVENT_TYPE = "backup_restore_drill_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -67,6 +68,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     RANDOMNESS_CONTROL_EVENT_TYPE,
     DEPLOYMENT_ROLLOUT_EVENT_TYPE,
     WORKER_FLEET_EVENT_TYPE,
+    BACKUP_RESTORE_DRILL_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1053,6 +1055,46 @@ def _extract_worker_fleet_heartbeat(event, bags):
         "missing_fields": sorted(set(missing_fields)),
         "violation_fields": [],
         "worker_fleet_heartbeat_valid": not missing_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_backup_restore_drill(event, bags):
+    if event.get("event_type") != BACKUP_RESTORE_DRILL_EVENT_TYPE:
+        return None
+    values = {
+        "drill_id": _extract_scalar(bags, [("drill_id",)]),
+        "backup_set_id": _extract_scalar(bags, [("backup_set_id",)]),
+        "restored_world_hash": _extract_scalar(bags, [("restored_world_hash",)]),
+        "restore_started_at": _extract_scalar(bags, [("restore_started_at",)]),
+        "restore_completed_at": _extract_scalar(bags, [("restore_completed_at",)]),
+        "restore_status": _extract_scalar(bags, [("restore_status",), ("status",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("drill_id", "backup_set_id", "restored_world_hash", "restore_started_at", "restore_completed_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("restored_world_hash") and not _valid_sha256_hex(values.get("restored_world_hash")):
+        violation_fields.append("restored_world_hash_sha256")
+    started_sec = _timestamp_epoch_seconds(values.get("restore_started_at"))
+    completed_sec = _timestamp_epoch_seconds(values.get("restore_completed_at"))
+    if values.get("restore_started_at") and started_sec is None:
+        violation_fields.append("restore_started_at_parseable")
+    if values.get("restore_completed_at") and completed_sec is None:
+        violation_fields.append("restore_completed_at_parseable")
+    if started_sec is not None and completed_sec is not None and completed_sec < started_sec:
+        violation_fields.append("restore_completed_before_started")
+    if values.get("restore_status") and str(values.get("restore_status")).strip().lower() not in {"passed", "verified", "complete", "completed", "ok"}:
+        violation_fields.append("restore_status_not_passed")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "backup_restore_drill_valid": not missing_fields and not violation_fields,
         "source_event_id": event.get("event_id"),
         "global_seq": event.get("global_seq"),
     }
@@ -2194,6 +2236,7 @@ def _contract_evidence_from_records(
     randomness_controls=None,
     deployment_rollouts=None,
     worker_fleet_heartbeats=None,
+    backup_restore_drills=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -2206,6 +2249,9 @@ def _contract_evidence_from_records(
     raw_worker_fleet_count = len(worker_fleet_heartbeats or [])
     worker_fleet_heartbeats = _latest_by_key(worker_fleet_heartbeats or [], "worker_id")
     superseded_worker_fleet_count = max(0, raw_worker_fleet_count - len(worker_fleet_heartbeats))
+    raw_backup_restore_drill_count = len(backup_restore_drills or [])
+    backup_restore_drills = _latest_by_key(backup_restore_drills or [], "drill_id")
+    superseded_backup_restore_drill_count = max(0, raw_backup_restore_drill_count - len(backup_restore_drills))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -2967,6 +3013,16 @@ def _contract_evidence_from_records(
         for item in worker_fleet_heartbeats
         if item.get("missing_fields")
     ]
+    malformed_backup_restore_drills = [
+        item
+        for item in backup_restore_drills
+        if item.get("missing_fields")
+    ]
+    backup_restore_drill_violations = [
+        item
+        for item in backup_restore_drills
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -3279,6 +3335,39 @@ def _contract_evidence_from_records(
             "evidence_sources": sorted({item.get("evidence_source") for item in worker_fleet_heartbeats if item.get("evidence_source")}),
             "worker_fleet_projection_version": "v2.7.0.worker_fleet.v1",
         },
+        "BackupRestoreDrillContract": {
+            "eligible_backup_restore_drill_records": len(backup_restore_drills),
+            "backup_restore_drill_observation_count": raw_backup_restore_drill_count,
+            "current_backup_restore_drill_count": len(backup_restore_drills),
+            "superseded_backup_restore_drill_event_count": superseded_backup_restore_drill_count,
+            "valid_backup_restore_drill_count": sum(1 for item in backup_restore_drills if item.get("backup_restore_drill_valid") is True),
+            "malformed_count": len(malformed_backup_restore_drills),
+            "malformed_backup_restore_drills": [
+                {
+                    "drill_id": item.get("drill_id"),
+                    "backup_set_id": item.get("backup_set_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_backup_restore_drills
+            ],
+            "backup_restore_drill_violation_count": len(backup_restore_drill_violations),
+            "backup_restore_drill_violations": [
+                {
+                    "drill_id": item.get("drill_id"),
+                    "backup_set_id": item.get("backup_set_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in backup_restore_drill_violations
+            ],
+            "backup_set_ids": sorted({item.get("backup_set_id") for item in backup_restore_drills if item.get("backup_set_id")}),
+            "restored_world_hashes": sorted({item.get("restored_world_hash") for item in backup_restore_drills if item.get("restored_world_hash")}),
+            "restore_statuses": sorted({item.get("restore_status") for item in backup_restore_drills if item.get("restore_status")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in backup_restore_drills if item.get("evidence_source")}),
+            "backup_restore_drill_projection_version": "v2.7.0.backup_restore_drill.v1",
+        },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
             "idempotency_observation_count": len(all_idempotency_candidates),
@@ -3576,6 +3665,7 @@ def build_denominator_projection(
         "randomness_control_recorded_events": 0,
         "deployment_rollout_state_recorded_events": 0,
         "worker_fleet_heartbeat_recorded_events": 0,
+        "backup_restore_drill_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -3623,6 +3713,7 @@ def build_denominator_projection(
             "ResumeDrainPolicy": {},
             "DeploymentRolloutStateMachine": {},
             "WorkerFleetConsistencyContract": {},
+            "BackupRestoreDrillContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -3656,6 +3747,7 @@ def build_denominator_projection(
             "resume_drain_policy_ok": False,
             "deployment_rollout_state_machine_ok": False,
             "worker_fleet_consistency_ok": False,
+            "backup_restore_drill_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -3688,6 +3780,7 @@ def build_denominator_projection(
     randomness_controls = []
     deployment_rollouts = []
     worker_fleet_heartbeats = []
+    backup_restore_drills = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -3771,6 +3864,12 @@ def build_denominator_projection(
             worker_fleet_heartbeat = _extract_worker_fleet_heartbeat(event, _payload_bags(event))
             if worker_fleet_heartbeat:
                 worker_fleet_heartbeats.append(worker_fleet_heartbeat)
+            continue
+        if event.get("event_type") == BACKUP_RESTORE_DRILL_EVENT_TYPE:
+            projection["backup_restore_drill_recorded_events"] += 1
+            backup_restore_drill = _extract_backup_restore_drill(event, _payload_bags(event))
+            if backup_restore_drill:
+                backup_restore_drills.append(backup_restore_drill)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -3942,6 +4041,7 @@ def build_denominator_projection(
         randomness_controls=randomness_controls,
         deployment_rollouts=deployment_rollouts,
         worker_fleet_heartbeats=worker_fleet_heartbeats,
+        backup_restore_drills=backup_restore_drills,
     )
     if progress_callback:
         progress_callback(
@@ -4115,6 +4215,12 @@ def build_denominator_projection(
         and contract_evidence["WorkerFleetConsistencyContract"]["valid_worker_fleet_count"] > 0
         and contract_evidence["WorkerFleetConsistencyContract"]["malformed_count"] == 0
         and contract_evidence["WorkerFleetConsistencyContract"]["worker_fleet_violation_count"] == 0
+    )
+    projection["health"]["backup_restore_drill_ok"] = (
+        contract_evidence["BackupRestoreDrillContract"]["eligible_backup_restore_drill_records"] > 0
+        and contract_evidence["BackupRestoreDrillContract"]["valid_backup_restore_drill_count"] > 0
+        and contract_evidence["BackupRestoreDrillContract"]["malformed_count"] == 0
+        and contract_evidence["BackupRestoreDrillContract"]["backup_restore_drill_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
