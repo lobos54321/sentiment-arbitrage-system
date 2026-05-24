@@ -13,6 +13,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_safety_case,
     verify_top_fix_queue,
     verify_waiver_policy,
+    verify_write_path_registry,
 )
 
 
@@ -33,6 +34,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "TopFixQueueContract",
         "SafetyCaseContract",
         "WaiverPolicyContract",
+        "WritePathRegistryContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -216,6 +218,91 @@ def test_governance_readiness_contracts_pass_seed_artifact():
     assert verify_top_fix_queue()["status"] == "pass"
     assert verify_safety_case()["status"] == "pass"
     assert verify_waiver_policy()["status"] == "pass"
+
+
+def test_write_path_registry_covers_dashboard_write_paths():
+    report = verify_write_path_registry()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["scan_target_count"] == 1
+    assert report["evidence"]["scanned_mutation_count"] == 8
+    assert report["evidence"]["registered_write_path_count"] == 8
+    assert report["evidence"]["unregistered_mutation_count"] == 0
+    assert "sqlite:paper_trades" in report["evidence"]["registered_targets"]
+
+
+def test_write_path_registry_blocks_unregistered_static_write(tmp_path):
+    source_path = tmp_path / "writer.js"
+    source_path.write_text("db.prepare(`UPDATE demo SET value = 1`).run();\n", encoding="utf-8")
+    registry_path = tmp_path / "write-path-registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.write_path_registry.v1",
+                "static_scan": {
+                    "targets": [
+                        {
+                            "source_file": str(source_path),
+                            "include_patterns": ["UPDATE "],
+                            "exclude_patterns": [],
+                        }
+                    ]
+                },
+                "write_paths": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_write_path_registry(registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "write_path_registry_missing_malformed_or_incomplete"
+    assert report["evidence"]["scanned_mutation_count"] == 1
+    assert report["evidence"]["unregistered_mutation_count"] == 1
+
+
+def test_write_path_registry_accepts_tmp_registered_write(tmp_path):
+    source_path = tmp_path / "writer.js"
+    source_path.write_text("db.prepare(`UPDATE demo SET value = 1`).run();\n", encoding="utf-8")
+    registry_path = tmp_path / "write-path-registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.write_path_registry.v1",
+                "static_scan": {
+                    "targets": [
+                        {
+                            "source_file": str(source_path),
+                            "include_patterns": ["UPDATE "],
+                            "exclude_patterns": [],
+                        }
+                    ]
+                },
+                "write_paths": [
+                    {
+                        "write_path_id": "unit.demo.update",
+                        "module": "unit",
+                        "entry_point": "unit_test",
+                        "target_store": "sqlite:demo",
+                        "mutation_type": "update",
+                        "requires_outbox": False,
+                        "outbox_reason": "unit_test_non_production_write",
+                        "owner": "test",
+                        "mode_gate": "diagnostics",
+                        "source_file": str(source_path),
+                        "source_anchor": "UPDATE demo",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_write_path_registry(registry_path)
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["registered_write_path_count"] == 1
 
 
 def test_governance_readiness_blocks_incomplete_artifact(tmp_path):

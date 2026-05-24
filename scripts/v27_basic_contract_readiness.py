@@ -27,6 +27,29 @@ DEFAULT_CHANNELS_CSV = PROJECT_ROOT / "config" / "channels.csv"
 DEFAULT_SYSTEM_CONFIG = PROJECT_ROOT / "config" / "system.config.json"
 DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.json"
 DEFAULT_GOVERNANCE_READINESS = PROJECT_ROOT / "config" / "v27-governance-readiness.json"
+DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
+WRITE_PATH_REQUIRED_FIELDS = (
+    "write_path_id",
+    "module",
+    "target_store",
+    "requires_outbox",
+    "owner",
+)
+WRITE_PATH_SOURCE_FIELDS = (
+    "entry_point",
+    "mutation_type",
+    "mode_gate",
+    "source_file",
+    "source_anchor",
+)
+WRITE_PATH_ALLOWED_MODE_GATES = {
+    "observe_only",
+    "shadow",
+    "ultra_tiny",
+    "normal_tiny",
+    "admin_break_glass",
+    "diagnostics",
+}
 NORMAL_TINY_BLOCKING_CONTRACTS = {
     "RawProviderEvidenceContract",
     "LabelFinalizationContract",
@@ -124,6 +147,172 @@ def _load_governance_readiness(governance_path):
     if not isinstance(payload, dict):
         return None, {"governance_path": str(governance_path), "error": "governance_readiness_not_object"}
     return payload, {"governance_path": str(governance_path), "schema_version": payload.get("schema_version"), "updated_at": payload.get("updated_at")}
+
+
+def _resolve_source_file(source_file):
+    path = Path(str(source_file or ""))
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
+
+
+def _scan_write_path_target(target):
+    source_file = target.get("source_file") if isinstance(target, dict) else None
+    source_path = _resolve_source_file(source_file)
+    include_patterns = target.get("include_patterns") if isinstance(target, dict) else None
+    exclude_patterns = target.get("exclude_patterns") if isinstance(target, dict) else None
+    include_patterns = include_patterns if isinstance(include_patterns, list) else []
+    exclude_patterns = exclude_patterns if isinstance(exclude_patterns, list) else []
+    if not source_file or not include_patterns:
+        return [], [{"source_file": source_file, "error": "scan_target_missing_source_file_or_include_patterns"}]
+    if not source_path.exists():
+        return [], [{"source_file": source_file, "error": "scan_target_source_file_missing"}]
+
+    occurrences = []
+    lines = source_path.read_text(encoding="utf-8").splitlines()
+    for line_no, line in enumerate(lines, start=1):
+        if not any(str(pattern) in line for pattern in include_patterns):
+            continue
+        if any(str(pattern) in line for pattern in exclude_patterns):
+            continue
+        occurrences.append(
+            {
+                "source_file": str(source_file),
+                "line": line_no,
+                "text": line.strip(),
+            }
+        )
+    return occurrences, []
+
+
+def _find_anchor_occurrences(source_file, source_anchor, scanned_occurrences):
+    return [
+        item
+        for item in scanned_occurrences
+        if item.get("source_file") == source_file and str(source_anchor or "") in item.get("text", "")
+    ]
+
+
+def verify_write_path_registry(registry_path=DEFAULT_WRITE_PATH_REGISTRY):
+    try:
+        registry = _load_json(registry_path)
+    except Exception as exc:
+        return _contract("WritePathRegistryContract", False, "write_path_registry_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(registry, dict):
+        return _contract("WritePathRegistryContract", False, "write_path_registry_not_object", {"registry_path": str(registry_path)})
+
+    static_scan = registry.get("static_scan") if isinstance(registry.get("static_scan"), dict) else {}
+    scan_targets = static_scan.get("targets") if isinstance(static_scan, dict) else []
+    scan_targets = scan_targets if isinstance(scan_targets, list) else []
+    write_paths = registry.get("write_paths") if isinstance(registry.get("write_paths"), list) else []
+
+    scanned_occurrences = []
+    scan_errors = []
+    for target in scan_targets:
+        occurrences, errors = _scan_write_path_target(target if isinstance(target, dict) else {})
+        scanned_occurrences.extend(occurrences)
+        scan_errors.extend(errors)
+
+    malformed = []
+    duplicate_write_path_ids = []
+    duplicate_source_bindings = []
+    seen_write_path_ids = set()
+    seen_source_bindings = set()
+    registered_anchors = {}
+    for index, item in enumerate(write_paths):
+        if not isinstance(item, dict):
+            malformed.append({"index": index, "write_path_id": None, "missing_fields": list(WRITE_PATH_REQUIRED_FIELDS), "violations": ["write_path_not_object"]})
+            continue
+        write_path_id = item.get("write_path_id")
+        missing = _missing_required_fields(item, WRITE_PATH_REQUIRED_FIELDS + WRITE_PATH_SOURCE_FIELDS)
+        violations = []
+        if write_path_id in seen_write_path_ids:
+            duplicate_write_path_ids.append(write_path_id)
+        if write_path_id:
+            seen_write_path_ids.add(write_path_id)
+        if not isinstance(item.get("requires_outbox"), bool):
+            violations.append("requires_outbox_bool")
+        if item.get("requires_outbox") is False and not item.get("outbox_reason"):
+            violations.append("outbox_reason_required_when_requires_outbox_false")
+        if str(item.get("mode_gate") or "") not in WRITE_PATH_ALLOWED_MODE_GATES:
+            violations.append("mode_gate_invalid")
+        try:
+            source_anchor_occurrence = int(item.get("source_anchor_occurrence") or 1)
+        except (TypeError, ValueError):
+            source_anchor_occurrence = 0
+        if source_anchor_occurrence <= 0:
+            violations.append("source_anchor_occurrence_positive_int")
+        source_file = str(item.get("source_file") or "")
+        source_anchor = str(item.get("source_anchor") or "")
+        source_binding = (source_file, source_anchor, source_anchor_occurrence)
+        if source_binding in seen_source_bindings:
+            duplicate_source_bindings.append(
+                {
+                    "source_file": source_file,
+                    "source_anchor": source_anchor,
+                    "source_anchor_occurrence": source_anchor_occurrence,
+                    "write_path_id": write_path_id,
+                }
+            )
+        seen_source_bindings.add(source_binding)
+        if source_file and source_anchor:
+            registered_anchors.setdefault(source_file, set()).add(source_anchor)
+            anchor_occurrences = _find_anchor_occurrences(source_file, source_anchor, scanned_occurrences)
+            if len(anchor_occurrences) < source_anchor_occurrence:
+                violations.append("source_anchor_not_found")
+        if missing or violations:
+            malformed.append(
+                {
+                    "index": index,
+                    "write_path_id": write_path_id,
+                    "missing_fields": missing,
+                    "violations": violations,
+                }
+            )
+
+    unregistered_occurrences = []
+    for occurrence in scanned_occurrences:
+        source_file = occurrence.get("source_file")
+        anchors = registered_anchors.get(source_file, set())
+        if not any(anchor in occurrence.get("text", "") for anchor in anchors):
+            unregistered_occurrences.append(occurrence)
+
+    passed = (
+        registry.get("schema_version") == "v2.7.0.write_path_registry.v1"
+        and bool(scan_targets)
+        and bool(write_paths)
+        and not scan_errors
+        and not malformed
+        and not duplicate_write_path_ids
+        and not duplicate_source_bindings
+        and not unregistered_occurrences
+    )
+    return _contract(
+        "WritePathRegistryContract",
+        passed,
+        "write_path_registry_missing_malformed_or_incomplete",
+        {
+            "registry_path": str(registry_path),
+            "schema_version": registry.get("schema_version"),
+            "scope": registry.get("scope"),
+            "scan_target_count": len(scan_targets),
+            "scanned_mutation_count": len(scanned_occurrences),
+            "registered_write_path_count": len(write_paths),
+            "duplicate_write_path_ids": sorted(str(item) for item in duplicate_write_path_ids),
+            "duplicate_source_bindings": duplicate_source_bindings,
+            "scan_errors": scan_errors,
+            "malformed_write_paths": malformed,
+            "unregistered_mutation_count": len(unregistered_occurrences),
+            "unregistered_mutations": unregistered_occurrences[:20],
+            "registered_targets": sorted(
+                {
+                    str(item.get("target_store"))
+                    for item in write_paths
+                    if isinstance(item, dict) and item.get("target_store")
+                }
+            ),
+        },
+    )
 
 
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
@@ -532,6 +721,7 @@ def build_basic_contract_readiness(
     catalog_path=CATALOG_PATH,
     registry_path=ENTRY_MODE_REGISTRY_PATH,
     governance_path=DEFAULT_GOVERNANCE_READINESS,
+    write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
     env=None,
 ):
     contracts = {
@@ -548,6 +738,7 @@ def build_basic_contract_readiness(
             verify_top_fix_queue(governance_path=governance_path),
             verify_safety_case(governance_path=governance_path),
             verify_waiver_policy(governance_path=governance_path),
+            verify_write_path_registry(registry_path=write_path_registry_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -574,6 +765,7 @@ def main():
     parser.add_argument("--catalog", default=str(CATALOG_PATH))
     parser.add_argument("--entry-mode-registry", default=str(ENTRY_MODE_REGISTRY_PATH))
     parser.add_argument("--governance-readiness", default=str(DEFAULT_GOVERNANCE_READINESS))
+    parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -586,6 +778,7 @@ def main():
         catalog_path=Path(args.catalog),
         registry_path=Path(args.entry_mode_registry),
         governance_path=Path(args.governance_readiness),
+        write_path_registry_path=Path(args.write_path_registry),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

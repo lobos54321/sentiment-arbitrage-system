@@ -1,0 +1,151 @@
+{
+  "schema_version": "v2.7.0.write_path_registry.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "dashboard_server_direct_write_paths",
+  "owner": "v27_safety_governance",
+  "static_scan": {
+    "targets": [
+      {
+        "source_file": "src/web/dashboard-server.js",
+        "include_patterns": [
+          "fs.appendFileSync",
+          "INSERT INTO",
+          "INSERT OR REPLACE",
+          "UPDATE ",
+          "DELETE FROM"
+        ],
+        "exclude_patterns": []
+      }
+    ]
+  },
+  "write_paths": [
+    {
+      "write_path_id": "dashboard.runtime_log.append",
+      "module": "dashboard_server",
+      "entry_point": "console_log_capture",
+      "target_store": "filesystem:runtime_log",
+      "write_target": "runtimeLogPath",
+      "mutation_type": "append_file",
+      "requires_outbox": false,
+      "outbox_reason": "diagnostic_log_only_no_decision_or_ledger_state",
+      "owner": "dashboard_runtime",
+      "mode_gate": "diagnostics",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "fs.appendFileSync(runtimeLogPath",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.paper_trades.cleanup_open_positions",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/paper-trades/cleanup",
+      "target_store": "sqlite:paper_trades",
+      "write_target": "paper_trades",
+      "mutation_type": "update",
+      "requires_outbox": false,
+      "outbox_reason": "authenticated_manual_paper_cleanup_path_not_used_for_autonomous_entry",
+      "owner": "paper_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "UPDATE paper_trades",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.live_positions.manual_close",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/close-position",
+      "target_store": "sqlite:live_positions",
+      "write_target": "live_positions",
+      "mutation_type": "update",
+      "requires_outbox": false,
+      "outbox_reason": "authenticated_manual_live_admin_path_outside_v27_paper_entry_pipeline",
+      "owner": "live_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": false,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "UPDATE live_positions",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.system_state.pause_trading",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/pause-trading",
+      "target_store": "sqlite:system_state",
+      "write_target": "system_state.trading_paused",
+      "mutation_type": "upsert",
+      "requires_outbox": false,
+      "outbox_reason": "authenticated_manual_pause_control_state",
+      "owner": "risk_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "INSERT OR REPLACE INTO system_state (key, value, expires_at) VALUES ('trading_paused'",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.system_state.resume_trading",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/resume-trading",
+      "target_store": "sqlite:system_state",
+      "write_target": "system_state.trading_paused",
+      "mutation_type": "delete",
+      "requires_outbox": false,
+      "outbox_reason": "authenticated_manual_resume_control_state",
+      "owner": "risk_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "DELETE FROM system_state WHERE key = 'trading_paused'",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.system_state.reset_daily_loss",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/reset-daily-loss",
+      "target_store": "sqlite:system_state",
+      "write_target": "system_state.daily_loss_reset_ts",
+      "mutation_type": "upsert",
+      "requires_outbox": false,
+      "outbox_reason": "authenticated_manual_risk_window_reset_control_state",
+      "owner": "risk_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "INSERT OR REPLACE INTO system_state (key, value) VALUES ('daily_loss_reset_ts'",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.live_positions.reset_live_data",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/reset-live-data",
+      "target_store": "sqlite:live_positions",
+      "write_target": "live_positions",
+      "mutation_type": "delete",
+      "requires_outbox": false,
+      "outbox_reason": "authenticated_destructive_live_admin_reset_outside_v27_paper_entry_pipeline",
+      "owner": "live_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": false,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "DELETE FROM live_positions",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.system_state.reset_live_data_clear_pause",
+      "module": "dashboard_server",
+      "entry_point": "POST /api/reset-live-data",
+      "target_store": "sqlite:system_state",
+      "write_target": "system_state.trading_paused",
+      "mutation_type": "delete",
+      "requires_outbox": false,
+      "outbox_reason": "paired_cleanup_for_authenticated_destructive_live_admin_reset",
+      "owner": "live_ops",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": false,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "DELETE FROM system_state WHERE key = 'trading_paused'",
+      "source_anchor_occurrence": 2
+    }
+  ]
+}

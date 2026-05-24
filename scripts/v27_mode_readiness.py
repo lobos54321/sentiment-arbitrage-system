@@ -38,6 +38,7 @@ MODE_REQUIREMENTS = {
         "PaperModeSafetyBoundary",
         "ChainConfigContract",
         "SourceRegistryContract",
+        "WritePathRegistryContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",
