@@ -482,6 +482,65 @@ def append_retry_storm_control(
     )
 
 
+def append_provider_coverage_map(
+    log,
+    *,
+    provider="jupiter_ultra",
+    chain="solana",
+    pool_type="raydium_amm",
+    coverage_status="supported",
+    unsupported_reason="none",
+    checked_at="2026-01-15T00:06:00Z",
+):
+    payload = {
+        "provider": provider,
+        "chain": chain,
+        "pool_type": pool_type,
+        "coverage_status": coverage_status,
+        "unsupported_reason": unsupported_reason,
+        "coverage_map_version": "v2.7.0.provider_coverage_map.v1",
+        "checked_at": checked_at,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="provider_coverage_map_recorded",
+        aggregate_id=f"provider_coverage_map:{provider}:{chain}:{pool_type}",
+        idempotency_key=f"provider_coverage_map:{provider}:{chain}:{pool_type}:{coverage_status}",
+        payload=payload,
+    )
+
+
+def append_training_serving_skew(
+    log,
+    *,
+    feature_set_id="normal-tiny-features-v1",
+    normalization_version="norm-v1",
+    training_feature_code_hash=None,
+    serving_feature_code_hash=None,
+    skew_check_result="pass",
+    checked_at="2026-01-15T00:07:00Z",
+):
+    training_feature_code_hash = training_feature_code_hash or sha256_hex({"feature_code": "training", "version": "v1"})
+    serving_feature_code_hash = serving_feature_code_hash or sha256_hex({"feature_code": "serving", "version": "v1"})
+    payload = {
+        "feature_set_id": feature_set_id,
+        "training_feature_code_hash": training_feature_code_hash,
+        "serving_feature_code_hash": serving_feature_code_hash,
+        "normalization_version": normalization_version,
+        "skew_check_result": skew_check_result,
+        "checked_at": checked_at,
+        "training_artifact_id": "training-artifact-unit-v1",
+        "serving_artifact_id": "serving-artifact-unit-v1",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="training_serving_skew_recorded",
+        aggregate_id=f"training_serving_skew:{feature_set_id}:{normalization_version}",
+        idempotency_key=f"training_serving_skew:{feature_set_id}:{normalization_version}:{skew_check_result}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -1106,6 +1165,66 @@ def test_denominator_projection_rejects_bad_queue_candidate_and_retry_contracts(
         "backoff_policy_not_bounded",
         "max_concurrent_retries_nonnegative",
         "p0_reserved_capacity_nonnegative",
+    ]
+
+
+def test_denominator_projection_consumes_provider_coverage_and_training_serving_skew_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_provider_coverage_map(log)
+    append_training_serving_skew(log)
+
+    projection = build_denominator_projection(tmp_path)
+    coverage = projection["contract_evidence"]["ProviderCoverageMapContract"]
+    skew = projection["contract_evidence"]["TrainingServingSkewContract"]
+
+    assert projection["provider_coverage_map_recorded_events"] == 1
+    assert projection["training_serving_skew_recorded_events"] == 1
+    assert projection["health"]["provider_coverage_map_ok"] is True
+    assert projection["health"]["training_serving_skew_ok"] is True
+    assert coverage["eligible_provider_coverage_map_records"] == 1
+    assert coverage["valid_provider_coverage_map_count"] == 1
+    assert coverage["provider_coverage_map_violation_count"] == 0
+    assert coverage["providers"] == ["jupiter_ultra"]
+    assert coverage["coverage_statuses"] == ["supported"]
+    assert skew["eligible_training_serving_skew_records"] == 1
+    assert skew["valid_training_serving_skew_count"] == 1
+    assert skew["training_serving_skew_violation_count"] == 0
+    assert skew["normalization_versions"] == ["norm-v1"]
+    assert skew["skew_check_results"] == ["pass"]
+
+
+def test_denominator_projection_rejects_bad_provider_coverage_and_training_serving_skew_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_provider_coverage_map(log, provider="", coverage_status="ambiguous", unsupported_reason="", checked_at="not-a-time")
+    append_training_serving_skew(
+        log,
+        training_feature_code_hash="not-a-sha",
+        serving_feature_code_hash="also-not-a-sha",
+        skew_check_result="fail",
+        checked_at="not-a-time",
+    )
+
+    projection = build_denominator_projection(tmp_path)
+    coverage = projection["contract_evidence"]["ProviderCoverageMapContract"]
+    skew = projection["contract_evidence"]["TrainingServingSkewContract"]
+
+    assert projection["health"]["provider_coverage_map_ok"] is False
+    assert projection["health"]["training_serving_skew_ok"] is False
+    assert coverage["valid_provider_coverage_map_count"] == 0
+    assert coverage["malformed_count"] == 1
+    assert coverage["provider_coverage_map_violation_count"] == 1
+    assert coverage["provider_coverage_map_violations"][0]["missing_fields"] == ["provider", "unsupported_reason"]
+    assert coverage["provider_coverage_map_violations"][0]["violation_fields"] == [
+        "checked_at_parseable",
+        "coverage_status_unknown",
+    ]
+    assert skew["valid_training_serving_skew_count"] == 0
+    assert skew["training_serving_skew_violation_count"] == 1
+    assert skew["training_serving_skew_violations"][0]["violation_fields"] == [
+        "checked_at_parseable",
+        "serving_feature_code_hash_sha256",
+        "skew_check_result_not_passed",
+        "training_feature_code_hash_sha256",
     ]
 
 

@@ -453,6 +453,20 @@ def build_contract_statuses(
         "retry_storm_control_missing_malformed_or_invalid",
         retry_storm_evidence,
     )
+    provider_coverage_evidence = contract_evidence.get("ProviderCoverageMapContract") or {}
+    statuses["ProviderCoverageMapContract"] = _status(
+        "ProviderCoverageMapContract",
+        "pass" if projection_built and projection_health.get("provider_coverage_map_ok") else "missing_evidence",
+        "provider_coverage_map_missing_malformed_or_invalid",
+        provider_coverage_evidence,
+    )
+    training_serving_skew_evidence = contract_evidence.get("TrainingServingSkewContract") or {}
+    statuses["TrainingServingSkewContract"] = _status(
+        "TrainingServingSkewContract",
+        "pass" if projection_built and projection_health.get("training_serving_skew_ok") else "missing_evidence",
+        "training_serving_skew_missing_malformed_or_invalid",
+        training_serving_skew_evidence,
+    )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",
@@ -580,8 +594,6 @@ def build_contract_statuses(
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "ProviderCoverageMapContract",
-        "TrainingServingSkewContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",

@@ -344,6 +344,45 @@ def append_retry_storm_control_event(event_log_dir):
     )
 
 
+def append_provider_coverage_map_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="provider_coverage_map_recorded",
+        aggregate_id="provider_coverage_map:jupiter_ultra:solana:raydium_amm",
+        idempotency_key="provider_coverage_map:jupiter_ultra:solana:raydium_amm:supported",
+        payload={
+            "provider": "jupiter_ultra",
+            "chain": "solana",
+            "pool_type": "raydium_amm",
+            "coverage_status": "supported",
+            "unsupported_reason": "none",
+            "coverage_map_version": "v2.7.0.provider_coverage_map.v1",
+            "checked_at": "2026-01-15T00:06:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
+def append_training_serving_skew_event(event_log_dir):
+    feature_set_id = "normal-tiny-features-v1"
+    normalization_version = "norm-v1"
+    V27EventLog(event_log_dir).append_event(
+        event_type="training_serving_skew_recorded",
+        aggregate_id=f"training_serving_skew:{feature_set_id}:{normalization_version}",
+        idempotency_key=f"training_serving_skew:{feature_set_id}:{normalization_version}:pass",
+        payload={
+            "feature_set_id": feature_set_id,
+            "training_feature_code_hash": sha256_hex({"feature_code": "training", "version": "v1"}),
+            "serving_feature_code_hash": sha256_hex({"feature_code": "serving", "version": "v1"}),
+            "normalization_version": normalization_version,
+            "skew_check_result": "pass",
+            "checked_at": "2026-01-15T00:07:00Z",
+            "training_artifact_id": "training-artifact-unit-v1",
+            "serving_artifact_id": "serving-artifact-unit-v1",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -858,6 +897,37 @@ def test_mode_readiness_consumes_queue_candidate_and_retry_for_normal_tiny(tmp_p
     assert "QueueDurabilityContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "CandidateCancellationContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "RetryStormControlContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_provider_coverage_and_training_serving_skew_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_provider_coverage_map_event(event_log_dir)
+    append_training_serving_skew_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    coverage = matrix["contract_statuses"]["ProviderCoverageMapContract"]
+    skew = matrix["contract_statuses"]["TrainingServingSkewContract"]
+    assert coverage["status"] == "pass"
+    assert skew["status"] == "pass"
+    assert coverage["evidence"]["valid_provider_coverage_map_count"] == 1
+    assert skew["evidence"]["valid_training_serving_skew_count"] == 1
+    assert "ProviderCoverageMapContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "TrainingServingSkewContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

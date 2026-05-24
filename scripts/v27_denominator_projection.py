@@ -50,6 +50,8 @@ CIRCUIT_BREAKER_RESUME_EVENT_TYPE = "circuit_breaker_resume_recorded"
 QUEUE_DURABILITY_EVENT_TYPE = "queue_durability_recorded"
 CANDIDATE_CANCELLATION_EVENT_TYPE = "candidate_cancellation_recorded"
 RETRY_STORM_CONTROL_EVENT_TYPE = "retry_storm_control_recorded"
+PROVIDER_COVERAGE_MAP_EVENT_TYPE = "provider_coverage_map_recorded"
+TRAINING_SERVING_SKEW_EVENT_TYPE = "training_serving_skew_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -79,6 +81,8 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     QUEUE_DURABILITY_EVENT_TYPE,
     CANDIDATE_CANCELLATION_EVENT_TYPE,
     RETRY_STORM_CONTROL_EVENT_TYPE,
+    PROVIDER_COVERAGE_MAP_EVENT_TYPE,
+    TRAINING_SERVING_SKEW_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1293,6 +1297,94 @@ def _extract_retry_storm_control(event, bags):
     }
 
 
+def _extract_provider_coverage_map(event, bags):
+    if event.get("event_type") != PROVIDER_COVERAGE_MAP_EVENT_TYPE:
+        return None
+    values = {
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "chain": _extract_scalar(bags, [("chain",)]),
+        "pool_type": _extract_scalar(bags, [("pool_type",), ("pool_kind",)]),
+        "coverage_status": _extract_scalar(bags, [("coverage_status",)]),
+        "unsupported_reason": _extract_scalar(bags, [("unsupported_reason",)]),
+        "coverage_map_version": _extract_scalar(bags, [("coverage_map_version",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("provider", "chain", "pool_type", "coverage_status", "unsupported_reason"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    coverage_status = str(values.get("coverage_status") or "").strip().lower()
+    if coverage_status not in {"supported", "unsupported", "partial", "degraded", "unknown"}:
+        violation_fields.append("coverage_status_unknown")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    coverage_key = ":".join(
+        [
+            str(values.get("provider") or "unknown_provider"),
+            str(values.get("chain") or "unknown_chain"),
+            str(values.get("pool_type") or "unknown_pool_type"),
+        ]
+    )
+    return {
+        **values,
+        "coverage_key": coverage_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_coverage_map_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_training_serving_skew(event, bags):
+    if event.get("event_type") != TRAINING_SERVING_SKEW_EVENT_TYPE:
+        return None
+    values = {
+        "training_feature_code_hash": _extract_scalar(bags, [("training_feature_code_hash",)]),
+        "serving_feature_code_hash": _extract_scalar(bags, [("serving_feature_code_hash",)]),
+        "normalization_version": _extract_scalar(bags, [("normalization_version",)]),
+        "skew_check_result": _extract_scalar(bags, [("skew_check_result",)]),
+        "feature_set_id": _extract_scalar(bags, [("feature_set_id",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "training_artifact_id": _extract_scalar(bags, [("training_artifact_id",)]),
+        "serving_artifact_id": _extract_scalar(bags, [("serving_artifact_id",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("training_feature_code_hash", "serving_feature_code_hash", "normalization_version", "skew_check_result"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("training_feature_code_hash") and not _valid_sha256_hex(values.get("training_feature_code_hash")):
+        violation_fields.append("training_feature_code_hash_sha256")
+    if values.get("serving_feature_code_hash") and not _valid_sha256_hex(values.get("serving_feature_code_hash")):
+        violation_fields.append("serving_feature_code_hash_sha256")
+    skew_check_result = str(values.get("skew_check_result") or "").strip().lower()
+    if skew_check_result not in {"pass", "passed", "ok", "matched", "equivalent", "within_tolerance", "no_skew"}:
+        violation_fields.append("skew_check_result_not_passed")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    skew_key = ":".join(
+        [
+            str(values.get("feature_set_id") or "default_feature_set"),
+            str(values.get("normalization_version") or "unknown_normalization"),
+        ]
+    )
+    return {
+        **values,
+        "skew_key": skew_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "training_serving_skew_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _latest_by_key(items, key_name):
     latest = {}
     passthrough = []
@@ -2435,6 +2527,8 @@ def _contract_evidence_from_records(
     queue_durability_records=None,
     candidate_cancellations=None,
     retry_storm_controls=None,
+    provider_coverage_maps=None,
+    training_serving_skews=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -2465,6 +2559,12 @@ def _contract_evidence_from_records(
     raw_retry_storm_control_count = len(retry_storm_controls or [])
     retry_storm_controls = _latest_by_key(retry_storm_controls or [], "retry_family")
     superseded_retry_storm_control_count = max(0, raw_retry_storm_control_count - len(retry_storm_controls))
+    raw_provider_coverage_map_count = len(provider_coverage_maps or [])
+    provider_coverage_maps = _latest_by_key(provider_coverage_maps or [], "coverage_key")
+    superseded_provider_coverage_map_count = max(0, raw_provider_coverage_map_count - len(provider_coverage_maps))
+    raw_training_serving_skew_count = len(training_serving_skews or [])
+    training_serving_skews = _latest_by_key(training_serving_skews or [], "skew_key")
+    superseded_training_serving_skew_count = max(0, raw_training_serving_skew_count - len(training_serving_skews))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -3301,6 +3401,26 @@ def _contract_evidence_from_records(
         for item in retry_storm_controls
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_provider_coverage_maps = [
+        item
+        for item in provider_coverage_maps
+        if item.get("missing_fields")
+    ]
+    provider_coverage_map_violations = [
+        item
+        for item in provider_coverage_maps
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_training_serving_skews = [
+        item
+        for item in training_serving_skews
+        if item.get("missing_fields")
+    ]
+    training_serving_skew_violations = [
+        item
+        for item in training_serving_skews
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -3810,6 +3930,78 @@ def _contract_evidence_from_records(
             "evidence_sources": sorted({item.get("evidence_source") for item in retry_storm_controls if item.get("evidence_source")}),
             "retry_storm_control_projection_version": "v2.7.0.retry_storm_control.v1",
         },
+        "ProviderCoverageMapContract": {
+            "eligible_provider_coverage_map_records": len(provider_coverage_maps),
+            "provider_coverage_map_observation_count": raw_provider_coverage_map_count,
+            "current_provider_coverage_map_count": len(provider_coverage_maps),
+            "superseded_provider_coverage_map_event_count": superseded_provider_coverage_map_count,
+            "valid_provider_coverage_map_count": sum(1 for item in provider_coverage_maps if item.get("provider_coverage_map_valid") is True),
+            "malformed_count": len(malformed_provider_coverage_maps),
+            "malformed_provider_coverage_maps": [
+                {
+                    "provider": item.get("provider"),
+                    "chain": item.get("chain"),
+                    "pool_type": item.get("pool_type"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_provider_coverage_maps
+            ],
+            "provider_coverage_map_violation_count": len(provider_coverage_map_violations),
+            "provider_coverage_map_violations": [
+                {
+                    "provider": item.get("provider"),
+                    "chain": item.get("chain"),
+                    "pool_type": item.get("pool_type"),
+                    "coverage_status": item.get("coverage_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in provider_coverage_map_violations
+            ],
+            "providers": sorted({item.get("provider") for item in provider_coverage_maps if item.get("provider")}),
+            "chains": sorted({item.get("chain") for item in provider_coverage_maps if item.get("chain")}),
+            "pool_types": sorted({item.get("pool_type") for item in provider_coverage_maps if item.get("pool_type")}),
+            "coverage_statuses": sorted({item.get("coverage_status") for item in provider_coverage_maps if item.get("coverage_status")}),
+            "unsupported_reasons": sorted({item.get("unsupported_reason") for item in provider_coverage_maps if item.get("unsupported_reason")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in provider_coverage_maps if item.get("evidence_source")}),
+            "provider_coverage_map_projection_version": "v2.7.0.provider_coverage_map.v1",
+        },
+        "TrainingServingSkewContract": {
+            "eligible_training_serving_skew_records": len(training_serving_skews),
+            "training_serving_skew_observation_count": raw_training_serving_skew_count,
+            "current_training_serving_skew_count": len(training_serving_skews),
+            "superseded_training_serving_skew_event_count": superseded_training_serving_skew_count,
+            "valid_training_serving_skew_count": sum(1 for item in training_serving_skews if item.get("training_serving_skew_valid") is True),
+            "malformed_count": len(malformed_training_serving_skews),
+            "malformed_training_serving_skews": [
+                {
+                    "feature_set_id": item.get("feature_set_id"),
+                    "normalization_version": item.get("normalization_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_training_serving_skews
+            ],
+            "training_serving_skew_violation_count": len(training_serving_skew_violations),
+            "training_serving_skew_violations": [
+                {
+                    "feature_set_id": item.get("feature_set_id"),
+                    "normalization_version": item.get("normalization_version"),
+                    "skew_check_result": item.get("skew_check_result"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in training_serving_skew_violations
+            ],
+            "feature_set_ids": sorted({item.get("feature_set_id") for item in training_serving_skews if item.get("feature_set_id")}),
+            "normalization_versions": sorted({item.get("normalization_version") for item in training_serving_skews if item.get("normalization_version")}),
+            "skew_check_results": sorted({item.get("skew_check_result") for item in training_serving_skews if item.get("skew_check_result")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in training_serving_skews if item.get("evidence_source")}),
+            "training_serving_skew_projection_version": "v2.7.0.training_serving_skew.v1",
+        },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
             "idempotency_observation_count": len(all_idempotency_candidates),
@@ -4113,6 +4305,8 @@ def build_denominator_projection(
         "queue_durability_recorded_events": 0,
         "candidate_cancellation_recorded_events": 0,
         "retry_storm_control_recorded_events": 0,
+        "provider_coverage_map_recorded_events": 0,
+        "training_serving_skew_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -4166,6 +4360,8 @@ def build_denominator_projection(
             "QueueDurabilityContract": {},
             "CandidateCancellationContract": {},
             "RetryStormControlContract": {},
+            "ProviderCoverageMapContract": {},
+            "TrainingServingSkewContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -4205,6 +4401,8 @@ def build_denominator_projection(
             "queue_durability_ok": False,
             "candidate_cancellation_ok": False,
             "retry_storm_control_ok": False,
+            "provider_coverage_map_ok": False,
+            "training_serving_skew_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -4243,6 +4441,8 @@ def build_denominator_projection(
     queue_durability_records = []
     candidate_cancellations = []
     retry_storm_controls = []
+    provider_coverage_maps = []
+    training_serving_skews = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -4362,6 +4562,18 @@ def build_denominator_projection(
             retry_storm_control = _extract_retry_storm_control(event, _payload_bags(event))
             if retry_storm_control:
                 retry_storm_controls.append(retry_storm_control)
+            continue
+        if event.get("event_type") == PROVIDER_COVERAGE_MAP_EVENT_TYPE:
+            projection["provider_coverage_map_recorded_events"] += 1
+            provider_coverage_map = _extract_provider_coverage_map(event, _payload_bags(event))
+            if provider_coverage_map:
+                provider_coverage_maps.append(provider_coverage_map)
+            continue
+        if event.get("event_type") == TRAINING_SERVING_SKEW_EVENT_TYPE:
+            projection["training_serving_skew_recorded_events"] += 1
+            training_serving_skew = _extract_training_serving_skew(event, _payload_bags(event))
+            if training_serving_skew:
+                training_serving_skews.append(training_serving_skew)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -4539,6 +4751,8 @@ def build_denominator_projection(
         queue_durability_records=queue_durability_records,
         candidate_cancellations=candidate_cancellations,
         retry_storm_controls=retry_storm_controls,
+        provider_coverage_maps=provider_coverage_maps,
+        training_serving_skews=training_serving_skews,
     )
     if progress_callback:
         progress_callback(
@@ -4748,6 +4962,18 @@ def build_denominator_projection(
         and contract_evidence["RetryStormControlContract"]["valid_retry_storm_control_count"] > 0
         and contract_evidence["RetryStormControlContract"]["malformed_count"] == 0
         and contract_evidence["RetryStormControlContract"]["retry_storm_control_violation_count"] == 0
+    )
+    projection["health"]["provider_coverage_map_ok"] = (
+        contract_evidence["ProviderCoverageMapContract"]["eligible_provider_coverage_map_records"] > 0
+        and contract_evidence["ProviderCoverageMapContract"]["valid_provider_coverage_map_count"] > 0
+        and contract_evidence["ProviderCoverageMapContract"]["malformed_count"] == 0
+        and contract_evidence["ProviderCoverageMapContract"]["provider_coverage_map_violation_count"] == 0
+    )
+    projection["health"]["training_serving_skew_ok"] = (
+        contract_evidence["TrainingServingSkewContract"]["eligible_training_serving_skew_records"] > 0
+        and contract_evidence["TrainingServingSkewContract"]["valid_training_serving_skew_count"] > 0
+        and contract_evidence["TrainingServingSkewContract"]["malformed_count"] == 0
+        and contract_evidence["TrainingServingSkewContract"]["training_serving_skew_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
