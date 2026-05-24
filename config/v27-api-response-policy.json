@@ -1,0 +1,121 @@
+{
+  "schema_version": "v2.7.0.api_response_policy.v1",
+  "scope": "v27_manual_evidence_api_responses",
+  "source_file": "src/web/dashboard-server.js",
+  "response_policies": [
+    {
+      "endpoint": "/api/paper/v27-read-model-refresh",
+      "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+      "status_code_policy": {
+        "accepted": 202,
+        "rejected": 409,
+        "method_not_allowed": 405,
+        "auth_failed": [401, 403],
+        "audit_unavailable": 500
+      },
+      "error_envelope": {
+        "required": true,
+        "error_field": "error",
+        "guard_errors": true,
+        "rejected_response_error_required": true
+      },
+      "cache_control": "no-store",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh)"
+    },
+    {
+      "endpoint": "/api/paper/v27-recovery-control-mirror",
+      "response_schema_version": "v2.7.0.manual_recovery_control_mirror.v1",
+      "status_code_policy": {
+        "accepted": 202,
+        "rejected": 409,
+        "method_not_allowed": 405,
+        "auth_failed": [401, 403],
+        "audit_unavailable": 500
+      },
+      "error_envelope": {
+        "required": true,
+        "error_field": "error",
+        "guard_errors": true,
+        "rejected_response_error_required": true
+      },
+      "cache_control": "no-store",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh)"
+    },
+    {
+      "endpoint": "/api/paper/v27-raw-provider-evidence-mirror",
+      "response_schema_version": "v2.7.0.manual_raw_provider_evidence_mirror.v1",
+      "status_code_policy": {
+        "accepted": 202,
+        "rejected": 409,
+        "method_not_allowed": 405,
+        "auth_failed": [401, 403],
+        "audit_unavailable": 500
+      },
+      "error_envelope": {
+        "required": true,
+        "error_field": "error",
+        "guard_errors": true,
+        "rejected_response_error_required": true
+      },
+      "cache_control": "no-store",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror)"
+    },
+    {
+      "endpoint": "/api/paper/v27-raw-provider-probe-evidence",
+      "response_schema_version": "v2.7.0.manual_raw_provider_probe_evidence.v1",
+      "status_code_policy": {
+        "accepted": 202,
+        "rejected": 409,
+        "method_not_allowed": 405,
+        "auth_failed": [401, 403],
+        "audit_unavailable": 500
+      },
+      "error_envelope": {
+        "required": true,
+        "error_field": "error",
+        "guard_errors": true,
+        "rejected_response_error_required": true
+      },
+      "cache_control": "no-store",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record)"
+    },
+    {
+      "endpoint": "/api/paper/v27-randomness-control-mirror",
+      "response_schema_version": "v2.7.0.manual_randomness_control_mirror.v1",
+      "status_code_policy": {
+        "accepted": 202,
+        "rejected": 409,
+        "method_not_allowed": 405,
+        "auth_failed": [401, 403],
+        "audit_unavailable": 500
+      },
+      "error_envelope": {
+        "required": true,
+        "error_field": "error",
+        "guard_errors": true,
+        "rejected_response_error_required": true
+      },
+      "cache_control": "no-store",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror)"
+    },
+    {
+      "endpoint": "/api/paper/v27-normal-tiny-ops-evidence",
+      "response_schema_version": "v2.7.0.manual_normal_tiny_ops_evidence.v1",
+      "status_code_policy": {
+        "accepted": 202,
+        "rejected": 409,
+        "method_not_allowed": 405,
+        "auth_failed": [401, 403],
+        "audit_unavailable": 500
+      },
+      "error_envelope": {
+        "required": true,
+        "error_field": "error",
+        "guard_errors": true,
+        "rejected_response_error_required": true
+      },
+      "cache_control": "no-store",
+      "source_anchor": "buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record)"
+    }
+  ]
+}

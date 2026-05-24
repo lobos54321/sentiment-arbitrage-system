@@ -62,19 +62,41 @@ const PAPER_REPORT_COOLDOWN_MS = Math.max(
 let paperReportBusy = false;
 let paperReportCooldownUntil = 0;
 
+export function apiJsonHeaders(cacheControl = 'no-store') {
+  return {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': cacheControl,
+  };
+}
+
+export function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result = {}, options = {}) {
+  const generatedAt = options.generatedAt || new Date().toISOString();
+  const payload = {
+    generated_at: generatedAt,
+    materialized: false,
+    response_schema_version: responseSchemaVersion,
+    refresh_schema_version: responseSchemaVersion,
+    ...result,
+  };
+  if (payload.accepted === false && !payload.error) {
+    payload.error = payload.status || 'manual_evidence_request_rejected';
+  }
+  return payload;
+}
+
 /**
  * 验证敏感 API 的访问令牌
  * 需要设置环境变量 DASHBOARD_TOKEN，否则敏感端点被禁用
  */
 function checkAuth(req, url, res) {
   if (!DASHBOARD_TOKEN) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.writeHead(403, apiJsonHeaders());
     res.end(JSON.stringify({ error: 'DASHBOARD_TOKEN not configured. Set DASHBOARD_TOKEN env var to enable this endpoint.' }));
     return false;
   }
   const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
   if (token !== DASHBOARD_TOKEN) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.writeHead(401, apiJsonHeaders());
     res.end(JSON.stringify({ error: 'Invalid or missing token' }));
     return false;
   }
@@ -83,7 +105,7 @@ function checkAuth(req, url, res) {
 
 function requirePost(req, res) {
   if (req.method !== 'POST') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.writeHead(405, apiJsonHeaders());
     res.end(JSON.stringify({ error: 'Use POST' }));
     return false;
   }
@@ -608,7 +630,7 @@ function requireDashboardAuditEvent(req, res, url, input = {}) {
       ...input,
     });
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.writeHead(500, apiJsonHeaders());
     res.end(JSON.stringify({ error: 'Audit log unavailable', detail: error.message }));
     return null;
   }
@@ -8417,13 +8439,8 @@ const server = http.createServer(async (req, res) => {
       strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
     });
-    res.writeHead(refresh.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      generated_at: new Date().toISOString(),
-      materialized: false,
-      refresh_schema_version: 'v2.7.0.manual_read_model_refresh.v1',
-      ...refresh,
-    }, null, 2));
+    res.writeHead(refresh.accepted ? 202 : 409, apiJsonHeaders());
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_read_model_refresh.v1', refresh), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-recovery-control-mirror') {
     if (!requirePost(req, res)) return;
@@ -8443,13 +8460,8 @@ const server = http.createServer(async (req, res) => {
       environmentId: url.searchParams.get('environment_id') || undefined,
       recoveryVersion: url.searchParams.get('recovery_version') || undefined,
     });
-    res.writeHead(refresh.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      generated_at: new Date().toISOString(),
-      materialized: false,
-      refresh_schema_version: 'v2.7.0.manual_recovery_control_mirror.v1',
-      ...refresh,
-    }, null, 2));
+    res.writeHead(refresh.accepted ? 202 : 409, apiJsonHeaders());
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_recovery_control_mirror.v1', refresh), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-raw-provider-evidence-mirror') {
     if (!requirePost(req, res)) return;
@@ -8480,13 +8492,8 @@ const server = http.createServer(async (req, res) => {
       defaultProvider: url.searchParams.get('default_provider') || undefined,
       defaultEndpoint: url.searchParams.get('default_endpoint') || undefined,
     });
-    res.writeHead(mirror.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      generated_at: new Date().toISOString(),
-      materialized: false,
-      refresh_schema_version: 'v2.7.0.manual_raw_provider_evidence_mirror.v1',
-      ...mirror,
-    }, null, 2));
+    res.writeHead(mirror.accepted ? 202 : 409, apiJsonHeaders());
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_evidence_mirror.v1', mirror), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-raw-provider-probe-evidence') {
     if (!requirePost(req, res)) return;
@@ -8518,13 +8525,8 @@ const server = http.createServer(async (req, res) => {
       provider: url.searchParams.get('provider') || undefined,
       endpoint: url.searchParams.get('endpoint') || undefined,
     });
-    res.writeHead(record.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      generated_at: new Date().toISOString(),
-      materialized: false,
-      refresh_schema_version: 'v2.7.0.manual_raw_provider_probe_evidence.v1',
-      ...record,
-    }, null, 2));
+    res.writeHead(record.accepted ? 202 : 409, apiJsonHeaders());
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_raw_provider_probe_evidence.v1', record), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-randomness-control-mirror') {
     if (!requirePost(req, res)) return;
@@ -8556,13 +8558,8 @@ const server = http.createServer(async (req, res) => {
       defaultRandomizationUnit: url.searchParams.get('default_randomization_unit') || undefined,
       environmentId: url.searchParams.get('environment_id') || undefined,
     });
-    res.writeHead(mirror.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      generated_at: new Date().toISOString(),
-      materialized: false,
-      refresh_schema_version: 'v2.7.0.manual_randomness_control_mirror.v1',
-      ...mirror,
-    }, null, 2));
+    res.writeHead(mirror.accepted ? 202 : 409, apiJsonHeaders());
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_randomness_control_mirror.v1', mirror), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-normal-tiny-ops-evidence') {
     if (!requirePost(req, res)) return;
@@ -8587,13 +8584,8 @@ const server = http.createServer(async (req, res) => {
       strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
       workerRoles: url.searchParams.getAll('worker_role').flatMap((value) => String(value).split(',')).map((value) => value.trim()).filter(Boolean),
     });
-    res.writeHead(record.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      generated_at: new Date().toISOString(),
-      materialized: false,
-      refresh_schema_version: 'v2.7.0.manual_normal_tiny_ops_evidence.v1',
-      ...record,
-    }, null, 2));
+    res.writeHead(record.accepted ? 202 : 409, apiJsonHeaders());
+    res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record), null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-mode-readiness') {
     if (!checkAuth(req, url, res)) return;

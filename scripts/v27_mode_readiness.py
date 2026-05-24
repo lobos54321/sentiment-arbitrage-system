@@ -45,6 +45,7 @@ MODE_REQUIREMENTS = {
         "BackgroundJobRegistryContract",
         "EntryPointInventoryContract",
         "StaticPolicyEnforcementContract",
+        "APIResponseContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

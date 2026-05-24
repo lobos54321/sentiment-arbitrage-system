@@ -5,6 +5,7 @@ sys.path.insert(0, "scripts")
 
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
+    verify_api_response_contract,
     verify_audit_log_integrity,
     verify_background_job_registry,
     verify_direct_database_mutation_ban,
@@ -47,6 +48,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "BackgroundJobRegistryContract",
         "EntryPointInventoryContract",
         "StaticPolicyEnforcementContract",
+        "APIResponseContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -671,6 +673,104 @@ def test_static_policy_enforcement_blocks_forbidden_pattern(tmp_path):
             "line": 1,
             "match": "export const value = eval('1 + 1');",
         }
+    ]
+
+
+def test_api_response_contract_covers_v27_manual_evidence_post_routes():
+    report = verify_api_response_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.api_response_policy.v1"
+    assert report["evidence"]["endpoint_count"] == 6
+    assert report["evidence"]["v27_evidence_endpoint_count"] == 6
+    assert report["evidence"]["uncovered_v27_evidence_endpoints"] == []
+    assert report["evidence"]["unknown_policy_endpoints"] == []
+    assert report["evidence"]["malformed_policies"] == []
+    assert report["evidence"]["route_violations"] == []
+    assert report["evidence"]["source_violations"] == []
+    assert report["evidence"]["missing_guard_helper_fragments"] == []
+
+
+def test_api_response_contract_blocks_missing_response_builder_anchor(tmp_path):
+    source_path = tmp_path / "dashboard.js"
+    endpoint = "/api/paper/v27-read-model-refresh"
+    source_path.write_text(
+        "\n".join(
+            [
+                "export function apiJsonHeaders(cacheControl = 'no-store') { return {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': cacheControl}; }",
+                "function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result = {}, options = {}) {",
+                "  const generatedAt = options.generatedAt || new Date().toISOString();",
+                "  const payload = {generated_at: generatedAt, materialized: false, response_schema_version: responseSchemaVersion, refresh_schema_version: responseSchemaVersion, ...result};",
+                "  if (payload.accepted === false && !payload.error) payload.error = payload.status || 'manual_evidence_request_rejected';",
+                "  return payload;",
+                "}",
+                "function checkAuth(req, url, res) { res.writeHead(403, apiJsonHeaders()); res.writeHead(401, apiJsonHeaders()); return true; }",
+                "function requirePost(req, res) { res.writeHead(405, apiJsonHeaders()); return true; }",
+                "function requireDashboardAuditEvent(req, res, url) { res.writeHead(500, apiJsonHeaders()); return true; /* Audit log unavailable */ }",
+                f"if (url.pathname === '{endpoint}') {{",
+                "  if (!requirePost(req, res)) return;",
+                "  if (!checkAuth(req, url, res)) return;",
+                "  if (!requireDashboardAuditEvent(req, res, url)) return;",
+                "  res.writeHead(refresh.accepted ? 202 : 409, apiJsonHeaders());",
+                "  res.end(JSON.stringify({ response_schema_version: 'v2.7.0.manual_read_model_refresh.v1', refresh_schema_version: 'v2.7.0.manual_read_model_refresh.v1', ...refresh }));",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    access_policy_path = tmp_path / "access-policy.json"
+    access_policy_path.write_text(
+        json.dumps(
+            {
+                "source_file": str(source_path),
+                "endpoint_overrides": [
+                    {
+                        "endpoint": endpoint,
+                        "token_scope": "v27:evidence_mutation",
+                        "audit_log_required": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "api-response-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.api_response_policy.v1",
+                "source_file": str(source_path),
+                "response_policies": [
+                    {
+                        "endpoint": endpoint,
+                        "response_schema_version": "v2.7.0.manual_read_model_refresh.v1",
+                        "status_code_policy": {
+                            "accepted": 202,
+                            "rejected": 409,
+                            "method_not_allowed": 405,
+                            "auth_failed": [401, 403],
+                            "audit_unavailable": 500,
+                        },
+                        "error_envelope": {
+                            "required": True,
+                            "error_field": "error",
+                            "guard_errors": True,
+                            "rejected_response_error_required": True,
+                        },
+                        "cache_control": "no-store",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_api_response_contract(policy_path, access_policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "api_response_policy_missing_malformed_or_unenforced"
+    assert report["evidence"]["source_violations"] == [
+        {"endpoint": endpoint, "reason": "response_builder_missing"}
     ]
 
 

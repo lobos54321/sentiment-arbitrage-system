@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import {
+  apiJsonHeaders,
+  buildV27ManualEvidenceApiResponse,
   buildDogCatchGoalProgress,
   buildStorageHealthSnapshot,
   buildClosedLoopProbeSummary,
@@ -23,6 +25,37 @@ import {
   tryBeginPaperReport,
   verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
+
+test('apiJsonHeaders defaults JSON responses to no-store', () => {
+  assert.deepEqual(apiJsonHeaders(), {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  assert.equal(apiJsonHeaders('max-age=60')['Cache-Control'], 'max-age=60');
+});
+
+test('buildV27ManualEvidenceApiResponse preserves legacy schema and rejected error shape', () => {
+  const accepted = buildV27ManualEvidenceApiResponse(
+    'v2.7.0.manual_read_model_refresh.v1',
+    { accepted: true, status: 'started' },
+    { generatedAt: '2026-05-25T00:00:00.000Z' },
+  );
+
+  assert.equal(accepted.generated_at, '2026-05-25T00:00:00.000Z');
+  assert.equal(accepted.materialized, false);
+  assert.equal(accepted.response_schema_version, 'v2.7.0.manual_read_model_refresh.v1');
+  assert.equal(accepted.refresh_schema_version, 'v2.7.0.manual_read_model_refresh.v1');
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.status, 'started');
+
+  const rejected = buildV27ManualEvidenceApiResponse(
+    'v2.7.0.manual_read_model_refresh.v1',
+    { accepted: false, status: 'already_running' },
+    { generatedAt: '2026-05-25T00:00:01.000Z' },
+  );
+
+  assert.equal(rejected.error, 'already_running');
+});
 
 test('storage health reports db markers and disk snapshot without opening sqlite', () => {
   const dir = fs.mkdtempSync(join(os.tmpdir(), 'storage-health-'));

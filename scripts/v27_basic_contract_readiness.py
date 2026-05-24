@@ -34,6 +34,7 @@ DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-databa
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
+DEFAULT_API_RESPONSE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-policy.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -88,6 +89,13 @@ STATIC_POLICY_REQUIRED_FIELDS = (
     "forbidden_pattern",
     "scan_target",
     "result",
+)
+API_RESPONSE_REQUIRED_FIELDS = (
+    "endpoint",
+    "response_schema_version",
+    "status_code_policy",
+    "error_envelope",
+    "cache_control",
 )
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
@@ -259,6 +267,23 @@ def _extract_dashboard_routes(lines):
                 }
             )
     return routes
+
+
+def _dashboard_route_block(lines, endpoint):
+    route_line_indexes = []
+    endpoints_by_line = {}
+    for index, line in enumerate(lines):
+        endpoints = re.findall(r"url\.pathname\s*===\s*['\"]([^'\"]+)['\"]", line)
+        if not endpoints:
+            continue
+        route_line_indexes.append(index)
+        endpoints_by_line[index] = endpoints
+    for route_index, line_index in enumerate(route_line_indexes):
+        if endpoint not in endpoints_by_line.get(line_index, []):
+            continue
+        next_line_index = route_line_indexes[route_index + 1] if route_index + 1 < len(route_line_indexes) else len(lines)
+        return "\n".join(lines[line_index:next_line_index])
+    return ""
 
 
 def _resolve_access_policy(endpoint, defaults, overrides):
@@ -1283,6 +1308,186 @@ def verify_static_policy_enforcement(policy_path=DEFAULT_STATIC_POLICY_ENFORCEME
     )
 
 
+def verify_api_response_contract(
+    policy_path=DEFAULT_API_RESPONSE_POLICY,
+    access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
+):
+    try:
+        policy = _load_json(policy_path)
+        access_policy = _load_json(access_control_policy_path)
+    except Exception as exc:
+        return _contract("APIResponseContract", False, "api_response_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict) or not isinstance(access_policy, dict):
+        return _contract(
+            "APIResponseContract",
+            False,
+            "api_response_policy_not_object",
+            {
+                "policy_path": str(policy_path),
+                "access_control_policy_path": str(access_control_policy_path),
+            },
+        )
+
+    source_lines, source_error = _source_lines(policy.get("source_file") or access_policy.get("source_file"))
+    if source_error:
+        return _contract("APIResponseContract", False, "api_response_source_missing", {"policy_path": str(policy_path), **source_error})
+    source_text = "\n".join(source_lines)
+    routes = _extract_dashboard_routes(source_lines)
+    route_by_endpoint = {route["endpoint"]: route for route in routes}
+    overrides = {
+        str(item.get("endpoint")): item
+        for item in (access_policy.get("endpoint_overrides") or [])
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+    v27_evidence_endpoints = {
+        endpoint
+        for endpoint, item in overrides.items()
+        if item.get("token_scope") == "v27:evidence_mutation"
+    }
+
+    response_policies = policy.get("response_policies") if isinstance(policy.get("response_policies"), list) else []
+    malformed_policies = []
+    duplicate_endpoints = []
+    route_violations = []
+    source_violations = []
+    seen_endpoints = set()
+
+    for index, item in enumerate(response_policies):
+        if not isinstance(item, dict):
+            malformed_policies.append({"index": index, "endpoint": None, "missing_fields": list(API_RESPONSE_REQUIRED_FIELDS), "violations": ["policy_not_object"]})
+            continue
+        endpoint = str(item.get("endpoint") or "")
+        missing = _missing_required_fields(item, API_RESPONSE_REQUIRED_FIELDS)
+        violations = []
+        if endpoint in seen_endpoints:
+            duplicate_endpoints.append(endpoint)
+        if endpoint:
+            seen_endpoints.add(endpoint)
+
+        status_policy = item.get("status_code_policy")
+        if not isinstance(status_policy, dict):
+            violations.append("status_code_policy_not_object")
+        else:
+            if status_policy.get("accepted") != 202:
+                violations.append("accepted_status_must_be_202")
+            if status_policy.get("rejected") != 409:
+                violations.append("rejected_status_must_be_409")
+            if status_policy.get("method_not_allowed") != 405:
+                violations.append("method_not_allowed_status_must_be_405")
+            auth_failed = status_policy.get("auth_failed")
+            if not isinstance(auth_failed, list) or sorted(int(value) for value in auth_failed) != [401, 403]:
+                violations.append("auth_failed_statuses_must_be_401_403")
+            if status_policy.get("audit_unavailable") != 500:
+                violations.append("audit_unavailable_status_must_be_500")
+
+        error_envelope = item.get("error_envelope")
+        if not isinstance(error_envelope, dict):
+            violations.append("error_envelope_not_object")
+        else:
+            if error_envelope.get("required") is not True:
+                violations.append("error_envelope_required_must_be_true")
+            if error_envelope.get("error_field") != "error":
+                violations.append("error_field_must_be_error")
+            if error_envelope.get("guard_errors") is not True:
+                violations.append("guard_errors_must_be_true")
+            if error_envelope.get("rejected_response_error_required") is not True:
+                violations.append("rejected_response_error_required_must_be_true")
+
+        if item.get("cache_control") != "no-store":
+            violations.append("cache_control_must_be_no_store")
+
+        route = route_by_endpoint.get(endpoint)
+        if not route:
+            route_violations.append({"endpoint": endpoint, "reason": "route_not_found"})
+        else:
+            if route.get("has_post_guard") is not True:
+                route_violations.append({"endpoint": endpoint, "reason": "post_guard_missing"})
+            if route.get("has_check_auth") is not True:
+                route_violations.append({"endpoint": endpoint, "reason": "auth_guard_missing"})
+            if route.get("has_audit_event") is not True:
+                route_violations.append({"endpoint": endpoint, "reason": "audit_guard_missing"})
+        access_override = overrides.get(endpoint)
+        if not access_override:
+            route_violations.append({"endpoint": endpoint, "reason": "access_policy_override_missing"})
+        elif access_override.get("audit_log_required") is not True:
+            route_violations.append({"endpoint": endpoint, "reason": "access_policy_audit_required_missing"})
+
+        route_block = _dashboard_route_block(source_lines, endpoint)
+        source_anchor = str(item.get("source_anchor") or "")
+        response_schema_version = str(item.get("response_schema_version") or "")
+        if source_anchor and source_anchor not in source_text:
+            source_violations.append({"endpoint": endpoint, "reason": "source_anchor_missing", "source_anchor": source_anchor})
+        if response_schema_version and response_schema_version not in route_block:
+            source_violations.append({"endpoint": endpoint, "reason": "response_schema_version_missing_in_route"})
+        if "buildV27ManualEvidenceApiResponse(" not in route_block:
+            source_violations.append({"endpoint": endpoint, "reason": "response_builder_missing"})
+        if "apiJsonHeaders()" not in route_block and "apiJsonHeaders('no-store')" not in route_block:
+            source_violations.append({"endpoint": endpoint, "reason": "no_store_header_missing"})
+        if "? 202 : 409" not in route_block:
+            source_violations.append({"endpoint": endpoint, "reason": "accepted_rejected_status_branch_missing"})
+
+        if missing or violations:
+            malformed_policies.append({"index": index, "endpoint": endpoint or None, "missing_fields": missing, "violations": violations})
+
+    policy_endpoints = {
+        str(item.get("endpoint"))
+        for item in response_policies
+        if isinstance(item, dict) and item.get("endpoint")
+    }
+    uncovered_v27_evidence_endpoints = sorted(v27_evidence_endpoints - policy_endpoints)
+    unknown_policy_endpoints = sorted(policy_endpoints - v27_evidence_endpoints)
+    guard_helper_fragments = {
+        "api_json_headers_default_no_store": "apiJsonHeaders(cacheControl = 'no-store')" in source_text,
+        "api_json_headers_cache_control": "'Cache-Control': cacheControl" in source_text,
+        "response_generated_at": "generated_at: generatedAt" in source_text,
+        "response_schema_version": "response_schema_version: responseSchemaVersion" in source_text,
+        "response_legacy_refresh_schema_version": "refresh_schema_version: responseSchemaVersion" in source_text,
+        "response_materialized_false": "materialized: false" in source_text,
+        "auth_403_no_store": "res.writeHead(403, apiJsonHeaders())" in source_text,
+        "auth_401_no_store": "res.writeHead(401, apiJsonHeaders())" in source_text,
+        "method_405_no_store": "res.writeHead(405, apiJsonHeaders())" in source_text,
+        "audit_500_no_store": "res.writeHead(500, apiJsonHeaders())" in source_text and "Audit log unavailable" in source_text,
+        "rejected_response_error": "payload.accepted === false && !payload.error" in source_text,
+    }
+    missing_guard_helper_fragments = sorted(key for key, present in guard_helper_fragments.items() if not present)
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.api_response_policy.v1"
+        and bool(response_policies)
+        and len(response_policies) >= 6
+        and not malformed_policies
+        and not duplicate_endpoints
+        and not uncovered_v27_evidence_endpoints
+        and not unknown_policy_endpoints
+        and not route_violations
+        and not source_violations
+        and not missing_guard_helper_fragments
+    )
+    return _contract(
+        "APIResponseContract",
+        passed,
+        "api_response_policy_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "access_control_policy_path": str(access_control_policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "source_file": policy.get("source_file") or access_policy.get("source_file"),
+            "endpoint_count": len(response_policies),
+            "endpoints": sorted(str(item.get("endpoint")) for item in response_policies if isinstance(item, dict) and item.get("endpoint")),
+            "v27_evidence_endpoint_count": len(v27_evidence_endpoints),
+            "uncovered_v27_evidence_endpoints": uncovered_v27_evidence_endpoints,
+            "unknown_policy_endpoints": unknown_policy_endpoints,
+            "duplicate_endpoints": sorted(str(item) for item in duplicate_endpoints),
+            "malformed_policies": malformed_policies,
+            "route_violations": route_violations,
+            "source_violations": source_violations,
+            "guard_helper_fragments": guard_helper_fragments,
+            "missing_guard_helper_fragments": missing_guard_helper_fragments,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -1695,6 +1900,7 @@ def build_basic_contract_readiness(
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
+    api_response_policy_path=DEFAULT_API_RESPONSE_POLICY,
     env=None,
 ):
     contracts = {
@@ -1728,6 +1934,10 @@ def build_basic_contract_readiness(
                 access_control_policy_path=access_control_policy_path,
             ),
             verify_static_policy_enforcement(policy_path=static_policy_path),
+            verify_api_response_contract(
+                policy_path=api_response_policy_path,
+                access_control_policy_path=access_control_policy_path,
+            ),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -1760,6 +1970,7 @@ def main():
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
+    parser.add_argument("--api-response-policy", default=str(DEFAULT_API_RESPONSE_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -1778,6 +1989,7 @@ def main():
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
+        api_response_policy_path=Path(args.api_response_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:
