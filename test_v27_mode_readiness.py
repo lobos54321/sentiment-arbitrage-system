@@ -625,6 +625,8 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["ChainConfigContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["SourceRegistryContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["InputSanitizationContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SafeDefaultContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ProjectStopLossContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["TransactionalOutboxContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["DeadLetterQueueContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ConsumerCheckpointContract"]["status"] == "pass"
@@ -641,6 +643,8 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert "EntryExecutionStateMachine" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
     assert matrix["modes"]["normal_tiny"]["status"] == "blocked"
     assert "WorkerFleetConsistencyContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "SafeDefaultContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "ProjectStopLossContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert matrix["health"]["observe_only_ready"] is True
     assert matrix["health"]["shadow_ready"] is True
     assert matrix["health"]["normal_tiny_ready"] is False

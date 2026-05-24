@@ -598,8 +598,6 @@ def build_contract_statuses(
         "TopFixQueueContract",
         "SafetyCaseContract",
         "WaiverPolicyContract",
-        "SafeDefaultContract",
-        "ProjectStopLossContract",
     ]
     for contract_id in missing_contracts:
         statuses.setdefault(

@@ -7,6 +7,8 @@ from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
     verify_input_sanitization,
     verify_paper_mode_safety,
+    verify_project_stop_loss,
+    verify_safe_default,
 )
 
 
@@ -21,6 +23,8 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "ChainConfigContract",
         "SourceRegistryContract",
         "InputSanitizationContract",
+        "SafeDefaultContract",
+        "ProjectStopLossContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -150,3 +154,50 @@ def test_input_sanitization_redacts_raw_telegram_text():
     assert report["evidence"]["payload_schema_valid"] is True
     assert report["evidence"]["raw_message_hash_present"] is True
     assert report["evidence"]["legacy_raw_message_leaked"] is False
+
+
+def test_safe_default_requires_blocked_shadow_defaults(tmp_path):
+    registry_path = tmp_path / "entry-mode-registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "tiers": {"live": {"paper_enabled": True}},
+                "modes": {
+                    "unit_live": {
+                        "tier": "live",
+                        "paper_enabled": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_safe_default(registry_path=registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "safe_default_fail_closed_unverified"
+    assert report["evidence"]["blocked_mode_count"] == 0
+    assert report["evidence"]["default_action"] == "fail_closed"
+
+
+def test_project_stop_loss_blocks_when_auto_kill_disabled():
+    report = verify_project_stop_loss(
+        env={
+            "ENTRY_MODE_QUALITY_AUTO_KILL_SWITCH_ENABLED": "false",
+        }
+    )
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "project_stop_loss_unverified_or_disabled"
+    assert report["evidence"]["auto_kill_switch_enabled"] is False
+    assert report["evidence"]["action"]["stop_automatic_entry"] is True
+
+
+def test_project_stop_loss_passes_default_thresholds():
+    report = verify_project_stop_loss(env={})
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["scope"] == "entry_mode"
+    assert report["evidence"]["stop_criteria"]["negative_ev_min_samples"] == 20
+    assert report["evidence"]["action"]["action"] == "downgrade_to_watch_only"

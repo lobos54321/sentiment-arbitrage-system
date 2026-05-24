@@ -24,6 +24,7 @@ DEFAULT_CHAIN_CONFIG = PROJECT_ROOT / "config" / "v27-chain-config.json"
 DEFAULT_SOURCE_REGISTRY = PROJECT_ROOT / "config" / "v27-source-registry.json"
 DEFAULT_CHANNELS_CSV = PROJECT_ROOT / "config" / "channels.csv"
 DEFAULT_SYSTEM_CONFIG = PROJECT_ROOT / "config" / "system.config.json"
+DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.json"
 
 
 def _utc_now_iso():
@@ -42,6 +43,27 @@ def _contract(contract_id, passed, reason, evidence):
         "blocking_reason": None if passed else reason,
         "evidence": evidence,
     }
+
+
+def _bool_env(env, name, default):
+    value = (env or {}).get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _int_env(env, name, default):
+    try:
+        return int((env or {}).get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_env(env, name, default):
+    try:
+        return float((env or {}).get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
@@ -182,6 +204,100 @@ def verify_input_sanitization():
     )
 
 
+def verify_safe_default(registry_path=DEFAULT_ENTRY_MODE_REGISTRY):
+    try:
+        registry = _load_json(registry_path)
+    except Exception as exc:
+        return _contract("SafeDefaultContract", False, "safe_default_registry_missing_or_invalid", {"error": str(exc)})
+    modes = registry.get("modes") if isinstance(registry, dict) else {}
+    tiers = registry.get("tiers") if isinstance(registry, dict) else {}
+    if not isinstance(modes, dict):
+        modes = {}
+    if not isinstance(tiers, dict):
+        tiers = {}
+    hard_shadow_modes = sorted(
+        mode
+        for mode, entry in modes.items()
+        if isinstance(entry, dict)
+        and entry.get("paper_enabled") is False
+        and str(entry.get("tier") or "") in {"hard_shadow", "shadow_watch_only", "deprecated_shadow"}
+    )
+    blocked_modes = sorted(
+        mode
+        for mode, entry in modes.items()
+        if isinstance(entry, dict) and entry.get("paper_enabled") is False
+    )
+    invalid_tier_modes = sorted(
+        mode
+        for mode, entry in modes.items()
+        if isinstance(entry, dict) and str(entry.get("tier") or "") not in tiers
+    )
+    default_record = {
+        "unknown_type": "unregistered_entry_mode_or_unproven_contract",
+        "default_action": "fail_closed",
+        "allowed_modes": ["observe_only", "shadow"],
+        "owning_contract": "SafeDefaultContract",
+    }
+    passed = bool(modes) and bool(blocked_modes) and bool(hard_shadow_modes) and not invalid_tier_modes
+    return _contract(
+        "SafeDefaultContract",
+        passed,
+        "safe_default_fail_closed_unverified",
+        {
+            **default_record,
+            "entry_mode_registry_path": str(registry_path),
+            "mode_count": len(modes),
+            "blocked_mode_count": len(blocked_modes),
+            "hard_shadow_default_mode_count": len(hard_shadow_modes),
+            "invalid_tier_modes": invalid_tier_modes,
+            "blocked_modes_sample": blocked_modes[:20],
+        },
+    )
+
+
+def verify_project_stop_loss(env=None):
+    if env is None:
+        env = os.environ
+    auto_kill_enabled = _bool_env(env, "ENTRY_MODE_QUALITY_AUTO_KILL_SWITCH_ENABLED", True)
+    window = max(5, _int_env(env, "ENTRY_MODE_QUALITY_WINDOW", 20))
+    shadow_sec = max(60, _int_env(env, "ENTRY_MODE_QUALITY_SHADOW_SEC", 2 * 3600))
+    stop_criteria = {
+        "negative_ev_min_samples": max(1, _int_env(env, "ENTRY_MODE_QUALITY_NEGATIVE_EV_MIN_SAMPLES", 20)),
+        "tail_min_samples": max(1, _int_env(env, "ENTRY_MODE_QUALITY_TAIL_MIN_SAMPLES", 8)),
+        "avg_pnl_floor": _float_env(env, "ENTRY_MODE_QUALITY_AVG_PNL_FLOOR", 0.0),
+        "p10_pnl_floor": _float_env(env, "ENTRY_MODE_QUALITY_P10_PNL_FLOOR", -0.30),
+        "max_loss_floor": _float_env(env, "ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR", -0.80),
+    }
+    action = {
+        "action": "downgrade_to_watch_only",
+        "shadow_sec": shadow_sec,
+        "stop_automatic_entry": True,
+    }
+    invalid_criteria = []
+    if stop_criteria["negative_ev_min_samples"] <= 0:
+        invalid_criteria.append("negative_ev_min_samples")
+    if stop_criteria["tail_min_samples"] <= 0:
+        invalid_criteria.append("tail_min_samples")
+    if stop_criteria["p10_pnl_floor"] >= 0:
+        invalid_criteria.append("p10_pnl_floor")
+    if stop_criteria["max_loss_floor"] >= 0:
+        invalid_criteria.append("max_loss_floor")
+    passed = auto_kill_enabled and window > 0 and shadow_sec >= 60 and not invalid_criteria
+    return _contract(
+        "ProjectStopLossContract",
+        passed,
+        "project_stop_loss_unverified_or_disabled",
+        {
+            "scope": "entry_mode",
+            "window": {"closed_trade_window": window},
+            "stop_criteria": stop_criteria,
+            "action": action,
+            "auto_kill_switch_enabled": auto_kill_enabled,
+            "invalid_criteria": invalid_criteria,
+        },
+    )
+
+
 def build_basic_contract_readiness(
     *,
     chain_config_path=DEFAULT_CHAIN_CONFIG,
@@ -201,6 +317,8 @@ def build_basic_contract_readiness(
             verify_chain_config(chain_config_path, system_config_path),
             verify_source_registry(source_registry_path, channels_csv),
             verify_input_sanitization(),
+            verify_safe_default(registry_path=DEFAULT_ENTRY_MODE_REGISTRY),
+            verify_project_stop_loss(env=env),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
