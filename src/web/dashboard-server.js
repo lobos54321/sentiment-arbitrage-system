@@ -592,6 +592,7 @@ export function resolveDashboardLogPath(pathname, env = process.env) {
     '/api/logs/v27-realtime-clean-mirror': env.V27_REALTIME_CLEAN_MIRROR_LOG || '/app/data/v27-realtime-clean-mirror.log',
     '/api/logs/v27-quote-intent-binding-mirror': env.V27_QUOTE_INTENT_BINDING_MIRROR_LOG || '/app/data/v27-quote-intent-binding-mirror.log',
     '/api/logs/v27-raw-provider-evidence-mirror': env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG || '/app/data/v27-raw-provider-evidence-mirror.log',
+    '/api/logs/v27-randomness-control-mirror': env.V27_RANDOMNESS_CONTROL_MIRROR_LOG || '/app/data/v27-randomness-control-mirror.log',
     '/api/logs/v27-idempotency-contract-mirror': env.V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG || '/app/data/v27-idempotency-contract-mirror.log',
     '/api/logs/v27-execution-control-mirror': env.V27_EXECUTION_CONTROL_MIRROR_LOG || '/app/data/v27-execution-control-mirror.log',
     '/api/logs/v27-paper-ledger-mirror': env.V27_PAPER_LEDGER_MIRROR_LOG || '/app/data/v27-paper-ledger-mirror.log',
@@ -674,6 +675,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     'v27-realtime-clean-mirror.log',
     'v27-quote-intent-binding-mirror.log',
     'v27-raw-provider-evidence-mirror.log',
+    'v27-randomness-control-mirror.log',
     'v27-idempotency-contract-mirror.log',
     'v27-execution-control-mirror.log',
     'v27-paper-ledger-mirror.log',
@@ -1164,6 +1166,12 @@ let v27RawProviderEvidenceManualMirror = {
   pid: null,
 };
 
+let v27RandomnessControlManualMirror = {
+  running: false,
+  started_at: null,
+  pid: null,
+};
+
 function triggerV27RawProviderEvidenceMirror(options = {}) {
   if (v27RawProviderEvidenceManualMirror.running) {
     return {
@@ -1265,6 +1273,109 @@ function triggerV27RawProviderEvidenceMirror(options = {}) {
     accepted: true,
     status: 'started',
     ...v27RawProviderEvidenceManualMirror,
+  };
+}
+
+function triggerV27RandomnessControlMirror(options = {}) {
+  if (v27RandomnessControlManualMirror.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      ...v27RandomnessControlManualMirror,
+    };
+  }
+  const signalDbPath = resolvedDbPath;
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const auditVersion = options.auditVersion || process.env.V27_RANDOMNESS_CONTROL_AUDIT_VERSION || 'legacy_strategy_experiment_randomness_control_v0.1';
+  const defaultRandomizationUnit = options.defaultRandomizationUnit || process.env.V27_RANDOMNESS_CONTROL_DEFAULT_UNIT || 'strategy_experiment_candidate';
+  const environmentId = options.environmentId || process.env.V27_ENVIRONMENT_ID || process.env.NODE_ENV || 'production';
+  const limitRaw = options.limit ?? process.env.V27_RANDOMNESS_CONTROL_MIRROR_LIMIT ?? 500;
+  const limit = limitRaw === null ? null : Math.max(1, Number(limitRaw) || 500);
+  const timeoutMs = Math.max(30000, Math.min(options.timeoutMs || Number(process.env.V27_RANDOMNESS_CONTROL_MANUAL_TIMEOUT_MS || 600000) || 600000, 1800000));
+  const logPathRaw = process.env.V27_RANDOMNESS_CONTROL_MIRROR_LOG || join(projectRoot, 'data', 'v27-randomness-control-mirror.log');
+  const logPath = isAbsolute(logPathRaw) ? logPathRaw : join(projectRoot, logPathRaw);
+  const args = [
+    'scripts/v27_mirror_randomness_controls.py',
+    '--new-only',
+    '--db',
+    signalDbPath,
+    '--event-log-dir',
+    eventLogDir,
+    '--audit-version',
+    auditVersion,
+    '--default-randomization-unit',
+    defaultRandomizationUnit,
+    '--environment-id',
+    environmentId,
+  ];
+  if (options.sinceCreatedAt) args.push('--since-created-at', String(options.sinceCreatedAt));
+  if (options.untilCreatedAt) args.push('--until-created-at', String(options.untilCreatedAt));
+  if (Array.isArray(options.statuses)) {
+    for (const status of options.statuses) {
+      if (status) args.push('--status', String(status));
+    }
+  }
+  if (limit !== null) args.push('--limit', String(limit));
+  if (options.dryRun) args.push('--dry-run');
+  if (options.strict) args.push('--strict');
+  const env = {
+    ...process.env,
+    DB_PATH: signalDbPath,
+    SENTIMENT_DB: signalDbPath,
+    V27_EVENT_LOG_DIR: eventLogDir,
+    V27_ENVIRONMENT_ID: environmentId,
+    V27_RANDOMNESS_CONTROL_AUDIT_VERSION: auditVersion,
+    V27_RANDOMNESS_CONTROL_DEFAULT_UNIT: defaultRandomizationUnit,
+  };
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const startedAt = new Date().toISOString();
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-randomness-control-mirror-once: python3 ${args.join(' ')}\n`);
+  v27RandomnessControlManualMirror = {
+    running: true,
+    started_at: startedAt,
+    pid: null,
+  };
+  const child = execFile('python3', args, {
+    cwd: projectRoot,
+    env,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 50 * 1024 * 1024,
+  }, (error, stdout, stderr) => {
+    const finishedAt = new Date().toISOString();
+    if (stdout) logStream.write(String(stdout));
+    if (stderr) logStream.write(String(stderr));
+    if (error) {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-randomness-control-mirror-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+    } else {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-randomness-control-mirror-once completed\n`);
+    }
+    v27RandomnessControlManualMirror = {
+      running: false,
+      started_at: startedAt,
+      pid: child?.pid || null,
+      completed_at: finishedAt,
+      exit_code: error ? error.code ?? null : 0,
+      exit_signal: error ? error.signal ?? null : null,
+      error: error ? error.message : null,
+      log_path: logPath,
+    };
+    logStream.end();
+  });
+  v27RandomnessControlManualMirror = {
+    ...v27RandomnessControlManualMirror,
+    pid: child.pid,
+    log_path: logPath,
+    timeout_ms: timeoutMs,
+    limit,
+    dry_run: Boolean(options.dryRun),
+    statuses: options.statuses || [],
+  };
+  return {
+    accepted: true,
+    status: 'started',
+    ...v27RandomnessControlManualMirror,
   };
 }
 
@@ -7939,6 +8050,32 @@ const server = http.createServer(async (req, res) => {
       generated_at: new Date().toISOString(),
       materialized: false,
       refresh_schema_version: 'v2.7.0.manual_raw_provider_evidence_mirror.v1',
+      ...mirror,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-randomness-control-mirror') {
+    if (!checkAuth(req, url, res)) return;
+    const statusesRaw = url.searchParams.getAll('status')
+      .flatMap((value) => String(value).split(','))
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const mirror = triggerV27RandomnessControlMirror({
+      timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
+      limit: url.searchParams.has('limit') ? boundedIntParam(url, 'limit', 500, 1, 5000) : undefined,
+      sinceCreatedAt: url.searchParams.get('since_created_at') || undefined,
+      untilCreatedAt: url.searchParams.get('until_created_at') || undefined,
+      statuses: statusesRaw,
+      dryRun: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+      strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      auditVersion: url.searchParams.get('audit_version') || undefined,
+      defaultRandomizationUnit: url.searchParams.get('default_randomization_unit') || undefined,
+      environmentId: url.searchParams.get('environment_id') || undefined,
+    });
+    res.writeHead(mirror.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      materialized: false,
+      refresh_schema_version: 'v2.7.0.manual_randomness_control_mirror.v1',
       ...mirror,
     }, null, 2));
     return;

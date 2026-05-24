@@ -972,6 +972,23 @@ def _extract_randomness_control(event, bags):
     }
 
 
+def _latest_randomness_controls(randomness_controls):
+    latest_by_assignment = {}
+    passthrough = []
+    for item in randomness_controls or []:
+        assignment_id = item.get("assignment_id")
+        if assignment_id is None or (isinstance(assignment_id, str) and not assignment_id.strip()):
+            passthrough.append(item)
+            continue
+        current = latest_by_assignment.get(str(assignment_id))
+        if current is None or int(item.get("global_seq") or 0) >= int(current.get("global_seq") or 0):
+            latest_by_assignment[str(assignment_id)] = item
+    return passthrough + [
+        latest_by_assignment[key]
+        for key in sorted(latest_by_assignment)
+    ]
+
+
 def _extract_idempotency_contract(event, bags):
     version = _extract_scalar(
         bags,
@@ -2090,7 +2107,9 @@ def _metric_definitions(metrics, metrics_window):
 def _contract_evidence_from_records(record_list, runtime_recovery_controls=None, standalone_no_fill_outcomes=None, randomness_controls=None):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
-    randomness_controls = randomness_controls or []
+    raw_randomness_control_count = len(randomness_controls or [])
+    randomness_controls = _latest_randomness_controls(randomness_controls or [])
+    superseded_randomness_control_count = max(0, raw_randomness_control_count - len(randomness_controls))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -3046,7 +3065,9 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
         },
         "RandomnessControlContract": {
             "eligible_randomness_control_records": len(randomness_controls),
-            "randomness_control_observation_count": len(randomness_controls),
+            "randomness_control_observation_count": raw_randomness_control_count,
+            "current_randomness_control_count": len(randomness_controls),
+            "superseded_randomness_control_event_count": superseded_randomness_control_count,
             "valid_randomness_control_count": sum(1 for item in randomness_controls if item.get("randomness_control_valid") is True),
             "malformed_count": len(malformed_randomness_controls),
             "malformed_randomness_controls": [

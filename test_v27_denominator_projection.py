@@ -268,7 +268,7 @@ def append_raw_provider_evidence(log, *, token_ca, paper_trade_id=1, pool="pool-
     )
 
 
-def append_randomness_control(log, *, assignment_id="normal-tiny-policy-v1", missing_seed=False, bad_hash=False):
+def append_randomness_control(log, *, assignment_id="normal-tiny-policy-v1", missing_seed=False, bad_hash=False, idempotency_suffix=None):
     payload = {
         "rng_seed": None if missing_seed else "sha256:normal-tiny-policy-seed",
         "rng_version": "v2.7.0.randomness_control.v1",
@@ -286,7 +286,7 @@ def append_randomness_control(log, *, assignment_id="normal-tiny-policy-v1", mis
     return log.append_event(
         event_type="randomness_control_recorded",
         aggregate_id=f"randomness_control:{assignment_id}",
-        idempotency_key=f"randomness_control:{assignment_id}:v2.7.0.randomness_control.v1",
+        idempotency_key=f"randomness_control:{assignment_id}:v2.7.0.randomness_control.v1{':' + idempotency_suffix if idempotency_suffix else ''}",
         payload=payload,
     )
 
@@ -690,6 +690,24 @@ def test_denominator_projection_rejects_malformed_randomness_control_contract(tm
     assert evidence["randomness_control_violation_count"] == 1
     assert evidence["malformed_randomness_controls"][0]["missing_fields"] == ["rng_seed"]
     assert evidence["randomness_control_violations"][0]["violation_fields"] == ["assignment_hash_sha256"]
+
+
+def test_denominator_projection_uses_latest_randomness_control_assignment(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_randomness_control(log, assignment_id="candidate-repair", missing_seed=True, bad_hash=True, idempotency_suffix="bad")
+    append_randomness_control(log, assignment_id="candidate-repair", idempotency_suffix="good")
+
+    projection = build_denominator_projection(tmp_path)
+    evidence = projection["contract_evidence"]["RandomnessControlContract"]
+
+    assert projection["randomness_control_recorded_events"] == 2
+    assert projection["health"]["randomness_control_ok"] is True
+    assert evidence["randomness_control_observation_count"] == 2
+    assert evidence["current_randomness_control_count"] == 1
+    assert evidence["superseded_randomness_control_event_count"] == 1
+    assert evidence["valid_randomness_control_count"] == 1
+    assert evidence["malformed_count"] == 0
+    assert evidence["randomness_control_violation_count"] == 0
 
 
 def test_denominator_projection_consumes_idempotency_contracts(tmp_path):

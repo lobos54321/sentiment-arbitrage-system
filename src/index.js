@@ -207,6 +207,7 @@ function startShadowDataSidecars(config) {
   const v27RealtimeCleanMirrorLog = process.env.V27_REALTIME_CLEAN_MIRROR_LOG || './data/v27-realtime-clean-mirror.log';
   const v27QuoteIntentBindingMirrorLog = process.env.V27_QUOTE_INTENT_BINDING_MIRROR_LOG || './data/v27-quote-intent-binding-mirror.log';
   const v27RawProviderEvidenceMirrorLog = process.env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG || './data/v27-raw-provider-evidence-mirror.log';
+  const v27RandomnessControlMirrorLog = process.env.V27_RANDOMNESS_CONTROL_MIRROR_LOG || './data/v27-randomness-control-mirror.log';
   const v27IdempotencyContractMirrorLog = process.env.V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG || './data/v27-idempotency-contract-mirror.log';
   const v27ExecutionControlMirrorLog = process.env.V27_EXECUTION_CONTROL_MIRROR_LOG || './data/v27-execution-control-mirror.log';
   const v27PaperLedgerMirrorLog = process.env.V27_PAPER_LEDGER_MIRROR_LOG || './data/v27-paper-ledger-mirror.log';
@@ -547,6 +548,31 @@ function startShadowDataSidecars(config) {
         V27_RAW_PROVIDER_EVIDENCE_VERSION: process.env.V27_RAW_PROVIDER_EVIDENCE_VERSION || 'legacy_paper_raw_provider_evidence_v0.1',
         V27_RAW_PROVIDER_DEFAULT_PROVIDER: process.env.V27_RAW_PROVIDER_DEFAULT_PROVIDER || 'jupiter_ultra',
         V27_RAW_PROVIDER_DEFAULT_ENDPOINT: process.env.V27_RAW_PROVIDER_DEFAULT_ENDPOINT || '/ultra/v1/order',
+      },
+    }));
+  }
+  if (envFlag('V27_RANDOMNESS_CONTROL_MIRROR_WORKER_ENABLED', false)) {
+    workers.push(startPythonSidecar({
+      name: 'v27-randomness-control-mirror',
+      logPath: v27RandomnessControlMirrorLog,
+      args: [
+        'scripts/v27_mirror_randomness_controls.py',
+        '--loop',
+        '--new-only',
+        '--db', signalDb,
+        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        '--interval', process.env.V27_RANDOMNESS_CONTROL_MIRROR_INTERVAL_SEC || '60',
+        '--limit', process.env.V27_RANDOMNESS_CONTROL_MIRROR_LIMIT || '500',
+        '--initial-delay', process.env.V27_RANDOMNESS_CONTROL_MIRROR_INITIAL_DELAY_SEC || '0',
+        '--lock-file', process.env.V27_RANDOMNESS_CONTROL_MIRROR_LOCK_FILE || '/tmp/v27_randomness_control_mirror.lock',
+      ],
+      env: {
+        DB_PATH: signalDb,
+        SENTIMENT_DB: signalDb,
+        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
+        V27_ENVIRONMENT_ID: process.env.V27_ENVIRONMENT_ID || process.env.NODE_ENV || 'production',
+        V27_RANDOMNESS_CONTROL_AUDIT_VERSION: process.env.V27_RANDOMNESS_CONTROL_AUDIT_VERSION || 'legacy_strategy_experiment_randomness_control_v0.1',
+        V27_RANDOMNESS_CONTROL_DEFAULT_UNIT: process.env.V27_RANDOMNESS_CONTROL_DEFAULT_UNIT || 'strategy_experiment_candidate',
       },
     }));
   }
