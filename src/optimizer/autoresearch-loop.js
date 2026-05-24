@@ -5,6 +5,16 @@ import { FixedEvaluator } from './fixed-evaluator.js';
 import { ChampionChallengerComparator } from './champion-challenger.js';
 import { PromotionGuardrails } from './promotion-guardrails.js';
 
+function parseCandidateNotes(notes) {
+  if (!notes) return {};
+  if (typeof notes === 'object') return notes;
+  try {
+    return JSON.parse(notes);
+  } catch {
+    return { legacyNote: String(notes) };
+  }
+}
+
 export class AutoresearchLoop {
   constructor({ config, registry, experimentStore }) {
     this.config = config;
@@ -28,7 +38,9 @@ export class AutoresearchLoop {
     const fallbackCandidate = this.mutator.mutate(baseline);
     const candidate = (generatorCandidate.mutationSet?.length || 0) >= 3 ? generatorCandidate : fallbackCandidate;
     candidate.datasetRefs = [this.config.datasets.signalExport, this.config.datasets.localRecorder, this.config.datasets.paperTrades];
+    const existingNotes = parseCandidateNotes(candidate.notes);
     candidate.notes = JSON.stringify({
+      ...existingNotes,
       trigger,
       researchSummary,
       summary,
