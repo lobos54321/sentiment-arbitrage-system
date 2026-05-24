@@ -576,6 +576,29 @@ def test_mode_readiness_consumes_randomness_control_for_normal_tiny(tmp_path):
     assert "RawProviderEvidenceContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 
+def test_mode_readiness_blocks_randomness_control_when_missing(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["contract_statuses"]["RandomnessControlContract"]["status"] == "missing_evidence"
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["required_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
 def test_mode_readiness_consumes_idempotency_contract_evidence(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
