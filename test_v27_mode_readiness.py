@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0, "scripts")
 
 from v27_event_log import V27EventLog, sha256_hex  # noqa: E402
+import v27_mode_readiness as mode_readiness_module  # noqa: E402
 from v27_mode_readiness import build_mode_readiness_matrix  # noqa: E402
 from v27_read_model_refresh import refresh_denominator_read_model  # noqa: E402
 
@@ -656,6 +657,85 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["health"]["observe_only_ready"] is True
     assert matrix["health"]["shadow_ready"] is True
     assert matrix["health"]["normal_tiny_ready"] is False
+
+
+def test_mode_readiness_component_health_follows_final_normal_tiny_gate(monkeypatch, tmp_path):
+    required_contracts = set()
+    for mode in mode_readiness_module.MODE_ORDER:
+        required_contracts.update(mode_readiness_module._expanded_requirements(mode))
+    passing_contracts = {
+        contract_id: {
+            "contract_id": contract_id,
+            "status": "pass",
+            "blocking_reason": None,
+            "evidence": {"source": "unit"},
+        }
+        for contract_id in required_contracts
+    }
+
+    monkeypatch.setattr(
+        mode_readiness_module,
+        "_load_json",
+        lambda path: {"contracts": {contract_id: {} for contract_id in required_contracts}},
+    )
+    monkeypatch.setattr(mode_readiness_module, "validate_all", lambda *args, **kwargs: {"spec_valid": True})
+    monkeypatch.setattr(
+        mode_readiness_module,
+        "build_basic_contract_readiness",
+        lambda **kwargs: {
+            "contracts": {},
+            "blocking_contracts": [],
+            "health": {
+                "status": "basic_contract_readiness_ok",
+                "observe_only_foundation_ready": True,
+                "normal_tiny_ready": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mode_readiness_module,
+        "validate_snapshot_file",
+        lambda *args, **kwargs: {
+            "blocking_reasons": [],
+            "health": {
+                "status": "dashboard_read_model_fresh",
+                "dashboard_safe": True,
+                "normal_tiny_ready": False,
+            },
+        },
+    )
+    monkeypatch.setattr(mode_readiness_module, "_snapshot_payload", lambda path: {})
+    monkeypatch.setattr(mode_readiness_module, "_event_log_report", lambda event_log_dir: {"ok": True})
+    monkeypatch.setattr(
+        mode_readiness_module,
+        "read_projection_consumer_health",
+        lambda path: {
+            "contracts": {},
+            "blocking_contracts": [],
+            "health": {
+                "status": "projection_consumer_ok",
+                "shadow_consumer_ready": True,
+                "normal_tiny_ready": False,
+            },
+        },
+    )
+    monkeypatch.setattr(mode_readiness_module, "build_contract_statuses", lambda **kwargs: dict(passing_contracts))
+
+    matrix = mode_readiness_module.build_mode_readiness_matrix(
+        event_log_dir=tmp_path / "events",
+        snapshot_path=tmp_path / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    assert matrix["highest_allowed_mode"] == "normal_tiny"
+    assert matrix["health"]["normal_tiny_ready"] is True
+    assert matrix["read_model"]["health"]["normal_tiny_ready"] is True
+    assert matrix["basic_readiness"]["health"]["normal_tiny_ready"] is True
+    assert matrix["projection_consumer"]["health"]["normal_tiny_ready"] is True
+    assert matrix["read_model"]["health"]["normal_tiny_ready_source"] == "mode_readiness_matrix"
+    assert matrix["read_model"]["health"]["read_model_fresh"] is True
+    assert matrix["basic_readiness"]["health"]["basic_contracts_ready"] is True
+    assert matrix["projection_consumer"]["health"]["projection_consumer_ready"] is True
 
 
 def test_mode_readiness_consumes_realtime_clean_detector_evidence(tmp_path):

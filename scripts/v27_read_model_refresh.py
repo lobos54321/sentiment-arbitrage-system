@@ -140,6 +140,7 @@ def refresh_denominator_read_model(
         manifest_path=Path(spec_manifest_path),
         max_snapshot_age_ms=max_snapshot_age_ms,
     )
+    normal_tiny_ready = bool(mode_readiness.get("health", {}).get("normal_tiny_ready"))
 
     refresh_report = {
         "refresh_schema_version": "v2.7.0.read_model_refresh.v1",
@@ -177,7 +178,8 @@ def refresh_denominator_read_model(
         "health": {
             "status": "read_model_refresh_ok" if verifier_report.get("health", {}).get("dashboard_safe") else "read_model_refresh_not_ready",
             "dashboard_safe": bool(verifier_report.get("health", {}).get("dashboard_safe")),
-            "normal_tiny_ready": False,
+            "normal_tiny_ready": normal_tiny_ready,
+            "highest_allowed_mode": mode_readiness.get("highest_allowed_mode"),
         },
     }
     if progress_callback:

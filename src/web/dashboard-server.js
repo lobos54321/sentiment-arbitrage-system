@@ -1591,7 +1591,7 @@ export function readV27ModeReadiness(options = {}) {
     };
   }
   try {
-    const payload = JSON.parse(fs.readFileSync(path, 'utf8'));
+    const payload = normalizeV27ModeReadinessPayload(JSON.parse(fs.readFileSync(path, 'utf8')));
     return {
       generated_at: generatedAt,
       available: true,
@@ -1617,6 +1617,25 @@ export function readV27ModeReadiness(options = {}) {
       },
     };
   }
+}
+
+function normalizeV27ModeReadinessPayload(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const normalTinyReady = Boolean(payload.health?.normal_tiny_ready);
+  const output = JSON.parse(JSON.stringify(payload));
+  const sections = [
+    ['read_model', 'read_model_fresh', Boolean(output.read_model?.health?.dashboard_safe)],
+    ['basic_readiness', 'basic_contracts_ready', Array.isArray(output.basic_readiness?.blocking_contracts) && output.basic_readiness.blocking_contracts.length === 0],
+    ['projection_consumer', 'projection_consumer_ready', Boolean(output.projection_consumer?.health?.shadow_consumer_ready)],
+  ];
+  for (const [section, componentReadyKey, componentReady] of sections) {
+    if (!output[section] || typeof output[section] !== 'object') continue;
+    if (!output[section].health || typeof output[section].health !== 'object') continue;
+    output[section].health[componentReadyKey] = componentReady;
+    output[section].health.normal_tiny_ready = normalTinyReady;
+    output[section].health.normal_tiny_ready_source = 'mode_readiness_matrix';
+  }
+  return output;
 }
 
 export function readV27DenominatorReadModelHealth(options = {}) {
@@ -1650,6 +1669,7 @@ export function readV27DenominatorReadModelHealth(options = {}) {
       derivedBlockingReasons.push('event_log_empty');
     }
     const dashboardSafe = Boolean(payload.dashboard_safe || payload.health?.dashboard_safe) && derivedBlockingReasons.length === 0;
+    const normalTinyReady = payload.health?.normal_tiny_ready ?? payload.mode_readiness?.normal_tiny_ready ?? false;
     const blockingReasons = Array.isArray(payload.blocking_reasons)
       ? payload.blocking_reasons
       : Array.isArray(payload.verifier_report?.blocking_reasons)
@@ -1666,7 +1686,7 @@ export function readV27DenominatorReadModelHealth(options = {}) {
       health: {
         ...(payload.health || {}),
         dashboard_safe: dashboardSafe,
-        normal_tiny_ready: false,
+        normal_tiny_ready: Boolean(normalTinyReady),
         status: payload.health?.status || (dashboardSafe ? 'read_model_refresh_ok' : 'read_model_refresh_not_ready'),
       },
     };

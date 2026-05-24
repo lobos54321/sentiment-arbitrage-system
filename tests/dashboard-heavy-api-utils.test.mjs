@@ -71,8 +71,13 @@ test('v27 read model health exposes materialized verifier result', () => {
     blocking_reasons: [],
     health: {
       dashboard_safe: true,
-      normal_tiny_ready: false,
+      normal_tiny_ready: true,
+      highest_allowed_mode: 'normal_tiny',
       status: 'read_model_refresh_ok',
+    },
+    mode_readiness: {
+      normal_tiny_ready: true,
+      highest_allowed_mode: 'normal_tiny',
     },
     verifier_report: {
       snapshot_hash_ok: true,
@@ -90,6 +95,8 @@ test('v27 read model health exposes materialized verifier result', () => {
   assert.equal(health.read_model_seq, 7);
   assert.equal(health.event_log_latest_seq, 7);
   assert.equal(health.health.status, 'read_model_refresh_ok');
+  assert.equal(health.health.normal_tiny_ready, true);
+  assert.equal(health.health.highest_allowed_mode, 'normal_tiny');
   assert.equal(health.verifier_report.spec_valid, true);
 });
 
@@ -134,13 +141,32 @@ test('v27 mode readiness exposes materialized matrix and missing state', () => {
   const modeReadinessPath = join(readyDir, 'mode_readiness.json');
   fs.writeFileSync(modeReadinessPath, JSON.stringify({
     matrix_schema_version: 'v2.7.0.mode_readiness.v1',
-    highest_allowed_mode: 'shadow',
+    highest_allowed_mode: 'normal_tiny',
     health: {
       observe_only_ready: true,
       shadow_ready: true,
-      ultra_tiny_ready: false,
-      normal_tiny_ready: false,
+      ultra_tiny_ready: true,
+      normal_tiny_ready: true,
       status: 'mode_readiness_evaluated',
+    },
+    read_model: {
+      health: {
+        dashboard_safe: true,
+        normal_tiny_ready: false,
+      },
+    },
+    basic_readiness: {
+      blocking_contracts: [],
+      health: {
+        observe_only_foundation_ready: true,
+        normal_tiny_ready: false,
+      },
+    },
+    projection_consumer: {
+      health: {
+        shadow_consumer_ready: true,
+        normal_tiny_ready: false,
+      },
     },
     contract_statuses: {
       PaperModeSafetyBoundary: {
@@ -155,7 +181,14 @@ test('v27 mode readiness exposes materialized matrix and missing state', () => {
 
   const readiness = readV27ModeReadiness({ modeReadinessPath });
   assert.equal(readiness.available, true);
-  assert.equal(readiness.highest_allowed_mode, 'shadow');
+  assert.equal(readiness.highest_allowed_mode, 'normal_tiny');
+  assert.equal(readiness.read_model.health.normal_tiny_ready, true);
+  assert.equal(readiness.basic_readiness.health.normal_tiny_ready, true);
+  assert.equal(readiness.projection_consumer.health.normal_tiny_ready, true);
+  assert.equal(readiness.read_model.health.normal_tiny_ready_source, 'mode_readiness_matrix');
+  assert.equal(readiness.read_model.health.read_model_fresh, true);
+  assert.equal(readiness.basic_readiness.health.basic_contracts_ready, true);
+  assert.equal(readiness.projection_consumer.health.projection_consumer_ready, true);
   assert.equal(readiness.contract_statuses.PaperModeSafetyBoundary.evidence.runtime_evidence_present, true);
 });
 

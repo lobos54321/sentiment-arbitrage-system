@@ -2,6 +2,7 @@
 """Build the v2.7 ModeReadinessMatrix from current machine evidence."""
 
 import argparse
+import copy
 import json
 import sys
 import time
@@ -615,6 +616,20 @@ def _expanded_requirements(mode):
     raise KeyError(mode)
 
 
+def _with_mode_health_context(report, mode_health, *, component_ready_key=None, component_ready=None):
+    if not isinstance(report, dict):
+        return report
+    output = copy.deepcopy(report)
+    health = output.get("health")
+    if not isinstance(health, dict):
+        return output
+    if component_ready_key is not None:
+        health[component_ready_key] = bool(component_ready)
+    health["normal_tiny_ready"] = bool(mode_health.get("normal_tiny_ready"))
+    health["normal_tiny_ready_source"] = "mode_readiness_matrix"
+    return output
+
+
 def build_mode_readiness_matrix(
     *,
     event_log_dir=DEFAULT_EVENT_LOG_DIR,
@@ -682,6 +697,15 @@ def build_mode_readiness_matrix(
         if not blocking:
             highest_allowed = mode
 
+    health = {
+        "status": "mode_readiness_evaluated",
+        "dashboard_safe": bool(snapshot_report.get("health", {}).get("dashboard_safe")),
+        "normal_tiny_ready": modes["normal_tiny"]["status"] == "allowed",
+        "ultra_tiny_ready": modes["ultra_tiny"]["status"] == "allowed",
+        "shadow_ready": modes["shadow"]["status"] == "allowed",
+        "observe_only_ready": modes["observe_only"]["status"] == "allowed",
+    }
+
     return {
         "matrix_schema_version": "v2.7.0.mode_readiness.v1",
         "generated_at": _utc_now_iso(),
@@ -689,20 +713,28 @@ def build_mode_readiness_matrix(
         "snapshot_path": str(snapshot_path),
         "spec": spec_report or {"spec_valid": False, "error": spec_error},
         "event_log": event_log,
-        "read_model": snapshot_report,
-        "basic_readiness": basic_readiness,
-        "projection_consumer": projection_consumer_health,
+        "read_model": _with_mode_health_context(
+            snapshot_report,
+            health,
+            component_ready_key="read_model_fresh",
+            component_ready=snapshot_report.get("health", {}).get("dashboard_safe"),
+        ),
+        "basic_readiness": _with_mode_health_context(
+            basic_readiness,
+            health,
+            component_ready_key="basic_contracts_ready",
+            component_ready=not (basic_readiness.get("blocking_contracts") or []),
+        ),
+        "projection_consumer": _with_mode_health_context(
+            projection_consumer_health,
+            health,
+            component_ready_key="projection_consumer_ready",
+            component_ready=projection_consumer_health.get("health", {}).get("shadow_consumer_ready"),
+        ),
         "contract_statuses": contract_statuses,
         "modes": modes,
         "highest_allowed_mode": highest_allowed,
-        "health": {
-            "status": "mode_readiness_evaluated",
-            "dashboard_safe": bool(snapshot_report.get("health", {}).get("dashboard_safe")),
-            "normal_tiny_ready": modes["normal_tiny"]["status"] == "allowed",
-            "ultra_tiny_ready": modes["ultra_tiny"]["status"] == "allowed",
-            "shadow_ready": modes["shadow"]["status"] == "allowed",
-            "observe_only_ready": modes["observe_only"]["status"] == "allowed",
-        },
+        "health": health,
     }
 
 
