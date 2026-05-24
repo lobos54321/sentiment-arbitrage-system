@@ -34,6 +34,14 @@ def canonical_json_bytes(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def file_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def file_line_count(path):
+    return len(Path(path).read_text(encoding="utf-8").splitlines())
+
+
 def compute_spec_hash(manifest, catalog, gap_register=None):
     manifest_for_hash = dict(manifest)
     manifest_for_hash.pop("computed_spec_hash", None)
@@ -46,7 +54,7 @@ def compute_spec_hash(manifest, catalog, gap_register=None):
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def validate_manifest(manifest):
+def validate_manifest(manifest, manifest_path=None):
     if manifest.get("spec_id") != "telegram_dog_regime_capture":
         raise SpecValidationError("spec_id mismatch")
     if manifest.get("spec_version") != "2.7.0":
@@ -62,11 +70,23 @@ def validate_manifest(manifest):
     if actual != expected:
         raise SpecValidationError(f"section ids not contiguous: {actual}")
 
+    manifest_dir = Path(manifest_path).parent if manifest_path else None
     for view in manifest.get("rendered_views") or []:
         if len(str(view.get("sha256", ""))) != 64:
             raise SpecValidationError(f"rendered view hash invalid: {view.get('file')}")
         if int(view.get("lines") or 0) <= 0:
             raise SpecValidationError(f"rendered view lines invalid: {view.get('file')}")
+        if manifest_dir is None:
+            continue
+        view_path = manifest_dir / str(view.get("file"))
+        if not view_path.exists():
+            raise SpecValidationError(f"rendered view missing: {view.get('file')}")
+        actual_lines = file_line_count(view_path)
+        if actual_lines != int(view.get("lines") or 0):
+            raise SpecValidationError(f"rendered view line count mismatch: {view.get('file')}")
+        actual_hash = file_sha256(view_path)
+        if actual_hash != view.get("sha256"):
+            raise SpecValidationError(f"rendered view hash mismatch: {view.get('file')}")
 
 
 def required_contract_ids(manifest):
@@ -146,6 +166,9 @@ def validate_gap_register(manifest, catalog, gap_register):
 
     catalog_contracts = set((catalog.get("contracts") or {}).keys())
     required = required_contract_ids(manifest)
+    missing_gap_catalog_records = sorted(set(ids) - catalog_contracts)
+    if missing_gap_catalog_records:
+        raise SpecValidationError(f"gap contracts missing from catalog: {missing_gap_catalog_records}")
     missing_required = sorted((required - catalog_contracts) - set(ids))
     if missing_required:
         raise SpecValidationError(f"required contracts missing from catalog and gap register: {missing_required}")
@@ -175,7 +198,7 @@ def validate_all(
     gap_register = load_json(gap_register_path)
     registry = load_json(registry_path)
 
-    validate_manifest(manifest)
+    validate_manifest(manifest, manifest_path)
     validate_contract_catalog(manifest, catalog)
     validate_gap_register(manifest, catalog, gap_register)
     validate_m0_freeze(manifest, registry)

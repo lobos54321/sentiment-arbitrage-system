@@ -37,8 +37,9 @@ def test_v27_manifest_has_stable_identity_and_rendered_views():
 
     rendered = manifest["rendered_views"]
     assert len(rendered) == 3
-    assert sum(view["lines"] for view in rendered) == 9016
+    assert sum(view["lines"] for view in rendered) == 2043
     assert all(len(view["sha256"]) == 64 for view in rendered)
+    assert all((SPEC_PATH.parent / view["file"]).exists() for view in rendered)
 
 
 def test_v27_manifest_has_contiguous_section_ids():
@@ -121,9 +122,9 @@ def test_v27_spec_validator_computes_stable_hash_and_contract_coverage():
     assert result["spec_version"] == "2.7.0"
     assert result["section_count"] == 24
     assert result["required_contract_count"] == 77
-    assert result["catalog_contract_count"] == 104
+    assert result["catalog_contract_count"] == 213
     assert result["gap_register_count"] == 175
-    assert result["spec_hash"] == "80a41076c47f0a19bd9890a8c6babd173004df889e52a47a80c3fb43a78a3c83"
+    assert result["spec_hash"] == "bbbad3551afe72dc104888529dff4f91a67524464f6a7e49ea7bfae46c3eef53"
 
 
 def test_v27_spec_validator_rejects_reopened_m0_direct_probe_modes(tmp_path):
