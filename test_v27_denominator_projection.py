@@ -291,6 +291,46 @@ def append_randomness_control(log, *, assignment_id="normal-tiny-policy-v1", mis
     )
 
 
+def append_deployment_rollout(log, *, rollout_id="rollout-unit-v1", state="completed", canary_status="passed", fleet_hash_map=None):
+    payload = {
+        "rollout_id": rollout_id,
+        "state": state,
+        "fleet_hash_map": fleet_hash_map if fleet_hash_map is not None else {
+            "dashboard": "build-a",
+            "v27-read-model-refresh": "build-a",
+        },
+        "canary_status": canary_status,
+        "build_hash": "build-a",
+        "runtime_config_hash": "config-a",
+        "policy_bundle_id": "policy-a",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="deployment_rollout_state_recorded",
+        aggregate_id=f"deployment_rollout:{rollout_id}",
+        idempotency_key=f"deployment_rollout:{rollout_id}:{state}:{canary_status}",
+        payload=payload,
+    )
+
+
+def append_worker_fleet_heartbeat(log, *, worker_id="dashboard", build_hash="build-a", runtime_config_hash="config-a", policy_bundle_id="policy-a"):
+    payload = {
+        "worker_id": worker_id,
+        "role": worker_id,
+        "build_hash": build_hash,
+        "runtime_config_hash": runtime_config_hash,
+        "policy_bundle_id": policy_bundle_id,
+        "heartbeat_at": "2026-01-15T00:00:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="worker_fleet_heartbeat_recorded",
+        aggregate_id=f"worker_fleet:{worker_id}",
+        idempotency_key=f"worker_fleet:{worker_id}:{build_hash}:{runtime_config_hash}:{policy_bundle_id}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -708,6 +748,50 @@ def test_denominator_projection_uses_latest_randomness_control_assignment(tmp_pa
     assert evidence["valid_randomness_control_count"] == 1
     assert evidence["malformed_count"] == 0
     assert evidence["randomness_control_violation_count"] == 0
+
+
+def test_denominator_projection_consumes_deployment_and_worker_fleet_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_deployment_rollout(log)
+    append_worker_fleet_heartbeat(log, worker_id="dashboard")
+    append_worker_fleet_heartbeat(log, worker_id="v27-read-model-refresh")
+
+    projection = build_denominator_projection(tmp_path)
+    deployment = projection["contract_evidence"]["DeploymentRolloutStateMachine"]
+    fleet = projection["contract_evidence"]["WorkerFleetConsistencyContract"]
+
+    assert projection["deployment_rollout_state_recorded_events"] == 1
+    assert projection["worker_fleet_heartbeat_recorded_events"] == 2
+    assert projection["health"]["deployment_rollout_state_machine_ok"] is True
+    assert projection["health"]["worker_fleet_consistency_ok"] is True
+    assert deployment["valid_deployment_rollout_count"] == 1
+    assert deployment["deployment_rollout_violation_count"] == 0
+    assert fleet["valid_worker_fleet_count"] == 2
+    assert fleet["worker_fleet_violation_count"] == 0
+    assert fleet["build_hashes"] == ["build-a"]
+    assert fleet["runtime_config_hashes"] == ["config-a"]
+
+
+def test_denominator_projection_rejects_bad_rollout_and_mixed_worker_fleet(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_deployment_rollout(log, state="deploying", canary_status="failed", fleet_hash_map={})
+    append_worker_fleet_heartbeat(log, worker_id="dashboard", build_hash="build-a")
+    append_worker_fleet_heartbeat(log, worker_id="v27-read-model-refresh", build_hash="build-b")
+
+    projection = build_denominator_projection(tmp_path)
+    deployment = projection["contract_evidence"]["DeploymentRolloutStateMachine"]
+    fleet = projection["contract_evidence"]["WorkerFleetConsistencyContract"]
+
+    assert projection["health"]["deployment_rollout_state_machine_ok"] is False
+    assert projection["health"]["worker_fleet_consistency_ok"] is False
+    assert deployment["deployment_rollout_violation_count"] == 1
+    assert deployment["deployment_rollout_violations"][0]["violation_fields"] == [
+        "canary_status_not_passed",
+        "fleet_hash_map_empty",
+        "state_not_ready",
+    ]
+    assert fleet["worker_fleet_violation_count"] == 1
+    assert fleet["worker_fleet_violations"] == ["mixed_build_hash"]
 
 
 def test_denominator_projection_consumes_idempotency_contracts(tmp_path):

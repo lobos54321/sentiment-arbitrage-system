@@ -42,6 +42,8 @@ PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
 NO_FILL_OUTCOME_EVENT_TYPE = "no_fill_outcome_recorded"
 RUNTIME_RECOVERY_EVENT_TYPE = "runtime_recovery_control_recorded"
 RANDOMNESS_CONTROL_EVENT_TYPE = "randomness_control_recorded"
+DEPLOYMENT_ROLLOUT_EVENT_TYPE = "deployment_rollout_state_recorded"
+WORKER_FLEET_EVENT_TYPE = "worker_fleet_heartbeat_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -63,6 +65,8 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     NO_FILL_OUTCOME_EVENT_TYPE,
     RUNTIME_RECOVERY_EVENT_TYPE,
     RANDOMNESS_CONTROL_EVENT_TYPE,
+    DEPLOYMENT_ROLLOUT_EVENT_TYPE,
+    WORKER_FLEET_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -987,6 +991,85 @@ def _latest_randomness_controls(randomness_controls):
         latest_by_assignment[key]
         for key in sorted(latest_by_assignment)
     ]
+
+
+def _extract_deployment_rollout(event, bags):
+    if event.get("event_type") != DEPLOYMENT_ROLLOUT_EVENT_TYPE:
+        return None
+    fleet_hash_map = _extract_scalar(bags, [("fleet_hash_map",)], default={})
+    values = {
+        "rollout_id": _extract_scalar(bags, [("rollout_id",)]),
+        "state": _extract_scalar(bags, [("state",), ("rollout_state",)]),
+        "fleet_hash_map": fleet_hash_map,
+        "canary_status": _extract_scalar(bags, [("canary_status",)]),
+        "build_hash": _extract_scalar(bags, [("build_hash",)]),
+        "runtime_config_hash": _extract_scalar(bags, [("runtime_config_hash",)]),
+        "policy_bundle_id": _extract_scalar(bags, [("policy_bundle_id",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("rollout_id", "state", "fleet_hash_map", "canary_status"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()) or (field == "fleet_hash_map" and not isinstance(value, dict)):
+            missing_fields.append(field)
+    violation_fields = []
+    normalized_state = str(values.get("state") or "").strip().lower()
+    if normalized_state not in {"completed", "rolled_out", "active", "ready"}:
+        violation_fields.append("state_not_ready")
+    normalized_canary = str(values.get("canary_status") or "").strip().lower()
+    if normalized_canary not in {"passed", "healthy", "complete", "completed", "ok"}:
+        violation_fields.append("canary_status_not_passed")
+    if isinstance(fleet_hash_map, dict) and not fleet_hash_map:
+        violation_fields.append("fleet_hash_map_empty")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "deployment_rollout_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_worker_fleet_heartbeat(event, bags):
+    if event.get("event_type") != WORKER_FLEET_EVENT_TYPE:
+        return None
+    values = {
+        "worker_id": _extract_scalar(bags, [("worker_id",)]),
+        "build_hash": _extract_scalar(bags, [("build_hash",)]),
+        "runtime_config_hash": _extract_scalar(bags, [("runtime_config_hash",)]),
+        "policy_bundle_id": _extract_scalar(bags, [("policy_bundle_id",)]),
+        "heartbeat_at": _extract_scalar(bags, [("heartbeat_at",)]),
+        "role": _extract_scalar(bags, [("role",), ("worker_role",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("worker_id", "build_hash", "runtime_config_hash", "policy_bundle_id", "heartbeat_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": [],
+        "worker_fleet_heartbeat_valid": not missing_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _latest_by_key(items, key_name):
+    latest = {}
+    passthrough = []
+    for item in items or []:
+        key = item.get(key_name)
+        if key is None or (isinstance(key, str) and not key.strip()):
+            passthrough.append(item)
+            continue
+        current = latest.get(str(key))
+        if current is None or int(item.get("global_seq") or 0) >= int(current.get("global_seq") or 0):
+            latest[str(key)] = item
+    return passthrough + [latest[key] for key in sorted(latest)]
 
 
 def _extract_idempotency_contract(event, bags):
@@ -2104,12 +2187,25 @@ def _metric_definitions(metrics, metrics_window):
     return definitions
 
 
-def _contract_evidence_from_records(record_list, runtime_recovery_controls=None, standalone_no_fill_outcomes=None, randomness_controls=None):
+def _contract_evidence_from_records(
+    record_list,
+    runtime_recovery_controls=None,
+    standalone_no_fill_outcomes=None,
+    randomness_controls=None,
+    deployment_rollouts=None,
+    worker_fleet_heartbeats=None,
+):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
     raw_randomness_control_count = len(randomness_controls or [])
     randomness_controls = _latest_randomness_controls(randomness_controls or [])
     superseded_randomness_control_count = max(0, raw_randomness_control_count - len(randomness_controls))
+    raw_deployment_rollout_count = len(deployment_rollouts or [])
+    deployment_rollouts = _latest_by_key(deployment_rollouts or [], "rollout_id")
+    superseded_deployment_rollout_count = max(0, raw_deployment_rollout_count - len(deployment_rollouts))
+    raw_worker_fleet_count = len(worker_fleet_heartbeats or [])
+    worker_fleet_heartbeats = _latest_by_key(worker_fleet_heartbeats or [], "worker_id")
+    superseded_worker_fleet_count = max(0, raw_worker_fleet_count - len(worker_fleet_heartbeats))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -2856,6 +2952,33 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
         for item in randomness_controls
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_deployment_rollouts = [
+        item
+        for item in deployment_rollouts
+        if item.get("missing_fields")
+    ]
+    deployment_rollout_violations = [
+        item
+        for item in deployment_rollouts
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_worker_fleet_heartbeats = [
+        item
+        for item in worker_fleet_heartbeats
+        if item.get("missing_fields")
+    ]
+    worker_fleet_hashes = {
+        "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
+        "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
+        "policy_bundle_ids": sorted({item.get("policy_bundle_id") for item in worker_fleet_heartbeats if item.get("policy_bundle_id")}),
+    }
+    worker_fleet_consistency_violations = []
+    if len(worker_fleet_hashes["build_hashes"]) > 1:
+        worker_fleet_consistency_violations.append("mixed_build_hash")
+    if len(worker_fleet_hashes["runtime_config_hashes"]) > 1:
+        worker_fleet_consistency_violations.append("mixed_runtime_config_hash")
+    if len(worker_fleet_hashes["policy_bundle_ids"]) > 1:
+        worker_fleet_consistency_violations.append("mixed_policy_bundle_id")
     return {
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
@@ -3095,6 +3218,66 @@ def _contract_evidence_from_records(record_list, runtime_recovery_controls=None,
             "assignment_statuses": sorted({item.get("assignment_status") for item in randomness_controls if item.get("assignment_status")}),
             "evidence_sources": sorted({item.get("evidence_source") for item in randomness_controls if item.get("evidence_source")}),
             "randomness_control_projection_version": "v2.7.0.randomness_control.v1",
+        },
+        "DeploymentRolloutStateMachine": {
+            "eligible_deployment_rollout_records": len(deployment_rollouts),
+            "deployment_rollout_observation_count": raw_deployment_rollout_count,
+            "current_deployment_rollout_count": len(deployment_rollouts),
+            "superseded_deployment_rollout_event_count": superseded_deployment_rollout_count,
+            "valid_deployment_rollout_count": sum(1 for item in deployment_rollouts if item.get("deployment_rollout_valid") is True),
+            "malformed_count": len(malformed_deployment_rollouts),
+            "malformed_deployment_rollouts": [
+                {
+                    "rollout_id": item.get("rollout_id"),
+                    "state": item.get("state"),
+                    "canary_status": item.get("canary_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_deployment_rollouts
+            ],
+            "deployment_rollout_violation_count": len(deployment_rollout_violations),
+            "deployment_rollout_violations": [
+                {
+                    "rollout_id": item.get("rollout_id"),
+                    "state": item.get("state"),
+                    "canary_status": item.get("canary_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in deployment_rollout_violations
+            ],
+            "rollout_states": sorted({item.get("state") for item in deployment_rollouts if item.get("state")}),
+            "canary_statuses": sorted({item.get("canary_status") for item in deployment_rollouts if item.get("canary_status")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in deployment_rollouts if item.get("evidence_source")}),
+            "deployment_rollout_projection_version": "v2.7.0.deployment_rollout.v1",
+        },
+        "WorkerFleetConsistencyContract": {
+            "eligible_worker_fleet_records": len(worker_fleet_heartbeats),
+            "worker_fleet_observation_count": raw_worker_fleet_count,
+            "current_worker_fleet_count": len(worker_fleet_heartbeats),
+            "superseded_worker_fleet_event_count": superseded_worker_fleet_count,
+            "valid_worker_fleet_count": sum(1 for item in worker_fleet_heartbeats if item.get("worker_fleet_heartbeat_valid") is True),
+            "malformed_count": len(malformed_worker_fleet_heartbeats),
+            "malformed_worker_fleet_heartbeats": [
+                {
+                    "worker_id": item.get("worker_id"),
+                    "role": item.get("role"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_worker_fleet_heartbeats
+            ],
+            "worker_fleet_violation_count": len(malformed_worker_fleet_heartbeats) + len(worker_fleet_consistency_violations),
+            "worker_fleet_violations": worker_fleet_consistency_violations,
+            "worker_ids": sorted({item.get("worker_id") for item in worker_fleet_heartbeats if item.get("worker_id")}),
+            "roles": sorted({item.get("role") for item in worker_fleet_heartbeats if item.get("role")}),
+            "build_hashes": worker_fleet_hashes["build_hashes"],
+            "runtime_config_hashes": worker_fleet_hashes["runtime_config_hashes"],
+            "policy_bundle_ids": worker_fleet_hashes["policy_bundle_ids"],
+            "evidence_sources": sorted({item.get("evidence_source") for item in worker_fleet_heartbeats if item.get("evidence_source")}),
+            "worker_fleet_projection_version": "v2.7.0.worker_fleet.v1",
         },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
@@ -3391,6 +3574,8 @@ def build_denominator_projection(
         "no_fill_outcome_recorded_events": 0,
         "runtime_recovery_control_recorded_events": 0,
         "randomness_control_recorded_events": 0,
+        "deployment_rollout_state_recorded_events": 0,
+        "worker_fleet_heartbeat_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -3436,6 +3621,8 @@ def build_denominator_projection(
             "NoFillOutcome": {},
             "CrashRecoveryStateMachine": {},
             "ResumeDrainPolicy": {},
+            "DeploymentRolloutStateMachine": {},
+            "WorkerFleetConsistencyContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -3467,6 +3654,8 @@ def build_denominator_projection(
             "no_fill_outcome_ok": False,
             "crash_recovery_state_machine_ok": False,
             "resume_drain_policy_ok": False,
+            "deployment_rollout_state_machine_ok": False,
+            "worker_fleet_consistency_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -3497,6 +3686,8 @@ def build_denominator_projection(
     no_fill_facts = []
     runtime_recovery_controls = []
     randomness_controls = []
+    deployment_rollouts = []
+    worker_fleet_heartbeats = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -3568,6 +3759,18 @@ def build_denominator_projection(
             randomness_control = _extract_randomness_control(event, _payload_bags(event))
             if randomness_control:
                 randomness_controls.append(randomness_control)
+            continue
+        if event.get("event_type") == DEPLOYMENT_ROLLOUT_EVENT_TYPE:
+            projection["deployment_rollout_state_recorded_events"] += 1
+            deployment_rollout = _extract_deployment_rollout(event, _payload_bags(event))
+            if deployment_rollout:
+                deployment_rollouts.append(deployment_rollout)
+            continue
+        if event.get("event_type") == WORKER_FLEET_EVENT_TYPE:
+            projection["worker_fleet_heartbeat_recorded_events"] += 1
+            worker_fleet_heartbeat = _extract_worker_fleet_heartbeat(event, _payload_bags(event))
+            if worker_fleet_heartbeat:
+                worker_fleet_heartbeats.append(worker_fleet_heartbeat)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -3737,6 +3940,8 @@ def build_denominator_projection(
         runtime_recovery_controls=runtime_recovery_controls,
         standalone_no_fill_outcomes=standalone_no_fill_outcomes,
         randomness_controls=randomness_controls,
+        deployment_rollouts=deployment_rollouts,
+        worker_fleet_heartbeats=worker_fleet_heartbeats,
     )
     if progress_callback:
         progress_callback(
@@ -3898,6 +4103,18 @@ def build_denominator_projection(
         contract_evidence["ResumeDrainPolicy"]["eligible_resume_drain_records"] > 0
         and contract_evidence["ResumeDrainPolicy"]["malformed_count"] == 0
         and contract_evidence["ResumeDrainPolicy"]["resume_drain_violation_count"] == 0
+    )
+    projection["health"]["deployment_rollout_state_machine_ok"] = (
+        contract_evidence["DeploymentRolloutStateMachine"]["eligible_deployment_rollout_records"] > 0
+        and contract_evidence["DeploymentRolloutStateMachine"]["valid_deployment_rollout_count"] > 0
+        and contract_evidence["DeploymentRolloutStateMachine"]["malformed_count"] == 0
+        and contract_evidence["DeploymentRolloutStateMachine"]["deployment_rollout_violation_count"] == 0
+    )
+    projection["health"]["worker_fleet_consistency_ok"] = (
+        contract_evidence["WorkerFleetConsistencyContract"]["eligible_worker_fleet_records"] > 0
+        and contract_evidence["WorkerFleetConsistencyContract"]["valid_worker_fleet_count"] > 0
+        and contract_evidence["WorkerFleetConsistencyContract"]["malformed_count"] == 0
+        and contract_evidence["WorkerFleetConsistencyContract"]["worker_fleet_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

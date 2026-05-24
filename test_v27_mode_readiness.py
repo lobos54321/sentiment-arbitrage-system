@@ -207,6 +207,44 @@ def append_randomness_control_event(event_log_dir):
     )
 
 
+def append_deployment_rollout_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="deployment_rollout_state_recorded",
+        aggregate_id="deployment_rollout:rollout-unit-v1",
+        idempotency_key="deployment_rollout:rollout-unit-v1:completed:passed",
+        payload={
+            "rollout_id": "rollout-unit-v1",
+            "state": "completed",
+            "fleet_hash_map": {
+                "dashboard": "build-a",
+                "v27-read-model-refresh": "build-a",
+            },
+            "canary_status": "passed",
+            "build_hash": "build-a",
+            "runtime_config_hash": "config-a",
+            "policy_bundle_id": "policy-a",
+            "evidence_source": "unit",
+        },
+    )
+
+
+def append_worker_fleet_heartbeat_event(event_log_dir, worker_id="dashboard", build_hash="build-a"):
+    V27EventLog(event_log_dir).append_event(
+        event_type="worker_fleet_heartbeat_recorded",
+        aggregate_id=f"worker_fleet:{worker_id}",
+        idempotency_key=f"worker_fleet:{worker_id}:{build_hash}:config-a:policy-a",
+        payload={
+            "worker_id": worker_id,
+            "role": worker_id,
+            "build_hash": build_hash,
+            "runtime_config_hash": "config-a",
+            "policy_bundle_id": "policy-a",
+            "heartbeat_at": "2026-01-15T00:00:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -596,6 +634,38 @@ def test_mode_readiness_blocks_randomness_control_when_missing(tmp_path):
 
     assert matrix["contract_statuses"]["RandomnessControlContract"]["status"] == "missing_evidence"
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["required_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_deployment_and_worker_fleet_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_deployment_rollout_event(event_log_dir)
+    append_worker_fleet_heartbeat_event(event_log_dir, worker_id="dashboard")
+    append_worker_fleet_heartbeat_event(event_log_dir, worker_id="v27-read-model-refresh")
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    deployment = matrix["contract_statuses"]["DeploymentRolloutStateMachine"]
+    fleet = matrix["contract_statuses"]["WorkerFleetConsistencyContract"]
+    assert deployment["status"] == "pass"
+    assert fleet["status"] == "pass"
+    assert deployment["evidence"]["valid_deployment_rollout_count"] == 1
+    assert fleet["evidence"]["valid_worker_fleet_count"] == 2
+    assert "DeploymentRolloutStateMachine" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "WorkerFleetConsistencyContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

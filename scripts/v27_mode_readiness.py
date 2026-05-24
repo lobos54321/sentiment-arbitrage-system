@@ -397,6 +397,20 @@ def build_contract_statuses(
         "randomness_control_missing_malformed_or_invalid",
         randomness_control_evidence,
     )
+    deployment_rollout_evidence = contract_evidence.get("DeploymentRolloutStateMachine") or {}
+    statuses["DeploymentRolloutStateMachine"] = _status(
+        "DeploymentRolloutStateMachine",
+        "pass" if projection_built and projection_health.get("deployment_rollout_state_machine_ok") else "missing_evidence",
+        "deployment_rollout_missing_malformed_or_invalid",
+        deployment_rollout_evidence,
+    )
+    worker_fleet_evidence = contract_evidence.get("WorkerFleetConsistencyContract") or {}
+    statuses["WorkerFleetConsistencyContract"] = _status(
+        "WorkerFleetConsistencyContract",
+        "pass" if projection_built and projection_health.get("worker_fleet_consistency_ok") else "missing_evidence",
+        "worker_fleet_missing_malformed_or_inconsistent",
+        worker_fleet_evidence,
+    )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",
@@ -524,8 +538,6 @@ def build_contract_statuses(
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "DeploymentRolloutStateMachine",
-        "WorkerFleetConsistencyContract",
         "BackupRestoreDrillContract",
         "IncidentEvidenceFreezeContract",
         "CircuitBreakerResumeContract",
