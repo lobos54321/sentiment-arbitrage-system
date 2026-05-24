@@ -34,6 +34,7 @@ MODE_REQUIREMENTS = {
     "observe_only": [
         "CanonicalSpecIntegrityContract",
         "CanonicalSerializationContract",
+        "ModeReadinessMatrix",
         "SpecConsistencyLinterContract",
         "PaperModeSafetyBoundary",
         "ChainConfigContract",
@@ -632,6 +633,92 @@ def _expanded_requirements(mode):
     raise KeyError(mode)
 
 
+def _build_modes(contract_statuses):
+    modes = {}
+    highest_allowed = None
+    for mode in MODE_ORDER:
+        required = list(dict.fromkeys(_expanded_requirements(mode)))
+        blocking = [
+            contract_id
+            for contract_id in required
+            if contract_statuses.get(contract_id, {}).get("status") != "pass"
+        ]
+        modes[mode] = {
+            "mode": mode,
+            "required_contracts": required,
+            "blocking_contracts": blocking,
+            "status": "allowed" if not blocking else "blocked",
+        }
+        if not blocking:
+            highest_allowed = mode
+    return modes, highest_allowed
+
+
+def _mode_readiness_matrix_status(modes):
+    required_fields = ["mode", "required_contracts", "status", "blocking_contracts"]
+    row_violations = []
+    missing_modes = [mode for mode in MODE_ORDER if mode not in modes]
+    for mode in MODE_ORDER:
+        row = modes.get(mode)
+        if not isinstance(row, dict):
+            row_violations.append({"mode": mode, "reason": "mode_row_missing_or_not_object"})
+            continue
+        missing_fields = [field for field in required_fields if field not in row]
+        required = row.get("required_contracts")
+        blocking = row.get("blocking_contracts")
+        violations = []
+        if missing_fields:
+            violations.append("required_fields_missing")
+        if row.get("mode") != mode:
+            violations.append("mode_field_mismatch")
+        if not isinstance(required, list) or not required:
+            violations.append("required_contracts_list_required")
+            required_set = set()
+        else:
+            required_set = set(required)
+        if not isinstance(blocking, list):
+            violations.append("blocking_contracts_list_required")
+            blocking_set = set()
+        else:
+            blocking_set = set(blocking)
+        if blocking_set - required_set:
+            violations.append("blocking_contracts_must_be_subset_of_required_contracts")
+        expected_status = "allowed" if not blocking_set else "blocked"
+        if row.get("status") != expected_status:
+            violations.append("status_must_match_blocking_contracts")
+        if violations:
+            row_violations.append(
+                {
+                    "mode": mode,
+                    "missing_fields": missing_fields,
+                    "violations": violations,
+                }
+            )
+    passed = not missing_modes and not row_violations
+    return _status(
+        "ModeReadinessMatrix",
+        "pass" if passed else "missing_evidence",
+        "mode_readiness_matrix_missing_malformed_or_inconsistent",
+        {
+            "matrix_schema_version": "v2.7.0.mode_readiness.v1",
+            "required_fields": required_fields,
+            "mode_count": len(modes),
+            "modes": [
+                {
+                    "mode": modes.get(mode, {}).get("mode"),
+                    "required_contract_count": len(modes.get(mode, {}).get("required_contracts") or []),
+                    "blocking_contract_count": len(modes.get(mode, {}).get("blocking_contracts") or []),
+                    "status": modes.get(mode, {}).get("status"),
+                }
+                for mode in MODE_ORDER
+                if isinstance(modes.get(mode), dict)
+            ],
+            "missing_modes": missing_modes,
+            "row_violations": row_violations,
+        },
+    )
+
+
 def _with_mode_health_context(report, mode_health, *, component_ready_key=None, component_ready=None):
     if not isinstance(report, dict):
         return report
@@ -695,23 +782,23 @@ def build_mode_readiness_matrix(
         contract_statuses[contract_id]["mode_target"] = record.get("mode_target")
         contract_statuses[contract_id]["failure_action"] = record.get("failure_action")
 
-    modes = {}
-    highest_allowed = None
-    for mode in MODE_ORDER:
-        required = list(dict.fromkeys(_expanded_requirements(mode)))
-        blocking = [
-            contract_id
-            for contract_id in required
-            if contract_statuses.get(contract_id, {}).get("status") != "pass"
-        ]
-        modes[mode] = {
-            "mode": mode,
-            "required_contracts": required,
-            "blocking_contracts": blocking,
-            "status": "allowed" if not blocking else "blocked",
-        }
-        if not blocking:
-            highest_allowed = mode
+    matrix_catalog_record = catalog_contracts.get("ModeReadinessMatrix") or {}
+    contract_statuses["ModeReadinessMatrix"] = _status(
+        "ModeReadinessMatrix",
+        "pass",
+        "mode_readiness_matrix_missing_malformed_or_inconsistent",
+        {"provisional_self_check": True},
+    )
+    contract_statuses["ModeReadinessMatrix"]["section_id"] = matrix_catalog_record.get("section_id")
+    contract_statuses["ModeReadinessMatrix"]["mode_target"] = matrix_catalog_record.get("mode_target")
+    contract_statuses["ModeReadinessMatrix"]["failure_action"] = matrix_catalog_record.get("failure_action")
+    modes, _ = _build_modes(contract_statuses)
+    matrix_status = _mode_readiness_matrix_status(modes)
+    matrix_status["section_id"] = matrix_catalog_record.get("section_id")
+    matrix_status["mode_target"] = matrix_catalog_record.get("mode_target")
+    matrix_status["failure_action"] = matrix_catalog_record.get("failure_action")
+    contract_statuses["ModeReadinessMatrix"] = matrix_status
+    modes, highest_allowed = _build_modes(contract_statuses)
 
     gate_scope = build_mode_gate_scope_audit(catalog, MODE_REQUIREMENTS, MODE_ORDER)
     health = {

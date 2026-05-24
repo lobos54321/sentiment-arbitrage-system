@@ -31,6 +31,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "LogRedactionVerificationContract" not in normal["missing_contracts"]
     assert "ServiceReadinessProbeContract" not in normal["missing_contracts"]
     assert "DashboardActionSeparationContract" not in normal["missing_contracts"]
+    assert "ModeReadinessMatrix" not in normal["missing_contracts"]
     assert "ReplaySideEffectIsolationContract" not in normal["missing_contracts"]
     assert "WritePathRegistryContract" not in normal["missing_contracts"]
     assert "ManualReplaySafetyContract" in normal["missing_contracts"]
