@@ -593,6 +593,7 @@ export function resolveDashboardLogPath(pathname, env = process.env) {
     '/api/logs/v27-quote-intent-binding-mirror': env.V27_QUOTE_INTENT_BINDING_MIRROR_LOG || '/app/data/v27-quote-intent-binding-mirror.log',
     '/api/logs/v27-raw-provider-evidence-mirror': env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG || '/app/data/v27-raw-provider-evidence-mirror.log',
     '/api/logs/v27-randomness-control-mirror': env.V27_RANDOMNESS_CONTROL_MIRROR_LOG || '/app/data/v27-randomness-control-mirror.log',
+    '/api/logs/v27-normal-tiny-ops-evidence': env.V27_NORMAL_TINY_OPS_EVIDENCE_LOG || '/app/data/v27-normal-tiny-ops-evidence.log',
     '/api/logs/v27-idempotency-contract-mirror': env.V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG || '/app/data/v27-idempotency-contract-mirror.log',
     '/api/logs/v27-execution-control-mirror': env.V27_EXECUTION_CONTROL_MIRROR_LOG || '/app/data/v27-execution-control-mirror.log',
     '/api/logs/v27-paper-ledger-mirror': env.V27_PAPER_LEDGER_MIRROR_LOG || '/app/data/v27-paper-ledger-mirror.log',
@@ -676,6 +677,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     'v27-quote-intent-binding-mirror.log',
     'v27-raw-provider-evidence-mirror.log',
     'v27-randomness-control-mirror.log',
+    'v27-normal-tiny-ops-evidence.log',
     'v27-idempotency-contract-mirror.log',
     'v27-execution-control-mirror.log',
     'v27-paper-ledger-mirror.log',
@@ -1376,6 +1378,93 @@ function triggerV27RandomnessControlMirror(options = {}) {
     accepted: true,
     status: 'started',
     ...v27RandomnessControlManualMirror,
+  };
+}
+
+let v27NormalTinyOpsEvidenceManualRecord = {
+  running: false,
+  started_at: null,
+  pid: null,
+};
+
+function triggerV27NormalTinyOpsEvidence(options = {}) {
+  if (v27NormalTinyOpsEvidenceManualRecord.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      ...v27NormalTinyOpsEvidenceManualRecord,
+    };
+  }
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const timeoutMs = Math.max(30000, Math.min(options.timeoutMs || Number(process.env.V27_NORMAL_TINY_OPS_EVIDENCE_TIMEOUT_MS || 600000) || 600000, 1800000));
+  const logPathRaw = process.env.V27_NORMAL_TINY_OPS_EVIDENCE_LOG || join(projectRoot, 'data', 'v27-normal-tiny-ops-evidence.log');
+  const logPath = isAbsolute(logPathRaw) ? logPathRaw : join(projectRoot, logPathRaw);
+  const args = [
+    'scripts/v27_record_normal_tiny_ops_evidence.py',
+    '--event-log-dir',
+    eventLogDir,
+  ];
+  if (options.runId) args.push('--run-id', String(options.runId));
+  if (options.scratchDir) args.push('--scratch-dir', String(options.scratchDir));
+  if (Array.isArray(options.workerRoles)) {
+    for (const role of options.workerRoles) {
+      if (role) args.push('--worker-role', String(role));
+    }
+  }
+  if (options.dryRun) args.push('--dry-run');
+  if (options.strict) args.push('--strict');
+  const env = {
+    ...process.env,
+    V27_EVENT_LOG_DIR: eventLogDir,
+  };
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const startedAt = new Date().toISOString();
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-normal-tiny-ops-evidence-once: python3 ${args.join(' ')}\n`);
+  v27NormalTinyOpsEvidenceManualRecord = {
+    running: true,
+    started_at: startedAt,
+    pid: null,
+  };
+  const child = execFile('python3', args, {
+    cwd: projectRoot,
+    env,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 50 * 1024 * 1024,
+  }, (error, stdout, stderr) => {
+    const finishedAt = new Date().toISOString();
+    if (stdout) logStream.write(String(stdout));
+    if (stderr) logStream.write(String(stderr));
+    if (error) {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-normal-tiny-ops-evidence-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+    } else {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-normal-tiny-ops-evidence-once completed\n`);
+    }
+    v27NormalTinyOpsEvidenceManualRecord = {
+      running: false,
+      started_at: startedAt,
+      pid: child?.pid || null,
+      completed_at: finishedAt,
+      exit_code: error ? error.code ?? null : 0,
+      exit_signal: error ? error.signal ?? null : null,
+      error: error ? error.message : null,
+      log_path: logPath,
+    };
+    logStream.end();
+  });
+  v27NormalTinyOpsEvidenceManualRecord = {
+    ...v27NormalTinyOpsEvidenceManualRecord,
+    pid: child.pid,
+    log_path: logPath,
+    timeout_ms: timeoutMs,
+    dry_run: Boolean(options.dryRun),
+    strict: Boolean(options.strict),
+  };
+  return {
+    accepted: true,
+    status: 'started',
+    ...v27NormalTinyOpsEvidenceManualRecord,
   };
 }
 
@@ -8077,6 +8166,24 @@ const server = http.createServer(async (req, res) => {
       materialized: false,
       refresh_schema_version: 'v2.7.0.manual_randomness_control_mirror.v1',
       ...mirror,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-normal-tiny-ops-evidence') {
+    if (!checkAuth(req, url, res)) return;
+    const record = triggerV27NormalTinyOpsEvidence({
+      timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
+      runId: url.searchParams.get('run_id') || undefined,
+      scratchDir: url.searchParams.get('scratch_dir') || undefined,
+      dryRun: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+      strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      workerRoles: url.searchParams.getAll('worker_role').flatMap((value) => String(value).split(',')).map((value) => value.trim()).filter(Boolean),
+    });
+    res.writeHead(record.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      materialized: false,
+      refresh_schema_version: 'v2.7.0.manual_normal_tiny_ops_evidence.v1',
+      ...record,
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-mode-readiness') {
