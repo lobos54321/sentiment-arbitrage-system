@@ -55,6 +55,7 @@ test('buildV27ManualEvidenceApiResponse preserves legacy schema and rejected err
   );
 
   assert.equal(rejected.error, 'already_running');
+  assert.equal(rejected.error_code, 'already_running');
 });
 
 test('storage health reports db markers and disk snapshot without opening sqlite', () => {

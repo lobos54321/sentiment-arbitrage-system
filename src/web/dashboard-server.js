@@ -81,6 +81,9 @@ export function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result 
   if (payload.accepted === false && !payload.error) {
     payload.error = payload.status || 'manual_evidence_request_rejected';
   }
+  if (payload.accepted === false && !payload.error_code) {
+    payload.error_code = payload.error || 'manual_evidence_request_rejected';
+  }
   return payload;
 }
 
@@ -91,13 +94,16 @@ export function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result 
 function checkAuth(req, url, res) {
   if (!DASHBOARD_TOKEN) {
     res.writeHead(403, apiJsonHeaders());
-    res.end(JSON.stringify({ error: 'DASHBOARD_TOKEN not configured. Set DASHBOARD_TOKEN env var to enable this endpoint.' }));
+    res.end(JSON.stringify({
+      error: 'DASHBOARD_TOKEN not configured. Set DASHBOARD_TOKEN env var to enable this endpoint.',
+      error_code: 'dashboard_token_not_configured',
+    }));
     return false;
   }
   const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
   if (token !== DASHBOARD_TOKEN) {
     res.writeHead(401, apiJsonHeaders());
-    res.end(JSON.stringify({ error: 'Invalid or missing token' }));
+    res.end(JSON.stringify({ error: 'Invalid or missing token', error_code: 'invalid_or_missing_token' }));
     return false;
   }
   return true;
@@ -106,7 +112,7 @@ function checkAuth(req, url, res) {
 function requirePost(req, res) {
   if (req.method !== 'POST') {
     res.writeHead(405, apiJsonHeaders());
-    res.end(JSON.stringify({ error: 'Use POST' }));
+    res.end(JSON.stringify({ error: 'Use POST', error_code: 'method_not_allowed_post_required' }));
     return false;
   }
   return true;
@@ -631,7 +637,7 @@ function requireDashboardAuditEvent(req, res, url, input = {}) {
     });
   } catch (error) {
     res.writeHead(500, apiJsonHeaders());
-    res.end(JSON.stringify({ error: 'Audit log unavailable', detail: error.message }));
+    res.end(JSON.stringify({ error: 'Audit log unavailable', error_code: 'audit_log_unavailable', detail: error.message }));
     return null;
   }
 }

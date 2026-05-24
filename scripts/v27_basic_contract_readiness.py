@@ -35,6 +35,7 @@ DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
 DEFAULT_API_RESPONSE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-policy.json"
+DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -96,6 +97,13 @@ API_RESPONSE_REQUIRED_FIELDS = (
     "status_code_policy",
     "error_envelope",
     "cache_control",
+)
+ERROR_TAXONOMY_REQUIRED_FIELDS = (
+    "error_code",
+    "category",
+    "severity",
+    "operator_action",
+    "introduced_at",
 )
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
@@ -1488,6 +1496,152 @@ def verify_api_response_contract(
     )
 
 
+def _read_project_text(path):
+    resolved = _resolve_project_file(path)
+    if not resolved or not resolved.exists():
+        return "", {"source_file": str(path), "reason": "source_missing"}
+    try:
+        return resolved.read_text(encoding="utf-8"), None
+    except UnicodeDecodeError as exc:
+        return "", {"source_file": str(path), "reason": "source_decode_failed", "error": str(exc)}
+
+
+def _extract_basic_readiness_error_codes(source_text):
+    codes = set(
+        re.findall(
+            r"_contract\(\s*['\"][^'\"]+['\"]\s*,\s*[^,]+,\s*['\"]([^'\"]+)['\"]",
+            source_text,
+            flags=re.S,
+        )
+    )
+    codes.update(re.findall(r"reason\s+or\s+['\"]([^'\"]+)['\"]", source_text))
+    return codes
+
+
+def _extract_dashboard_error_codes(source_text):
+    codes = set(re.findall(r"error_code\s*:\s*['\"]([^'\"]+)['\"]", source_text))
+    if "manual_evidence_request_rejected" in source_text:
+        codes.add("manual_evidence_request_rejected")
+    codes.update(
+        re.findall(
+            r"accepted\s*:\s*false\s*,[\s\S]{0,180}?status\s*:\s*['\"]([^'\"]+)['\"]",
+            source_text,
+        )
+    )
+    return codes
+
+
+def _extract_paper_mode_error_codes(source_text):
+    return set(
+        re.findall(
+            r"['\"](paper_[a-z0-9_]*(?:detected|missing|unverified))['\"]",
+            source_text,
+        )
+    )
+
+
+def verify_error_taxonomy(
+    taxonomy_path=DEFAULT_ERROR_TAXONOMY,
+    dashboard_source_path=None,
+    basic_readiness_source_path=None,
+    paper_mode_safety_source_path=None,
+):
+    try:
+        taxonomy = _load_json(taxonomy_path)
+    except Exception as exc:
+        return _contract("ErrorTaxonomyContract", False, "error_taxonomy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(taxonomy, dict):
+        return _contract("ErrorTaxonomyContract", False, "error_taxonomy_not_object", {"taxonomy_path": str(taxonomy_path)})
+
+    coverage = taxonomy.get("coverage") if isinstance(taxonomy.get("coverage"), dict) else {}
+    dashboard_source_path = dashboard_source_path or coverage.get("dashboard_source_file") or "src/web/dashboard-server.js"
+    basic_readiness_source_path = basic_readiness_source_path or coverage.get("basic_readiness_source_file") or "scripts/v27_basic_contract_readiness.py"
+    paper_mode_safety_source_path = paper_mode_safety_source_path or coverage.get("paper_mode_safety_source_file") or "scripts/v27_paper_mode_safety.py"
+
+    source_errors = []
+    dashboard_text, source_error = _read_project_text(dashboard_source_path)
+    if source_error:
+        source_errors.append({"source": "dashboard", **source_error})
+    basic_text, source_error = _read_project_text(basic_readiness_source_path)
+    if source_error:
+        source_errors.append({"source": "basic_readiness", **source_error})
+    paper_text, source_error = _read_project_text(paper_mode_safety_source_path)
+    if source_error:
+        source_errors.append({"source": "paper_mode_safety", **source_error})
+
+    observed_by_source = {
+        "dashboard_api_error_codes": sorted(_extract_dashboard_error_codes(dashboard_text)),
+        "basic_readiness_blocking_reasons": sorted(_extract_basic_readiness_error_codes(basic_text)),
+        "paper_mode_safety_reasons": sorted(_extract_paper_mode_error_codes(paper_text)),
+    }
+    required_codes = set()
+    for codes in observed_by_source.values():
+        required_codes.update(codes)
+
+    allowed_categories = set(str(item) for item in (taxonomy.get("allowed_categories") or []))
+    allowed_severities = set(str(item) for item in (taxonomy.get("allowed_severities") or []))
+    entries = taxonomy.get("taxonomy") if isinstance(taxonomy.get("taxonomy"), list) else []
+    malformed_entries = []
+    duplicate_error_codes = []
+    taxonomy_codes = set()
+    seen_codes = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            malformed_entries.append({"index": index, "error_code": None, "missing_fields": list(ERROR_TAXONOMY_REQUIRED_FIELDS), "violations": ["entry_not_object"]})
+            continue
+        error_code = str(entry.get("error_code") or "")
+        missing = _missing_required_fields(entry, ERROR_TAXONOMY_REQUIRED_FIELDS)
+        violations = []
+        if error_code in seen_codes:
+            duplicate_error_codes.append(error_code)
+        if error_code:
+            seen_codes.add(error_code)
+            taxonomy_codes.add(error_code)
+        if error_code and not re.match(r"^[a-z][a-z0-9_]*$", error_code):
+            violations.append("error_code_must_be_lower_snake_case")
+        if str(entry.get("category") or "") not in allowed_categories:
+            violations.append("category_not_allowed")
+        if str(entry.get("severity") or "") not in allowed_severities:
+            violations.append("severity_not_allowed")
+        if entry.get("introduced_at") and _parse_iso_ts(entry.get("introduced_at")) is None:
+            violations.append("introduced_at_invalid_iso_timestamp")
+        if missing or violations:
+            malformed_entries.append({"index": index, "error_code": error_code or None, "missing_fields": missing, "violations": violations})
+
+    unclassified_error_codes = sorted(required_codes - taxonomy_codes)
+    unused_taxonomy_codes = sorted(taxonomy_codes - required_codes)
+    passed = (
+        taxonomy.get("schema_version") == "v2.7.0.error_taxonomy.v1"
+        and bool(entries)
+        and bool(allowed_categories)
+        and bool(allowed_severities)
+        and not source_errors
+        and not malformed_entries
+        and not duplicate_error_codes
+        and not unclassified_error_codes
+        and not unused_taxonomy_codes
+    )
+    return _contract(
+        "ErrorTaxonomyContract",
+        passed,
+        "error_taxonomy_missing_malformed_or_incomplete",
+        {
+            "taxonomy_path": str(taxonomy_path),
+            "schema_version": taxonomy.get("schema_version"),
+            "scope": taxonomy.get("scope"),
+            "failure_action": taxonomy.get("failure_action"),
+            "taxonomy_entry_count": len(entries),
+            "required_error_code_count": len(required_codes),
+            "observed_by_source": observed_by_source,
+            "duplicate_error_codes": sorted(str(item) for item in duplicate_error_codes),
+            "malformed_entries": malformed_entries,
+            "source_errors": source_errors,
+            "unclassified_error_codes": unclassified_error_codes,
+            "unused_taxonomy_codes": unused_taxonomy_codes,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -1901,6 +2055,7 @@ def build_basic_contract_readiness(
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
     api_response_policy_path=DEFAULT_API_RESPONSE_POLICY,
+    error_taxonomy_path=DEFAULT_ERROR_TAXONOMY,
     env=None,
 ):
     contracts = {
@@ -1938,6 +2093,7 @@ def build_basic_contract_readiness(
                 policy_path=api_response_policy_path,
                 access_control_policy_path=access_control_policy_path,
             ),
+            verify_error_taxonomy(taxonomy_path=error_taxonomy_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -1971,6 +2127,7 @@ def main():
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
     parser.add_argument("--api-response-policy", default=str(DEFAULT_API_RESPONSE_POLICY))
+    parser.add_argument("--error-taxonomy", default=str(DEFAULT_ERROR_TAXONOMY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -1990,6 +2147,7 @@ def main():
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
         api_response_policy_path=Path(args.api_response_policy),
+        error_taxonomy_path=Path(args.error_taxonomy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

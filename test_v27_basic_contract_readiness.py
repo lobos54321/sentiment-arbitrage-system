@@ -10,6 +10,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_background_job_registry,
     verify_direct_database_mutation_ban,
     verify_entry_point_inventory,
+    verify_error_taxonomy,
     verify_evidence_eligibility_matrix,
     verify_static_policy_enforcement,
     verify_access_control_policy,
@@ -49,6 +50,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "EntryPointInventoryContract",
         "StaticPolicyEnforcementContract",
         "APIResponseContract",
+        "ErrorTaxonomyContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -771,6 +773,107 @@ def test_api_response_contract_blocks_missing_response_builder_anchor(tmp_path):
     assert report["blocking_reason"] == "api_response_policy_missing_malformed_or_unenforced"
     assert report["evidence"]["source_violations"] == [
         {"endpoint": endpoint, "reason": "response_builder_missing"}
+    ]
+
+
+def test_error_taxonomy_covers_dashboard_and_readiness_error_codes():
+    report = verify_error_taxonomy()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.error_taxonomy.v1"
+    assert report["evidence"]["unclassified_error_codes"] == []
+    assert report["evidence"]["unused_taxonomy_codes"] == []
+    assert report["evidence"]["malformed_entries"] == []
+    assert "already_running" in report["evidence"]["observed_by_source"]["dashboard_api_error_codes"]
+    assert "error_taxonomy_missing_malformed_or_incomplete" in report["evidence"]["observed_by_source"]["basic_readiness_blocking_reasons"]
+    assert "paper_live_capability_detected" in report["evidence"]["observed_by_source"]["paper_mode_safety_reasons"]
+
+
+def test_error_taxonomy_blocks_unclassified_dashboard_error(tmp_path):
+    dashboard_source = tmp_path / "dashboard.js"
+    dashboard_source.write_text("res.end(JSON.stringify({ error: 'Nope', error_code: 'unclassified_unit_error' }));\n", encoding="utf-8")
+    basic_source = tmp_path / "basic.py"
+    basic_source.write_text("", encoding="utf-8")
+    paper_source = tmp_path / "paper.py"
+    paper_source.write_text("", encoding="utf-8")
+    taxonomy_path = tmp_path / "taxonomy.json"
+    taxonomy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.error_taxonomy.v1",
+                "coverage": {},
+                "allowed_categories": ["dashboard_request"],
+                "allowed_severities": ["error"],
+                "taxonomy": [
+                    {
+                        "error_code": "classified_unit_error",
+                        "category": "dashboard_request",
+                        "severity": "error",
+                        "operator_action": "unit test",
+                        "introduced_at": "2026-05-25T00:00:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_error_taxonomy(
+        taxonomy_path=taxonomy_path,
+        dashboard_source_path=dashboard_source,
+        basic_readiness_source_path=basic_source,
+        paper_mode_safety_source_path=paper_source,
+    )
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "error_taxonomy_missing_malformed_or_incomplete"
+    assert report["evidence"]["unclassified_error_codes"] == ["unclassified_unit_error"]
+    assert report["evidence"]["unused_taxonomy_codes"] == ["classified_unit_error"]
+
+
+def test_error_taxonomy_blocks_malformed_entry(tmp_path):
+    dashboard_source = tmp_path / "dashboard.js"
+    dashboard_source.write_text("res.end(JSON.stringify({ error: 'Nope', error_code: 'classified_unit_error' }));\n", encoding="utf-8")
+    basic_source = tmp_path / "basic.py"
+    basic_source.write_text("", encoding="utf-8")
+    paper_source = tmp_path / "paper.py"
+    paper_source.write_text("", encoding="utf-8")
+    taxonomy_path = tmp_path / "taxonomy.json"
+    taxonomy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.error_taxonomy.v1",
+                "coverage": {},
+                "allowed_categories": ["dashboard_request"],
+                "allowed_severities": ["error"],
+                "taxonomy": [
+                    {
+                        "error_code": "classified_unit_error",
+                        "category": "dashboard_request",
+                        "severity": "error",
+                        "introduced_at": "not-a-date",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_error_taxonomy(
+        taxonomy_path=taxonomy_path,
+        dashboard_source_path=dashboard_source,
+        basic_readiness_source_path=basic_source,
+        paper_mode_safety_source_path=paper_source,
+    )
+
+    assert report["status"] == "missing_evidence"
+    assert report["evidence"]["malformed_entries"] == [
+        {
+            "index": 0,
+            "error_code": "classified_unit_error",
+            "missing_fields": ["operator_action"],
+            "violations": ["introduced_at_invalid_iso_timestamp"],
+        }
     ]
 
 
