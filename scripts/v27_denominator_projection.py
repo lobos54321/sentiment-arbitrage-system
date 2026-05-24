@@ -47,6 +47,9 @@ WORKER_FLEET_EVENT_TYPE = "worker_fleet_heartbeat_recorded"
 BACKUP_RESTORE_DRILL_EVENT_TYPE = "backup_restore_drill_recorded"
 INCIDENT_EVIDENCE_FREEZE_EVENT_TYPE = "incident_evidence_freeze_recorded"
 CIRCUIT_BREAKER_RESUME_EVENT_TYPE = "circuit_breaker_resume_recorded"
+QUEUE_DURABILITY_EVENT_TYPE = "queue_durability_recorded"
+CANDIDATE_CANCELLATION_EVENT_TYPE = "candidate_cancellation_recorded"
+RETRY_STORM_CONTROL_EVENT_TYPE = "retry_storm_control_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -73,6 +76,9 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     BACKUP_RESTORE_DRILL_EVENT_TYPE,
     INCIDENT_EVIDENCE_FREEZE_EVENT_TYPE,
     CIRCUIT_BREAKER_RESUME_EVENT_TYPE,
+    QUEUE_DURABILITY_EVENT_TYPE,
+    CANDIDATE_CANCELLATION_EVENT_TYPE,
+    RETRY_STORM_CONTROL_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1181,6 +1187,107 @@ def _extract_circuit_breaker_resume(event, bags):
         "missing_fields": sorted(set(missing_fields)),
         "violation_fields": sorted(set(violation_fields)),
         "circuit_breaker_resume_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_queue_durability(event, bags):
+    if event.get("event_type") != QUEUE_DURABILITY_EVENT_TYPE:
+        return None
+    values = {
+        "queue_id": _extract_scalar(bags, [("queue_id",)]),
+        "task_id": _extract_scalar(bags, [("task_id",)]),
+        "durable_state": _extract_scalar(bags, [("durable_state",)]),
+        "ack_state": _extract_scalar(bags, [("ack_state",)]),
+        "created_at": _extract_scalar(bags, [("created_at",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("queue_id", "task_id", "durable_state", "ack_state", "created_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    durable_state = str(values.get("durable_state") or "").strip().lower()
+    if durable_state not in {"persisted", "durable", "stored", "committed"}:
+        violation_fields.append("durable_state_not_durable")
+    ack_state = str(values.get("ack_state") or "").strip().lower()
+    if ack_state not in {"pending", "acked", "nacked", "retrying"}:
+        violation_fields.append("ack_state_invalid")
+    if values.get("created_at") and _timestamp_epoch_seconds(values.get("created_at")) is None:
+        violation_fields.append("created_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "queue_durability_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_candidate_cancellation(event, bags):
+    if event.get("event_type") != CANDIDATE_CANCELLATION_EVENT_TYPE:
+        return None
+    values = {
+        "candidate_id": _extract_scalar(bags, [("candidate_id",)]),
+        "cancel_reason": _extract_scalar(bags, [("cancel_reason",)]),
+        "cancel_event_seq": _extract_scalar(bags, [("cancel_event_seq",)]),
+        "cancelled_at": _extract_scalar(bags, [("cancelled_at",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("candidate_id", "cancel_reason", "cancel_event_seq", "cancelled_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    cancel_event_seq = _as_int(values.get("cancel_event_seq"), default=-1)
+    if values.get("cancel_event_seq") is not None and cancel_event_seq < 0:
+        violation_fields.append("cancel_event_seq_nonnegative")
+    if values.get("cancelled_at") and _timestamp_epoch_seconds(values.get("cancelled_at")) is None:
+        violation_fields.append("cancelled_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "candidate_cancellation_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_retry_storm_control(event, bags):
+    if event.get("event_type") != RETRY_STORM_CONTROL_EVENT_TYPE:
+        return None
+    values = {
+        "retry_family": _extract_scalar(bags, [("retry_family",)]),
+        "backoff_policy": _extract_scalar(bags, [("backoff_policy",)]),
+        "max_concurrent_retries": _extract_scalar(bags, [("max_concurrent_retries",)]),
+        "p0_reserved_capacity": _extract_scalar(bags, [("p0_reserved_capacity",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("retry_family", "backoff_policy", "max_concurrent_retries", "p0_reserved_capacity"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    backoff_policy = str(values.get("backoff_policy") or "").strip().lower()
+    if backoff_policy not in {"exponential_jitter", "capped_exponential_jitter", "linear_jitter", "fixed_jitter"}:
+        violation_fields.append("backoff_policy_not_bounded")
+    max_concurrent_retries = _as_int(values.get("max_concurrent_retries"), default=-1)
+    if values.get("max_concurrent_retries") is not None and max_concurrent_retries < 0:
+        violation_fields.append("max_concurrent_retries_nonnegative")
+    p0_reserved_capacity = _as_int(values.get("p0_reserved_capacity"), default=-1)
+    if values.get("p0_reserved_capacity") is not None and p0_reserved_capacity < 0:
+        violation_fields.append("p0_reserved_capacity_nonnegative")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "retry_storm_control_valid": not missing_fields and not violation_fields,
         "source_event_id": event.get("event_id"),
         "global_seq": event.get("global_seq"),
     }
@@ -2325,6 +2432,9 @@ def _contract_evidence_from_records(
     backup_restore_drills=None,
     incident_evidence_freezes=None,
     circuit_breaker_resumes=None,
+    queue_durability_records=None,
+    candidate_cancellations=None,
+    retry_storm_controls=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -2346,6 +2456,15 @@ def _contract_evidence_from_records(
     raw_circuit_breaker_resume_count = len(circuit_breaker_resumes or [])
     circuit_breaker_resumes = _latest_by_key(circuit_breaker_resumes or [], "breaker_id")
     superseded_circuit_breaker_resume_count = max(0, raw_circuit_breaker_resume_count - len(circuit_breaker_resumes))
+    raw_queue_durability_count = len(queue_durability_records or [])
+    queue_durability_records = _latest_by_key(queue_durability_records or [], "task_id")
+    superseded_queue_durability_count = max(0, raw_queue_durability_count - len(queue_durability_records))
+    raw_candidate_cancellation_count = len(candidate_cancellations or [])
+    candidate_cancellations = _latest_by_key(candidate_cancellations or [], "candidate_id")
+    superseded_candidate_cancellation_count = max(0, raw_candidate_cancellation_count - len(candidate_cancellations))
+    raw_retry_storm_control_count = len(retry_storm_controls or [])
+    retry_storm_controls = _latest_by_key(retry_storm_controls or [], "retry_family")
+    superseded_retry_storm_control_count = max(0, raw_retry_storm_control_count - len(retry_storm_controls))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -3152,6 +3271,36 @@ def _contract_evidence_from_records(
         for item in circuit_breaker_resumes
         if item.get("evidence_freeze_id") and item.get("evidence_freeze_id") not in valid_freeze_ids
     ]
+    malformed_queue_durability = [
+        item
+        for item in queue_durability_records
+        if item.get("missing_fields")
+    ]
+    queue_durability_violations = [
+        item
+        for item in queue_durability_records
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_candidate_cancellations = [
+        item
+        for item in candidate_cancellations
+        if item.get("missing_fields")
+    ]
+    candidate_cancellation_violations = [
+        item
+        for item in candidate_cancellations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_retry_storm_controls = [
+        item
+        for item in retry_storm_controls
+        if item.get("missing_fields")
+    ]
+    retry_storm_control_violations = [
+        item
+        for item in retry_storm_controls
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -3564,6 +3713,103 @@ def _contract_evidence_from_records(
             "evidence_sources": sorted({item.get("evidence_source") for item in circuit_breaker_resumes if item.get("evidence_source")}),
             "circuit_breaker_resume_projection_version": "v2.7.0.circuit_breaker_resume.v1",
         },
+        "QueueDurabilityContract": {
+            "eligible_queue_durability_records": len(queue_durability_records),
+            "queue_durability_observation_count": raw_queue_durability_count,
+            "current_queue_durability_count": len(queue_durability_records),
+            "superseded_queue_durability_event_count": superseded_queue_durability_count,
+            "valid_queue_durability_count": sum(1 for item in queue_durability_records if item.get("queue_durability_valid") is True),
+            "malformed_count": len(malformed_queue_durability),
+            "malformed_queue_durability": [
+                {
+                    "queue_id": item.get("queue_id"),
+                    "task_id": item.get("task_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_queue_durability
+            ],
+            "queue_durability_violation_count": len(queue_durability_violations),
+            "queue_durability_violations": [
+                {
+                    "queue_id": item.get("queue_id"),
+                    "task_id": item.get("task_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in queue_durability_violations
+            ],
+            "queue_ids": sorted({item.get("queue_id") for item in queue_durability_records if item.get("queue_id")}),
+            "durable_states": sorted({item.get("durable_state") for item in queue_durability_records if item.get("durable_state")}),
+            "ack_states": sorted({item.get("ack_state") for item in queue_durability_records if item.get("ack_state")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in queue_durability_records if item.get("evidence_source")}),
+            "queue_durability_projection_version": "v2.7.0.queue_durability.v1",
+        },
+        "CandidateCancellationContract": {
+            "eligible_candidate_cancellation_records": len(candidate_cancellations),
+            "candidate_cancellation_observation_count": raw_candidate_cancellation_count,
+            "current_candidate_cancellation_count": len(candidate_cancellations),
+            "superseded_candidate_cancellation_event_count": superseded_candidate_cancellation_count,
+            "valid_candidate_cancellation_count": sum(1 for item in candidate_cancellations if item.get("candidate_cancellation_valid") is True),
+            "malformed_count": len(malformed_candidate_cancellations),
+            "malformed_candidate_cancellations": [
+                {
+                    "candidate_id": item.get("candidate_id"),
+                    "cancel_reason": item.get("cancel_reason"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_candidate_cancellations
+            ],
+            "candidate_cancellation_violation_count": len(candidate_cancellation_violations),
+            "candidate_cancellation_violations": [
+                {
+                    "candidate_id": item.get("candidate_id"),
+                    "cancel_reason": item.get("cancel_reason"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in candidate_cancellation_violations
+            ],
+            "candidate_ids": sorted({item.get("candidate_id") for item in candidate_cancellations if item.get("candidate_id")}),
+            "cancel_reasons": sorted({item.get("cancel_reason") for item in candidate_cancellations if item.get("cancel_reason")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in candidate_cancellations if item.get("evidence_source")}),
+            "candidate_cancellation_projection_version": "v2.7.0.candidate_cancellation.v1",
+        },
+        "RetryStormControlContract": {
+            "eligible_retry_storm_control_records": len(retry_storm_controls),
+            "retry_storm_control_observation_count": raw_retry_storm_control_count,
+            "current_retry_storm_control_count": len(retry_storm_controls),
+            "superseded_retry_storm_control_event_count": superseded_retry_storm_control_count,
+            "valid_retry_storm_control_count": sum(1 for item in retry_storm_controls if item.get("retry_storm_control_valid") is True),
+            "malformed_count": len(malformed_retry_storm_controls),
+            "malformed_retry_storm_controls": [
+                {
+                    "retry_family": item.get("retry_family"),
+                    "backoff_policy": item.get("backoff_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_retry_storm_controls
+            ],
+            "retry_storm_control_violation_count": len(retry_storm_control_violations),
+            "retry_storm_control_violations": [
+                {
+                    "retry_family": item.get("retry_family"),
+                    "backoff_policy": item.get("backoff_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in retry_storm_control_violations
+            ],
+            "retry_families": sorted({item.get("retry_family") for item in retry_storm_controls if item.get("retry_family")}),
+            "backoff_policies": sorted({item.get("backoff_policy") for item in retry_storm_controls if item.get("backoff_policy")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in retry_storm_controls if item.get("evidence_source")}),
+            "retry_storm_control_projection_version": "v2.7.0.retry_storm_control.v1",
+        },
         "IdempotencyContract": {
             "eligible_idempotency_records": len(idempotency_records),
             "idempotency_observation_count": len(all_idempotency_candidates),
@@ -3864,6 +4110,9 @@ def build_denominator_projection(
         "backup_restore_drill_recorded_events": 0,
         "incident_evidence_freeze_recorded_events": 0,
         "circuit_breaker_resume_recorded_events": 0,
+        "queue_durability_recorded_events": 0,
+        "candidate_cancellation_recorded_events": 0,
+        "retry_storm_control_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -3914,6 +4163,9 @@ def build_denominator_projection(
             "BackupRestoreDrillContract": {},
             "IncidentEvidenceFreezeContract": {},
             "CircuitBreakerResumeContract": {},
+            "QueueDurabilityContract": {},
+            "CandidateCancellationContract": {},
+            "RetryStormControlContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -3950,6 +4202,9 @@ def build_denominator_projection(
             "backup_restore_drill_ok": False,
             "incident_evidence_freeze_ok": False,
             "circuit_breaker_resume_ok": False,
+            "queue_durability_ok": False,
+            "candidate_cancellation_ok": False,
+            "retry_storm_control_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -3985,6 +4240,9 @@ def build_denominator_projection(
     backup_restore_drills = []
     incident_evidence_freezes = []
     circuit_breaker_resumes = []
+    queue_durability_records = []
+    candidate_cancellations = []
+    retry_storm_controls = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -4086,6 +4344,24 @@ def build_denominator_projection(
             circuit_breaker_resume = _extract_circuit_breaker_resume(event, _payload_bags(event))
             if circuit_breaker_resume:
                 circuit_breaker_resumes.append(circuit_breaker_resume)
+            continue
+        if event.get("event_type") == QUEUE_DURABILITY_EVENT_TYPE:
+            projection["queue_durability_recorded_events"] += 1
+            queue_durability = _extract_queue_durability(event, _payload_bags(event))
+            if queue_durability:
+                queue_durability_records.append(queue_durability)
+            continue
+        if event.get("event_type") == CANDIDATE_CANCELLATION_EVENT_TYPE:
+            projection["candidate_cancellation_recorded_events"] += 1
+            candidate_cancellation = _extract_candidate_cancellation(event, _payload_bags(event))
+            if candidate_cancellation:
+                candidate_cancellations.append(candidate_cancellation)
+            continue
+        if event.get("event_type") == RETRY_STORM_CONTROL_EVENT_TYPE:
+            projection["retry_storm_control_recorded_events"] += 1
+            retry_storm_control = _extract_retry_storm_control(event, _payload_bags(event))
+            if retry_storm_control:
+                retry_storm_controls.append(retry_storm_control)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -4260,6 +4536,9 @@ def build_denominator_projection(
         backup_restore_drills=backup_restore_drills,
         incident_evidence_freezes=incident_evidence_freezes,
         circuit_breaker_resumes=circuit_breaker_resumes,
+        queue_durability_records=queue_durability_records,
+        candidate_cancellations=candidate_cancellations,
+        retry_storm_controls=retry_storm_controls,
     )
     if progress_callback:
         progress_callback(
@@ -4451,6 +4730,24 @@ def build_denominator_projection(
         and contract_evidence["CircuitBreakerResumeContract"]["valid_circuit_breaker_resume_count"] > 0
         and contract_evidence["CircuitBreakerResumeContract"]["malformed_count"] == 0
         and contract_evidence["CircuitBreakerResumeContract"]["circuit_breaker_resume_violation_count"] == 0
+    )
+    projection["health"]["queue_durability_ok"] = (
+        contract_evidence["QueueDurabilityContract"]["eligible_queue_durability_records"] > 0
+        and contract_evidence["QueueDurabilityContract"]["valid_queue_durability_count"] > 0
+        and contract_evidence["QueueDurabilityContract"]["malformed_count"] == 0
+        and contract_evidence["QueueDurabilityContract"]["queue_durability_violation_count"] == 0
+    )
+    projection["health"]["candidate_cancellation_ok"] = (
+        contract_evidence["CandidateCancellationContract"]["eligible_candidate_cancellation_records"] > 0
+        and contract_evidence["CandidateCancellationContract"]["valid_candidate_cancellation_count"] > 0
+        and contract_evidence["CandidateCancellationContract"]["malformed_count"] == 0
+        and contract_evidence["CandidateCancellationContract"]["candidate_cancellation_violation_count"] == 0
+    )
+    projection["health"]["retry_storm_control_ok"] = (
+        contract_evidence["RetryStormControlContract"]["eligible_retry_storm_control_records"] > 0
+        and contract_evidence["RetryStormControlContract"]["valid_retry_storm_control_count"] > 0
+        and contract_evidence["RetryStormControlContract"]["malformed_count"] == 0
+        and contract_evidence["RetryStormControlContract"]["retry_storm_control_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

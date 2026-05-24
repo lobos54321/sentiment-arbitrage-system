@@ -298,6 +298,52 @@ def append_circuit_breaker_resume_event(event_log_dir):
     )
 
 
+def append_queue_durability_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="queue_durability_recorded",
+        aggregate_id="queue_durability:entry-queue:task-unit-v1",
+        idempotency_key="queue_durability:entry-queue:task-unit-v1:persisted:acked",
+        payload={
+            "queue_id": "entry-queue",
+            "task_id": "task-unit-v1",
+            "durable_state": "persisted",
+            "ack_state": "acked",
+            "created_at": "2026-01-15T00:04:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
+def append_candidate_cancellation_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="candidate_cancellation_recorded",
+        aggregate_id="candidate_cancellation:candidate-unit-v1",
+        idempotency_key="candidate_cancellation:candidate-unit-v1:42",
+        payload={
+            "candidate_id": "candidate-unit-v1",
+            "cancel_reason": "risk_revalidated",
+            "cancel_event_seq": 42,
+            "cancelled_at": "2026-01-15T00:05:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
+def append_retry_storm_control_event(event_log_dir):
+    V27EventLog(event_log_dir).append_event(
+        event_type="retry_storm_control_recorded",
+        aggregate_id="retry_storm_control:provider_quote",
+        idempotency_key="retry_storm_control:provider_quote:capped_exponential_jitter",
+        payload={
+            "retry_family": "provider_quote",
+            "backoff_policy": "capped_exponential_jitter",
+            "max_concurrent_retries": 2,
+            "p0_reserved_capacity": 1,
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -776,6 +822,42 @@ def test_mode_readiness_consumes_incident_freeze_and_breaker_resume_for_normal_t
     assert resume["evidence"]["valid_circuit_breaker_resume_count"] == 1
     assert "IncidentEvidenceFreezeContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "CircuitBreakerResumeContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_queue_candidate_and_retry_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_queue_durability_event(event_log_dir)
+    append_candidate_cancellation_event(event_log_dir)
+    append_retry_storm_control_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    queue = matrix["contract_statuses"]["QueueDurabilityContract"]
+    cancellation = matrix["contract_statuses"]["CandidateCancellationContract"]
+    retry = matrix["contract_statuses"]["RetryStormControlContract"]
+    assert queue["status"] == "pass"
+    assert cancellation["status"] == "pass"
+    assert retry["status"] == "pass"
+    assert queue["evidence"]["valid_queue_durability_count"] == 1
+    assert cancellation["evidence"]["valid_candidate_cancellation_count"] == 1
+    assert retry["evidence"]["valid_retry_storm_control_count"] == 1
+    assert "QueueDurabilityContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "CandidateCancellationContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RetryStormControlContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

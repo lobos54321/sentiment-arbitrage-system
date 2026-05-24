@@ -411,6 +411,77 @@ def append_circuit_breaker_resume(
     )
 
 
+def append_queue_durability(
+    log,
+    *,
+    queue_id="entry-queue",
+    task_id="task-unit-v1",
+    durable_state="persisted",
+    ack_state="acked",
+    created_at="2026-01-15T00:04:00Z",
+):
+    payload = {
+        "queue_id": queue_id,
+        "task_id": task_id,
+        "durable_state": durable_state,
+        "ack_state": ack_state,
+        "created_at": created_at,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="queue_durability_recorded",
+        aggregate_id=f"queue_durability:{queue_id}:{task_id}",
+        idempotency_key=f"queue_durability:{queue_id}:{task_id}:{durable_state}:{ack_state}",
+        payload=payload,
+    )
+
+
+def append_candidate_cancellation(
+    log,
+    *,
+    candidate_id="candidate-unit-v1",
+    cancel_reason="risk_revalidated",
+    cancel_event_seq=42,
+    cancelled_at="2026-01-15T00:05:00Z",
+):
+    payload = {
+        "candidate_id": candidate_id,
+        "cancel_reason": cancel_reason,
+        "cancel_event_seq": cancel_event_seq,
+        "cancelled_at": cancelled_at,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="candidate_cancellation_recorded",
+        aggregate_id=f"candidate_cancellation:{candidate_id}",
+        idempotency_key=f"candidate_cancellation:{candidate_id}:{cancel_event_seq}",
+        payload=payload,
+    )
+
+
+def append_retry_storm_control(
+    log,
+    *,
+    retry_family="provider_quote",
+    backoff_policy="capped_exponential_jitter",
+    max_concurrent_retries=2,
+    p0_reserved_capacity=1,
+):
+    payload = {
+        "retry_family": retry_family,
+        "backoff_policy": backoff_policy,
+        "max_concurrent_retries": max_concurrent_retries,
+        "p0_reserved_capacity": p0_reserved_capacity,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="retry_storm_control_recorded",
+        aggregate_id=f"retry_storm_control:{retry_family}",
+        idempotency_key=f"retry_storm_control:{retry_family}:{backoff_policy}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -974,6 +1045,67 @@ def test_denominator_projection_rejects_bad_incident_freeze_and_unfrozen_resume(
     ]
     assert resume["circuit_breaker_resume_violations"][1]["violation_fields"] == [
         "evidence_freeze_id_not_frozen",
+    ]
+
+
+def test_denominator_projection_consumes_queue_candidate_and_retry_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_queue_durability(log)
+    append_candidate_cancellation(log)
+    append_retry_storm_control(log)
+
+    projection = build_denominator_projection(tmp_path)
+    queue = projection["contract_evidence"]["QueueDurabilityContract"]
+    cancellation = projection["contract_evidence"]["CandidateCancellationContract"]
+    retry = projection["contract_evidence"]["RetryStormControlContract"]
+
+    assert projection["queue_durability_recorded_events"] == 1
+    assert projection["candidate_cancellation_recorded_events"] == 1
+    assert projection["retry_storm_control_recorded_events"] == 1
+    assert projection["health"]["queue_durability_ok"] is True
+    assert projection["health"]["candidate_cancellation_ok"] is True
+    assert projection["health"]["retry_storm_control_ok"] is True
+    assert queue["valid_queue_durability_count"] == 1
+    assert queue["queue_durability_violation_count"] == 0
+    assert queue["queue_ids"] == ["entry-queue"]
+    assert cancellation["valid_candidate_cancellation_count"] == 1
+    assert cancellation["candidate_cancellation_violation_count"] == 0
+    assert cancellation["cancel_reasons"] == ["risk_revalidated"]
+    assert retry["valid_retry_storm_control_count"] == 1
+    assert retry["retry_storm_control_violation_count"] == 0
+    assert retry["backoff_policies"] == ["capped_exponential_jitter"]
+
+
+def test_denominator_projection_rejects_bad_queue_candidate_and_retry_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_queue_durability(log, durable_state="memory_only", ack_state="unknown", created_at="not-a-time")
+    append_candidate_cancellation(log, cancel_event_seq=-1, cancelled_at="not-a-time")
+    append_retry_storm_control(log, backoff_policy="immediate", max_concurrent_retries=-1, p0_reserved_capacity=-1)
+
+    projection = build_denominator_projection(tmp_path)
+    queue = projection["contract_evidence"]["QueueDurabilityContract"]
+    cancellation = projection["contract_evidence"]["CandidateCancellationContract"]
+    retry = projection["contract_evidence"]["RetryStormControlContract"]
+
+    assert projection["health"]["queue_durability_ok"] is False
+    assert projection["health"]["candidate_cancellation_ok"] is False
+    assert projection["health"]["retry_storm_control_ok"] is False
+    assert queue["queue_durability_violation_count"] == 1
+    assert queue["queue_durability_violations"][0]["violation_fields"] == [
+        "ack_state_invalid",
+        "created_at_parseable",
+        "durable_state_not_durable",
+    ]
+    assert cancellation["candidate_cancellation_violation_count"] == 1
+    assert cancellation["candidate_cancellation_violations"][0]["violation_fields"] == [
+        "cancel_event_seq_nonnegative",
+        "cancelled_at_parseable",
+    ]
+    assert retry["retry_storm_control_violation_count"] == 1
+    assert retry["retry_storm_control_violations"][0]["violation_fields"] == [
+        "backoff_policy_not_bounded",
+        "max_concurrent_retries_nonnegative",
+        "p0_reserved_capacity_nonnegative",
     ]
 
 

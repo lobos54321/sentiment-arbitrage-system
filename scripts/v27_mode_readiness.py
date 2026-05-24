@@ -432,6 +432,27 @@ def build_contract_statuses(
         "circuit_breaker_resume_missing_malformed_or_invalid",
         circuit_breaker_resume_evidence,
     )
+    queue_durability_evidence = contract_evidence.get("QueueDurabilityContract") or {}
+    statuses["QueueDurabilityContract"] = _status(
+        "QueueDurabilityContract",
+        "pass" if projection_built and projection_health.get("queue_durability_ok") else "missing_evidence",
+        "queue_durability_missing_malformed_or_invalid",
+        queue_durability_evidence,
+    )
+    candidate_cancellation_evidence = contract_evidence.get("CandidateCancellationContract") or {}
+    statuses["CandidateCancellationContract"] = _status(
+        "CandidateCancellationContract",
+        "pass" if projection_built and projection_health.get("candidate_cancellation_ok") else "missing_evidence",
+        "candidate_cancellation_missing_malformed_or_invalid",
+        candidate_cancellation_evidence,
+    )
+    retry_storm_evidence = contract_evidence.get("RetryStormControlContract") or {}
+    statuses["RetryStormControlContract"] = _status(
+        "RetryStormControlContract",
+        "pass" if projection_built and projection_health.get("retry_storm_control_ok") else "missing_evidence",
+        "retry_storm_control_missing_malformed_or_invalid",
+        retry_storm_evidence,
+    )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",
@@ -559,9 +580,6 @@ def build_contract_statuses(
         "RawProviderEvidenceContract",
         "LabelFinalizationContract",
         "OutcomeWindowCloseContract",
-        "QueueDurabilityContract",
-        "CandidateCancellationContract",
-        "RetryStormControlContract",
         "ProviderCoverageMapContract",
         "TrainingServingSkewContract",
         "EvidenceEligibilityMatrix",
