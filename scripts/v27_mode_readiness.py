@@ -16,6 +16,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from v27_event_log import V27EventLog, V27EventLogError  # noqa: E402
 from v27_basic_contract_readiness import build_basic_contract_readiness  # noqa: E402
+from v27_mode_gate_scope import build_mode_gate_scope_audit  # noqa: E402
 from v27_projection_consumer_evidence import CONSUMER_HEALTH_FILE, read_projection_consumer_health  # noqa: E402
 from v27_read_model_freshness import validate_snapshot_file  # noqa: E402
 from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_PATH, validate_all  # noqa: E402
@@ -697,10 +698,19 @@ def build_mode_readiness_matrix(
         if not blocking:
             highest_allowed = mode
 
+    gate_scope = build_mode_gate_scope_audit(catalog, MODE_REQUIREMENTS, MODE_ORDER)
     health = {
         "status": "mode_readiness_evaluated",
         "dashboard_safe": bool(snapshot_report.get("health", {}).get("dashboard_safe")),
         "normal_tiny_ready": modes["normal_tiny"]["status"] == "allowed",
+        "current_gate_normal_tiny_ready": modes["normal_tiny"]["status"] == "allowed",
+        "final_spec_normal_tiny_ready": (
+            modes["normal_tiny"]["status"] == "allowed"
+            and bool(gate_scope.get("health", {}).get("final_normal_tiny_blocking_scope_complete"))
+        ),
+        "final_spec_normal_tiny_missing_count": gate_scope.get("health", {}).get(
+            "final_normal_tiny_blocking_missing_count"
+        ),
         "ultra_tiny_ready": modes["ultra_tiny"]["status"] == "allowed",
         "shadow_ready": modes["shadow"]["status"] == "allowed",
         "observe_only_ready": modes["observe_only"]["status"] == "allowed",
@@ -731,6 +741,7 @@ def build_mode_readiness_matrix(
             component_ready_key="projection_consumer_ready",
             component_ready=projection_consumer_health.get("health", {}).get("shadow_consumer_ready"),
         ),
+        "gate_scope": gate_scope,
         "contract_statuses": contract_statuses,
         "modes": modes,
         "highest_allowed_mode": highest_allowed,
