@@ -1,0 +1,82 @@
+{
+  "schema_version": "v2.7.0.static_policy_enforcement.v1",
+  "scope": "critical_dashboard_and_v27_governance_static_policy",
+  "failure_action": "ci_fail",
+  "checks": [
+    {
+      "static_check_id": "dashboard_shell_exec_forbidden",
+      "forbidden_pattern": "\\bexec\\s*\\(",
+      "scan_target": [
+        "src/web/dashboard-server.js"
+      ],
+      "result": "pass",
+      "rationale": "Dashboard routes must not invoke shell-interpreted commands; use execFile with argv arrays for fixed tooling."
+    },
+    {
+      "static_check_id": "dashboard_unbounded_log_line_parse_forbidden",
+      "forbidden_pattern": "parseInt\\s*\\(\\s*url\\.searchParams\\?\\.get\\(['\"]lines['\"]\\)",
+      "scan_target": [
+        "src/web/dashboard-server.js"
+      ],
+      "result": "pass",
+      "rationale": "Log tail endpoints must clamp user supplied line counts through boundedIntParam."
+    },
+    {
+      "static_check_id": "critical_js_eval_forbidden",
+      "forbidden_pattern": "\\beval\\s*\\(",
+      "scan_target": [
+        "src/web/dashboard-server.js",
+        "src/index.js"
+      ],
+      "result": "pass",
+      "rationale": "Critical dashboard and runtime entry points must not evaluate dynamic JavaScript."
+    },
+    {
+      "static_check_id": "critical_js_new_function_forbidden",
+      "forbidden_pattern": "\\bnew\\s+Function\\s*\\(",
+      "scan_target": [
+        "src/web/dashboard-server.js",
+        "src/index.js"
+      ],
+      "result": "pass",
+      "rationale": "Critical dashboard and runtime entry points must not construct dynamic JavaScript functions."
+    },
+    {
+      "static_check_id": "dashboard_secret_interpolation_forbidden",
+      "forbidden_pattern": "\\$\\{\\s*DASHBOARD_TOKEN\\s*\\}|DASHBOARD_TOKEN\\s*\\+|\\+\\s*DASHBOARD_TOKEN",
+      "scan_target": [
+        "src/web/dashboard-server.js"
+      ],
+      "result": "pass",
+      "rationale": "Dashboard auth secrets may be checked but must never be reflected into responses or logs."
+    },
+    {
+      "static_check_id": "paper_mode_live_switch_default_true_forbidden",
+      "forbidden_pattern": "(PREMIUM_LIVE_EXECUTION_ENABLED|LIVE_SWAP_ENDPOINT_ENABLED|NETWORK_TRANSACTION_SIGNING_ENABLED|REAL_ORDER_ROUTER_ENABLED)[^\\n]*\\|\\|\\s*['\"]true['\"]",
+      "scan_target": [
+        "src/web/dashboard-server.js",
+        "src/index.js"
+      ],
+      "result": "pass",
+      "rationale": "Paper mode safety switches must never default live execution paths to true."
+    },
+    {
+      "static_check_id": "v27_python_shell_true_forbidden",
+      "forbidden_pattern": "shell\\s*=\\s*True",
+      "scan_target": [
+        "scripts/v27*.py"
+      ],
+      "result": "pass",
+      "rationale": "v27 governance and evidence helpers must not invoke subprocesses through a shell."
+    },
+    {
+      "static_check_id": "v27_python_dynamic_eval_forbidden",
+      "forbidden_pattern": "\\b(eval|exec)\\s*\\(",
+      "scan_target": [
+        "scripts/v27*.py"
+      ],
+      "result": "pass",
+      "rationale": "v27 governance and evidence helpers must not evaluate dynamic Python code."
+    }
+  ]
+}

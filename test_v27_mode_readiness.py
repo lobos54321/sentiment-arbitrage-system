@@ -631,6 +631,7 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["DirectDatabaseMutationBan"]["status"] == "pass"
     assert matrix["contract_statuses"]["BackgroundJobRegistryContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["EntryPointInventoryContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["StaticPolicyEnforcementContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["InputSanitizationContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["SafeDefaultContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ProjectStopLossContract"]["status"] == "pass"

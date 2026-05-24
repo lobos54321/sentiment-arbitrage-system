@@ -10,6 +10,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_direct_database_mutation_ban,
     verify_entry_point_inventory,
     verify_evidence_eligibility_matrix,
+    verify_static_policy_enforcement,
     verify_access_control_policy,
     verify_input_sanitization,
     verify_paper_mode_safety,
@@ -45,6 +46,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "DirectDatabaseMutationBan",
         "BackgroundJobRegistryContract",
         "EntryPointInventoryContract",
+        "StaticPolicyEnforcementContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -621,6 +623,53 @@ def test_entry_point_inventory_blocks_missing_anchor(tmp_path):
             "file": str(source_path),
             "anchor": "definitely_missing_anchor",
             "reason": "anchor_not_found",
+        }
+    ]
+
+
+def test_static_policy_enforcement_passes_critical_static_scans():
+    report = verify_static_policy_enforcement()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.static_policy_enforcement.v1"
+    assert report["evidence"]["static_check_count"] == 8
+    assert report["evidence"]["forbidden_match_count"] == 0
+    assert report["evidence"]["malformed_checks"] == []
+    assert report["evidence"]["scan_errors"] == []
+
+
+def test_static_policy_enforcement_blocks_forbidden_pattern(tmp_path):
+    source_path = tmp_path / "unsafe.js"
+    source_path.write_text("export const value = eval('1 + 1');\n", encoding="utf-8")
+    policy_path = tmp_path / "static-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.static_policy_enforcement.v1",
+                "checks": [
+                    {
+                        "static_check_id": "unit_eval_forbidden",
+                        "forbidden_pattern": "\\beval\\s*\\(",
+                        "scan_target": str(source_path),
+                        "result": "pass",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_static_policy_enforcement(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "static_policy_missing_malformed_or_violated"
+    assert report["evidence"]["forbidden_match_count"] == 1
+    assert report["evidence"]["forbidden_matches"] == [
+        {
+            "static_check_id": "unit_eval_forbidden",
+            "file": str(source_path),
+            "line": 1,
+            "match": "export const value = eval('1 + 1');",
         }
     ]
 

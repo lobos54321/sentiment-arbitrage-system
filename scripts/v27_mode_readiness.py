@@ -44,6 +44,7 @@ MODE_REQUIREMENTS = {
         "DirectDatabaseMutationBan",
         "BackgroundJobRegistryContract",
         "EntryPointInventoryContract",
+        "StaticPolicyEnforcementContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

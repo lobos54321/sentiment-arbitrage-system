@@ -33,6 +33,7 @@ DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry
 DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
+DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -82,6 +83,12 @@ ENTRY_POINT_REQUIRED_FIELDS = (
     "arbiter_required",
 )
 ENTRY_POINT_ALLOWED_TYPES = {"route_group", "server", "script", "cron", "deploy"}
+STATIC_POLICY_REQUIRED_FIELDS = (
+    "static_check_id",
+    "forbidden_pattern",
+    "scan_target",
+    "result",
+)
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
     "shadow",
@@ -1147,6 +1154,135 @@ def verify_entry_point_inventory(
     )
 
 
+def _static_policy_scan_files(scan_target):
+    raw_targets = scan_target if isinstance(scan_target, list) else [scan_target]
+    files = []
+    for raw_target in raw_targets:
+        if not raw_target:
+            continue
+        raw_text = str(raw_target)
+        if any(char in raw_text for char in "*?[]") and not Path(raw_text).is_absolute():
+            files.extend(sorted(path for path in PROJECT_ROOT.glob(raw_text) if path.is_file()))
+            continue
+        files.append(_resolve_project_file(raw_text))
+    unique = []
+    seen = set()
+    for path in files:
+        if not path:
+            continue
+        resolved = str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return unique
+
+
+def _static_policy_line(text, offset):
+    line_no = text.count("\n", 0, offset) + 1
+    line_start = text.rfind("\n", 0, offset) + 1
+    line_end = text.find("\n", offset)
+    if line_end == -1:
+        line_end = len(text)
+    return line_no, text[line_start:line_end].strip()[:180]
+
+
+def verify_static_policy_enforcement(policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("StaticPolicyEnforcementContract", False, "static_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("StaticPolicyEnforcementContract", False, "static_policy_not_object", {"policy_path": str(policy_path)})
+
+    checks = policy.get("checks") if isinstance(policy.get("checks"), list) else []
+    malformed_checks = []
+    duplicate_static_check_ids = []
+    scan_errors = []
+    forbidden_matches = []
+    seen_ids = set()
+    scan_target_files = set()
+
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            malformed_checks.append({"index": index, "static_check_id": None, "missing_fields": list(STATIC_POLICY_REQUIRED_FIELDS), "violations": ["check_not_object"]})
+            continue
+        check_id = str(check.get("static_check_id") or "")
+        missing = _missing_required_fields(check, STATIC_POLICY_REQUIRED_FIELDS)
+        violations = []
+        if check_id in seen_ids:
+            duplicate_static_check_ids.append(check_id)
+        if check_id:
+            seen_ids.add(check_id)
+        if check.get("result") != "pass":
+            violations.append("result_must_be_pass")
+        try:
+            pattern = re.compile(str(check.get("forbidden_pattern") or ""))
+        except re.error as exc:
+            pattern = None
+            violations.append("forbidden_pattern_invalid")
+            scan_errors.append({"static_check_id": check_id, "reason": "forbidden_pattern_invalid", "error": str(exc)})
+
+        target_files = _static_policy_scan_files(check.get("scan_target"))
+        if not target_files:
+            scan_errors.append({"static_check_id": check_id, "scan_target": check.get("scan_target"), "reason": "scan_target_empty"})
+        for path in target_files:
+            scan_target_files.add(str(path))
+            if not path.exists():
+                scan_errors.append({"static_check_id": check_id, "file": str(path), "reason": "scan_target_missing"})
+                continue
+            if not path.is_file():
+                scan_errors.append({"static_check_id": check_id, "file": str(path), "reason": "scan_target_not_file"})
+                continue
+            if pattern is None:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                scan_errors.append({"static_check_id": check_id, "file": str(path), "reason": "scan_target_decode_failed", "error": str(exc)})
+                continue
+            for match in pattern.finditer(text):
+                line_no, line_text = _static_policy_line(text, match.start())
+                forbidden_matches.append(
+                    {
+                        "static_check_id": check_id,
+                        "file": str(path),
+                        "line": line_no,
+                        "match": line_text,
+                    }
+                )
+
+        if missing or violations:
+            malformed_checks.append({"index": index, "static_check_id": check_id or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.static_policy_enforcement.v1"
+        and bool(checks)
+        and not malformed_checks
+        and not duplicate_static_check_ids
+        and not scan_errors
+        and not forbidden_matches
+    )
+    return _contract(
+        "StaticPolicyEnforcementContract",
+        passed,
+        "static_policy_missing_malformed_or_violated",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "static_check_count": len(checks),
+            "scan_target_file_count": len(scan_target_files),
+            "duplicate_static_check_ids": sorted(str(item) for item in duplicate_static_check_ids),
+            "malformed_checks": malformed_checks,
+            "scan_errors": scan_errors,
+            "forbidden_match_count": len(forbidden_matches),
+            "forbidden_matches": forbidden_matches,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -1558,6 +1694,7 @@ def build_basic_contract_readiness(
     direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
+    static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
     env=None,
 ):
     contracts = {
@@ -1590,6 +1727,7 @@ def build_basic_contract_readiness(
                 inventory_path=entry_point_inventory_path,
                 access_control_policy_path=access_control_policy_path,
             ),
+            verify_static_policy_enforcement(policy_path=static_policy_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -1621,6 +1759,7 @@ def main():
     parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
+    parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -1638,6 +1777,7 @@ def main():
         direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
+        static_policy_path=Path(args.static_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

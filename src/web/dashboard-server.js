@@ -12,7 +12,7 @@ import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
-import { exec, execFile, spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import {
   applyFinalBlocker,
   chooseFinalBlocker,
@@ -9103,10 +9103,10 @@ const server = http.createServer(async (req, res) => {
     // Paper trader Python 进程日志
     if (!checkAuth(req, url, res)) return;
     const paperTraderLogPath = process.env.PAPER_TRADER_LOG || '/app/data/paper-trader.log';
-    const tailLines = parseInt(url.searchParams?.get('lines') || '500');
+    const tailLines = boundedIntParam(url, 'lines', 500, 1, 5000);
     if (fs.existsSync(paperTraderLogPath)) {
       try {
-        exec(`tail -n ${tailLines} ${paperTraderLogPath}`, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+        execFile('tail', ['-n', String(tailLines), paperTraderLogPath], { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
           if (error) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: error.message }));
