@@ -211,7 +211,16 @@ def append_quote_intent_binding(log, *, token_ca, paper_trade_id=1, pool="pool-a
     )
 
 
-def append_raw_provider_evidence(log, *, token_ca, paper_trade_id=1, pool="pool-a", trusted=True, missing_version=False):
+def append_raw_provider_evidence(
+    log,
+    *,
+    token_ca,
+    paper_trade_id=1,
+    pool="pool-a",
+    trusted=True,
+    missing_version=False,
+    payload_overrides=None,
+):
     request_metadata = {
         "paper_trade_id": paper_trade_id,
         "side": "entry",
@@ -260,6 +269,8 @@ def append_raw_provider_evidence(log, *, token_ca, paper_trade_id=1, pool="pool-
         "provider_evidence_trusted": trusted,
         "decision_available_at": "2026-01-15T00:00:02Z",
     }
+    if payload_overrides:
+        payload.update(payload_overrides)
     return log.append_event(
         event_type="raw_provider_evidence_recorded",
         aggregate_id=f"raw_provider_evidence:solana:{token_ca}:{pool}:0:{paper_trade_id}:entry",
@@ -887,7 +898,11 @@ def test_denominator_projection_consumes_raw_provider_evidence_contract(tmp_path
     assert evidence["providers"] == ["jupiter_ultra"]
     assert evidence["endpoints"] == ["/ultra/v1/order"]
     assert evidence["provider_evidence_proof_levels"] == ["provider_request_id_with_raw_response_hash"]
-    assert projection["records"][0]["raw_provider_evidence_contract"]["provider_evidence_valid"] is True
+    assert evidence["response_material_types"] == ["execution._rawOrder"]
+    contract = projection["records"][0]["raw_provider_evidence_contract"]
+    assert contract["provider_evidence_valid"] is True
+    assert len(contract["raw_response_hash"]) == 64
+    assert contract["hash_algorithm"] == "sha256(canonical_json)"
 
 
 def test_denominator_projection_rejects_untrusted_raw_provider_evidence(tmp_path):
@@ -908,6 +923,52 @@ def test_denominator_projection_rejects_untrusted_raw_provider_evidence(tmp_path
         "provider_evidence_trusted",
         "raw_response_available",
     ]
+
+
+def test_denominator_projection_rejects_legacy_response_material_even_if_flags_claim_trusted(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenProviderForged", captured=True, **FULL_D3B_FLAGS)
+    append_raw_provider_evidence(
+        log,
+        token_ca="TokenProviderForged",
+        payload_overrides={
+            "response_material_type": "execution_json_projection",
+            "provider_evidence_proof_level": "legacy_execution_projection_without_raw_provider_response",
+            "raw_response_available": True,
+            "provider_evidence_trusted": True,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    evidence = projection["contract_evidence"]["RawProviderEvidenceContract"]
+    violations = evidence["provider_evidence_violations"][0]["violation_fields"]
+
+    assert projection["health"]["raw_provider_evidence_ok"] is False
+    assert evidence["trusted_raw_provider_evidence_count"] == 0
+    assert "response_material_type" in violations
+    assert "provider_evidence_proof_level" in violations
+    assert projection["records"][0]["raw_provider_evidence_contract"]["provider_evidence_valid"] is False
+
+
+def test_denominator_projection_requires_raw_response_hash_for_trusted_provider_evidence(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id=1, token_ca="TokenProviderNoRawHash", captured=True, **FULL_D3B_FLAGS)
+    append_raw_provider_evidence(
+        log,
+        token_ca="TokenProviderNoRawHash",
+        payload_overrides={
+            "raw_response_available": True,
+            "provider_evidence_trusted": True,
+            "raw_response_hash": None,
+        },
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+    evidence = projection["contract_evidence"]["RawProviderEvidenceContract"]
+
+    assert projection["health"]["raw_provider_evidence_ok"] is False
+    assert evidence["trusted_raw_provider_evidence_count"] == 0
+    assert evidence["provider_evidence_violations"][0]["violation_fields"] == ["raw_response_hash"]
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):

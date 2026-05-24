@@ -165,6 +165,7 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   fs.writeFileSync(join(dir, 'v27-earliest-actionable-mirror.log'), 'earliest actionable failed');
   fs.writeFileSync(join(dir, 'v27-idempotency-contract-mirror.log'), 'idempotency failed');
   fs.writeFileSync(join(dir, 'v27-raw-provider-evidence-mirror.log'), 'raw provider failed');
+  fs.writeFileSync(join(dir, 'v27-raw-provider-probe-evidence.log'), 'raw provider probe failed');
   fs.writeFileSync(join(dir, 'v27-randomness-control-mirror.log'), 'randomness failed');
   fs.writeFileSync(join(dir, 'v27-normal-tiny-ops-evidence.log'), 'ops evidence failed');
   fs.writeFileSync(join(dir, 'v27-execution-control-mirror.log'), 'execution control failed');
@@ -189,6 +190,7 @@ test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-realtime-clean-mirror.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-quote-intent-binding-mirror.log').exists, false);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-raw-provider-evidence-mirror.log').exists, true);
+  assert.equal(snapshot.log_files.find((row) => row.label === 'v27-raw-provider-probe-evidence.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-randomness-control-mirror.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-normal-tiny-ops-evidence.log').exists, true);
   assert.equal(snapshot.log_files.find((row) => row.label === 'v27-idempotency-contract-mirror.log').exists, true);
@@ -208,6 +210,7 @@ test('dashboard log resolver exposes v27 mirror sidecar logs', () => {
     V27_REALTIME_CLEAN_MIRROR_LOG: '/tmp/realtime-clean.log',
     V27_QUOTE_INTENT_BINDING_MIRROR_LOG: '/tmp/quote-intent-binding.log',
     V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG: '/tmp/raw-provider-evidence.log',
+    V27_RAW_PROVIDER_PROBE_EVIDENCE_LOG: '/tmp/raw-provider-probe-evidence.log',
     V27_RANDOMNESS_CONTROL_MIRROR_LOG: '/tmp/randomness-control.log',
     V27_NORMAL_TINY_OPS_EVIDENCE_LOG: '/tmp/normal-tiny-ops-evidence.log',
     V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG: '/tmp/idempotency-contract.log',
@@ -223,6 +226,7 @@ test('dashboard log resolver exposes v27 mirror sidecar logs', () => {
   assert.equal(resolveDashboardLogPath('/api/logs/v27-realtime-clean-mirror', env), '/tmp/realtime-clean.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-quote-intent-binding-mirror', env), '/tmp/quote-intent-binding.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-raw-provider-evidence-mirror', env), '/tmp/raw-provider-evidence.log');
+  assert.equal(resolveDashboardLogPath('/api/logs/v27-raw-provider-probe-evidence', env), '/tmp/raw-provider-probe-evidence.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-randomness-control-mirror', env), '/tmp/randomness-control.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-normal-tiny-ops-evidence', env), '/tmp/normal-tiny-ops-evidence.log');
   assert.equal(resolveDashboardLogPath('/api/logs/v27-idempotency-contract-mirror', env), '/tmp/idempotency-contract.log');

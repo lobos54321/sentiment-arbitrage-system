@@ -592,6 +592,7 @@ export function resolveDashboardLogPath(pathname, env = process.env) {
     '/api/logs/v27-realtime-clean-mirror': env.V27_REALTIME_CLEAN_MIRROR_LOG || '/app/data/v27-realtime-clean-mirror.log',
     '/api/logs/v27-quote-intent-binding-mirror': env.V27_QUOTE_INTENT_BINDING_MIRROR_LOG || '/app/data/v27-quote-intent-binding-mirror.log',
     '/api/logs/v27-raw-provider-evidence-mirror': env.V27_RAW_PROVIDER_EVIDENCE_MIRROR_LOG || '/app/data/v27-raw-provider-evidence-mirror.log',
+    '/api/logs/v27-raw-provider-probe-evidence': env.V27_RAW_PROVIDER_PROBE_EVIDENCE_LOG || '/app/data/v27-raw-provider-probe-evidence.log',
     '/api/logs/v27-randomness-control-mirror': env.V27_RANDOMNESS_CONTROL_MIRROR_LOG || '/app/data/v27-randomness-control-mirror.log',
     '/api/logs/v27-normal-tiny-ops-evidence': env.V27_NORMAL_TINY_OPS_EVIDENCE_LOG || '/app/data/v27-normal-tiny-ops-evidence.log',
     '/api/logs/v27-idempotency-contract-mirror': env.V27_IDEMPOTENCY_CONTRACT_MIRROR_LOG || '/app/data/v27-idempotency-contract-mirror.log',
@@ -676,6 +677,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     'v27-realtime-clean-mirror.log',
     'v27-quote-intent-binding-mirror.log',
     'v27-raw-provider-evidence-mirror.log',
+    'v27-raw-provider-probe-evidence.log',
     'v27-randomness-control-mirror.log',
     'v27-normal-tiny-ops-evidence.log',
     'v27-idempotency-contract-mirror.log',
@@ -1168,6 +1170,12 @@ let v27RawProviderEvidenceManualMirror = {
   pid: null,
 };
 
+let v27RawProviderProbeEvidenceManualRecord = {
+  running: false,
+  started_at: null,
+  pid: null,
+};
+
 let v27RandomnessControlManualMirror = {
   running: false,
   started_at: null,
@@ -1275,6 +1283,100 @@ function triggerV27RawProviderEvidenceMirror(options = {}) {
     accepted: true,
     status: 'started',
     ...v27RawProviderEvidenceManualMirror,
+  };
+}
+
+function triggerV27RawProviderProbeEvidence(options = {}) {
+  if (v27RawProviderProbeEvidenceManualRecord.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      ...v27RawProviderProbeEvidenceManualRecord,
+    };
+  }
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
+  const evidenceVersion = options.evidenceVersion || process.env.V27_RAW_PROVIDER_EVIDENCE_VERSION || 'legacy_paper_raw_provider_evidence_v0.1';
+  const provider = options.provider || process.env.V27_RAW_PROVIDER_DEFAULT_PROVIDER || 'jupiter_ultra';
+  const endpoint = options.endpoint || process.env.V27_RAW_PROVIDER_DEFAULT_ENDPOINT || '/ultra/v1/order';
+  const timeoutMs = Math.max(30000, Math.min(options.timeoutMs || Number(process.env.V27_RAW_PROVIDER_PROBE_EVIDENCE_TIMEOUT_MS || 600000) || 600000, 1800000));
+  const logPathRaw = process.env.V27_RAW_PROVIDER_PROBE_EVIDENCE_LOG || join(projectRoot, 'data', 'v27-raw-provider-probe-evidence.log');
+  const logPath = isAbsolute(logPathRaw) ? logPathRaw : join(projectRoot, logPathRaw);
+  const args = [
+    'scripts/v27_record_raw_provider_probe_evidence.py',
+    '--event-log-dir',
+    eventLogDir,
+    '--evidence-version',
+    evidenceVersion,
+    '--provider',
+    provider,
+    '--endpoint',
+    endpoint,
+  ];
+  if (options.runId) args.push('--run-id', String(options.runId));
+  if (options.endpointBase) args.push('--endpoint-base', String(options.endpointBase));
+  if (options.inputMint) args.push('--input-mint', String(options.inputMint));
+  if (options.outputMint) args.push('--output-mint', String(options.outputMint));
+  if (options.outputSymbol) args.push('--output-symbol', String(options.outputSymbol));
+  if (options.amountRaw) args.push('--amount-raw', String(options.amountRaw));
+  if (options.slippageBps !== undefined && options.slippageBps !== null) args.push('--slippage-bps', String(options.slippageBps));
+  if (options.timeoutSec !== undefined && options.timeoutSec !== null) args.push('--timeout-sec', String(options.timeoutSec));
+  if (options.dryRun) args.push('--dry-run');
+  if (options.strict) args.push('--strict');
+  const env = {
+    ...process.env,
+    V27_EVENT_LOG_DIR: eventLogDir,
+    V27_RAW_PROVIDER_EVIDENCE_VERSION: evidenceVersion,
+    V27_RAW_PROVIDER_DEFAULT_PROVIDER: provider,
+    V27_RAW_PROVIDER_DEFAULT_ENDPOINT: endpoint,
+  };
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const startedAt = new Date().toISOString();
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  logStream.write(`[dashboard-trigger] ${startedAt} starting v27-raw-provider-probe-evidence-once: python3 ${args.join(' ')}\n`);
+  v27RawProviderProbeEvidenceManualRecord = {
+    running: true,
+    started_at: startedAt,
+    pid: null,
+  };
+  const child = execFile('python3', args, {
+    cwd: projectRoot,
+    env,
+    timeout: timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 50 * 1024 * 1024,
+  }, (error, stdout, stderr) => {
+    const finishedAt = new Date().toISOString();
+    if (stdout) logStream.write(String(stdout));
+    if (stderr) logStream.write(String(stderr));
+    if (error) {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-probe-evidence-once failed code=${error.code || ''} signal=${error.signal || ''} error=${error.message}\n`);
+    } else {
+      logStream.write(`[dashboard-trigger] ${finishedAt} v27-raw-provider-probe-evidence-once completed\n`);
+    }
+    v27RawProviderProbeEvidenceManualRecord = {
+      running: false,
+      started_at: startedAt,
+      pid: child?.pid || null,
+      completed_at: finishedAt,
+      exit_code: error ? error.code ?? null : 0,
+      exit_signal: error ? error.signal ?? null : null,
+      error: error ? error.message : null,
+      log_path: logPath,
+    };
+    logStream.end();
+  });
+  v27RawProviderProbeEvidenceManualRecord = {
+    ...v27RawProviderProbeEvidenceManualRecord,
+    pid: child.pid,
+    log_path: logPath,
+    timeout_ms: timeoutMs,
+    dry_run: Boolean(options.dryRun),
+    strict: Boolean(options.strict),
+  };
+  return {
+    accepted: true,
+    status: 'started',
+    ...v27RawProviderProbeEvidenceManualRecord,
   };
 }
 
@@ -8140,6 +8242,32 @@ const server = http.createServer(async (req, res) => {
       materialized: false,
       refresh_schema_version: 'v2.7.0.manual_raw_provider_evidence_mirror.v1',
       ...mirror,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-raw-provider-probe-evidence') {
+    if (!checkAuth(req, url, res)) return;
+    const record = triggerV27RawProviderProbeEvidence({
+      timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
+      runId: url.searchParams.get('run_id') || undefined,
+      endpointBase: url.searchParams.get('endpoint_base') || undefined,
+      inputMint: url.searchParams.get('input_mint') || undefined,
+      outputMint: url.searchParams.get('output_mint') || undefined,
+      outputSymbol: url.searchParams.get('output_symbol') || undefined,
+      amountRaw: url.searchParams.get('amount_raw') || undefined,
+      slippageBps: url.searchParams.has('slippage_bps') ? boundedIntParam(url, 'slippage_bps', 0, 0, 10000) : undefined,
+      timeoutSec: url.searchParams.has('probe_timeout_sec') ? boundedIntParam(url, 'probe_timeout_sec', 10, 1, 60) : undefined,
+      dryRun: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+      strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      evidenceVersion: url.searchParams.get('evidence_version') || undefined,
+      provider: url.searchParams.get('provider') || undefined,
+      endpoint: url.searchParams.get('endpoint') || undefined,
+    });
+    res.writeHead(record.accepted ? 202 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      generated_at: new Date().toISOString(),
+      materialized: false,
+      refresh_schema_version: 'v2.7.0.manual_raw_provider_probe_evidence.v1',
+      ...record,
     }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-randomness-control-mirror') {

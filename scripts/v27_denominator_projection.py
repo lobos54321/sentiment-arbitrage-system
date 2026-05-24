@@ -36,6 +36,19 @@ EARLIEST_ACTIONABLE_EVENT_TYPE = "earliest_actionable_time_recorded"
 REALTIME_CLEAN_EVENT_TYPE = "realtime_clean_detector_recorded"
 QUOTE_INTENT_BINDING_EVENT_TYPE = "quote_intent_binding_recorded"
 RAW_PROVIDER_EVIDENCE_EVENT_TYPE = "raw_provider_evidence_recorded"
+RAW_PROVIDER_TRUSTED_PROOF_LEVEL = "provider_request_id_with_raw_response_hash"
+RAW_PROVIDER_RESPONSE_MATERIAL_TYPES = {
+    "execution._rawOrder",
+    "execution.rawResponse",
+    "execution.raw_response",
+    "execution.providerResponse",
+    "execution.provider_response",
+    "audit.rawResponse",
+    "audit.raw_response",
+    "audit.providerResponse",
+    "audit.provider_response",
+    "provider_probe.rawResponse",
+}
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
@@ -929,6 +942,8 @@ def _extract_raw_provider_evidence_contract(event, bags):
         violation_fields.append("request_metadata_hash_sha256")
     if values.get("raw_response_hash") and not _valid_sha256_hex(values.get("raw_response_hash")):
         violation_fields.append("raw_response_hash_sha256")
+    if values.get("raw_response_available") is True and not _valid_sha256_hex(values.get("raw_response_hash")):
+        violation_fields.append("raw_response_hash")
     if values.get("hash_algorithm") != "sha256(canonical_json)":
         violation_fields.append("hash_algorithm")
     if values.get("request_metadata_available") is not True:
@@ -937,6 +952,11 @@ def _extract_raw_provider_evidence_contract(event, bags):
         violation_fields.append("raw_response_available")
     if values.get("provider_evidence_trusted") is not True:
         violation_fields.append("provider_evidence_trusted")
+    if values.get("raw_response_available") is True or values.get("provider_evidence_trusted") is True:
+        if values.get("response_material_type") not in RAW_PROVIDER_RESPONSE_MATERIAL_TYPES:
+            violation_fields.append("response_material_type")
+        if values.get("provider_evidence_proof_level") != RAW_PROVIDER_TRUSTED_PROOF_LEVEL:
+            violation_fields.append("provider_evidence_proof_level")
     if values.get("provider_request_id") is None:
         violation_fields.append("provider_request_id")
     trusted = bool(not missing_fields and not violation_fields)
