@@ -616,6 +616,7 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["matrix_schema_version"] == "v2.7.0.mode_readiness.v1"
     assert matrix["event_log"]["verify"]["event_count"] == 2
     assert matrix["contract_statuses"]["CanonicalSpecIntegrityContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["NumericPrecisionContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ModeReadinessMatrix"]["status"] == "pass"
     assert matrix["contract_statuses"]["ModeReadinessMatrix"]["evidence"]["row_violations"] == []
     assert matrix["contract_statuses"]["EventSemanticsContract"]["status"] == "pass"
@@ -659,6 +660,7 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["ReferencePriceContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["MetricsWindowContract"]["status"] == "pass"
     assert matrix["modes"]["observe_only"]["status"] == "allowed"
+    assert "NumericPrecisionContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert matrix["modes"]["shadow"]["status"] == "allowed"
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []

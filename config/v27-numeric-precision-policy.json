@@ -1,0 +1,134 @@
+{
+  "schema_version": "v2.7.0.numeric_precision_policy.v1",
+  "scope": "v27_all_modes_numeric_evidence",
+  "failure_action": "spec_dirty",
+  "units": [
+    {
+      "unit": "sol",
+      "decimal_scale": 12,
+      "rounding_mode": "ROUND_HALF_UP",
+      "overflow_policy": "reject",
+      "serialization": "decimal_string",
+      "min_value": "0",
+      "max_value": "1000000000"
+    },
+    {
+      "unit": "token_base_units",
+      "decimal_scale": 0,
+      "rounding_mode": "ROUND_DOWN",
+      "overflow_policy": "reject",
+      "serialization": "integer_string",
+      "min_value": "0",
+      "max_value": "1000000000000000000000000000000000000"
+    },
+    {
+      "unit": "price_quote",
+      "decimal_scale": 18,
+      "rounding_mode": "ROUND_HALF_UP",
+      "overflow_policy": "reject",
+      "serialization": "decimal_string",
+      "min_value": "0",
+      "max_value": "1000000000000"
+    },
+    {
+      "unit": "percentage",
+      "decimal_scale": 6,
+      "rounding_mode": "ROUND_HALF_UP",
+      "overflow_policy": "reject",
+      "serialization": "decimal_string",
+      "min_value": "-1000000",
+      "max_value": "1000000"
+    },
+    {
+      "unit": "basis_points",
+      "decimal_scale": 0,
+      "rounding_mode": "ROUND_DOWN",
+      "overflow_policy": "reject",
+      "serialization": "integer_string",
+      "min_value": "0",
+      "max_value": "1000000"
+    },
+    {
+      "unit": "market_cap_usd",
+      "decimal_scale": 2,
+      "rounding_mode": "ROUND_HALF_UP",
+      "overflow_policy": "reject",
+      "serialization": "decimal_string",
+      "min_value": "0",
+      "max_value": "1000000000000000"
+    },
+    {
+      "unit": "unix_ms",
+      "decimal_scale": 0,
+      "rounding_mode": "ROUND_DOWN",
+      "overflow_policy": "reject",
+      "serialization": "integer_string",
+      "min_value": "0",
+      "max_value": "4102444800000"
+    }
+  ],
+  "sample_cases": [
+    {
+      "case_id": "sol_scale_half_up",
+      "unit": "sol",
+      "input": "1.2345678901235",
+      "expected": "1.234567890124"
+    },
+    {
+      "case_id": "token_base_units_down",
+      "unit": "token_base_units",
+      "input": "123456789.9",
+      "expected": "123456789"
+    },
+    {
+      "case_id": "price_quote_micro",
+      "unit": "price_quote",
+      "input": "0.0000000001234567894",
+      "expected": "0.000000000123456789"
+    },
+    {
+      "case_id": "percentage_half_up",
+      "unit": "percentage",
+      "input": "12.3456785",
+      "expected": "12.345679"
+    },
+    {
+      "case_id": "basis_points_down",
+      "unit": "basis_points",
+      "input": "25.9",
+      "expected": "25"
+    },
+    {
+      "case_id": "market_cap_usd_cents",
+      "unit": "market_cap_usd",
+      "input": "123456.789",
+      "expected": "123456.79"
+    },
+    {
+      "case_id": "unix_ms_integer",
+      "unit": "unix_ms",
+      "input": "1779656290894.9",
+      "expected": "1779656290894"
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_mirror_paper_ledgers.py",
+      "source_anchor": "from decimal import Decimal, InvalidOperation, ROUND_HALF_UP",
+      "required_patterns": [
+        "QUANT = Decimal(\"0.000000000001\")",
+        "quantize(QUANT, rounding=ROUND_HALF_UP)",
+        "position_realized = (entry_size * pnl_pct / Decimal(\"100\"))"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_event_log.py",
+      "source_anchor": "def canonical_json_bytes(value):",
+      "required_patterns": [
+        "sort_keys=True",
+        "separators=(\",\", \":\")",
+        "sha256_hex(value)"
+      ]
+    }
+  ]
+}

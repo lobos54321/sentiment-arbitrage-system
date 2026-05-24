@@ -15,6 +15,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_error_taxonomy,
     verify_evidence_eligibility_matrix,
     verify_log_redaction_verification,
+    verify_numeric_precision_policy,
     verify_static_policy_enforcement,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -36,6 +37,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
     assert report["blocking_contracts"] == []
     for contract_id in (
         "SpecConsistencyLinterContract",
+        "NumericPrecisionContract",
         "PaperModeSafetyBoundary",
         "ChainConfigContract",
         "SourceRegistryContract",
@@ -61,6 +63,24 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "DashboardActionSeparationContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
+
+
+def test_numeric_precision_policy_verifies_units_samples_and_source_anchors():
+    report = verify_numeric_precision_policy()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["missing_required_units"] == []
+    assert report["evidence"]["malformed_units"] == []
+    assert report["evidence"]["malformed_sample_cases"] == []
+    assert {case["unit"] for case in report["evidence"]["sample_results"]} >= {
+        "basis_points",
+        "market_cap_usd",
+        "percentage",
+        "price_quote",
+        "sol",
+        "token_base_units",
+        "unix_ms",
+    }
 
 
 def test_paper_mode_safety_blocks_live_capabilities():

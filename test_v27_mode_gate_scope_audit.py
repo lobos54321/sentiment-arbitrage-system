@@ -11,6 +11,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     audit = build_mode_gate_scope_audit(load_json(CATALOG_PATH), MODE_REQUIREMENTS, MODE_ORDER)
 
     normal = audit["final_scopes"]["normal_tiny_blocking"]
+    mvp = audit["final_scopes"]["mvp_blocking"]
     assert audit["health"]["current_gate_normal_tiny_contract_count"] == len(
         set(MODE_REQUIREMENTS["observe_only"])
         | set(MODE_REQUIREMENTS["shadow"])
@@ -32,6 +33,8 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "ServiceReadinessProbeContract" not in normal["missing_contracts"]
     assert "DashboardActionSeparationContract" not in normal["missing_contracts"]
     assert "ModeReadinessMatrix" not in normal["missing_contracts"]
+    assert "NumericPrecisionContract" not in mvp["missing_contracts"]
+    assert "SafeDefaultContract" in mvp["missing_contracts"]
     assert "ReplaySideEffectIsolationContract" not in normal["missing_contracts"]
     assert "WritePathRegistryContract" not in normal["missing_contracts"]
     assert "ManualReplaySafetyContract" in normal["missing_contracts"]

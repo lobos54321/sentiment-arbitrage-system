@@ -10,6 +10,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_HALF_UP
 from pathlib import Path
 
 
@@ -41,6 +42,28 @@ DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
 DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-policy.json"
 DEFAULT_SERVICE_READINESS_PROBES = PROJECT_ROOT / "config" / "v27-service-readiness-probes.json"
 DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-dashboard-action-separation-policy.json"
+DEFAULT_NUMERIC_PRECISION_POLICY = PROJECT_ROOT / "config" / "v27-numeric-precision-policy.json"
+NUMERIC_PRECISION_REQUIRED_FIELDS = (
+    "unit",
+    "decimal_scale",
+    "rounding_mode",
+    "overflow_policy",
+)
+NUMERIC_PRECISION_REQUIRED_UNITS = {
+    "basis_points",
+    "market_cap_usd",
+    "percentage",
+    "price_quote",
+    "sol",
+    "token_base_units",
+    "unix_ms",
+}
+NUMERIC_PRECISION_ROUNDING = {
+    "ROUND_DOWN": ROUND_DOWN,
+    "ROUND_HALF_EVEN": ROUND_HALF_EVEN,
+    "ROUND_HALF_UP": ROUND_HALF_UP,
+}
+NUMERIC_PRECISION_OVERFLOW_POLICIES = {"reject", "fail_closed"}
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -2427,6 +2450,170 @@ def verify_dashboard_action_separation_contract(
     )
 
 
+def _numeric_precision_quantize(value, *, scale, rounding_mode):
+    decimal_value = Decimal(str(value))
+    quant = Decimal("1").scaleb(-int(scale))
+    return format(decimal_value.quantize(quant, rounding=NUMERIC_PRECISION_ROUNDING[rounding_mode]), "f")
+
+
+def verify_numeric_precision_policy(policy_path=DEFAULT_NUMERIC_PRECISION_POLICY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("NumericPrecisionContract", False, "numeric_precision_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("NumericPrecisionContract", False, "numeric_precision_policy_not_object", {"policy_path": str(policy_path)})
+
+    units = policy.get("units") if isinstance(policy.get("units"), list) else []
+    malformed_units = []
+    duplicate_units = []
+    unit_records = {}
+    seen_units = set()
+    for index, unit in enumerate(units):
+        if not isinstance(unit, dict):
+            malformed_units.append({"index": index, "unit": None, "missing_fields": list(NUMERIC_PRECISION_REQUIRED_FIELDS), "violations": ["unit_not_object"]})
+            continue
+        unit_id = str(unit.get("unit") or "")
+        missing = _missing_required_fields(unit, NUMERIC_PRECISION_REQUIRED_FIELDS)
+        violations = []
+        if unit_id in seen_units:
+            duplicate_units.append(unit_id)
+        if unit_id:
+            seen_units.add(unit_id)
+            unit_records[unit_id] = unit
+        if unit_id and not re.match(r"^[a-z][a-z0-9_]*$", unit_id):
+            violations.append("unit_must_be_lower_snake_case")
+        scale = unit.get("decimal_scale")
+        if isinstance(scale, bool) or not isinstance(scale, int) or scale < 0 or scale > 18:
+            violations.append("decimal_scale_must_be_integer_0_to_18")
+        rounding_mode = str(unit.get("rounding_mode") or "")
+        if rounding_mode not in NUMERIC_PRECISION_ROUNDING:
+            violations.append("rounding_mode_not_allowed")
+        overflow_policy = str(unit.get("overflow_policy") or "")
+        if overflow_policy not in NUMERIC_PRECISION_OVERFLOW_POLICIES:
+            violations.append("overflow_policy_not_allowed")
+        for bound in ("min_value", "max_value"):
+            if bound in unit:
+                try:
+                    Decimal(str(unit.get(bound)))
+                except (InvalidOperation, ValueError):
+                    violations.append(f"{bound}_invalid_decimal")
+        if "min_value" in unit and "max_value" in unit:
+            try:
+                if Decimal(str(unit.get("min_value"))) > Decimal(str(unit.get("max_value"))):
+                    violations.append("min_value_greater_than_max_value")
+            except (InvalidOperation, ValueError):
+                pass
+        if missing or violations:
+            malformed_units.append({"index": index, "unit": unit_id or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_units = sorted(NUMERIC_PRECISION_REQUIRED_UNITS - set(unit_records))
+
+    sample_cases = policy.get("sample_cases") if isinstance(policy.get("sample_cases"), list) else []
+    malformed_sample_cases = []
+    sample_results = []
+    for index, case in enumerate(sample_cases):
+        if not isinstance(case, dict):
+            malformed_sample_cases.append({"index": index, "case_id": None, "violations": ["sample_case_not_object"]})
+            continue
+        case_id = str(case.get("case_id") or f"case_{index}")
+        unit_id = str(case.get("unit") or "")
+        input_value = case.get("input")
+        expected = case.get("expected")
+        violations = []
+        unit = unit_records.get(unit_id)
+        actual = None
+        if unit is None:
+            violations.append("sample_unit_unknown")
+        if not isinstance(input_value, str) or not isinstance(expected, str):
+            violations.append("sample_input_and_expected_must_be_strings")
+        if unit is not None and not violations:
+            try:
+                actual = _numeric_precision_quantize(
+                    input_value,
+                    scale=unit.get("decimal_scale"),
+                    rounding_mode=str(unit.get("rounding_mode")),
+                )
+                if actual != expected:
+                    violations.append("sample_expected_mismatch")
+            except (InvalidOperation, ValueError, KeyError) as exc:
+                violations.append(f"sample_quantize_failed:{type(exc).__name__}")
+        result = {
+            "case_id": case_id,
+            "unit": unit_id or None,
+            "input": input_value,
+            "expected": expected,
+            "actual": actual,
+            "ok": not violations,
+        }
+        sample_results.append(result)
+        if violations:
+            malformed_sample_cases.append({"index": index, "case_id": case_id, "violations": violations, "result": result})
+
+    source_files = policy.get("source_files") if isinstance(policy.get("source_files"), list) else []
+    source_checks = []
+    source_errors = []
+    for index, source in enumerate(source_files):
+        if not isinstance(source, dict):
+            source_errors.append({"index": index, "source_file": None, "reason": "source_record_not_object"})
+            continue
+        source_file = source.get("source_file")
+        source_anchor = source.get("source_anchor")
+        required_patterns = source.get("required_patterns") if isinstance(source.get("required_patterns"), list) else []
+        text, error = _read_project_text(source_file)
+        if error:
+            source_errors.append({"index": index, **error})
+            continue
+        missing_patterns = [str(pattern) for pattern in required_patterns if str(pattern) not in text]
+        anchor_present = bool(source_anchor and str(source_anchor) in text)
+        check = {
+            "source_file": source_file,
+            "source_anchor": source_anchor,
+            "anchor_present": anchor_present,
+            "required_pattern_count": len(required_patterns),
+            "missing_patterns": missing_patterns,
+        }
+        source_checks.append(check)
+        if not anchor_present or missing_patterns:
+            source_errors.append({"index": index, "source_file": source_file, "reason": "source_anchor_or_pattern_missing", **check})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.numeric_precision_policy.v1"
+        and policy.get("failure_action") == "spec_dirty"
+        and bool(units)
+        and bool(sample_cases)
+        and bool(source_files)
+        and not malformed_units
+        and not duplicate_units
+        and not missing_required_units
+        and not malformed_sample_cases
+        and not source_errors
+    )
+    return _contract(
+        "NumericPrecisionContract",
+        passed,
+        "numeric_precision_policy_missing_malformed_or_unverified",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "required_fields": list(NUMERIC_PRECISION_REQUIRED_FIELDS),
+            "required_units": sorted(NUMERIC_PRECISION_REQUIRED_UNITS),
+            "unit_count": len(units),
+            "sample_case_count": len(sample_cases),
+            "source_file_count": len(source_files),
+            "missing_required_units": missing_required_units,
+            "duplicate_units": sorted(str(item) for item in duplicate_units),
+            "malformed_units": malformed_units,
+            "sample_results": sample_results,
+            "malformed_sample_cases": malformed_sample_cases,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -2845,12 +3032,14 @@ def build_basic_contract_readiness(
     log_redaction_policy_path=DEFAULT_LOG_REDACTION_POLICY,
     service_readiness_policy_path=DEFAULT_SERVICE_READINESS_PROBES,
     dashboard_action_separation_policy_path=DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY,
+    numeric_precision_policy_path=DEFAULT_NUMERIC_PRECISION_POLICY,
     env=None,
 ):
     contracts = {
         item["contract_id"]: item
         for item in [
             verify_spec_consistency(manifest_path, catalog_path, registry_path),
+            verify_numeric_precision_policy(policy_path=numeric_precision_policy_path),
             verify_paper_mode_safety(env=env),
             verify_chain_config(chain_config_path, system_config_path),
             verify_source_registry(source_registry_path, channels_csv),
@@ -2925,6 +3114,7 @@ def main():
     parser.add_argument("--log-redaction-policy", default=str(DEFAULT_LOG_REDACTION_POLICY))
     parser.add_argument("--service-readiness-policy", default=str(DEFAULT_SERVICE_READINESS_PROBES))
     parser.add_argument("--dashboard-action-separation-policy", default=str(DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY))
+    parser.add_argument("--numeric-precision-policy", default=str(DEFAULT_NUMERIC_PRECISION_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -2949,6 +3139,7 @@ def main():
         log_redaction_policy_path=Path(args.log_redaction_policy),
         service_readiness_policy_path=Path(args.service_readiness_policy),
         dashboard_action_separation_policy_path=Path(args.dashboard_action_separation_policy),
+        numeric_precision_policy_path=Path(args.numeric_precision_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:
