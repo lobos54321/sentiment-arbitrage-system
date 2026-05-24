@@ -7,6 +7,7 @@
 import http from 'http';
 import https from 'https';
 import fs from 'fs';
+import { createHash, randomUUID } from 'crypto';
 import { URL, fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
 import Database from 'better-sqlite3';
@@ -467,6 +468,8 @@ const originalConsoleWarn = console.warn;
 // 日志文件路径
 const logsDir = join(projectRoot, 'logs');
 const runtimeLogPath = join(logsDir, 'runtime.log');
+const DASHBOARD_AUDIT_SCHEMA_VERSION = 'v2.7.0.audit_log_integrity.v1';
+const DASHBOARD_AUDIT_GENESIS_HASH = 'GENESIS';
 
 // 确保日志目录存在
 try {
@@ -474,6 +477,142 @@ try {
     fs.mkdirSync(logsDir, { recursive: true });
   }
 } catch (e) { /* ignore */ }
+
+export function canonicalAuditJson(value) {
+  if (value === undefined) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalAuditJson(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalAuditJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function auditSha256Hex(value) {
+  const text = typeof value === 'string' ? value : canonicalAuditJson(value);
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function auditPayloadForHash(event) {
+  return {
+    schema_version: event.schema_version,
+    audit_event_id: event.audit_event_id,
+    created_at: event.created_at,
+    actor_id: event.actor_id,
+    endpoint: event.endpoint,
+    method: event.method,
+    required_role: event.required_role,
+    token_scope: event.token_scope,
+    danger_level: event.danger_level,
+    action: event.action,
+    outcome: event.outcome,
+    payload: event.payload || {},
+  };
+}
+
+export function buildDashboardAuditEvent(input = {}) {
+  const event = {
+    schema_version: DASHBOARD_AUDIT_SCHEMA_VERSION,
+    audit_event_id: input.audit_event_id || randomUUID(),
+    created_at: input.created_at || new Date().toISOString(),
+    actor_id: input.actor_id || 'dashboard_token',
+    endpoint: input.endpoint,
+    method: input.method || 'POST',
+    required_role: input.required_role || 'dashboard_operator',
+    token_scope: input.token_scope,
+    danger_level: input.danger_level,
+    action: input.action,
+    outcome: input.outcome || 'attempt',
+    payload: input.payload || {},
+    prev_audit_hash: input.prev_audit_hash || DASHBOARD_AUDIT_GENESIS_HASH,
+  };
+  event.audit_payload_hash = auditSha256Hex(auditPayloadForHash(event));
+  event.audit_chain_hash = auditSha256Hex({
+    audit_event_id: event.audit_event_id,
+    created_at: event.created_at,
+    prev_audit_hash: event.prev_audit_hash,
+    audit_payload_hash: event.audit_payload_hash,
+  });
+  return event;
+}
+
+export function verifyDashboardAuditChain(events = []) {
+  let expectedPrev = DASHBOARD_AUDIT_GENESIS_HASH;
+  const failures = [];
+  for (const [index, event] of events.entries()) {
+    const expectedPayloadHash = auditSha256Hex(auditPayloadForHash(event));
+    const expectedChainHash = auditSha256Hex({
+      audit_event_id: event.audit_event_id,
+      created_at: event.created_at,
+      prev_audit_hash: event.prev_audit_hash,
+      audit_payload_hash: expectedPayloadHash,
+    });
+    if (event.prev_audit_hash !== expectedPrev) {
+      failures.push({ index, reason: 'prev_audit_hash_mismatch' });
+    }
+    if (event.audit_payload_hash !== expectedPayloadHash) {
+      failures.push({ index, reason: 'audit_payload_hash_mismatch' });
+    }
+    if (event.audit_chain_hash !== expectedChainHash) {
+      failures.push({ index, reason: 'audit_chain_hash_mismatch' });
+    }
+    expectedPrev = event.audit_chain_hash;
+  }
+  return {
+    ok: failures.length === 0,
+    event_count: events.length,
+    failures,
+    last_audit_chain_hash: expectedPrev,
+  };
+}
+
+function dashboardAuditLogPath(options = {}) {
+  const raw = options.auditLogPath || process.env.V27_DASHBOARD_AUDIT_LOG_PATH || join(projectRoot, 'data', 'v27_dashboard_audit.jsonl');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function lastDashboardAuditHash(auditLogPath) {
+  const text = readTinyText(auditLogPath, 1024 * 1024);
+  if (!text) return DASHBOARD_AUDIT_GENESIS_HASH;
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return DASHBOARD_AUDIT_GENESIS_HASH;
+  const last = JSON.parse(lines[lines.length - 1]);
+  if (!last.audit_chain_hash) {
+    throw new Error('last audit event missing audit_chain_hash');
+  }
+  return last.audit_chain_hash;
+}
+
+export function appendDashboardAuditEvent(input = {}, options = {}) {
+  const auditLogPath = dashboardAuditLogPath(options);
+  fs.mkdirSync(dirname(auditLogPath), { recursive: true });
+  const event = buildDashboardAuditEvent({
+    ...input,
+    prev_audit_hash: input.prev_audit_hash || lastDashboardAuditHash(auditLogPath),
+  });
+  fs.appendFileSync(auditLogPath, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
+  return event;
+}
+
+function requireDashboardAuditEvent(req, res, url, input = {}) {
+  try {
+    return appendDashboardAuditEvent({
+      endpoint: url.pathname,
+      method: req.method,
+      ...input,
+    });
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Audit log unavailable', detail: error.message }));
+    return null;
+  }
+}
 
 function formatLogArg(arg) {
   if (arg instanceof Error) {
@@ -4646,6 +4785,13 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'Position not found or already closed' }));
         return;
       }
+      if (!requireDashboardAuditEvent(req, res, url, {
+        required_role: 'dashboard_admin',
+        token_scope: 'dashboard:admin_mutation',
+        danger_level: 'critical',
+        action: 'close_position',
+        payload: { ca, reason, symbol: pos.symbol || null },
+      })) return;
 
       // 关闭持仓
       d.prepare(`
@@ -4681,6 +4827,13 @@ const server = http.createServer(async (req, res) => {
     if (!checkAuth(req, url, res)) return;
     try {
       const hours = parseInt(url.searchParams.get('hours') || '4');
+      if (!requireDashboardAuditEvent(req, res, url, {
+        required_role: 'dashboard_admin',
+        token_scope: 'dashboard:risk_mutation',
+        danger_level: 'admin_mutation',
+        action: 'pause_trading',
+        payload: { hours },
+      })) return;
       const rm = global.__riskManager;
       if (rm) {
         rm.manualPause(hours);
@@ -4707,6 +4860,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (!checkAuth(req, url, res)) return;
     try {
+      if (!requireDashboardAuditEvent(req, res, url, {
+        required_role: 'dashboard_admin',
+        token_scope: 'dashboard:risk_mutation',
+        danger_level: 'admin_mutation',
+        action: 'resume_trading',
+        payload: {},
+      })) return;
       const rm = global.__riskManager;
       if (rm) {
         rm.resumeTrading();
@@ -4751,6 +4911,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (!checkAuth(req, url, res)) return;
     try {
+      if (!requireDashboardAuditEvent(req, res, url, {
+        required_role: 'dashboard_admin',
+        token_scope: 'dashboard:risk_mutation',
+        danger_level: 'admin_mutation',
+        action: 'reset_daily_loss',
+        payload: {},
+      })) return;
       const rm = global.__riskManager;
       if (rm) {
         rm.resetDailyLoss();
@@ -4778,6 +4945,13 @@ const server = http.createServer(async (req, res) => {
     try {
       const d = getDb();
       const count = d.prepare(`SELECT COUNT(*) as c FROM live_positions`).get().c;
+      if (!requireDashboardAuditEvent(req, res, url, {
+        required_role: 'dashboard_admin',
+        token_scope: 'dashboard:admin_mutation',
+        danger_level: 'critical',
+        action: 'reset_live_data',
+        payload: { live_position_count: count },
+      })) return;
       d.prepare(`DELETE FROM live_positions`).run();
       try { d.prepare(`DELETE FROM system_state WHERE key = 'trading_paused'`).run(); } catch(e) { /* table may not exist */ }
       const rm = global.__riskManager;
@@ -4809,6 +4983,13 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'pnl_pct must be a valid number' }));
         return;
       }
+      if (!requireDashboardAuditEvent(req, res, url, {
+        required_role: 'dashboard_admin',
+        token_scope: 'dashboard:paper_mutation',
+        danger_level: 'admin_mutation',
+        action: 'paper_trades_cleanup',
+        payload: { reason, pnl_pct: pnlPct },
+      })) return;
       const result = cleanupOpenPaperPositions({ reason, pnlPct });
       console.log(`🧹 Cleaned ${result.updated} open paper positions reason=${reason} pnlPct=${pnlPct} db=${result.dbPath}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -8221,6 +8402,16 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/v27-read-model-refresh') {
     if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
+    if (!requireDashboardAuditEvent(req, res, url, {
+      required_role: 'dashboard_operator',
+      token_scope: 'v27:evidence_mutation',
+      danger_level: 'operator_mutation',
+      action: 'v27_read_model_refresh',
+      payload: {
+        include_records: ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_records') || '').toLowerCase()),
+        strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      },
+    })) return;
     const refresh = triggerV27ReadModelRefresh({
       includeRecords: ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_records') || '').toLowerCase()),
       strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
@@ -8237,6 +8428,16 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/v27-recovery-control-mirror') {
     if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
+    if (!requireDashboardAuditEvent(req, res, url, {
+      required_role: 'dashboard_operator',
+      token_scope: 'v27:evidence_mutation',
+      danger_level: 'operator_mutation',
+      action: 'v27_recovery_control_mirror',
+      payload: {
+        environment_id: url.searchParams.get('environment_id') || null,
+        recovery_version: url.searchParams.get('recovery_version') || null,
+      },
+    })) return;
     const refresh = triggerV27RecoveryControlMirror({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
       environmentId: url.searchParams.get('environment_id') || undefined,
@@ -8253,6 +8454,17 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/v27-raw-provider-evidence-mirror') {
     if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
+    if (!requireDashboardAuditEvent(req, res, url, {
+      required_role: 'dashboard_operator',
+      token_scope: 'v27:evidence_mutation',
+      danger_level: 'operator_mutation',
+      action: 'v27_raw_provider_evidence_mirror',
+      payload: {
+        dry_run: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+        strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+        trusted_only: url.searchParams.get('trusted_only') || null,
+      },
+    })) return;
     const mirror = triggerV27RawProviderEvidenceMirror({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
       limit: url.searchParams.has('limit') ? boundedIntParam(url, 'limit', 500, 1, 5000) : undefined,
@@ -8279,6 +8491,17 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/v27-raw-provider-probe-evidence') {
     if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
+    if (!requireDashboardAuditEvent(req, res, url, {
+      required_role: 'dashboard_operator',
+      token_scope: 'v27:evidence_mutation',
+      danger_level: 'operator_mutation',
+      action: 'v27_raw_provider_probe_evidence',
+      payload: {
+        run_id: url.searchParams.get('run_id') || null,
+        dry_run: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+        strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      },
+    })) return;
     const record = triggerV27RawProviderProbeEvidence({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
       runId: url.searchParams.get('run_id') || undefined,
@@ -8310,6 +8533,17 @@ const server = http.createServer(async (req, res) => {
       .flatMap((value) => String(value).split(','))
       .map((value) => value.trim())
       .filter(Boolean);
+    if (!requireDashboardAuditEvent(req, res, url, {
+      required_role: 'dashboard_operator',
+      token_scope: 'v27:evidence_mutation',
+      danger_level: 'operator_mutation',
+      action: 'v27_randomness_control_mirror',
+      payload: {
+        statuses: statusesRaw,
+        dry_run: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+        strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+      },
+    })) return;
     const mirror = triggerV27RandomnessControlMirror({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
       limit: url.searchParams.has('limit') ? boundedIntParam(url, 'limit', 500, 1, 5000) : undefined,
@@ -8333,6 +8567,18 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/v27-normal-tiny-ops-evidence') {
     if (!requirePost(req, res)) return;
     if (!checkAuth(req, url, res)) return;
+    if (!requireDashboardAuditEvent(req, res, url, {
+      required_role: 'dashboard_operator',
+      token_scope: 'v27:evidence_mutation',
+      danger_level: 'operator_mutation',
+      action: 'v27_normal_tiny_ops_evidence',
+      payload: {
+        run_id: url.searchParams.get('run_id') || null,
+        dry_run: ['1', 'true', 'yes'].includes(String(url.searchParams.get('dry_run') || '').toLowerCase()),
+        strict: ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase()),
+        worker_roles: url.searchParams.getAll('worker_role'),
+      },
+    })) return;
     const record = triggerV27NormalTinyOpsEvidence({
       timeoutMs: boundedIntParam(url, 'timeout_ms', 600000, 30000, 1800000),
       runId: url.searchParams.get('run_id') || undefined,

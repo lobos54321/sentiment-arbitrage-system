@@ -37,6 +37,13 @@ ACCESS_CONTROL_REQUIRED_FIELDS = (
     "audit_log_required",
     "danger_level",
 )
+AUDIT_LOG_REQUIRED_FIELDS = (
+    "audit_event_id",
+    "prev_audit_hash",
+    "audit_payload_hash",
+    "audit_chain_hash",
+    "created_at",
+)
 WRITE_PATH_REQUIRED_FIELDS = (
     "write_path_id",
     "module",
@@ -188,12 +195,15 @@ def _extract_dashboard_routes(lines):
         block = lines[line_index:next_line_index]
         check_auth_line = None
         post_guard_line = None
+        audit_event_line = None
         mutation_markers = []
         for offset, text in enumerate(block):
             if check_auth_line is None and "checkAuth(req, url, res)" in text:
                 check_auth_line = line_index + offset + 1
             if post_guard_line is None and ("req.method !== 'POST'" in text or "requirePost(req, res)" in text):
                 post_guard_line = line_index + offset + 1
+            if audit_event_line is None and "requireDashboardAuditEvent(req, res, url" in text:
+                audit_event_line = line_index + offset + 1
             if (
                 "triggerV27" in text
                 or "cleanupOpenPaperPositions(" in text
@@ -212,6 +222,8 @@ def _extract_dashboard_routes(lines):
                     "check_auth_line": check_auth_line,
                     "has_post_guard": post_guard_line is not None,
                     "post_guard_line": post_guard_line,
+                    "has_audit_event": audit_event_line is not None,
+                    "audit_event_line": audit_event_line,
                     "mutation_markers": mutation_markers[:5],
                 }
             )
@@ -422,6 +434,76 @@ def verify_access_control_policy(policy_path=DEFAULT_ACCESS_CONTROL_POLICY, writ
             "write_path_policy_gaps": write_path_policy_gaps,
             "dynamic_failures": dynamic_failures,
             "sample_resolved_policies": resolved_endpoint_policies[:20],
+        },
+    )
+
+
+def verify_audit_log_integrity(policy_path=DEFAULT_ACCESS_CONTROL_POLICY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("AuditLogIntegrityContract", False, "audit_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("AuditLogIntegrityContract", False, "audit_policy_not_object", {"policy_path": str(policy_path)})
+
+    lines, source_error = _source_lines(policy.get("source_file"))
+    if source_error:
+        return _contract("AuditLogIntegrityContract", False, "audit_source_missing", {"policy_path": str(policy_path), **source_error})
+    source_text = "\n".join(lines)
+    routes = _extract_dashboard_routes(lines)
+    route_by_endpoint = {route["endpoint"]: route for route in routes}
+    overrides = [
+        item
+        for item in (policy.get("endpoint_overrides") or [])
+        if isinstance(item, dict)
+    ]
+    audit_required_endpoints = sorted(
+        str(item.get("endpoint"))
+        for item in overrides
+        if item.get("audit_log_required") is True and item.get("endpoint")
+    )
+    missing_audit_hooks = []
+    for endpoint in audit_required_endpoints:
+        route = route_by_endpoint.get(endpoint)
+        if not route or not route.get("has_audit_event"):
+            missing_audit_hooks.append(
+                {
+                    "endpoint": endpoint,
+                    "registered_route": bool(route),
+                    "has_audit_event": bool(route and route.get("has_audit_event")),
+                }
+            )
+
+    helper_required_fragments = {
+        "schema_version": "DASHBOARD_AUDIT_SCHEMA_VERSION" in source_text and "v2.7.0.audit_log_integrity.v1" in source_text,
+        "sha256_hashing": "createHash('sha256')" in source_text,
+        "append_only_jsonl": "fs.appendFileSync(auditLogPath" in source_text,
+        "chain_verifier": "verifyDashboardAuditChain" in source_text,
+        "fail_closed_response": "Audit log unavailable" in source_text,
+    }
+    chain_field_presence = {
+        field: field in source_text
+        for field in AUDIT_LOG_REQUIRED_FIELDS
+    }
+    passed = (
+        bool(audit_required_endpoints)
+        and all(helper_required_fragments.values())
+        and all(chain_field_presence.values())
+        and not missing_audit_hooks
+    )
+    return _contract(
+        "AuditLogIntegrityContract",
+        passed,
+        "audit_log_integrity_missing_malformed_or_incomplete",
+        {
+            "policy_path": str(policy_path),
+            "source_file": policy.get("source_file"),
+            "schema_version": "v2.7.0.audit_log_integrity.v1",
+            "audit_required_endpoint_count": len(audit_required_endpoints),
+            "audit_required_endpoints": audit_required_endpoints,
+            "helper_required_fragments": helper_required_fragments,
+            "chain_field_presence": chain_field_presence,
+            "missing_audit_hooks": missing_audit_hooks,
         },
     )
 
@@ -1013,6 +1095,7 @@ def build_basic_contract_readiness(
                 policy_path=access_control_policy_path,
                 write_path_registry_path=write_path_registry_path,
             ),
+            verify_audit_log_integrity(policy_path=access_control_policy_path),
             verify_write_path_registry(registry_path=write_path_registry_path),
         ]
     }

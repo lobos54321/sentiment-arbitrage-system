@@ -39,6 +39,7 @@ MODE_REQUIREMENTS = {
         "ChainConfigContract",
         "SourceRegistryContract",
         "AccessControlContract",
+        "AuditLogIntegrityContract",
         "WritePathRegistryContract",
         "RouteRegistryContract",
         "InputSanitizationContract",

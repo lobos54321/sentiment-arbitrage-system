@@ -9,6 +9,8 @@ import {
   buildStorageHealthSnapshot,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
+  appendDashboardAuditEvent,
+  buildDashboardAuditEvent,
   boundedIntParam,
   boundedWindowedSinceTs,
   dogCatchGoalFromLiveSnapshot,
@@ -19,6 +21,7 @@ import {
   resetPaperReportGateForTest,
   shouldUseMaterializedMissedRecoverySummary,
   tryBeginPaperReport,
+  verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
 
 test('storage health reports db markers and disk snapshot without opening sqlite', () => {
@@ -42,6 +45,76 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   assert.equal(snapshot.db_files.find((row) => row.label === 'paper_trades').exists, true);
   assert.match(snapshot.integrity_error, /malformed page/);
   assert.match(snapshot.preflight_tail, /checkpoint failed/);
+});
+
+test('dashboard audit events form a verifiable hash chain', () => {
+  const first = buildDashboardAuditEvent({
+    audit_event_id: 'audit-1',
+    created_at: '2026-05-25T00:00:00.000Z',
+    endpoint: '/api/pause-trading',
+    method: 'POST',
+    required_role: 'dashboard_admin',
+    token_scope: 'dashboard:risk_mutation',
+    danger_level: 'admin_mutation',
+    action: 'pause_trading',
+    payload: { hours: 4 },
+  });
+  const second = buildDashboardAuditEvent({
+    audit_event_id: 'audit-2',
+    created_at: '2026-05-25T00:01:00.000Z',
+    endpoint: '/api/resume-trading',
+    method: 'POST',
+    required_role: 'dashboard_admin',
+    token_scope: 'dashboard:risk_mutation',
+    danger_level: 'admin_mutation',
+    action: 'resume_trading',
+    prev_audit_hash: first.audit_chain_hash,
+  });
+
+  assert.equal(first.prev_audit_hash, 'GENESIS');
+  assert.match(first.audit_payload_hash, /^[a-f0-9]{64}$/);
+  assert.match(first.audit_chain_hash, /^[a-f0-9]{64}$/);
+  assert.deepEqual(verifyDashboardAuditChain([first, second]), {
+    ok: true,
+    event_count: 2,
+    failures: [],
+    last_audit_chain_hash: second.audit_chain_hash,
+  });
+
+  const tampered = { ...second, payload: { changed: true } };
+  const tamperReport = verifyDashboardAuditChain([first, tampered]);
+  assert.equal(tamperReport.ok, false);
+  assert.equal(tamperReport.failures.some((row) => row.reason === 'audit_payload_hash_mismatch'), true);
+});
+
+test('dashboard audit append continues from previous chain hash', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'dashboard-audit-'));
+  const auditLogPath = join(dir, 'audit.jsonl');
+  const first = appendDashboardAuditEvent({
+    audit_event_id: 'append-1',
+    created_at: '2026-05-25T00:00:00.000Z',
+    endpoint: '/api/paper/v27-read-model-refresh',
+    method: 'POST',
+    required_role: 'dashboard_operator',
+    token_scope: 'v27:evidence_mutation',
+    danger_level: 'operator_mutation',
+    action: 'v27_read_model_refresh',
+  }, { auditLogPath });
+  const second = appendDashboardAuditEvent({
+    audit_event_id: 'append-2',
+    created_at: '2026-05-25T00:01:00.000Z',
+    endpoint: '/api/paper/v27-mode-readiness',
+    method: 'POST',
+    required_role: 'dashboard_operator',
+    token_scope: 'v27:evidence_mutation',
+    danger_level: 'operator_mutation',
+    action: 'v27_mode_readiness',
+  }, { auditLogPath });
+
+  assert.equal(second.prev_audit_hash, first.audit_chain_hash);
+  const events = fs.readFileSync(auditLogPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(events.length, 2);
+  assert.equal(verifyDashboardAuditChain(events).ok, true);
 });
 
 test('v27 read model health reports missing materialized snapshot as unsafe', () => {

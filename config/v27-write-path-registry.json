@@ -20,6 +20,22 @@
   },
   "write_paths": [
     {
+      "write_path_id": "dashboard.audit_log.append",
+      "module": "dashboard_server",
+      "entry_point": "appendDashboardAuditEvent",
+      "target_store": "filesystem:v27_dashboard_audit_log",
+      "write_target": "v27_dashboard_audit.jsonl",
+      "mutation_type": "append_file",
+      "requires_outbox": false,
+      "outbox_reason": "append_only_security_audit_hash_chain_written_before_admin_mutation",
+      "owner": "dashboard_security",
+      "mode_gate": "admin_break_glass",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "fs.appendFileSync(auditLogPath",
+      "source_anchor_occurrence": 1
+    },
+    {
       "write_path_id": "dashboard.runtime_log.append",
       "module": "dashboard_server",
       "entry_point": "console_log_capture",

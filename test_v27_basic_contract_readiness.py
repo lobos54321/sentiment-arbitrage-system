@@ -5,6 +5,7 @@ sys.path.insert(0, "scripts")
 
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
+    verify_audit_log_integrity,
     verify_evidence_eligibility_matrix,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -36,6 +37,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "SafetyCaseContract",
         "WaiverPolicyContract",
         "AccessControlContract",
+        "AuditLogIntegrityContract",
         "WritePathRegistryContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
@@ -275,6 +277,16 @@ def test_access_control_policy_covers_dashboard_routes_and_mutations():
     assert report["evidence"]["write_path_policy_gaps"] == []
 
 
+def test_audit_log_integrity_covers_required_mutation_routes():
+    report = verify_audit_log_integrity()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["audit_required_endpoint_count"] == 12
+    assert report["evidence"]["missing_audit_hooks"] == []
+    assert report["evidence"]["helper_required_fragments"]["sha256_hashing"] is True
+    assert report["evidence"]["chain_field_presence"]["audit_chain_hash"] is True
+
+
 def test_access_control_policy_blocks_unprotected_dashboard_route(tmp_path):
     source_path = tmp_path / "server.js"
     source_path.write_text(
@@ -350,13 +362,64 @@ if (url.pathname === '/api/mutate') {
     assert report["evidence"]["write_path_policy_gaps"][0]["endpoint"] == "/api/mutate"
 
 
+def test_audit_log_integrity_blocks_missing_audit_hook(tmp_path):
+    source_path = tmp_path / "server.js"
+    source_path.write_text(
+        """
+import { createHash } from 'crypto';
+const DASHBOARD_AUDIT_SCHEMA_VERSION = 'v2.7.0.audit_log_integrity.v1';
+function verifyDashboardAuditChain(events) { return events; }
+function checkAuth(req, url, res) {
+  if (!DASHBOARD_TOKEN) { res.writeHead(403); return false; }
+  const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
+  if (token !== DASHBOARD_TOKEN) { res.writeHead(401); return false; }
+  return true;
+}
+function writeAudit(event) {
+  createHash('sha256').update(event.audit_event_id + event.prev_audit_hash + event.audit_payload_hash + event.audit_chain_hash + event.created_at);
+  fs.appendFileSync(auditLogPath, JSON.stringify(event));
+}
+function requireDashboardAuditEvent(req, res, url, input) {
+  res.end('Audit log unavailable');
+}
+if (url.pathname === '/api/mutate') {
+  if (req.method !== 'POST') return;
+  if (!checkAuth(req, url, res)) return;
+  db.prepare('UPDATE demo SET value = 1').run();
+}
+""",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "access-policy.json"
+    write_access_policy(
+        policy_path,
+        source_path,
+        overrides=[
+            {
+                "endpoint": "/api/mutate",
+                "required_role": "dashboard_admin",
+                "token_scope": "dashboard:admin_mutation",
+                "audit_log_required": True,
+                "danger_level": "critical",
+            }
+        ],
+    )
+
+    report = verify_audit_log_integrity(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["evidence"]["missing_audit_hooks"] == [
+        {"endpoint": "/api/mutate", "registered_route": True, "has_audit_event": False}
+    ]
+
+
 def test_write_path_registry_covers_dashboard_write_paths():
     report = verify_write_path_registry()
 
     assert report["status"] == "pass"
     assert report["evidence"]["scan_target_count"] == 1
-    assert report["evidence"]["scanned_mutation_count"] == 8
-    assert report["evidence"]["registered_write_path_count"] == 8
+    assert report["evidence"]["scanned_mutation_count"] == 9
+    assert report["evidence"]["registered_write_path_count"] == 9
     assert report["evidence"]["unregistered_mutation_count"] == 0
     assert "sqlite:paper_trades" in report["evidence"]["registered_targets"]
 
