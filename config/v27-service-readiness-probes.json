@@ -1,0 +1,118 @@
+{
+  "schema_version": "v2.7.0.service_readiness_probes.v1",
+  "scope": "dashboard_runtime_and_v27_readiness_service_probes",
+  "failure_action": "service_not_ready",
+  "required_fields": ["service_name", "probe_id", "health_status", "dependency_status", "checked_at"],
+  "required_probe_ids": [
+    "public_health",
+    "dashboard_status_snapshot",
+    "module_health_snapshot",
+    "v27_read_model_health",
+    "v27_mode_readiness",
+    "zeabur_supervisor_boot"
+  ],
+  "probes": [
+    {
+      "service_name": "dashboard_http_server",
+      "probe_id": "public_health",
+      "health_status": "ready",
+      "endpoint": "/health",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping'",
+      "dependency_status": {
+        "startup_error_guard": "fail_soft_degraded",
+        "commit_fingerprint": "required"
+      },
+      "dependency_anchors": [
+        "status: global.__startupError ? 'degraded' : 'ok'",
+        "commit: runtimeCommitFingerprint()"
+      ]
+    },
+    {
+      "service_name": "dashboard_status_api",
+      "probe_id": "dashboard_status_snapshot",
+      "health_status": "ready",
+      "endpoint": "/api/status",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "const data = getDashboardData();",
+      "dependency_status": {
+        "auth_required": "required",
+        "dashboard_data_builder": "required"
+      },
+      "dependency_anchors": [
+        "if (!checkAuth(req, url, res)) return;",
+        "function getDashboardData()"
+      ]
+    },
+    {
+      "service_name": "module_health_api",
+      "probe_id": "module_health_snapshot",
+      "health_status": "ready",
+      "endpoint": "/api/module-health",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "const moduleHealth = getModuleHealthData(windowDays);",
+      "dependency_status": {
+        "auth_required": "required",
+        "module_health_builder": "required"
+      },
+      "dependency_anchors": [
+        "if (!checkAuth(req, url, res)) return;",
+        "function getModuleHealthData(windowDays = 7)"
+      ]
+    },
+    {
+      "service_name": "v27_read_model_health_api",
+      "probe_id": "v27_read_model_health",
+      "health_status": "ready",
+      "endpoint": "/api/paper/v27-read-model-health",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "const health = readV27DenominatorReadModelHealth();",
+      "dependency_status": {
+        "auth_required": "required",
+        "materialized_health_reader": "required",
+        "unsafe_strict_status": "required"
+      },
+      "dependency_anchors": [
+        "if (!checkAuth(req, url, res)) return;",
+        "readV27DenominatorReadModelHealth()",
+        "strict && !health.dashboard_safe"
+      ]
+    },
+    {
+      "service_name": "v27_mode_readiness_api",
+      "probe_id": "v27_mode_readiness",
+      "health_status": "ready",
+      "endpoint": "/api/paper/v27-mode-readiness",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "const readiness = readV27ModeReadiness();",
+      "dependency_status": {
+        "auth_required": "required",
+        "materialized_mode_matrix_reader": "required",
+        "not_ready_status": "required"
+      },
+      "dependency_anchors": [
+        "if (!checkAuth(req, url, res)) return;",
+        "readV27ModeReadiness()",
+        "readiness.available ? 200 : 202"
+      ]
+    },
+    {
+      "service_name": "zeabur_supervisor",
+      "probe_id": "zeabur_supervisor_boot",
+      "health_status": "ready",
+      "endpoint": null,
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "[STARTUP] PIDs redis=$REDIS_PID node=$NODE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID scout=$SCOUT_PID resonance=$RESONANCE_PID social=$SOCIAL_PID",
+      "dependency_status": {
+        "redis_ready_probe": "required",
+        "node_pid_probe": "required",
+        "worker_pid_probes": "required"
+      },
+      "dependency_anchors": [
+        "redis-cli -h 127.0.0.1 -p 6379 ping",
+        "kill -0 \"$NODE_PID\"",
+        "kill -0 \"$PAPER_PID\""
+      ]
+    }
+  ]
+}

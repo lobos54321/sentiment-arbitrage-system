@@ -39,6 +39,7 @@ DEFAULT_API_RESPONSE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-policy
 DEFAULT_API_RESPONSE_ENVELOPE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-envelope-policy.json"
 DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
 DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-policy.json"
+DEFAULT_SERVICE_READINESS_PROBES = PROJECT_ROOT / "config" / "v27-service-readiness-probes.json"
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -127,6 +128,21 @@ LOG_REDACTION_STREAM_REQUIRED_FIELDS = (
     "redaction_anchor",
     "write_anchor",
     "sample_case_ids",
+)
+SERVICE_READINESS_PROBE_REQUIRED_FIELDS = (
+    "service_name",
+    "probe_id",
+    "health_status",
+    "dependency_status",
+    "source_file",
+    "source_anchor",
+)
+SERVICE_READINESS_CONTRACT_FIELDS = (
+    "service_name",
+    "probe_id",
+    "health_status",
+    "dependency_status",
+    "checked_at",
 )
 WRITE_PATH_ALLOWED_MODE_GATES = {
     "observe_only",
@@ -2077,6 +2093,124 @@ def verify_log_redaction_verification(policy_path=DEFAULT_LOG_REDACTION_POLICY):
     )
 
 
+def verify_service_readiness_probe_contract(policy_path=DEFAULT_SERVICE_READINESS_PROBES):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("ServiceReadinessProbeContract", False, "service_readiness_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("ServiceReadinessProbeContract", False, "service_readiness_policy_not_object", {"policy_path": str(policy_path)})
+
+    probes = policy.get("probes") if isinstance(policy.get("probes"), list) else []
+    required_probe_ids = [str(item) for item in (policy.get("required_probe_ids") or [])]
+    required_fields = [str(item) for item in (policy.get("required_fields") or [])]
+    checked_at = _utc_now_iso()
+
+    schema_violations = []
+    if policy.get("schema_version") != "v2.7.0.service_readiness_probes.v1":
+        schema_violations.append("schema_version_invalid")
+    if policy.get("failure_action") != "service_not_ready":
+        schema_violations.append("failure_action_must_be_service_not_ready")
+    if set(required_fields) != set(SERVICE_READINESS_CONTRACT_FIELDS):
+        schema_violations.append("required_fields_must_match_contract_catalog")
+    if not required_probe_ids:
+        schema_violations.append("required_probe_ids_required")
+
+    malformed_probes = []
+    duplicate_probe_ids = []
+    source_violations = []
+    seen_probe_ids = set()
+    probe_ids = set()
+    probe_evidence = []
+    for index, probe in enumerate(probes):
+        if not isinstance(probe, dict):
+            malformed_probes.append({"index": index, "probe_id": None, "missing_fields": list(SERVICE_READINESS_PROBE_REQUIRED_FIELDS), "violations": ["probe_not_object"]})
+            continue
+
+        service_name = str(probe.get("service_name") or "")
+        probe_id = str(probe.get("probe_id") or "")
+        probe_ids.add(probe_id)
+        missing = _missing_required_fields(probe, SERVICE_READINESS_PROBE_REQUIRED_FIELDS)
+        violations = []
+        if probe_id in seen_probe_ids:
+            duplicate_probe_ids.append(probe_id)
+        if probe_id:
+            seen_probe_ids.add(probe_id)
+        if str(probe.get("health_status") or "") not in {"ready", "degraded", "blocked"}:
+            violations.append("health_status_invalid")
+        dependency_status = probe.get("dependency_status")
+        if not isinstance(dependency_status, dict) or not dependency_status:
+            violations.append("dependency_status_required")
+        dependency_anchors = [str(item) for item in (probe.get("dependency_anchors") or [])]
+        if not dependency_anchors:
+            violations.append("dependency_anchors_required")
+
+        source_text, source_error = _read_project_text(probe.get("source_file"))
+        if source_error:
+            source_violations.append({"probe_id": probe_id, **source_error})
+        else:
+            source_anchor = str(probe.get("source_anchor") or "")
+            if source_anchor and source_anchor not in source_text:
+                source_violations.append({"probe_id": probe_id, "reason": "source_anchor_missing", "source_anchor": source_anchor})
+            missing_dependency_anchors = [anchor for anchor in dependency_anchors if anchor not in source_text]
+            if missing_dependency_anchors:
+                source_violations.append({"probe_id": probe_id, "reason": "dependency_anchor_missing", "missing_dependency_anchors": missing_dependency_anchors})
+            endpoint = probe.get("endpoint")
+            if endpoint:
+                source_lines = source_text.splitlines()
+                route_block = _dashboard_route_block(source_lines, str(endpoint))
+                if not route_block:
+                    source_violations.append({"probe_id": probe_id, "endpoint": endpoint, "reason": "endpoint_route_missing"})
+                elif source_anchor and source_anchor not in route_block:
+                    source_violations.append({"probe_id": probe_id, "endpoint": endpoint, "reason": "source_anchor_missing_in_route", "source_anchor": source_anchor})
+
+        probe_evidence.append(
+            {
+                "service_name": service_name,
+                "probe_id": probe_id,
+                "health_status": probe.get("health_status"),
+                "dependency_status": dependency_status,
+                "checked_at": checked_at,
+            }
+        )
+        if missing or violations:
+            malformed_probes.append({"index": index, "service_name": service_name or None, "probe_id": probe_id or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_probe_ids = sorted(set(required_probe_ids) - probe_ids)
+    unexpected_probe_ids = sorted(probe_ids - set(required_probe_ids))
+    passed = (
+        not schema_violations
+        and bool(probes)
+        and not malformed_probes
+        and not duplicate_probe_ids
+        and not source_violations
+        and not missing_required_probe_ids
+        and not unexpected_probe_ids
+        and all(item.get("health_status") == "ready" for item in probe_evidence)
+    )
+    return _contract(
+        "ServiceReadinessProbeContract",
+        passed,
+        "service_readiness_probe_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "required_fields": required_fields,
+            "probe_count": len(probes),
+            "required_probe_ids": required_probe_ids,
+            "probes": probe_evidence,
+            "schema_violations": schema_violations,
+            "malformed_probes": malformed_probes,
+            "duplicate_probe_ids": sorted(str(item) for item in duplicate_probe_ids),
+            "source_violations": source_violations,
+            "missing_required_probe_ids": missing_required_probe_ids,
+            "unexpected_probe_ids": unexpected_probe_ids,
+        },
+    )
+
+
 def verify_spec_consistency(manifest_path=MANIFEST_PATH, catalog_path=CATALOG_PATH, registry_path=ENTRY_MODE_REGISTRY_PATH):
     try:
         report = validate_all(manifest_path, catalog_path, registry_path)
@@ -2493,6 +2627,7 @@ def build_basic_contract_readiness(
     api_response_envelope_policy_path=DEFAULT_API_RESPONSE_ENVELOPE_POLICY,
     error_taxonomy_path=DEFAULT_ERROR_TAXONOMY,
     log_redaction_policy_path=DEFAULT_LOG_REDACTION_POLICY,
+    service_readiness_policy_path=DEFAULT_SERVICE_READINESS_PROBES,
     env=None,
 ):
     contracts = {
@@ -2533,6 +2668,7 @@ def build_basic_contract_readiness(
             verify_api_response_envelope_contract(policy_path=api_response_envelope_policy_path),
             verify_error_taxonomy(taxonomy_path=error_taxonomy_path),
             verify_log_redaction_verification(policy_path=log_redaction_policy_path),
+            verify_service_readiness_probe_contract(policy_path=service_readiness_policy_path),
         ]
     }
     blocking = [contract_id for contract_id, item in contracts.items() if item.get("status") != "pass"]
@@ -2569,6 +2705,7 @@ def main():
     parser.add_argument("--api-response-envelope-policy", default=str(DEFAULT_API_RESPONSE_ENVELOPE_POLICY))
     parser.add_argument("--error-taxonomy", default=str(DEFAULT_ERROR_TAXONOMY))
     parser.add_argument("--log-redaction-policy", default=str(DEFAULT_LOG_REDACTION_POLICY))
+    parser.add_argument("--service-readiness-policy", default=str(DEFAULT_SERVICE_READINESS_PROBES))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -2591,6 +2728,7 @@ def main():
         api_response_envelope_policy_path=Path(args.api_response_envelope_policy),
         error_taxonomy_path=Path(args.error_taxonomy),
         log_redaction_policy_path=Path(args.log_redaction_policy),
+        service_readiness_policy_path=Path(args.service_readiness_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

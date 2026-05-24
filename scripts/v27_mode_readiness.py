@@ -49,6 +49,7 @@ MODE_REQUIREMENTS = {
         "APIResponseEnvelopeContract",
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
+        "ServiceReadinessProbeContract",
         "RouteRegistryContract",
         "InputSanitizationContract",
         "EventSemanticsContract",

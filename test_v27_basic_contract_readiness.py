@@ -21,6 +21,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_project_stop_loss,
     verify_safe_default,
     verify_safety_case,
+    verify_service_readiness_probe_contract,
     verify_top_fix_queue,
     verify_waiver_policy,
     verify_write_path_registry,
@@ -55,6 +56,7 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "APIResponseEnvelopeContract",
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
+        "ServiceReadinessProbeContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
 
@@ -1072,6 +1074,77 @@ def test_log_redaction_verification_blocks_unredacted_sample(tmp_path):
             "reason": "redaction_anchor_missing",
             "redaction_anchor": "redactLogMessage(args.map(formatLogArg).join(' '))",
         }
+    ]
+
+
+def test_service_readiness_probe_contract_covers_health_surfaces():
+    report = verify_service_readiness_probe_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["schema_version"] == "v2.7.0.service_readiness_probes.v1"
+    assert report["evidence"]["failure_action"] == "service_not_ready"
+    assert report["evidence"]["required_fields"] == ["service_name", "probe_id", "health_status", "dependency_status", "checked_at"]
+    assert report["evidence"]["probe_count"] == 6
+    assert report["evidence"]["schema_violations"] == []
+    assert report["evidence"]["malformed_probes"] == []
+    assert report["evidence"]["source_violations"] == []
+    assert report["evidence"]["missing_required_probe_ids"] == []
+    probe_ids = {probe["probe_id"] for probe in report["evidence"]["probes"]}
+    assert {
+        "public_health",
+        "dashboard_status_snapshot",
+        "module_health_snapshot",
+        "v27_read_model_health",
+        "v27_mode_readiness",
+        "zeabur_supervisor_boot",
+    } <= probe_ids
+    for probe in report["evidence"]["probes"]:
+        assert probe["health_status"] == "ready"
+        assert probe["dependency_status"]
+        assert probe["checked_at"]
+
+
+def test_service_readiness_probe_contract_blocks_missing_dependency_anchor(tmp_path):
+    source_path = tmp_path / "dashboard.js"
+    source_path.write_text(
+        "if (url.pathname === '/health') { res.end(JSON.stringify({status: 'ok'})); }\n",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "service-readiness.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.service_readiness_probes.v1",
+                "failure_action": "service_not_ready",
+                "required_fields": ["service_name", "probe_id", "health_status", "dependency_status", "checked_at"],
+                "required_probe_ids": ["public_health"],
+                "probes": [
+                    {
+                        "service_name": "dashboard_http_server",
+                        "probe_id": "public_health",
+                        "health_status": "ready",
+                        "endpoint": "/health",
+                        "source_file": str(source_path),
+                        "source_anchor": "url.pathname === '/health'",
+                        "dependency_status": {"commit_fingerprint": "required"},
+                        "dependency_anchors": ["commit: runtimeCommitFingerprint()"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_service_readiness_probe_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "service_readiness_probe_missing_malformed_or_unenforced"
+    assert report["evidence"]["source_violations"] == [
+        {
+            "probe_id": "public_health",
+            "reason": "dependency_anchor_missing",
+            "missing_dependency_anchors": ["commit: runtimeCommitFingerprint()"],
+        },
     ]
 
 
