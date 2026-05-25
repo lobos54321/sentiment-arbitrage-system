@@ -1,0 +1,60 @@
+{
+  "schema_version": "v2.7.0.event_schema_compatibility.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "v27_event_log_schema_enum_and_mutation_idempotency",
+  "failure_action": "event_rejected",
+  "allowed_event_schema_versions": ["v2.7.0.seed"],
+  "source_anchors": [
+    {"source_file": "scripts/v27_event_log.py", "anchor": "\"event_schema_version\": \"v2.7.0.seed\""},
+    {"source_file": "scripts/v27_event_log.py", "anchor": "if not isinstance(payload, dict):"},
+    {"source_file": "scripts/v27_event_log.py", "anchor": "idempotency_key = spec.get(\"idempotency_key\") or sha256_hex"},
+    {"source_file": "scripts/v27_event_log.py", "anchor": "appended_by_key = {}"},
+    {"source_file": "scripts/v27_event_log.py", "anchor": "existing_event_id = state[\"idempotency_index\"].get(idempotency_key)"},
+    {"source_file": "scripts/v27_event_log.py", "anchor": "state[\"idempotency_index\"][idempotency_key] = event_id"},
+    {"source_file": "scripts/v27_denominator_projection.py", "anchor": "TELEGRAM_SIGNAL_EVENT_TYPE = \"telegram_signal_seen\""},
+    {"source_file": "scripts/v27_denominator_projection.py", "anchor": "IDEMPOTENCY_EVENT_TYPE = \"idempotency_contract_recorded\""}
+  ],
+  "event_schemas": [
+    {"event_type": "telegram_signal_seen", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_telegram_signals.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "source_dog_label_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_source_labels.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "paper_decision_event_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_paper_decisions.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "paper_missed_signal_attribution_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_paper_decisions.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "trade_outcome_label_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_trade_outcomes.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "standardized_stop_contract_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_standardized_stops.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "ex_ante_feasibility_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_ex_ante_feasibility.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "earliest_actionable_time_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_earliest_actionable_times.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "realtime_clean_detector_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_realtime_clean.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "quote_intent_binding_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_quote_intent_bindings.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "raw_provider_evidence_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_raw_provider_evidence.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "idempotency_contract_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_idempotency_contracts.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "execution_control_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_execution_control.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "paper_ledger_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_paper_ledgers.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "no_fill_outcome_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_recovery_controls.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"},
+    {"event_type": "runtime_recovery_control_recorded", "schema_version": "v2.7.0.seed", "producer_version": "v27_mirror_recovery_controls.py", "consumer_version": "v27_denominator_projection.py", "compatibility_result": "backward_compatible"}
+  ],
+  "enum_evolution": [
+    {"enum_name": "event_schema_version", "old_value": "v2.7.0.seed", "new_value": "v2.7.0.seed", "compatibility_policy": "append_only_no_rename", "migration_action": "no_migration_required"},
+    {"enum_name": "event_type", "old_value": "telegram_signal_seen", "new_value": "idempotency_contract_recorded", "compatibility_policy": "append_only_no_rename", "migration_action": "register_consumer_before_producer"},
+    {"enum_name": "event_type", "old_value": "trade_outcome_label_recorded", "new_value": "raw_provider_evidence_recorded", "compatibility_policy": "append_only_no_rename", "migration_action": "register_consumer_before_producer"},
+    {"enum_name": "mode_target", "old_value": "mvp_blocking", "new_value": "normal_tiny_blocking", "compatibility_policy": "append_only_no_rename", "migration_action": "catalog_scope_audit_required"},
+    {"enum_name": "entry_mode_tier", "old_value": "shadow_watch_only", "new_value": "hard_shadow", "compatibility_policy": "append_only_no_rename", "migration_action": "safe_default_fail_closed"}
+  ],
+  "mutation_commands": [
+    {
+      "command_id": "v27_event_log_append",
+      "idempotency_key": "event_log_append:unit:telegram_signal_seen",
+      "mutation_target": "filesystem:data/v27_event_log/events.jsonl",
+      "dedupe_hash_material": ["event_type", "aggregate_id", "payload"],
+      "result_hash_material": ["event_id", "event_hash"],
+      "sample_payload": {"event_type": "telegram_signal_seen", "aggregate_id": "telegram_signal:sol:So11111111111111111111111111111111111111112:unknown_pool:0", "payload": {"token_ca": "So11111111111111111111111111111111111111112"}}
+    },
+    {
+      "command_id": "dashboard_manual_evidence_mutation",
+      "idempotency_key": "manual_evidence:v27-read-model-refresh:unit",
+      "mutation_target": "filesystem:data/v27_read_models",
+      "dedupe_hash_material": ["endpoint", "requested_at_floor", "operator_scope"],
+      "result_hash_material": ["endpoint", "payload_hash"],
+      "sample_payload": {"endpoint": "/api/paper/v27-read-model-refresh", "requested_at_floor": "2026-05-25T00:00:00Z", "operator_scope": "v27:evidence_mutation"}
+    }
+  ]
+}

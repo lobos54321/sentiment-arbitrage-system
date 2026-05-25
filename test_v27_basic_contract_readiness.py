@@ -13,14 +13,17 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_clock_rollback_guard_contract,
     verify_dashboard_action_separation_contract,
     verify_direct_database_mutation_ban,
+    verify_enum_evolution_contract,
     verify_entry_point_inventory,
     verify_error_taxonomy,
+    verify_event_schema_compatibility_contract,
     verify_feature_flag_dependency_contract,
     verify_filesystem_disk_pressure_policy,
     verify_evidence_eligibility_matrix,
     verify_human_readable_reason_contract,
     verify_log_redaction_verification,
     verify_machine_readable_reason_contract,
+    verify_mutation_command_idempotency_contract,
     verify_numeric_precision_policy,
     verify_scheduled_job_mode_gate_contract,
     verify_static_policy_enforcement,
@@ -63,6 +66,9 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "DirectDatabaseMutationBan",
         "AggregateBoundaryContract",
         "ClockRollbackGuardContract",
+        "EventSchemaCompatibilityContract",
+        "EnumEvolutionContract",
+        "MutationCommandIdempotencyContract",
         "BackgroundJobRegistryContract",
         "ScheduledJobModeGateContract",
         "EntryPointInventoryContract",
@@ -268,6 +274,91 @@ def test_clock_rollback_guard_detects_monotonic_regression():
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "clock_rollback_guard_unverified_or_dirty"
     assert report["evidence"]["rollback_detected"] is True
+
+
+def test_event_schema_policy_binds_producers_consumers_and_versions():
+    schema = verify_event_schema_compatibility_contract()
+    enums = verify_enum_evolution_contract()
+    idempotency = verify_mutation_command_idempotency_contract()
+
+    assert schema["status"] == "pass"
+    assert schema["evidence"]["event_schema_count"] >= 10
+    assert schema["evidence"]["consumer_gaps"] == []
+    assert schema["evidence"]["source_anchor_violations"] == []
+    assert enums["status"] == "pass"
+    assert set(enums["evidence"]["enum_names"]) >= {
+        "event_schema_version",
+        "event_type",
+        "mode_target",
+        "entry_mode_tier",
+    }
+    assert idempotency["status"] == "pass"
+    assert idempotency["evidence"]["command_count"] >= 2
+    assert idempotency["evidence"]["malformed_commands"] == []
+
+
+def test_event_schema_policy_blocks_bad_schema_version(tmp_path):
+    policy_path = tmp_path / "event-schema.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.event_schema_compatibility.v1",
+                "scope": "unit",
+                "failure_action": "event_rejected",
+                "allowed_event_schema_versions": ["v2.7.0.seed"],
+                "source_anchors": [],
+                "event_schemas": [
+                    {
+                        "event_type": "telegram_signal_seen",
+                        "schema_version": "v9.bad",
+                        "producer_version": "producer",
+                        "consumer_version": "consumer",
+                        "compatibility_result": "backward_compatible",
+                    }
+                ],
+                "enum_evolution": [],
+                "mutation_commands": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_event_schema_compatibility_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "event_schema_compatibility_missing_malformed_or_unenforced"
+    assert report["evidence"]["malformed_schemas"][0]["violations"] == ["schema_version_not_allowed"]
+
+
+def test_mutation_command_idempotency_blocks_missing_dedupe_material(tmp_path):
+    policy_path = tmp_path / "event-schema.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.event_schema_compatibility.v1",
+                "scope": "unit",
+                "failure_action": "event_rejected",
+                "source_anchors": [],
+                "mutation_commands": [
+                    {
+                        "command_id": "unit",
+                        "idempotency_key": "unit:1",
+                        "mutation_target": "filesystem:unit",
+                        "dedupe_hash_material": [],
+                        "result_hash_material": ["event_id"],
+                        "sample_payload": {"event_id": "evt"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_mutation_command_idempotency_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "mutation_command_idempotency_missing_malformed_or_unenforced"
+    assert "dedupe_hash_material_required" in report["evidence"]["malformed_commands"][0]["violations"]
 
 
 def test_paper_mode_safety_blocks_live_capabilities():

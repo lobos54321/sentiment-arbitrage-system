@@ -34,6 +34,7 @@ DEFAULT_ACCESS_CONTROL_POLICY = PROJECT_ROOT / "config" / "v27-access-control-po
 DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
 DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
 DEFAULT_AGGREGATE_BOUNDARIES = PROJECT_ROOT / "config" / "v27-aggregate-boundaries.json"
+DEFAULT_EVENT_SCHEMA_COMPATIBILITY = PROJECT_ROOT / "config" / "v27-event-schema-compatibility.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
@@ -115,6 +116,27 @@ CLOCK_ROLLBACK_REQUIRED_FIELDS = (
     "monotonic_ts",
     "rollback_detected",
     "guard_action",
+)
+EVENT_SCHEMA_COMPATIBILITY_REQUIRED_FIELDS = (
+    "event_type",
+    "schema_version",
+    "producer_version",
+    "consumer_version",
+    "compatibility_result",
+)
+ENUM_EVOLUTION_REQUIRED_FIELDS = (
+    "enum_name",
+    "old_value",
+    "new_value",
+    "compatibility_policy",
+    "migration_action",
+)
+MUTATION_COMMAND_IDEMPOTENCY_REQUIRED_FIELDS = (
+    "command_id",
+    "idempotency_key",
+    "mutation_target",
+    "dedupe_hash",
+    "result_hash",
 )
 BACKGROUND_JOB_REQUIRED_FIELDS = (
     "job_name",
@@ -1204,6 +1226,231 @@ def verify_clock_rollback_guard_contract(clock_samples=None):
                 )
                 for sample in samples
             ],
+        },
+    )
+
+
+def _load_event_schema_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "event_schema_policy_not_object"}
+    return policy, {"policy_path": str(policy_path), "schema_version": policy.get("schema_version"), "scope": policy.get("scope")}
+
+
+def _verify_source_anchors(source_anchors):
+    missing = []
+    source_errors = []
+    for index, item in enumerate(source_anchors if isinstance(source_anchors, list) else []):
+        if not isinstance(item, dict):
+            missing.append({"index": index, "source_file": None, "anchor": None, "reason": "source_anchor_not_object"})
+            continue
+        source_file = item.get("source_file")
+        anchor = str(item.get("anchor") or "")
+        text, error = _read_project_text(source_file)
+        if error:
+            source_errors.append({"index": index, **error})
+            continue
+        if not anchor or anchor not in text:
+            missing.append({"index": index, "source_file": source_file, "anchor": anchor, "reason": "anchor_missing"})
+    return missing, source_errors
+
+
+def verify_event_schema_compatibility_contract(policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY):
+    policy, base_evidence = _load_event_schema_policy(policy_path)
+    if policy is None:
+        return _contract("EventSchemaCompatibilityContract", False, "event_schema_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    projection_text, projection_error = _read_project_text("scripts/v27_denominator_projection.py")
+    if projection_error:
+        source_errors.append({"source": "projection", **projection_error})
+    allowed_versions = set(str(item) for item in (policy.get("allowed_event_schema_versions") or []))
+    schemas = policy.get("event_schemas") if isinstance(policy.get("event_schemas"), list) else []
+    malformed_schemas = []
+    duplicate_event_types = []
+    consumer_gaps = []
+    seen_event_types = set()
+    compatible_results = {"backward_compatible", "producer_consumer_match"}
+    for index, item in enumerate(schemas):
+        if not isinstance(item, dict):
+            malformed_schemas.append({"index": index, "event_type": None, "missing_fields": list(EVENT_SCHEMA_COMPATIBILITY_REQUIRED_FIELDS), "violations": ["schema_not_object"]})
+            continue
+        event_type = str(item.get("event_type") or "")
+        missing = _missing_required_fields(item, EVENT_SCHEMA_COMPATIBILITY_REQUIRED_FIELDS)
+        violations = []
+        if event_type in seen_event_types:
+            duplicate_event_types.append(event_type)
+        if event_type:
+            seen_event_types.add(event_type)
+        if event_type and not re.match(r"^[a-z][a-z0-9_]*$", event_type):
+            violations.append("event_type_must_be_lower_snake_case")
+        if str(item.get("schema_version") or "") not in allowed_versions:
+            violations.append("schema_version_not_allowed")
+        if str(item.get("compatibility_result") or "") not in compatible_results:
+            violations.append("compatibility_result_not_compatible")
+        if event_type and event_type not in projection_text:
+            consumer_gaps.append({"event_type": event_type, "consumer_version": item.get("consumer_version")})
+        if missing or violations:
+            malformed_schemas.append({"index": index, "event_type": event_type or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.event_schema_compatibility.v1"
+        and policy.get("failure_action") == "event_rejected"
+        and bool(allowed_versions)
+        and len(schemas) >= 10
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_schemas
+        and not duplicate_event_types
+        and not consumer_gaps
+    )
+    return _contract(
+        "EventSchemaCompatibilityContract",
+        passed,
+        "event_schema_compatibility_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "allowed_event_schema_versions": sorted(allowed_versions),
+            "event_schema_count": len(schemas),
+            "event_types": sorted(seen_event_types),
+            "duplicate_event_types": sorted(str(item) for item in duplicate_event_types),
+            "malformed_schemas": malformed_schemas,
+            "consumer_gaps": consumer_gaps,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_enum_evolution_contract(policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY):
+    policy, base_evidence = _load_event_schema_policy(policy_path)
+    if policy is None:
+        return _contract("EnumEvolutionContract", False, "enum_evolution_policy_missing_or_invalid", base_evidence)
+
+    rows = policy.get("enum_evolution") if isinstance(policy.get("enum_evolution"), list) else []
+    malformed_rows = []
+    duplicate_rows = []
+    enum_names = set()
+    seen = set()
+    allowed_policies = {"append_only_no_rename", "backward_compatible_alias"}
+    allowed_actions = {
+        "catalog_scope_audit_required",
+        "no_migration_required",
+        "register_consumer_before_producer",
+        "safe_default_fail_closed",
+    }
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "enum_name": None, "missing_fields": list(ENUM_EVOLUTION_REQUIRED_FIELDS), "violations": ["enum_row_not_object"]})
+            continue
+        enum_name = str(item.get("enum_name") or "")
+        key = (enum_name, str(item.get("old_value") or ""), str(item.get("new_value") or ""))
+        missing = _missing_required_fields(item, ENUM_EVOLUTION_REQUIRED_FIELDS)
+        violations = []
+        if key in seen:
+            duplicate_rows.append(":".join(key))
+        seen.add(key)
+        if enum_name:
+            enum_names.add(enum_name)
+        if str(item.get("compatibility_policy") or "") not in allowed_policies:
+            violations.append("compatibility_policy_invalid")
+        if str(item.get("migration_action") or "") not in allowed_actions:
+            violations.append("migration_action_invalid")
+        if missing or violations:
+            malformed_rows.append({"index": index, "enum_name": enum_name or None, "missing_fields": missing, "violations": violations})
+
+    required_enum_names = {"event_schema_version", "event_type", "mode_target", "entry_mode_tier"}
+    missing_enum_names = sorted(required_enum_names - enum_names)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.event_schema_compatibility.v1"
+        and bool(rows)
+        and not malformed_rows
+        and not duplicate_rows
+        and not missing_enum_names
+    )
+    return _contract(
+        "EnumEvolutionContract",
+        passed,
+        "enum_evolution_missing_malformed_or_unsafe",
+        {
+            **base_evidence,
+            "enum_evolution_count": len(rows),
+            "enum_names": sorted(enum_names),
+            "missing_enum_names": missing_enum_names,
+            "duplicate_rows": sorted(duplicate_rows),
+            "malformed_rows": malformed_rows,
+        },
+    )
+
+
+def verify_mutation_command_idempotency_contract(policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY):
+    policy, base_evidence = _load_event_schema_policy(policy_path)
+    if policy is None:
+        return _contract("MutationCommandIdempotencyContract", False, "mutation_idempotency_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    commands = policy.get("mutation_commands") if isinstance(policy.get("mutation_commands"), list) else []
+    malformed_commands = []
+    duplicate_command_ids = []
+    seen_command_ids = set()
+    command_evidence = []
+    for index, item in enumerate(commands):
+        if not isinstance(item, dict):
+            malformed_commands.append({"index": index, "command_id": None, "missing_fields": list(MUTATION_COMMAND_IDEMPOTENCY_REQUIRED_FIELDS), "violations": ["command_not_object"]})
+            continue
+        command_id = str(item.get("command_id") or "")
+        sample_payload = item.get("sample_payload") if isinstance(item.get("sample_payload"), dict) else {}
+        dedupe_hash_material = [str(value) for value in (item.get("dedupe_hash_material") or [])]
+        result_hash_material = [str(value) for value in (item.get("result_hash_material") or [])]
+        dedupe_hash = _sha256_json({key: sample_payload.get(key) for key in dedupe_hash_material})
+        result_hash = _sha256_json({"command_id": command_id, "idempotency_key": item.get("idempotency_key"), "mutation_target": item.get("mutation_target"), "dedupe_hash": dedupe_hash, "result_hash_material": result_hash_material})
+        evidence_row = {
+            "command_id": command_id,
+            "idempotency_key": item.get("idempotency_key"),
+            "mutation_target": item.get("mutation_target"),
+            "dedupe_hash": dedupe_hash,
+            "result_hash": result_hash,
+        }
+        command_evidence.append(evidence_row)
+        missing = _missing_required_fields(evidence_row, MUTATION_COMMAND_IDEMPOTENCY_REQUIRED_FIELDS)
+        violations = []
+        if command_id in seen_command_ids:
+            duplicate_command_ids.append(command_id)
+        if command_id:
+            seen_command_ids.add(command_id)
+        if not dedupe_hash_material:
+            violations.append("dedupe_hash_material_required")
+        if not result_hash_material:
+            violations.append("result_hash_material_required")
+        if not isinstance(sample_payload, dict) or not sample_payload:
+            violations.append("sample_payload_required")
+        if missing or violations:
+            malformed_commands.append({"index": index, "command_id": command_id or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.event_schema_compatibility.v1"
+        and bool(commands)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_commands
+        and not duplicate_command_ids
+    )
+    return _contract(
+        "MutationCommandIdempotencyContract",
+        passed,
+        "mutation_command_idempotency_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "command_count": len(commands),
+            "commands": command_evidence,
+            "duplicate_command_ids": sorted(str(item) for item in duplicate_command_ids),
+            "malformed_commands": malformed_commands,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
         },
     )
 
@@ -3752,6 +3999,7 @@ def build_basic_contract_readiness(
     write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
     direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
     aggregate_boundary_policy_path=DEFAULT_AGGREGATE_BOUNDARIES,
+    event_schema_compatibility_policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
@@ -3797,6 +4045,9 @@ def build_basic_contract_readiness(
             ),
             verify_aggregate_boundary_contract(policy_path=aggregate_boundary_policy_path),
             verify_clock_rollback_guard_contract(),
+            verify_event_schema_compatibility_contract(policy_path=event_schema_compatibility_policy_path),
+            verify_enum_evolution_contract(policy_path=event_schema_compatibility_policy_path),
+            verify_mutation_command_idempotency_contract(policy_path=event_schema_compatibility_policy_path),
             verify_background_job_registry(registry_path=background_job_registry_path),
             verify_scheduled_job_mode_gate_contract(registry_path=background_job_registry_path),
             verify_entry_point_inventory(
@@ -3845,6 +4096,7 @@ def main():
     parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
     parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
     parser.add_argument("--aggregate-boundary-policy", default=str(DEFAULT_AGGREGATE_BOUNDARIES))
+    parser.add_argument("--event-schema-compatibility-policy", default=str(DEFAULT_EVENT_SCHEMA_COMPATIBILITY))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
@@ -3874,6 +4126,7 @@ def main():
         write_path_registry_path=Path(args.write_path_registry),
         direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
         aggregate_boundary_policy_path=Path(args.aggregate_boundary_policy),
+        event_schema_compatibility_policy_path=Path(args.event_schema_compatibility_policy),
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
