@@ -185,6 +185,53 @@ def append_raw_provider_evidence_event(event_log_dir):
     )
 
 
+def append_decision_audit_event(event_log_dir):
+    feature_vector = {
+        "token_ca": "TokenReady",
+        "route": "unit_route",
+        "quote_intent_id": 1,
+        "entry_quote_available_at": "2026-01-15T00:00:02Z",
+    }
+    trace_bundle = {
+        "policy_version": "v2.7.0.unit_ultra_decision_policy.v1",
+        "source_event_ids": ["unit:telegram_signal_seen", "unit:quote_intent_binding"],
+        "feature_max_available_at": "2026-01-15T00:00:02Z",
+        "decision_available_at": "2026-01-15T00:00:03Z",
+        "used_future_peak": False,
+        "used_future_outcome": False,
+        "used_posthoc_label": False,
+        "forbidden_future_fields_used": [],
+    }
+    V27EventLog(event_log_dir).append_event(
+        event_type="decision_audit_recorded",
+        aggregate_id="decision_audit:paper_trade:1:entry_decision",
+        idempotency_key="decision_audit:paper_trade:1:entry_decision:v2.7.0.unit_ultra_decision_policy.v1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "decision_audit_version": "v2.7.0.decision_audit.v1",
+            "decision_id": "paper_trade:1:entry_decision",
+            "policy_bundle_id": "policy-bundle:unit-ultra:v1",
+            "spec_hash": sha256_hex({"spec": "v2.7.0"}),
+            "feature_vector": feature_vector,
+            "feature_vector_hash": sha256_hex(feature_vector),
+            "decision_trace_bundle": trace_bundle,
+            "decision_trace_bundle_hash": sha256_hex(trace_bundle),
+            "decision_available_at": "2026-01-15T00:00:03Z",
+            "feature_max_available_at": "2026-01-15T00:00:02Z",
+            "failure_action": "entry_rejected",
+            "used_future_peak": False,
+            "used_future_outcome": False,
+            "used_posthoc_label": False,
+            "forbidden_future_fields_used": [],
+        },
+    )
+
+
 def append_randomness_control_event(event_log_dir):
     assignment_id = "normal-tiny-policy-v1"
     V27EventLog(event_log_dir).append_event(
@@ -847,6 +894,8 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"
     assert "EntryExecutionStateMachine" in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "DecisionAudit" in matrix["modes"]["ultra_tiny"]["required_contracts"]
+    assert "LedgerSnapshotHashContract" in matrix["modes"]["ultra_tiny"]["required_contracts"]
     assert matrix["modes"]["normal_tiny"]["status"] == "blocked"
     assert "WorkerFleetConsistencyContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "SafeDefaultContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
@@ -1351,6 +1400,49 @@ def test_mode_readiness_consumes_no_fill_and_recovery_controls(tmp_path):
     ):
         assert matrix["contract_statuses"][contract_id]["status"] == "pass"
         assert contract_id not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_decision_audit_and_ledger_snapshot_hash(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_shadow_trade_timing_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_raw_provider_evidence_event(event_log_dir)
+    append_decision_audit_event(event_log_dir)
+    append_idempotency_contract_event(event_log_dir)
+    append_execution_control_event(event_log_dir)
+    append_paper_ledger_event(event_log_dir)
+    append_no_fill_outcome_event(event_log_dir)
+    append_runtime_recovery_control_event(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    decision_audit = matrix["contract_statuses"]["DecisionAudit"]
+    ledger_snapshot = matrix["contract_statuses"]["LedgerSnapshotHashContract"]
+    assert decision_audit["status"] == "pass"
+    assert decision_audit["evidence"]["valid_decision_audit_count"] == 1
+    assert decision_audit["evidence"]["future_leakage_count"] == 0
+    assert ledger_snapshot["status"] == "pass"
+    assert ledger_snapshot["evidence"]["ledger_checkpoint_id"] == "ledger_checkpoint:unit:paper:1"
+    assert ledger_snapshot["evidence"]["snapshot_hash_ok"] is True
+    assert ledger_snapshot["evidence"]["replay_hash"]
+    assert "DecisionAudit" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert "LedgerSnapshotHashContract" not in matrix["modes"]["ultra_tiny"]["blocking_contracts"]
+    assert matrix["modes"]["ultra_tiny"]["status"] == "allowed"
+    assert matrix["highest_allowed_mode"] == "ultra_tiny"
 
 
 def test_mode_readiness_consumes_trade_outcome_label_evidence(tmp_path):

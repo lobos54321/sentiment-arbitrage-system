@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile v27 readiness scripts
-        run: python3 -m py_compile scripts/v27_basic_contract_readiness.py scripts/v27_mode_readiness.py scripts/generate_v27_contract_client.py
+        run: python3 -m py_compile scripts/v27_basic_contract_readiness.py scripts/v27_mode_readiness.py scripts/v27_denominator_projection.py scripts/generate_v27_contract_client.py
       - name: Validate v27 readiness JSON
         run: |
           python3 -m json.tool config/v27-error-taxonomy.json

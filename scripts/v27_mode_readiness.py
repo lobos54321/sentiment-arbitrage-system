@@ -137,6 +137,7 @@ MODE_REQUIREMENTS = {
     "ultra_tiny": [
         "RealtimeCleanDetector",
         "QuoteIntentBindingContract",
+        "DecisionAudit",
         "IdempotencyContract",
         "IdempotencyKeyNamespaceContract",
         "ExecutionLeaseContract",
@@ -145,6 +146,7 @@ MODE_REQUIREMENTS = {
         "PaperPositionLedgerContract",
         "PaperCapitalLedgerContract",
         "DoubleEntryLedgerInvariantContract",
+        "LedgerSnapshotHashContract",
         "CapitalReservationPolicy",
         "NoFillOutcome",
         "CrashRecoveryStateMachine",
@@ -265,6 +267,69 @@ def _consumer_contract_status(projection_consumer_health, contract_id):
             "projection_consumer_health_path": projection_consumer_health.get("path"),
             "consumer_health_hash_ok": hash_ok,
         },
+    )
+
+
+def _sha256_hex_like(value):
+    text = str(value or "")
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
+
+
+def _ledger_snapshot_hash_status(snapshot_report, snapshot):
+    projection = snapshot.get("projection") if isinstance(snapshot, dict) else {}
+    if not isinstance(projection, dict):
+        projection = {}
+    projection_health = projection.get("health") if isinstance(projection.get("health"), dict) else {}
+    contract_evidence = projection.get("contract_evidence") if isinstance(projection.get("contract_evidence"), dict) else {}
+    double_entry = contract_evidence.get("DoubleEntryLedgerInvariantContract") or {}
+    checkpoint_ids = [
+        str(item)
+        for item in (double_entry.get("ledger_checkpoint_ids") or [])
+        if item
+    ]
+    ledger_checkpoint_id = checkpoint_ids[-1] if checkpoint_ids else None
+    replay_hash = projection.get("records_hash") or snapshot.get("projection_hash")
+    evidence = {
+        "ledger_snapshot_id": snapshot.get("snapshot_id") if isinstance(snapshot, dict) else None,
+        "ledger_checkpoint_id": ledger_checkpoint_id,
+        "ledger_checkpoint_ids": checkpoint_ids,
+        "snapshot_hash": snapshot.get("snapshot_hash") if isinstance(snapshot, dict) else None,
+        "replay_hash": replay_hash,
+        "verified_at": snapshot_report.get("checked_at") or snapshot.get("generated_at") if isinstance(snapshot, dict) else None,
+        "snapshot_hash_ok": bool(snapshot_report.get("snapshot_hash_ok")),
+        "projection_hash_ok": bool(snapshot_report.get("projection_hash_ok")),
+        "dashboard_safe": bool(snapshot_report.get("health", {}).get("dashboard_safe")),
+        "paper_ledger_ok": bool(projection_health.get("paper_position_ledger_ok") and projection_health.get("paper_capital_ledger_ok")),
+        "double_entry_ledger_invariant_ok": bool(projection_health.get("double_entry_ledger_invariant_ok")),
+        "records_hash": projection.get("records_hash"),
+        "projection_hash": snapshot.get("projection_hash") if isinstance(snapshot, dict) else None,
+    }
+    missing_fields = [
+        field
+        for field in ("ledger_snapshot_id", "ledger_checkpoint_id", "snapshot_hash", "replay_hash", "verified_at")
+        if not evidence.get(field)
+    ]
+    hash_violations = []
+    if evidence.get("snapshot_hash") and not _sha256_hex_like(evidence.get("snapshot_hash")):
+        hash_violations.append("snapshot_hash_not_sha256")
+    if evidence.get("replay_hash") and not _sha256_hex_like(evidence.get("replay_hash")):
+        hash_violations.append("replay_hash_not_sha256")
+    evidence["missing_fields"] = missing_fields
+    evidence["hash_violations"] = hash_violations
+    passed = (
+        not missing_fields
+        and not hash_violations
+        and evidence["snapshot_hash_ok"]
+        and evidence["projection_hash_ok"]
+        and evidence["dashboard_safe"]
+        and evidence["paper_ledger_ok"]
+        and evidence["double_entry_ledger_invariant_ok"]
+    )
+    return _status(
+        "LedgerSnapshotHashContract",
+        "pass" if passed else "missing_evidence",
+        "ledger_snapshot_hash_missing_stale_or_dirty",
+        evidence,
     )
 
 
@@ -459,6 +524,13 @@ def build_contract_statuses(
         "raw_provider_evidence_missing_malformed_or_untrusted",
         raw_provider_evidence,
     )
+    decision_audit_evidence = contract_evidence.get("DecisionAudit") or {}
+    statuses["DecisionAudit"] = _status(
+        "DecisionAudit",
+        "pass" if projection_built and projection_health.get("decision_audit_ok") else "missing_evidence",
+        "decision_audit_missing_malformed_or_leaky",
+        decision_audit_evidence,
+    )
     randomness_control_evidence = contract_evidence.get("RandomnessControlContract") or {}
     statuses["RandomnessControlContract"] = _status(
         "RandomnessControlContract",
@@ -592,6 +664,7 @@ def build_contract_statuses(
         "double_entry_ledger_invariant_missing_or_violated",
         double_entry_evidence,
     )
+    statuses["LedgerSnapshotHashContract"] = _ledger_snapshot_hash_status(snapshot_report, snapshot)
     reservation_evidence = contract_evidence.get("CapitalReservationPolicy") or {}
     statuses["CapitalReservationPolicy"] = _status(
         "CapitalReservationPolicy",

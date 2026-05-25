@@ -49,6 +49,7 @@ RAW_PROVIDER_RESPONSE_MATERIAL_TYPES = {
     "audit.provider_response",
     "provider_probe.rawResponse",
 }
+DECISION_AUDIT_EVENT_TYPE = "decision_audit_recorded"
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
@@ -80,6 +81,7 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     REALTIME_CLEAN_EVENT_TYPE,
     QUOTE_INTENT_BINDING_EVENT_TYPE,
     RAW_PROVIDER_EVIDENCE_EVENT_TYPE,
+    DECISION_AUDIT_EVENT_TYPE,
     IDEMPOTENCY_EVENT_TYPE,
     EXECUTION_CONTROL_EVENT_TYPE,
     PAPER_LEDGER_EVENT_TYPE,
@@ -228,6 +230,11 @@ def _as_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _sha256_hex_like(value):
+    text = str(value or "")
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
 def _clean_label(value):
@@ -1586,6 +1593,176 @@ def _hash_matches(material, expected_hash):
         return False
 
 
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _extract_decision_audit_contract(event, bags):
+    version = _extract_scalar(
+        bags,
+        [
+            ("decision_audit_version",),
+            ("decision_trace_version",),
+            ("decision_contract_version",),
+        ],
+    )
+    decision_id = _extract_scalar(bags, [("decision_id",), ("decision_event_id",)])
+    policy_bundle_id = _extract_scalar(
+        bags,
+        [
+            ("policy_bundle_id",),
+            ("decision_trace_bundle", "policy_bundle_id"),
+        ],
+    )
+    spec_hash = _extract_scalar(bags, [("spec_hash",), ("decision_trace_bundle", "spec_hash")])
+    feature_vector_hash = _extract_scalar(
+        bags,
+        [
+            ("feature_vector_hash",),
+            ("decision_trace_bundle", "feature_vector_hash"),
+        ],
+    )
+    decision_trace_bundle = _extract_scalar(bags, [("decision_trace_bundle",), ("trace_bundle",), ("decision_trace",)])
+    if (
+        event.get("event_type") != DECISION_AUDIT_EVENT_TYPE
+        and not version
+        and not (decision_id and policy_bundle_id and feature_vector_hash and decision_trace_bundle)
+    ):
+        return None
+
+    feature_vector = _extract_scalar(bags, [("feature_vector",), ("features",)])
+    trace_bundle_hash = _extract_scalar(bags, [("decision_trace_bundle_hash",), ("trace_bundle_hash",)])
+    failure_action = _extract_scalar(bags, [("failure_action",)], default="entry_rejected")
+    decision_available_at = _extract_scalar(
+        bags,
+        [
+            ("decision_available_at",),
+            ("decision_ts",),
+            ("available_at",),
+        ],
+        default=event.get("available_at"),
+    )
+    feature_max_available_at = _extract_scalar(
+        bags,
+        [
+            ("feature_max_available_at",),
+            ("decision_trace_bundle", "feature_max_available_at"),
+            ("source_max_available_at",),
+            ("decision_trace_bundle", "source_max_available_at"),
+        ],
+    )
+    forbidden_future_fields_used = _as_list(
+        _extract_scalar(
+            bags,
+            [
+                ("forbidden_future_fields_used",),
+                ("decision_trace_bundle", "forbidden_future_fields_used"),
+            ],
+            default=[],
+        )
+    )
+    used_future_peak = _extract_flag(
+        bags,
+        [
+            ("used_future_peak",),
+            ("decision_trace_bundle", "used_future_peak"),
+        ],
+    )
+    used_future_outcome = _extract_flag(
+        bags,
+        [
+            ("used_future_outcome",),
+            ("decision_trace_bundle", "used_future_outcome"),
+        ],
+    )
+    used_posthoc_label = _extract_flag(
+        bags,
+        [
+            ("used_posthoc_label",),
+            ("decision_trace_bundle", "used_posthoc_label"),
+        ],
+    )
+
+    values = {
+        "decision_audit_version": str(version) if version else None,
+        "decision_id": str(decision_id) if decision_id is not None else None,
+        "policy_bundle_id": str(policy_bundle_id) if policy_bundle_id is not None else None,
+        "spec_hash": str(spec_hash) if spec_hash is not None else None,
+        "feature_vector_hash": str(feature_vector_hash) if feature_vector_hash is not None else None,
+        "decision_trace_bundle": decision_trace_bundle,
+        "decision_trace_bundle_hash": trace_bundle_hash,
+        "feature_vector_material_present": isinstance(feature_vector, dict),
+        "decision_available_at": decision_available_at,
+        "feature_max_available_at": feature_max_available_at,
+        "failure_action": failure_action,
+        "used_future_peak": bool(used_future_peak),
+        "used_future_outcome": bool(used_future_outcome),
+        "used_posthoc_label": bool(used_posthoc_label),
+        "forbidden_future_fields_used": [str(field) for field in forbidden_future_fields_used if field],
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+    required = ["decision_id", "policy_bundle_id", "spec_hash", "feature_vector_hash", "decision_trace_bundle"]
+    missing_fields = []
+    for field in required:
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+
+    violation_fields = []
+    if values.get("spec_hash") and not _sha256_hex_like(values.get("spec_hash")):
+        violation_fields.append("spec_hash_not_sha256")
+    if values.get("feature_vector_hash") and not _sha256_hex_like(values.get("feature_vector_hash")):
+        violation_fields.append("feature_vector_hash_not_sha256")
+    feature_vector_hash_ok = (
+        _hash_matches(feature_vector, values.get("feature_vector_hash"))
+        if isinstance(feature_vector, dict)
+        else _sha256_hex_like(values.get("feature_vector_hash"))
+    )
+    if values.get("feature_vector_hash") and not feature_vector_hash_ok:
+        violation_fields.append("feature_vector_hash_mismatch")
+    trace_bundle_is_object = isinstance(decision_trace_bundle, dict)
+    if decision_trace_bundle is not None and not trace_bundle_is_object:
+        violation_fields.append("decision_trace_bundle_not_object")
+    trace_bundle_hash_ok = (
+        _hash_matches(decision_trace_bundle, trace_bundle_hash)
+        if trace_bundle_hash and trace_bundle_is_object
+        else bool(not trace_bundle_hash or _sha256_hex_like(trace_bundle_hash))
+    )
+    if trace_bundle_hash and not trace_bundle_hash_ok:
+        violation_fields.append("decision_trace_bundle_hash_mismatch")
+    if failure_action != "entry_rejected":
+        violation_fields.append("failure_action_not_entry_rejected")
+    decision_ts = _timestamp_epoch_seconds(decision_available_at)
+    feature_ts = _timestamp_epoch_seconds(feature_max_available_at)
+    if decision_available_at is not None and decision_ts is None:
+        violation_fields.append("decision_available_at_unparseable")
+    if feature_max_available_at is not None and feature_ts is None:
+        violation_fields.append("feature_max_available_at_unparseable")
+    if decision_ts is not None and feature_ts is not None and feature_ts > decision_ts:
+        violation_fields.append("feature_after_decision")
+
+    future_leakage_fields = []
+    if values["used_future_peak"]:
+        future_leakage_fields.append("used_future_peak")
+    if values["used_future_outcome"]:
+        future_leakage_fields.append("used_future_outcome")
+    if values["used_posthoc_label"]:
+        future_leakage_fields.append("used_posthoc_label")
+    future_leakage_fields.extend(values["forbidden_future_fields_used"])
+    values["feature_vector_hash_ok"] = feature_vector_hash_ok
+    values["decision_trace_bundle_hash_ok"] = trace_bundle_hash_ok
+    values["missing_fields"] = sorted(set(missing_fields))
+    values["violation_fields"] = sorted(set(violation_fields))
+    values["future_leakage_fields"] = sorted(set(future_leakage_fields))
+    values["decision_audit_valid"] = not values["missing_fields"] and not values["violation_fields"] and not values["future_leakage_fields"]
+    return values
+
+
 def _extract_paper_ledger_contract(event, bags):
     version = _extract_scalar(
         bags,
@@ -1943,6 +2120,7 @@ def _extract_decision_fact(event):
         "realtime_clean_contract": _extract_realtime_clean_contract(event, bags),
         "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
         "raw_provider_evidence_contract": _extract_raw_provider_evidence_contract(event, bags),
+        "decision_audit_contract": _extract_decision_audit_contract(event, bags),
         "idempotency_contract": _extract_idempotency_contract(event, bags),
         "execution_control": _extract_execution_control(event, bags),
         "paper_ledger_contract": _extract_paper_ledger_contract(event, bags),
@@ -1990,6 +2168,7 @@ def _new_record(fact):
         "realtime_clean_candidates": [],
         "quote_intent_binding_candidates": [],
         "raw_provider_evidence_candidates": [],
+        "decision_audit_candidates": [],
         "idempotency_contract_candidates": [],
         "execution_control_candidates": [],
         "paper_ledger_candidates": [],
@@ -2010,6 +2189,7 @@ def _new_record(fact):
         "realtime_clean_contract": None,
         "quote_intent_binding_contract": None,
         "raw_provider_evidence_contract": None,
+        "decision_audit_contract": None,
         "idempotency_contract": None,
         "execution_control": None,
         "paper_ledger_contract": None,
@@ -2099,6 +2279,9 @@ def _merge_fact(record, fact):
     raw_provider_evidence = fact.get("raw_provider_evidence_contract")
     if raw_provider_evidence:
         record["raw_provider_evidence_candidates"].append(raw_provider_evidence)
+    decision_audit = fact.get("decision_audit_contract")
+    if decision_audit:
+        record["decision_audit_candidates"].append(decision_audit)
     idempotency_contract = fact.get("idempotency_contract")
     if idempotency_contract:
         record["idempotency_contract_candidates"].append(idempotency_contract)
@@ -2406,6 +2589,16 @@ def _finalize_idempotency_contract(record):
     record["idempotency_contract"] = candidates[0] if candidates else None
 
 
+def _finalize_decision_audit(record):
+    candidates = sorted(
+        record.get("decision_audit_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["decision_audit_candidates"] = candidates
+    valid_candidates = [candidate for candidate in candidates if candidate.get("decision_audit_valid") is True]
+    record["decision_audit_contract"] = valid_candidates[0] if valid_candidates else (candidates[0] if candidates else None)
+
+
 def _finalize_execution_control(record):
     candidates = sorted(
         record.get("execution_control_candidates") or [],
@@ -2476,6 +2669,8 @@ def _record_missing_evidence(record):
         missing.append("QuoteIntentBindingContract")
     if record.get("quote_intent_binding_contract") and not record.get("raw_provider_evidence_contract"):
         missing.append("RawProviderEvidenceContract")
+    if record.get("quote_intent_binding_contract") and not record.get("decision_audit_contract"):
+        missing.append("DecisionAudit")
     if record.get("quote_intent_binding_contract") and not record.get("idempotency_contract"):
         missing.append("IdempotencyContract")
         missing.append("IdempotencyKeyNamespaceContract")
@@ -2918,6 +3113,48 @@ def _contract_evidence_from_records(
                     "violation_count": len(violated),
                     "violation_fields": sorted({field for item in violated for field in item.get("violation_fields", [])}),
                     "source_event_ids": [item.get("source_event_id") for item in violated],
+                }
+            )
+    decision_audit_records = [
+        record
+        for record in record_list
+        if record.get("decision_audit_candidates")
+    ]
+    all_decision_audit_candidates = [
+        item
+        for record in decision_audit_records
+        for item in record.get("decision_audit_candidates") or []
+    ]
+    malformed_decision_audits = []
+    future_leakage_decision_audits = []
+    for record in decision_audit_records:
+        malformed = [
+            item
+            for item in record.get("decision_audit_candidates") or []
+            if item.get("missing_fields") or item.get("violation_fields")
+        ]
+        if malformed:
+            malformed_decision_audits.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                    "violation_fields": sorted({field for item in malformed for field in item.get("violation_fields", [])}),
+                    "source_event_ids": [item.get("source_event_id") for item in malformed],
+                }
+            )
+        leaky = [
+            item
+            for item in record.get("decision_audit_candidates") or []
+            if item.get("future_leakage_fields")
+        ]
+        if leaky:
+            future_leakage_decision_audits.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "future_leakage_count": len(leaky),
+                    "future_leakage_fields": sorted({field for item in leaky for field in item.get("future_leakage_fields", [])}),
+                    "source_event_ids": [item.get("source_event_id") for item in leaky],
                 }
             )
     idempotency_records = [
@@ -3660,6 +3897,22 @@ def _contract_evidence_from_records(
             "raw_provider_evidence_versions": sorted({item.get("raw_provider_evidence_version") for item in all_raw_provider_candidates if item.get("raw_provider_evidence_version")}),
             "raw_provider_evidence_projection_version": "v2.7.0.raw_provider_evidence.v1",
         },
+        "DecisionAudit": {
+            "eligible_decision_audit_records": len(decision_audit_records),
+            "decision_audit_observation_count": len(all_decision_audit_candidates),
+            "valid_decision_audit_count": sum(1 for item in all_decision_audit_candidates if item.get("decision_audit_valid") is True),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_decision_audits),
+            "malformed_decision_audits": malformed_decision_audits,
+            "future_leakage_count": sum(item["future_leakage_count"] for item in future_leakage_decision_audits),
+            "future_leakage_decision_audits": future_leakage_decision_audits,
+            "feature_vector_hash_mismatch_count": sum(1 for item in all_decision_audit_candidates if item.get("feature_vector_hash_ok") is not True),
+            "trace_bundle_hash_mismatch_count": sum(1 for item in all_decision_audit_candidates if item.get("decision_trace_bundle_hash_ok") is not True),
+            "policy_bundle_ids": sorted({item.get("policy_bundle_id") for item in all_decision_audit_candidates if item.get("policy_bundle_id")}),
+            "spec_hashes": sorted({item.get("spec_hash") for item in all_decision_audit_candidates if item.get("spec_hash")}),
+            "decision_audit_versions": sorted({item.get("decision_audit_version") for item in all_decision_audit_candidates if item.get("decision_audit_version")}),
+            "failure_actions": sorted({item.get("failure_action") for item in all_decision_audit_candidates if item.get("failure_action")}),
+            "decision_audit_projection_version": "v2.7.0.decision_audit.v1",
+        },
         "RandomnessControlContract": {
             "eligible_randomness_control_records": len(randomness_controls),
             "randomness_control_observation_count": raw_randomness_control_count,
@@ -4129,6 +4382,8 @@ def _contract_evidence_from_records(
             "invariant_violation_count": sum(item["violation_count"] for item in double_entry_violations),
             "double_entry_violations": double_entry_violations,
             "max_abs_invariant_delta": max([abs(item.get("invariant_delta") or 0.0) for item in all_paper_ledger_candidates] or [None]),
+            "ledger_checkpoint_ids": sorted({item.get("ledger_checkpoint_id") for item in all_paper_ledger_candidates if item.get("ledger_checkpoint_id")}),
+            "ledger_hashes": sorted({item.get("ledger_hash") for item in all_paper_ledger_candidates if item.get("ledger_hash")}),
             "ledger_scopes": sorted({item.get("ledger_scope") for item in all_paper_ledger_candidates if item.get("ledger_scope")}),
             "double_entry_projection_version": "v2.7.0.double_entry_ledger.v1",
         },
@@ -4226,6 +4481,7 @@ RECORD_HASH_CONTRACT_FIELDS = {
     "realtime_clean": "realtime_clean_contract",
     "quote_intent_binding": "quote_intent_binding_contract",
     "raw_provider_evidence": "raw_provider_evidence_contract",
+    "decision_audit": "decision_audit_contract",
     "idempotency": "idempotency_contract",
     "execution_control": "execution_control",
     "paper_ledger": "paper_ledger_contract",
@@ -4246,6 +4502,9 @@ def _compact_contract_ref(value):
             "outcome_state",
             "state",
             "contract_version",
+            "decision_id",
+            "policy_bundle_id",
+            "decision_audit_version",
             "no_fill_outcome_version",
         )
         if value.get(key) is not None
@@ -4311,6 +4570,7 @@ def build_denominator_projection(
         "realtime_clean_detector_recorded_events": 0,
         "quote_intent_binding_recorded_events": 0,
         "raw_provider_evidence_recorded_events": 0,
+        "decision_audit_recorded_events": 0,
         "idempotency_contract_recorded_events": 0,
         "execution_control_recorded_events": 0,
         "paper_ledger_recorded_events": 0,
@@ -4359,6 +4619,7 @@ def build_denominator_projection(
             "RealtimeCleanDetector": {},
             "QuoteIntentBindingContract": {},
             "RawProviderEvidenceContract": {},
+            "DecisionAudit": {},
             "RandomnessControlContract": {},
             "IdempotencyContract": {},
             "IdempotencyKeyNamespaceContract": {},
@@ -4400,6 +4661,7 @@ def build_denominator_projection(
             "realtime_clean_detector_ok": False,
             "quote_intent_binding_ok": False,
             "raw_provider_evidence_ok": False,
+            "decision_audit_ok": False,
             "randomness_control_ok": False,
             "idempotency_contract_ok": False,
             "idempotency_key_namespace_ok": False,
@@ -4515,6 +4777,8 @@ def build_denominator_projection(
             projection["quote_intent_binding_recorded_events"] += 1
         if event.get("event_type") == RAW_PROVIDER_EVIDENCE_EVENT_TYPE:
             projection["raw_provider_evidence_recorded_events"] += 1
+        if event.get("event_type") == DECISION_AUDIT_EVENT_TYPE:
+            projection["decision_audit_recorded_events"] += 1
         if event.get("event_type") == IDEMPOTENCY_EVENT_TYPE:
             projection["idempotency_contract_recorded_events"] += 1
         if event.get("event_type") == EXECUTION_CONTROL_EVENT_TYPE:
@@ -4679,6 +4943,7 @@ def build_denominator_projection(
         _finalize_realtime_clean(record)
         _finalize_quote_intent_binding(record)
         _finalize_raw_provider_evidence(record)
+        _finalize_decision_audit(record)
         _finalize_idempotency_contract(record)
         _finalize_execution_control(record)
         _finalize_paper_ledger(record)
@@ -4865,6 +5130,14 @@ def build_denominator_projection(
         and contract_evidence["RawProviderEvidenceContract"]["trusted_raw_provider_evidence_count"] > 0
         and contract_evidence["RawProviderEvidenceContract"]["malformed_count"] == 0
         and contract_evidence["RawProviderEvidenceContract"]["provider_evidence_violation_count"] == 0
+    )
+    projection["health"]["decision_audit_ok"] = (
+        contract_evidence["DecisionAudit"]["eligible_decision_audit_records"] > 0
+        and contract_evidence["DecisionAudit"]["valid_decision_audit_count"] > 0
+        and contract_evidence["DecisionAudit"]["malformed_count"] == 0
+        and contract_evidence["DecisionAudit"]["future_leakage_count"] == 0
+        and contract_evidence["DecisionAudit"]["feature_vector_hash_mismatch_count"] == 0
+        and contract_evidence["DecisionAudit"]["trace_bundle_hash_mismatch_count"] == 0
     )
     projection["health"]["randomness_control_ok"] = (
         contract_evidence["RandomnessControlContract"]["eligible_randomness_control_records"] > 0
