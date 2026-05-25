@@ -35,6 +35,7 @@ DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry
 DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
 DEFAULT_AGGREGATE_BOUNDARIES = PROJECT_ROOT / "config" / "v27-aggregate-boundaries.json"
 DEFAULT_EVENT_SCHEMA_COMPATIBILITY = PROJECT_ROOT / "config" / "v27-event-schema-compatibility.json"
+DEFAULT_READ_MODEL_SNAPSHOT_POLICY = PROJECT_ROOT / "config" / "v27-read-model-snapshot-policy.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
@@ -137,6 +138,28 @@ MUTATION_COMMAND_IDEMPOTENCY_REQUIRED_FIELDS = (
     "mutation_target",
     "dedupe_hash",
     "result_hash",
+)
+PROJECTION_VERSION_ISOLATION_REQUIRED_FIELDS = (
+    "projection_name",
+    "projection_version",
+    "snapshot_field",
+    "isolation_key_fields",
+    "consumer_action",
+)
+SNAPSHOT_COMPACTION_INVARIANT_REQUIRED_FIELDS = (
+    "invariant_id",
+    "artifact",
+    "hash_field",
+    "hash_source",
+    "excludes_fields",
+    "failure_action",
+)
+SNAPSHOT_READ_BARRIER_REQUIRED_FIELDS = (
+    "barrier_id",
+    "consumer",
+    "required_checks",
+    "unsafe_statuses",
+    "failure_action",
 )
 BACKGROUND_JOB_REQUIRED_FIELDS = (
     "job_name",
@@ -1449,6 +1472,230 @@ def verify_mutation_command_idempotency_contract(policy_path=DEFAULT_EVENT_SCHEM
             "commands": command_evidence,
             "duplicate_command_ids": sorted(str(item) for item in duplicate_command_ids),
             "malformed_commands": malformed_commands,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def _load_read_model_snapshot_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "read_model_snapshot_policy_not_object"}
+    return policy, {"policy_path": str(policy_path), "schema_version": policy.get("schema_version"), "scope": policy.get("scope")}
+
+
+def verify_projection_version_isolation_contract(policy_path=DEFAULT_READ_MODEL_SNAPSHOT_POLICY):
+    policy, base_evidence = _load_read_model_snapshot_policy(policy_path)
+    if policy is None:
+        return _contract("ProjectionVersionIsolationContract", False, "read_model_snapshot_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("projection_versions") if isinstance(policy.get("projection_versions"), list) else []
+    malformed_rows = []
+    duplicate_projection_keys = []
+    projection_keys = set()
+    required_isolation_fields = {"projection_name", "projection_version", "projection_hash", "spec.spec_hash"}
+    allowed_consumer_actions = {"reject_mismatched_projection_hash"}
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "projection_name": None, "missing_fields": list(PROJECTION_VERSION_ISOLATION_REQUIRED_FIELDS), "violations": ["projection_version_row_not_object"]})
+            continue
+        projection_name = str(item.get("projection_name") or "")
+        projection_version = str(item.get("projection_version") or "")
+        key = f"{projection_name}:{projection_version}"
+        missing = _missing_required_fields(item, PROJECTION_VERSION_ISOLATION_REQUIRED_FIELDS)
+        violations = []
+        if key in projection_keys:
+            duplicate_projection_keys.append(key)
+        if projection_name and projection_version:
+            projection_keys.add(key)
+        isolation_fields = set(str(field) for field in (item.get("isolation_key_fields") or []))
+        missing_isolation_fields = sorted(required_isolation_fields - isolation_fields)
+        if missing_isolation_fields:
+            violations.append("isolation_key_fields_incomplete:" + ",".join(missing_isolation_fields))
+        if item.get("snapshot_field") != "projection_version":
+            violations.append("snapshot_field_must_be_projection_version")
+        if item.get("consumer_action") not in allowed_consumer_actions:
+            violations.append("consumer_action_invalid")
+        if not projection_name.startswith("v27_"):
+            violations.append("projection_name_must_be_v27_scoped")
+        if not projection_version.startswith("v"):
+            violations.append("projection_version_must_be_versioned")
+        if missing or violations:
+            malformed_rows.append({"index": index, "projection_name": projection_name or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.read_model_snapshot_policy.v1"
+        and policy.get("failure_action") == "dashboard_snapshot_rejected"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_projection_keys
+    )
+    return _contract(
+        "ProjectionVersionIsolationContract",
+        passed,
+        "projection_version_isolation_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "projection_version_count": len(rows),
+            "projection_keys": sorted(projection_keys),
+            "required_isolation_fields": sorted(required_isolation_fields),
+            "duplicate_projection_keys": sorted(duplicate_projection_keys),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_snapshot_compaction_invariant_contract(policy_path=DEFAULT_READ_MODEL_SNAPSHOT_POLICY):
+    policy, base_evidence = _load_read_model_snapshot_policy(policy_path)
+    if policy is None:
+        return _contract("SnapshotCompactionInvariantContract", False, "read_model_snapshot_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("snapshot_compaction_invariants") if isinstance(policy.get("snapshot_compaction_invariants"), list) else []
+    malformed_rows = []
+    duplicate_invariant_ids = []
+    invariant_ids = set()
+    hash_fields = set()
+    allowed_hash_sources = {
+        "projection_payload_without_event_log_dir",
+        "snapshot_payload_without_snapshot_hash",
+    }
+    allowed_failure_actions = {"projection_hash_mismatch", "snapshot_hash_mismatch"}
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "invariant_id": None, "missing_fields": list(SNAPSHOT_COMPACTION_INVARIANT_REQUIRED_FIELDS), "violations": ["compaction_invariant_not_object"]})
+            continue
+        invariant_id = str(item.get("invariant_id") or "")
+        missing = _missing_required_fields(item, SNAPSHOT_COMPACTION_INVARIANT_REQUIRED_FIELDS)
+        violations = []
+        if invariant_id in invariant_ids:
+            duplicate_invariant_ids.append(invariant_id)
+        if invariant_id:
+            invariant_ids.add(invariant_id)
+        hash_field = str(item.get("hash_field") or "")
+        if hash_field:
+            hash_fields.add(hash_field)
+        excludes_fields = set(str(field) for field in (item.get("excludes_fields") or []))
+        if hash_field == "projection_hash" and "event_log_dir" not in excludes_fields:
+            violations.append("projection_compaction_must_exclude_event_log_dir")
+        if hash_field == "snapshot_hash" and "snapshot_hash" not in excludes_fields:
+            violations.append("snapshot_compaction_must_exclude_snapshot_hash")
+        if item.get("hash_source") not in allowed_hash_sources:
+            violations.append("hash_source_invalid")
+        if item.get("failure_action") not in allowed_failure_actions:
+            violations.append("failure_action_invalid")
+        if missing or violations:
+            malformed_rows.append({"index": index, "invariant_id": invariant_id or None, "missing_fields": missing, "violations": violations})
+
+    missing_hash_fields = sorted({"projection_hash", "snapshot_hash"} - hash_fields)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.read_model_snapshot_policy.v1"
+        and policy.get("failure_action") == "dashboard_snapshot_rejected"
+        and len(rows) >= 2
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_invariant_ids
+        and not missing_hash_fields
+    )
+    return _contract(
+        "SnapshotCompactionInvariantContract",
+        passed,
+        "snapshot_compaction_invariant_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "invariant_count": len(rows),
+            "invariant_ids": sorted(invariant_ids),
+            "hash_fields": sorted(hash_fields),
+            "missing_hash_fields": missing_hash_fields,
+            "duplicate_invariant_ids": sorted(duplicate_invariant_ids),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_snapshot_compaction_read_barrier_contract(policy_path=DEFAULT_READ_MODEL_SNAPSHOT_POLICY):
+    policy, base_evidence = _load_read_model_snapshot_policy(policy_path)
+    if policy is None:
+        return _contract("SnapshotCompactionReadBarrier", False, "read_model_snapshot_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("read_barriers") if isinstance(policy.get("read_barriers"), list) else []
+    malformed_rows = []
+    duplicate_barrier_ids = []
+    barrier_ids = set()
+    required_checks = {
+        "snapshot_schema_ok",
+        "snapshot_hash_ok",
+        "projection_hash_ok",
+        "spec_valid",
+        "read_model_fresh_enough",
+        "snapshot_age_ok",
+        "projection_built",
+        "event_log_ok",
+    }
+    required_unsafe_statuses = {"event_log_invalid", "not_built", "seed_empty"}
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "barrier_id": None, "missing_fields": list(SNAPSHOT_READ_BARRIER_REQUIRED_FIELDS), "violations": ["read_barrier_not_object"]})
+            continue
+        barrier_id = str(item.get("barrier_id") or "")
+        missing = _missing_required_fields(item, SNAPSHOT_READ_BARRIER_REQUIRED_FIELDS)
+        violations = []
+        if barrier_id in barrier_ids:
+            duplicate_barrier_ids.append(barrier_id)
+        if barrier_id:
+            barrier_ids.add(barrier_id)
+        checks = set(str(check) for check in (item.get("required_checks") or []))
+        unsafe_statuses = set(str(status) for status in (item.get("unsafe_statuses") or []))
+        missing_checks = sorted(required_checks - checks)
+        missing_unsafe_statuses = sorted(required_unsafe_statuses - unsafe_statuses)
+        if missing_checks:
+            violations.append("required_checks_incomplete:" + ",".join(missing_checks))
+        if missing_unsafe_statuses:
+            violations.append("unsafe_statuses_incomplete:" + ",".join(missing_unsafe_statuses))
+        if item.get("failure_action") != "dashboard_snapshot_rejected":
+            violations.append("failure_action_must_reject_dashboard_snapshot")
+        if item.get("consumer") != "dashboard_and_mode_readiness":
+            violations.append("consumer_must_bind_dashboard_and_mode_readiness")
+        if missing or violations:
+            malformed_rows.append({"index": index, "barrier_id": barrier_id or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.read_model_snapshot_policy.v1"
+        and policy.get("failure_action") == "dashboard_snapshot_rejected"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_barrier_ids
+    )
+    return _contract(
+        "SnapshotCompactionReadBarrier",
+        passed,
+        "snapshot_compaction_read_barrier_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "barrier_count": len(rows),
+            "barrier_ids": sorted(barrier_ids),
+            "required_checks": sorted(required_checks),
+            "required_unsafe_statuses": sorted(required_unsafe_statuses),
+            "duplicate_barrier_ids": sorted(duplicate_barrier_ids),
+            "malformed_rows": malformed_rows,
             "source_anchor_violations": source_anchor_violations,
             "source_errors": source_errors,
         },
@@ -4000,6 +4247,7 @@ def build_basic_contract_readiness(
     direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
     aggregate_boundary_policy_path=DEFAULT_AGGREGATE_BOUNDARIES,
     event_schema_compatibility_policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY,
+    read_model_snapshot_policy_path=DEFAULT_READ_MODEL_SNAPSHOT_POLICY,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
@@ -4048,6 +4296,9 @@ def build_basic_contract_readiness(
             verify_event_schema_compatibility_contract(policy_path=event_schema_compatibility_policy_path),
             verify_enum_evolution_contract(policy_path=event_schema_compatibility_policy_path),
             verify_mutation_command_idempotency_contract(policy_path=event_schema_compatibility_policy_path),
+            verify_projection_version_isolation_contract(policy_path=read_model_snapshot_policy_path),
+            verify_snapshot_compaction_invariant_contract(policy_path=read_model_snapshot_policy_path),
+            verify_snapshot_compaction_read_barrier_contract(policy_path=read_model_snapshot_policy_path),
             verify_background_job_registry(registry_path=background_job_registry_path),
             verify_scheduled_job_mode_gate_contract(registry_path=background_job_registry_path),
             verify_entry_point_inventory(
@@ -4097,6 +4348,7 @@ def main():
     parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
     parser.add_argument("--aggregate-boundary-policy", default=str(DEFAULT_AGGREGATE_BOUNDARIES))
     parser.add_argument("--event-schema-compatibility-policy", default=str(DEFAULT_EVENT_SCHEMA_COMPATIBILITY))
+    parser.add_argument("--read-model-snapshot-policy", default=str(DEFAULT_READ_MODEL_SNAPSHOT_POLICY))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
@@ -4127,6 +4379,7 @@ def main():
         direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
         aggregate_boundary_policy_path=Path(args.aggregate_boundary_policy),
         event_schema_compatibility_policy_path=Path(args.event_schema_compatibility_policy),
+        read_model_snapshot_policy_path=Path(args.read_model_snapshot_policy),
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),

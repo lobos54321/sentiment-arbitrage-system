@@ -25,7 +25,10 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_machine_readable_reason_contract,
     verify_mutation_command_idempotency_contract,
     verify_numeric_precision_policy,
+    verify_projection_version_isolation_contract,
     verify_scheduled_job_mode_gate_contract,
+    verify_snapshot_compaction_invariant_contract,
+    verify_snapshot_compaction_read_barrier_contract,
     verify_static_policy_enforcement,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -69,6 +72,9 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "EventSchemaCompatibilityContract",
         "EnumEvolutionContract",
         "MutationCommandIdempotencyContract",
+        "ProjectionVersionIsolationContract",
+        "SnapshotCompactionInvariantContract",
+        "SnapshotCompactionReadBarrier",
         "BackgroundJobRegistryContract",
         "ScheduledJobModeGateContract",
         "EntryPointInventoryContract",
@@ -359,6 +365,52 @@ def test_mutation_command_idempotency_blocks_missing_dedupe_material(tmp_path):
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "mutation_command_idempotency_missing_malformed_or_unenforced"
     assert "dedupe_hash_material_required" in report["evidence"]["malformed_commands"][0]["violations"]
+
+
+def test_read_model_snapshot_policy_binds_projection_hashes_and_barrier():
+    projection = verify_projection_version_isolation_contract()
+    compaction = verify_snapshot_compaction_invariant_contract()
+    barrier = verify_snapshot_compaction_read_barrier_contract()
+
+    assert projection["status"] == "pass"
+    assert projection["evidence"]["projection_keys"] == ["v27_denominator_projection:v0.1"]
+    assert projection["evidence"]["malformed_rows"] == []
+    assert compaction["status"] == "pass"
+    assert set(compaction["evidence"]["hash_fields"]) == {"projection_hash", "snapshot_hash"}
+    assert compaction["evidence"]["missing_hash_fields"] == []
+    assert barrier["status"] == "pass"
+    assert set(barrier["evidence"]["required_unsafe_statuses"]) == {"event_log_invalid", "not_built", "seed_empty"}
+    assert barrier["evidence"]["malformed_rows"] == []
+
+
+def test_snapshot_read_barrier_blocks_missing_hash_check(tmp_path):
+    policy_path = tmp_path / "snapshot-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.read_model_snapshot_policy.v1",
+                "scope": "unit",
+                "failure_action": "dashboard_snapshot_rejected",
+                "source_anchors": [],
+                "read_barriers": [
+                    {
+                        "barrier_id": "unit",
+                        "consumer": "dashboard_and_mode_readiness",
+                        "required_checks": ["snapshot_schema_ok"],
+                        "unsafe_statuses": ["event_log_invalid", "not_built", "seed_empty"],
+                        "failure_action": "dashboard_snapshot_rejected",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_snapshot_compaction_read_barrier_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "snapshot_compaction_read_barrier_missing_malformed_or_unenforced"
+    assert "required_checks_incomplete" in report["evidence"]["malformed_rows"][0]["violations"][0]
 
 
 def test_paper_mode_safety_blocks_live_capabilities():
