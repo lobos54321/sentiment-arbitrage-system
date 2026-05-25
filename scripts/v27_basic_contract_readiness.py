@@ -43,6 +43,7 @@ DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-poli
 DEFAULT_SERVICE_READINESS_PROBES = PROJECT_ROOT / "config" / "v27-service-readiness-probes.json"
 DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-dashboard-action-separation-policy.json"
 DEFAULT_NUMERIC_PRECISION_POLICY = PROJECT_ROOT / "config" / "v27-numeric-precision-policy.json"
+DEFAULT_REASON_TAXONOMY_POLICY = PROJECT_ROOT / "config" / "v27-reason-taxonomy-policy.json"
 NUMERIC_PRECISION_REQUIRED_FIELDS = (
     "unit",
     "decimal_scale",
@@ -144,6 +145,20 @@ ERROR_TAXONOMY_REQUIRED_FIELDS = (
     "severity",
     "operator_action",
     "introduced_at",
+)
+HUMAN_REASON_REQUIRED_FIELDS = (
+    "reason_code",
+    "human_message",
+    "operator_action",
+    "locale",
+    "owner",
+)
+MACHINE_REASON_REQUIRED_FIELDS = (
+    "reason_code",
+    "machine_code",
+    "schema_version",
+    "blocking_contract",
+    "failure_action",
 )
 LOG_REDACTION_STREAM_REQUIRED_FIELDS = (
     "log_stream",
@@ -1815,7 +1830,7 @@ def _read_project_text(path):
 def _extract_basic_readiness_error_codes(source_text):
     codes = set(
         re.findall(
-            r"_contract\(\s*['\"][^'\"]+['\"]\s*,\s*[^,]+,\s*['\"]([^'\"]+)['\"]",
+            r"_contract\(\s*(?:['\"][^'\"]+['\"]|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*[^,]+,\s*['\"]([^'\"]+)['\"]",
             source_text,
             flags=re.S,
         )
@@ -1945,6 +1960,180 @@ def verify_error_taxonomy(
             "unclassified_error_codes": unclassified_error_codes,
             "unused_taxonomy_codes": unused_taxonomy_codes,
         },
+    )
+
+
+def _expected_basic_readiness_reason_bindings(source_text):
+    bindings = {}
+    for contract_id, reason_code in re.findall(
+        r"_contract\(\s*['\"]([^'\"]+)['\"]\s*,\s*[^,]+,\s*['\"]([^'\"]+)['\"]",
+        source_text,
+        flags=re.S,
+    ):
+        bindings.setdefault(reason_code, contract_id)
+    return bindings
+
+
+def _verify_reason_taxonomy(policy_path=DEFAULT_REASON_TAXONOMY_POLICY, *, contract_id, required_fields, schema_version):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract(contract_id, False, "reason_taxonomy_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract(contract_id, False, "reason_taxonomy_policy_not_object", {"policy_path": str(policy_path)})
+
+    human_contract = contract_id == "HumanReadableReasonContract"
+    required_field_key = "human_required_fields" if human_contract else "machine_required_fields"
+    schema_version_key = "human_reason_schema_version" if human_contract else "machine_reason_schema_version"
+    coverage = policy.get("coverage") if isinstance(policy.get("coverage"), dict) else {}
+    basic_readiness_source_path = coverage.get("basic_readiness_source_file") or "scripts/v27_basic_contract_readiness.py"
+    source_text, source_error = _read_project_text(basic_readiness_source_path)
+    expected_bindings = {} if source_error else _expected_basic_readiness_reason_bindings(source_text)
+    catalog_failure_actions = {}
+    catalog_error = None
+    catalog_path = _resolve_project_file(coverage.get("contract_catalog_file") or CATALOG_PATH)
+    try:
+        catalog = _load_json(catalog_path)
+        catalog_failure_actions = {
+            contract: record.get("failure_action")
+            for contract, record in (catalog.get("contracts") or {}).items()
+            if isinstance(record, dict)
+        }
+    except Exception as exc:
+        catalog_error = {"source_file": str(catalog_path), "reason": "catalog_missing_or_invalid", "error": str(exc)}
+
+    taxonomy_by_code = {}
+    taxonomy_error = None
+    taxonomy_path = _resolve_project_file(coverage.get("error_taxonomy_file") or DEFAULT_ERROR_TAXONOMY)
+    try:
+        taxonomy = _load_json(taxonomy_path)
+        taxonomy_by_code = {
+            item.get("error_code"): item
+            for item in (taxonomy.get("taxonomy") or [])
+            if isinstance(item, dict) and item.get("error_code")
+        }
+    except Exception as exc:
+        taxonomy_error = {"source_file": str(taxonomy_path), "reason": "taxonomy_missing_or_invalid", "error": str(exc)}
+
+    allowed_locales = set(str(item) for item in (policy.get("allowed_locales") or []))
+    allowed_schema_versions = set(str(item) for item in (policy.get("allowed_schema_versions") or []))
+    default_locale = str(policy.get("default_locale") or "")
+    owner_by_category = policy.get("owner_by_category") if isinstance(policy.get("owner_by_category"), dict) else {}
+    message_template = str(policy.get("human_message_template") or "{blocking_contract} is blocked by {reason_code}.")
+    reason_evidence = []
+    malformed_reasons = []
+    missing_reason_codes = []
+    for index, (reason_code, blocking_contract) in enumerate(sorted(expected_bindings.items())):
+        taxonomy_entry = taxonomy_by_code.get(reason_code)
+        violations = []
+        if not taxonomy_entry:
+            missing_reason_codes.append(reason_code)
+            taxonomy_entry = {}
+        operator_action = str(taxonomy_entry.get("operator_action") or "")
+        owner = str(owner_by_category.get(taxonomy_entry.get("category")) or owner_by_category.get("default") or "")
+        failure_action = catalog_failure_actions.get(blocking_contract)
+        human_message = message_template.format(
+            blocking_contract=blocking_contract,
+            reason_code=reason_code,
+            operator_action=operator_action,
+        )
+        if human_contract:
+            reason = {
+                "reason_code": reason_code,
+                "human_message": human_message,
+                "operator_action": operator_action,
+                "locale": default_locale,
+                "owner": owner,
+            }
+            missing = _missing_required_fields(reason, required_fields)
+            if str(reason.get("locale") or "") not in allowed_locales:
+                violations.append("locale_not_allowed")
+            if len(str(reason.get("human_message") or "").strip()) < 12:
+                violations.append("human_message_too_short")
+            if len(str(reason.get("operator_action") or "").strip()) < 12:
+                violations.append("operator_action_too_short")
+        else:
+            reason = {
+                "reason_code": reason_code,
+                "machine_code": reason_code.upper(),
+                "schema_version": schema_version,
+                "blocking_contract": blocking_contract,
+                "failure_action": failure_action,
+            }
+            missing = _missing_required_fields(reason, required_fields)
+            if str(reason.get("schema_version") or "") not in allowed_schema_versions:
+                violations.append("schema_version_not_allowed")
+            if str(reason.get("machine_code") or "") != reason_code.upper():
+                violations.append("machine_code_must_be_upper_reason_code")
+            if not catalog_failure_actions.get(blocking_contract):
+                violations.append("failure_action_missing_from_catalog")
+        if missing or violations:
+            malformed_reasons.append({"index": index, "reason_code": reason_code or None, "missing_fields": missing, "violations": violations})
+        reason_evidence.append(reason)
+
+    schema_violations = []
+    if policy.get("schema_version") != "v2.7.0.reason_taxonomy_policy.v1":
+        schema_violations.append("schema_version_invalid")
+    if policy.get("failure_action") != "reason_missing":
+        schema_violations.append("failure_action_must_be_reason_missing")
+    if policy.get(schema_version_key) != schema_version:
+        schema_violations.append(f"{schema_version_key}_invalid")
+    if set(policy.get(required_field_key) or []) != set(required_fields):
+        schema_violations.append("required_fields_must_match_contract_catalog")
+    if not allowed_locales:
+        schema_violations.append("allowed_locales_required")
+    if not allowed_schema_versions:
+        schema_violations.append("allowed_schema_versions_required")
+
+    passed = (
+        not source_error
+        and not catalog_error
+        and not taxonomy_error
+        and not schema_violations
+        and bool(reason_evidence)
+        and not malformed_reasons
+        and not missing_reason_codes
+    )
+    return _contract(
+        contract_id,
+        passed,
+        "reason_taxonomy_policy_missing_malformed_or_incomplete",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "reason_schema_version": policy.get(schema_version_key),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "required_fields": list(required_fields),
+            "reason_count": len(reason_evidence),
+            "expected_reason_count": len(expected_bindings),
+            "coverage": coverage,
+            "source_error": source_error,
+            "catalog_error": catalog_error,
+            "taxonomy_error": taxonomy_error,
+            "schema_violations": schema_violations,
+            "malformed_reasons": malformed_reasons,
+            "missing_reason_codes": missing_reason_codes,
+            "sample_reasons": reason_evidence[:20],
+        },
+    )
+
+
+def verify_human_readable_reason_contract(policy_path=DEFAULT_REASON_TAXONOMY_POLICY):
+    return _verify_reason_taxonomy(
+        policy_path,
+        contract_id="HumanReadableReasonContract",
+        required_fields=HUMAN_REASON_REQUIRED_FIELDS,
+        schema_version="v2.7.0.human_reason.v1",
+    )
+
+
+def verify_machine_readable_reason_contract(policy_path=DEFAULT_REASON_TAXONOMY_POLICY):
+    return _verify_reason_taxonomy(
+        policy_path,
+        contract_id="MachineReadableReasonContract",
+        required_fields=MACHINE_REASON_REQUIRED_FIELDS,
+        schema_version="v2.7.0.machine_reason.v1",
     )
 
 
@@ -3033,6 +3222,7 @@ def build_basic_contract_readiness(
     service_readiness_policy_path=DEFAULT_SERVICE_READINESS_PROBES,
     dashboard_action_separation_policy_path=DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY,
     numeric_precision_policy_path=DEFAULT_NUMERIC_PRECISION_POLICY,
+    reason_taxonomy_policy_path=DEFAULT_REASON_TAXONOMY_POLICY,
     env=None,
 ):
     contracts = {
@@ -3040,6 +3230,8 @@ def build_basic_contract_readiness(
         for item in [
             verify_spec_consistency(manifest_path, catalog_path, registry_path),
             verify_numeric_precision_policy(policy_path=numeric_precision_policy_path),
+            verify_human_readable_reason_contract(policy_path=reason_taxonomy_policy_path),
+            verify_machine_readable_reason_contract(policy_path=reason_taxonomy_policy_path),
             verify_paper_mode_safety(env=env),
             verify_chain_config(chain_config_path, system_config_path),
             verify_source_registry(source_registry_path, channels_csv),
@@ -3115,6 +3307,7 @@ def main():
     parser.add_argument("--service-readiness-policy", default=str(DEFAULT_SERVICE_READINESS_PROBES))
     parser.add_argument("--dashboard-action-separation-policy", default=str(DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY))
     parser.add_argument("--numeric-precision-policy", default=str(DEFAULT_NUMERIC_PRECISION_POLICY))
+    parser.add_argument("--reason-taxonomy-policy", default=str(DEFAULT_REASON_TAXONOMY_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -3140,6 +3333,7 @@ def main():
         service_readiness_policy_path=Path(args.service_readiness_policy),
         dashboard_action_separation_policy_path=Path(args.dashboard_action_separation_policy),
         numeric_precision_policy_path=Path(args.numeric_precision_policy),
+        reason_taxonomy_policy_path=Path(args.reason_taxonomy_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

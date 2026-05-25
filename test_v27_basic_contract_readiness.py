@@ -14,7 +14,9 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_entry_point_inventory,
     verify_error_taxonomy,
     verify_evidence_eligibility_matrix,
+    verify_human_readable_reason_contract,
     verify_log_redaction_verification,
+    verify_machine_readable_reason_contract,
     verify_numeric_precision_policy,
     verify_static_policy_enforcement,
     verify_access_control_policy,
@@ -38,6 +40,8 @@ def test_basic_contract_readiness_passes_seed_foundation():
     for contract_id in (
         "SpecConsistencyLinterContract",
         "NumericPrecisionContract",
+        "HumanReadableReasonContract",
+        "MachineReadableReasonContract",
         "PaperModeSafetyBoundary",
         "ChainConfigContract",
         "SourceRegistryContract",
@@ -81,6 +85,57 @@ def test_numeric_precision_policy_verifies_units_samples_and_source_anchors():
         "token_base_units",
         "unix_ms",
     }
+
+
+def test_reason_taxonomy_contracts_bind_human_and_machine_reasons():
+    human = verify_human_readable_reason_contract()
+    machine = verify_machine_readable_reason_contract()
+
+    assert human["status"] == "pass"
+    assert machine["status"] == "pass"
+    assert human["evidence"]["reason_count"] == machine["evidence"]["reason_count"]
+    assert human["evidence"]["missing_reason_codes"] == []
+    assert machine["evidence"]["missing_reason_codes"] == []
+    assert human["evidence"]["malformed_reasons"] == []
+    assert machine["evidence"]["malformed_reasons"] == []
+    sample = machine["evidence"]["sample_reasons"][0]
+    assert sample["machine_code"] == sample["reason_code"].upper()
+    assert sample["blocking_contract"]
+    assert sample["failure_action"]
+
+
+def test_reason_taxonomy_blocks_bad_locale(tmp_path):
+    policy_path = tmp_path / "reason-taxonomy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.reason_taxonomy_policy.v1",
+                "scope": "unit",
+                "failure_action": "reason_missing",
+                "human_reason_schema_version": "v2.7.0.human_reason.v1",
+                "machine_reason_schema_version": "v2.7.0.machine_reason.v1",
+                "human_required_fields": ["reason_code", "human_message", "operator_action", "locale", "owner"],
+                "machine_required_fields": ["reason_code", "machine_code", "schema_version", "blocking_contract", "failure_action"],
+                "allowed_locales": ["fr-FR"],
+                "allowed_schema_versions": ["v2.7.0.machine_reason.v1"],
+                "default_locale": "en-US",
+                "human_message_template": "{blocking_contract} is blocked by {reason_code}; {operator_action}.",
+                "coverage": {
+                    "basic_readiness_source_file": "scripts/v27_basic_contract_readiness.py",
+                    "contract_catalog_file": "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
+                    "error_taxonomy_file": "config/v27-error-taxonomy.json",
+                },
+                "owner_by_category": {"default": "test"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_human_readable_reason_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "reason_taxonomy_policy_missing_malformed_or_incomplete"
+    assert report["evidence"]["malformed_reasons"][0]["violations"] == ["locale_not_allowed"]
 
 
 def test_paper_mode_safety_blocks_live_capabilities():

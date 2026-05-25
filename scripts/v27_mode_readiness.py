@@ -34,6 +34,8 @@ MODE_REQUIREMENTS = {
     "observe_only": [
         "CanonicalSpecIntegrityContract",
         "CanonicalSerializationContract",
+        "HumanReadableReasonContract",
+        "MachineReadableReasonContract",
         "NumericPrecisionContract",
         "ModeReadinessMatrix",
         "SpecConsistencyLinterContract",

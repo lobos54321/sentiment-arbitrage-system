@@ -1,0 +1,34 @@
+{
+  "schema_version": "v2.7.0.reason_taxonomy_policy.v1",
+  "scope": "v27_basic_contract_readiness_blocking_reasons",
+  "failure_action": "reason_missing",
+  "human_reason_schema_version": "v2.7.0.human_reason.v1",
+  "machine_reason_schema_version": "v2.7.0.machine_reason.v1",
+  "human_required_fields": ["reason_code", "human_message", "operator_action", "locale", "owner"],
+  "machine_required_fields": ["reason_code", "machine_code", "schema_version", "blocking_contract", "failure_action"],
+  "allowed_locales": ["en-US"],
+  "allowed_schema_versions": ["v2.7.0.machine_reason.v1"],
+  "default_locale": "en-US",
+  "human_message_template": "{blocking_contract} is blocked by {reason_code}; {operator_action}.",
+  "coverage": {
+    "basic_readiness_source_file": "scripts/v27_basic_contract_readiness.py",
+    "contract_catalog_file": "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
+    "error_taxonomy_file": "config/v27-error-taxonomy.json"
+  },
+  "owner_by_category": {
+    "default": "v27-readiness",
+    "access_control": "dashboard-security",
+    "api_response": "dashboard-api",
+    "audit": "dashboard-security",
+    "concurrency": "runtime-ops",
+    "configuration": "runtime-config",
+    "dashboard_request": "dashboard-api",
+    "governance": "v27-governance",
+    "paper_mode_safety": "runtime-safety",
+    "registry": "runtime-registry",
+    "source_integrity": "source-integrity",
+    "spec_integrity": "spec-governance",
+    "static_policy": "static-policy",
+    "write_path": "write-path-governance"
+  }
+}
