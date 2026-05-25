@@ -1,0 +1,77 @@
+{
+  "schema_version": "v2.7.0.security_session_policy.v1",
+  "updated_at": "2026-05-26T00:00:00Z",
+  "scope": "dashboard_admin_secret_access_and_telegram_ingestion_sessions",
+  "failure_action": "reject_admin_mutation_or_disable_ingestion",
+  "admin_sessions": [
+    {
+      "session_id": "dashboard-admin-token-session-v1",
+      "operator_id": "dashboard_token_operator",
+      "mfa_required": true,
+      "expires_at": "2026-06-25T00:00:00Z",
+      "csrf_protection": "post_only_mutation_and_non_cookie_token",
+      "required_role": "dashboard_admin",
+      "token_scope": "dashboard:admin_mutation",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchors": [
+        "function checkAuth(req, url, res)",
+        "const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';",
+        "function requirePost(req, res)",
+        "requireDashboardAuditEvent(req, res, url,"
+      ]
+    }
+  ],
+  "secret_access_audit": [
+    {
+      "secret_id": "env:DASHBOARD_TOKEN",
+      "accessor_id": "dashboard_server_boot",
+      "access_reason": "protect dashboard read, export, and mutation endpoints",
+      "audit_event_id": "secret-access-dashboard-token-policy-v1",
+      "accessed_at": "2026-05-26T00:00:00Z",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';",
+      "redaction_pattern_ids": ["dashboard_query_token", "key_value_secret_field"],
+      "store_secret_value": false
+    },
+    {
+      "secret_id": "env:TELEGRAM_API_HASH",
+      "accessor_id": "premium_channel_listener",
+      "access_reason": "authenticate Telegram premium channel ingestion session",
+      "audit_event_id": "secret-access-telegram-api-hash-policy-v1",
+      "accessed_at": "2026-05-26T00:00:00Z",
+      "source_file": "src/inputs/premium-channel-listener.js",
+      "source_anchor": "const apiHash = process.env.TELEGRAM_API_HASH || '';",
+      "redaction_pattern_ids": ["key_value_secret_field"],
+      "store_secret_value": false
+    },
+    {
+      "secret_id": "env:TELEGRAM_SESSION",
+      "accessor_id": "premium_channel_listener",
+      "access_reason": "restore Telegram StringSession without interactive login",
+      "audit_event_id": "secret-access-telegram-session-policy-v1",
+      "accessed_at": "2026-05-26T00:00:00Z",
+      "source_file": "src/inputs/premium-channel-listener.js",
+      "source_anchor": "const sessionString = process.env.TELEGRAM_SESSION || '';",
+      "redaction_pattern_ids": ["quoted_secret_field", "key_value_secret_field"],
+      "store_secret_value": false
+    }
+  ],
+  "telegram_sessions": [
+    {
+      "session_id": "telegram-premium-user-session-v1",
+      "account_id": "premium_channel_listener_env_account",
+      "auth_state": "required_before_ingestion",
+      "device_fingerprint_hash": "74f0c5a385e0eac8996dd52f6a92a5aa6e9628ae88934226e86a4e8aa4f534b1",
+      "checked_at": "2026-05-26T00:00:00Z",
+      "source_file": "src/inputs/premium-channel-listener.js",
+      "source_anchors": [
+        "const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');",
+        "const apiHash = process.env.TELEGRAM_API_HASH || '';",
+        "const sessionString = process.env.TELEGRAM_SESSION || '';",
+        "if (!apiId || !apiHash || !sessionString)",
+        "return false;"
+      ]
+    }
+  ],
+  "log_redaction_policy_file": "config/v27-log-redaction-policy.json"
+}

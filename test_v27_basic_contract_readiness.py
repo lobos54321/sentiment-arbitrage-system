@@ -5,6 +5,7 @@ sys.path.insert(0, "scripts")
 
 from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
+    verify_admin_session_security_contract,
     verify_api_response_contract,
     verify_api_response_envelope_contract,
     verify_aggregate_boundary_contract,
@@ -41,8 +42,10 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_safe_default,
     verify_safety_case,
     verify_service_readiness_probe_contract,
+    verify_secret_access_audit_contract,
     verify_silent_worker_death_detector_contract,
     verify_top_fix_queue,
+    verify_telegram_session_security_contract,
     verify_waiver_policy,
     verify_warm_start_safety_contract,
     verify_worker_heartbeat_contract,
@@ -99,6 +102,9 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "APIResponseEnvelopeContract",
         "ErrorTaxonomyContract",
         "LogRedactionVerificationContract",
+        "AdminSessionSecurityContract",
+        "SecretAccessAuditContract",
+        "TelegramSessionSecurityContract",
         "ServiceReadinessProbeContract",
         "DashboardActionSeparationContract",
     ):
@@ -1501,7 +1507,7 @@ def test_log_redaction_verification_covers_runtime_and_manual_evidence_logs():
     assert report["evidence"]["schema_version"] == "v2.7.0.log_redaction_policy.v1"
     assert report["evidence"]["secret_pattern_set"] == "v2.7.0.secret_pattern_set.dashboard_runtime.v1"
     assert report["evidence"]["pattern_count"] == 4
-    assert report["evidence"]["sample_case_count"] == 3
+    assert report["evidence"]["sample_case_count"] == 4
     assert report["evidence"]["stream_count"] == 3
     assert report["evidence"]["malformed_samples"] == []
     assert report["evidence"]["malformed_streams"] == []
@@ -1570,6 +1576,64 @@ def test_log_redaction_verification_blocks_unredacted_sample(tmp_path):
             "redaction_anchor": "redactLogMessage(args.map(formatLogArg).join(' '))",
         }
     ]
+
+
+def test_security_session_policy_covers_admin_secret_and_telegram_sessions():
+    admin = verify_admin_session_security_contract()
+    secret = verify_secret_access_audit_contract()
+    telegram = verify_telegram_session_security_contract()
+
+    assert admin["status"] == "pass"
+    assert admin["evidence"]["session_count"] == 1
+    assert admin["evidence"]["malformed_sessions"] == []
+    assert admin["evidence"]["source_violations"] == []
+    assert admin["evidence"]["sessions"][0]["mfa_required"] is True
+    assert admin["evidence"]["sessions"][0]["csrf_protection"] == "post_only_mutation_and_non_cookie_token"
+
+    assert secret["status"] == "pass"
+    assert secret["evidence"]["record_count"] == 3
+    assert secret["evidence"]["malformed_records"] == []
+    assert secret["evidence"]["redaction_violations"] == []
+    assert {item["secret_id"] for item in secret["evidence"]["records"]} == {
+        "env:DASHBOARD_TOKEN",
+        "env:TELEGRAM_API_HASH",
+        "env:TELEGRAM_SESSION",
+    }
+
+    assert telegram["status"] == "pass"
+    assert telegram["evidence"]["session_count"] == 1
+    assert telegram["evidence"]["malformed_sessions"] == []
+    assert telegram["evidence"]["source_violations"] == []
+    assert telegram["evidence"]["sessions"][0]["auth_state"] == "required_before_ingestion"
+
+
+def test_security_session_policy_blocks_missing_admin_source_anchor(tmp_path):
+    policy_path = tmp_path / "security-session.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.security_session_policy.v1",
+                "admin_sessions": [
+                    {
+                        "session_id": "broken-admin",
+                        "operator_id": "dashboard_token_operator",
+                        "mfa_required": True,
+                        "expires_at": "2026-06-25T00:00:00Z",
+                        "csrf_protection": "post_only_mutation_and_non_cookie_token",
+                        "source_file": "src/web/dashboard-server.js",
+                        "source_anchors": ["definitely_missing_admin_session_anchor"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_admin_session_security_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "admin_session_security_missing_malformed_or_unenforced"
+    assert report["evidence"]["source_violations"][0]["missing_anchors"] == ["definitely_missing_admin_session_anchor"]
 
 
 def test_service_readiness_probe_contract_covers_health_surfaces():

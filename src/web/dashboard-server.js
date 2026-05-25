@@ -533,6 +533,7 @@ export function redactLogMessage(input) {
   const secretNames = [
     'dashboard_token',
     'x-dashboard-token',
+    'telegram_session',
     'telegram_bot_token',
     'telegram_api_hash',
     'gmgn_api_key',

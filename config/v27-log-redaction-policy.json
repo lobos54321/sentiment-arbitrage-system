@@ -8,7 +8,7 @@
     "patterns": [
       {
         "pattern_id": "quoted_secret_field",
-        "regex": "([\"']?(?:dashboard_token|x-dashboard-token|telegram_bot_token|telegram_api_hash|gmgn_api_key|api_key|private_key|wallet_private_key|trade_wallet_private_key|live_private_key|solana_private_key|bsc_private_key|secret)[\"']?\\s*:\\s*[\"'])([^\"']+)([\"'])",
+        "regex": "([\"']?(?:dashboard_token|x-dashboard-token|telegram_session|telegram_bot_token|telegram_api_hash|gmgn_api_key|api_key|private_key|wallet_private_key|trade_wallet_private_key|live_private_key|solana_private_key|bsc_private_key|secret)[\"']?\\s*:\\s*[\"'])([^\"']+)([\"'])",
         "replacement": "\\1[REDACTED]\\3"
       },
       {
@@ -23,7 +23,7 @@
       },
       {
         "pattern_id": "key_value_secret_field",
-        "regex": "((?:dashboard_token|x-dashboard-token|telegram_bot_token|telegram_api_hash|gmgn_api_key|api_key|private_key|wallet_private_key|trade_wallet_private_key|live_private_key|solana_private_key|bsc_private_key|secret)\\s*[=:]\\s*)([^\\s\"',;]+)",
+        "regex": "((?:dashboard_token|x-dashboard-token|telegram_session|telegram_bot_token|telegram_api_hash|gmgn_api_key|api_key|private_key|wallet_private_key|trade_wallet_private_key|live_private_key|solana_private_key|bsc_private_key|secret)\\s*[=:]\\s*)([^\\s\"',;]+)",
         "replacement": "\\1[REDACTED]"
       }
     ]
@@ -46,6 +46,12 @@
       "raw": "{\"wallet_private_key\":\"unit-wallet-private-key\",\"token_ca\":\"So11111111111111111111111111111111111111112\"}",
       "expected_fragments_absent": ["unit-wallet-private-key"],
       "expected_fragments_present": ["\"wallet_private_key\":\"[REDACTED]\"", "So11111111111111111111111111111111111111112"]
+    },
+    {
+      "sample_id": "telegram_session",
+      "raw": "telegram_session=unit-telegram-session TELEGRAM_SESSION: unit-telegram-session-2",
+      "expected_fragments_absent": ["unit-telegram-session", "unit-telegram-session-2"],
+      "expected_fragments_present": ["telegram_session=[REDACTED]", "TELEGRAM_SESSION: [REDACTED]"]
     }
   ],
   "streams": [
@@ -55,7 +61,7 @@
       "source_file": "src/web/dashboard-server.js",
       "redaction_anchor": "const message = redactLogMessage(args.map(formatLogArg).join(' '));",
       "write_anchor": "fs.appendFileSync(runtimeLogPath",
-      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key"]
+      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key", "telegram_session"]
     },
     {
       "log_stream": "dashboard_memory_log_buffer",
@@ -63,7 +69,7 @@
       "source_file": "src/web/dashboard-server.js",
       "redaction_anchor": "const message = redactLogMessage(args.map(formatLogArg).join(' '));",
       "write_anchor": "logBuffer.push(logLine)",
-      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key"]
+      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key", "telegram_session"]
     },
     {
       "log_stream": "v27_manual_evidence_child_process_logs",
@@ -71,7 +77,7 @@
       "source_file": "src/web/dashboard-server.js",
       "redaction_anchor": "function writeRedactedLogStream(logStream, chunk)",
       "write_anchor": "logStream.write(redactLogMessage(chunk));",
-      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key"]
+      "sample_case_ids": ["dashboard_token_query", "authorization_header", "json_private_key", "telegram_session"]
     }
   ]
 }

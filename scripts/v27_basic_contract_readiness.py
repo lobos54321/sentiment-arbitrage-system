@@ -51,6 +51,28 @@ DEFAULT_SERVICE_READINESS_PROBES = PROJECT_ROOT / "config" / "v27-service-readin
 DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-dashboard-action-separation-policy.json"
 DEFAULT_NUMERIC_PRECISION_POLICY = PROJECT_ROOT / "config" / "v27-numeric-precision-policy.json"
 DEFAULT_REASON_TAXONOMY_POLICY = PROJECT_ROOT / "config" / "v27-reason-taxonomy-policy.json"
+DEFAULT_SECURITY_SESSION_POLICY = PROJECT_ROOT / "config" / "v27-security-session-policy.json"
+ADMIN_SESSION_SECURITY_REQUIRED_FIELDS = (
+    "session_id",
+    "operator_id",
+    "mfa_required",
+    "expires_at",
+    "csrf_protection",
+)
+SECRET_ACCESS_AUDIT_REQUIRED_FIELDS = (
+    "secret_id",
+    "accessor_id",
+    "access_reason",
+    "audit_event_id",
+    "accessed_at",
+)
+TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS = (
+    "session_id",
+    "account_id",
+    "auth_state",
+    "device_fingerprint_hash",
+    "checked_at",
+)
 NUMERIC_PRECISION_REQUIRED_FIELDS = (
     "unit",
     "decimal_scale",
@@ -3956,6 +3978,260 @@ def verify_log_redaction_verification(policy_path=DEFAULT_LOG_REDACTION_POLICY):
     )
 
 
+def _security_session_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "security_session_policy_not_object"}
+    return policy, None
+
+
+def _policy_source_anchor_violations(record, *, source_anchor_key="source_anchor"):
+    source_file = record.get("source_file") if isinstance(record, dict) else None
+    source_text, source_error = _read_project_text(source_file)
+    if source_error:
+        return [{**source_error}]
+    anchors = record.get(source_anchor_key)
+    if isinstance(anchors, list):
+        expected_anchors = [str(anchor) for anchor in anchors if str(anchor)]
+    else:
+        expected_anchors = [str(anchors)] if anchors else []
+    missing_anchors = [anchor for anchor in expected_anchors if anchor not in source_text]
+    return [
+        {
+            "source_file": source_file,
+            "reason": "source_anchor_missing",
+            "missing_anchors": missing_anchors,
+        }
+    ] if missing_anchors else []
+
+
+def verify_admin_session_security_contract(policy_path=DEFAULT_SECURITY_SESSION_POLICY):
+    policy, policy_error = _security_session_policy(policy_path)
+    if policy_error:
+        return _contract("AdminSessionSecurityContract", False, "admin_session_security_missing_malformed_or_unenforced", policy_error)
+
+    sessions = policy.get("admin_sessions") if isinstance(policy.get("admin_sessions"), list) else []
+    malformed_sessions = []
+    source_violations = []
+    csrf_modes = {"post_only_mutation_and_non_cookie_token", "double_submit_token"}
+    for index, session in enumerate(sessions):
+        if not isinstance(session, dict):
+            malformed_sessions.append({"index": index, "session_id": None, "missing_fields": list(ADMIN_SESSION_SECURITY_REQUIRED_FIELDS), "violations": ["session_not_object"]})
+            continue
+        missing = _missing_required_fields(session, ADMIN_SESSION_SECURITY_REQUIRED_FIELDS)
+        violations = []
+        if session.get("mfa_required") is not True:
+            violations.append("mfa_required_must_be_true")
+        if _parse_iso_ts(session.get("expires_at")) is None:
+            violations.append("expires_at_invalid")
+        if str(session.get("csrf_protection") or "") not in csrf_modes:
+            violations.append("csrf_protection_invalid")
+        if str(session.get("operator_id") or "") in {"root", "anonymous", "unknown"}:
+            violations.append("operator_id_not_bound")
+        if str(session.get("required_role") or "") and str(session.get("required_role")) != "dashboard_admin":
+            violations.append("required_role_must_be_dashboard_admin")
+        source_violations.extend(
+            {"index": index, "session_id": session.get("session_id"), **violation}
+            for violation in _policy_source_anchor_violations(session, source_anchor_key="source_anchors")
+        )
+        if missing or violations:
+            malformed_sessions.append({"index": index, "session_id": session.get("session_id"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.security_session_policy.v1"
+        and bool(sessions)
+        and not malformed_sessions
+        and not source_violations
+    )
+    return _contract(
+        "AdminSessionSecurityContract",
+        passed,
+        "admin_session_security_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "session_count": len(sessions),
+            "required_fields": list(ADMIN_SESSION_SECURITY_REQUIRED_FIELDS),
+            "malformed_sessions": malformed_sessions,
+            "source_violations": source_violations,
+            "sessions": [
+                {
+                    "session_id": item.get("session_id"),
+                    "operator_id": item.get("operator_id"),
+                    "mfa_required": item.get("mfa_required"),
+                    "expires_at": item.get("expires_at"),
+                    "csrf_protection": item.get("csrf_protection"),
+                    "token_scope": item.get("token_scope"),
+                }
+                for item in sessions
+                if isinstance(item, dict)
+            ],
+        },
+    )
+
+
+def _log_redaction_pattern_ids(policy):
+    pattern_set = policy.get("secret_pattern_set") if isinstance(policy.get("secret_pattern_set"), dict) else {}
+    patterns = pattern_set.get("patterns") if isinstance(pattern_set.get("patterns"), list) else []
+    return {
+        str(pattern.get("pattern_id")): str(pattern.get("regex") or "")
+        for pattern in patterns
+        if isinstance(pattern, dict) and pattern.get("pattern_id")
+    }
+
+
+def verify_secret_access_audit_contract(policy_path=DEFAULT_SECURITY_SESSION_POLICY):
+    policy, policy_error = _security_session_policy(policy_path)
+    if policy_error:
+        return _contract("SecretAccessAuditContract", False, "secret_access_audit_missing_malformed_or_unverified", policy_error)
+
+    log_policy_path = _resolve_project_file(policy.get("log_redaction_policy_file")) or DEFAULT_LOG_REDACTION_POLICY
+    try:
+        log_policy = _load_json(log_policy_path)
+        redaction_patterns = _log_redaction_pattern_ids(log_policy)
+        log_policy_error = None
+    except Exception as exc:
+        redaction_patterns = {}
+        log_policy_error = {"policy_path": str(log_policy_path), "error": str(exc)}
+
+    records = policy.get("secret_access_audit") if isinstance(policy.get("secret_access_audit"), list) else []
+    malformed_records = []
+    source_violations = []
+    redaction_violations = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            malformed_records.append({"index": index, "secret_id": None, "missing_fields": list(SECRET_ACCESS_AUDIT_REQUIRED_FIELDS), "violations": ["secret_access_record_not_object"]})
+            continue
+        missing = _missing_required_fields(record, SECRET_ACCESS_AUDIT_REQUIRED_FIELDS)
+        violations = []
+        if _parse_iso_ts(record.get("accessed_at")) is None:
+            violations.append("accessed_at_invalid")
+        if record.get("store_secret_value") is not False:
+            violations.append("store_secret_value_must_be_false")
+        if not re.match(r"^env:[A-Z][A-Z0-9_]*$", str(record.get("secret_id") or "")):
+            violations.append("secret_id_must_reference_env_name")
+        source_violations.extend(
+            {"index": index, "secret_id": record.get("secret_id"), **violation}
+            for violation in _policy_source_anchor_violations(record)
+        )
+        pattern_ids = [str(item) for item in (record.get("redaction_pattern_ids") or [])]
+        unknown_patterns = sorted(pattern_id for pattern_id in pattern_ids if pattern_id not in redaction_patterns)
+        if unknown_patterns:
+            redaction_violations.append({"index": index, "secret_id": record.get("secret_id"), "unknown_pattern_ids": unknown_patterns})
+        secret_name = str(record.get("secret_id") or "").split("env:", 1)[-1].lower()
+        if secret_name and not any(secret_name in regex.lower() for regex in redaction_patterns.values()):
+            redaction_violations.append({"index": index, "secret_id": record.get("secret_id"), "reason": "secret_name_not_covered_by_redaction_patterns"})
+        if missing or violations:
+            malformed_records.append({"index": index, "secret_id": record.get("secret_id"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.security_session_policy.v1"
+        and len(records) >= 3
+        and not log_policy_error
+        and not malformed_records
+        and not source_violations
+        and not redaction_violations
+    )
+    return _contract(
+        "SecretAccessAuditContract",
+        passed,
+        "secret_access_audit_missing_malformed_or_unverified",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "record_count": len(records),
+            "required_fields": list(SECRET_ACCESS_AUDIT_REQUIRED_FIELDS),
+            "log_redaction_policy_path": str(log_policy_path),
+            "log_policy_error": log_policy_error,
+            "malformed_records": malformed_records,
+            "source_violations": source_violations,
+            "redaction_violations": redaction_violations,
+            "records": [
+                {
+                    "secret_id": item.get("secret_id"),
+                    "accessor_id": item.get("accessor_id"),
+                    "access_reason": item.get("access_reason"),
+                    "audit_event_id": item.get("audit_event_id"),
+                    "accessed_at": item.get("accessed_at"),
+                }
+                for item in records
+                if isinstance(item, dict)
+            ],
+        },
+    )
+
+
+def verify_telegram_session_security_contract(policy_path=DEFAULT_SECURITY_SESSION_POLICY):
+    policy, policy_error = _security_session_policy(policy_path)
+    if policy_error:
+        return _contract("TelegramSessionSecurityContract", False, "telegram_session_security_missing_malformed_or_unenforced", policy_error)
+
+    sessions = policy.get("telegram_sessions") if isinstance(policy.get("telegram_sessions"), list) else []
+    malformed_sessions = []
+    source_violations = []
+    allowed_auth_states = {"required_before_ingestion", "authenticated", "disabled"}
+    for index, session in enumerate(sessions):
+        if not isinstance(session, dict):
+            malformed_sessions.append({"index": index, "session_id": None, "missing_fields": list(TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS), "violations": ["telegram_session_not_object"]})
+            continue
+        missing = _missing_required_fields(session, TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS)
+        violations = []
+        if str(session.get("auth_state") or "") not in allowed_auth_states:
+            violations.append("auth_state_invalid")
+        if not re.match(r"^[0-9a-f]{64}$", str(session.get("device_fingerprint_hash") or "")):
+            violations.append("device_fingerprint_hash_must_be_sha256_hex")
+        if _parse_iso_ts(session.get("checked_at")) is None:
+            violations.append("checked_at_invalid")
+        source_violations.extend(
+            {"index": index, "session_id": session.get("session_id"), **violation}
+            for violation in _policy_source_anchor_violations(session, source_anchor_key="source_anchors")
+        )
+        source_text, source_error = _read_project_text(session.get("source_file"))
+        if source_error:
+            source_violations.append({"index": index, "session_id": session.get("session_id"), **source_error})
+        else:
+            required_runtime_fragments = ["new StringSession(sessionString)", "new TelegramClient(session", "Missing Telegram User API credentials"]
+            missing_fragments = [fragment for fragment in required_runtime_fragments if fragment not in source_text]
+            if missing_fragments:
+                source_violations.append({"index": index, "session_id": session.get("session_id"), "reason": "telegram_runtime_guard_missing", "missing_fragments": missing_fragments})
+        if missing or violations:
+            malformed_sessions.append({"index": index, "session_id": session.get("session_id"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.security_session_policy.v1"
+        and bool(sessions)
+        and not malformed_sessions
+        and not source_violations
+    )
+    return _contract(
+        "TelegramSessionSecurityContract",
+        passed,
+        "telegram_session_security_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "session_count": len(sessions),
+            "required_fields": list(TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS),
+            "malformed_sessions": malformed_sessions,
+            "source_violations": source_violations,
+            "sessions": [
+                {
+                    "session_id": item.get("session_id"),
+                    "account_id": item.get("account_id"),
+                    "auth_state": item.get("auth_state"),
+                    "device_fingerprint_hash": item.get("device_fingerprint_hash"),
+                    "checked_at": item.get("checked_at"),
+                }
+                for item in sessions
+                if isinstance(item, dict)
+            ],
+        },
+    )
+
+
 def verify_service_readiness_probe_contract(policy_path=DEFAULT_SERVICE_READINESS_PROBES):
     try:
         policy = _load_json(policy_path)
@@ -4873,6 +5149,7 @@ def build_basic_contract_readiness(
     dashboard_action_separation_policy_path=DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY,
     numeric_precision_policy_path=DEFAULT_NUMERIC_PRECISION_POLICY,
     reason_taxonomy_policy_path=DEFAULT_REASON_TAXONOMY_POLICY,
+    security_session_policy_path=DEFAULT_SECURITY_SESSION_POLICY,
     env=None,
 ):
     contracts = {
@@ -4937,6 +5214,9 @@ def build_basic_contract_readiness(
             verify_api_response_envelope_contract(policy_path=api_response_envelope_policy_path),
             verify_error_taxonomy(taxonomy_path=error_taxonomy_path),
             verify_log_redaction_verification(policy_path=log_redaction_policy_path),
+            verify_admin_session_security_contract(policy_path=security_session_policy_path),
+            verify_secret_access_audit_contract(policy_path=security_session_policy_path),
+            verify_telegram_session_security_contract(policy_path=security_session_policy_path),
             verify_service_readiness_probe_contract(policy_path=service_readiness_policy_path),
             verify_dashboard_action_separation_contract(policy_path=dashboard_action_separation_policy_path),
         ]
@@ -4986,6 +5266,7 @@ def main():
     parser.add_argument("--dashboard-action-separation-policy", default=str(DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY))
     parser.add_argument("--numeric-precision-policy", default=str(DEFAULT_NUMERIC_PRECISION_POLICY))
     parser.add_argument("--reason-taxonomy-policy", default=str(DEFAULT_REASON_TAXONOMY_POLICY))
+    parser.add_argument("--security-session-policy", default=str(DEFAULT_SECURITY_SESSION_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -5019,6 +5300,7 @@ def main():
         dashboard_action_separation_policy_path=Path(args.dashboard_action_separation_policy),
         numeric_precision_policy_path=Path(args.numeric_precision_policy),
         reason_taxonomy_policy_path=Path(args.reason_taxonomy_policy),
+        security_session_policy_path=Path(args.security_session_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:
