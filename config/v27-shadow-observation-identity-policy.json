@@ -1,0 +1,144 @@
+{
+  "schema_version": "v2.7.0.shadow_observation_identity_policy.v1",
+  "scope": "v27_shadow_observation_identity_and_counterfactual_readiness",
+  "failure_action": "shadow_identity_or_observation_blocked",
+  "coverage": {
+    "source_registry_file": "config/v27-source-registry.json",
+    "lifecycle_mirror_source_file": "scripts/v27_mirror_lifecycle_tracks.py",
+    "trade_outcome_mirror_source_file": "scripts/v27_mirror_trade_outcomes.py",
+    "earliest_actionable_source_file": "scripts/v27_mirror_earliest_actionable_times.py",
+    "denominator_projection_source_file": "scripts/v27_denominator_projection.py",
+    "basic_readiness_source_file": "scripts/v27_basic_contract_readiness.py"
+  },
+  "source_anchors": [
+    {
+      "source_file": "scripts/v27_mirror_lifecycle_tracks.py",
+      "anchor": "LIFECYCLE_EVENT_TYPE = \"token_lifecycle_identity_resolved\""
+    },
+    {
+      "source_file": "scripts/v27_mirror_lifecycle_tracks.py",
+      "anchor": "\"canonical_pool_group\": pool_address or \"unknown_pool\""
+    },
+    {
+      "source_file": "scripts/v27_denominator_projection.py",
+      "anchor": "resolved_pool_by_identity"
+    },
+    {
+      "source_file": "scripts/v27_mirror_trade_outcomes.py",
+      "anchor": "\"counterfactual_entry_reason\": \"legacy_paper_trade_entry\""
+    },
+    {
+      "source_file": "scripts/v27_mirror_earliest_actionable_times.py",
+      "anchor": "\"counterfactual_entry_ts\": entry_ts"
+    },
+    {
+      "source_file": "scripts/v27_mirror_telegram_signals.py",
+      "anchor": "\"realtime_observable_quality\": \"backfilled\" if backfilled else \"realtime_seed\" if realtime_observable else \"unproven\""
+    }
+  ],
+  "allowed_source_aliases": [
+    "paper_trades",
+    "lifecycle_tracks",
+    "v27_event_log",
+    "denominator_projection"
+  ],
+  "forbidden_future_fields": [
+    "exit_ts",
+    "peak_pnl",
+    "net_delayed_executable_peak_3s",
+    "realized_pnl",
+    "trade_label_available_at"
+  ],
+  "identity_merge_split_records": [
+    {
+      "merge_split_id": "merge-tokenready-pool-resolution-v1",
+      "old_identity_key": "solana:TokenReady:unknown_pool:0",
+      "new_identity_key": "solana:TokenReady:resolved_pool_unit:0",
+      "resolution_reason": "lifecycle_pool_resolution_from_token_lifecycle_identity_resolved",
+      "resolution_policy_version": "v2.7.0.identity_merge_split.shadow.v1",
+      "source_event_type": "token_lifecycle_identity_resolved",
+      "supersedes_event_id": "evt_lifecycle_unknown_pool_unit",
+      "failure_action": "identity_dirty"
+    }
+  ],
+  "rekey_records": [
+    {
+      "old_key": "telegram_signal:solana:TokenReady:unknown_pool:0",
+      "new_key": "telegram_signal:solana:TokenReady:resolved_pool_unit:0",
+      "rekey_reason": "canonical_pool_group_resolved_after_lifecycle_identity",
+      "supersedes_event_id": "evt_telegram_signal_unknown_pool_unit",
+      "rekey_policy_version": "v2.7.0.rekeying.shadow.v1",
+      "source_event_type": "token_lifecycle_identity_resolved",
+      "old_key_retired": true,
+      "failure_action": "identity_dirty"
+    }
+  ],
+  "source_gap_backfill_boundaries": [
+    {
+      "backfill_id": "premium-source-gap-backfill-research-only-v1",
+      "source_id": "premium:egeye_ai_gems_100x_vip",
+      "gap_window": {
+        "start": "2026-05-25T00:00:00Z",
+        "end": "2026-05-25T00:05:00Z"
+      },
+      "allowed_fields": [
+        "telegram_signal_id",
+        "token_ca",
+        "symbol",
+        "chain",
+        "source_id",
+        "raw_message_hash",
+        "observed_at"
+      ],
+      "forbidden_fields": [
+        "exit_ts",
+        "peak_pnl",
+        "net_delayed_executable_peak_3s",
+        "realized_pnl",
+        "trade_label_available_at"
+      ],
+      "backfilled_at": "2026-05-26T00:00:00Z",
+      "backfill_mode": "research_only",
+      "writes_to_shadow_only": true,
+      "failure_action": "backfill_research_only"
+    }
+  ],
+  "observation_policies": [
+    {
+      "observation_id": "premium-clean-observation-policy-v1",
+      "observation_policy_version": "v2.7.0.observation_policy.shadow.v1",
+      "allowed_sources": [
+        "premium:egeye_ai_gems_100x_vip",
+        "paper_trades",
+        "lifecycle_tracks",
+        "v27_event_log",
+        "denominator_projection"
+      ],
+      "forbidden_fields": [
+        "exit_ts",
+        "peak_pnl",
+        "net_delayed_executable_peak_3s",
+        "realized_pnl",
+        "trade_label_available_at"
+      ],
+      "recorded_at": "2026-05-26T00:00:00Z",
+      "policy_action": "observation_rejected",
+      "leakage_guard": "forbid_future_outcome_fields_before_decision_time"
+    }
+  ],
+  "counterfactual_entry_time_records": [
+    {
+      "counterfactual_entry_ts": "2026-05-25T00:00:03Z",
+      "counterfactual_policy_version": "legacy_actual_paper_entry_actionable_time_v0.1",
+      "counterfactual_model_snapshot_id": "sha256:5cb563f8725ef2705b3a4b5032197acbf8a5c0a714a00b601db16edcdc044410",
+      "decision_available_at": "2026-05-25T00:00:02Z",
+      "feature_max_available_at": "2026-05-25T00:00:02Z",
+      "source_event_type": "earliest_actionable_time_recorded",
+      "forbidden_future_fields_used": [],
+      "used_future_peak": false,
+      "used_future_outcome": false,
+      "used_posthoc_label": false,
+      "failure_action": "research_only"
+    }
+  ]
+}

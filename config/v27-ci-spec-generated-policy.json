@@ -1,13 +1,14 @@
 {
   "ci_merge_gates": [
     {
-      "artifact_hash": "e7e73d78391c84993bca53dad2d85acabfd00d0e3d7199fd15555403dd05f304",
+      "artifact_hash": "dede3e24cf263e52fdf7d212109cb2b3fc2dfbb6930d1cd59915b5a7f613c67d",
       "gate_result": "pass",
       "merge_gate_id": "v27-readiness-main-pr-gate",
       "required_checks": [
         "python3 -m py_compile scripts/v27_basic_contract_readiness.py scripts/v27_mode_readiness.py scripts/generate_v27_contract_client.py",
         "python3 -m json.tool config/v27-error-taxonomy.json",
         "python3 -m json.tool config/v27-ci-spec-generated-policy.json",
+        "python3 -m json.tool config/v27-shadow-observation-identity-policy.json",
         "python3 -m json.tool spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json",
         "python3 scripts/generate_v27_contract_client.py --check",
         "python3 scripts/v27_spec_validate.py",
@@ -18,7 +19,7 @@
       ],
       "spec_hash": "bbbad3551afe72dc104888529dff4f91a67524464f6a7e49ea7bfae46c3eef53",
       "workflow_file": ".github/workflows/v27-readiness.yml",
-      "workflow_sha256": "41c5e22eb51106d8440308ca04b9c217a9002c38fd2bd7b481922d83e54fa117"
+      "workflow_sha256": "b90561f58290c14b225e10646997c0dff5dcee457cfb294f522280620422f1a0"
     }
   ],
   "failure_action": "ci_fail",
@@ -43,6 +44,11 @@
         "StandardizedStopContract",
         "ExAnteFeasibility",
         "EarliestActionableTime",
+        "CounterfactualEntryTime",
+        "IdentityMergeSplitContract",
+        "ReKeyingContract",
+        "SourceGapBackfillBoundary",
+        "ObservationPolicyContract",
         "ClientSideCacheContract",
         "ClientSideFreshnessContract",
         "DashboardQueryProvenanceContract",
@@ -73,12 +79,13 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-26T00:00:00Z",
-      "impact_hash": "07a50fc8007246e3e12e50589b146ada7fdedff2e3ddffb2f0cff876ebd6b907",
+      "impact_hash": "8151f703551b062fca7e1fc627b57fc3e98bb4ab83955d1b411eb18e4b1d07a0",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
         "spec/telegram_dog_regime_capture/v2.7.0/gap-register.json",
         "config/v27-source-parser-auth-policy.json",
+        "config/v27-shadow-observation-identity-policy.json",
         "config/v27-error-taxonomy.json",
         "scripts/v27_basic_contract_readiness.py",
         "scripts/v27_mode_readiness.py",
@@ -92,23 +99,24 @@
         "test_v27_mode_gate_scope_audit.py"
       ],
       "source_hashes": {
-        ".github/workflows/v27-readiness.yml": "41c5e22eb51106d8440308ca04b9c217a9002c38fd2bd7b481922d83e54fa117",
-        "config/v27-error-taxonomy.json": "4e9b7d07f79d3ad16360aca9ac06294b510e0d7c750c971c8ef809776ec30b8e",
+        ".github/workflows/v27-readiness.yml": "b90561f58290c14b225e10646997c0dff5dcee457cfb294f522280620422f1a0",
+        "config/v27-error-taxonomy.json": "c423fac1369abb96261b0fce64f4bc39e270e66018c07d5b436bb1c84c393e3e",
+        "config/v27-shadow-observation-identity-policy.json": "68325b198f413e5f1e52a9e7be598400bf5a7da6460e47cabc41360acac9b902",
         "config/v27-source-parser-auth-policy.json": "8afb5db9fd4cda64d7ef0e2285761f3a9834a5873383a7a8b89a70e09eb64a21",
         "scripts/generate_v27_contract_client.py": "3d8c06fd2242773e306d2a49a6e5191f6aceac8c3ed7c9659bfc677381e83c7a",
-        "scripts/v27_basic_contract_readiness.py": "e23f9c151434bb957e2aae3ea77cc0a00018fae272c9f0e5d54a2b79f679c2ec",
+        "scripts/v27_basic_contract_readiness.py": "d1fcc2dbaac602fbe1571cc33102f2988dc59bf655f402bec361474fde6a94e5",
         "scripts/v27_mode_gate_scope_audit.py": "e548951e66da42aa00d7fdff5944191609ad527dd375b9f459714a0576637d5d",
-        "scripts/v27_mode_readiness.py": "2d8bcf05fea3320a8c6d56cdfb45aeecba279be10494b74ed6b22dac9bf7a5e1",
+        "scripts/v27_mode_readiness.py": "5f9b1b1094fc4c0a968fe50c22a71ec61b7581472f59aa6edfd5e2953d38b42b",
         "scripts/v27_projection_consumer_evidence.py": "cdae1f25c2137c85bce4c29214fc5c3033ccb6982304ccd9558f1acf4d9bd82a",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json": "fc4f59ba12aef17576dfacc5c10e3f1d054f4cacb462f0bd8eef4c76508a068d",
         "spec/telegram_dog_regime_capture/v2.7.0/gap-register.json": "1e72251702c363326a1d4a9ee4270b9d38c22137d5ef4b426ee8e29b6d74e575",
         "spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json": "2c7e751f5df00934bb6c6b26799b1458c8323e3ef730469bb25f8792ed55f549",
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json": "02f5364a80d031db66b98a98538aeeb907a4159722533ddfa9a888ae6ca1db42",
-        "test_v27_basic_contract_readiness.py": "3081824d57b1a28f2f2d696a552cb22c1386796a405a4b85a94c773ffd5b199e",
-        "test_v27_mode_gate_scope_audit.py": "6e977b4b96e0f94bc9ef6752a603959bd1606b8276d73b8b912be855a02dcd29",
-        "test_v27_mode_readiness.py": "91f02fc3f2465141e99ed1f53b39fcf25b258014903c25ab8b136dc900a2e366"
+        "test_v27_basic_contract_readiness.py": "ddd5efe7e4508d9f13cbee281fb404823d87f9d7a00cc6b42a142f46425158c1",
+        "test_v27_mode_gate_scope_audit.py": "93806e872d962ab2c92ed9b691457e4077be3e4eeacf307b9a2124d8ae4e1113",
+        "test_v27_mode_readiness.py": "fe65e570cfde4076e8e9b57fedd49ede9e159305e39c17d5cc19a28c089b097f"
       },
-      "spec_change_id": "v27-shadow-source-parser-auth-readiness",
+      "spec_change_id": "v27-shadow-observation-identity-readiness",
       "spec_hash": "bbbad3551afe72dc104888529dff4f91a67524464f6a7e49ea7bfae46c3eef53"
     }
   ]

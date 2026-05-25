@@ -50,6 +50,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_safety_case,
     verify_service_readiness_probe_contract,
     verify_secret_access_audit_contract,
+    verify_shadow_observation_identity_contracts,
     verify_silent_worker_death_detector_contract,
     verify_source_parser_authenticity_contracts,
     verify_top_fix_queue,
@@ -82,6 +83,11 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "ParserConfusablesContract",
         "ImageOCRSignalPolicy",
         "SourceImpersonationDetector",
+        "IdentityMergeSplitContract",
+        "ReKeyingContract",
+        "SourceGapBackfillBoundary",
+        "ObservationPolicyContract",
+        "CounterfactualEntryTime",
         "InputSanitizationContract",
         "SafeDefaultContract",
         "ProjectStopLossContract",
@@ -169,6 +175,39 @@ def test_source_parser_authenticity_policy_blocks_bad_ambiguity_case(tmp_path):
     assert ambiguity["status"] == "missing_evidence"
     assert ambiguity["blocking_reason"] == "parser_ambiguity_policy_missing_malformed_or_unenforced"
     assert ambiguity["evidence"]["malformed_ambiguity_cases"][0]["violations"] == ["selected_anchor_not_in_candidates"]
+
+
+def test_shadow_observation_identity_policy_verifies_shadow_contracts():
+    reports = {item["contract_id"]: item for item in verify_shadow_observation_identity_contracts()}
+
+    for contract_id in (
+        "IdentityMergeSplitContract",
+        "ReKeyingContract",
+        "SourceGapBackfillBoundary",
+        "ObservationPolicyContract",
+        "CounterfactualEntryTime",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["IdentityMergeSplitContract"]["evidence"]["malformed_merge_split_records"] == []
+    assert reports["ReKeyingContract"]["evidence"]["old_key_retired_count"] == 1
+    assert reports["SourceGapBackfillBoundary"]["evidence"]["research_only_backfill_count"] == 1
+    assert reports["ObservationPolicyContract"]["evidence"]["rejecting_observation_policy_count"] == 1
+    assert reports["CounterfactualEntryTime"]["evidence"]["leak_free_counterfactual_entry_time_count"] == 1
+
+
+def test_shadow_observation_identity_policy_blocks_future_leaky_backfill(tmp_path):
+    policy = json.loads(Path("config/v27-shadow-observation-identity-policy.json").read_text(encoding="utf-8"))
+    policy["source_gap_backfill_boundaries"][0]["allowed_fields"].append("peak_pnl")
+    policy_path = tmp_path / "shadow-observation-identity-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_shadow_observation_identity_contracts(policy_path=policy_path)}
+
+    backfill = reports["SourceGapBackfillBoundary"]
+    assert backfill["status"] == "missing_evidence"
+    assert backfill["blocking_reason"] == "source_gap_backfill_boundary_missing_malformed_or_live_mutating"
+    assert backfill["evidence"]["malformed_source_gap_backfill_boundaries"][0]["violations"] == ["allowed_fields_include_future_outcome"]
 
 
 def test_numeric_precision_policy_verifies_units_samples_and_source_anchors():

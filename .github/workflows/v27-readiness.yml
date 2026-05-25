@@ -20,6 +20,7 @@ jobs:
         run: |
           python3 -m json.tool config/v27-error-taxonomy.json
           python3 -m json.tool config/v27-ci-spec-generated-policy.json
+          python3 -m json.tool config/v27-shadow-observation-identity-policy.json
           python3 -m json.tool spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json
       - name: Validate v27 generated client
         run: python3 scripts/generate_v27_contract_client.py --check

@@ -818,6 +818,11 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["ParserConfusablesContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ImageOCRSignalPolicy"]["status"] == "pass"
     assert matrix["contract_statuses"]["SourceImpersonationDetector"]["status"] == "pass"
+    assert matrix["contract_statuses"]["IdentityMergeSplitContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ReKeyingContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SourceGapBackfillBoundary"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ObservationPolicyContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["CounterfactualEntryTime"]["status"] == "pass"
     assert matrix["modes"]["observe_only"]["status"] == "allowed"
     assert "NumericPrecisionContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert "CICDMergeGateContract" in matrix["modes"]["observe_only"]["required_contracts"]
@@ -833,8 +838,11 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert "StandardizedStopContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "ExAnteFeasibility" in matrix["modes"]["shadow"]["required_contracts"]
     assert "EarliestActionableTime" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "CounterfactualEntryTime" in matrix["modes"]["shadow"]["required_contracts"]
     assert "ParserCanaryCorpusContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "SourceImpersonationDetector" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "ObservationPolicyContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "IdentityMergeSplitContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"

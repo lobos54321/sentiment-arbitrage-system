@@ -27,6 +27,7 @@ from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_P
 DEFAULT_CHAIN_CONFIG = PROJECT_ROOT / "config" / "v27-chain-config.json"
 DEFAULT_SOURCE_REGISTRY = PROJECT_ROOT / "config" / "v27-source-registry.json"
 DEFAULT_SOURCE_PARSER_AUTH_POLICY = PROJECT_ROOT / "config" / "v27-source-parser-auth-policy.json"
+DEFAULT_SHADOW_OBSERVATION_IDENTITY_POLICY = PROJECT_ROOT / "config" / "v27-shadow-observation-identity-policy.json"
 DEFAULT_CHANNELS_CSV = PROJECT_ROOT / "config" / "channels.csv"
 DEFAULT_SYSTEM_CONFIG = PROJECT_ROOT / "config" / "system.config.json"
 DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.json"
@@ -129,6 +130,37 @@ SOURCE_IMPERSONATION_REQUIRED_FIELDS = (
     "impersonation_signal",
     "confidence",
     "action",
+)
+IDENTITY_MERGE_SPLIT_REQUIRED_FIELDS = (
+    "merge_split_id",
+    "old_identity_key",
+    "new_identity_key",
+    "resolution_reason",
+)
+REKEYING_REQUIRED_FIELDS = (
+    "old_key",
+    "new_key",
+    "rekey_reason",
+    "supersedes_event_id",
+)
+SOURCE_GAP_BACKFILL_REQUIRED_FIELDS = (
+    "backfill_id",
+    "source_id",
+    "gap_window",
+    "allowed_fields",
+    "backfilled_at",
+)
+OBSERVATION_POLICY_REQUIRED_FIELDS = (
+    "observation_id",
+    "observation_policy_version",
+    "allowed_sources",
+    "forbidden_fields",
+    "recorded_at",
+)
+COUNTERFACTUAL_ENTRY_TIME_REQUIRED_FIELDS = (
+    "counterfactual_entry_ts",
+    "counterfactual_policy_version",
+    "counterfactual_model_snapshot_id",
 )
 QUEUE_ACK_NACK_REQUIRED_FIELDS = (
     "queue_id",
@@ -5813,6 +5845,282 @@ def verify_source_parser_authenticity_contracts(
     ]
 
 
+def _shadow_observation_identity_policy_base(policy_path, source_registry_path):
+    try:
+        policy = _load_json(policy_path)
+        policy_error = None
+    except Exception as exc:
+        policy = {}
+        policy_error = {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        policy = {}
+        policy_error = {"policy_path": str(policy_path), "error": "shadow_observation_identity_policy_not_object"}
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    schema_violations = []
+    if policy.get("schema_version") != "v2.7.0.shadow_observation_identity_policy.v1":
+        schema_violations.append("schema_version_mismatch")
+    try:
+        source_by_id, shadow_source_ids = _source_registry_index(source_registry_path)
+        registry_error = None
+    except Exception as exc:
+        source_by_id, shadow_source_ids = {}, []
+        registry_error = {"source_registry_path": str(source_registry_path), "error": str(exc)}
+    allowed_aliases = [str(item) for item in (policy.get("allowed_source_aliases") or []) if item]
+    forbidden_future_fields = [str(item) for item in (policy.get("forbidden_future_fields") or []) if item]
+    base = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "source_registry_path": str(source_registry_path),
+        "source_anchor_violations": source_anchor_violations,
+        "source_errors": source_errors,
+        "schema_violations": schema_violations,
+        "registry_error": registry_error,
+        "shadow_source_ids": shadow_source_ids,
+        "allowed_source_aliases": allowed_aliases,
+        "forbidden_future_fields": forbidden_future_fields,
+    }
+    base_failed = bool(policy_error or source_anchor_violations or source_errors or schema_violations or registry_error)
+    if policy_error:
+        base["policy_error"] = policy_error
+    return policy, source_by_id, shadow_source_ids, allowed_aliases, forbidden_future_fields, base, base_failed
+
+
+def _shadow_observation_identity_contract(contract_id, passed, reason, base_evidence, evidence):
+    return _contract(contract_id, passed, reason, {**base_evidence, **evidence})
+
+
+def _identity_merge_split_evidence(records):
+    malformed = []
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, IDENTITY_MERGE_SPLIT_REQUIRED_FIELDS)
+        violations = []
+        old_key = item.get("old_identity_key") if isinstance(item, dict) else None
+        new_key = item.get("new_identity_key") if isinstance(item, dict) else None
+        if old_key and new_key and old_key == new_key:
+            violations.append("identity_key_not_changed")
+        if item.get("source_event_type") != "token_lifecycle_identity_resolved":
+            violations.append("unexpected_source_event_type")
+        if item.get("failure_action") != "identity_dirty":
+            violations.append("unexpected_failure_action")
+        if missing or violations:
+            malformed.append({"index": index, "merge_split_id": item.get("merge_split_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "merge_split_count": len(records) if isinstance(records, list) else 0,
+        "malformed_merge_split_records": malformed,
+    }
+
+
+def _rekeying_evidence(records):
+    malformed = []
+    retired_count = 0
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, REKEYING_REQUIRED_FIELDS)
+        violations = []
+        old_key = item.get("old_key") if isinstance(item, dict) else None
+        new_key = item.get("new_key") if isinstance(item, dict) else None
+        if old_key and new_key and old_key == new_key:
+            violations.append("rekey_target_unchanged")
+        if item.get("source_event_type") != "token_lifecycle_identity_resolved":
+            violations.append("unexpected_source_event_type")
+        if item.get("old_key_retired") is not True:
+            violations.append("old_key_not_retired")
+        else:
+            retired_count += 1
+        if item.get("failure_action") != "identity_dirty":
+            violations.append("unexpected_failure_action")
+        if missing or violations:
+            malformed.append({"index": index, "old_key": old_key, "new_key": new_key, "missing_fields": missing, "violations": violations})
+    return {
+        "rekey_count": len(records) if isinstance(records, list) else 0,
+        "old_key_retired_count": retired_count,
+        "malformed_rekey_records": malformed,
+    }
+
+
+def _source_gap_backfill_boundary_evidence(records, source_by_id, forbidden_future_fields):
+    malformed = []
+    research_only_count = 0
+    forbidden_set = set(forbidden_future_fields)
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, SOURCE_GAP_BACKFILL_REQUIRED_FIELDS)
+        violations = []
+        source_id = str(item.get("source_id") or "") if isinstance(item, dict) else ""
+        gap_window = item.get("gap_window") if isinstance(item, dict) else None
+        allowed_fields = item.get("allowed_fields") if isinstance(item, dict) else None
+        forbidden_fields = item.get("forbidden_fields") if isinstance(item, dict) else None
+        if source_id not in source_by_id:
+            violations.append("unknown_source_id")
+        if not isinstance(gap_window, dict):
+            violations.append("gap_window_not_object")
+        else:
+            start_ts = _parse_iso_ts(gap_window.get("start"))
+            end_ts = _parse_iso_ts(gap_window.get("end"))
+            if start_ts is None or end_ts is None:
+                violations.append("gap_window_invalid")
+            elif start_ts > end_ts:
+                violations.append("gap_window_reversed")
+        if not isinstance(allowed_fields, list) or not allowed_fields:
+            violations.append("allowed_fields_missing")
+        elif forbidden_set.intersection(str(field) for field in allowed_fields):
+            violations.append("allowed_fields_include_future_outcome")
+        if not isinstance(forbidden_fields, list) or not forbidden_set.issubset(set(str(field) for field in forbidden_fields)):
+            violations.append("forbidden_fields_incomplete")
+        if _parse_iso_ts(item.get("backfilled_at") if isinstance(item, dict) else None) is None:
+            violations.append("backfilled_at_invalid")
+        if item.get("backfill_mode") != "research_only":
+            violations.append("backfill_mode_not_research_only")
+        else:
+            research_only_count += 1
+        if item.get("writes_to_shadow_only") is not True:
+            violations.append("writes_to_shadow_only_not_true")
+        if item.get("failure_action") != "backfill_research_only":
+            violations.append("unexpected_failure_action")
+        if missing or violations:
+            malformed.append({"index": index, "backfill_id": item.get("backfill_id") if isinstance(item, dict) else None, "source_id": source_id, "missing_fields": missing, "violations": violations})
+    return {
+        "source_gap_backfill_boundary_count": len(records) if isinstance(records, list) else 0,
+        "research_only_backfill_count": research_only_count,
+        "malformed_source_gap_backfill_boundaries": malformed,
+    }
+
+
+def _observation_policy_evidence(records, source_by_id, allowed_aliases, forbidden_future_fields):
+    malformed = []
+    known_sources = set(source_by_id) | set(allowed_aliases)
+    forbidden_set = set(forbidden_future_fields)
+    rejecting_policy_count = 0
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, OBSERVATION_POLICY_REQUIRED_FIELDS)
+        violations = []
+        allowed_sources = item.get("allowed_sources") if isinstance(item, dict) else None
+        forbidden_fields = item.get("forbidden_fields") if isinstance(item, dict) else None
+        if not isinstance(allowed_sources, list) or not allowed_sources:
+            violations.append("allowed_sources_missing")
+        else:
+            unknown_allowed = sorted(str(source) for source in allowed_sources if str(source) not in known_sources)
+            if unknown_allowed:
+                violations.append("unknown_allowed_source")
+        if not isinstance(forbidden_fields, list) or not forbidden_set.issubset(set(str(field) for field in forbidden_fields)):
+            violations.append("forbidden_fields_incomplete")
+        if _parse_iso_ts(item.get("recorded_at") if isinstance(item, dict) else None) is None:
+            violations.append("recorded_at_invalid")
+        if item.get("policy_action") != "observation_rejected":
+            violations.append("unexpected_policy_action")
+        else:
+            rejecting_policy_count += 1
+        if missing or violations:
+            malformed.append({"index": index, "observation_id": item.get("observation_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "observation_policy_count": len(records) if isinstance(records, list) else 0,
+        "rejecting_observation_policy_count": rejecting_policy_count,
+        "malformed_observation_policies": malformed,
+    }
+
+
+def _counterfactual_model_snapshot_valid(value):
+    text = str(value or "")
+    if text.startswith("sha256:"):
+        text = text.split("sha256:", 1)[1]
+    return _sha256_hex_like(text)
+
+
+def _counterfactual_entry_time_evidence(records):
+    malformed = []
+    leak_free_count = 0
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, COUNTERFACTUAL_ENTRY_TIME_REQUIRED_FIELDS)
+        violations = []
+        entry_ts = _parse_iso_ts(item.get("counterfactual_entry_ts") if isinstance(item, dict) else None)
+        decision_ts = _parse_iso_ts(item.get("decision_available_at") if isinstance(item, dict) else None)
+        feature_ts = _parse_iso_ts(item.get("feature_max_available_at") if isinstance(item, dict) else None)
+        if entry_ts is None:
+            violations.append("counterfactual_entry_ts_invalid")
+        if decision_ts is None:
+            violations.append("decision_available_at_invalid")
+        elif entry_ts is not None and decision_ts > entry_ts:
+            violations.append("decision_after_counterfactual_entry")
+        if feature_ts is not None and entry_ts is not None and feature_ts > entry_ts:
+            violations.append("feature_after_counterfactual_entry")
+        if not _counterfactual_model_snapshot_valid(item.get("counterfactual_model_snapshot_id") if isinstance(item, dict) else None):
+            violations.append("counterfactual_model_snapshot_id_invalid")
+        used_future_peak = item.get("used_future_peak") if isinstance(item, dict) else None
+        used_future_outcome = item.get("used_future_outcome") if isinstance(item, dict) else None
+        used_posthoc_label = item.get("used_posthoc_label") if isinstance(item, dict) else None
+        forbidden_used = item.get("forbidden_future_fields_used") if isinstance(item, dict) else None
+        if used_future_peak is not False:
+            violations.append("used_future_peak_not_false")
+        if used_future_outcome is not False:
+            violations.append("used_future_outcome_not_false")
+        if used_posthoc_label is not False:
+            violations.append("used_posthoc_label_not_false")
+        if forbidden_used not in ([], None):
+            violations.append("forbidden_future_fields_used_not_empty")
+        if item.get("failure_action") != "research_only":
+            violations.append("unexpected_failure_action")
+        if missing or violations:
+            malformed.append({"index": index, "counterfactual_policy_version": item.get("counterfactual_policy_version") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+        else:
+            leak_free_count += 1
+    return {
+        "counterfactual_entry_time_count": len(records) if isinstance(records, list) else 0,
+        "leak_free_counterfactual_entry_time_count": leak_free_count,
+        "malformed_counterfactual_entry_times": malformed,
+    }
+
+
+def verify_shadow_observation_identity_contracts(
+    policy_path=DEFAULT_SHADOW_OBSERVATION_IDENTITY_POLICY,
+    source_registry_path=DEFAULT_SOURCE_REGISTRY,
+):
+    policy, source_by_id, shadow_source_ids, allowed_aliases, forbidden_future_fields, base, base_failed = _shadow_observation_identity_policy_base(policy_path, source_registry_path)
+
+    merge_split = _identity_merge_split_evidence(policy.get("identity_merge_split_records"))
+    rekeying = _rekeying_evidence(policy.get("rekey_records"))
+    backfill = _source_gap_backfill_boundary_evidence(policy.get("source_gap_backfill_boundaries"), source_by_id, forbidden_future_fields)
+    observation = _observation_policy_evidence(policy.get("observation_policies"), source_by_id, allowed_aliases, forbidden_future_fields)
+    counterfactual = _counterfactual_entry_time_evidence(policy.get("counterfactual_entry_time_records"))
+
+    return [
+        _shadow_observation_identity_contract(
+            "IdentityMergeSplitContract",
+            not base_failed and merge_split["merge_split_count"] > 0 and not merge_split["malformed_merge_split_records"],
+            "identity_merge_split_policy_missing_malformed_or_unenforced",
+            base,
+            merge_split,
+        ),
+        _shadow_observation_identity_contract(
+            "ReKeyingContract",
+            not base_failed and rekeying["rekey_count"] > 0 and rekeying["old_key_retired_count"] > 0 and not rekeying["malformed_rekey_records"],
+            "rekeying_policy_missing_malformed_or_unenforced",
+            base,
+            rekeying,
+        ),
+        _shadow_observation_identity_contract(
+            "SourceGapBackfillBoundary",
+            not base_failed and backfill["source_gap_backfill_boundary_count"] > 0 and backfill["research_only_backfill_count"] > 0 and not backfill["malformed_source_gap_backfill_boundaries"],
+            "source_gap_backfill_boundary_missing_malformed_or_live_mutating",
+            base,
+            backfill,
+        ),
+        _shadow_observation_identity_contract(
+            "ObservationPolicyContract",
+            not base_failed and observation["observation_policy_count"] > 0 and observation["rejecting_observation_policy_count"] > 0 and not observation["malformed_observation_policies"],
+            "observation_policy_missing_malformed_or_leaky",
+            base,
+            observation,
+        ),
+        _shadow_observation_identity_contract(
+            "CounterfactualEntryTime",
+            not base_failed and counterfactual["counterfactual_entry_time_count"] > 0 and counterfactual["leak_free_counterfactual_entry_time_count"] > 0 and not counterfactual["malformed_counterfactual_entry_times"],
+            "counterfactual_entry_time_missing_malformed_or_future_leaky",
+            base,
+            counterfactual,
+        ),
+    ]
+
+
 def verify_input_sanitization():
     sample = {
         "id": 1,
@@ -6103,6 +6411,7 @@ def build_basic_contract_readiness(
     chain_config_path=DEFAULT_CHAIN_CONFIG,
     source_registry_path=DEFAULT_SOURCE_REGISTRY,
     source_parser_auth_policy_path=DEFAULT_SOURCE_PARSER_AUTH_POLICY,
+    shadow_observation_identity_policy_path=DEFAULT_SHADOW_OBSERVATION_IDENTITY_POLICY,
     channels_csv=DEFAULT_CHANNELS_CSV,
     system_config_path=DEFAULT_SYSTEM_CONFIG,
     manifest_path=MANIFEST_PATH,
@@ -6149,6 +6458,10 @@ def build_basic_contract_readiness(
                 policy_path=source_parser_auth_policy_path,
                 source_registry_path=source_registry_path,
                 channels_csv=channels_csv,
+            ),
+            *verify_shadow_observation_identity_contracts(
+                policy_path=shadow_observation_identity_policy_path,
+                source_registry_path=source_registry_path,
             ),
             verify_input_sanitization(),
             verify_safe_default(registry_path=registry_path),
@@ -6244,6 +6557,7 @@ def main():
     parser.add_argument("--chain-config", default=str(DEFAULT_CHAIN_CONFIG))
     parser.add_argument("--source-registry", default=str(DEFAULT_SOURCE_REGISTRY))
     parser.add_argument("--source-parser-auth-policy", default=str(DEFAULT_SOURCE_PARSER_AUTH_POLICY))
+    parser.add_argument("--shadow-observation-identity-policy", default=str(DEFAULT_SHADOW_OBSERVATION_IDENTITY_POLICY))
     parser.add_argument("--channels-csv", default=str(DEFAULT_CHANNELS_CSV))
     parser.add_argument("--system-config", default=str(DEFAULT_SYSTEM_CONFIG))
     parser.add_argument("--manifest", default=str(MANIFEST_PATH))
@@ -6281,6 +6595,7 @@ def main():
         chain_config_path=Path(args.chain_config),
         source_registry_path=Path(args.source_registry),
         source_parser_auth_policy_path=Path(args.source_parser_auth_policy),
+        shadow_observation_identity_policy_path=Path(args.shadow_observation_identity_policy),
         channels_csv=Path(args.channels_csv),
         system_config_path=Path(args.system_config),
         manifest_path=Path(args.manifest),
