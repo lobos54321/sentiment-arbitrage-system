@@ -105,6 +105,12 @@ MODE_REQUIREMENTS = {
         "ProjectionHandlerIdempotencyContract",
         "DecisionReadModelFreshnessContract",
         "CacheInvalidationContract",
+        "ClientSideCacheContract",
+        "ClientSideFreshnessContract",
+        "DashboardQueryProvenanceContract",
+        "DashboardComputationProvenanceContract",
+        "DataExportWatermarkContract",
+        "DataExportEnvelopeContract",
         "DenominatorDedupContract",
         "SignalCreditAssignmentContract",
         "SourceDogLabelContract",
@@ -611,6 +617,12 @@ def build_contract_statuses(
         "ConsumerCheckpointContract",
         "ProjectionHandlerIdempotencyContract",
         "CacheInvalidationContract",
+        "ClientSideCacheContract",
+        "ClientSideFreshnessContract",
+        "DashboardQueryProvenanceContract",
+        "DashboardComputationProvenanceContract",
+        "DataExportWatermarkContract",
+        "DataExportEnvelopeContract",
     ):
         statuses[contract_id] = _consumer_contract_status(projection_consumer_health, contract_id)
 

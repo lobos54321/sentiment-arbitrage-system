@@ -31,6 +31,8 @@ REPLAY_SIDE_EFFECT_ALLOWED_TARGETS = [
 ]
 SYNTHETIC_SENTINEL_EVENT_TYPE = "projection_consumer_health_sentinel"
 MANUAL_REPLAY_OPERATOR_ID = "v27_read_model_refresh_worker"
+DASHBOARD_READ_MODEL_VIEW_ID = "v27_denominator_dashboard"
+DATA_EXPORT_ENVELOPE_VERSION = "v2.7.0.data_export_envelope.v1"
 
 
 def _utc_now_iso():
@@ -325,6 +327,160 @@ def _reconciliation_diff_evidence(
     )
 
 
+def _client_side_cache_evidence(*, snapshot_hash, cache_manifest, now_iso):
+    invalidation_events = list(cache_manifest.get("invalidated_by_event_type") or [])
+    evidence = {
+        "cache_key": cache_manifest.get("cache_key"),
+        "ttl_ms": cache_manifest.get("ttl_ms"),
+        "source_snapshot_hash": snapshot_hash,
+        "invalidation_event": invalidation_events[0] if invalidation_events else None,
+        "invalidation_events": invalidation_events,
+        "served_at": now_iso,
+        "cache_value_hash": cache_manifest.get("cache_value_hash"),
+        "stale_read_detected": cache_manifest.get("stale_read_detected"),
+        "cache_bypass_required": cache_manifest.get("cache_bypass_required"),
+    }
+    passed = (
+        evidence["cache_key"] == "v27_denominator_read_model"
+        and isinstance(evidence["ttl_ms"], int)
+        and evidence["ttl_ms"] > 0
+        and evidence["source_snapshot_hash"] == evidence["cache_value_hash"]
+        and bool(evidence["invalidation_event"])
+        and evidence["stale_read_detected"] is False
+    )
+    return _contract(
+        "ClientSideCacheContract",
+        passed,
+        "client_side_cache_unverified",
+        evidence,
+    )
+
+
+def _client_side_freshness_evidence(*, latest_seq, cache_manifest, now_iso):
+    max_age_ms = int(cache_manifest.get("ttl_ms") or 0)
+    evidence = {
+        "view_id": DASHBOARD_READ_MODEL_VIEW_ID,
+        "snapshot_seq": latest_seq,
+        "max_age_ms": max_age_ms,
+        "fresh_enough": bool(max_age_ms > 0 and not cache_manifest.get("stale_read_detected")),
+        "checked_at": now_iso,
+        "cache_key": cache_manifest.get("cache_key"),
+    }
+    passed = (
+        evidence["snapshot_seq"] == latest_seq
+        and isinstance(evidence["snapshot_seq"], int)
+        and evidence["snapshot_seq"] >= 0
+        and evidence["max_age_ms"] > 0
+        and evidence["fresh_enough"] is True
+    )
+    return _contract(
+        "ClientSideFreshnessContract",
+        passed,
+        "client_side_freshness_unverified",
+        evidence,
+    )
+
+
+def _dashboard_query_provenance_evidence(*, snapshot_hash, projection, now_iso):
+    metrics = projection.get("metrics") if isinstance(projection.get("metrics"), dict) else {}
+    query_payload = {
+        "metrics": metrics,
+        "records_hash": projection.get("records_hash"),
+        "metric_definitions_hash": projection.get("metric_definitions_hash"),
+    }
+    evidence = {
+        "query_id": "v27_denominator_dashboard_default_query",
+        "source_snapshot_hash": snapshot_hash,
+        "filter_hash": sha256_hex({"view_id": DASHBOARD_READ_MODEL_VIEW_ID, "filters": {"mode": "shadow_readiness"}}),
+        "result_hash": sha256_hex(query_payload),
+        "queried_at": now_iso,
+        "metric_count": len(metrics),
+        "records_hash": projection.get("records_hash"),
+    }
+    passed = bool(evidence["source_snapshot_hash"] and evidence["filter_hash"] and evidence["result_hash"] and metrics)
+    return _contract(
+        "DashboardQueryProvenanceContract",
+        passed,
+        "dashboard_query_provenance_unverified",
+        evidence,
+    )
+
+
+def _dashboard_computation_provenance_evidence(*, snapshot_hash, projection, now_iso):
+    computation_version = "v2.7.0.denominator_dashboard_computation.v1"
+    provenance_payload = {
+        "widget_id": "v27_capture_denominator_summary",
+        "input_snapshot_hash": snapshot_hash,
+        "computation_version": computation_version,
+        "metric_definitions_hash": projection.get("metric_definitions_hash"),
+        "records_hash": projection.get("records_hash"),
+    }
+    evidence = {
+        **provenance_payload,
+        "generated_at": now_iso,
+        "provenance_hash": sha256_hex(provenance_payload),
+    }
+    passed = bool(
+        evidence["input_snapshot_hash"]
+        and evidence["computation_version"]
+        and evidence["metric_definitions_hash"]
+        and evidence["records_hash"]
+        and evidence["provenance_hash"] == sha256_hex(provenance_payload)
+    )
+    return _contract(
+        "DashboardComputationProvenanceContract",
+        passed,
+        "dashboard_computation_provenance_unverified",
+        evidence,
+    )
+
+
+def _data_export_watermark_evidence(*, latest_seq, snapshot_hash, now_iso):
+    watermark = {
+        "snapshot_seq": latest_seq,
+        "snapshot_hash": snapshot_hash,
+        "watermark_version": "v2.7.0.data_export_watermark.v1",
+    }
+    evidence = {
+        "export_id": "v27_denominator_read_model_export",
+        "snapshot_seq": latest_seq,
+        "watermark": sha256_hex(watermark),
+        "watermark_payload": watermark,
+        "generated_at": now_iso,
+        "consumer_warning": "export_untrusted_if_watermark_or_snapshot_hash_mismatch",
+    }
+    passed = isinstance(latest_seq, int) and latest_seq >= 0 and bool(snapshot_hash) and bool(evidence["watermark"])
+    return _contract(
+        "DataExportWatermarkContract",
+        passed,
+        "data_export_watermark_unverified",
+        evidence,
+    )
+
+
+def _data_export_envelope_evidence(*, watermark_contract, projection, now_iso):
+    watermark = (watermark_contract.get("evidence") or {}).get("watermark")
+    row_count = int((projection.get("metrics") or {}).get("denominator_seed_records") or 0)
+    envelope_payload = {
+        "export_id": "v27_denominator_read_model_export",
+        "envelope_version": DATA_EXPORT_ENVELOPE_VERSION,
+        "watermark": watermark,
+        "row_count": row_count,
+        "generated_at": now_iso,
+    }
+    evidence = {
+        **envelope_payload,
+        "envelope_hash": sha256_hex(envelope_payload),
+    }
+    passed = watermark_contract.get("status") == "pass" and bool(watermark) and row_count >= 0
+    return _contract(
+        "DataExportEnvelopeContract",
+        passed,
+        "data_export_envelope_unverified",
+        evidence,
+    )
+
+
 def _unresolved_dlq_entries(records):
     return [record for record in records if record.get("status") != "resolved"]
 
@@ -467,6 +623,11 @@ def write_projection_consumer_evidence(
         projection_hash_ok=projection_hash_ok,
         snapshot_hash_ok=snapshot_hash_ok,
     )
+    data_export_watermark_contract = _data_export_watermark_evidence(
+        latest_seq=latest_seq,
+        snapshot_hash=snapshot_hash,
+        now_iso=now_iso,
+    )
     contracts = {
         "ReplaySideEffectIsolationContract": replay_side_effect_contract,
         "ManualReplaySafetyContract": _manual_replay_safety_evidence(
@@ -493,6 +654,32 @@ def write_projection_consumer_evidence(
             checkpoint_hash_ok=checkpoint_hash_ok,
             projection_hash_ok=projection_hash_ok,
             snapshot_hash_ok=snapshot_hash_ok,
+        ),
+        "ClientSideCacheContract": _client_side_cache_evidence(
+            snapshot_hash=snapshot_hash,
+            cache_manifest=cache_manifest,
+            now_iso=now_iso,
+        ),
+        "ClientSideFreshnessContract": _client_side_freshness_evidence(
+            latest_seq=latest_seq,
+            cache_manifest=cache_manifest,
+            now_iso=now_iso,
+        ),
+        "DashboardQueryProvenanceContract": _dashboard_query_provenance_evidence(
+            snapshot_hash=snapshot_hash,
+            projection=projection,
+            now_iso=now_iso,
+        ),
+        "DashboardComputationProvenanceContract": _dashboard_computation_provenance_evidence(
+            snapshot_hash=snapshot_hash,
+            projection=projection,
+            now_iso=now_iso,
+        ),
+        "DataExportWatermarkContract": data_export_watermark_contract,
+        "DataExportEnvelopeContract": _data_export_envelope_evidence(
+            watermark_contract=data_export_watermark_contract,
+            projection=projection,
+            now_iso=now_iso,
         ),
         "TransactionalOutboxContract": _contract(
             "TransactionalOutboxContract",
@@ -595,6 +782,12 @@ def read_projection_consumer_health(path):
                 "ManualReplaySafetyContract",
                 "SyntheticSentinelEventContract",
                 "ReconciliationDiffContract",
+                "ClientSideCacheContract",
+                "ClientSideFreshnessContract",
+                "DashboardQueryProvenanceContract",
+                "DashboardComputationProvenanceContract",
+                "DataExportWatermarkContract",
+                "DataExportEnvelopeContract",
                 "TransactionalOutboxContract",
                 "DeadLetterQueueContract",
                 "ConsumerCheckpointContract",
@@ -627,6 +820,12 @@ def read_projection_consumer_health(path):
                 "ManualReplaySafetyContract",
                 "SyntheticSentinelEventContract",
                 "ReconciliationDiffContract",
+                "ClientSideCacheContract",
+                "ClientSideFreshnessContract",
+                "DashboardQueryProvenanceContract",
+                "DashboardComputationProvenanceContract",
+                "DataExportWatermarkContract",
+                "DataExportEnvelopeContract",
                 "TransactionalOutboxContract",
                 "DeadLetterQueueContract",
                 "ConsumerCheckpointContract",

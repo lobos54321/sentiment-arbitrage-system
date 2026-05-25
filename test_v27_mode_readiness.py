@@ -689,6 +689,18 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["ConsumerCheckpointContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ProjectionHandlerIdempotencyContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["CacheInvalidationContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ClientSideCacheContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ClientSideCacheContract"]["evidence"]["source_snapshot_hash"] == matrix["contract_statuses"]["ClientSideCacheContract"]["evidence"]["cache_value_hash"]
+    assert matrix["contract_statuses"]["ClientSideFreshnessContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ClientSideFreshnessContract"]["evidence"]["fresh_enough"] is True
+    assert matrix["contract_statuses"]["DashboardQueryProvenanceContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["DashboardQueryProvenanceContract"]["evidence"]["result_hash"]
+    assert matrix["contract_statuses"]["DashboardComputationProvenanceContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["DashboardComputationProvenanceContract"]["evidence"]["provenance_hash"]
+    assert matrix["contract_statuses"]["DataExportWatermarkContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["DataExportWatermarkContract"]["evidence"]["watermark"]
+    assert matrix["contract_statuses"]["DataExportEnvelopeContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["DataExportEnvelopeContract"]["evidence"]["envelope_version"] == "v2.7.0.data_export_envelope.v1"
     assert matrix["contract_statuses"]["SignalCreditAssignmentContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ReferencePriceContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["MetricsWindowContract"]["status"] == "pass"
@@ -701,6 +713,8 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert "ManualReplaySafetyContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "SyntheticSentinelEventContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "ReconciliationDiffContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "ClientSideCacheContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "DataExportEnvelopeContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"
