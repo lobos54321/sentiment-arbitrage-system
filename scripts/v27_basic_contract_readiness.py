@@ -52,6 +52,7 @@ DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-dash
 DEFAULT_NUMERIC_PRECISION_POLICY = PROJECT_ROOT / "config" / "v27-numeric-precision-policy.json"
 DEFAULT_REASON_TAXONOMY_POLICY = PROJECT_ROOT / "config" / "v27-reason-taxonomy-policy.json"
 DEFAULT_SECURITY_SESSION_POLICY = PROJECT_ROOT / "config" / "v27-security-session-policy.json"
+DEFAULT_RUNTIME_PIPELINE_POLICY = PROJECT_ROOT / "config" / "v27-runtime-pipeline-policy.json"
 ADMIN_SESSION_SECURITY_REQUIRED_FIELDS = (
     "session_id",
     "operator_id",
@@ -71,6 +72,27 @@ TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS = (
     "account_id",
     "auth_state",
     "device_fingerprint_hash",
+    "checked_at",
+)
+QUEUE_ACK_NACK_REQUIRED_FIELDS = (
+    "queue_id",
+    "task_id",
+    "ack_state",
+    "nack_reason",
+    "recorded_at",
+)
+PIPELINE_PROGRESS_REQUIRED_FIELDS = (
+    "pipeline_id",
+    "stage_name",
+    "max_stall_ms",
+    "last_progress_at",
+    "stall_action",
+)
+THREAD_POOL_ISOLATION_REQUIRED_FIELDS = (
+    "pool_name",
+    "workload_class",
+    "max_workers",
+    "reserved_capacity",
     "checked_at",
 )
 NUMERIC_PRECISION_REQUIRED_FIELDS = (
@@ -4232,6 +4254,209 @@ def verify_telegram_session_security_contract(policy_path=DEFAULT_SECURITY_SESSI
     )
 
 
+def _runtime_pipeline_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "runtime_pipeline_policy_not_object"}
+    return policy, None
+
+
+def verify_queue_ack_nack_contract(policy_path=DEFAULT_RUNTIME_PIPELINE_POLICY):
+    policy, policy_error = _runtime_pipeline_policy(policy_path)
+    if policy_error:
+        return _contract("QueueAckNackContract", False, "queue_ack_nack_missing_malformed_or_unenforced", policy_error)
+
+    records = policy.get("queue_ack_nack") if isinstance(policy.get("queue_ack_nack"), list) else []
+    malformed_records = []
+    source_violations = []
+    duplicate_task_ids = []
+    ack_states = set()
+    seen_task_ids = set()
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            malformed_records.append({"index": index, "task_id": None, "missing_fields": list(QUEUE_ACK_NACK_REQUIRED_FIELDS), "violations": ["queue_record_not_object"]})
+            continue
+        task_id = str(record.get("task_id") or "")
+        missing = _missing_required_fields(record, QUEUE_ACK_NACK_REQUIRED_FIELDS)
+        violations = []
+        if task_id in seen_task_ids:
+            duplicate_task_ids.append(task_id)
+        if task_id:
+            seen_task_ids.add(task_id)
+        ack_state = str(record.get("ack_state") or "").strip().lower()
+        ack_states.add(ack_state)
+        if ack_state not in {"acked", "nacked", "retrying", "pending"}:
+            violations.append("ack_state_invalid")
+        if ack_state == "nacked" and str(record.get("nack_reason") or "").strip().lower() in {"", "none", "null"}:
+            violations.append("nack_reason_required_for_nacked")
+        if ack_state != "nacked" and str(record.get("nack_reason") or "").strip().lower() == "":
+            violations.append("nack_reason_required")
+        if _parse_iso_ts(record.get("recorded_at")) is None:
+            violations.append("recorded_at_invalid")
+        source_violations.extend(
+            {"index": index, "task_id": task_id or None, **violation}
+            for violation in _policy_source_anchor_violations(record)
+        )
+        if missing or violations:
+            malformed_records.append({"index": index, "task_id": task_id or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_pipeline_policy.v1"
+        and bool(records)
+        and {"acked", "nacked"}.issubset(ack_states)
+        and not malformed_records
+        and not duplicate_task_ids
+        and not source_violations
+    )
+    return _contract(
+        "QueueAckNackContract",
+        passed,
+        "queue_ack_nack_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "record_count": len(records),
+            "ack_states": sorted(ack_states),
+            "required_fields": list(QUEUE_ACK_NACK_REQUIRED_FIELDS),
+            "duplicate_task_ids": sorted(str(item) for item in duplicate_task_ids),
+            "malformed_records": malformed_records,
+            "source_violations": source_violations,
+        },
+    )
+
+
+def verify_pipeline_progress_invariant(policy_path=DEFAULT_RUNTIME_PIPELINE_POLICY):
+    policy, policy_error = _runtime_pipeline_policy(policy_path)
+    if policy_error:
+        return _contract("PipelineProgressInvariant", False, "pipeline_progress_missing_malformed_or_unenforced", policy_error)
+
+    records = policy.get("pipeline_progress") if isinstance(policy.get("pipeline_progress"), list) else []
+    malformed_records = []
+    source_violations = []
+    duplicate_stage_keys = []
+    seen_stage_keys = set()
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            malformed_records.append({"index": index, "pipeline_id": None, "missing_fields": list(PIPELINE_PROGRESS_REQUIRED_FIELDS), "violations": ["pipeline_progress_record_not_object"]})
+            continue
+        pipeline_id = str(record.get("pipeline_id") or "")
+        stage_name = str(record.get("stage_name") or "")
+        stage_key = f"{pipeline_id}:{stage_name}"
+        missing = _missing_required_fields(record, PIPELINE_PROGRESS_REQUIRED_FIELDS)
+        violations = []
+        if stage_key in seen_stage_keys:
+            duplicate_stage_keys.append(stage_key)
+        if pipeline_id and stage_name:
+            seen_stage_keys.add(stage_key)
+        max_stall_ms = record.get("max_stall_ms")
+        if isinstance(max_stall_ms, bool) or not isinstance(max_stall_ms, int) or max_stall_ms <= 0:
+            violations.append("max_stall_ms_positive_int_required")
+        if _parse_iso_ts(record.get("last_progress_at")) is None:
+            violations.append("last_progress_at_invalid")
+        if str(record.get("stall_action") or "") not in {"emit_progress_warning_and_classify_cause", "strict_smoke_fails_with_blocking_reasons"}:
+            violations.append("stall_action_invalid")
+        source_violations.extend(
+            {"index": index, "pipeline_id": pipeline_id or None, "stage_name": stage_name or None, **violation}
+            for violation in _policy_source_anchor_violations(record, source_anchor_key="source_anchors")
+        )
+        if missing or violations:
+            malformed_records.append(
+                {
+                    "index": index,
+                    "pipeline_id": pipeline_id or None,
+                    "stage_name": stage_name or None,
+                    "missing_fields": missing,
+                    "violations": violations,
+                }
+            )
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_pipeline_policy.v1"
+        and len(records) >= 2
+        and not malformed_records
+        and not duplicate_stage_keys
+        and not source_violations
+    )
+    return _contract(
+        "PipelineProgressInvariant",
+        passed,
+        "pipeline_progress_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "record_count": len(records),
+            "required_fields": list(PIPELINE_PROGRESS_REQUIRED_FIELDS),
+            "duplicate_stage_keys": sorted(str(item) for item in duplicate_stage_keys),
+            "malformed_records": malformed_records,
+            "source_violations": source_violations,
+        },
+    )
+
+
+def verify_thread_pool_isolation_contract(policy_path=DEFAULT_RUNTIME_PIPELINE_POLICY):
+    policy, policy_error = _runtime_pipeline_policy(policy_path)
+    if policy_error:
+        return _contract("ThreadPoolIsolationContract", False, "thread_pool_isolation_missing_malformed_or_unenforced", policy_error)
+
+    pools = policy.get("thread_pools") if isinstance(policy.get("thread_pools"), list) else []
+    malformed_pools = []
+    source_violations = []
+    duplicate_pool_names = []
+    seen_pool_names = set()
+    for index, pool in enumerate(pools):
+        if not isinstance(pool, dict):
+            malformed_pools.append({"index": index, "pool_name": None, "missing_fields": list(THREAD_POOL_ISOLATION_REQUIRED_FIELDS), "violations": ["thread_pool_record_not_object"]})
+            continue
+        pool_name = str(pool.get("pool_name") or "")
+        missing = _missing_required_fields(pool, THREAD_POOL_ISOLATION_REQUIRED_FIELDS)
+        violations = []
+        if pool_name in seen_pool_names:
+            duplicate_pool_names.append(pool_name)
+        if pool_name:
+            seen_pool_names.add(pool_name)
+        for field in ("max_workers", "reserved_capacity"):
+            value = pool.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                violations.append(f"{field}_positive_int_required")
+        if isinstance(pool.get("max_workers"), int) and isinstance(pool.get("reserved_capacity"), int):
+            if pool.get("reserved_capacity") > pool.get("max_workers"):
+                violations.append("reserved_capacity_gt_max_workers")
+        if _parse_iso_ts(pool.get("checked_at")) is None:
+            violations.append("checked_at_invalid")
+        source_violations.extend(
+            {"index": index, "pool_name": pool_name or None, **violation}
+            for violation in _policy_source_anchor_violations(pool)
+        )
+        if missing or violations:
+            malformed_pools.append({"index": index, "pool_name": pool_name or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_pipeline_policy.v1"
+        and len(pools) >= 3
+        and not malformed_pools
+        and not duplicate_pool_names
+        and not source_violations
+    )
+    return _contract(
+        "ThreadPoolIsolationContract",
+        passed,
+        "thread_pool_isolation_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "pool_count": len(pools),
+            "pool_names": sorted(str(pool.get("pool_name")) for pool in pools if isinstance(pool, dict) and pool.get("pool_name")),
+            "required_fields": list(THREAD_POOL_ISOLATION_REQUIRED_FIELDS),
+            "duplicate_pool_names": sorted(str(item) for item in duplicate_pool_names),
+            "malformed_pools": malformed_pools,
+            "source_violations": source_violations,
+        },
+    )
+
+
 def verify_service_readiness_probe_contract(policy_path=DEFAULT_SERVICE_READINESS_PROBES):
     try:
         policy = _load_json(policy_path)
@@ -5150,6 +5375,7 @@ def build_basic_contract_readiness(
     numeric_precision_policy_path=DEFAULT_NUMERIC_PRECISION_POLICY,
     reason_taxonomy_policy_path=DEFAULT_REASON_TAXONOMY_POLICY,
     security_session_policy_path=DEFAULT_SECURITY_SESSION_POLICY,
+    runtime_pipeline_policy_path=DEFAULT_RUNTIME_PIPELINE_POLICY,
     env=None,
 ):
     contracts = {
@@ -5217,6 +5443,9 @@ def build_basic_contract_readiness(
             verify_admin_session_security_contract(policy_path=security_session_policy_path),
             verify_secret_access_audit_contract(policy_path=security_session_policy_path),
             verify_telegram_session_security_contract(policy_path=security_session_policy_path),
+            verify_queue_ack_nack_contract(policy_path=runtime_pipeline_policy_path),
+            verify_pipeline_progress_invariant(policy_path=runtime_pipeline_policy_path),
+            verify_thread_pool_isolation_contract(policy_path=runtime_pipeline_policy_path),
             verify_service_readiness_probe_contract(policy_path=service_readiness_policy_path),
             verify_dashboard_action_separation_contract(policy_path=dashboard_action_separation_policy_path),
         ]
@@ -5267,6 +5496,7 @@ def main():
     parser.add_argument("--numeric-precision-policy", default=str(DEFAULT_NUMERIC_PRECISION_POLICY))
     parser.add_argument("--reason-taxonomy-policy", default=str(DEFAULT_REASON_TAXONOMY_POLICY))
     parser.add_argument("--security-session-policy", default=str(DEFAULT_SECURITY_SESSION_POLICY))
+    parser.add_argument("--runtime-pipeline-policy", default=str(DEFAULT_RUNTIME_PIPELINE_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -5301,6 +5531,7 @@ def main():
         numeric_precision_policy_path=Path(args.numeric_precision_policy),
         reason_taxonomy_policy_path=Path(args.reason_taxonomy_policy),
         security_session_policy_path=Path(args.security_session_policy),
+        runtime_pipeline_policy_path=Path(args.runtime_pipeline_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

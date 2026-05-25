@@ -30,11 +30,14 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_machine_readable_reason_contract,
     verify_mutation_command_idempotency_contract,
     verify_numeric_precision_policy,
+    verify_pipeline_progress_invariant,
     verify_projection_version_isolation_contract,
+    verify_queue_ack_nack_contract,
     verify_scheduled_job_mode_gate_contract,
     verify_snapshot_compaction_invariant_contract,
     verify_snapshot_compaction_read_barrier_contract,
     verify_static_policy_enforcement,
+    verify_thread_pool_isolation_contract,
     verify_access_control_policy,
     verify_input_sanitization,
     verify_paper_mode_safety,
@@ -105,6 +108,9 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "AdminSessionSecurityContract",
         "SecretAccessAuditContract",
         "TelegramSessionSecurityContract",
+        "QueueAckNackContract",
+        "PipelineProgressInvariant",
+        "ThreadPoolIsolationContract",
         "ServiceReadinessProbeContract",
         "DashboardActionSeparationContract",
     ):
@@ -1634,6 +1640,64 @@ def test_security_session_policy_blocks_missing_admin_source_anchor(tmp_path):
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "admin_session_security_missing_malformed_or_unenforced"
     assert report["evidence"]["source_violations"][0]["missing_anchors"] == ["definitely_missing_admin_session_anchor"]
+
+
+def test_runtime_pipeline_policy_covers_queue_progress_and_thread_pools():
+    queue = verify_queue_ack_nack_contract()
+    progress = verify_pipeline_progress_invariant()
+    pools = verify_thread_pool_isolation_contract()
+
+    assert queue["status"] == "pass"
+    assert queue["evidence"]["record_count"] == 2
+    assert queue["evidence"]["ack_states"] == ["acked", "nacked"]
+    assert queue["evidence"]["malformed_records"] == []
+    assert queue["evidence"]["source_violations"] == []
+
+    assert progress["status"] == "pass"
+    assert progress["evidence"]["record_count"] == 2
+    assert progress["evidence"]["malformed_records"] == []
+    assert progress["evidence"]["source_violations"] == []
+
+    assert pools["status"] == "pass"
+    assert pools["evidence"]["pool_count"] == 3
+    assert pools["evidence"]["malformed_pools"] == []
+    assert pools["evidence"]["source_violations"] == []
+    assert set(pools["evidence"]["pool_names"]) == {
+        "paper_fast_lane_pool",
+        "smart_entry_pool",
+        "timing_executor",
+    }
+
+
+def test_runtime_pipeline_policy_blocks_nacked_record_without_reason(tmp_path):
+    source_path = tmp_path / "queue.py"
+    source_path.write_text("ack_state = 'nacked'\n", encoding="utf-8")
+    policy_path = tmp_path / "runtime-pipeline.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.runtime_pipeline_policy.v1",
+                "queue_ack_nack": [
+                    {
+                        "queue_id": "unit_queue",
+                        "task_id": "unit-task",
+                        "ack_state": "nacked",
+                        "nack_reason": "none",
+                        "recorded_at": "2026-05-26T00:00:00Z",
+                        "source_file": str(source_path),
+                        "source_anchor": "ack_state = 'nacked'",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_queue_ack_nack_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "queue_ack_nack_missing_malformed_or_unenforced"
+    assert report["evidence"]["malformed_records"][0]["violations"] == ["nack_reason_required_for_nacked"]
 
 
 def test_service_readiness_probe_contract_covers_health_surfaces():

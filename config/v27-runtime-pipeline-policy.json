@@ -1,0 +1,82 @@
+{
+  "schema_version": "v2.7.0.runtime_pipeline_policy.v1",
+  "updated_at": "2026-05-26T00:00:00Z",
+  "scope": "paper_runtime_pipeline_progress_queue_ack_nack_and_thread_pool_isolation",
+  "failure_action": "pipeline_degraded",
+  "queue_ack_nack": [
+    {
+      "queue_id": "normal_tiny_ops_readiness",
+      "task_id": "normal-tiny-ops-readiness-drill",
+      "ack_state": "acked",
+      "nack_reason": "none",
+      "recorded_at": "2026-05-26T00:00:00Z",
+      "source_file": "scripts/v27_record_normal_tiny_ops_evidence.py",
+      "source_anchor": "\"ack_state\": \"acked\""
+    },
+    {
+      "queue_id": "paper_fast_entry_queue",
+      "task_id": "fast-entry-retry-watch-drill",
+      "ack_state": "nacked",
+      "nack_reason": "quote_unavailable_retry_watch",
+      "recorded_at": "2026-05-26T00:00:00Z",
+      "source_file": "scripts/v27_denominator_projection.py",
+      "source_anchor": "if ack_state not in {\"pending\", \"acked\", \"nacked\", \"retrying\"}:"
+    }
+  ],
+  "pipeline_progress": [
+    {
+      "pipeline_id": "paper_trade_monitor_main_loop",
+      "stage_name": "signal_poll_to_entry_or_watch",
+      "max_stall_ms": 600000,
+      "last_progress_at": "2026-05-26T00:00:00Z",
+      "stall_action": "emit_progress_warning_and_classify_cause",
+      "source_file": "scripts/paper_trade_monitor.py",
+      "source_anchors": [
+        "last_progress = time.time()",
+        "if now - last_progress >= HEARTBEAT_INTERVAL_SEC * 2:",
+        "No trading progress for"
+      ]
+    },
+    {
+      "pipeline_id": "v27_pipeline_smoke",
+      "stage_name": "mirror_project_refresh",
+      "max_stall_ms": 300000,
+      "last_progress_at": "2026-05-26T00:00:00Z",
+      "stall_action": "strict_smoke_fails_with_blocking_reasons",
+      "source_file": "scripts/v27_pipeline_smoke.py",
+      "source_anchors": [
+        "\"blocking_reasons\": blocking_reasons",
+        "\"status\": \"v27_pipeline_smoke_ok\" if not blocking_reasons else \"v27_pipeline_smoke_failed\""
+      ]
+    }
+  ],
+  "thread_pools": [
+    {
+      "pool_name": "timing_executor",
+      "workload_class": "timing_and_background_accounting",
+      "max_workers": 50,
+      "reserved_capacity": 5,
+      "checked_at": "2026-05-26T00:00:00Z",
+      "source_file": "scripts/paper_trade_monitor.py",
+      "source_anchor": "_timing_executor = ThreadPoolExecutor("
+    },
+    {
+      "pool_name": "smart_entry_pool",
+      "workload_class": "smart_entry_quote_and_probe",
+      "max_workers": 3,
+      "reserved_capacity": 1,
+      "checked_at": "2026-05-26T00:00:00Z",
+      "source_file": "scripts/paper_trade_monitor.py",
+      "source_anchor": "smart_entry_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='SmartEntry')"
+    },
+    {
+      "pool_name": "paper_fast_lane_pool",
+      "workload_class": "paper_fast_lane_candidate_scan",
+      "max_workers": 4,
+      "reserved_capacity": 1,
+      "checked_at": "2026-05-26T00:00:00Z",
+      "source_file": "scripts/paper_fast_lane.py",
+      "source_anchor": "ThreadPoolExecutor(max_workers=args.concurrency + 2, thread_name_prefix=\"paper-fast\")"
+    }
+  ]
+}
