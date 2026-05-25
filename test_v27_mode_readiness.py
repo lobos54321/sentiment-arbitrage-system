@@ -431,6 +431,78 @@ def append_training_serving_skew_event(event_log_dir):
     )
 
 
+def append_provider_dependency_resource_trust_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="provider_byzantine_quorum_recorded",
+        aggregate_id="provider_byzantine_quorum:provider-quorum-solana-entry",
+        idempotency_key="provider_byzantine_quorum:provider-quorum-solana-entry:jupiter_ultra",
+        payload={
+            "quorum_id": "provider-quorum-solana-entry",
+            "provider_set": ["jupiter_ultra", "gmgn_quote"],
+            "conflict_policy": "fail_closed_on_conflict",
+            "selected_provider": "jupiter_ultra",
+            "quorum_size": 2,
+            "agreement_metric": "entry_quote_price_within_tolerance",
+            "checked_at": "2026-01-15T00:08:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="provider_cache_poisoning_guard_recorded",
+        aggregate_id="provider_cache_poisoning_guard:jupiter_ultra:quote:solana:TokenReady:unknown_pool",
+        idempotency_key="provider_cache_poisoning_guard:jupiter_ultra:quote:solana:TokenReady:unknown_pool:none",
+        payload={
+            "cache_key": "quote:solana:TokenReady:unknown_pool",
+            "provider": "jupiter_ultra",
+            "poison_detected": False,
+            "quarantine_action": "none",
+            "cache_validation_hash": sha256_hex({"cache_key": "quote:solana:TokenReady:unknown_pool"}),
+            "checked_at": "2026-01-15T00:09:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="external_dependency_health_recorded",
+        aggregate_id="external_dependency:jupiter_ultra_quote",
+        idempotency_key="external_dependency:jupiter_ultra_quote:healthy",
+        payload={
+            "dependency_name": "jupiter_ultra_quote",
+            "health_status": "healthy",
+            "fallback_mode": "fail_closed",
+            "fail_closed_action": "block_entry",
+            "checked_at": "2026-01-15T00:10:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="third_party_status_correlation_recorded",
+        aggregate_id="third_party_status_correlation:jupiter_ultra_quote:jupiter_status_page:none",
+        idempotency_key="third_party_status_correlation:jupiter_ultra_quote:jupiter_status_page:none:no_incident",
+        payload={
+            "dependency_name": "jupiter_ultra_quote",
+            "status_source": "jupiter_status_page",
+            "incident_id": "none",
+            "correlation_result": "no_incident",
+            "checked_at": "2026-01-15T00:11:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="resource_exhaustion_recorded",
+        aggregate_id="resource_exhaustion:provider_quote_pool",
+        idempotency_key="resource_exhaustion:provider_quote_pool:normal:observe",
+        payload={
+            "resource_type": "provider_quote_pool",
+            "pressure_level": "normal",
+            "pressure_action": "observe",
+            "safety_budget_remaining": 10,
+            "checked_at": "2026-01-15T00:12:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -1363,6 +1435,43 @@ def test_mode_readiness_consumes_provider_coverage_and_training_serving_skew_for
     assert skew["evidence"]["valid_training_serving_skew_count"] == 1
     assert "ProviderCoverageMapContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "TrainingServingSkewContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_provider_dependency_resource_trust_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_provider_dependency_resource_trust_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "ProviderByzantineQuorumContract",
+        "ProviderCachePoisoningGuard",
+        "ExternalDependencyContract",
+        "ThirdPartyStatusCorrelationContract",
+        "ResourceExhaustionContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert (
+        matrix["contract_statuses"]["ProviderByzantineQuorumContract"]["evidence"]["valid_provider_byzantine_quorum_count"]
+        == 1
+    )
+    assert matrix["contract_statuses"]["ExternalDependencyContract"]["evidence"]["valid_external_dependency_count"] == 1
+    assert matrix["contract_statuses"]["ResourceExhaustionContract"]["evidence"]["valid_resource_exhaustion_count"] == 1
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

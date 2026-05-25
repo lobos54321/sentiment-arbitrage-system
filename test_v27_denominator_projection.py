@@ -661,6 +661,130 @@ def append_training_serving_skew(
     )
 
 
+def append_provider_byzantine_quorum(
+    log,
+    *,
+    quorum_id="provider-quorum-solana-entry",
+    provider_set=None,
+    selected_provider="jupiter_ultra",
+    conflict_policy="fail_closed_on_conflict",
+):
+    payload = {
+        "quorum_id": quorum_id,
+        "provider_set": provider_set if provider_set is not None else ["jupiter_ultra", "gmgn_quote"],
+        "conflict_policy": conflict_policy,
+        "selected_provider": selected_provider,
+        "quorum_size": 2,
+        "agreement_metric": "entry_quote_price_within_tolerance",
+        "checked_at": "2026-01-15T00:08:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="provider_byzantine_quorum_recorded",
+        aggregate_id=f"provider_byzantine_quorum:{quorum_id}",
+        idempotency_key=f"provider_byzantine_quorum:{quorum_id}:{selected_provider}",
+        payload=payload,
+    )
+
+
+def append_provider_cache_poisoning_guard(
+    log,
+    *,
+    cache_key="quote:solana:TokenReady:pool-a",
+    provider="jupiter_ultra",
+    poison_detected=False,
+    quarantine_action="none",
+    cache_validation_hash=None,
+):
+    payload = {
+        "cache_key": cache_key,
+        "provider": provider,
+        "poison_detected": poison_detected,
+        "quarantine_action": quarantine_action,
+        "cache_validation_hash": cache_validation_hash or sha256_hex({"cache_key": cache_key, "provider": provider}),
+        "checked_at": "2026-01-15T00:09:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="provider_cache_poisoning_guard_recorded",
+        aggregate_id=f"provider_cache_poisoning_guard:{provider}:{cache_key}",
+        idempotency_key=f"provider_cache_poisoning_guard:{provider}:{cache_key}:{quarantine_action}",
+        payload=payload,
+    )
+
+
+def append_external_dependency(
+    log,
+    *,
+    dependency_name="jupiter_ultra_quote",
+    health_status="healthy",
+    fallback_mode="fail_closed",
+    fail_closed_action="block_entry",
+):
+    payload = {
+        "dependency_name": dependency_name,
+        "health_status": health_status,
+        "fallback_mode": fallback_mode,
+        "fail_closed_action": fail_closed_action,
+        "checked_at": "2026-01-15T00:10:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="external_dependency_health_recorded",
+        aggregate_id=f"external_dependency:{dependency_name}",
+        idempotency_key=f"external_dependency:{dependency_name}:{health_status}",
+        payload=payload,
+    )
+
+
+def append_third_party_status_correlation(
+    log,
+    *,
+    dependency_name="jupiter_ultra_quote",
+    status_source="jupiter_status_page",
+    incident_id="none",
+    correlation_result="no_incident",
+):
+    payload = {
+        "dependency_name": dependency_name,
+        "status_source": status_source,
+        "incident_id": incident_id,
+        "correlation_result": correlation_result,
+        "checked_at": "2026-01-15T00:11:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="third_party_status_correlation_recorded",
+        aggregate_id=f"third_party_status_correlation:{dependency_name}:{status_source}:{incident_id}",
+        idempotency_key=f"third_party_status_correlation:{dependency_name}:{status_source}:{incident_id}:{correlation_result}",
+        payload=payload,
+    )
+
+
+def append_resource_exhaustion(
+    log,
+    *,
+    resource_type="provider_quote_pool",
+    pressure_level="normal",
+    pressure_action="observe",
+    safety_budget_remaining=10,
+):
+    payload = {
+        "resource_type": resource_type,
+        "pressure_level": pressure_level,
+        "pressure_action": pressure_action,
+        "safety_budget_remaining": safety_budget_remaining,
+        "checked_at": "2026-01-15T00:12:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="resource_exhaustion_recorded",
+        aggregate_id=f"resource_exhaustion:{resource_type}",
+        idempotency_key=f"resource_exhaustion:{resource_type}:{pressure_level}:{pressure_action}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -1147,6 +1271,63 @@ def test_denominator_projection_rejects_malformed_fee_provider_and_risk_contract
     assert projection["contract_evidence"]["ProviderRequestReplayContract"]["provider_request_replay_violation_count"] == 1
     assert projection["contract_evidence"]["ProviderResponseAuthenticityContract"]["provider_response_authenticity_violation_count"] == 1
     assert projection["contract_evidence"]["RiskRevalidationAfterEntryContract"]["risk_revalidation_after_entry_violation_count"] == 1
+
+
+def test_denominator_projection_consumes_provider_dependency_resource_trust_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_provider_byzantine_quorum(log)
+    append_provider_cache_poisoning_guard(log)
+    append_external_dependency(log)
+    append_third_party_status_correlation(log)
+    append_resource_exhaustion(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    quorum = projection["contract_evidence"]["ProviderByzantineQuorumContract"]
+    cache_guard = projection["contract_evidence"]["ProviderCachePoisoningGuard"]
+    external_dependency = projection["contract_evidence"]["ExternalDependencyContract"]
+    status_correlation = projection["contract_evidence"]["ThirdPartyStatusCorrelationContract"]
+    resource_exhaustion = projection["contract_evidence"]["ResourceExhaustionContract"]
+    assert projection["provider_byzantine_quorum_recorded_events"] == 1
+    assert projection["provider_cache_poisoning_guard_recorded_events"] == 1
+    assert projection["external_dependency_health_recorded_events"] == 1
+    assert projection["third_party_status_correlation_recorded_events"] == 1
+    assert projection["resource_exhaustion_recorded_events"] == 1
+    assert projection["health"]["provider_byzantine_quorum_ok"] is True
+    assert projection["health"]["provider_cache_poisoning_guard_ok"] is True
+    assert projection["health"]["external_dependency_ok"] is True
+    assert projection["health"]["third_party_status_correlation_ok"] is True
+    assert projection["health"]["resource_exhaustion_ok"] is True
+    assert quorum["valid_provider_byzantine_quorum_count"] == 1
+    assert cache_guard["valid_provider_cache_poisoning_guard_count"] == 1
+    assert external_dependency["valid_external_dependency_count"] == 1
+    assert status_correlation["valid_third_party_status_correlation_count"] == 1
+    assert resource_exhaustion["valid_resource_exhaustion_count"] == 1
+    assert quorum["providers"] == ["gmgn_quote", "jupiter_ultra"]
+    assert cache_guard["poison_detected_count"] == 0
+    assert external_dependency["fail_closed_actions"] == ["block_entry"]
+
+
+def test_denominator_projection_rejects_provider_dependency_resource_trust_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_provider_byzantine_quorum(log, provider_set=["jupiter_ultra"], selected_provider="gmgn_quote")
+    append_provider_cache_poisoning_guard(log, poison_detected=True, quarantine_action="none")
+    append_external_dependency(log, health_status="down", fail_closed_action="none")
+    append_third_party_status_correlation(log, incident_id="incident-123", correlation_result="no_incident")
+    append_resource_exhaustion(log, pressure_level="critical", pressure_action="none", safety_budget_remaining=0)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["provider_byzantine_quorum_ok"] is False
+    assert projection["health"]["provider_cache_poisoning_guard_ok"] is False
+    assert projection["health"]["external_dependency_ok"] is False
+    assert projection["health"]["third_party_status_correlation_ok"] is False
+    assert projection["health"]["resource_exhaustion_ok"] is False
+    assert projection["contract_evidence"]["ProviderByzantineQuorumContract"]["provider_byzantine_quorum_violation_count"] == 1
+    assert projection["contract_evidence"]["ProviderCachePoisoningGuard"]["provider_cache_poisoning_guard_violation_count"] == 1
+    assert projection["contract_evidence"]["ExternalDependencyContract"]["external_dependency_violation_count"] == 1
+    assert projection["contract_evidence"]["ThirdPartyStatusCorrelationContract"]["third_party_status_correlation_violation_count"] == 1
+    assert projection["contract_evidence"]["ResourceExhaustionContract"]["resource_exhaustion_violation_count"] == 1
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):

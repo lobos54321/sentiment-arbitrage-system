@@ -173,6 +173,11 @@ MODE_REQUIREMENTS = {
         "ProviderResponseAuthenticityContract",
         "RiskRevalidationAfterEntryContract",
         "TrainingServingSkewContract",
+        "ProviderByzantineQuorumContract",
+        "ProviderCachePoisoningGuard",
+        "ExternalDependencyContract",
+        "ThirdPartyStatusCorrelationContract",
+        "ResourceExhaustionContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -648,6 +653,41 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("training_serving_skew_ok") else "missing_evidence",
         "training_serving_skew_missing_malformed_or_invalid",
         training_serving_skew_evidence,
+    )
+    provider_byzantine_quorum_evidence = contract_evidence.get("ProviderByzantineQuorumContract") or {}
+    statuses["ProviderByzantineQuorumContract"] = _status(
+        "ProviderByzantineQuorumContract",
+        "pass" if projection_built and projection_health.get("provider_byzantine_quorum_ok") else "missing_evidence",
+        "provider_byzantine_quorum_missing_malformed_or_invalid",
+        provider_byzantine_quorum_evidence,
+    )
+    provider_cache_poisoning_guard_evidence = contract_evidence.get("ProviderCachePoisoningGuard") or {}
+    statuses["ProviderCachePoisoningGuard"] = _status(
+        "ProviderCachePoisoningGuard",
+        "pass" if projection_built and projection_health.get("provider_cache_poisoning_guard_ok") else "missing_evidence",
+        "provider_cache_poisoning_guard_missing_malformed_or_invalid",
+        provider_cache_poisoning_guard_evidence,
+    )
+    external_dependency_evidence = contract_evidence.get("ExternalDependencyContract") or {}
+    statuses["ExternalDependencyContract"] = _status(
+        "ExternalDependencyContract",
+        "pass" if projection_built and projection_health.get("external_dependency_ok") else "missing_evidence",
+        "external_dependency_missing_malformed_or_unbounded",
+        external_dependency_evidence,
+    )
+    third_party_status_correlation_evidence = contract_evidence.get("ThirdPartyStatusCorrelationContract") or {}
+    statuses["ThirdPartyStatusCorrelationContract"] = _status(
+        "ThirdPartyStatusCorrelationContract",
+        "pass" if projection_built and projection_health.get("third_party_status_correlation_ok") else "missing_evidence",
+        "third_party_status_correlation_missing_malformed_or_untrusted",
+        third_party_status_correlation_evidence,
+    )
+    resource_exhaustion_evidence = contract_evidence.get("ResourceExhaustionContract") or {}
+    statuses["ResourceExhaustionContract"] = _status(
+        "ResourceExhaustionContract",
+        "pass" if projection_built and projection_health.get("resource_exhaustion_ok") else "missing_evidence",
+        "resource_exhaustion_missing_malformed_or_unbounded",
+        resource_exhaustion_evidence,
     )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(

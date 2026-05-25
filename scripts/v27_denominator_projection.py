@@ -71,6 +71,11 @@ CANDIDATE_CANCELLATION_EVENT_TYPE = "candidate_cancellation_recorded"
 RETRY_STORM_CONTROL_EVENT_TYPE = "retry_storm_control_recorded"
 PROVIDER_COVERAGE_MAP_EVENT_TYPE = "provider_coverage_map_recorded"
 TRAINING_SERVING_SKEW_EVENT_TYPE = "training_serving_skew_recorded"
+PROVIDER_BYZANTINE_QUORUM_EVENT_TYPE = "provider_byzantine_quorum_recorded"
+PROVIDER_CACHE_POISONING_GUARD_EVENT_TYPE = "provider_cache_poisoning_guard_recorded"
+EXTERNAL_DEPENDENCY_EVENT_TYPE = "external_dependency_health_recorded"
+THIRD_PARTY_STATUS_CORRELATION_EVENT_TYPE = "third_party_status_correlation_recorded"
+RESOURCE_EXHAUSTION_EVENT_TYPE = "resource_exhaustion_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -108,6 +113,11 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     RETRY_STORM_CONTROL_EVENT_TYPE,
     PROVIDER_COVERAGE_MAP_EVENT_TYPE,
     TRAINING_SERVING_SKEW_EVENT_TYPE,
+    PROVIDER_BYZANTINE_QUORUM_EVENT_TYPE,
+    PROVIDER_CACHE_POISONING_GUARD_EVENT_TYPE,
+    EXTERNAL_DEPENDENCY_EVENT_TYPE,
+    THIRD_PARTY_STATUS_CORRELATION_EVENT_TYPE,
+    RESOURCE_EXHAUSTION_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1655,6 +1665,255 @@ def _extract_training_serving_skew(event, bags):
     }
 
 
+def _extract_provider_byzantine_quorum(event, bags):
+    if event.get("event_type") != PROVIDER_BYZANTINE_QUORUM_EVENT_TYPE:
+        return None
+    provider_set = _as_string_list(_extract_scalar(bags, [("provider_set",), ("providers",)]))
+    values = {
+        "quorum_id": _extract_scalar(bags, [("quorum_id",)]),
+        "provider_set": provider_set,
+        "conflict_policy": _extract_scalar(bags, [("conflict_policy",)]),
+        "selected_provider": _extract_scalar(bags, [("selected_provider",)]),
+        "quorum_size": _as_int(_extract_scalar(bags, [("quorum_size",)]), default=None),
+        "agreement_metric": _extract_scalar(bags, [("agreement_metric",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("quorum_id", "conflict_policy", "selected_provider"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not provider_set:
+        missing_fields.append("provider_set")
+    violation_fields = []
+    if provider_set and len(provider_set) < 2:
+        violation_fields.append("provider_set_too_small")
+    if values.get("selected_provider") and provider_set and values.get("selected_provider") not in provider_set:
+        violation_fields.append("selected_provider_not_in_provider_set")
+    conflict_policy = str(values.get("conflict_policy") or "").strip().lower()
+    allowed_conflict_policies = {
+        "fail_closed_on_conflict",
+        "majority_quorum",
+        "median_quorum",
+        "weighted_quorum",
+        "provider_priority_with_quorum",
+    }
+    if conflict_policy and conflict_policy not in allowed_conflict_policies:
+        violation_fields.append("conflict_policy_not_fail_safe")
+    quorum_size = values.get("quorum_size")
+    if quorum_size is not None and (quorum_size < 2 or (provider_set and quorum_size > len(provider_set))):
+        violation_fields.append("quorum_size_invalid")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_byzantine_quorum_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_provider_cache_poisoning_guard(event, bags):
+    if event.get("event_type") != PROVIDER_CACHE_POISONING_GUARD_EVENT_TYPE:
+        return None
+    values = {
+        "cache_key": _extract_scalar(bags, [("cache_key",)]),
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "poison_detected": _extract_flag(bags, [("poison_detected",)]),
+        "quarantine_action": _extract_scalar(bags, [("quarantine_action",)]),
+        "cache_validation_hash": _extract_scalar(bags, [("cache_validation_hash",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("cache_key", "provider", "quarantine_action"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if values.get("poison_detected") is None:
+        missing_fields.append("poison_detected")
+    violation_fields = []
+    quarantine_action = str(values.get("quarantine_action") or "").strip().lower()
+    clean_actions = {"none", "clean", "no_action_clean", "validate_only"}
+    quarantine_actions = {"quarantined", "evicted", "bypass_cache", "provider_blocked", "fail_closed"}
+    if quarantine_action and quarantine_action not in clean_actions | quarantine_actions:
+        violation_fields.append("quarantine_action_unknown")
+    if values.get("poison_detected") is True and quarantine_action not in quarantine_actions:
+        violation_fields.append("poison_detected_without_quarantine")
+    if values.get("cache_validation_hash") and not _valid_sha256_hex(values.get("cache_validation_hash")):
+        violation_fields.append("cache_validation_hash_sha256")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    cache_guard_key = ":".join(
+        [
+            str(values.get("provider") or "unknown_provider"),
+            str(values.get("cache_key") or "unknown_cache_key"),
+        ]
+    )
+    return {
+        **values,
+        "cache_guard_key": cache_guard_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_cache_poisoning_guard_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_external_dependency(event, bags):
+    if event.get("event_type") != EXTERNAL_DEPENDENCY_EVENT_TYPE:
+        return None
+    values = {
+        "dependency_name": _extract_scalar(bags, [("dependency_name",)]),
+        "health_status": _extract_scalar(bags, [("health_status",), ("status",)]),
+        "fallback_mode": _extract_scalar(bags, [("fallback_mode",)]),
+        "fail_closed_action": _extract_scalar(bags, [("fail_closed_action",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("dependency_name", "health_status", "fallback_mode", "fail_closed_action"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    health_status = str(values.get("health_status") or "").strip().lower()
+    healthy_statuses = {"healthy", "ok", "pass", "passed", "available", "green"}
+    degraded_statuses = {"degraded", "partial", "incident", "down", "unavailable", "red"}
+    if health_status and health_status not in healthy_statuses | degraded_statuses:
+        violation_fields.append("health_status_unknown")
+    fallback_mode = str(values.get("fallback_mode") or "").strip().lower()
+    allowed_fallback_modes = {"fail_closed", "read_only", "cached_safe", "provider_fallback", "disable_entries", "degrade_low_priority"}
+    if fallback_mode and fallback_mode not in allowed_fallback_modes:
+        violation_fields.append("fallback_mode_not_bounded")
+    fail_closed_action = str(values.get("fail_closed_action") or "").strip().lower()
+    no_op_actions = {"none", "noop", "no_action"}
+    safe_actions = {"block_entry", "pause_dependency", "disable_entries", "switch_provider", "fail_closed", "degrade_low_priority"}
+    if fail_closed_action and fail_closed_action not in no_op_actions | safe_actions:
+        violation_fields.append("fail_closed_action_unknown")
+    if health_status in degraded_statuses and fail_closed_action not in safe_actions:
+        violation_fields.append("degraded_dependency_without_fail_closed_action")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "external_dependency_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_third_party_status_correlation(event, bags):
+    if event.get("event_type") != THIRD_PARTY_STATUS_CORRELATION_EVENT_TYPE:
+        return None
+    values = {
+        "dependency_name": _extract_scalar(bags, [("dependency_name",)]),
+        "status_source": _extract_scalar(bags, [("status_source",)]),
+        "incident_id": _extract_scalar(bags, [("incident_id",)]),
+        "correlation_result": _extract_scalar(bags, [("correlation_result",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("dependency_name", "status_source", "incident_id", "correlation_result", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    correlation_result = str(values.get("correlation_result") or "").strip().lower()
+    allowed_results = {
+        "no_incident",
+        "dependency_clean",
+        "matched",
+        "correlated",
+        "dependency_degraded_confirmed",
+        "provider_incident_confirmed",
+    }
+    if correlation_result and correlation_result not in allowed_results:
+        violation_fields.append("correlation_result_unknown_or_untrusted")
+    incident_id = str(values.get("incident_id") or "").strip().lower()
+    has_incident = bool(incident_id and incident_id not in {"none", "no_incident", "n/a"})
+    if has_incident and correlation_result not in {
+        "matched",
+        "correlated",
+        "dependency_degraded_confirmed",
+        "provider_incident_confirmed",
+    }:
+        violation_fields.append("incident_without_positive_correlation")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    status_correlation_key = ":".join(
+        [
+            str(values.get("dependency_name") or "unknown_dependency"),
+            str(values.get("status_source") or "unknown_status_source"),
+            str(values.get("incident_id") or "unknown_incident"),
+        ]
+    )
+    return {
+        **values,
+        "status_correlation_key": status_correlation_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "third_party_status_correlation_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_resource_exhaustion(event, bags):
+    if event.get("event_type") != RESOURCE_EXHAUSTION_EVENT_TYPE:
+        return None
+    values = {
+        "resource_type": _extract_scalar(bags, [("resource_type",)]),
+        "pressure_level": _extract_scalar(bags, [("pressure_level",)]),
+        "pressure_action": _extract_scalar(bags, [("pressure_action",)]),
+        "safety_budget_remaining": _as_float(_extract_scalar(bags, [("safety_budget_remaining",)])),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("resource_type", "pressure_level", "pressure_action"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if values.get("safety_budget_remaining") is None:
+        missing_fields.append("safety_budget_remaining")
+    violation_fields = []
+    pressure_level = str(values.get("pressure_level") or "").strip().lower()
+    allowed_pressure_levels = {"normal", "low", "medium", "high", "critical"}
+    if pressure_level and pressure_level not in allowed_pressure_levels:
+        violation_fields.append("pressure_level_unknown")
+    pressure_action = str(values.get("pressure_action") or "").strip().lower()
+    no_op_actions = {"none", "observe", "no_action"}
+    protective_actions = {"throttle", "degrade_low_priority", "shed_low_priority", "pause_entries", "fail_closed"}
+    if pressure_action and pressure_action not in no_op_actions | protective_actions:
+        violation_fields.append("pressure_action_unknown")
+    if pressure_level in {"high", "critical"} and pressure_action not in protective_actions:
+        violation_fields.append("high_pressure_without_protective_action")
+    safety_budget_remaining = values.get("safety_budget_remaining")
+    if safety_budget_remaining is not None:
+        if not math.isfinite(safety_budget_remaining) or safety_budget_remaining < 0:
+            violation_fields.append("safety_budget_remaining_nonnegative")
+        elif safety_budget_remaining == 0 and pressure_action not in protective_actions:
+            violation_fields.append("zero_safety_budget_without_protective_action")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "resource_exhaustion_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _latest_by_key(items, key_name):
     latest = {}
     passthrough = []
@@ -3043,6 +3302,11 @@ def _contract_evidence_from_records(
     training_serving_skews=None,
     fee_schedules=None,
     provider_credential_scopes=None,
+    provider_byzantine_quorums=None,
+    provider_cache_poisoning_guards=None,
+    external_dependencies=None,
+    third_party_status_correlations=None,
+    resource_exhaustions=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -3088,6 +3352,30 @@ def _contract_evidence_from_records(
         0,
         raw_provider_credential_scope_count - len(provider_credential_scopes),
     )
+    raw_provider_byzantine_quorum_count = len(provider_byzantine_quorums or [])
+    provider_byzantine_quorums = _latest_by_key(provider_byzantine_quorums or [], "quorum_id")
+    superseded_provider_byzantine_quorum_count = max(
+        0,
+        raw_provider_byzantine_quorum_count - len(provider_byzantine_quorums),
+    )
+    raw_provider_cache_poisoning_guard_count = len(provider_cache_poisoning_guards or [])
+    provider_cache_poisoning_guards = _latest_by_key(provider_cache_poisoning_guards or [], "cache_guard_key")
+    superseded_provider_cache_poisoning_guard_count = max(
+        0,
+        raw_provider_cache_poisoning_guard_count - len(provider_cache_poisoning_guards),
+    )
+    raw_external_dependency_count = len(external_dependencies or [])
+    external_dependencies = _latest_by_key(external_dependencies or [], "dependency_name")
+    superseded_external_dependency_count = max(0, raw_external_dependency_count - len(external_dependencies))
+    raw_third_party_status_correlation_count = len(third_party_status_correlations or [])
+    third_party_status_correlations = _latest_by_key(third_party_status_correlations or [], "status_correlation_key")
+    superseded_third_party_status_correlation_count = max(
+        0,
+        raw_third_party_status_correlation_count - len(third_party_status_correlations),
+    )
+    raw_resource_exhaustion_count = len(resource_exhaustions or [])
+    resource_exhaustions = _latest_by_key(resource_exhaustions or [], "resource_type")
+    superseded_resource_exhaustion_count = max(0, raw_resource_exhaustion_count - len(resource_exhaustions))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -4136,6 +4424,56 @@ def _contract_evidence_from_records(
         for item in provider_credential_scopes
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_provider_byzantine_quorums = [
+        item
+        for item in provider_byzantine_quorums
+        if item.get("missing_fields")
+    ]
+    provider_byzantine_quorum_violations = [
+        item
+        for item in provider_byzantine_quorums
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_provider_cache_poisoning_guards = [
+        item
+        for item in provider_cache_poisoning_guards
+        if item.get("missing_fields")
+    ]
+    provider_cache_poisoning_guard_violations = [
+        item
+        for item in provider_cache_poisoning_guards
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_external_dependencies = [
+        item
+        for item in external_dependencies
+        if item.get("missing_fields")
+    ]
+    external_dependency_violations = [
+        item
+        for item in external_dependencies
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_third_party_status_correlations = [
+        item
+        for item in third_party_status_correlations
+        if item.get("missing_fields")
+    ]
+    third_party_status_correlation_violations = [
+        item
+        for item in third_party_status_correlations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_resource_exhaustions = [
+        item
+        for item in resource_exhaustions
+        if item.get("missing_fields")
+    ]
+    resource_exhaustion_violations = [
+        item
+        for item in resource_exhaustions
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -4832,6 +5170,190 @@ def _contract_evidence_from_records(
             "allowed_modes": sorted({mode for item in provider_credential_scopes for mode in item.get("allowed_modes", [])}),
             "provider_credential_scope_projection_version": "v2.7.0.provider_credential_scope.v1",
         },
+        "ProviderByzantineQuorumContract": {
+            "eligible_provider_byzantine_quorum_records": len(provider_byzantine_quorums),
+            "provider_byzantine_quorum_observation_count": raw_provider_byzantine_quorum_count,
+            "current_provider_byzantine_quorum_count": len(provider_byzantine_quorums),
+            "superseded_provider_byzantine_quorum_event_count": superseded_provider_byzantine_quorum_count,
+            "valid_provider_byzantine_quorum_count": sum(
+                1 for item in provider_byzantine_quorums if item.get("provider_byzantine_quorum_valid") is True
+            ),
+            "malformed_count": len(malformed_provider_byzantine_quorums),
+            "malformed_provider_byzantine_quorums": [
+                {
+                    "quorum_id": item.get("quorum_id"),
+                    "provider_set": item.get("provider_set"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_provider_byzantine_quorums
+            ],
+            "provider_byzantine_quorum_violation_count": len(provider_byzantine_quorum_violations),
+            "provider_byzantine_quorum_violations": [
+                {
+                    "quorum_id": item.get("quorum_id"),
+                    "provider_set": item.get("provider_set"),
+                    "selected_provider": item.get("selected_provider"),
+                    "conflict_policy": item.get("conflict_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in provider_byzantine_quorum_violations
+            ],
+            "quorum_ids": sorted({item.get("quorum_id") for item in provider_byzantine_quorums if item.get("quorum_id")}),
+            "providers": sorted({provider for item in provider_byzantine_quorums for provider in item.get("provider_set", [])}),
+            "selected_providers": sorted({item.get("selected_provider") for item in provider_byzantine_quorums if item.get("selected_provider")}),
+            "conflict_policies": sorted({item.get("conflict_policy") for item in provider_byzantine_quorums if item.get("conflict_policy")}),
+            "provider_byzantine_quorum_projection_version": "v2.7.0.provider_byzantine_quorum.v1",
+        },
+        "ProviderCachePoisoningGuard": {
+            "eligible_provider_cache_poisoning_guard_records": len(provider_cache_poisoning_guards),
+            "provider_cache_poisoning_guard_observation_count": raw_provider_cache_poisoning_guard_count,
+            "current_provider_cache_poisoning_guard_count": len(provider_cache_poisoning_guards),
+            "superseded_provider_cache_poisoning_guard_event_count": superseded_provider_cache_poisoning_guard_count,
+            "valid_provider_cache_poisoning_guard_count": sum(
+                1 for item in provider_cache_poisoning_guards if item.get("provider_cache_poisoning_guard_valid") is True
+            ),
+            "malformed_count": len(malformed_provider_cache_poisoning_guards),
+            "malformed_provider_cache_poisoning_guards": [
+                {
+                    "cache_key": item.get("cache_key"),
+                    "provider": item.get("provider"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_provider_cache_poisoning_guards
+            ],
+            "provider_cache_poisoning_guard_violation_count": len(provider_cache_poisoning_guard_violations),
+            "provider_cache_poisoning_guard_violations": [
+                {
+                    "cache_key": item.get("cache_key"),
+                    "provider": item.get("provider"),
+                    "poison_detected": item.get("poison_detected"),
+                    "quarantine_action": item.get("quarantine_action"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in provider_cache_poisoning_guard_violations
+            ],
+            "cache_keys": sorted({item.get("cache_key") for item in provider_cache_poisoning_guards if item.get("cache_key")}),
+            "providers": sorted({item.get("provider") for item in provider_cache_poisoning_guards if item.get("provider")}),
+            "quarantine_actions": sorted({item.get("quarantine_action") for item in provider_cache_poisoning_guards if item.get("quarantine_action")}),
+            "poison_detected_count": sum(1 for item in provider_cache_poisoning_guards if item.get("poison_detected") is True),
+            "provider_cache_poisoning_guard_projection_version": "v2.7.0.provider_cache_poisoning_guard.v1",
+        },
+        "ExternalDependencyContract": {
+            "eligible_external_dependency_records": len(external_dependencies),
+            "external_dependency_observation_count": raw_external_dependency_count,
+            "current_external_dependency_count": len(external_dependencies),
+            "superseded_external_dependency_event_count": superseded_external_dependency_count,
+            "valid_external_dependency_count": sum(1 for item in external_dependencies if item.get("external_dependency_valid") is True),
+            "malformed_count": len(malformed_external_dependencies),
+            "malformed_external_dependencies": [
+                {
+                    "dependency_name": item.get("dependency_name"),
+                    "health_status": item.get("health_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_external_dependencies
+            ],
+            "external_dependency_violation_count": len(external_dependency_violations),
+            "external_dependency_violations": [
+                {
+                    "dependency_name": item.get("dependency_name"),
+                    "health_status": item.get("health_status"),
+                    "fallback_mode": item.get("fallback_mode"),
+                    "fail_closed_action": item.get("fail_closed_action"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in external_dependency_violations
+            ],
+            "dependency_names": sorted({item.get("dependency_name") for item in external_dependencies if item.get("dependency_name")}),
+            "health_statuses": sorted({item.get("health_status") for item in external_dependencies if item.get("health_status")}),
+            "fallback_modes": sorted({item.get("fallback_mode") for item in external_dependencies if item.get("fallback_mode")}),
+            "fail_closed_actions": sorted({item.get("fail_closed_action") for item in external_dependencies if item.get("fail_closed_action")}),
+            "external_dependency_projection_version": "v2.7.0.external_dependency.v1",
+        },
+        "ThirdPartyStatusCorrelationContract": {
+            "eligible_third_party_status_correlation_records": len(third_party_status_correlations),
+            "third_party_status_correlation_observation_count": raw_third_party_status_correlation_count,
+            "current_third_party_status_correlation_count": len(third_party_status_correlations),
+            "superseded_third_party_status_correlation_event_count": superseded_third_party_status_correlation_count,
+            "valid_third_party_status_correlation_count": sum(
+                1 for item in third_party_status_correlations if item.get("third_party_status_correlation_valid") is True
+            ),
+            "malformed_count": len(malformed_third_party_status_correlations),
+            "malformed_third_party_status_correlations": [
+                {
+                    "dependency_name": item.get("dependency_name"),
+                    "status_source": item.get("status_source"),
+                    "incident_id": item.get("incident_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_third_party_status_correlations
+            ],
+            "third_party_status_correlation_violation_count": len(third_party_status_correlation_violations),
+            "third_party_status_correlation_violations": [
+                {
+                    "dependency_name": item.get("dependency_name"),
+                    "status_source": item.get("status_source"),
+                    "incident_id": item.get("incident_id"),
+                    "correlation_result": item.get("correlation_result"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in third_party_status_correlation_violations
+            ],
+            "dependency_names": sorted(
+                {item.get("dependency_name") for item in third_party_status_correlations if item.get("dependency_name")}
+            ),
+            "status_sources": sorted({item.get("status_source") for item in third_party_status_correlations if item.get("status_source")}),
+            "correlation_results": sorted(
+                {item.get("correlation_result") for item in third_party_status_correlations if item.get("correlation_result")}
+            ),
+            "third_party_status_correlation_projection_version": "v2.7.0.third_party_status_correlation.v1",
+        },
+        "ResourceExhaustionContract": {
+            "eligible_resource_exhaustion_records": len(resource_exhaustions),
+            "resource_exhaustion_observation_count": raw_resource_exhaustion_count,
+            "current_resource_exhaustion_count": len(resource_exhaustions),
+            "superseded_resource_exhaustion_event_count": superseded_resource_exhaustion_count,
+            "valid_resource_exhaustion_count": sum(1 for item in resource_exhaustions if item.get("resource_exhaustion_valid") is True),
+            "malformed_count": len(malformed_resource_exhaustions),
+            "malformed_resource_exhaustions": [
+                {
+                    "resource_type": item.get("resource_type"),
+                    "pressure_level": item.get("pressure_level"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_resource_exhaustions
+            ],
+            "resource_exhaustion_violation_count": len(resource_exhaustion_violations),
+            "resource_exhaustion_violations": [
+                {
+                    "resource_type": item.get("resource_type"),
+                    "pressure_level": item.get("pressure_level"),
+                    "pressure_action": item.get("pressure_action"),
+                    "safety_budget_remaining": item.get("safety_budget_remaining"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in resource_exhaustion_violations
+            ],
+            "resource_types": sorted({item.get("resource_type") for item in resource_exhaustions if item.get("resource_type")}),
+            "pressure_levels": sorted({item.get("pressure_level") for item in resource_exhaustions if item.get("pressure_level")}),
+            "pressure_actions": sorted({item.get("pressure_action") for item in resource_exhaustions if item.get("pressure_action")}),
+            "resource_exhaustion_projection_version": "v2.7.0.resource_exhaustion.v1",
+        },
         "TrainingServingSkewContract": {
             "eligible_training_serving_skew_records": len(training_serving_skews),
             "training_serving_skew_observation_count": raw_training_serving_skew_count,
@@ -5203,6 +5725,11 @@ def build_denominator_projection(
         "retry_storm_control_recorded_events": 0,
         "provider_coverage_map_recorded_events": 0,
         "training_serving_skew_recorded_events": 0,
+        "provider_byzantine_quorum_recorded_events": 0,
+        "provider_cache_poisoning_guard_recorded_events": 0,
+        "external_dependency_health_recorded_events": 0,
+        "third_party_status_correlation_recorded_events": 0,
+        "resource_exhaustion_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -5265,6 +5792,11 @@ def build_denominator_projection(
             "RetryStormControlContract": {},
             "ProviderCoverageMapContract": {},
             "TrainingServingSkewContract": {},
+            "ProviderByzantineQuorumContract": {},
+            "ProviderCachePoisoningGuard": {},
+            "ExternalDependencyContract": {},
+            "ThirdPartyStatusCorrelationContract": {},
+            "ResourceExhaustionContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -5313,6 +5845,11 @@ def build_denominator_projection(
             "retry_storm_control_ok": False,
             "provider_coverage_map_ok": False,
             "training_serving_skew_ok": False,
+            "provider_byzantine_quorum_ok": False,
+            "provider_cache_poisoning_guard_ok": False,
+            "external_dependency_ok": False,
+            "third_party_status_correlation_ok": False,
+            "resource_exhaustion_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -5355,6 +5892,11 @@ def build_denominator_projection(
     training_serving_skews = []
     fee_schedules = []
     provider_credential_scopes = []
+    provider_byzantine_quorums = []
+    provider_cache_poisoning_guards = []
+    external_dependencies = []
+    third_party_status_correlations = []
+    resource_exhaustions = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -5506,6 +6048,36 @@ def build_denominator_projection(
             training_serving_skew = _extract_training_serving_skew(event, _payload_bags(event))
             if training_serving_skew:
                 training_serving_skews.append(training_serving_skew)
+            continue
+        if event.get("event_type") == PROVIDER_BYZANTINE_QUORUM_EVENT_TYPE:
+            projection["provider_byzantine_quorum_recorded_events"] += 1
+            provider_byzantine_quorum = _extract_provider_byzantine_quorum(event, _payload_bags(event))
+            if provider_byzantine_quorum:
+                provider_byzantine_quorums.append(provider_byzantine_quorum)
+            continue
+        if event.get("event_type") == PROVIDER_CACHE_POISONING_GUARD_EVENT_TYPE:
+            projection["provider_cache_poisoning_guard_recorded_events"] += 1
+            provider_cache_poisoning_guard = _extract_provider_cache_poisoning_guard(event, _payload_bags(event))
+            if provider_cache_poisoning_guard:
+                provider_cache_poisoning_guards.append(provider_cache_poisoning_guard)
+            continue
+        if event.get("event_type") == EXTERNAL_DEPENDENCY_EVENT_TYPE:
+            projection["external_dependency_health_recorded_events"] += 1
+            external_dependency = _extract_external_dependency(event, _payload_bags(event))
+            if external_dependency:
+                external_dependencies.append(external_dependency)
+            continue
+        if event.get("event_type") == THIRD_PARTY_STATUS_CORRELATION_EVENT_TYPE:
+            projection["third_party_status_correlation_recorded_events"] += 1
+            third_party_status_correlation = _extract_third_party_status_correlation(event, _payload_bags(event))
+            if third_party_status_correlation:
+                third_party_status_correlations.append(third_party_status_correlation)
+            continue
+        if event.get("event_type") == RESOURCE_EXHAUSTION_EVENT_TYPE:
+            projection["resource_exhaustion_recorded_events"] += 1
+            resource_exhaustion = _extract_resource_exhaustion(event, _payload_bags(event))
+            if resource_exhaustion:
+                resource_exhaustions.append(resource_exhaustion)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -5691,6 +6263,11 @@ def build_denominator_projection(
         training_serving_skews=training_serving_skews,
         fee_schedules=fee_schedules,
         provider_credential_scopes=provider_credential_scopes,
+        provider_byzantine_quorums=provider_byzantine_quorums,
+        provider_cache_poisoning_guards=provider_cache_poisoning_guards,
+        external_dependencies=external_dependencies,
+        third_party_status_correlations=third_party_status_correlations,
+        resource_exhaustions=resource_exhaustions,
     )
     if progress_callback:
         progress_callback(
@@ -5956,6 +6533,36 @@ def build_denominator_projection(
         and contract_evidence["TrainingServingSkewContract"]["valid_training_serving_skew_count"] > 0
         and contract_evidence["TrainingServingSkewContract"]["malformed_count"] == 0
         and contract_evidence["TrainingServingSkewContract"]["training_serving_skew_violation_count"] == 0
+    )
+    projection["health"]["provider_byzantine_quorum_ok"] = (
+        contract_evidence["ProviderByzantineQuorumContract"]["eligible_provider_byzantine_quorum_records"] > 0
+        and contract_evidence["ProviderByzantineQuorumContract"]["valid_provider_byzantine_quorum_count"] > 0
+        and contract_evidence["ProviderByzantineQuorumContract"]["malformed_count"] == 0
+        and contract_evidence["ProviderByzantineQuorumContract"]["provider_byzantine_quorum_violation_count"] == 0
+    )
+    projection["health"]["provider_cache_poisoning_guard_ok"] = (
+        contract_evidence["ProviderCachePoisoningGuard"]["eligible_provider_cache_poisoning_guard_records"] > 0
+        and contract_evidence["ProviderCachePoisoningGuard"]["valid_provider_cache_poisoning_guard_count"] > 0
+        and contract_evidence["ProviderCachePoisoningGuard"]["malformed_count"] == 0
+        and contract_evidence["ProviderCachePoisoningGuard"]["provider_cache_poisoning_guard_violation_count"] == 0
+    )
+    projection["health"]["external_dependency_ok"] = (
+        contract_evidence["ExternalDependencyContract"]["eligible_external_dependency_records"] > 0
+        and contract_evidence["ExternalDependencyContract"]["valid_external_dependency_count"] > 0
+        and contract_evidence["ExternalDependencyContract"]["malformed_count"] == 0
+        and contract_evidence["ExternalDependencyContract"]["external_dependency_violation_count"] == 0
+    )
+    projection["health"]["third_party_status_correlation_ok"] = (
+        contract_evidence["ThirdPartyStatusCorrelationContract"]["eligible_third_party_status_correlation_records"] > 0
+        and contract_evidence["ThirdPartyStatusCorrelationContract"]["valid_third_party_status_correlation_count"] > 0
+        and contract_evidence["ThirdPartyStatusCorrelationContract"]["malformed_count"] == 0
+        and contract_evidence["ThirdPartyStatusCorrelationContract"]["third_party_status_correlation_violation_count"] == 0
+    )
+    projection["health"]["resource_exhaustion_ok"] = (
+        contract_evidence["ResourceExhaustionContract"]["eligible_resource_exhaustion_records"] > 0
+        and contract_evidence["ResourceExhaustionContract"]["valid_resource_exhaustion_count"] > 0
+        and contract_evidence["ResourceExhaustionContract"]["malformed_count"] == 0
+        and contract_evidence["ResourceExhaustionContract"]["resource_exhaustion_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
