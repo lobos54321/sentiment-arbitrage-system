@@ -595,10 +595,112 @@ def append_runtime_recovery_control_event(event_log_dir):
     )
 
 
+def append_shadow_trade_timing_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="trade_outcome_label_recorded",
+        aggregate_id="trade_outcome:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="paper_trade_outcome_label:1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "trade_outcome_label_version": "legacy_paper_trade_outcome_v0.1",
+            "counterfactual_entry_ts": 1_700_000_003,
+            "simulated_fill_price": 0.001,
+            "trade_label_available_at": 1_700_000_120,
+        },
+    )
+    log.append_event(
+        event_type="standardized_stop_contract_recorded",
+        aggregate_id="standardized_stop:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="standardized_stop_contract:1:legacy_standardized_stop_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "stop_contract_version": "legacy_standardized_stop_v0.1",
+            "stop_type": "standardized_counterfactual_stop",
+            "stop_threshold_pct": -30.0,
+            "stop_window": "60m",
+            "stop_price_type": "delayed_executable_exit_quote_proxy",
+            "stop_executable_required": True,
+            "stop_friction_model_version": "legacy_round_trip_friction_v0.1",
+            "stop_available_at": 1_700_000_003,
+        },
+    )
+    log.append_event(
+        event_type="ex_ante_feasibility_recorded",
+        aggregate_id="ex_ante_feasibility:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="ex_ante_feasibility:1:legacy_actual_paper_entry_feasibility_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "decision_ts": 1_700_000_002,
+            "decision_available_at": 1_700_000_002,
+            "counterfactual_entry_ts": 1_700_000_003,
+            "feasibility_policy_version": "legacy_actual_paper_entry_feasibility_v0.1",
+            "ex_ante_feasible": True,
+            "feasibility_class": "legacy_actual_paper_entry",
+            "entry_quote_available": True,
+            "entry_quote_available_at": 1_700_000_002,
+            "current_quote_availability": True,
+            "current_pool_resolution": "unknown_pool",
+            "used_future_peak": False,
+            "used_future_outcome": False,
+            "used_posthoc_label": False,
+            "forbidden_future_fields_used": [],
+        },
+    )
+    log.append_event(
+        event_type="earliest_actionable_time_recorded",
+        aggregate_id="earliest_actionable_time:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="earliest_actionable_time:1:legacy_actual_paper_entry_actionable_time_v0.1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "earliest_actionable_policy_version": "legacy_actual_paper_entry_actionable_time_v0.1",
+            "earliest_actionable_ts": 1_700_000_003,
+            "required_inputs_available_at": {
+                "telegram_anchor_available_at": 1_700_000_000,
+                "pool_resolved_available_at": 1_700_000_002,
+                "entry_quote_executable_available_at": 1_700_000_002,
+                "exit_quote_executable_available_at": 1_700_000_002,
+                "critical_risk_not_bad_available_at": 1_700_000_002,
+                "liquidity_ok_available_at": 1_700_000_002,
+                "decision_engine_available_at": 1_700_000_002,
+            },
+            "missing_inputs_before_ts": [],
+            "peak_ts": 1_700_000_120,
+            "peak_ts_quality": "legacy_outcome_window_close_proxy",
+            "peak_ts_source": "paper_trade_exit_ts",
+            "counterfactual_entry_ts": 1_700_000_003,
+            "actionable_before_peak": True,
+            "earliest_actionable_reason": "legacy_actual_paper_entry_inputs_available_by_decision",
+            "actionability_quality": "legacy_actual_paper_entry_window_proof",
+        },
+    )
+
+
 def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_path):
     event_log_dir = tmp_path / "events"
     out_dir = tmp_path / "read_models"
     append_seed_events(event_log_dir)
+    append_shadow_trade_timing_events(event_log_dir)
     refresh_denominator_read_model(
         event_log_dir=event_log_dir,
         projection_path=out_dir / "denominator_projection.json",
@@ -614,7 +716,7 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     )
 
     assert matrix["matrix_schema_version"] == "v2.7.0.mode_readiness.v1"
-    assert matrix["event_log"]["verify"]["event_count"] == 2
+    assert matrix["event_log"]["verify"]["event_count"] == 6
     assert matrix["contract_statuses"]["CanonicalSpecIntegrityContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["NumericPrecisionContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ModeReadinessMatrix"]["status"] == "pass"
@@ -704,6 +806,10 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["SignalCreditAssignmentContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ReferencePriceContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["MetricsWindowContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["TradeOutcomeLabelContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["StandardizedStopContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ExAnteFeasibility"]["status"] == "pass"
+    assert matrix["contract_statuses"]["EarliestActionableTime"]["status"] == "pass"
     assert matrix["modes"]["observe_only"]["status"] == "allowed"
     assert "NumericPrecisionContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert "CICDMergeGateContract" in matrix["modes"]["observe_only"]["required_contracts"]
@@ -715,6 +821,10 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert "ReconciliationDiffContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "ClientSideCacheContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "DataExportEnvelopeContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "TradeOutcomeLabelContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "StandardizedStopContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "ExAnteFeasibility" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "EarliestActionableTime" in matrix["modes"]["shadow"]["required_contracts"]
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"

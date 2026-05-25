@@ -116,12 +116,12 @@ MODE_REQUIREMENTS = {
         "SourceDogLabelContract",
         "ReferencePriceContract",
         "MetricsWindowContract",
-    ],
-    "ultra_tiny": [
         "TradeOutcomeLabelContract",
         "StandardizedStopContract",
         "ExAnteFeasibility",
         "EarliestActionableTime",
+    ],
+    "ultra_tiny": [
         "RealtimeCleanDetector",
         "QuoteIntentBindingContract",
         "IdempotencyContract",

@@ -11,6 +11,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     audit = build_mode_gate_scope_audit(load_json(CATALOG_PATH), MODE_REQUIREMENTS, MODE_ORDER)
 
     normal = audit["final_scopes"]["normal_tiny_blocking"]
+    shadow = audit["final_scopes"]["shadow"]
     mvp = audit["final_scopes"]["mvp_blocking"]
     assert audit["health"]["current_gate_normal_tiny_contract_count"] == len(
         set(MODE_REQUIREMENTS["observe_only"])
@@ -19,6 +20,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
         | set(MODE_REQUIREMENTS["normal_tiny"])
     )
     assert normal["scope_complete"] is False
+    assert shadow["missing_count"] == 13
     assert normal["missing_count"] == 63
     assert mvp["missing_count"] == 0
     assert "AccessControlContract" not in normal["missing_contracts"]
@@ -75,6 +77,10 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "DashboardComputationProvenanceContract" not in normal["missing_contracts"]
     assert "DataExportWatermarkContract" not in normal["missing_contracts"]
     assert "DataExportEnvelopeContract" not in normal["missing_contracts"]
+    assert "TradeOutcomeLabelContract" not in shadow["missing_contracts"]
+    assert "StandardizedStopContract" not in shadow["missing_contracts"]
+    assert "ExAnteFeasibility" not in shadow["missing_contracts"]
+    assert "EarliestActionableTime" not in shadow["missing_contracts"]
     assert "WritePathRegistryContract" not in normal["missing_contracts"]
     assert "ProviderByzantineQuorumContract" in normal["missing_contracts"]
     assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is False
