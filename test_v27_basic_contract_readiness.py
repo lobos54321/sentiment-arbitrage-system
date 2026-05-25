@@ -11,8 +11,12 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_audit_log_integrity,
     verify_background_job_registry,
     verify_clock_rollback_guard_contract,
+    verify_connection_pool_partition_contract,
+    verify_database_transaction_isolation_contract,
+    verify_db_lock_contention_policy,
     verify_dashboard_action_separation_contract,
     verify_direct_database_mutation_ban,
+    verify_distributed_lock_backend_health_contract,
     verify_enum_evolution_contract,
     verify_entry_point_inventory,
     verify_error_taxonomy,
@@ -81,6 +85,10 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "WorkerHeartbeatContract",
         "SilentWorkerDeathDetector",
         "WarmStartSafetyContract",
+        "ConnectionPoolPartitionContract",
+        "DBLockContentionPolicy",
+        "DatabaseTransactionIsolationContract",
+        "DistributedLockBackendHealthContract",
         "BackgroundJobRegistryContract",
         "ScheduledJobModeGateContract",
         "EntryPointInventoryContract",
@@ -442,6 +450,72 @@ def test_runtime_worker_health_policy_binds_heartbeats_death_detectors_and_warm_
         "volume_preflight_before_service_start",
     }
     assert warm_start["evidence"]["malformed_rows"] == []
+
+
+def test_db_runtime_concurrency_policy_binds_sqlite_and_distributed_locks():
+    pool = verify_connection_pool_partition_contract()
+    contention = verify_db_lock_contention_policy()
+    isolation = verify_database_transaction_isolation_contract()
+    backend = verify_distributed_lock_backend_health_contract()
+
+    assert pool["status"] == "pass"
+    assert set(pool["evidence"]["pool_names"]) == {
+        "market_data_distributed_singleflight",
+        "paper_sqlite_writer_pool",
+    }
+    assert pool["evidence"]["source_anchor_violations"] == []
+    assert contention["status"] == "pass"
+    assert set(contention["evidence"]["stores"]) == {
+        "sqlite:missed_attribution",
+        "sqlite:paper_trades",
+        "sqlite:volume_preflight",
+    }
+    assert contention["evidence"]["malformed_rows"] == []
+    assert isolation["status"] == "pass"
+    assert set(isolation["evidence"]["stores"]) == {
+        "sqlite:kline_cache",
+        "sqlite:paper_decision_audit",
+        "sqlite:paper_trades",
+    }
+    assert isolation["evidence"]["malformed_rows"] == []
+    assert backend["status"] == "pass"
+    assert set(backend["evidence"]["backend_names"]) == {
+        "redis_market_data_singleflight",
+        "sqlite_file_lock_single_writer",
+    }
+    assert backend["evidence"]["source_violations"] == []
+
+
+def test_db_lock_contention_blocks_missing_retry_policy(tmp_path):
+    policy_path = tmp_path / "db-runtime-concurrency.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.db_runtime_concurrency_policy.v1",
+                "scope": "unit",
+                "failure_action": "storage_or_lock_backend_degraded",
+                "source_anchors": [],
+                "db_lock_contention_policies": [
+                    {
+                        "store": "sqlite:paper_trades",
+                        "lock_name": "unit",
+                        "contention_threshold_ms": 30000,
+                        "retry_policy": {},
+                        "fallback_action": "rollback_and_retry_then_raise",
+                        "source_file": "scripts/sqlite_write_coordinator.py",
+                        "source_anchor": "fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_db_lock_contention_policy(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "db_lock_contention_policy_missing_malformed_or_unenforced"
+    assert "retry_policy_non_empty_object_required" in report["evidence"]["malformed_rows"][0]["violations"]
 
 
 def test_worker_heartbeat_blocks_missing_required_role(tmp_path):

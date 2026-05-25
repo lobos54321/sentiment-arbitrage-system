@@ -1,0 +1,114 @@
+{
+  "schema_version": "v2.7.0.db_runtime_concurrency_policy.v1",
+  "scope": "paper_sqlite_and_market_data_distributed_lock_runtime",
+  "failure_action": "storage_or_lock_backend_degraded",
+  "source_anchors": [
+    {"source_file": "scripts/sqlite_write_coordinator.py", "anchor": "fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)"},
+    {"source_file": "scripts/sqlite_write_coordinator.py", "anchor": "_PROCESS_WRITE_LOCK = threading.RLock()"},
+    {"source_file": "scripts/paper_trade_monitor.py", "anchor": "db.execute(f\"PRAGMA busy_timeout = {PAPER_SQLITE_BUSY_TIMEOUT_MS}\")"},
+    {"source_file": "scripts/paper_trade_monitor.py", "anchor": "with sqlite_single_writer(f\"paper_trade_monitor:{label}\"):"},
+    {"source_file": "scripts/paper_decision_audit.py", "anchor": "with sqlite_single_writer(\"paper_decision_audit:record_event\"):"},
+    {"source_file": "scripts/zeabur_preflight_cleanup.py", "anchor": "PRAGMA wal_checkpoint(TRUNCATE)"},
+    {"source_file": "src/market-data/shared-market-runtime.js", "anchor": "client.set(lockKey, token, { PX: lockMs, NX: true })"}
+  ],
+  "connection_pools": [
+    {
+      "pool_name": "paper_sqlite_writer_pool",
+      "partition_key": "sqlite_store:paper_trades.db:single_writer",
+      "max_connections": 1,
+      "critical_reserved_connections": 1,
+      "checked_at": "2026-05-26T00:00:00Z",
+      "source_file": "scripts/sqlite_write_coordinator.py",
+      "source_anchor": "_PROCESS_WRITE_LOCK = threading.RLock()"
+    },
+    {
+      "pool_name": "market_data_distributed_singleflight",
+      "partition_key": "namespace:market-data:pool-ohclv",
+      "max_connections": 1,
+      "critical_reserved_connections": 1,
+      "checked_at": "2026-05-26T00:00:00Z",
+      "source_file": "src/market-data/shared-market-runtime.js",
+      "source_anchor": "const lockKey = this.#redisKey(`singleflight:${key}:lock`);"
+    }
+  ],
+  "db_lock_contention_policies": [
+    {
+      "store": "sqlite:paper_trades",
+      "lock_name": "paper_sqlite_single_writer",
+      "contention_threshold_ms": 30000,
+      "retry_policy": {"attempts": 3, "base_sleep_ms": 350, "timeout_ms": 30000},
+      "fallback_action": "rollback_and_retry_then_raise",
+      "source_file": "scripts/paper_trade_monitor.py",
+      "source_anchor": "with sqlite_single_writer(f\"paper_trade_monitor:{label}\"):"
+    },
+    {
+      "store": "sqlite:missed_attribution",
+      "lock_name": "missed_attribution_write_lock",
+      "contention_threshold_ms": 30000,
+      "retry_policy": {"backoff_initial_ms": 180000, "backoff_max_ms": 900000},
+      "fallback_action": "database_locked_backoff_and_skip_due_update",
+      "source_file": "scripts/paper_trade_monitor.py",
+      "source_anchor": "'reason': 'database_locked_backoff'"
+    },
+    {
+      "store": "sqlite:volume_preflight",
+      "lock_name": "zeabur_wal_checkpoint",
+      "contention_threshold_ms": 5000,
+      "retry_policy": {"busy_timeout_ms": 5000, "checkpoint": "wal_checkpoint(TRUNCATE)"},
+      "fallback_action": "warn_integrity_marker_or_quarantine_paper_db",
+      "source_file": "scripts/zeabur_preflight_cleanup.py",
+      "source_anchor": "PRAGMA wal_checkpoint(TRUNCATE)"
+    }
+  ],
+  "transaction_isolation_contracts": [
+    {
+      "store": "sqlite:paper_trades",
+      "isolation_level": "single_writer_file_lock_plus_wal",
+      "transaction_id": "paper_trade_monitor_db_write_retry",
+      "deadlock_retry_policy": "sqlite_locked_rollback_retry_3_attempts",
+      "invariant_scope": ["paper_trades", "paper_decision_events", "paper_missed_signal_attribution"],
+      "source_file": "scripts/paper_trade_monitor.py",
+      "source_anchor": "def run_db_write_with_retry"
+    },
+    {
+      "store": "sqlite:paper_decision_audit",
+      "isolation_level": "single_writer_file_lock_plus_commit",
+      "transaction_id": "paper_decision_audit_record_event",
+      "deadlock_retry_policy": "single_writer_file_lock",
+      "invariant_scope": ["paper_decision_events"],
+      "source_file": "scripts/paper_decision_audit.py",
+      "source_anchor": "with sqlite_single_writer(\"paper_decision_audit:record_event\"):"
+    },
+    {
+      "store": "sqlite:kline_cache",
+      "isolation_level": "better_sqlite3_transaction",
+      "transaction_id": "kline_repository_batch_upsert",
+      "deadlock_retry_policy": "single_process_transaction_guard",
+      "invariant_scope": ["kline_1m", "helius_trades", "history_backfill_cursor"],
+      "source_file": "src/market-data/kline-repository.js",
+      "source_anchor": "const tx = this.db.transaction((items) => {"
+    }
+  ],
+  "distributed_lock_backends": [
+    {
+      "backend_name": "redis_market_data_singleflight",
+      "health_status": "ready_or_fail_open_to_local_producer",
+      "stale_read_detected": false,
+      "split_brain_detected": false,
+      "source_file": "src/market-data/shared-market-runtime.js",
+      "acquire_anchor": "client.set(lockKey, token, { PX: lockMs, NX: true })",
+      "release_anchor": "if (current === token) {",
+      "fallback_anchor": "return producer();"
+    },
+    {
+      "backend_name": "sqlite_file_lock_single_writer",
+      "health_status": "ready",
+      "stale_read_detected": false,
+      "split_brain_detected": false,
+      "source_file": "scripts/sqlite_write_coordinator.py",
+      "acquire_anchor": "fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+      "release_anchor": "fcntl.flock(fh, fcntl.LOCK_UN)",
+      "fallback_anchor": "raise TimeoutError"
+    }
+  ]
+}

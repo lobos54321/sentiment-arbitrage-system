@@ -37,6 +37,7 @@ DEFAULT_AGGREGATE_BOUNDARIES = PROJECT_ROOT / "config" / "v27-aggregate-boundari
 DEFAULT_EVENT_SCHEMA_COMPATIBILITY = PROJECT_ROOT / "config" / "v27-event-schema-compatibility.json"
 DEFAULT_READ_MODEL_SNAPSHOT_POLICY = PROJECT_ROOT / "config" / "v27-read-model-snapshot-policy.json"
 DEFAULT_RUNTIME_WORKER_HEALTH_POLICY = PROJECT_ROOT / "config" / "v27-runtime-worker-health-policy.json"
+DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY = PROJECT_ROOT / "config" / "v27-db-runtime-concurrency-policy.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
@@ -182,6 +183,33 @@ WARM_START_CONTROL_REQUIRED_FIELDS = (
     "source_anchor",
     "protected_paths",
     "failure_action",
+)
+CONNECTION_POOL_PARTITION_REQUIRED_FIELDS = (
+    "pool_name",
+    "partition_key",
+    "max_connections",
+    "critical_reserved_connections",
+    "checked_at",
+)
+DB_LOCK_CONTENTION_REQUIRED_FIELDS = (
+    "store",
+    "lock_name",
+    "contention_threshold_ms",
+    "retry_policy",
+    "fallback_action",
+)
+DATABASE_TRANSACTION_ISOLATION_REQUIRED_FIELDS = (
+    "store",
+    "isolation_level",
+    "transaction_id",
+    "deadlock_retry_policy",
+    "invariant_scope",
+)
+DISTRIBUTED_LOCK_BACKEND_HEALTH_REQUIRED_FIELDS = (
+    "backend_name",
+    "health_status",
+    "stale_read_detected",
+    "split_brain_detected",
 )
 BACKGROUND_JOB_REQUIRED_FIELDS = (
     "job_name",
@@ -1932,6 +1960,353 @@ def verify_warm_start_safety_contract(policy_path=DEFAULT_RUNTIME_WORKER_HEALTH_
             "duplicate_control_ids": sorted(duplicate_control_ids),
             "malformed_rows": malformed_rows,
             "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def _load_db_runtime_concurrency_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "db_runtime_concurrency_policy_not_object"}
+    return policy, {"policy_path": str(policy_path), "schema_version": policy.get("schema_version"), "scope": policy.get("scope")}
+
+
+def _verify_row_source_anchor(item, index, *, anchor_field="source_anchor"):
+    text, error = _read_project_text(item.get("source_file"))
+    if error:
+        return {"index": index, **error}
+    anchor = str(item.get(anchor_field) or "")
+    if not anchor or anchor not in text:
+        return {
+            "index": index,
+            "source_file": item.get("source_file"),
+            "reason": f"{anchor_field}_missing",
+            anchor_field: anchor,
+        }
+    return None
+
+
+def verify_connection_pool_partition_contract(policy_path=DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY):
+    policy, base_evidence = _load_db_runtime_concurrency_policy(policy_path)
+    if policy is None:
+        return _contract("ConnectionPoolPartitionContract", False, "db_runtime_concurrency_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("connection_pools") if isinstance(policy.get("connection_pools"), list) else []
+    malformed_rows = []
+    duplicate_pool_names = []
+    source_violations = []
+    pool_names = set()
+    required_pools = {"paper_sqlite_writer_pool", "market_data_distributed_singleflight"}
+
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "pool_name": None, "missing_fields": list(CONNECTION_POOL_PARTITION_REQUIRED_FIELDS), "violations": ["connection_pool_not_object"]})
+            continue
+        pool_name = str(item.get("pool_name") or "")
+        missing = _missing_required_fields(item, CONNECTION_POOL_PARTITION_REQUIRED_FIELDS + ("source_file", "source_anchor"))
+        violations = []
+        if pool_name in pool_names:
+            duplicate_pool_names.append(pool_name)
+        if pool_name:
+            pool_names.add(pool_name)
+        try:
+            max_connections = int(item.get("max_connections"))
+            if max_connections <= 0:
+                violations.append("max_connections_must_be_positive")
+        except (TypeError, ValueError):
+            max_connections = None
+            violations.append("max_connections_must_be_positive")
+        try:
+            critical_reserved = int(item.get("critical_reserved_connections"))
+            if critical_reserved <= 0:
+                violations.append("critical_reserved_connections_must_be_positive")
+            if max_connections is not None and critical_reserved > max_connections:
+                violations.append("critical_reserved_connections_cannot_exceed_max")
+        except (TypeError, ValueError):
+            violations.append("critical_reserved_connections_must_be_positive")
+        if _parse_iso_ts(item.get("checked_at")) is None:
+            violations.append("checked_at_invalid")
+        if ":" not in str(item.get("partition_key") or ""):
+            violations.append("partition_key_must_be_namespaced")
+        source_violation = _verify_row_source_anchor(item, index)
+        if source_violation:
+            source_violations.append({"pool_name": pool_name or None, **source_violation})
+        if missing or violations:
+            malformed_rows.append({"index": index, "pool_name": pool_name or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_pools = sorted(required_pools - pool_names)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.db_runtime_concurrency_policy.v1"
+        and policy.get("failure_action") == "storage_or_lock_backend_degraded"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_pool_names
+        and not source_violations
+        and not missing_required_pools
+    )
+    return _contract(
+        "ConnectionPoolPartitionContract",
+        passed,
+        "connection_pool_partition_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "pool_count": len(rows),
+            "pool_names": sorted(pool_names),
+            "required_pools": sorted(required_pools),
+            "missing_required_pools": missing_required_pools,
+            "duplicate_pool_names": sorted(str(item) for item in duplicate_pool_names),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_violations": source_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_db_lock_contention_policy(policy_path=DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY):
+    policy, base_evidence = _load_db_runtime_concurrency_policy(policy_path)
+    if policy is None:
+        return _contract("DBLockContentionPolicy", False, "db_runtime_concurrency_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("db_lock_contention_policies") if isinstance(policy.get("db_lock_contention_policies"), list) else []
+    malformed_rows = []
+    duplicate_locks = []
+    source_violations = []
+    lock_keys = set()
+    stores = set()
+    allowed_fallbacks = {
+        "rollback_and_retry_then_raise",
+        "database_locked_backoff_and_skip_due_update",
+        "warn_integrity_marker_or_quarantine_paper_db",
+    }
+    required_stores = {"sqlite:paper_trades", "sqlite:missed_attribution", "sqlite:volume_preflight"}
+
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "lock_name": None, "missing_fields": list(DB_LOCK_CONTENTION_REQUIRED_FIELDS), "violations": ["lock_contention_policy_not_object"]})
+            continue
+        store = str(item.get("store") or "")
+        lock_name = str(item.get("lock_name") or "")
+        key = (store, lock_name)
+        missing = _missing_required_fields(item, DB_LOCK_CONTENTION_REQUIRED_FIELDS + ("source_file", "source_anchor"))
+        violations = []
+        if key in lock_keys:
+            duplicate_locks.append(":".join(key))
+        if store and lock_name:
+            lock_keys.add(key)
+            stores.add(store)
+        try:
+            if int(item.get("contention_threshold_ms")) <= 0:
+                violations.append("contention_threshold_ms_must_be_positive")
+        except (TypeError, ValueError):
+            violations.append("contention_threshold_ms_must_be_positive")
+        if not isinstance(item.get("retry_policy"), dict) or not item.get("retry_policy"):
+            violations.append("retry_policy_non_empty_object_required")
+        if item.get("fallback_action") not in allowed_fallbacks:
+            violations.append("fallback_action_invalid")
+        source_violation = _verify_row_source_anchor(item, index)
+        if source_violation:
+            source_violations.append({"store": store or None, "lock_name": lock_name or None, **source_violation})
+        if missing or violations:
+            malformed_rows.append({"index": index, "store": store or None, "lock_name": lock_name or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_stores = sorted(required_stores - stores)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.db_runtime_concurrency_policy.v1"
+        and policy.get("failure_action") == "storage_or_lock_backend_degraded"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_locks
+        and not source_violations
+        and not missing_required_stores
+    )
+    return _contract(
+        "DBLockContentionPolicy",
+        passed,
+        "db_lock_contention_policy_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "policy_count": len(rows),
+            "stores": sorted(stores),
+            "required_stores": sorted(required_stores),
+            "missing_required_stores": missing_required_stores,
+            "duplicate_locks": sorted(str(item) for item in duplicate_locks),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_violations": source_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_database_transaction_isolation_contract(policy_path=DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY):
+    policy, base_evidence = _load_db_runtime_concurrency_policy(policy_path)
+    if policy is None:
+        return _contract("DatabaseTransactionIsolationContract", False, "db_runtime_concurrency_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("transaction_isolation_contracts") if isinstance(policy.get("transaction_isolation_contracts"), list) else []
+    malformed_rows = []
+    duplicate_transaction_ids = []
+    source_violations = []
+    transaction_ids = set()
+    stores = set()
+    allowed_isolation_levels = {
+        "single_writer_file_lock_plus_wal",
+        "single_writer_file_lock_plus_commit",
+        "better_sqlite3_transaction",
+    }
+    required_stores = {"sqlite:paper_trades", "sqlite:paper_decision_audit", "sqlite:kline_cache"}
+
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "transaction_id": None, "missing_fields": list(DATABASE_TRANSACTION_ISOLATION_REQUIRED_FIELDS), "violations": ["transaction_isolation_row_not_object"]})
+            continue
+        transaction_id = str(item.get("transaction_id") or "")
+        store = str(item.get("store") or "")
+        missing = _missing_required_fields(item, DATABASE_TRANSACTION_ISOLATION_REQUIRED_FIELDS + ("source_file", "source_anchor"))
+        violations = []
+        if transaction_id in transaction_ids:
+            duplicate_transaction_ids.append(transaction_id)
+        if transaction_id:
+            transaction_ids.add(transaction_id)
+        if store:
+            stores.add(store)
+        if item.get("isolation_level") not in allowed_isolation_levels:
+            violations.append("isolation_level_invalid")
+        if not isinstance(item.get("invariant_scope"), list) or not item.get("invariant_scope"):
+            violations.append("invariant_scope_non_empty_list_required")
+        if not str(item.get("deadlock_retry_policy") or "").strip():
+            violations.append("deadlock_retry_policy_required")
+        source_violation = _verify_row_source_anchor(item, index)
+        if source_violation:
+            source_violations.append({"transaction_id": transaction_id or None, **source_violation})
+        if missing or violations:
+            malformed_rows.append({"index": index, "transaction_id": transaction_id or None, "store": store or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_stores = sorted(required_stores - stores)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.db_runtime_concurrency_policy.v1"
+        and policy.get("failure_action") == "storage_or_lock_backend_degraded"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_transaction_ids
+        and not source_violations
+        and not missing_required_stores
+    )
+    return _contract(
+        "DatabaseTransactionIsolationContract",
+        passed,
+        "database_transaction_isolation_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "transaction_count": len(rows),
+            "transaction_ids": sorted(transaction_ids),
+            "stores": sorted(stores),
+            "required_stores": sorted(required_stores),
+            "missing_required_stores": missing_required_stores,
+            "duplicate_transaction_ids": sorted(str(item) for item in duplicate_transaction_ids),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_violations": source_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_distributed_lock_backend_health_contract(policy_path=DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY):
+    policy, base_evidence = _load_db_runtime_concurrency_policy(policy_path)
+    if policy is None:
+        return _contract("DistributedLockBackendHealthContract", False, "db_runtime_concurrency_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("distributed_lock_backends") if isinstance(policy.get("distributed_lock_backends"), list) else []
+    malformed_rows = []
+    duplicate_backend_names = []
+    source_violations = []
+    backend_names = set()
+    allowed_health = {"ready", "ready_or_fail_open_to_local_producer"}
+    required_backends = {"redis_market_data_singleflight", "sqlite_file_lock_single_writer"}
+
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "backend_name": None, "missing_fields": list(DISTRIBUTED_LOCK_BACKEND_HEALTH_REQUIRED_FIELDS), "violations": ["distributed_lock_backend_not_object"]})
+            continue
+        backend_name = str(item.get("backend_name") or "")
+        missing = _missing_required_fields(item, DISTRIBUTED_LOCK_BACKEND_HEALTH_REQUIRED_FIELDS + ("source_file", "acquire_anchor", "release_anchor", "fallback_anchor"))
+        violations = []
+        if backend_name in backend_names:
+            duplicate_backend_names.append(backend_name)
+        if backend_name:
+            backend_names.add(backend_name)
+        if item.get("health_status") not in allowed_health:
+            violations.append("health_status_invalid")
+        if item.get("stale_read_detected") is not False:
+            violations.append("stale_read_detected_must_be_false")
+        if item.get("split_brain_detected") is not False:
+            violations.append("split_brain_detected_must_be_false")
+        text, error = _read_project_text(item.get("source_file"))
+        if error:
+            source_violations.append({"index": index, "backend_name": backend_name or None, **error})
+        else:
+            for anchor_field in ("acquire_anchor", "release_anchor", "fallback_anchor"):
+                anchor = str(item.get(anchor_field) or "")
+                if not anchor or anchor not in text:
+                    source_violations.append(
+                        {
+                            "index": index,
+                            "backend_name": backend_name or None,
+                            "source_file": item.get("source_file"),
+                            "reason": f"{anchor_field}_missing",
+                            anchor_field: anchor,
+                        }
+                    )
+        if missing or violations:
+            malformed_rows.append({"index": index, "backend_name": backend_name or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_backends = sorted(required_backends - backend_names)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.db_runtime_concurrency_policy.v1"
+        and policy.get("failure_action") == "storage_or_lock_backend_degraded"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_backend_names
+        and not source_violations
+        and not missing_required_backends
+    )
+    return _contract(
+        "DistributedLockBackendHealthContract",
+        passed,
+        "distributed_lock_backend_health_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "contract_failure_action": "lock_backend_unhealthy",
+            "policy_failure_action": policy.get("failure_action"),
+            "backend_count": len(rows),
+            "backend_names": sorted(backend_names),
+            "required_backends": sorted(required_backends),
+            "missing_required_backends": missing_required_backends,
+            "duplicate_backend_names": sorted(str(item) for item in duplicate_backend_names),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_violations": source_violations,
             "source_errors": source_errors,
         },
     )
@@ -4484,6 +4859,7 @@ def build_basic_contract_readiness(
     event_schema_compatibility_policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY,
     read_model_snapshot_policy_path=DEFAULT_READ_MODEL_SNAPSHOT_POLICY,
     runtime_worker_health_policy_path=DEFAULT_RUNTIME_WORKER_HEALTH_POLICY,
+    db_runtime_concurrency_policy_path=DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
@@ -4541,6 +4917,10 @@ def build_basic_contract_readiness(
                 background_job_registry_path=background_job_registry_path,
             ),
             verify_warm_start_safety_contract(policy_path=runtime_worker_health_policy_path),
+            verify_connection_pool_partition_contract(policy_path=db_runtime_concurrency_policy_path),
+            verify_db_lock_contention_policy(policy_path=db_runtime_concurrency_policy_path),
+            verify_database_transaction_isolation_contract(policy_path=db_runtime_concurrency_policy_path),
+            verify_distributed_lock_backend_health_contract(policy_path=db_runtime_concurrency_policy_path),
             verify_background_job_registry(registry_path=background_job_registry_path),
             verify_scheduled_job_mode_gate_contract(registry_path=background_job_registry_path),
             verify_entry_point_inventory(
@@ -4592,6 +4972,7 @@ def main():
     parser.add_argument("--event-schema-compatibility-policy", default=str(DEFAULT_EVENT_SCHEMA_COMPATIBILITY))
     parser.add_argument("--read-model-snapshot-policy", default=str(DEFAULT_READ_MODEL_SNAPSHOT_POLICY))
     parser.add_argument("--runtime-worker-health-policy", default=str(DEFAULT_RUNTIME_WORKER_HEALTH_POLICY))
+    parser.add_argument("--db-runtime-concurrency-policy", default=str(DEFAULT_DB_RUNTIME_CONCURRENCY_POLICY))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
@@ -4624,6 +5005,7 @@ def main():
         event_schema_compatibility_policy_path=Path(args.event_schema_compatibility_policy),
         read_model_snapshot_policy_path=Path(args.read_model_snapshot_policy),
         runtime_worker_health_policy_path=Path(args.runtime_worker_health_policy),
+        db_runtime_concurrency_policy_path=Path(args.db_runtime_concurrency_policy),
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
