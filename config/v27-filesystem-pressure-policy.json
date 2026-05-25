@@ -1,0 +1,28 @@
+{
+  "schema_version": "v2.7.0.filesystem_pressure_policy.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "local_and_zeabur_data_directory_storage_pressure",
+  "failure_action": "storage_degraded",
+  "source_file": "src/web/dashboard-server.js",
+  "source_anchors": [
+    "fs.statfsSync(dataDir)",
+    "free_bytes: free",
+    "low_free: free > 0 && free < Number(process.env.ZEABUR_DISK_WARN_FREE_MB || 256) * 1024 * 1024",
+    "['paper_trades_wal', `${paperDbPath}-wal`]",
+    "['lifecycle_tracks_wal', `${lifecycleDbPath}-wal`]"
+  ],
+  "filesystems": [
+    {
+      "filesystem_path": "data",
+      "min_free_bytes": 268435456,
+      "max_wal_bytes": 536870912,
+      "pressure_action": "warn_and_block_promotion_if_below_floor",
+      "wal_files": [
+        "data/paper_trades.db-wal",
+        "data/sentiment_arb.db-wal",
+        "data/kline_cache.db-wal",
+        "data/lifecycle_tracks.db-wal"
+      ]
+    }
+  ]
+}

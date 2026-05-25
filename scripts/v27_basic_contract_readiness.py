@@ -36,6 +36,8 @@ DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-databa
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
+DEFAULT_FEATURE_FLAG_DEPENDENCIES = PROJECT_ROOT / "config" / "v27-feature-flag-dependencies.json"
+DEFAULT_FILESYSTEM_PRESSURE_POLICY = PROJECT_ROOT / "config" / "v27-filesystem-pressure-policy.json"
 DEFAULT_API_RESPONSE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-policy.json"
 DEFAULT_API_RESPONSE_ENVELOPE_POLICY = PROJECT_ROOT / "config" / "v27-api-response-envelope-policy.json"
 DEFAULT_ERROR_TAXONOMY = PROJECT_ROOT / "config" / "v27-error-taxonomy.json"
@@ -107,6 +109,45 @@ BACKGROUND_JOB_REQUIRED_FIELDS = (
     "owner",
 )
 BACKGROUND_JOB_ALLOWED_MODES = {"observe_only", "shadow", "ultra_tiny", "normal_tiny"}
+SCHEDULED_JOB_MODE_GATE_REQUIRED_FIELDS = (
+    "job_name",
+    "mode",
+    "allowed_to_run",
+    "gate_reason",
+    "checked_at",
+)
+FEATURE_FLAG_DEPENDENCY_REQUIRED_FIELDS = (
+    "feature_flag",
+    "depends_on",
+    "mode_scope",
+    "dependency_state",
+    "activation_action",
+)
+FEATURE_FLAG_DEPENDENCY_STATES = {
+    "disabled_by_default",
+    "optional_safe",
+    "paper_only_required",
+    "required_pass",
+}
+FEATURE_FLAG_ACTIVATION_ACTIONS = {
+    "allow_when_dependencies_ready",
+    "block_until_dependencies_ready",
+    "keep_disabled_until_enabled",
+    "quarantine_live_execution",
+}
+FILESYSTEM_PRESSURE_REQUIRED_FIELDS = (
+    "filesystem_path",
+    "free_bytes",
+    "wal_bytes",
+    "pressure_action",
+)
+FILESYSTEM_PRESSURE_POLICY_REQUIRED_FIELDS = (
+    "filesystem_path",
+    "min_free_bytes",
+    "max_wal_bytes",
+    "pressure_action",
+    "wal_files",
+)
 ENTRY_POINT_REQUIRED_FIELDS = (
     "entry_point_id",
     "code_location",
@@ -1069,6 +1110,314 @@ def verify_background_job_registry(registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY
             "malformed_jobs": malformed_jobs,
             "missing_entry_point_files": missing_entry_point_files,
             "missing_source_anchors": missing_source_anchors,
+        },
+    )
+
+
+def verify_scheduled_job_mode_gate_contract(registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY):
+    try:
+        registry = _load_json(registry_path)
+    except Exception as exc:
+        return _contract("ScheduledJobModeGateContract", False, "scheduled_job_mode_gate_registry_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(registry, dict):
+        return _contract("ScheduledJobModeGateContract", False, "scheduled_job_mode_gate_registry_not_object", {"registry_path": str(registry_path)})
+
+    checked_at = registry.get("updated_at")
+    jobs = registry.get("jobs") if isinstance(registry.get("jobs"), list) else []
+    gate_rows = []
+    malformed_rows = []
+    invalid_checked_at = _parse_iso_ts(checked_at) is None
+    expected_modes = sorted(BACKGROUND_JOB_ALLOWED_MODES)
+    for job_index, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            malformed_rows.append({"index": job_index, "job_name": None, "violations": ["job_not_object"]})
+            continue
+        job_name = str(job.get("job_name") or "")
+        allowed_modes = [str(mode) for mode in (job.get("allowed_modes") or [])]
+        allowed_mode_set = set(allowed_modes)
+        invalid_modes = sorted(mode for mode in allowed_mode_set if mode not in BACKGROUND_JOB_ALLOWED_MODES)
+        for mode in expected_modes:
+            allowed_to_run = mode in allowed_mode_set
+            row = {
+                "job_name": job_name,
+                "mode": mode,
+                "allowed_to_run": allowed_to_run,
+                "gate_reason": "mode_allowed_by_background_job_registry" if allowed_to_run else "mode_not_listed_for_job",
+                "checked_at": checked_at,
+            }
+            missing = _missing_required_fields(row, SCHEDULED_JOB_MODE_GATE_REQUIRED_FIELDS)
+            violations = []
+            if invalid_checked_at:
+                violations.append("checked_at_invalid")
+            if invalid_modes:
+                violations.append(f"invalid_allowed_modes:{','.join(invalid_modes)}")
+            if not isinstance(row["allowed_to_run"], bool):
+                violations.append("allowed_to_run_must_be_bool")
+            gate_rows.append(row)
+            if missing or violations:
+                malformed_rows.append(
+                    {
+                        "index": len(gate_rows) - 1,
+                        "job_name": job_name or None,
+                        "mode": mode,
+                        "missing_fields": missing,
+                        "violations": violations,
+                    }
+                )
+
+    denied_rows = [row for row in gate_rows if row.get("allowed_to_run") is False]
+    passed = (
+        registry.get("schema_version") == "v2.7.0.background_job_registry.v1"
+        and bool(jobs)
+        and len(gate_rows) == len(jobs) * len(BACKGROUND_JOB_ALLOWED_MODES)
+        and not malformed_rows
+    )
+    return _contract(
+        "ScheduledJobModeGateContract",
+        passed,
+        "scheduled_job_mode_gate_missing_malformed_or_incomplete",
+        {
+            "registry_path": str(registry_path),
+            "schema_version": registry.get("schema_version"),
+            "checked_at": checked_at,
+            "job_count": len(jobs),
+            "mode_count": len(BACKGROUND_JOB_ALLOWED_MODES),
+            "gate_row_count": len(gate_rows),
+            "denied_row_count": len(denied_rows),
+            "denied_rows": denied_rows,
+            "malformed_rows": malformed_rows,
+            "sample_gate_rows": gate_rows[:20],
+        },
+    )
+
+
+def _extract_env_flag_names(source_text):
+    return set(re.findall(r"envFlag\(\s*['\"]([^'\"]+)['\"]", source_text))
+
+
+def _catalog_contract_ids(catalog_path):
+    catalog = _load_json(catalog_path)
+    contracts = catalog.get("contracts") if isinstance(catalog, dict) else {}
+    return set(str(contract_id) for contract_id in contracts.keys()) if isinstance(contracts, dict) else set()
+
+
+def verify_feature_flag_dependency_contract(
+    policy_path=DEFAULT_FEATURE_FLAG_DEPENDENCIES,
+    catalog_path=CATALOG_PATH,
+):
+    try:
+        policy = _load_json(policy_path)
+        catalog_contracts = _catalog_contract_ids(catalog_path)
+    except Exception as exc:
+        return _contract("FeatureFlagDependencyContract", False, "feature_flag_dependency_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("FeatureFlagDependencyContract", False, "feature_flag_dependency_policy_not_object", {"policy_path": str(policy_path)})
+
+    source_file = policy.get("source_file") or "src/index.js"
+    source_text, source_error = _read_project_text(source_file)
+    source_flags = _extract_env_flag_names(source_text) if not source_error else set()
+    dependencies = policy.get("feature_flag_dependencies") if isinstance(policy.get("feature_flag_dependencies"), list) else []
+    malformed_dependencies = []
+    duplicate_feature_flags = []
+    source_anchor_violations = []
+    unknown_dependencies = []
+    seen_flags = set()
+    policy_flags = set()
+
+    for index, item in enumerate(dependencies):
+        if not isinstance(item, dict):
+            malformed_dependencies.append({"index": index, "feature_flag": None, "missing_fields": list(FEATURE_FLAG_DEPENDENCY_REQUIRED_FIELDS), "violations": ["dependency_not_object"]})
+            continue
+        feature_flag = str(item.get("feature_flag") or "")
+        policy_flags.add(feature_flag)
+        missing = _missing_required_fields(item, FEATURE_FLAG_DEPENDENCY_REQUIRED_FIELDS)
+        violations = []
+        if feature_flag in seen_flags:
+            duplicate_feature_flags.append(feature_flag)
+        if feature_flag:
+            seen_flags.add(feature_flag)
+        depends_on = [str(value) for value in (item.get("depends_on") or [])]
+        if not depends_on:
+            violations.append("depends_on_non_empty_list_required")
+        for dependency in depends_on:
+            if dependency not in catalog_contracts:
+                unknown_dependencies.append({"feature_flag": feature_flag, "dependency": dependency})
+        mode_scope = [str(value) for value in (item.get("mode_scope") or [])]
+        invalid_modes = sorted(mode for mode in mode_scope if mode not in BACKGROUND_JOB_ALLOWED_MODES)
+        if not mode_scope:
+            violations.append("mode_scope_non_empty_list_required")
+        if invalid_modes:
+            violations.append(f"mode_scope_invalid:{','.join(invalid_modes)}")
+        if str(item.get("dependency_state") or "") not in FEATURE_FLAG_DEPENDENCY_STATES:
+            violations.append("dependency_state_invalid")
+        if str(item.get("activation_action") or "") not in FEATURE_FLAG_ACTIVATION_ACTIONS:
+            violations.append("activation_action_invalid")
+        if "default_enabled" in item and not isinstance(item.get("default_enabled"), bool):
+            violations.append("default_enabled_must_be_bool")
+        source_anchor = str(item.get("source_anchor") or "")
+        if source_anchor and source_anchor not in source_text:
+            source_anchor_violations.append({"feature_flag": feature_flag, "source_anchor": source_anchor})
+        if missing or violations:
+            malformed_dependencies.append(
+                {
+                    "index": index,
+                    "feature_flag": feature_flag or None,
+                    "missing_fields": missing,
+                    "violations": violations,
+                }
+            )
+
+    uncovered_source_flags = sorted(source_flags - policy_flags)
+    unknown_policy_flags = sorted(policy_flags - source_flags)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.feature_flag_dependencies.v1"
+        and policy.get("failure_action") == "feature_flag_blocked"
+        and bool(dependencies)
+        and not source_error
+        and not malformed_dependencies
+        and not duplicate_feature_flags
+        and not source_anchor_violations
+        and not unknown_dependencies
+        and not uncovered_source_flags
+        and not unknown_policy_flags
+    )
+    return _contract(
+        "FeatureFlagDependencyContract",
+        passed,
+        "feature_flag_dependency_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "catalog_path": str(catalog_path),
+            "source_file": source_file,
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "feature_flag_count": len(dependencies),
+            "source_feature_flag_count": len(source_flags),
+            "uncovered_source_flags": uncovered_source_flags,
+            "unknown_policy_flags": unknown_policy_flags,
+            "duplicate_feature_flags": sorted(str(item) for item in duplicate_feature_flags),
+            "unknown_dependencies": unknown_dependencies,
+            "malformed_dependencies": malformed_dependencies,
+            "source_anchor_violations": source_anchor_violations,
+            "source_error": source_error,
+        },
+    )
+
+
+def _file_size_or_zero(path):
+    try:
+        path = _resolve_project_file(path)
+        if path.exists() and path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return None
+    return 0
+
+
+def _stat_free_bytes(path):
+    try:
+        resolved = _resolve_project_file(path)
+        target = resolved if resolved.exists() else resolved.parent
+        stats = os.statvfs(target)
+        return int(stats.f_bavail) * int(stats.f_frsize), None
+    except OSError as exc:
+        return None, str(exc)
+
+
+def verify_filesystem_disk_pressure_policy(policy_path=DEFAULT_FILESYSTEM_PRESSURE_POLICY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("FilesystemDiskPressurePolicy", False, "filesystem_pressure_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("FilesystemDiskPressurePolicy", False, "filesystem_pressure_policy_not_object", {"policy_path": str(policy_path)})
+
+    source_file = policy.get("source_file") or "src/web/dashboard-server.js"
+    source_text, source_error = _read_project_text(source_file)
+    source_anchors = [str(anchor) for anchor in (policy.get("source_anchors") or [])]
+    missing_source_anchors = sorted(anchor for anchor in source_anchors if anchor not in source_text)
+    filesystems = policy.get("filesystems") if isinstance(policy.get("filesystems"), list) else []
+    malformed_filesystems = []
+    pressure_violations = []
+    measurements = []
+
+    for index, item in enumerate(filesystems):
+        if not isinstance(item, dict):
+            malformed_filesystems.append({"index": index, "filesystem_path": None, "missing_fields": list(FILESYSTEM_PRESSURE_POLICY_REQUIRED_FIELDS), "violations": ["filesystem_not_object"]})
+            continue
+        filesystem_path = str(item.get("filesystem_path") or "")
+        missing = _missing_required_fields(item, FILESYSTEM_PRESSURE_POLICY_REQUIRED_FIELDS)
+        violations = []
+        if str(item.get("pressure_action") or "") not in {"warn_and_block_promotion_if_below_floor", "checkpoint_wal_and_warn", "fail_closed"}:
+            violations.append("pressure_action_invalid")
+        try:
+            min_free_bytes = int(item.get("min_free_bytes"))
+            max_wal_bytes = int(item.get("max_wal_bytes"))
+        except (TypeError, ValueError):
+            min_free_bytes = None
+            max_wal_bytes = None
+            violations.append("thresholds_must_be_int")
+        wal_files = item.get("wal_files")
+        if not isinstance(wal_files, list) or not wal_files:
+            violations.append("wal_files_non_empty_list_required")
+            wal_files = []
+        free_bytes, stat_error = _stat_free_bytes(filesystem_path)
+        wal_file_sizes = []
+        wal_bytes = 0
+        for raw_path in wal_files:
+            size = _file_size_or_zero(raw_path)
+            if size is None:
+                violations.append(f"wal_file_unreadable:{raw_path}")
+                continue
+            wal_bytes += size
+            wal_file_sizes.append({"path": str(raw_path), "bytes": size})
+        measurement = {
+            "filesystem_path": filesystem_path,
+            "free_bytes": free_bytes,
+            "wal_bytes": wal_bytes,
+            "pressure_action": item.get("pressure_action"),
+            "min_free_bytes": min_free_bytes,
+            "max_wal_bytes": max_wal_bytes,
+            "wal_file_sizes": wal_file_sizes,
+            "stat_error": stat_error,
+        }
+        measurements.append(measurement)
+        if stat_error:
+            violations.append("filesystem_stat_failed")
+        if free_bytes is not None and min_free_bytes is not None and free_bytes < min_free_bytes:
+            pressure_violations.append({"filesystem_path": filesystem_path, "reason": "free_bytes_below_floor", "free_bytes": free_bytes, "min_free_bytes": min_free_bytes})
+        if max_wal_bytes is not None and wal_bytes > max_wal_bytes:
+            pressure_violations.append({"filesystem_path": filesystem_path, "reason": "wal_bytes_above_ceiling", "wal_bytes": wal_bytes, "max_wal_bytes": max_wal_bytes})
+        if missing or violations:
+            malformed_filesystems.append({"index": index, "filesystem_path": filesystem_path or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.filesystem_pressure_policy.v1"
+        and policy.get("failure_action") == "storage_degraded"
+        and bool(filesystems)
+        and not source_error
+        and not missing_source_anchors
+        and not malformed_filesystems
+        and not pressure_violations
+    )
+    return _contract(
+        "FilesystemDiskPressurePolicy",
+        passed,
+        "filesystem_pressure_missing_malformed_or_degraded",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "source_file": source_file,
+            "source_error": source_error,
+            "missing_source_anchors": missing_source_anchors,
+            "filesystem_count": len(filesystems),
+            "measurements": measurements,
+            "malformed_filesystems": malformed_filesystems,
+            "pressure_violations": pressure_violations,
+            "required_fields": list(FILESYSTEM_PRESSURE_REQUIRED_FIELDS),
         },
     )
 
@@ -3215,6 +3564,8 @@ def build_basic_contract_readiness(
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
+    feature_flag_dependency_policy_path=DEFAULT_FEATURE_FLAG_DEPENDENCIES,
+    filesystem_pressure_policy_path=DEFAULT_FILESYSTEM_PRESSURE_POLICY,
     api_response_policy_path=DEFAULT_API_RESPONSE_POLICY,
     api_response_envelope_policy_path=DEFAULT_API_RESPONSE_ENVELOPE_POLICY,
     error_taxonomy_path=DEFAULT_ERROR_TAXONOMY,
@@ -3254,11 +3605,14 @@ def build_basic_contract_readiness(
                 access_control_policy_path=access_control_policy_path,
             ),
             verify_background_job_registry(registry_path=background_job_registry_path),
+            verify_scheduled_job_mode_gate_contract(registry_path=background_job_registry_path),
             verify_entry_point_inventory(
                 inventory_path=entry_point_inventory_path,
                 access_control_policy_path=access_control_policy_path,
             ),
             verify_static_policy_enforcement(policy_path=static_policy_path),
+            verify_feature_flag_dependency_contract(policy_path=feature_flag_dependency_policy_path, catalog_path=catalog_path),
+            verify_filesystem_disk_pressure_policy(policy_path=filesystem_pressure_policy_path),
             verify_api_response_contract(
                 policy_path=api_response_policy_path,
                 access_control_policy_path=access_control_policy_path,
@@ -3300,6 +3654,8 @@ def main():
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
+    parser.add_argument("--feature-flag-dependency-policy", default=str(DEFAULT_FEATURE_FLAG_DEPENDENCIES))
+    parser.add_argument("--filesystem-pressure-policy", default=str(DEFAULT_FILESYSTEM_PRESSURE_POLICY))
     parser.add_argument("--api-response-policy", default=str(DEFAULT_API_RESPONSE_POLICY))
     parser.add_argument("--api-response-envelope-policy", default=str(DEFAULT_API_RESPONSE_ENVELOPE_POLICY))
     parser.add_argument("--error-taxonomy", default=str(DEFAULT_ERROR_TAXONOMY))
@@ -3326,6 +3682,8 @@ def main():
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
+        feature_flag_dependency_policy_path=Path(args.feature_flag_dependency_policy),
+        filesystem_pressure_policy_path=Path(args.filesystem_pressure_policy),
         api_response_policy_path=Path(args.api_response_policy),
         api_response_envelope_policy_path=Path(args.api_response_envelope_policy),
         error_taxonomy_path=Path(args.error_taxonomy),

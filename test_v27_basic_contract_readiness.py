@@ -13,11 +13,14 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_direct_database_mutation_ban,
     verify_entry_point_inventory,
     verify_error_taxonomy,
+    verify_feature_flag_dependency_contract,
+    verify_filesystem_disk_pressure_policy,
     verify_evidence_eligibility_matrix,
     verify_human_readable_reason_contract,
     verify_log_redaction_verification,
     verify_machine_readable_reason_contract,
     verify_numeric_precision_policy,
+    verify_scheduled_job_mode_gate_contract,
     verify_static_policy_enforcement,
     verify_access_control_policy,
     verify_input_sanitization,
@@ -57,8 +60,11 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "WritePathRegistryContract",
         "DirectDatabaseMutationBan",
         "BackgroundJobRegistryContract",
+        "ScheduledJobModeGateContract",
         "EntryPointInventoryContract",
         "StaticPolicyEnforcementContract",
+        "FeatureFlagDependencyContract",
+        "FilesystemDiskPressurePolicy",
         "APIResponseContract",
         "APIResponseEnvelopeContract",
         "ErrorTaxonomyContract",
@@ -136,6 +142,73 @@ def test_reason_taxonomy_blocks_bad_locale(tmp_path):
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "reason_taxonomy_policy_missing_malformed_or_incomplete"
     assert report["evidence"]["malformed_reasons"][0]["violations"] == ["locale_not_allowed"]
+
+
+def test_scheduled_job_mode_gate_derives_explicit_allow_deny_rows():
+    report = verify_scheduled_job_mode_gate_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["job_count"] >= 8
+    assert report["evidence"]["mode_count"] == 4
+    assert report["evidence"]["gate_row_count"] == report["evidence"]["job_count"] * 4
+    assert report["evidence"]["denied_rows"]
+    assert report["evidence"]["malformed_rows"] == []
+
+
+def test_feature_flag_dependency_policy_covers_all_runtime_env_flags():
+    report = verify_feature_flag_dependency_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["feature_flag_count"] == report["evidence"]["source_feature_flag_count"]
+    assert report["evidence"]["uncovered_source_flags"] == []
+    assert report["evidence"]["unknown_policy_flags"] == []
+    assert report["evidence"]["unknown_dependencies"] == []
+    assert report["evidence"]["source_anchor_violations"] == []
+
+
+def test_feature_flag_dependency_blocks_unknown_contract(tmp_path):
+    policy_path = tmp_path / "feature-flags.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.feature_flag_dependencies.v1",
+                "scope": "unit",
+                "failure_action": "feature_flag_blocked",
+                "source_file": "src/index.js",
+                "feature_flag_dependencies": [
+                    {
+                        "feature_flag": "NODE_STARTUP_PREFLIGHT_ENABLED",
+                        "depends_on": ["NotAContract"],
+                        "mode_scope": ["observe_only"],
+                        "dependency_state": "required_pass",
+                        "activation_action": "block_until_dependencies_ready",
+                        "source_anchor": "envFlag('NODE_STARTUP_PREFLIGHT_ENABLED'",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_feature_flag_dependency_contract(policy_path=policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "feature_flag_dependency_missing_malformed_or_unenforced"
+    assert report["evidence"]["unknown_dependencies"] == [
+        {"feature_flag": "NODE_STARTUP_PREFLIGHT_ENABLED", "dependency": "NotAContract"}
+    ]
+
+
+def test_filesystem_disk_pressure_policy_reads_free_space_and_wal_bytes():
+    report = verify_filesystem_disk_pressure_policy()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["filesystem_count"] == 1
+    measurement = report["evidence"]["measurements"][0]
+    assert isinstance(measurement["free_bytes"], int)
+    assert measurement["free_bytes"] >= measurement["min_free_bytes"]
+    assert measurement["wal_bytes"] <= measurement["max_wal_bytes"]
+    assert report["evidence"]["pressure_violations"] == []
 
 
 def test_paper_mode_safety_blocks_live_capabilities():
