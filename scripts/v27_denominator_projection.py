@@ -81,6 +81,13 @@ CONFIG_DISTRIBUTION_ACK_EVENT_TYPE = "config_distribution_ack_recorded"
 IN_FLIGHT_CONFIG_ROTATION_EVENT_TYPE = "in_flight_config_rotation_recorded"
 POLICY_ACTIVATION_BARRIER_EVENT_TYPE = "policy_activation_barrier_recorded"
 RETRY_POLICY_CATALOG_EVENT_TYPE = "retry_policy_catalog_recorded"
+ALERT_NOISE_BUDGET_EVENT_TYPE = "alert_noise_budget_recorded"
+ALERT_SUPPRESSION_AUDIT_EVENT_TYPE = "alert_suppression_audit_recorded"
+CANARY_ABORT_EVENT_TYPE = "canary_abort_recorded"
+MODEL_ARTIFACT_RUNTIME_COMPATIBILITY_EVENT_TYPE = "model_artifact_runtime_compatibility_recorded"
+MODEL_ROLLBACK_EVENT_TYPE = "model_rollback_recorded"
+POST_RELEASE_MONITORING_WINDOW_EVENT_TYPE = "post_release_monitoring_window_recorded"
+TRAINING_POISONING_GUARD_EVENT_TYPE = "training_poisoning_guard_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -128,6 +135,13 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     IN_FLIGHT_CONFIG_ROTATION_EVENT_TYPE,
     POLICY_ACTIVATION_BARRIER_EVENT_TYPE,
     RETRY_POLICY_CATALOG_EVENT_TYPE,
+    ALERT_NOISE_BUDGET_EVENT_TYPE,
+    ALERT_SUPPRESSION_AUDIT_EVENT_TYPE,
+    CANARY_ABORT_EVENT_TYPE,
+    MODEL_ARTIFACT_RUNTIME_COMPATIBILITY_EVENT_TYPE,
+    MODEL_ROLLBACK_EVENT_TYPE,
+    POST_RELEASE_MONITORING_WINDOW_EVENT_TYPE,
+    TRAINING_POISONING_GUARD_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -2134,6 +2148,257 @@ def _extract_retry_policy_catalog(event, bags):
     }
 
 
+def _extract_alert_noise_budget(event, bags):
+    if event.get("event_type") != ALERT_NOISE_BUDGET_EVENT_TYPE:
+        return None
+    values = {
+        "alert_family": _extract_scalar(bags, [("alert_family",)]),
+        "window_id": _extract_scalar(bags, [("window_id",)]),
+        "noise_budget": _as_float(_extract_scalar(bags, [("noise_budget",)])),
+        "suppression_count": _as_int(_extract_scalar(bags, [("suppression_count",)]), default=None),
+        "owner": _extract_scalar(bags, [("owner",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("alert_family", "window_id", "noise_budget", "suppression_count", "owner"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("noise_budget") is not None and (not math.isfinite(values.get("noise_budget")) or values.get("noise_budget") < 0):
+        violation_fields.append("noise_budget_nonnegative")
+    if values.get("suppression_count") is not None and values.get("suppression_count") < 0:
+        violation_fields.append("suppression_count_nonnegative")
+    if (
+        values.get("noise_budget") is not None
+        and values.get("suppression_count") is not None
+        and values.get("suppression_count") > values.get("noise_budget")
+    ):
+        violation_fields.append("suppression_count_within_noise_budget")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    budget_key = ":".join([str(values.get("alert_family") or "unknown_alert_family"), str(values.get("window_id") or "unknown_window")])
+    return {
+        **values,
+        "alert_noise_budget_key": budget_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "alert_noise_budget_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_alert_suppression_audit(event, bags):
+    if event.get("event_type") != ALERT_SUPPRESSION_AUDIT_EVENT_TYPE:
+        return None
+    values = {
+        "suppression_id": _extract_scalar(bags, [("suppression_id",)]),
+        "alert_family": _extract_scalar(bags, [("alert_family",)]),
+        "suppression_reason": _extract_scalar(bags, [("suppression_reason",)]),
+        "expires_at": _extract_scalar(bags, [("expires_at",)]),
+        "audit_event_id": _extract_scalar(bags, [("audit_event_id",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("suppression_id", "alert_family", "suppression_reason", "expires_at", "audit_event_id"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("expires_at") and _timestamp_epoch_seconds(values.get("expires_at")) is None:
+        violation_fields.append("expires_at_parseable")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "alert_suppression_audit_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_canary_abort(event, bags):
+    if event.get("event_type") != CANARY_ABORT_EVENT_TYPE:
+        return None
+    values = {
+        "canary_id": _extract_scalar(bags, [("canary_id",)]),
+        "abort_threshold": _as_float(_extract_scalar(bags, [("abort_threshold",)])),
+        "observed_metric": _as_float(_extract_scalar(bags, [("observed_metric",)])),
+        "abort_action": _extract_scalar(bags, [("abort_action",)]),
+        "aborted_at": _extract_scalar(bags, [("aborted_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("canary_id", "abort_threshold", "observed_metric", "abort_action", "aborted_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    for field in ("abort_threshold", "observed_metric"):
+        if values.get(field) is not None and not math.isfinite(values.get(field)):
+            violation_fields.append(f"{field}_finite")
+    abort_action = str(values.get("abort_action") or "").strip().lower()
+    if abort_action and abort_action not in {"abort_release", "rollback_release", "pause_entries", "halt_canary", "fail_closed"}:
+        violation_fields.append("abort_action_not_protective")
+    if values.get("aborted_at") and _timestamp_epoch_seconds(values.get("aborted_at")) is None:
+        violation_fields.append("aborted_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "canary_abort_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_model_artifact_runtime_compatibility(event, bags):
+    if event.get("event_type") != MODEL_ARTIFACT_RUNTIME_COMPATIBILITY_EVENT_TYPE:
+        return None
+    values = {
+        "model_snapshot_id": _extract_scalar(bags, [("model_snapshot_id",)]),
+        "runtime_version": _extract_scalar(bags, [("runtime_version",)]),
+        "serialization_format": _extract_scalar(bags, [("serialization_format",)]),
+        "compatibility_result": _extract_scalar(bags, [("compatibility_result",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("model_snapshot_id", "runtime_version", "serialization_format", "compatibility_result"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    compatibility_result = str(values.get("compatibility_result") or "").strip().lower()
+    if compatibility_result and compatibility_result not in {"compatible", "loadable", "pass", "ok"}:
+        violation_fields.append("compatibility_result_not_loadable")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "model_artifact_runtime_compatibility_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_model_rollback(event, bags):
+    if event.get("event_type") != MODEL_ROLLBACK_EVENT_TYPE:
+        return None
+    values = {
+        "rollback_id": _extract_scalar(bags, [("rollback_id",)]),
+        "from_model_snapshot_id": _extract_scalar(bags, [("from_model_snapshot_id",)]),
+        "to_model_snapshot_id": _extract_scalar(bags, [("to_model_snapshot_id",)]),
+        "rollback_verified_at": _extract_scalar(bags, [("rollback_verified_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("rollback_id", "from_model_snapshot_id", "to_model_snapshot_id", "rollback_verified_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("from_model_snapshot_id") and values.get("to_model_snapshot_id") and values.get("from_model_snapshot_id") == values.get("to_model_snapshot_id"):
+        violation_fields.append("rollback_target_not_changed")
+    if values.get("rollback_verified_at") and _timestamp_epoch_seconds(values.get("rollback_verified_at")) is None:
+        violation_fields.append("rollback_verified_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "model_rollback_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_post_release_monitoring_window(event, bags):
+    if event.get("event_type") != POST_RELEASE_MONITORING_WINDOW_EVENT_TYPE:
+        return None
+    monitored_metrics = _as_string_list(_extract_scalar(bags, [("monitored_metrics",)]))
+    values = {
+        "release_id": _extract_scalar(bags, [("release_id",)]),
+        "window_start": _extract_scalar(bags, [("window_start",)]),
+        "window_end": _extract_scalar(bags, [("window_end",)]),
+        "monitored_metrics": monitored_metrics,
+        "exit_status": _extract_scalar(bags, [("exit_status",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("release_id", "window_start", "window_end", "exit_status"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not monitored_metrics:
+        missing_fields.append("monitored_metrics")
+    violation_fields = []
+    start_ts = _timestamp_epoch_seconds(values.get("window_start"))
+    end_ts = _timestamp_epoch_seconds(values.get("window_end"))
+    if values.get("window_start") and start_ts is None:
+        violation_fields.append("window_start_parseable")
+    if values.get("window_end") and end_ts is None:
+        violation_fields.append("window_end_parseable")
+    if start_ts is not None and end_ts is not None and end_ts <= start_ts:
+        violation_fields.append("window_end_after_start")
+    exit_status = str(values.get("exit_status") or "").strip().lower()
+    if exit_status and exit_status not in {"monitoring_passed", "monitoring_active", "rollback_required", "release_blocked"}:
+        violation_fields.append("exit_status_unknown")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "post_release_monitoring_window_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_training_poisoning_guard(event, bags):
+    if event.get("event_type") != TRAINING_POISONING_GUARD_EVENT_TYPE:
+        return None
+    values = {
+        "training_run_id": _extract_scalar(bags, [("training_run_id",)]),
+        "dataset_hash": _extract_scalar(bags, [("dataset_hash",)]),
+        "poison_signal_count": _as_int(_extract_scalar(bags, [("poison_signal_count",)]), default=None),
+        "quarantine_action": _extract_scalar(bags, [("quarantine_action",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("training_run_id", "dataset_hash", "poison_signal_count", "quarantine_action", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("dataset_hash") and not _valid_sha256_hex(values.get("dataset_hash")):
+        violation_fields.append("dataset_hash_sha256")
+    if values.get("poison_signal_count") is not None and values.get("poison_signal_count") < 0:
+        violation_fields.append("poison_signal_count_nonnegative")
+    quarantine_action = str(values.get("quarantine_action") or "").strip().lower()
+    allowed_actions = {"none", "observe", "quarantine_dataset", "block_promotion", "fail_closed", "manual_review"}
+    if quarantine_action and quarantine_action not in allowed_actions:
+        violation_fields.append("quarantine_action_unknown")
+    if values.get("poison_signal_count") and values.get("poison_signal_count") > 0 and quarantine_action in {"none", "observe"}:
+        violation_fields.append("poison_signal_without_quarantine")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "training_poisoning_guard_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _latest_by_key(items, key_name):
     latest = {}
     passthrough = []
@@ -3532,6 +3797,13 @@ def _contract_evidence_from_records(
     in_flight_config_rotations=None,
     policy_activation_barriers=None,
     retry_policy_catalogs=None,
+    alert_noise_budgets=None,
+    alert_suppression_audits=None,
+    canary_aborts=None,
+    model_artifact_runtime_compatibilities=None,
+    model_rollbacks=None,
+    post_release_monitoring_windows=None,
+    training_poisoning_guards=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -3622,6 +3894,36 @@ def _contract_evidence_from_records(
     raw_retry_policy_catalog_count = len(retry_policy_catalogs or [])
     retry_policy_catalogs = _latest_by_key(retry_policy_catalogs or [], "retry_family")
     superseded_retry_policy_catalog_count = max(0, raw_retry_policy_catalog_count - len(retry_policy_catalogs))
+    raw_alert_noise_budget_count = len(alert_noise_budgets or [])
+    alert_noise_budgets = _latest_by_key(alert_noise_budgets or [], "alert_noise_budget_key")
+    superseded_alert_noise_budget_count = max(0, raw_alert_noise_budget_count - len(alert_noise_budgets))
+    raw_alert_suppression_audit_count = len(alert_suppression_audits or [])
+    alert_suppression_audits = _latest_by_key(alert_suppression_audits or [], "suppression_id")
+    superseded_alert_suppression_audit_count = max(0, raw_alert_suppression_audit_count - len(alert_suppression_audits))
+    raw_canary_abort_count = len(canary_aborts or [])
+    canary_aborts = _latest_by_key(canary_aborts or [], "canary_id")
+    superseded_canary_abort_count = max(0, raw_canary_abort_count - len(canary_aborts))
+    raw_model_artifact_runtime_compatibility_count = len(model_artifact_runtime_compatibilities or [])
+    model_artifact_runtime_compatibilities = _latest_by_key(
+        model_artifact_runtime_compatibilities or [],
+        "model_snapshot_id",
+    )
+    superseded_model_artifact_runtime_compatibility_count = max(
+        0,
+        raw_model_artifact_runtime_compatibility_count - len(model_artifact_runtime_compatibilities),
+    )
+    raw_model_rollback_count = len(model_rollbacks or [])
+    model_rollbacks = _latest_by_key(model_rollbacks or [], "rollback_id")
+    superseded_model_rollback_count = max(0, raw_model_rollback_count - len(model_rollbacks))
+    raw_post_release_monitoring_window_count = len(post_release_monitoring_windows or [])
+    post_release_monitoring_windows = _latest_by_key(post_release_monitoring_windows or [], "release_id")
+    superseded_post_release_monitoring_window_count = max(
+        0,
+        raw_post_release_monitoring_window_count - len(post_release_monitoring_windows),
+    )
+    raw_training_poisoning_guard_count = len(training_poisoning_guards or [])
+    training_poisoning_guards = _latest_by_key(training_poisoning_guards or [], "training_run_id")
+    superseded_training_poisoning_guard_count = max(0, raw_training_poisoning_guard_count - len(training_poisoning_guards))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -4803,6 +5105,76 @@ def _contract_evidence_from_records(
         for item in retry_policy_catalogs
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_alert_noise_budgets = [
+        item
+        for item in alert_noise_budgets
+        if item.get("missing_fields")
+    ]
+    alert_noise_budget_violations = [
+        item
+        for item in alert_noise_budgets
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_alert_suppression_audits = [
+        item
+        for item in alert_suppression_audits
+        if item.get("missing_fields")
+    ]
+    alert_suppression_audit_violations = [
+        item
+        for item in alert_suppression_audits
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_canary_aborts = [
+        item
+        for item in canary_aborts
+        if item.get("missing_fields")
+    ]
+    canary_abort_violations = [
+        item
+        for item in canary_aborts
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_model_artifact_runtime_compatibilities = [
+        item
+        for item in model_artifact_runtime_compatibilities
+        if item.get("missing_fields")
+    ]
+    model_artifact_runtime_compatibility_violations = [
+        item
+        for item in model_artifact_runtime_compatibilities
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_model_rollbacks = [
+        item
+        for item in model_rollbacks
+        if item.get("missing_fields")
+    ]
+    model_rollback_violations = [
+        item
+        for item in model_rollbacks
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_post_release_monitoring_windows = [
+        item
+        for item in post_release_monitoring_windows
+        if item.get("missing_fields")
+    ]
+    post_release_monitoring_window_violations = [
+        item
+        for item in post_release_monitoring_windows
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_training_poisoning_guards = [
+        item
+        for item in training_poisoning_guards
+        if item.get("missing_fields")
+    ]
+    training_poisoning_guard_violations = [
+        item
+        for item in training_poisoning_guards
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -5861,6 +6233,259 @@ def _contract_evidence_from_records(
             "owners": sorted({item.get("owner") for item in retry_policy_catalogs if item.get("owner")}),
             "retry_policy_catalog_projection_version": "v2.7.0.retry_policy_catalog.v1",
         },
+        "AlertNoiseBudgetContract": {
+            "eligible_alert_noise_budget_records": len(alert_noise_budgets),
+            "alert_noise_budget_observation_count": raw_alert_noise_budget_count,
+            "current_alert_noise_budget_count": len(alert_noise_budgets),
+            "superseded_alert_noise_budget_event_count": superseded_alert_noise_budget_count,
+            "valid_alert_noise_budget_count": sum(1 for item in alert_noise_budgets if item.get("alert_noise_budget_valid") is True),
+            "malformed_count": len(malformed_alert_noise_budgets),
+            "malformed_alert_noise_budgets": [
+                {
+                    "alert_family": item.get("alert_family"),
+                    "window_id": item.get("window_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_alert_noise_budgets
+            ],
+            "alert_noise_budget_violation_count": len(alert_noise_budget_violations),
+            "alert_noise_budget_violations": [
+                {
+                    "alert_family": item.get("alert_family"),
+                    "window_id": item.get("window_id"),
+                    "noise_budget": item.get("noise_budget"),
+                    "suppression_count": item.get("suppression_count"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in alert_noise_budget_violations
+            ],
+            "alert_families": sorted({item.get("alert_family") for item in alert_noise_budgets if item.get("alert_family")}),
+            "window_ids": sorted({item.get("window_id") for item in alert_noise_budgets if item.get("window_id")}),
+            "owners": sorted({item.get("owner") for item in alert_noise_budgets if item.get("owner")}),
+            "alert_noise_budget_projection_version": "v2.7.0.alert_noise_budget.v1",
+        },
+        "AlertSuppressionAuditContract": {
+            "eligible_alert_suppression_audit_records": len(alert_suppression_audits),
+            "alert_suppression_audit_observation_count": raw_alert_suppression_audit_count,
+            "current_alert_suppression_audit_count": len(alert_suppression_audits),
+            "superseded_alert_suppression_audit_event_count": superseded_alert_suppression_audit_count,
+            "valid_alert_suppression_audit_count": sum(
+                1 for item in alert_suppression_audits if item.get("alert_suppression_audit_valid") is True
+            ),
+            "malformed_count": len(malformed_alert_suppression_audits),
+            "malformed_alert_suppression_audits": [
+                {
+                    "suppression_id": item.get("suppression_id"),
+                    "alert_family": item.get("alert_family"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_alert_suppression_audits
+            ],
+            "alert_suppression_audit_violation_count": len(alert_suppression_audit_violations),
+            "alert_suppression_audit_violations": [
+                {
+                    "suppression_id": item.get("suppression_id"),
+                    "alert_family": item.get("alert_family"),
+                    "suppression_reason": item.get("suppression_reason"),
+                    "expires_at": item.get("expires_at"),
+                    "audit_event_id": item.get("audit_event_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in alert_suppression_audit_violations
+            ],
+            "suppression_ids": sorted({item.get("suppression_id") for item in alert_suppression_audits if item.get("suppression_id")}),
+            "alert_families": sorted({item.get("alert_family") for item in alert_suppression_audits if item.get("alert_family")}),
+            "suppression_reasons": sorted({item.get("suppression_reason") for item in alert_suppression_audits if item.get("suppression_reason")}),
+            "alert_suppression_audit_projection_version": "v2.7.0.alert_suppression_audit.v1",
+        },
+        "CanaryAbortContract": {
+            "eligible_canary_abort_records": len(canary_aborts),
+            "canary_abort_observation_count": raw_canary_abort_count,
+            "current_canary_abort_count": len(canary_aborts),
+            "superseded_canary_abort_event_count": superseded_canary_abort_count,
+            "valid_canary_abort_count": sum(1 for item in canary_aborts if item.get("canary_abort_valid") is True),
+            "malformed_count": len(malformed_canary_aborts),
+            "malformed_canary_aborts": [
+                {
+                    "canary_id": item.get("canary_id"),
+                    "abort_action": item.get("abort_action"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_canary_aborts
+            ],
+            "canary_abort_violation_count": len(canary_abort_violations),
+            "canary_abort_violations": [
+                {
+                    "canary_id": item.get("canary_id"),
+                    "abort_threshold": item.get("abort_threshold"),
+                    "observed_metric": item.get("observed_metric"),
+                    "abort_action": item.get("abort_action"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in canary_abort_violations
+            ],
+            "canary_ids": sorted({item.get("canary_id") for item in canary_aborts if item.get("canary_id")}),
+            "abort_actions": sorted({item.get("abort_action") for item in canary_aborts if item.get("abort_action")}),
+            "canary_abort_projection_version": "v2.7.0.canary_abort.v1",
+        },
+        "ModelArtifactRuntimeCompatibilityContract": {
+            "eligible_model_artifact_runtime_compatibility_records": len(model_artifact_runtime_compatibilities),
+            "model_artifact_runtime_compatibility_observation_count": raw_model_artifact_runtime_compatibility_count,
+            "current_model_artifact_runtime_compatibility_count": len(model_artifact_runtime_compatibilities),
+            "superseded_model_artifact_runtime_compatibility_event_count": superseded_model_artifact_runtime_compatibility_count,
+            "valid_model_artifact_runtime_compatibility_count": sum(
+                1
+                for item in model_artifact_runtime_compatibilities
+                if item.get("model_artifact_runtime_compatibility_valid") is True
+            ),
+            "malformed_count": len(malformed_model_artifact_runtime_compatibilities),
+            "malformed_model_artifact_runtime_compatibilities": [
+                {
+                    "model_snapshot_id": item.get("model_snapshot_id"),
+                    "runtime_version": item.get("runtime_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_model_artifact_runtime_compatibilities
+            ],
+            "model_artifact_runtime_compatibility_violation_count": len(model_artifact_runtime_compatibility_violations),
+            "model_artifact_runtime_compatibility_violations": [
+                {
+                    "model_snapshot_id": item.get("model_snapshot_id"),
+                    "runtime_version": item.get("runtime_version"),
+                    "serialization_format": item.get("serialization_format"),
+                    "compatibility_result": item.get("compatibility_result"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in model_artifact_runtime_compatibility_violations
+            ],
+            "model_snapshot_ids": sorted(
+                {item.get("model_snapshot_id") for item in model_artifact_runtime_compatibilities if item.get("model_snapshot_id")}
+            ),
+            "runtime_versions": sorted({item.get("runtime_version") for item in model_artifact_runtime_compatibilities if item.get("runtime_version")}),
+            "serialization_formats": sorted(
+                {item.get("serialization_format") for item in model_artifact_runtime_compatibilities if item.get("serialization_format")}
+            ),
+            "compatibility_results": sorted(
+                {item.get("compatibility_result") for item in model_artifact_runtime_compatibilities if item.get("compatibility_result")}
+            ),
+            "model_artifact_runtime_compatibility_projection_version": "v2.7.0.model_artifact_runtime_compatibility.v1",
+        },
+        "ModelRollbackContract": {
+            "eligible_model_rollback_records": len(model_rollbacks),
+            "model_rollback_observation_count": raw_model_rollback_count,
+            "current_model_rollback_count": len(model_rollbacks),
+            "superseded_model_rollback_event_count": superseded_model_rollback_count,
+            "valid_model_rollback_count": sum(1 for item in model_rollbacks if item.get("model_rollback_valid") is True),
+            "malformed_count": len(malformed_model_rollbacks),
+            "malformed_model_rollbacks": [
+                {
+                    "rollback_id": item.get("rollback_id"),
+                    "from_model_snapshot_id": item.get("from_model_snapshot_id"),
+                    "to_model_snapshot_id": item.get("to_model_snapshot_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_model_rollbacks
+            ],
+            "model_rollback_violation_count": len(model_rollback_violations),
+            "model_rollback_violations": [
+                {
+                    "rollback_id": item.get("rollback_id"),
+                    "from_model_snapshot_id": item.get("from_model_snapshot_id"),
+                    "to_model_snapshot_id": item.get("to_model_snapshot_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in model_rollback_violations
+            ],
+            "rollback_ids": sorted({item.get("rollback_id") for item in model_rollbacks if item.get("rollback_id")}),
+            "from_model_snapshot_ids": sorted({item.get("from_model_snapshot_id") for item in model_rollbacks if item.get("from_model_snapshot_id")}),
+            "to_model_snapshot_ids": sorted({item.get("to_model_snapshot_id") for item in model_rollbacks if item.get("to_model_snapshot_id")}),
+            "model_rollback_projection_version": "v2.7.0.model_rollback.v1",
+        },
+        "PostReleaseMonitoringWindow": {
+            "eligible_post_release_monitoring_window_records": len(post_release_monitoring_windows),
+            "post_release_monitoring_window_observation_count": raw_post_release_monitoring_window_count,
+            "current_post_release_monitoring_window_count": len(post_release_monitoring_windows),
+            "superseded_post_release_monitoring_window_event_count": superseded_post_release_monitoring_window_count,
+            "valid_post_release_monitoring_window_count": sum(
+                1 for item in post_release_monitoring_windows if item.get("post_release_monitoring_window_valid") is True
+            ),
+            "malformed_count": len(malformed_post_release_monitoring_windows),
+            "malformed_post_release_monitoring_windows": [
+                {
+                    "release_id": item.get("release_id"),
+                    "monitored_metrics": item.get("monitored_metrics"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_post_release_monitoring_windows
+            ],
+            "post_release_monitoring_window_violation_count": len(post_release_monitoring_window_violations),
+            "post_release_monitoring_window_violations": [
+                {
+                    "release_id": item.get("release_id"),
+                    "window_start": item.get("window_start"),
+                    "window_end": item.get("window_end"),
+                    "exit_status": item.get("exit_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in post_release_monitoring_window_violations
+            ],
+            "release_ids": sorted({item.get("release_id") for item in post_release_monitoring_windows if item.get("release_id")}),
+            "monitored_metrics": sorted({metric for item in post_release_monitoring_windows for metric in item.get("monitored_metrics", [])}),
+            "exit_statuses": sorted({item.get("exit_status") for item in post_release_monitoring_windows if item.get("exit_status")}),
+            "post_release_monitoring_window_projection_version": "v2.7.0.post_release_monitoring_window.v1",
+        },
+        "TrainingPoisoningGuard": {
+            "eligible_training_poisoning_guard_records": len(training_poisoning_guards),
+            "training_poisoning_guard_observation_count": raw_training_poisoning_guard_count,
+            "current_training_poisoning_guard_count": len(training_poisoning_guards),
+            "superseded_training_poisoning_guard_event_count": superseded_training_poisoning_guard_count,
+            "valid_training_poisoning_guard_count": sum(
+                1 for item in training_poisoning_guards if item.get("training_poisoning_guard_valid") is True
+            ),
+            "malformed_count": len(malformed_training_poisoning_guards),
+            "malformed_training_poisoning_guards": [
+                {
+                    "training_run_id": item.get("training_run_id"),
+                    "dataset_hash": item.get("dataset_hash"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_training_poisoning_guards
+            ],
+            "training_poisoning_guard_violation_count": len(training_poisoning_guard_violations),
+            "training_poisoning_guard_violations": [
+                {
+                    "training_run_id": item.get("training_run_id"),
+                    "poison_signal_count": item.get("poison_signal_count"),
+                    "quarantine_action": item.get("quarantine_action"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in training_poisoning_guard_violations
+            ],
+            "training_run_ids": sorted({item.get("training_run_id") for item in training_poisoning_guards if item.get("training_run_id")}),
+            "quarantine_actions": sorted({item.get("quarantine_action") for item in training_poisoning_guards if item.get("quarantine_action")}),
+            "training_poisoning_guard_projection_version": "v2.7.0.training_poisoning_guard.v1",
+        },
         "TrainingServingSkewContract": {
             "eligible_training_serving_skew_records": len(training_serving_skews),
             "training_serving_skew_observation_count": raw_training_serving_skew_count,
@@ -6242,6 +6867,13 @@ def build_denominator_projection(
         "in_flight_config_rotation_recorded_events": 0,
         "policy_activation_barrier_recorded_events": 0,
         "retry_policy_catalog_recorded_events": 0,
+        "alert_noise_budget_recorded_events": 0,
+        "alert_suppression_audit_recorded_events": 0,
+        "canary_abort_recorded_events": 0,
+        "model_artifact_runtime_compatibility_recorded_events": 0,
+        "model_rollback_recorded_events": 0,
+        "post_release_monitoring_window_recorded_events": 0,
+        "training_poisoning_guard_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -6314,6 +6946,13 @@ def build_denominator_projection(
             "InFlightConfigRotationPolicy": {},
             "PolicyActivationBarrierContract": {},
             "RetryPolicyCatalogContract": {},
+            "AlertNoiseBudgetContract": {},
+            "AlertSuppressionAuditContract": {},
+            "CanaryAbortContract": {},
+            "ModelArtifactRuntimeCompatibilityContract": {},
+            "ModelRollbackContract": {},
+            "PostReleaseMonitoringWindow": {},
+            "TrainingPoisoningGuard": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -6372,6 +7011,13 @@ def build_denominator_projection(
             "in_flight_config_rotation_ok": False,
             "policy_activation_barrier_ok": False,
             "retry_policy_catalog_ok": False,
+            "alert_noise_budget_ok": False,
+            "alert_suppression_audit_ok": False,
+            "canary_abort_ok": False,
+            "model_artifact_runtime_compatibility_ok": False,
+            "model_rollback_ok": False,
+            "post_release_monitoring_window_ok": False,
+            "training_poisoning_guard_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -6424,6 +7070,13 @@ def build_denominator_projection(
     in_flight_config_rotations = []
     policy_activation_barriers = []
     retry_policy_catalogs = []
+    alert_noise_budgets = []
+    alert_suppression_audits = []
+    canary_aborts = []
+    model_artifact_runtime_compatibilities = []
+    model_rollbacks = []
+    post_release_monitoring_windows = []
+    training_poisoning_guards = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -6636,6 +7289,48 @@ def build_denominator_projection(
             if retry_policy_catalog:
                 retry_policy_catalogs.append(retry_policy_catalog)
             continue
+        if event.get("event_type") == ALERT_NOISE_BUDGET_EVENT_TYPE:
+            projection["alert_noise_budget_recorded_events"] += 1
+            alert_noise_budget = _extract_alert_noise_budget(event, _payload_bags(event))
+            if alert_noise_budget:
+                alert_noise_budgets.append(alert_noise_budget)
+            continue
+        if event.get("event_type") == ALERT_SUPPRESSION_AUDIT_EVENT_TYPE:
+            projection["alert_suppression_audit_recorded_events"] += 1
+            alert_suppression_audit = _extract_alert_suppression_audit(event, _payload_bags(event))
+            if alert_suppression_audit:
+                alert_suppression_audits.append(alert_suppression_audit)
+            continue
+        if event.get("event_type") == CANARY_ABORT_EVENT_TYPE:
+            projection["canary_abort_recorded_events"] += 1
+            canary_abort = _extract_canary_abort(event, _payload_bags(event))
+            if canary_abort:
+                canary_aborts.append(canary_abort)
+            continue
+        if event.get("event_type") == MODEL_ARTIFACT_RUNTIME_COMPATIBILITY_EVENT_TYPE:
+            projection["model_artifact_runtime_compatibility_recorded_events"] += 1
+            model_artifact_runtime_compatibility = _extract_model_artifact_runtime_compatibility(event, _payload_bags(event))
+            if model_artifact_runtime_compatibility:
+                model_artifact_runtime_compatibilities.append(model_artifact_runtime_compatibility)
+            continue
+        if event.get("event_type") == MODEL_ROLLBACK_EVENT_TYPE:
+            projection["model_rollback_recorded_events"] += 1
+            model_rollback = _extract_model_rollback(event, _payload_bags(event))
+            if model_rollback:
+                model_rollbacks.append(model_rollback)
+            continue
+        if event.get("event_type") == POST_RELEASE_MONITORING_WINDOW_EVENT_TYPE:
+            projection["post_release_monitoring_window_recorded_events"] += 1
+            post_release_monitoring_window = _extract_post_release_monitoring_window(event, _payload_bags(event))
+            if post_release_monitoring_window:
+                post_release_monitoring_windows.append(post_release_monitoring_window)
+            continue
+        if event.get("event_type") == TRAINING_POISONING_GUARD_EVENT_TYPE:
+            projection["training_poisoning_guard_recorded_events"] += 1
+            training_poisoning_guard = _extract_training_poisoning_guard(event, _payload_bags(event))
+            if training_poisoning_guard:
+                training_poisoning_guards.append(training_poisoning_guard)
+            continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -6830,6 +7525,13 @@ def build_denominator_projection(
         in_flight_config_rotations=in_flight_config_rotations,
         policy_activation_barriers=policy_activation_barriers,
         retry_policy_catalogs=retry_policy_catalogs,
+        alert_noise_budgets=alert_noise_budgets,
+        alert_suppression_audits=alert_suppression_audits,
+        canary_aborts=canary_aborts,
+        model_artifact_runtime_compatibilities=model_artifact_runtime_compatibilities,
+        model_rollbacks=model_rollbacks,
+        post_release_monitoring_windows=post_release_monitoring_windows,
+        training_poisoning_guards=training_poisoning_guards,
     )
     if progress_callback:
         progress_callback(
@@ -7155,6 +7857,48 @@ def build_denominator_projection(
         and contract_evidence["RetryPolicyCatalogContract"]["valid_retry_policy_catalog_count"] > 0
         and contract_evidence["RetryPolicyCatalogContract"]["malformed_count"] == 0
         and contract_evidence["RetryPolicyCatalogContract"]["retry_policy_catalog_violation_count"] == 0
+    )
+    projection["health"]["alert_noise_budget_ok"] = (
+        contract_evidence["AlertNoiseBudgetContract"]["eligible_alert_noise_budget_records"] > 0
+        and contract_evidence["AlertNoiseBudgetContract"]["valid_alert_noise_budget_count"] > 0
+        and contract_evidence["AlertNoiseBudgetContract"]["malformed_count"] == 0
+        and contract_evidence["AlertNoiseBudgetContract"]["alert_noise_budget_violation_count"] == 0
+    )
+    projection["health"]["alert_suppression_audit_ok"] = (
+        contract_evidence["AlertSuppressionAuditContract"]["eligible_alert_suppression_audit_records"] > 0
+        and contract_evidence["AlertSuppressionAuditContract"]["valid_alert_suppression_audit_count"] > 0
+        and contract_evidence["AlertSuppressionAuditContract"]["malformed_count"] == 0
+        and contract_evidence["AlertSuppressionAuditContract"]["alert_suppression_audit_violation_count"] == 0
+    )
+    projection["health"]["canary_abort_ok"] = (
+        contract_evidence["CanaryAbortContract"]["eligible_canary_abort_records"] > 0
+        and contract_evidence["CanaryAbortContract"]["valid_canary_abort_count"] > 0
+        and contract_evidence["CanaryAbortContract"]["malformed_count"] == 0
+        and contract_evidence["CanaryAbortContract"]["canary_abort_violation_count"] == 0
+    )
+    projection["health"]["model_artifact_runtime_compatibility_ok"] = (
+        contract_evidence["ModelArtifactRuntimeCompatibilityContract"]["eligible_model_artifact_runtime_compatibility_records"] > 0
+        and contract_evidence["ModelArtifactRuntimeCompatibilityContract"]["valid_model_artifact_runtime_compatibility_count"] > 0
+        and contract_evidence["ModelArtifactRuntimeCompatibilityContract"]["malformed_count"] == 0
+        and contract_evidence["ModelArtifactRuntimeCompatibilityContract"]["model_artifact_runtime_compatibility_violation_count"] == 0
+    )
+    projection["health"]["model_rollback_ok"] = (
+        contract_evidence["ModelRollbackContract"]["eligible_model_rollback_records"] > 0
+        and contract_evidence["ModelRollbackContract"]["valid_model_rollback_count"] > 0
+        and contract_evidence["ModelRollbackContract"]["malformed_count"] == 0
+        and contract_evidence["ModelRollbackContract"]["model_rollback_violation_count"] == 0
+    )
+    projection["health"]["post_release_monitoring_window_ok"] = (
+        contract_evidence["PostReleaseMonitoringWindow"]["eligible_post_release_monitoring_window_records"] > 0
+        and contract_evidence["PostReleaseMonitoringWindow"]["valid_post_release_monitoring_window_count"] > 0
+        and contract_evidence["PostReleaseMonitoringWindow"]["malformed_count"] == 0
+        and contract_evidence["PostReleaseMonitoringWindow"]["post_release_monitoring_window_violation_count"] == 0
+    )
+    projection["health"]["training_poisoning_guard_ok"] = (
+        contract_evidence["TrainingPoisoningGuard"]["eligible_training_poisoning_guard_records"] > 0
+        and contract_evidence["TrainingPoisoningGuard"]["valid_training_poisoning_guard_count"] > 0
+        and contract_evidence["TrainingPoisoningGuard"]["malformed_count"] == 0
+        and contract_evidence["TrainingPoisoningGuard"]["training_poisoning_guard_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

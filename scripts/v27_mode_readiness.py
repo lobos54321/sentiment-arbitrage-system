@@ -183,6 +183,13 @@ MODE_REQUIREMENTS = {
         "InFlightConfigRotationPolicy",
         "PolicyActivationBarrierContract",
         "RetryPolicyCatalogContract",
+        "AlertNoiseBudgetContract",
+        "AlertSuppressionAuditContract",
+        "CanaryAbortContract",
+        "ModelArtifactRuntimeCompatibilityContract",
+        "ModelRollbackContract",
+        "PostReleaseMonitoringWindow",
+        "TrainingPoisoningGuard",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -728,6 +735,55 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("retry_policy_catalog_ok") else "missing_evidence",
         "retry_policy_catalog_missing_malformed_or_unbounded",
         retry_policy_catalog_evidence,
+    )
+    alert_noise_budget_evidence = contract_evidence.get("AlertNoiseBudgetContract") or {}
+    statuses["AlertNoiseBudgetContract"] = _status(
+        "AlertNoiseBudgetContract",
+        "pass" if projection_built and projection_health.get("alert_noise_budget_ok") else "missing_evidence",
+        "alert_noise_budget_missing_malformed_or_exceeded",
+        alert_noise_budget_evidence,
+    )
+    alert_suppression_audit_evidence = contract_evidence.get("AlertSuppressionAuditContract") or {}
+    statuses["AlertSuppressionAuditContract"] = _status(
+        "AlertSuppressionAuditContract",
+        "pass" if projection_built and projection_health.get("alert_suppression_audit_ok") else "missing_evidence",
+        "alert_suppression_audit_missing_malformed_or_unaudited",
+        alert_suppression_audit_evidence,
+    )
+    canary_abort_evidence = contract_evidence.get("CanaryAbortContract") or {}
+    statuses["CanaryAbortContract"] = _status(
+        "CanaryAbortContract",
+        "pass" if projection_built and projection_health.get("canary_abort_ok") else "missing_evidence",
+        "canary_abort_missing_malformed_or_unprotective",
+        canary_abort_evidence,
+    )
+    model_artifact_runtime_compatibility_evidence = contract_evidence.get("ModelArtifactRuntimeCompatibilityContract") or {}
+    statuses["ModelArtifactRuntimeCompatibilityContract"] = _status(
+        "ModelArtifactRuntimeCompatibilityContract",
+        "pass" if projection_built and projection_health.get("model_artifact_runtime_compatibility_ok") else "missing_evidence",
+        "model_artifact_runtime_compatibility_missing_malformed_or_unloadable",
+        model_artifact_runtime_compatibility_evidence,
+    )
+    model_rollback_evidence = contract_evidence.get("ModelRollbackContract") or {}
+    statuses["ModelRollbackContract"] = _status(
+        "ModelRollbackContract",
+        "pass" if projection_built and projection_health.get("model_rollback_ok") else "missing_evidence",
+        "model_rollback_missing_malformed_or_unverified",
+        model_rollback_evidence,
+    )
+    post_release_monitoring_evidence = contract_evidence.get("PostReleaseMonitoringWindow") or {}
+    statuses["PostReleaseMonitoringWindow"] = _status(
+        "PostReleaseMonitoringWindow",
+        "pass" if projection_built and projection_health.get("post_release_monitoring_window_ok") else "missing_evidence",
+        "post_release_monitoring_window_missing_malformed_or_unbounded",
+        post_release_monitoring_evidence,
+    )
+    training_poisoning_guard_evidence = contract_evidence.get("TrainingPoisoningGuard") or {}
+    statuses["TrainingPoisoningGuard"] = _status(
+        "TrainingPoisoningGuard",
+        "pass" if projection_built and projection_health.get("training_poisoning_guard_ok") else "missing_evidence",
+        "training_poisoning_guard_missing_malformed_or_unquarantined",
+        training_poisoning_guard_evidence,
     )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(

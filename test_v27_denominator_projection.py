@@ -913,6 +913,178 @@ def append_retry_policy_catalog(
     )
 
 
+def append_alert_noise_budget(
+    log,
+    *,
+    alert_family="provider_quote_health",
+    window_id="alerts-2026-01-15T00",
+    noise_budget=5,
+    suppression_count=1,
+    owner="runtime",
+):
+    payload = {
+        "alert_family": alert_family,
+        "window_id": window_id,
+        "noise_budget": noise_budget,
+        "suppression_count": suppression_count,
+        "owner": owner,
+        "checked_at": "2026-01-15T00:17:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="alert_noise_budget_recorded",
+        aggregate_id=f"alert_noise_budget:{alert_family}:{window_id}",
+        idempotency_key=f"alert_noise_budget:{alert_family}:{window_id}",
+        payload=payload,
+    )
+
+
+def append_alert_suppression_audit(
+    log,
+    *,
+    suppression_id="suppression-unit-v1",
+    alert_family="provider_quote_health",
+    suppression_reason="deduplicated_noisy_probe",
+    expires_at="2026-01-15T01:17:00Z",
+    audit_event_id="audit-event-unit-v1",
+):
+    payload = {
+        "suppression_id": suppression_id,
+        "alert_family": alert_family,
+        "suppression_reason": suppression_reason,
+        "expires_at": expires_at,
+        "audit_event_id": audit_event_id,
+        "checked_at": "2026-01-15T00:17:10Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="alert_suppression_audit_recorded",
+        aggregate_id=f"alert_suppression_audit:{suppression_id}",
+        idempotency_key=f"alert_suppression_audit:{suppression_id}:{audit_event_id}",
+        payload=payload,
+    )
+
+
+def append_canary_abort(
+    log,
+    *,
+    canary_id="canary-unit-v1",
+    abort_threshold=0.05,
+    observed_metric=0.08,
+    abort_action="rollback_release",
+):
+    payload = {
+        "canary_id": canary_id,
+        "abort_threshold": abort_threshold,
+        "observed_metric": observed_metric,
+        "abort_action": abort_action,
+        "aborted_at": "2026-01-15T00:18:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="canary_abort_recorded",
+        aggregate_id=f"canary_abort:{canary_id}",
+        idempotency_key=f"canary_abort:{canary_id}:{abort_action}",
+        payload=payload,
+    )
+
+
+def append_model_artifact_runtime_compatibility(
+    log,
+    *,
+    model_snapshot_id="model-snapshot-unit-v1",
+    runtime_version="runtime-v1",
+    serialization_format="onnx",
+    compatibility_result="compatible",
+):
+    payload = {
+        "model_snapshot_id": model_snapshot_id,
+        "runtime_version": runtime_version,
+        "serialization_format": serialization_format,
+        "compatibility_result": compatibility_result,
+        "checked_at": "2026-01-15T00:19:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="model_artifact_runtime_compatibility_recorded",
+        aggregate_id=f"model_artifact_runtime_compatibility:{model_snapshot_id}:{runtime_version}",
+        idempotency_key=f"model_artifact_runtime_compatibility:{model_snapshot_id}:{runtime_version}",
+        payload=payload,
+    )
+
+
+def append_model_rollback(
+    log,
+    *,
+    rollback_id="model-rollback-unit-v1",
+    from_model_snapshot_id="model-snapshot-unit-v2",
+    to_model_snapshot_id="model-snapshot-unit-v1",
+):
+    payload = {
+        "rollback_id": rollback_id,
+        "from_model_snapshot_id": from_model_snapshot_id,
+        "to_model_snapshot_id": to_model_snapshot_id,
+        "rollback_verified_at": "2026-01-15T00:20:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="model_rollback_recorded",
+        aggregate_id=f"model_rollback:{rollback_id}",
+        idempotency_key=f"model_rollback:{rollback_id}:{to_model_snapshot_id}",
+        payload=payload,
+    )
+
+
+def append_post_release_monitoring_window(
+    log,
+    *,
+    release_id="release-unit-v1",
+    window_start="2026-01-15T00:00:00Z",
+    window_end="2026-01-15T01:00:00Z",
+    monitored_metrics=None,
+    exit_status="monitoring_passed",
+):
+    payload = {
+        "release_id": release_id,
+        "window_start": window_start,
+        "window_end": window_end,
+        "monitored_metrics": monitored_metrics if monitored_metrics is not None else ["error_rate", "capture_rate"],
+        "exit_status": exit_status,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="post_release_monitoring_window_recorded",
+        aggregate_id=f"post_release_monitoring_window:{release_id}",
+        idempotency_key=f"post_release_monitoring_window:{release_id}:{exit_status}",
+        payload=payload,
+    )
+
+
+def append_training_poisoning_guard(
+    log,
+    *,
+    training_run_id="training-run-unit-v1",
+    dataset_hash=None,
+    poison_signal_count=0,
+    quarantine_action="none",
+):
+    dataset_hash = dataset_hash or sha256_hex({"dataset": "unit", "version": "v1"})
+    payload = {
+        "training_run_id": training_run_id,
+        "dataset_hash": dataset_hash,
+        "poison_signal_count": poison_signal_count,
+        "quarantine_action": quarantine_action,
+        "checked_at": "2026-01-15T00:21:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="training_poisoning_guard_recorded",
+        aggregate_id=f"training_poisoning_guard:{training_run_id}",
+        idempotency_key=f"training_poisoning_guard:{training_run_id}:{poison_signal_count}:{quarantine_action}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -1516,6 +1688,79 @@ def test_denominator_projection_rejects_config_activation_retry_policy_violation
     assert projection["contract_evidence"]["InFlightConfigRotationPolicy"]["in_flight_config_rotation_violation_count"] == 1
     assert projection["contract_evidence"]["PolicyActivationBarrierContract"]["policy_activation_barrier_violation_count"] == 1
     assert projection["contract_evidence"]["RetryPolicyCatalogContract"]["retry_policy_catalog_violation_count"] == 1
+
+
+def test_denominator_projection_consumes_alert_model_release_runtime_trust_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_alert_noise_budget(log)
+    append_alert_suppression_audit(log)
+    append_canary_abort(log)
+    append_model_artifact_runtime_compatibility(log)
+    append_model_rollback(log)
+    append_post_release_monitoring_window(log)
+    append_training_poisoning_guard(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["alert_noise_budget_recorded_events"] == 1
+    assert projection["alert_suppression_audit_recorded_events"] == 1
+    assert projection["canary_abort_recorded_events"] == 1
+    assert projection["model_artifact_runtime_compatibility_recorded_events"] == 1
+    assert projection["model_rollback_recorded_events"] == 1
+    assert projection["post_release_monitoring_window_recorded_events"] == 1
+    assert projection["training_poisoning_guard_recorded_events"] == 1
+    assert projection["health"]["alert_noise_budget_ok"] is True
+    assert projection["health"]["alert_suppression_audit_ok"] is True
+    assert projection["health"]["canary_abort_ok"] is True
+    assert projection["health"]["model_artifact_runtime_compatibility_ok"] is True
+    assert projection["health"]["model_rollback_ok"] is True
+    assert projection["health"]["post_release_monitoring_window_ok"] is True
+    assert projection["health"]["training_poisoning_guard_ok"] is True
+    assert projection["contract_evidence"]["AlertNoiseBudgetContract"]["valid_alert_noise_budget_count"] == 1
+    assert projection["contract_evidence"]["AlertSuppressionAuditContract"]["valid_alert_suppression_audit_count"] == 1
+    assert projection["contract_evidence"]["CanaryAbortContract"]["valid_canary_abort_count"] == 1
+    assert (
+        projection["contract_evidence"]["ModelArtifactRuntimeCompatibilityContract"][
+            "valid_model_artifact_runtime_compatibility_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["ModelRollbackContract"]["valid_model_rollback_count"] == 1
+    assert projection["contract_evidence"]["PostReleaseMonitoringWindow"]["valid_post_release_monitoring_window_count"] == 1
+    assert projection["contract_evidence"]["TrainingPoisoningGuard"]["valid_training_poisoning_guard_count"] == 1
+
+
+def test_denominator_projection_rejects_alert_model_release_runtime_trust_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_alert_noise_budget(log, noise_budget=2, suppression_count=5)
+    append_alert_suppression_audit(log, expires_at="not-a-time")
+    append_canary_abort(log, abort_action="notify_only")
+    append_model_artifact_runtime_compatibility(log, compatibility_result="incompatible")
+    append_model_rollback(log, from_model_snapshot_id="model-same", to_model_snapshot_id="model-same")
+    append_post_release_monitoring_window(log, window_start="2026-01-15T02:00:00Z", window_end="2026-01-15T01:00:00Z")
+    append_training_poisoning_guard(log, poison_signal_count=2, quarantine_action="none")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["alert_noise_budget_ok"] is False
+    assert projection["health"]["alert_suppression_audit_ok"] is False
+    assert projection["health"]["canary_abort_ok"] is False
+    assert projection["health"]["model_artifact_runtime_compatibility_ok"] is False
+    assert projection["health"]["model_rollback_ok"] is False
+    assert projection["health"]["post_release_monitoring_window_ok"] is False
+    assert projection["health"]["training_poisoning_guard_ok"] is False
+    assert projection["contract_evidence"]["AlertNoiseBudgetContract"]["alert_noise_budget_violation_count"] == 1
+    assert projection["contract_evidence"]["AlertSuppressionAuditContract"]["alert_suppression_audit_violation_count"] == 1
+    assert projection["contract_evidence"]["CanaryAbortContract"]["canary_abort_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["ModelArtifactRuntimeCompatibilityContract"][
+            "model_artifact_runtime_compatibility_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["ModelRollbackContract"]["model_rollback_violation_count"] == 1
+    assert projection["contract_evidence"]["PostReleaseMonitoringWindow"]["post_release_monitoring_window_violation_count"] == 1
+    assert projection["contract_evidence"]["TrainingPoisoningGuard"]["training_poisoning_guard_violation_count"] == 1
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):

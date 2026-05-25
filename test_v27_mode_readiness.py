@@ -576,6 +576,102 @@ def append_config_activation_retry_policy_events(event_log_dir):
     )
 
 
+def append_alert_model_release_runtime_trust_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="alert_noise_budget_recorded",
+        aggregate_id="alert_noise_budget:provider_quote_health:alerts-2026-01-15T00",
+        idempotency_key="alert_noise_budget:provider_quote_health:alerts-2026-01-15T00",
+        payload={
+            "alert_family": "provider_quote_health",
+            "window_id": "alerts-2026-01-15T00",
+            "noise_budget": 5,
+            "suppression_count": 1,
+            "owner": "runtime",
+            "checked_at": "2026-01-15T00:17:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="alert_suppression_audit_recorded",
+        aggregate_id="alert_suppression_audit:suppression-unit-v1",
+        idempotency_key="alert_suppression_audit:suppression-unit-v1:audit-event-unit-v1",
+        payload={
+            "suppression_id": "suppression-unit-v1",
+            "alert_family": "provider_quote_health",
+            "suppression_reason": "deduplicated_noisy_probe",
+            "expires_at": "2026-01-15T01:17:00Z",
+            "audit_event_id": "audit-event-unit-v1",
+            "checked_at": "2026-01-15T00:17:10Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="canary_abort_recorded",
+        aggregate_id="canary_abort:canary-unit-v1",
+        idempotency_key="canary_abort:canary-unit-v1:rollback_release",
+        payload={
+            "canary_id": "canary-unit-v1",
+            "abort_threshold": 0.05,
+            "observed_metric": 0.08,
+            "abort_action": "rollback_release",
+            "aborted_at": "2026-01-15T00:18:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="model_artifact_runtime_compatibility_recorded",
+        aggregate_id="model_artifact_runtime_compatibility:model-snapshot-unit-v1:runtime-v1",
+        idempotency_key="model_artifact_runtime_compatibility:model-snapshot-unit-v1:runtime-v1",
+        payload={
+            "model_snapshot_id": "model-snapshot-unit-v1",
+            "runtime_version": "runtime-v1",
+            "serialization_format": "onnx",
+            "compatibility_result": "compatible",
+            "checked_at": "2026-01-15T00:19:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="model_rollback_recorded",
+        aggregate_id="model_rollback:model-rollback-unit-v1",
+        idempotency_key="model_rollback:model-rollback-unit-v1:model-snapshot-unit-v1",
+        payload={
+            "rollback_id": "model-rollback-unit-v1",
+            "from_model_snapshot_id": "model-snapshot-unit-v2",
+            "to_model_snapshot_id": "model-snapshot-unit-v1",
+            "rollback_verified_at": "2026-01-15T00:20:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="post_release_monitoring_window_recorded",
+        aggregate_id="post_release_monitoring_window:release-unit-v1",
+        idempotency_key="post_release_monitoring_window:release-unit-v1:monitoring_passed",
+        payload={
+            "release_id": "release-unit-v1",
+            "window_start": "2026-01-15T00:00:00Z",
+            "window_end": "2026-01-15T01:00:00Z",
+            "monitored_metrics": ["error_rate", "capture_rate"],
+            "exit_status": "monitoring_passed",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="training_poisoning_guard_recorded",
+        aggregate_id="training_poisoning_guard:training-run-unit-v1",
+        idempotency_key="training_poisoning_guard:training-run-unit-v1:0:none",
+        payload={
+            "training_run_id": "training-run-unit-v1",
+            "dataset_hash": sha256_hex({"dataset": "unit", "version": "v1"}),
+            "poison_signal_count": 0,
+            "quarantine_action": "none",
+            "checked_at": "2026-01-15T00:21:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -1578,6 +1674,42 @@ def test_mode_readiness_consumes_config_activation_retry_policy_for_normal_tiny(
         assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert matrix["contract_statuses"]["ConfigDistributionAckContract"]["evidence"]["valid_config_distribution_ack_count"] == 2
     assert matrix["contract_statuses"]["RetryPolicyCatalogContract"]["evidence"]["valid_retry_policy_catalog_count"] == 1
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_alert_model_release_runtime_trust_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_alert_model_release_runtime_trust_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "AlertNoiseBudgetContract",
+        "AlertSuppressionAuditContract",
+        "CanaryAbortContract",
+        "ModelArtifactRuntimeCompatibilityContract",
+        "ModelRollbackContract",
+        "PostReleaseMonitoringWindow",
+        "TrainingPoisoningGuard",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["AlertNoiseBudgetContract"]["evidence"]["valid_alert_noise_budget_count"] == 1
+    assert matrix["contract_statuses"]["ModelRollbackContract"]["evidence"]["valid_model_rollback_count"] == 1
+    assert matrix["contract_statuses"]["TrainingPoisoningGuard"]["evidence"]["valid_training_poisoning_guard_count"] == 1
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 
