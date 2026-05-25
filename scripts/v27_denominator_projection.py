@@ -50,6 +50,11 @@ RAW_PROVIDER_RESPONSE_MATERIAL_TYPES = {
     "provider_probe.rawResponse",
 }
 DECISION_AUDIT_EVENT_TYPE = "decision_audit_recorded"
+FEE_SCHEDULE_EVENT_TYPE = "fee_schedule_recorded"
+PROVIDER_CREDENTIAL_SCOPE_EVENT_TYPE = "provider_credential_scope_recorded"
+PROVIDER_REQUEST_REPLAY_EVENT_TYPE = "provider_request_replay_recorded"
+PROVIDER_RESPONSE_AUTHENTICITY_EVENT_TYPE = "provider_response_authenticity_recorded"
+RISK_REVALIDATION_AFTER_ENTRY_EVENT_TYPE = "risk_revalidation_after_entry_recorded"
 IDEMPOTENCY_EVENT_TYPE = "idempotency_contract_recorded"
 EXECUTION_CONTROL_EVENT_TYPE = "execution_control_recorded"
 PAPER_LEDGER_EVENT_TYPE = "paper_ledger_recorded"
@@ -82,6 +87,11 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     QUOTE_INTENT_BINDING_EVENT_TYPE,
     RAW_PROVIDER_EVIDENCE_EVENT_TYPE,
     DECISION_AUDIT_EVENT_TYPE,
+    FEE_SCHEDULE_EVENT_TYPE,
+    PROVIDER_CREDENTIAL_SCOPE_EVENT_TYPE,
+    PROVIDER_REQUEST_REPLAY_EVENT_TYPE,
+    PROVIDER_RESPONSE_AUTHENTICITY_EVENT_TYPE,
+    RISK_REVALIDATION_AFTER_ENTRY_EVENT_TYPE,
     IDEMPOTENCY_EVENT_TYPE,
     EXECUTION_CONTROL_EVENT_TYPE,
     PAPER_LEDGER_EVENT_TYPE,
@@ -897,6 +907,16 @@ def _valid_sha256_hex(value):
     return all(ch in "0123456789abcdef" for ch in value.lower())
 
 
+def _as_string_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
 def _extract_raw_provider_evidence_contract(event, bags):
     version = _extract_scalar(
         bags,
@@ -972,6 +992,229 @@ def _extract_raw_provider_evidence_contract(event, bags):
         "missing_fields": sorted(set(missing_fields)),
         "violation_fields": sorted(set(violation_fields)),
         "provider_evidence_valid": trusted,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_fee_schedule(event, bags):
+    if event.get("event_type") != FEE_SCHEDULE_EVENT_TYPE:
+        return None
+    values = {
+        "fee_source_id": _extract_scalar(bags, [("fee_source_id",)]),
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "fee_version": _extract_scalar(bags, [("fee_version",), ("fee_schedule_version",)]),
+        "source_hash": _extract_scalar(bags, [("source_hash",), ("fee_source_hash",)]),
+        "chain": _extract_scalar(bags, [("chain",)], default="unknown_chain"),
+        "effective_at": _extract_scalar(bags, [("effective_at",)]),
+        "supersedes_version": _extract_scalar(bags, [("supersedes_version",)], default="none"),
+        "fee_model_hash": _extract_scalar(bags, [("fee_model_hash",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    source_missing = []
+    for field in ("fee_source_id", "provider", "fee_version", "source_hash", "effective_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            source_missing.append(field)
+    version_missing = []
+    for field in ("fee_version", "provider", "chain", "effective_at", "supersedes_version"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            version_missing.append(field)
+    source_violations = []
+    version_violations = []
+    if values.get("source_hash") and not _valid_sha256_hex(values.get("source_hash")):
+        source_violations.append("source_hash_sha256")
+    if values.get("fee_model_hash") and not _valid_sha256_hex(values.get("fee_model_hash")):
+        version_violations.append("fee_model_hash_sha256")
+    if values.get("effective_at") and _timestamp_epoch_seconds(values.get("effective_at")) is None:
+        source_violations.append("effective_at_parseable")
+        version_violations.append("effective_at_parseable")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        source_violations.append("checked_at_parseable")
+        version_violations.append("checked_at_parseable")
+    fee_schedule_key = ":".join(
+        [
+            str(values.get("provider") or "unknown_provider"),
+            str(values.get("chain") or "unknown_chain"),
+            str(values.get("fee_version") or "unknown_fee_version"),
+        ]
+    )
+    return {
+        **values,
+        "fee_schedule_key": fee_schedule_key,
+        "missing_source_fields": sorted(set(source_missing)),
+        "missing_version_fields": sorted(set(version_missing)),
+        "source_violation_fields": sorted(set(source_violations)),
+        "version_violation_fields": sorted(set(version_violations)),
+        "fee_schedule_source_valid": not source_missing and not source_violations,
+        "fee_schedule_version_valid": not version_missing and not version_violations,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_provider_credential_scope(event, bags):
+    if event.get("event_type") != PROVIDER_CREDENTIAL_SCOPE_EVENT_TYPE:
+        return None
+    allowed_endpoints = _as_string_list(_extract_scalar(bags, [("allowed_endpoints",)]))
+    allowed_modes = _as_string_list(_extract_scalar(bags, [("allowed_modes",)]))
+    values = {
+        "credential_id": _extract_scalar(bags, [("credential_id",)]),
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "allowed_endpoints": allowed_endpoints,
+        "allowed_modes": allowed_modes,
+        "expires_at": _extract_scalar(bags, [("expires_at",)]),
+        "credential_status": _extract_scalar(bags, [("credential_status",), ("status",)], default="active"),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("credential_id", "provider", "expires_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not allowed_endpoints:
+        missing_fields.append("allowed_endpoints")
+    if not allowed_modes:
+        missing_fields.append("allowed_modes")
+    violation_fields = []
+    if values.get("expires_at") and _timestamp_epoch_seconds(values.get("expires_at")) is None:
+        violation_fields.append("expires_at_parseable")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    if str(values.get("credential_status") or "").strip().lower() in {"revoked", "disabled", "expired"}:
+        violation_fields.append("credential_status_not_active")
+    credential_scope_key = ":".join(
+        [
+            str(values.get("provider") or "unknown_provider"),
+            str(values.get("credential_id") or "unknown_credential"),
+        ]
+    )
+    return {
+        **values,
+        "credential_scope_key": credential_scope_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_credential_scope_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_provider_request_replay(event, bags):
+    if event.get("event_type") != PROVIDER_REQUEST_REPLAY_EVENT_TYPE:
+        return None
+    values = {
+        "request_id": _extract_scalar(bags, [("request_id",), ("provider_request_id",)]),
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "request_hash": _extract_scalar(bags, [("request_hash",)]),
+        "retry_count": _as_int(_extract_scalar(bags, [("retry_count",)]), default=None),
+        "decision_reason": _extract_scalar(bags, [("decision_reason",)]),
+        "replay_status": _extract_scalar(bags, [("replay_status",), ("status",)], default="replay_checked"),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+    }
+    missing_fields = []
+    for field in ("request_id", "provider", "request_hash", "retry_count", "decision_reason"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("request_hash") and not _valid_sha256_hex(values.get("request_hash")):
+        violation_fields.append("request_hash_sha256")
+    if values.get("retry_count") is not None and values.get("retry_count") < 0:
+        violation_fields.append("retry_count_nonnegative")
+    replay_status = str(values.get("replay_status") or "").strip().lower()
+    if replay_status not in {"replay_checked", "checked", "pass", "passed", "ok", "not_replayed_no_retry"}:
+        violation_fields.append("replay_status_not_passed")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_request_replay_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_provider_response_authenticity(event, bags):
+    if event.get("event_type") != PROVIDER_RESPONSE_AUTHENTICITY_EVENT_TYPE:
+        return None
+    values = {
+        "response_id": _extract_scalar(bags, [("response_id",), ("provider_response_id",), ("request_id",)]),
+        "provider": _extract_scalar(bags, [("provider",)]),
+        "signature_status": _extract_scalar(bags, [("signature_status",)]),
+        "transport_security": _extract_scalar(bags, [("transport_security",)]),
+        "verified_at": _extract_scalar(bags, [("verified_at",)], default=event.get("available_at")),
+        "response_hash": _extract_scalar(bags, [("response_hash",)]),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+    }
+    missing_fields = []
+    for field in ("response_id", "provider", "signature_status", "transport_security", "verified_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    signature_status = str(values.get("signature_status") or "").strip().lower()
+    if signature_status not in {"verified", "valid", "trusted", "passed", "signature_valid", "not_required_signed_transport"}:
+        violation_fields.append("signature_status_not_trusted")
+    transport_security = str(values.get("transport_security") or "").strip().lower()
+    if transport_security not in {"https", "tls", "tls_verified", "mtls", "m_tls", "secure_transport"}:
+        violation_fields.append("transport_security_not_verified")
+    if values.get("verified_at") and _timestamp_epoch_seconds(values.get("verified_at")) is None:
+        violation_fields.append("verified_at_parseable")
+    if values.get("response_hash") and not _valid_sha256_hex(values.get("response_hash")):
+        violation_fields.append("response_hash_sha256")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "provider_response_authenticity_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_risk_revalidation_after_entry(event, bags):
+    if event.get("event_type") != RISK_REVALIDATION_AFTER_ENTRY_EVENT_TYPE:
+        return None
+    values = {
+        "position_id": _extract_scalar(bags, [("position_id",)]),
+        "risk_event_id": _extract_scalar(bags, [("risk_event_id",)]),
+        "risk_status": _extract_scalar(bags, [("risk_status",)]),
+        "exit_safety_action": _extract_scalar(bags, [("exit_safety_action",)]),
+        "revalidated_at": _extract_scalar(bags, [("revalidated_at",), ("checked_at",)], default=event.get("available_at")),
+        "paper_trade_id": _extract_scalar(bags, [("paper_trade_id",), ("id",)]),
+    }
+    missing_fields = []
+    for field in ("position_id", "risk_event_id", "risk_status", "exit_safety_action"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    risk_status = str(values.get("risk_status") or "").strip().lower()
+    exit_safety_action = str(values.get("exit_safety_action") or "").strip().lower()
+    clean_statuses = {"clean", "ok", "pass", "passed", "revalidated_clean", "no_new_risk", "mitigated"}
+    bad_statuses = {"bad", "critical", "exit_required", "unsafe", "blocked"}
+    safe_actions = {"hold", "monitor", "no_action", "continue", "exit", "reduce", "block_new_entry"}
+    priority_exit_actions = {"exit", "reduce", "block_new_entry"}
+    if risk_status and risk_status not in clean_statuses | bad_statuses:
+        violation_fields.append("risk_status_unknown")
+    if exit_safety_action and exit_safety_action not in safe_actions:
+        violation_fields.append("exit_safety_action_unknown")
+    if risk_status in bad_statuses and exit_safety_action not in priority_exit_actions:
+        violation_fields.append("exit_safety_action_not_prioritized")
+    if values.get("revalidated_at") and _timestamp_epoch_seconds(values.get("revalidated_at")) is None:
+        violation_fields.append("revalidated_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "risk_revalidation_after_entry_valid": not missing_fields and not violation_fields,
         "source_event_id": event.get("event_id"),
         "global_seq": event.get("global_seq"),
     }
@@ -2121,6 +2364,9 @@ def _extract_decision_fact(event):
         "quote_intent_binding_contract": _extract_quote_intent_binding_contract(event, bags),
         "raw_provider_evidence_contract": _extract_raw_provider_evidence_contract(event, bags),
         "decision_audit_contract": _extract_decision_audit_contract(event, bags),
+        "provider_request_replay_contract": _extract_provider_request_replay(event, bags),
+        "provider_response_authenticity_contract": _extract_provider_response_authenticity(event, bags),
+        "risk_revalidation_after_entry_contract": _extract_risk_revalidation_after_entry(event, bags),
         "idempotency_contract": _extract_idempotency_contract(event, bags),
         "execution_control": _extract_execution_control(event, bags),
         "paper_ledger_contract": _extract_paper_ledger_contract(event, bags),
@@ -2169,6 +2415,9 @@ def _new_record(fact):
         "quote_intent_binding_candidates": [],
         "raw_provider_evidence_candidates": [],
         "decision_audit_candidates": [],
+        "provider_request_replay_candidates": [],
+        "provider_response_authenticity_candidates": [],
+        "risk_revalidation_after_entry_candidates": [],
         "idempotency_contract_candidates": [],
         "execution_control_candidates": [],
         "paper_ledger_candidates": [],
@@ -2190,6 +2439,9 @@ def _new_record(fact):
         "quote_intent_binding_contract": None,
         "raw_provider_evidence_contract": None,
         "decision_audit_contract": None,
+        "provider_request_replay_contract": None,
+        "provider_response_authenticity_contract": None,
+        "risk_revalidation_after_entry_contract": None,
         "idempotency_contract": None,
         "execution_control": None,
         "paper_ledger_contract": None,
@@ -2282,6 +2534,15 @@ def _merge_fact(record, fact):
     decision_audit = fact.get("decision_audit_contract")
     if decision_audit:
         record["decision_audit_candidates"].append(decision_audit)
+    provider_request_replay = fact.get("provider_request_replay_contract")
+    if provider_request_replay:
+        record["provider_request_replay_candidates"].append(provider_request_replay)
+    provider_response_authenticity = fact.get("provider_response_authenticity_contract")
+    if provider_response_authenticity:
+        record["provider_response_authenticity_candidates"].append(provider_response_authenticity)
+    risk_revalidation_after_entry = fact.get("risk_revalidation_after_entry_contract")
+    if risk_revalidation_after_entry:
+        record["risk_revalidation_after_entry_candidates"].append(risk_revalidation_after_entry)
     idempotency_contract = fact.get("idempotency_contract")
     if idempotency_contract:
         record["idempotency_contract_candidates"].append(idempotency_contract)
@@ -2599,6 +2860,36 @@ def _finalize_decision_audit(record):
     record["decision_audit_contract"] = valid_candidates[0] if valid_candidates else (candidates[0] if candidates else None)
 
 
+def _finalize_provider_request_replay(record):
+    candidates = sorted(
+        record.get("provider_request_replay_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["provider_request_replay_candidates"] = candidates
+    valid_candidates = [candidate for candidate in candidates if candidate.get("provider_request_replay_valid") is True]
+    record["provider_request_replay_contract"] = valid_candidates[0] if valid_candidates else (candidates[0] if candidates else None)
+
+
+def _finalize_provider_response_authenticity(record):
+    candidates = sorted(
+        record.get("provider_response_authenticity_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["provider_response_authenticity_candidates"] = candidates
+    valid_candidates = [candidate for candidate in candidates if candidate.get("provider_response_authenticity_valid") is True]
+    record["provider_response_authenticity_contract"] = valid_candidates[0] if valid_candidates else (candidates[0] if candidates else None)
+
+
+def _finalize_risk_revalidation_after_entry(record):
+    candidates = sorted(
+        record.get("risk_revalidation_after_entry_candidates") or [],
+        key=lambda item: (item.get("global_seq") or 0, str(item.get("source_event_id") or "")),
+    )
+    record["risk_revalidation_after_entry_candidates"] = candidates
+    valid_candidates = [candidate for candidate in candidates if candidate.get("risk_revalidation_after_entry_valid") is True]
+    record["risk_revalidation_after_entry_contract"] = valid_candidates[0] if valid_candidates else (candidates[0] if candidates else None)
+
+
 def _finalize_execution_control(record):
     candidates = sorted(
         record.get("execution_control_candidates") or [],
@@ -2671,6 +2962,10 @@ def _record_missing_evidence(record):
         missing.append("RawProviderEvidenceContract")
     if record.get("quote_intent_binding_contract") and not record.get("decision_audit_contract"):
         missing.append("DecisionAudit")
+    if record.get("raw_provider_evidence_contract") and not record.get("provider_request_replay_contract"):
+        missing.append("ProviderRequestReplayContract")
+    if record.get("raw_provider_evidence_contract") and not record.get("provider_response_authenticity_contract"):
+        missing.append("ProviderResponseAuthenticityContract")
     if record.get("quote_intent_binding_contract") and not record.get("idempotency_contract"):
         missing.append("IdempotencyContract")
         missing.append("IdempotencyKeyNamespaceContract")
@@ -2685,6 +2980,8 @@ def _record_missing_evidence(record):
         missing.append("CapitalReservationPolicy")
     if record.get("execution_control") and not record.get("no_fill_outcome"):
         missing.append("NoFillOutcome")
+    if record.get("execution_control") and not record.get("risk_revalidation_after_entry_contract"):
+        missing.append("RiskRevalidationAfterEntryContract")
     record["missing_evidence"] = missing
     return missing
 
@@ -2744,6 +3041,8 @@ def _contract_evidence_from_records(
     retry_storm_controls=None,
     provider_coverage_maps=None,
     training_serving_skews=None,
+    fee_schedules=None,
+    provider_credential_scopes=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -2780,6 +3079,15 @@ def _contract_evidence_from_records(
     raw_training_serving_skew_count = len(training_serving_skews or [])
     training_serving_skews = _latest_by_key(training_serving_skews or [], "skew_key")
     superseded_training_serving_skew_count = max(0, raw_training_serving_skew_count - len(training_serving_skews))
+    raw_fee_schedule_count = len(fee_schedules or [])
+    fee_schedules = _latest_by_key(fee_schedules or [], "fee_schedule_key")
+    superseded_fee_schedule_count = max(0, raw_fee_schedule_count - len(fee_schedules))
+    raw_provider_credential_scope_count = len(provider_credential_scopes or [])
+    provider_credential_scopes = _latest_by_key(provider_credential_scopes or [], "credential_scope_key")
+    superseded_provider_credential_scope_count = max(
+        0,
+        raw_provider_credential_scope_count - len(provider_credential_scopes),
+    )
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -3115,6 +3423,86 @@ def _contract_evidence_from_records(
                     "source_event_ids": [item.get("source_event_id") for item in violated],
                 }
             )
+    provider_request_replay_records = [
+        record
+        for record in record_list
+        if record.get("provider_request_replay_candidates")
+    ]
+    all_provider_request_replay_candidates = [
+        item
+        for record in provider_request_replay_records
+        for item in record.get("provider_request_replay_candidates") or []
+    ]
+    malformed_provider_request_replays = []
+    provider_request_replay_violations = []
+    for record in provider_request_replay_records:
+        malformed = [
+            item
+            for item in record.get("provider_request_replay_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_provider_request_replays.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        violated = [
+            item
+            for item in record.get("provider_request_replay_candidates") or []
+            if item.get("violation_fields")
+        ]
+        if violated:
+            provider_request_replay_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(violated),
+                    "violation_fields": sorted({field for item in violated for field in item.get("violation_fields", [])}),
+                    "source_event_ids": [item.get("source_event_id") for item in violated],
+                }
+            )
+    provider_response_authenticity_records = [
+        record
+        for record in record_list
+        if record.get("provider_response_authenticity_candidates")
+    ]
+    all_provider_response_authenticity_candidates = [
+        item
+        for record in provider_response_authenticity_records
+        for item in record.get("provider_response_authenticity_candidates") or []
+    ]
+    malformed_provider_response_authenticities = []
+    provider_response_authenticity_violations = []
+    for record in provider_response_authenticity_records:
+        malformed = [
+            item
+            for item in record.get("provider_response_authenticity_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_provider_response_authenticities.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        violated = [
+            item
+            for item in record.get("provider_response_authenticity_candidates") or []
+            if item.get("violation_fields")
+        ]
+        if violated:
+            provider_response_authenticity_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(violated),
+                    "violation_fields": sorted({field for item in violated for field in item.get("violation_fields", [])}),
+                    "source_event_ids": [item.get("source_event_id") for item in violated],
+                }
+            )
     decision_audit_records = [
         record
         for record in record_list
@@ -3359,6 +3747,46 @@ def _contract_evidence_from_records(
                     "denominator_dedup_key": record.get("denominator_dedup_key"),
                     "violation_count": len(bad_state),
                     "source_event_ids": [item.get("source_event_id") for item in bad_state],
+                }
+            )
+    risk_revalidation_records = [
+        record
+        for record in record_list
+        if record.get("risk_revalidation_after_entry_candidates")
+    ]
+    all_risk_revalidation_candidates = [
+        item
+        for record in risk_revalidation_records
+        for item in record.get("risk_revalidation_after_entry_candidates") or []
+    ]
+    malformed_risk_revalidations = []
+    risk_revalidation_violations = []
+    for record in risk_revalidation_records:
+        malformed = [
+            item
+            for item in record.get("risk_revalidation_after_entry_candidates") or []
+            if item.get("missing_fields")
+        ]
+        if malformed:
+            malformed_risk_revalidations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "malformed_count": len(malformed),
+                    "missing_fields": sorted({field for item in malformed for field in item.get("missing_fields", [])}),
+                }
+            )
+        violated = [
+            item
+            for item in record.get("risk_revalidation_after_entry_candidates") or []
+            if item.get("violation_fields")
+        ]
+        if violated:
+            risk_revalidation_violations.append(
+                {
+                    "denominator_dedup_key": record.get("denominator_dedup_key"),
+                    "violation_count": len(violated),
+                    "violation_fields": sorted({field for item in violated for field in item.get("violation_fields", [])}),
+                    "source_event_ids": [item.get("source_event_id") for item in violated],
                 }
             )
     paper_ledger_records = [
@@ -3678,6 +4106,36 @@ def _contract_evidence_from_records(
         for item in training_serving_skews
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_fee_schedule_sources = [
+        item
+        for item in fee_schedules
+        if item.get("missing_source_fields")
+    ]
+    fee_schedule_source_violations = [
+        item
+        for item in fee_schedules
+        if item.get("missing_source_fields") or item.get("source_violation_fields")
+    ]
+    malformed_fee_schedule_versions = [
+        item
+        for item in fee_schedules
+        if item.get("missing_version_fields")
+    ]
+    fee_schedule_version_violations = [
+        item
+        for item in fee_schedules
+        if item.get("missing_version_fields") or item.get("version_violation_fields")
+    ]
+    malformed_provider_credential_scopes = [
+        item
+        for item in provider_credential_scopes
+        if item.get("missing_fields")
+    ]
+    provider_credential_scope_violations = [
+        item
+        for item in provider_credential_scopes
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -3896,6 +4354,38 @@ def _contract_evidence_from_records(
             "hash_algorithms": sorted({item.get("hash_algorithm") for item in all_raw_provider_candidates if item.get("hash_algorithm")}),
             "raw_provider_evidence_versions": sorted({item.get("raw_provider_evidence_version") for item in all_raw_provider_candidates if item.get("raw_provider_evidence_version")}),
             "raw_provider_evidence_projection_version": "v2.7.0.raw_provider_evidence.v1",
+        },
+        "ProviderRequestReplayContract": {
+            "eligible_provider_request_replay_records": len(provider_request_replay_records),
+            "provider_request_replay_observation_count": len(all_provider_request_replay_candidates),
+            "valid_provider_request_replay_count": sum(1 for item in all_provider_request_replay_candidates if item.get("provider_request_replay_valid") is True),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_provider_request_replays),
+            "malformed_provider_request_replays": malformed_provider_request_replays,
+            "provider_request_replay_violation_count": sum(item["violation_count"] for item in provider_request_replay_violations),
+            "provider_request_replay_violations": provider_request_replay_violations,
+            "providers": sorted({item.get("provider") for item in all_provider_request_replay_candidates if item.get("provider")}),
+            "request_ids": sorted({item.get("request_id") for item in all_provider_request_replay_candidates if item.get("request_id")}),
+            "decision_reasons": sorted({item.get("decision_reason") for item in all_provider_request_replay_candidates if item.get("decision_reason")}),
+            "replay_statuses": sorted({item.get("replay_status") for item in all_provider_request_replay_candidates if item.get("replay_status")}),
+            "provider_request_replay_projection_version": "v2.7.0.provider_request_replay.v1",
+        },
+        "ProviderResponseAuthenticityContract": {
+            "eligible_provider_response_authenticity_records": len(provider_response_authenticity_records),
+            "provider_response_authenticity_observation_count": len(all_provider_response_authenticity_candidates),
+            "valid_provider_response_authenticity_count": sum(
+                1
+                for item in all_provider_response_authenticity_candidates
+                if item.get("provider_response_authenticity_valid") is True
+            ),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_provider_response_authenticities),
+            "malformed_provider_response_authenticities": malformed_provider_response_authenticities,
+            "provider_response_authenticity_violation_count": sum(item["violation_count"] for item in provider_response_authenticity_violations),
+            "provider_response_authenticity_violations": provider_response_authenticity_violations,
+            "providers": sorted({item.get("provider") for item in all_provider_response_authenticity_candidates if item.get("provider")}),
+            "response_ids": sorted({item.get("response_id") for item in all_provider_response_authenticity_candidates if item.get("response_id")}),
+            "signature_statuses": sorted({item.get("signature_status") for item in all_provider_response_authenticity_candidates if item.get("signature_status")}),
+            "transport_security": sorted({item.get("transport_security") for item in all_provider_response_authenticity_candidates if item.get("transport_security")}),
+            "provider_response_authenticity_projection_version": "v2.7.0.provider_response_authenticity.v1",
         },
         "DecisionAudit": {
             "eligible_decision_audit_records": len(decision_audit_records),
@@ -4241,6 +4731,107 @@ def _contract_evidence_from_records(
             "evidence_sources": sorted({item.get("evidence_source") for item in provider_coverage_maps if item.get("evidence_source")}),
             "provider_coverage_map_projection_version": "v2.7.0.provider_coverage_map.v1",
         },
+        "FeeScheduleSourceContract": {
+            "eligible_fee_schedule_source_records": len(fee_schedules),
+            "fee_schedule_source_observation_count": raw_fee_schedule_count,
+            "current_fee_schedule_source_count": len(fee_schedules),
+            "superseded_fee_schedule_source_event_count": superseded_fee_schedule_count,
+            "valid_fee_schedule_source_count": sum(1 for item in fee_schedules if item.get("fee_schedule_source_valid") is True),
+            "malformed_count": len(malformed_fee_schedule_sources),
+            "malformed_fee_schedule_sources": [
+                {
+                    "fee_source_id": item.get("fee_source_id"),
+                    "provider": item.get("provider"),
+                    "fee_version": item.get("fee_version"),
+                    "missing_fields": item.get("missing_source_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_fee_schedule_sources
+            ],
+            "fee_schedule_source_violation_count": len(fee_schedule_source_violations),
+            "fee_schedule_source_violations": [
+                {
+                    "fee_source_id": item.get("fee_source_id"),
+                    "provider": item.get("provider"),
+                    "fee_version": item.get("fee_version"),
+                    "missing_fields": item.get("missing_source_fields"),
+                    "violation_fields": item.get("source_violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in fee_schedule_source_violations
+            ],
+            "providers": sorted({item.get("provider") for item in fee_schedules if item.get("provider")}),
+            "fee_versions": sorted({item.get("fee_version") for item in fee_schedules if item.get("fee_version")}),
+            "source_hashes": sorted({item.get("source_hash") for item in fee_schedules if item.get("source_hash")}),
+            "fee_schedule_source_projection_version": "v2.7.0.fee_schedule_source.v1",
+        },
+        "FeeScheduleVersionContract": {
+            "eligible_fee_schedule_version_records": len(fee_schedules),
+            "fee_schedule_version_observation_count": raw_fee_schedule_count,
+            "current_fee_schedule_version_count": len(fee_schedules),
+            "superseded_fee_schedule_version_event_count": superseded_fee_schedule_count,
+            "valid_fee_schedule_version_count": sum(1 for item in fee_schedules if item.get("fee_schedule_version_valid") is True),
+            "malformed_count": len(malformed_fee_schedule_versions),
+            "malformed_fee_schedule_versions": [
+                {
+                    "provider": item.get("provider"),
+                    "chain": item.get("chain"),
+                    "fee_version": item.get("fee_version"),
+                    "missing_fields": item.get("missing_version_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_fee_schedule_versions
+            ],
+            "fee_schedule_version_violation_count": len(fee_schedule_version_violations),
+            "fee_schedule_version_violations": [
+                {
+                    "provider": item.get("provider"),
+                    "chain": item.get("chain"),
+                    "fee_version": item.get("fee_version"),
+                    "missing_fields": item.get("missing_version_fields"),
+                    "violation_fields": item.get("version_violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in fee_schedule_version_violations
+            ],
+            "providers": sorted({item.get("provider") for item in fee_schedules if item.get("provider")}),
+            "chains": sorted({item.get("chain") for item in fee_schedules if item.get("chain")}),
+            "fee_versions": sorted({item.get("fee_version") for item in fee_schedules if item.get("fee_version")}),
+            "supersedes_versions": sorted({item.get("supersedes_version") for item in fee_schedules if item.get("supersedes_version")}),
+            "fee_schedule_version_projection_version": "v2.7.0.fee_schedule_version.v1",
+        },
+        "ProviderCredentialScopeContract": {
+            "eligible_provider_credential_scope_records": len(provider_credential_scopes),
+            "provider_credential_scope_observation_count": raw_provider_credential_scope_count,
+            "current_provider_credential_scope_count": len(provider_credential_scopes),
+            "superseded_provider_credential_scope_event_count": superseded_provider_credential_scope_count,
+            "valid_provider_credential_scope_count": sum(1 for item in provider_credential_scopes if item.get("provider_credential_scope_valid") is True),
+            "malformed_count": len(malformed_provider_credential_scopes),
+            "malformed_provider_credential_scopes": [
+                {
+                    "credential_id": item.get("credential_id"),
+                    "provider": item.get("provider"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_provider_credential_scopes
+            ],
+            "provider_credential_scope_violation_count": len(provider_credential_scope_violations),
+            "provider_credential_scope_violations": [
+                {
+                    "credential_id": item.get("credential_id"),
+                    "provider": item.get("provider"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in provider_credential_scope_violations
+            ],
+            "credential_ids": sorted({item.get("credential_id") for item in provider_credential_scopes if item.get("credential_id")}),
+            "providers": sorted({item.get("provider") for item in provider_credential_scopes if item.get("provider")}),
+            "allowed_modes": sorted({mode for item in provider_credential_scopes for mode in item.get("allowed_modes", [])}),
+            "provider_credential_scope_projection_version": "v2.7.0.provider_credential_scope.v1",
+        },
         "TrainingServingSkewContract": {
             "eligible_training_serving_skew_records": len(training_serving_skews),
             "training_serving_skew_observation_count": raw_training_serving_skew_count,
@@ -4340,6 +4931,23 @@ def _contract_evidence_from_records(
             "requires_revalidation_count": sum(1 for item in all_execution_control_candidates if item.get("requires_revalidation_before_fill") is True),
             "revalidation_passed_count": sum(1 for item in all_execution_control_candidates if item.get("revalidation_passed") is True),
             "state_fencing_projection_version": "v2.7.0.state_fencing.v1",
+        },
+        "RiskRevalidationAfterEntryContract": {
+            "eligible_risk_revalidation_after_entry_records": len(risk_revalidation_records),
+            "risk_revalidation_after_entry_observation_count": len(all_risk_revalidation_candidates),
+            "valid_risk_revalidation_after_entry_count": sum(
+                1
+                for item in all_risk_revalidation_candidates
+                if item.get("risk_revalidation_after_entry_valid") is True
+            ),
+            "malformed_count": sum(item["malformed_count"] for item in malformed_risk_revalidations),
+            "malformed_risk_revalidations": malformed_risk_revalidations,
+            "risk_revalidation_after_entry_violation_count": sum(item["violation_count"] for item in risk_revalidation_violations),
+            "risk_revalidation_after_entry_violations": risk_revalidation_violations,
+            "position_ids": sorted({item.get("position_id") for item in all_risk_revalidation_candidates if item.get("position_id")}),
+            "risk_statuses": sorted({item.get("risk_status") for item in all_risk_revalidation_candidates if item.get("risk_status")}),
+            "exit_safety_actions": sorted({item.get("exit_safety_action") for item in all_risk_revalidation_candidates if item.get("exit_safety_action")}),
+            "risk_revalidation_after_entry_projection_version": "v2.7.0.risk_revalidation_after_entry.v1",
         },
         "EntryExecutionStateMachine": {
             "eligible_entry_execution_records": len(execution_control_records),
@@ -4482,8 +5090,11 @@ RECORD_HASH_CONTRACT_FIELDS = {
     "quote_intent_binding": "quote_intent_binding_contract",
     "raw_provider_evidence": "raw_provider_evidence_contract",
     "decision_audit": "decision_audit_contract",
+    "provider_request_replay": "provider_request_replay_contract",
+    "provider_response_authenticity": "provider_response_authenticity_contract",
     "idempotency": "idempotency_contract",
     "execution_control": "execution_control",
+    "risk_revalidation_after_entry": "risk_revalidation_after_entry_contract",
     "paper_ledger": "paper_ledger_contract",
     "no_fill_outcome": "no_fill_outcome",
 }
@@ -4571,6 +5182,11 @@ def build_denominator_projection(
         "quote_intent_binding_recorded_events": 0,
         "raw_provider_evidence_recorded_events": 0,
         "decision_audit_recorded_events": 0,
+        "fee_schedule_recorded_events": 0,
+        "provider_credential_scope_recorded_events": 0,
+        "provider_request_replay_recorded_events": 0,
+        "provider_response_authenticity_recorded_events": 0,
+        "risk_revalidation_after_entry_recorded_events": 0,
         "idempotency_contract_recorded_events": 0,
         "execution_control_recorded_events": 0,
         "paper_ledger_recorded_events": 0,
@@ -4620,6 +5236,12 @@ def build_denominator_projection(
             "QuoteIntentBindingContract": {},
             "RawProviderEvidenceContract": {},
             "DecisionAudit": {},
+            "FeeScheduleSourceContract": {},
+            "FeeScheduleVersionContract": {},
+            "ProviderCredentialScopeContract": {},
+            "ProviderRequestReplayContract": {},
+            "ProviderResponseAuthenticityContract": {},
+            "RiskRevalidationAfterEntryContract": {},
             "RandomnessControlContract": {},
             "IdempotencyContract": {},
             "IdempotencyKeyNamespaceContract": {},
@@ -4662,6 +5284,12 @@ def build_denominator_projection(
             "quote_intent_binding_ok": False,
             "raw_provider_evidence_ok": False,
             "decision_audit_ok": False,
+            "fee_schedule_source_ok": False,
+            "fee_schedule_version_ok": False,
+            "provider_credential_scope_ok": False,
+            "provider_request_replay_ok": False,
+            "provider_response_authenticity_ok": False,
+            "risk_revalidation_after_entry_ok": False,
             "randomness_control_ok": False,
             "idempotency_contract_ok": False,
             "idempotency_key_namespace_ok": False,
@@ -4725,6 +5353,8 @@ def build_denominator_projection(
     retry_storm_controls = []
     provider_coverage_maps = []
     training_serving_skews = []
+    fee_schedules = []
+    provider_credential_scopes = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -4779,6 +5409,24 @@ def build_denominator_projection(
             projection["raw_provider_evidence_recorded_events"] += 1
         if event.get("event_type") == DECISION_AUDIT_EVENT_TYPE:
             projection["decision_audit_recorded_events"] += 1
+        if event.get("event_type") == FEE_SCHEDULE_EVENT_TYPE:
+            projection["fee_schedule_recorded_events"] += 1
+            fee_schedule = _extract_fee_schedule(event, _payload_bags(event))
+            if fee_schedule:
+                fee_schedules.append(fee_schedule)
+            continue
+        if event.get("event_type") == PROVIDER_CREDENTIAL_SCOPE_EVENT_TYPE:
+            projection["provider_credential_scope_recorded_events"] += 1
+            provider_credential_scope = _extract_provider_credential_scope(event, _payload_bags(event))
+            if provider_credential_scope:
+                provider_credential_scopes.append(provider_credential_scope)
+            continue
+        if event.get("event_type") == PROVIDER_REQUEST_REPLAY_EVENT_TYPE:
+            projection["provider_request_replay_recorded_events"] += 1
+        if event.get("event_type") == PROVIDER_RESPONSE_AUTHENTICITY_EVENT_TYPE:
+            projection["provider_response_authenticity_recorded_events"] += 1
+        if event.get("event_type") == RISK_REVALIDATION_AFTER_ENTRY_EVENT_TYPE:
+            projection["risk_revalidation_after_entry_recorded_events"] += 1
         if event.get("event_type") == IDEMPOTENCY_EVENT_TYPE:
             projection["idempotency_contract_recorded_events"] += 1
         if event.get("event_type") == EXECUTION_CONTROL_EVENT_TYPE:
@@ -4944,10 +5592,13 @@ def build_denominator_projection(
         _finalize_quote_intent_binding(record)
         _finalize_raw_provider_evidence(record)
         _finalize_decision_audit(record)
+        _finalize_provider_request_replay(record)
+        _finalize_provider_response_authenticity(record)
         _finalize_idempotency_contract(record)
         _finalize_execution_control(record)
         _finalize_paper_ledger(record)
         _finalize_no_fill_outcome(record)
+        _finalize_risk_revalidation_after_entry(record)
         _record_denominator_membership(record)
         missing = _record_missing_evidence(record)
         for contract in missing:
@@ -5038,6 +5689,8 @@ def build_denominator_projection(
         retry_storm_controls=retry_storm_controls,
         provider_coverage_maps=provider_coverage_maps,
         training_serving_skews=training_serving_skews,
+        fee_schedules=fee_schedules,
+        provider_credential_scopes=provider_credential_scopes,
     )
     if progress_callback:
         progress_callback(
@@ -5131,6 +5784,18 @@ def build_denominator_projection(
         and contract_evidence["RawProviderEvidenceContract"]["malformed_count"] == 0
         and contract_evidence["RawProviderEvidenceContract"]["provider_evidence_violation_count"] == 0
     )
+    projection["health"]["provider_request_replay_ok"] = (
+        contract_evidence["ProviderRequestReplayContract"]["eligible_provider_request_replay_records"] > 0
+        and contract_evidence["ProviderRequestReplayContract"]["valid_provider_request_replay_count"] > 0
+        and contract_evidence["ProviderRequestReplayContract"]["malformed_count"] == 0
+        and contract_evidence["ProviderRequestReplayContract"]["provider_request_replay_violation_count"] == 0
+    )
+    projection["health"]["provider_response_authenticity_ok"] = (
+        contract_evidence["ProviderResponseAuthenticityContract"]["eligible_provider_response_authenticity_records"] > 0
+        and contract_evidence["ProviderResponseAuthenticityContract"]["valid_provider_response_authenticity_count"] > 0
+        and contract_evidence["ProviderResponseAuthenticityContract"]["malformed_count"] == 0
+        and contract_evidence["ProviderResponseAuthenticityContract"]["provider_response_authenticity_violation_count"] == 0
+    )
     projection["health"]["decision_audit_ok"] = (
         contract_evidence["DecisionAudit"]["eligible_decision_audit_records"] > 0
         and contract_evidence["DecisionAudit"]["valid_decision_audit_count"] > 0
@@ -5138,6 +5803,24 @@ def build_denominator_projection(
         and contract_evidence["DecisionAudit"]["future_leakage_count"] == 0
         and contract_evidence["DecisionAudit"]["feature_vector_hash_mismatch_count"] == 0
         and contract_evidence["DecisionAudit"]["trace_bundle_hash_mismatch_count"] == 0
+    )
+    projection["health"]["fee_schedule_source_ok"] = (
+        contract_evidence["FeeScheduleSourceContract"]["eligible_fee_schedule_source_records"] > 0
+        and contract_evidence["FeeScheduleSourceContract"]["valid_fee_schedule_source_count"] > 0
+        and contract_evidence["FeeScheduleSourceContract"]["malformed_count"] == 0
+        and contract_evidence["FeeScheduleSourceContract"]["fee_schedule_source_violation_count"] == 0
+    )
+    projection["health"]["fee_schedule_version_ok"] = (
+        contract_evidence["FeeScheduleVersionContract"]["eligible_fee_schedule_version_records"] > 0
+        and contract_evidence["FeeScheduleVersionContract"]["valid_fee_schedule_version_count"] > 0
+        and contract_evidence["FeeScheduleVersionContract"]["malformed_count"] == 0
+        and contract_evidence["FeeScheduleVersionContract"]["fee_schedule_version_violation_count"] == 0
+    )
+    projection["health"]["provider_credential_scope_ok"] = (
+        contract_evidence["ProviderCredentialScopeContract"]["eligible_provider_credential_scope_records"] > 0
+        and contract_evidence["ProviderCredentialScopeContract"]["valid_provider_credential_scope_count"] > 0
+        and contract_evidence["ProviderCredentialScopeContract"]["malformed_count"] == 0
+        and contract_evidence["ProviderCredentialScopeContract"]["provider_credential_scope_violation_count"] == 0
     )
     projection["health"]["randomness_control_ok"] = (
         contract_evidence["RandomnessControlContract"]["eligible_randomness_control_records"] > 0
@@ -5166,6 +5849,12 @@ def build_denominator_projection(
         contract_evidence["StateVersionFencing"]["eligible_state_fencing_records"] > 0
         and contract_evidence["StateVersionFencing"]["malformed_count"] == 0
         and contract_evidence["StateVersionFencing"]["fencing_violation_count"] == 0
+    )
+    projection["health"]["risk_revalidation_after_entry_ok"] = (
+        contract_evidence["RiskRevalidationAfterEntryContract"]["eligible_risk_revalidation_after_entry_records"] > 0
+        and contract_evidence["RiskRevalidationAfterEntryContract"]["valid_risk_revalidation_after_entry_count"] > 0
+        and contract_evidence["RiskRevalidationAfterEntryContract"]["malformed_count"] == 0
+        and contract_evidence["RiskRevalidationAfterEntryContract"]["risk_revalidation_after_entry_violation_count"] == 0
     )
     projection["health"]["entry_execution_state_machine_ok"] = (
         contract_evidence["EntryExecutionStateMachine"]["eligible_entry_execution_records"] > 0

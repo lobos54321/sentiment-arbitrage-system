@@ -279,6 +279,115 @@ def append_raw_provider_evidence(
     )
 
 
+def append_fee_schedule(log, *, provider="jupiter_ultra", chain="solana", fee_version="fee-v1", bad_hash=False):
+    payload = {
+        "fee_source_id": "fee-source-jupiter-ultra",
+        "provider": provider,
+        "chain": chain,
+        "fee_version": fee_version,
+        "source_hash": "not-a-sha" if bad_hash else sha256_hex({"provider": provider, "fee_version": fee_version}),
+        "fee_model_hash": sha256_hex({"fee_model": "unit", "fee_version": fee_version}),
+        "effective_at": "2026-01-15T00:00:00Z",
+        "supersedes_version": "none",
+        "checked_at": "2026-01-15T00:00:01Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="fee_schedule_recorded",
+        aggregate_id=f"fee_schedule:{provider}:{chain}:{fee_version}",
+        idempotency_key=f"fee_schedule:{provider}:{chain}:{fee_version}",
+        payload=payload,
+    )
+
+
+def append_provider_credential_scope(log, *, credential_id="jupiter-ultra-unit-token", provider="jupiter_ultra", revoked=False):
+    payload = {
+        "credential_id": credential_id,
+        "provider": provider,
+        "allowed_endpoints": ["/ultra/v1/order", "/ultra/v1/execute"],
+        "allowed_modes": ["paper", "normal_tiny"],
+        "expires_at": "2099-01-01T00:00:00Z",
+        "credential_status": "revoked" if revoked else "active",
+        "checked_at": "2026-01-15T00:00:01Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="provider_credential_scope_recorded",
+        aggregate_id=f"provider_credential_scope:{provider}:{credential_id}",
+        idempotency_key=f"provider_credential_scope:{provider}:{credential_id}",
+        payload=payload,
+    )
+
+
+def append_provider_request_replay(log, *, token_ca, paper_trade_id=1, pool="pool-a", bad_hash=False):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "request_id": f"provider-request-{paper_trade_id}",
+        "provider": "jupiter_ultra",
+        "request_hash": "not-a-sha" if bad_hash else sha256_hex({"request_id": f"provider-request-{paper_trade_id}"}),
+        "retry_count": 0,
+        "decision_reason": "initial_attempt_no_replay_needed",
+        "replay_status": "not_replayed_no_retry",
+        "checked_at": "2026-01-15T00:00:02Z",
+    }
+    return log.append_event(
+        event_type="provider_request_replay_recorded",
+        aggregate_id=f"provider_request_replay:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"provider_request_replay:{paper_trade_id}",
+        payload=payload,
+    )
+
+
+def append_provider_response_authenticity(log, *, token_ca, paper_trade_id=1, pool="pool-a", signature_status="verified"):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "response_id": f"provider-response-{paper_trade_id}",
+        "provider": "jupiter_ultra",
+        "signature_status": signature_status,
+        "transport_security": "tls_verified",
+        "verified_at": "2026-01-15T00:00:03Z",
+        "response_hash": sha256_hex({"response_id": f"provider-response-{paper_trade_id}"}),
+    }
+    return log.append_event(
+        event_type="provider_response_authenticity_recorded",
+        aggregate_id=f"provider_response_authenticity:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"provider_response_authenticity:{paper_trade_id}",
+        payload=payload,
+    )
+
+
+def append_risk_revalidation_after_entry(log, *, token_ca, paper_trade_id=1, pool="pool-a", risk_status="clean", exit_safety_action="hold"):
+    payload = {
+        "paper_trade_id": paper_trade_id,
+        "token_ca": token_ca,
+        "symbol": token_ca[-4:],
+        "chain": "solana",
+        "canonical_pool_group": pool,
+        "lifecycle_epoch": 0,
+        "position_id": f"paper_trade:{paper_trade_id}:position",
+        "risk_event_id": f"risk-event-{paper_trade_id}",
+        "risk_status": risk_status,
+        "exit_safety_action": exit_safety_action,
+        "revalidated_at": "2026-01-15T00:00:04Z",
+    }
+    return log.append_event(
+        event_type="risk_revalidation_after_entry_recorded",
+        aggregate_id=f"risk_revalidation_after_entry:solana:{token_ca}:{pool}:0:{paper_trade_id}",
+        idempotency_key=f"risk_revalidation_after_entry:{paper_trade_id}",
+        payload=payload,
+    )
+
+
 def append_randomness_control(log, *, assignment_id="normal-tiny-policy-v1", missing_seed=False, bad_hash=False, idempotency_suffix=None):
     payload = {
         "rng_seed": None if missing_seed else "sha256:normal-tiny-policy-seed",
@@ -969,6 +1078,75 @@ def test_denominator_projection_requires_raw_response_hash_for_trusted_provider_
     assert projection["health"]["raw_provider_evidence_ok"] is False
     assert evidence["trusted_raw_provider_evidence_count"] == 0
     assert evidence["provider_evidence_violations"][0]["violation_fields"] == ["raw_response_hash"]
+
+
+def test_denominator_projection_consumes_fee_provider_and_risk_normal_tiny_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id="d-provider-chain", token_ca="TokenProviderChain", **FULL_D3B_FLAGS)
+    append_raw_provider_evidence(log, token_ca="TokenProviderChain")
+    append_fee_schedule(log)
+    append_provider_credential_scope(log)
+    append_provider_request_replay(log, token_ca="TokenProviderChain")
+    append_provider_response_authenticity(log, token_ca="TokenProviderChain")
+    append_risk_revalidation_after_entry(log, token_ca="TokenProviderChain")
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    fee_source = projection["contract_evidence"]["FeeScheduleSourceContract"]
+    fee_version = projection["contract_evidence"]["FeeScheduleVersionContract"]
+    credential_scope = projection["contract_evidence"]["ProviderCredentialScopeContract"]
+    request_replay = projection["contract_evidence"]["ProviderRequestReplayContract"]
+    response_authenticity = projection["contract_evidence"]["ProviderResponseAuthenticityContract"]
+    risk_revalidation = projection["contract_evidence"]["RiskRevalidationAfterEntryContract"]
+    assert projection["fee_schedule_recorded_events"] == 1
+    assert projection["provider_credential_scope_recorded_events"] == 1
+    assert projection["provider_request_replay_recorded_events"] == 1
+    assert projection["provider_response_authenticity_recorded_events"] == 1
+    assert projection["risk_revalidation_after_entry_recorded_events"] == 1
+    assert projection["health"]["fee_schedule_source_ok"] is True
+    assert projection["health"]["fee_schedule_version_ok"] is True
+    assert projection["health"]["provider_credential_scope_ok"] is True
+    assert projection["health"]["provider_request_replay_ok"] is True
+    assert projection["health"]["provider_response_authenticity_ok"] is True
+    assert projection["health"]["risk_revalidation_after_entry_ok"] is True
+    assert fee_source["valid_fee_schedule_source_count"] == 1
+    assert fee_version["valid_fee_schedule_version_count"] == 1
+    assert credential_scope["valid_provider_credential_scope_count"] == 1
+    assert request_replay["valid_provider_request_replay_count"] == 1
+    assert response_authenticity["valid_provider_response_authenticity_count"] == 1
+    assert risk_revalidation["valid_risk_revalidation_after_entry_count"] == 1
+    record = projection["records"][0]
+    assert record["provider_request_replay_contract"]["provider_request_replay_valid"] is True
+    assert record["provider_response_authenticity_contract"]["provider_response_authenticity_valid"] is True
+    assert record["risk_revalidation_after_entry_contract"]["risk_revalidation_after_entry_valid"] is True
+
+
+def test_denominator_projection_rejects_malformed_fee_provider_and_risk_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_decision(log, decision_id="d-provider-bad", token_ca="TokenProviderBadChain", **FULL_D3B_FLAGS)
+    append_fee_schedule(log, bad_hash=True)
+    append_provider_credential_scope(log, revoked=True)
+    append_provider_request_replay(log, token_ca="TokenProviderBadChain", bad_hash=True)
+    append_provider_response_authenticity(log, token_ca="TokenProviderBadChain", signature_status="missing")
+    append_risk_revalidation_after_entry(
+        log,
+        token_ca="TokenProviderBadChain",
+        risk_status="bad",
+        exit_safety_action="hold",
+    )
+
+    projection = build_denominator_projection(tmp_path, include_records=True)
+
+    assert projection["health"]["fee_schedule_source_ok"] is False
+    assert projection["health"]["provider_credential_scope_ok"] is False
+    assert projection["health"]["provider_request_replay_ok"] is False
+    assert projection["health"]["provider_response_authenticity_ok"] is False
+    assert projection["health"]["risk_revalidation_after_entry_ok"] is False
+    assert projection["contract_evidence"]["FeeScheduleSourceContract"]["fee_schedule_source_violation_count"] == 1
+    assert projection["contract_evidence"]["ProviderCredentialScopeContract"]["provider_credential_scope_violation_count"] == 1
+    assert projection["contract_evidence"]["ProviderRequestReplayContract"]["provider_request_replay_violation_count"] == 1
+    assert projection["contract_evidence"]["ProviderResponseAuthenticityContract"]["provider_response_authenticity_violation_count"] == 1
+    assert projection["contract_evidence"]["RiskRevalidationAfterEntryContract"]["risk_revalidation_after_entry_violation_count"] == 1
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):

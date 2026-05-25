@@ -166,6 +166,12 @@ MODE_REQUIREMENTS = {
         "CandidateCancellationContract",
         "RetryStormControlContract",
         "ProviderCoverageMapContract",
+        "FeeScheduleSourceContract",
+        "FeeScheduleVersionContract",
+        "ProviderCredentialScopeContract",
+        "ProviderRequestReplayContract",
+        "ProviderResponseAuthenticityContract",
+        "RiskRevalidationAfterEntryContract",
         "TrainingServingSkewContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
@@ -524,6 +530,41 @@ def build_contract_statuses(
         "raw_provider_evidence_missing_malformed_or_untrusted",
         raw_provider_evidence,
     )
+    fee_schedule_source_evidence = contract_evidence.get("FeeScheduleSourceContract") or {}
+    statuses["FeeScheduleSourceContract"] = _status(
+        "FeeScheduleSourceContract",
+        "pass" if projection_built and projection_health.get("fee_schedule_source_ok") else "missing_evidence",
+        "fee_schedule_source_missing_malformed_or_untrusted",
+        fee_schedule_source_evidence,
+    )
+    fee_schedule_version_evidence = contract_evidence.get("FeeScheduleVersionContract") or {}
+    statuses["FeeScheduleVersionContract"] = _status(
+        "FeeScheduleVersionContract",
+        "pass" if projection_built and projection_health.get("fee_schedule_version_ok") else "missing_evidence",
+        "fee_schedule_version_missing_malformed_or_invalid",
+        fee_schedule_version_evidence,
+    )
+    provider_credential_scope_evidence = contract_evidence.get("ProviderCredentialScopeContract") or {}
+    statuses["ProviderCredentialScopeContract"] = _status(
+        "ProviderCredentialScopeContract",
+        "pass" if projection_built and projection_health.get("provider_credential_scope_ok") else "missing_evidence",
+        "provider_credential_scope_missing_malformed_or_invalid",
+        provider_credential_scope_evidence,
+    )
+    provider_request_replay_evidence = contract_evidence.get("ProviderRequestReplayContract") or {}
+    statuses["ProviderRequestReplayContract"] = _status(
+        "ProviderRequestReplayContract",
+        "pass" if projection_built and projection_health.get("provider_request_replay_ok") else "missing_evidence",
+        "provider_request_replay_missing_malformed_or_incomplete",
+        provider_request_replay_evidence,
+    )
+    provider_response_authenticity_evidence = contract_evidence.get("ProviderResponseAuthenticityContract") or {}
+    statuses["ProviderResponseAuthenticityContract"] = _status(
+        "ProviderResponseAuthenticityContract",
+        "pass" if projection_built and projection_health.get("provider_response_authenticity_ok") else "missing_evidence",
+        "provider_response_authenticity_missing_malformed_or_untrusted",
+        provider_response_authenticity_evidence,
+    )
     decision_audit_evidence = contract_evidence.get("DecisionAudit") or {}
     statuses["DecisionAudit"] = _status(
         "DecisionAudit",
@@ -635,6 +676,13 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("state_version_fencing_ok") else "missing_evidence",
         "state_version_fencing_missing_malformed_or_invalid",
         state_fencing_evidence,
+    )
+    risk_revalidation_evidence = contract_evidence.get("RiskRevalidationAfterEntryContract") or {}
+    statuses["RiskRevalidationAfterEntryContract"] = _status(
+        "RiskRevalidationAfterEntryContract",
+        "pass" if projection_built and projection_health.get("risk_revalidation_after_entry_ok") else "missing_evidence",
+        "risk_revalidation_after_entry_missing_malformed_or_not_prioritized",
+        risk_revalidation_evidence,
     )
     entry_execution_evidence = contract_evidence.get("EntryExecutionStateMachine") or {}
     statuses["EntryExecutionStateMachine"] = _status(

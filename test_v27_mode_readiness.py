@@ -431,6 +431,99 @@ def append_training_serving_skew_event(event_log_dir):
     )
 
 
+def append_fee_provider_and_risk_events(event_log_dir):
+    fee_version = "fee-v1"
+    V27EventLog(event_log_dir).append_event(
+        event_type="fee_schedule_recorded",
+        aggregate_id=f"fee_schedule:jupiter_ultra:solana:{fee_version}",
+        idempotency_key=f"fee_schedule:jupiter_ultra:solana:{fee_version}",
+        payload={
+            "fee_source_id": "fee-source-jupiter-ultra",
+            "provider": "jupiter_ultra",
+            "chain": "solana",
+            "fee_version": fee_version,
+            "source_hash": sha256_hex({"provider": "jupiter_ultra", "fee_version": fee_version}),
+            "fee_model_hash": sha256_hex({"fee_model": "unit", "fee_version": fee_version}),
+            "effective_at": "2026-01-15T00:00:00Z",
+            "supersedes_version": "none",
+            "checked_at": "2026-01-15T00:00:01Z",
+            "evidence_source": "unit",
+        },
+    )
+    V27EventLog(event_log_dir).append_event(
+        event_type="provider_credential_scope_recorded",
+        aggregate_id="provider_credential_scope:jupiter_ultra:jupiter-ultra-unit-token",
+        idempotency_key="provider_credential_scope:jupiter_ultra:jupiter-ultra-unit-token",
+        payload={
+            "credential_id": "jupiter-ultra-unit-token",
+            "provider": "jupiter_ultra",
+            "allowed_endpoints": ["/ultra/v1/order", "/ultra/v1/execute"],
+            "allowed_modes": ["paper", "normal_tiny"],
+            "expires_at": "2099-01-01T00:00:00Z",
+            "credential_status": "active",
+            "checked_at": "2026-01-15T00:00:01Z",
+            "evidence_source": "unit",
+        },
+    )
+    V27EventLog(event_log_dir).append_event(
+        event_type="provider_request_replay_recorded",
+        aggregate_id="provider_request_replay:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="provider_request_replay:1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "request_id": "provider-request-ready",
+            "provider": "jupiter_ultra",
+            "request_hash": sha256_hex({"request_id": "provider-request-ready"}),
+            "retry_count": 0,
+            "decision_reason": "initial_attempt_no_replay_needed",
+            "replay_status": "not_replayed_no_retry",
+            "checked_at": "2026-01-15T00:00:02Z",
+        },
+    )
+    V27EventLog(event_log_dir).append_event(
+        event_type="provider_response_authenticity_recorded",
+        aggregate_id="provider_response_authenticity:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="provider_response_authenticity:1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "response_id": "provider-response-ready",
+            "provider": "jupiter_ultra",
+            "signature_status": "verified",
+            "transport_security": "tls_verified",
+            "verified_at": "2026-01-15T00:00:03Z",
+            "response_hash": sha256_hex({"response_id": "provider-response-ready"}),
+        },
+    )
+    V27EventLog(event_log_dir).append_event(
+        event_type="risk_revalidation_after_entry_recorded",
+        aggregate_id="risk_revalidation_after_entry:solana:TokenReady:unknown_pool:0:1",
+        idempotency_key="risk_revalidation_after_entry:1",
+        payload={
+            "paper_trade_id": 1,
+            "token_ca": "TokenReady",
+            "symbol": "READY",
+            "chain": "solana",
+            "canonical_pool_group": "unknown_pool",
+            "lifecycle_epoch": 0,
+            "position_id": "paper_trade:1:position",
+            "risk_event_id": "risk-event-ready",
+            "risk_status": "clean",
+            "exit_safety_action": "hold",
+            "revalidated_at": "2026-01-15T00:00:04Z",
+        },
+    )
+
+
 def append_idempotency_contract_event(event_log_dir):
     V27EventLog(event_log_dir).append_event(
         event_type="idempotency_contract_recorded",
@@ -1270,6 +1363,45 @@ def test_mode_readiness_consumes_provider_coverage_and_training_serving_skew_for
     assert skew["evidence"]["valid_training_serving_skew_count"] == 1
     assert "ProviderCoverageMapContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
     assert "TrainingServingSkewContract" not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_fee_provider_auth_and_risk_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_realtime_clean_event(event_log_dir)
+    append_quote_intent_binding_event(event_log_dir)
+    append_raw_provider_evidence_event(event_log_dir)
+    append_execution_control_event(event_log_dir)
+    append_fee_provider_and_risk_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "FeeScheduleSourceContract",
+        "FeeScheduleVersionContract",
+        "ProviderCredentialScopeContract",
+        "ProviderRequestReplayContract",
+        "ProviderResponseAuthenticityContract",
+        "RiskRevalidationAfterEntryContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["FeeScheduleSourceContract"]["evidence"]["valid_fee_schedule_source_count"] == 1
+    assert matrix["contract_statuses"]["ProviderRequestReplayContract"]["evidence"]["valid_provider_request_replay_count"] == 1
+    assert matrix["contract_statuses"]["RiskRevalidationAfterEntryContract"]["evidence"]["valid_risk_revalidation_after_entry_count"] == 1
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 
