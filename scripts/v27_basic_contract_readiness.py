@@ -33,6 +33,7 @@ DEFAULT_GOVERNANCE_READINESS = PROJECT_ROOT / "config" / "v27-governance-readine
 DEFAULT_ACCESS_CONTROL_POLICY = PROJECT_ROOT / "config" / "v27-access-control-policy.json"
 DEFAULT_WRITE_PATH_REGISTRY = PROJECT_ROOT / "config" / "v27-write-path-registry.json"
 DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-database-mutation-policy.json"
+DEFAULT_AGGREGATE_BOUNDARIES = PROJECT_ROOT / "config" / "v27-aggregate-boundaries.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
@@ -100,6 +101,20 @@ DIRECT_DB_MUTATION_REQUIRED_FIELDS = (
     "target_store",
     "approved_mutation_path",
     "break_glass_id",
+)
+AGGREGATE_BOUNDARY_REQUIRED_FIELDS = (
+    "aggregate_type",
+    "aggregate_id_pattern",
+    "sequence_scope",
+    "owner_store",
+)
+AGGREGATE_SEQUENCE_SCOPES = {"aggregate_id", "global_and_aggregate"}
+CLOCK_ROLLBACK_REQUIRED_FIELDS = (
+    "clock_source",
+    "wall_clock_ts",
+    "monotonic_ts",
+    "rollback_detected",
+    "guard_action",
 )
 BACKGROUND_JOB_REQUIRED_FIELDS = (
     "job_name",
@@ -1014,6 +1029,181 @@ def verify_direct_database_mutation_ban(
             "registry_gate_violations": registry_gate_violations,
             "access_control_violations": access_control_violations,
             "outbox_rationale_violations": outbox_rationale_violations,
+        },
+    )
+
+
+def verify_aggregate_boundary_contract(policy_path=DEFAULT_AGGREGATE_BOUNDARIES):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("AggregateBoundaryContract", False, "aggregate_boundary_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("AggregateBoundaryContract", False, "aggregate_boundary_policy_not_object", {"policy_path": str(policy_path)})
+
+    source_file = policy.get("source_file") or "scripts/v27_event_log.py"
+    source_text, source_error = _read_project_text(source_file)
+    source_anchors = [str(anchor) for anchor in (policy.get("source_anchors") or [])]
+    missing_source_anchors = sorted(anchor for anchor in source_anchors if anchor not in source_text)
+    boundaries = policy.get("aggregate_boundaries") if isinstance(policy.get("aggregate_boundaries"), list) else []
+    malformed_boundaries = []
+    duplicate_aggregate_types = []
+    seen_types = set()
+    pattern_results = []
+    for index, boundary in enumerate(boundaries):
+        if not isinstance(boundary, dict):
+            malformed_boundaries.append({"index": index, "aggregate_type": None, "missing_fields": list(AGGREGATE_BOUNDARY_REQUIRED_FIELDS), "violations": ["boundary_not_object"]})
+            continue
+        aggregate_type = str(boundary.get("aggregate_type") or "")
+        missing = _missing_required_fields(boundary, AGGREGATE_BOUNDARY_REQUIRED_FIELDS)
+        violations = []
+        if aggregate_type in seen_types:
+            duplicate_aggregate_types.append(aggregate_type)
+        if aggregate_type:
+            seen_types.add(aggregate_type)
+        if str(boundary.get("sequence_scope") or "") not in AGGREGATE_SEQUENCE_SCOPES:
+            violations.append("sequence_scope_invalid")
+        if str(boundary.get("owner_store") or "") != "v27_event_log":
+            violations.append("owner_store_must_be_v27_event_log")
+        pattern = str(boundary.get("aggregate_id_pattern") or "")
+        sample = str(boundary.get("sample_aggregate_id") or "")
+        pattern_valid = False
+        sample_matches = False
+        try:
+            compiled = re.compile(pattern)
+            pattern_valid = True
+            sample_matches = bool(sample and compiled.match(sample))
+        except re.error as exc:
+            violations.append(f"aggregate_id_pattern_invalid:{exc}")
+        if not sample:
+            violations.append("sample_aggregate_id_required")
+        elif pattern_valid and not sample_matches:
+            violations.append("sample_aggregate_id_does_not_match_pattern")
+        pattern_results.append(
+            {
+                "aggregate_type": aggregate_type,
+                "pattern_valid": pattern_valid,
+                "sample_matches": sample_matches,
+                "sample_hash": _sha256_json({"aggregate_type": aggregate_type, "sample_aggregate_id": sample}) if sample else None,
+            }
+        )
+        if missing or violations:
+            malformed_boundaries.append(
+                {
+                    "index": index,
+                    "aggregate_type": aggregate_type or None,
+                    "missing_fields": missing,
+                    "violations": violations,
+                }
+            )
+
+    required_types = {
+        "telegram_signal",
+        "source_label",
+        "paper_missed",
+        "token_lifecycle",
+        "runtime_recovery",
+        "v27_contract_event",
+    }
+    missing_required_types = sorted(required_types - seen_types)
+    passed = (
+        policy.get("schema_version") == "v2.7.0.aggregate_boundaries.v1"
+        and policy.get("failure_action") == "event_log_unhealthy"
+        and bool(boundaries)
+        and not source_error
+        and not missing_source_anchors
+        and not malformed_boundaries
+        and not duplicate_aggregate_types
+        and not missing_required_types
+    )
+    return _contract(
+        "AggregateBoundaryContract",
+        passed,
+        "aggregate_boundary_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "source_file": source_file,
+            "source_error": source_error,
+            "boundary_count": len(boundaries),
+            "aggregate_types": sorted(seen_types),
+            "missing_required_types": missing_required_types,
+            "duplicate_aggregate_types": sorted(str(item) for item in duplicate_aggregate_types),
+            "malformed_boundaries": malformed_boundaries,
+            "missing_source_anchors": missing_source_anchors,
+            "pattern_results": pattern_results,
+        },
+    )
+
+
+def _clock_sample():
+    return {
+        "wall_clock_ns": time.time_ns(),
+        "monotonic_ns": time.monotonic_ns(),
+        "wall_clock_ts": _utc_now_iso(),
+    }
+
+
+def verify_clock_rollback_guard_contract(clock_samples=None):
+    samples = list(clock_samples) if clock_samples is not None else [_clock_sample(), _clock_sample()]
+    malformed_samples = []
+    rollback_detected = False
+    for index, sample in enumerate(samples):
+        missing = _missing_required_fields(
+            {
+                "clock_source": sample.get("clock_source", "system_time_and_monotonic"),
+                "wall_clock_ts": sample.get("wall_clock_ts"),
+                "monotonic_ts": sample.get("monotonic_ns"),
+                "rollback_detected": False,
+                "guard_action": sample.get("guard_action", "mark_time_dirty_and_block_promotion"),
+            },
+            CLOCK_ROLLBACK_REQUIRED_FIELDS,
+        )
+        violations = []
+        if not isinstance(sample.get("wall_clock_ns"), int):
+            violations.append("wall_clock_ns_required")
+        if not isinstance(sample.get("monotonic_ns"), int):
+            violations.append("monotonic_ns_required")
+        if _parse_iso_ts(sample.get("wall_clock_ts")) is None:
+            violations.append("wall_clock_ts_invalid")
+        if missing or violations:
+            malformed_samples.append({"index": index, "missing_fields": missing, "violations": violations})
+        if index > 0:
+            prev = samples[index - 1]
+            if isinstance(sample.get("wall_clock_ns"), int) and isinstance(prev.get("wall_clock_ns"), int):
+                rollback_detected = rollback_detected or sample["wall_clock_ns"] < prev["wall_clock_ns"]
+            if isinstance(sample.get("monotonic_ns"), int) and isinstance(prev.get("monotonic_ns"), int):
+                rollback_detected = rollback_detected or sample["monotonic_ns"] < prev["monotonic_ns"]
+
+    latest = samples[-1] if samples else {}
+    evidence_row = {
+        "clock_source": "system_time_and_monotonic",
+        "wall_clock_ts": latest.get("wall_clock_ts"),
+        "monotonic_ts": latest.get("monotonic_ns"),
+        "rollback_detected": rollback_detected,
+        "guard_action": "mark_time_dirty_and_block_promotion",
+    }
+    passed = bool(samples) and not malformed_samples and not rollback_detected
+    return _contract(
+        "ClockRollbackGuardContract",
+        passed,
+        "clock_rollback_guard_unverified_or_dirty",
+        {
+            **evidence_row,
+            "sample_count": len(samples),
+            "malformed_samples": malformed_samples,
+            "sample_hashes": [
+                _sha256_json(
+                    {
+                        "wall_clock_ns": sample.get("wall_clock_ns"),
+                        "monotonic_ns": sample.get("monotonic_ns"),
+                        "wall_clock_ts": sample.get("wall_clock_ts"),
+                    }
+                )
+                for sample in samples
+            ],
         },
     )
 
@@ -3561,6 +3751,7 @@ def build_basic_contract_readiness(
     access_control_policy_path=DEFAULT_ACCESS_CONTROL_POLICY,
     write_path_registry_path=DEFAULT_WRITE_PATH_REGISTRY,
     direct_db_mutation_policy_path=DEFAULT_DIRECT_DB_MUTATION_POLICY,
+    aggregate_boundary_policy_path=DEFAULT_AGGREGATE_BOUNDARIES,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
@@ -3604,6 +3795,8 @@ def build_basic_contract_readiness(
                 registry_path=write_path_registry_path,
                 access_control_policy_path=access_control_policy_path,
             ),
+            verify_aggregate_boundary_contract(policy_path=aggregate_boundary_policy_path),
+            verify_clock_rollback_guard_contract(),
             verify_background_job_registry(registry_path=background_job_registry_path),
             verify_scheduled_job_mode_gate_contract(registry_path=background_job_registry_path),
             verify_entry_point_inventory(
@@ -3651,6 +3844,7 @@ def main():
     parser.add_argument("--access-control-policy", default=str(DEFAULT_ACCESS_CONTROL_POLICY))
     parser.add_argument("--write-path-registry", default=str(DEFAULT_WRITE_PATH_REGISTRY))
     parser.add_argument("--direct-db-mutation-policy", default=str(DEFAULT_DIRECT_DB_MUTATION_POLICY))
+    parser.add_argument("--aggregate-boundary-policy", default=str(DEFAULT_AGGREGATE_BOUNDARIES))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
@@ -3679,6 +3873,7 @@ def main():
         access_control_policy_path=Path(args.access_control_policy),
         write_path_registry_path=Path(args.write_path_registry),
         direct_db_mutation_policy_path=Path(args.direct_db_mutation_policy),
+        aggregate_boundary_policy_path=Path(args.aggregate_boundary_policy),
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),

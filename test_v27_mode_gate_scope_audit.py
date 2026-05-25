@@ -19,10 +19,12 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
         | set(MODE_REQUIREMENTS["normal_tiny"])
     )
     assert normal["scope_complete"] is False
-    assert normal["missing_count"] == 96
-    assert mvp["missing_count"] == 28
+    assert normal["missing_count"] == 94
+    assert mvp["missing_count"] == 25
     assert "AccessControlContract" not in normal["missing_contracts"]
+    assert "AggregateBoundaryContract" not in normal["missing_contracts"]
     assert "AuditLogIntegrityContract" not in normal["missing_contracts"]
+    assert "ClockRollbackGuardContract" not in normal["missing_contracts"]
     assert "DirectDatabaseMutationBan" not in normal["missing_contracts"]
     assert "BackgroundJobRegistryContract" not in normal["missing_contracts"]
     assert "ScheduledJobModeGateContract" not in normal["missing_contracts"]
@@ -40,7 +42,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "HumanReadableReasonContract" not in normal["missing_contracts"]
     assert "MachineReadableReasonContract" not in normal["missing_contracts"]
     assert "NumericPrecisionContract" not in mvp["missing_contracts"]
-    assert "SafeDefaultContract" in mvp["missing_contracts"]
+    assert "SafeDefaultContract" not in mvp["missing_contracts"]
     assert "ReplaySideEffectIsolationContract" not in normal["missing_contracts"]
     assert "WritePathRegistryContract" not in normal["missing_contracts"]
     assert "ManualReplaySafetyContract" in normal["missing_contracts"]
@@ -84,5 +86,5 @@ def test_mode_readiness_exposes_current_gate_vs_final_spec_scope(tmp_path):
     assert matrix["gate_scope"]["scope_audit_schema_version"] == "v2.7.0.mode_gate_scope_audit.v1"
     assert matrix["gate_scope"]["health"]["final_normal_tiny_blocking_scope_complete"] is False
     assert matrix["health"]["final_spec_normal_tiny_ready"] is False
-    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 96
+    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 94
     assert matrix["health"]["current_gate_normal_tiny_ready"] is False

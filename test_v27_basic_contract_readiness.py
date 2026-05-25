@@ -7,8 +7,10 @@ from v27_basic_contract_readiness import (  # noqa: E402
     build_basic_contract_readiness,
     verify_api_response_contract,
     verify_api_response_envelope_contract,
+    verify_aggregate_boundary_contract,
     verify_audit_log_integrity,
     verify_background_job_registry,
+    verify_clock_rollback_guard_contract,
     verify_dashboard_action_separation_contract,
     verify_direct_database_mutation_ban,
     verify_entry_point_inventory,
@@ -59,6 +61,8 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "AuditLogIntegrityContract",
         "WritePathRegistryContract",
         "DirectDatabaseMutationBan",
+        "AggregateBoundaryContract",
+        "ClockRollbackGuardContract",
         "BackgroundJobRegistryContract",
         "ScheduledJobModeGateContract",
         "EntryPointInventoryContract",
@@ -209,6 +213,61 @@ def test_filesystem_disk_pressure_policy_reads_free_space_and_wal_bytes():
     assert measurement["free_bytes"] >= measurement["min_free_bytes"]
     assert measurement["wal_bytes"] <= measurement["max_wal_bytes"]
     assert report["evidence"]["pressure_violations"] == []
+
+
+def test_aggregate_boundary_policy_verifies_patterns_and_event_log_anchors():
+    report = verify_aggregate_boundary_contract()
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["boundary_count"] >= 6
+    assert report["evidence"]["missing_required_types"] == []
+    assert report["evidence"]["missing_source_anchors"] == []
+    assert report["evidence"]["malformed_boundaries"] == []
+    assert all(item["sample_matches"] for item in report["evidence"]["pattern_results"])
+
+
+def test_aggregate_boundary_blocks_bad_pattern(tmp_path):
+    policy_path = tmp_path / "aggregate-boundaries.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.aggregate_boundaries.v1",
+                "scope": "unit",
+                "failure_action": "event_log_unhealthy",
+                "source_file": "scripts/v27_event_log.py",
+                "source_anchors": ["aggregate_id = event.get(\"aggregate_id\")"],
+                "aggregate_boundaries": [
+                    {
+                        "aggregate_type": "telegram_signal",
+                        "aggregate_id_pattern": "[",
+                        "sequence_scope": "aggregate_id",
+                        "owner_store": "v27_event_log",
+                        "sample_aggregate_id": "telegram_signal:sol:So11111111111111111111111111111111111111112:unknown_pool:0",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_aggregate_boundary_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "aggregate_boundary_missing_malformed_or_unenforced"
+    assert "aggregate_id_pattern_invalid" in report["evidence"]["malformed_boundaries"][0]["violations"][0]
+
+
+def test_clock_rollback_guard_detects_monotonic_regression():
+    report = verify_clock_rollback_guard_contract(
+        clock_samples=[
+            {"wall_clock_ns": 200, "monotonic_ns": 200, "wall_clock_ts": "2026-05-25T00:00:00Z"},
+            {"wall_clock_ns": 199, "monotonic_ns": 201, "wall_clock_ts": "2026-05-25T00:00:01Z"},
+        ]
+    )
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "clock_rollback_guard_unverified_or_dirty"
+    assert report["evidence"]["rollback_detected"] is True
 
 
 def test_paper_mode_safety_blocks_live_capabilities():

@@ -1,0 +1,23 @@
+{
+  "schema_version": "v2.7.0.aggregate_boundaries.v1",
+  "updated_at": "2026-05-25T00:00:00Z",
+  "scope": "v27_event_log_aggregate_id_and_sequence_boundaries",
+  "failure_action": "event_log_unhealthy",
+  "source_file": "scripts/v27_event_log.py",
+  "source_anchors": [
+    "aggregate_id = event.get(\"aggregate_id\")",
+    "expected_aggregate_seq = int(state[\"aggregate_last_seq\"].get(aggregate_id, 0)) + 1",
+    "state[\"aggregate_last_seq\"][aggregate_id] = aggregate_seq",
+    "\"global_seq\": global_seq",
+    "\"aggregate_seq\": aggregate_seq"
+  ],
+  "aggregate_boundaries": [
+    {"aggregate_type": "telegram_signal", "aggregate_id_pattern": "^telegram_signal:[a-z0-9_]+:[^:]+:[^:]+:[0-9]+$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "telegram_signal:sol:So11111111111111111111111111111111111111112:unknown_pool:0"},
+    {"aggregate_type": "source_label", "aggregate_id_pattern": "^source_label:[a-z0-9_]+:[^:]+:[^:]+:[0-9]+$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "source_label:sol:So11111111111111111111111111111111111111112:unknown_pool:0"},
+    {"aggregate_type": "paper_missed", "aggregate_id_pattern": "^paper_missed:(token:[^:]+|row:[0-9A-Za-z_-]+)$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "paper_missed:token:So11111111111111111111111111111111111111112"},
+    {"aggregate_type": "token_lifecycle", "aggregate_id_pattern": "^token_lifecycle:([a-z0-9_]+:[^:]+:[^:]+:[0-9]+|row:[0-9A-Za-z_-]+)$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "token_lifecycle:sol:So11111111111111111111111111111111111111112:unknown_pool:0"},
+    {"aggregate_type": "no_fill_outcome", "aggregate_id_pattern": "^no_fill_outcome:[a-z0-9_]+:[^:]+:[^:]+:[0-9]+:[^:]+:[^:]+$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "no_fill_outcome:sol:So11111111111111111111111111111111111111112:unknown_pool:0:paper:unit"},
+    {"aggregate_type": "runtime_recovery", "aggregate_id_pattern": "^runtime_recovery:[0-9A-Za-z_.:-]+$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "runtime_recovery:zeabur-production"},
+    {"aggregate_type": "v27_contract_event", "aggregate_id_pattern": "^[a-z0-9_]+:[a-z0-9_]+:[^:]+:[^:]+:[0-9]+(:[0-9A-Za-z_.-]+)?$", "sequence_scope": "aggregate_id", "owner_store": "v27_event_log", "sample_aggregate_id": "quote_intent_binding:sol:So11111111111111111111111111111111111111112:unknown_pool:0"}
+  ]
+}

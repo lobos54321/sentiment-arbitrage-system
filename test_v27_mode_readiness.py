@@ -632,6 +632,8 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["AuditLogIntegrityContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["WritePathRegistryContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["DirectDatabaseMutationBan"]["status"] == "pass"
+    assert matrix["contract_statuses"]["AggregateBoundaryContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ClockRollbackGuardContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["BackgroundJobRegistryContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ScheduledJobModeGateContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["EntryPointInventoryContract"]["status"] == "pass"
