@@ -96,6 +96,9 @@ MODE_REQUIREMENTS = {
         "TieBreakOrderingContract",
         "TransactionalOutboxContract",
         "ReplaySideEffectIsolationContract",
+        "ManualReplaySafetyContract",
+        "SyntheticSentinelEventContract",
+        "ReconciliationDiffContract",
         "DeadLetterQueueContract",
         "ProjectionOrderingContract",
         "ConsumerCheckpointContract",
@@ -600,6 +603,9 @@ def build_contract_statuses(
     )
     for contract_id in (
         "ReplaySideEffectIsolationContract",
+        "ManualReplaySafetyContract",
+        "SyntheticSentinelEventContract",
+        "ReconciliationDiffContract",
         "TransactionalOutboxContract",
         "DeadLetterQueueContract",
         "ConsumerCheckpointContract",

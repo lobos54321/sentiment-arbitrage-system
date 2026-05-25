@@ -29,6 +29,8 @@ REPLAY_SIDE_EFFECT_ALLOWED_TARGETS = [
     "projection_cache_manifest",
     "projection_consumer_health",
 ]
+SYNTHETIC_SENTINEL_EVENT_TYPE = "projection_consumer_health_sentinel"
+MANUAL_REPLAY_OPERATOR_ID = "v27_read_model_refresh_worker"
 
 
 def _utc_now_iso():
@@ -189,6 +191,140 @@ def _replay_side_effect_evidence(
     )
 
 
+def _manual_replay_safety_evidence(*, batch_id, now_iso, replay_side_effect_contract):
+    replay_evidence = replay_side_effect_contract.get("evidence") or {}
+    allowed_write_targets = list(replay_evidence.get("write_targets_allowed") or [])
+    observed_write_targets = sorted((replay_evidence.get("write_target_paths") or {}).keys())
+    unexpected_write_targets = sorted(set(observed_write_targets) - set(allowed_write_targets))
+    evidence = {
+        "replay_id": batch_id,
+        "operator_id": MANUAL_REPLAY_OPERATOR_ID,
+        "side_effect_mode": replay_evidence.get("side_effect_mode"),
+        "allowed_write_targets": allowed_write_targets,
+        "observed_write_targets": observed_write_targets,
+        "unexpected_write_targets": unexpected_write_targets,
+        "provider_calls_allowed": replay_evidence.get("provider_calls_allowed"),
+        "provider_call_count": replay_evidence.get("provider_call_count"),
+        "external_side_effect_count": replay_evidence.get("external_side_effect_count"),
+        "started_at": now_iso,
+        "replay_side_effect_contract_status": replay_side_effect_contract.get("status"),
+    }
+    passed = (
+        replay_side_effect_contract.get("status") == "pass"
+        and evidence["side_effect_mode"] == "read_model_refresh_replay_artifact_allowlist"
+        and evidence["provider_calls_allowed"] is False
+        and int(evidence["provider_call_count"] or 0) == 0
+        and int(evidence["external_side_effect_count"] or 0) == 0
+        and observed_write_targets
+        and not unexpected_write_targets
+    )
+    return _contract(
+        "ManualReplaySafetyContract",
+        passed,
+        "manual_replay_safety_unverified",
+        evidence,
+    )
+
+
+def _synthetic_sentinel_event_evidence(
+    *,
+    batch_id,
+    now_iso,
+    latest_seq,
+    projection_hash,
+    snapshot_hash,
+    outbox_result,
+    dlq_unresolved_count,
+    checkpoint,
+    cache_manifest,
+):
+    expected_projection_delta = {
+        "batch_id": batch_id,
+        "event_log_latest_seq": latest_seq,
+        "projection_hash": projection_hash,
+        "snapshot_hash": snapshot_hash,
+        "outbox_status": outbox_result.get("status"),
+        "checkpoint_processed_global_seq": latest_seq,
+        "dlq_unresolved_count": 0,
+        "cache_source_event_seq": latest_seq,
+    }
+    observed_projection_delta = {
+        "batch_id": batch_id,
+        "event_log_latest_seq": latest_seq,
+        "projection_hash": checkpoint.get("projection_hash"),
+        "snapshot_hash": checkpoint.get("snapshot_hash"),
+        "outbox_status": outbox_result.get("status"),
+        "checkpoint_processed_global_seq": checkpoint.get("processed_global_seq"),
+        "dlq_unresolved_count": dlq_unresolved_count,
+        "cache_source_event_seq": cache_manifest.get("source_event_seq"),
+    }
+    evidence = {
+        "sentinel_id": f"sentinel_{batch_id}",
+        "event_type": SYNTHETIC_SENTINEL_EVENT_TYPE,
+        "expected_projection_delta": expected_projection_delta,
+        "observed_projection_delta": observed_projection_delta,
+        "expected_delta_hash": sha256_hex(expected_projection_delta),
+        "observed_delta_hash": sha256_hex(observed_projection_delta),
+        "checked_at": now_iso,
+    }
+    passed = evidence["expected_delta_hash"] == evidence["observed_delta_hash"]
+    return _contract(
+        "SyntheticSentinelEventContract",
+        passed,
+        "synthetic_sentinel_event_unverified",
+        evidence,
+    )
+
+
+def _reconciliation_diff_evidence(
+    *,
+    batch_id,
+    projection_hash,
+    snapshot_hash,
+    artifact_hashes,
+    checkpoint_hash_ok,
+    projection_hash_ok,
+    snapshot_hash_ok,
+):
+    before_hash = sha256_hex(
+        {
+            "projection_artifact_hash": artifact_hashes.get("projection"),
+            "snapshot_artifact_hash": artifact_hashes.get("snapshot"),
+        }
+    )
+    after_hash = sha256_hex(
+        {
+            "projection_hash": projection_hash,
+            "snapshot_hash": snapshot_hash,
+        }
+    )
+    diff = {
+        "projection_hash_mismatch": artifact_hashes.get("projection") != projection_hash,
+        "snapshot_hash_mismatch": artifact_hashes.get("snapshot") != snapshot_hash,
+        "checkpoint_hash_mismatch": not checkpoint_hash_ok,
+    }
+    impact_scope = "read_model_projection_snapshot_reconciliation"
+    evidence = {
+        "reconciliation_id": f"recon_{batch_id}",
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+        "impact_scope": impact_scope,
+        "diff_hash": sha256_hex(diff),
+        "diff": diff,
+        "diff_count": sum(1 for value in diff.values() if value),
+        "projection_hash_ok": projection_hash_ok,
+        "snapshot_hash_ok": snapshot_hash_ok,
+        "checkpoint_hash_ok": checkpoint_hash_ok,
+    }
+    passed = evidence["diff_count"] == 0
+    return _contract(
+        "ReconciliationDiffContract",
+        passed,
+        "reconciliation_diff_unverified",
+        evidence,
+    )
+
+
 def _unresolved_dlq_entries(records):
     return [record for record in records if record.get("status") != "resolved"]
 
@@ -318,17 +454,43 @@ def write_projection_consumer_evidence(
         and not cache_manifest.get("stale_read_detected")
         and int(cache_manifest.get("ttl_ms") or 0) > 0
     )
+    replay_side_effect_contract = _replay_side_effect_evidence(
+        batch_id=batch_id,
+        output_dir=output_dir,
+        projection_path=projection_path,
+        snapshot_path=snapshot_path,
+        outbox_path=outbox_path,
+        dlq_path=dlq_path,
+        checkpoint_path=checkpoint_path,
+        cache_manifest_path=cache_manifest_path,
+        health_path=health_path,
+        projection_hash_ok=projection_hash_ok,
+        snapshot_hash_ok=snapshot_hash_ok,
+    )
     contracts = {
-        "ReplaySideEffectIsolationContract": _replay_side_effect_evidence(
+        "ReplaySideEffectIsolationContract": replay_side_effect_contract,
+        "ManualReplaySafetyContract": _manual_replay_safety_evidence(
             batch_id=batch_id,
-            output_dir=output_dir,
-            projection_path=projection_path,
-            snapshot_path=snapshot_path,
-            outbox_path=outbox_path,
-            dlq_path=dlq_path,
-            checkpoint_path=checkpoint_path,
-            cache_manifest_path=cache_manifest_path,
-            health_path=health_path,
+            now_iso=now_iso,
+            replay_side_effect_contract=replay_side_effect_contract,
+        ),
+        "SyntheticSentinelEventContract": _synthetic_sentinel_event_evidence(
+            batch_id=batch_id,
+            now_iso=now_iso,
+            latest_seq=latest_seq,
+            projection_hash=projection_hash,
+            snapshot_hash=snapshot_hash,
+            outbox_result=outbox_result,
+            dlq_unresolved_count=len(unresolved_dlq),
+            checkpoint=checkpoint,
+            cache_manifest=cache_manifest,
+        ),
+        "ReconciliationDiffContract": _reconciliation_diff_evidence(
+            batch_id=batch_id,
+            projection_hash=projection_hash,
+            snapshot_hash=snapshot_hash,
+            artifact_hashes=artifact_hashes,
+            checkpoint_hash_ok=checkpoint_hash_ok,
             projection_hash_ok=projection_hash_ok,
             snapshot_hash_ok=snapshot_hash_ok,
         ),
@@ -430,6 +592,9 @@ def read_projection_consumer_health(path):
             "path": str(path),
             "blocking_contracts": [
                 "ReplaySideEffectIsolationContract",
+                "ManualReplaySafetyContract",
+                "SyntheticSentinelEventContract",
+                "ReconciliationDiffContract",
                 "TransactionalOutboxContract",
                 "DeadLetterQueueContract",
                 "ConsumerCheckpointContract",
@@ -459,6 +624,9 @@ def read_projection_consumer_health(path):
             "path": str(path),
             "blocking_contracts": [
                 "ReplaySideEffectIsolationContract",
+                "ManualReplaySafetyContract",
+                "SyntheticSentinelEventContract",
+                "ReconciliationDiffContract",
                 "TransactionalOutboxContract",
                 "DeadLetterQueueContract",
                 "ConsumerCheckpointContract",

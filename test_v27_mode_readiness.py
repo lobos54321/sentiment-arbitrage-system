@@ -679,6 +679,12 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["ReplaySideEffectIsolationContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ReplaySideEffectIsolationContract"]["evidence"]["provider_call_count"] == 0
     assert matrix["contract_statuses"]["ReplaySideEffectIsolationContract"]["evidence"]["unexpected_write_target_count"] == 0
+    assert matrix["contract_statuses"]["ManualReplaySafetyContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ManualReplaySafetyContract"]["evidence"]["provider_call_count"] == 0
+    assert matrix["contract_statuses"]["SyntheticSentinelEventContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SyntheticSentinelEventContract"]["evidence"]["expected_delta_hash"] == matrix["contract_statuses"]["SyntheticSentinelEventContract"]["evidence"]["observed_delta_hash"]
+    assert matrix["contract_statuses"]["ReconciliationDiffContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ReconciliationDiffContract"]["evidence"]["diff_count"] == 0
     assert matrix["contract_statuses"]["DeadLetterQueueContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ConsumerCheckpointContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ProjectionHandlerIdempotencyContract"]["status"] == "pass"
@@ -692,6 +698,9 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert "GeneratedClientContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert "SpecChangeImpactAnalysisContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert matrix["modes"]["shadow"]["status"] == "allowed"
+    assert "ManualReplaySafetyContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "SyntheticSentinelEventContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "ReconciliationDiffContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"
