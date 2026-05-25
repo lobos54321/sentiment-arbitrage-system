@@ -1,0 +1,93 @@
+{
+  "schema_version": "v2.7.0.runtime_worker_health_policy.v1",
+  "scope": "zeabur_supervisor_worker_heartbeat_silent_death_and_warm_start",
+  "failure_action": "worker_runtime_not_ready",
+  "source_anchors": [
+    {
+      "source_file": "scripts/run_zeabur_services.sh",
+      "anchor": "echo \"[STARTUP] Running volume preflight cleanup...\""
+    },
+    {
+      "source_file": "scripts/run_zeabur_services.sh",
+      "anchor": "python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true"
+    },
+    {
+      "source_file": "scripts/run_zeabur_services.sh",
+      "anchor": "while true; do"
+    },
+    {
+      "source_file": "scripts/run_zeabur_services.sh",
+      "anchor": "exited (code $EXIT_CODE), running preflight then restarting in 15s"
+    },
+    {
+      "source_file": "scripts/run_zeabur_services.sh",
+      "anchor": "kill -0 \"$NODE_PID\" 2>/dev/null || echo \"WARN: NODE dead\""
+    },
+    {
+      "source_file": "scripts/v27_record_normal_tiny_ops_evidence.py",
+      "anchor": "\"worker_fleet_heartbeat_recorded\""
+    },
+    {
+      "source_file": "scripts/v27_denominator_projection.py",
+      "anchor": "WORKER_FLEET_EVENT_TYPE = \"worker_fleet_heartbeat_recorded\""
+    }
+  ],
+  "worker_heartbeats": [
+    {
+      "event_type": "worker_fleet_heartbeat_recorded",
+      "required_roles": ["dashboard", "paper-trader", "lifecycle-tracker", "v27-read-model-refresh"],
+      "required_payload_fields": ["worker_id", "role", "build_hash", "runtime_config_hash", "policy_bundle_id", "heartbeat_at"],
+      "projection_health_key": "worker_fleet_consistency_ok",
+      "max_heartbeat_lag_ms": 300000,
+      "failure_action": "block_promotion_until_fresh_heartbeat"
+    }
+  ],
+  "silent_death_detectors": [
+    {
+      "job_name": "premium_node_server",
+      "pid_env": "NODE_PID",
+      "detection_anchor": "kill -0 \"$NODE_PID\"",
+      "restart_action": "supervised_restart_loop"
+    },
+    {
+      "job_name": "paper_trade_monitor",
+      "pid_env": "PAPER_PID",
+      "detection_anchor": "kill -0 \"$PAPER_PID\"",
+      "restart_action": "supervised_restart_loop"
+    },
+    {
+      "job_name": "gmgn_candidate_scout",
+      "pid_env": "SCOUT_PID",
+      "detection_anchor": "kill -0 \"$SCOUT_PID\"",
+      "restart_action": "supervised_restart_loop"
+    },
+    {
+      "job_name": "source_resonance_shadow",
+      "pid_env": "RESONANCE_PID",
+      "detection_anchor": "kill -0 \"$RESONANCE_PID\"",
+      "restart_action": "supervised_restart_loop"
+    },
+    {
+      "job_name": "social_signal_service",
+      "pid_env": "SOCIAL_PID",
+      "detection_anchor": "kill -0 \"$SOCIAL_PID\"",
+      "restart_action": "supervised_restart_loop"
+    }
+  ],
+  "warm_start_controls": [
+    {
+      "control_id": "volume_preflight_before_service_start",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true",
+      "protected_paths": ["/app/data/sentiment_arb.db", "/app/data/paper_trades.db", "/app/data/lifecycle_tracks.db", "/app/data/kline_cache.db"],
+      "failure_action": "quarantine_bad_volume_before_start"
+    },
+    {
+      "control_id": "node_restart_preflight_before_warm_rejoin",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "exited (code $EXIT_CODE), running preflight then restarting in 15s",
+      "protected_paths": ["/app/data/sentiment_arb.db", "/app/data/lifecycle_tracks.db", "/app/data/kline_cache.db"],
+      "failure_action": "run_preflight_before_restart"
+    }
+  ]
+}

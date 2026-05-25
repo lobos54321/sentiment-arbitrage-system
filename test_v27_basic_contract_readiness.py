@@ -37,8 +37,11 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_safe_default,
     verify_safety_case,
     verify_service_readiness_probe_contract,
+    verify_silent_worker_death_detector_contract,
     verify_top_fix_queue,
     verify_waiver_policy,
+    verify_warm_start_safety_contract,
+    verify_worker_heartbeat_contract,
     verify_write_path_registry,
 )
 
@@ -75,6 +78,9 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "ProjectionVersionIsolationContract",
         "SnapshotCompactionInvariantContract",
         "SnapshotCompactionReadBarrier",
+        "WorkerHeartbeatContract",
+        "SilentWorkerDeathDetector",
+        "WarmStartSafetyContract",
         "BackgroundJobRegistryContract",
         "ScheduledJobModeGateContract",
         "EntryPointInventoryContract",
@@ -411,6 +417,69 @@ def test_snapshot_read_barrier_blocks_missing_hash_check(tmp_path):
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "snapshot_compaction_read_barrier_missing_malformed_or_unenforced"
     assert "required_checks_incomplete" in report["evidence"]["malformed_rows"][0]["violations"][0]
+
+
+def test_runtime_worker_health_policy_binds_heartbeats_death_detectors_and_warm_start():
+    heartbeat = verify_worker_heartbeat_contract()
+    silent_death = verify_silent_worker_death_detector_contract()
+    warm_start = verify_warm_start_safety_contract()
+
+    assert heartbeat["status"] == "pass"
+    assert set(heartbeat["evidence"]["required_roles"]) == {
+        "dashboard",
+        "paper-trader",
+        "lifecycle-tracker",
+        "v27-read-model-refresh",
+    }
+    assert heartbeat["evidence"]["source_anchor_violations"] == []
+    assert silent_death["status"] == "pass"
+    assert silent_death["evidence"]["detector_count"] >= 5
+    assert "premium_node_server" in silent_death["evidence"]["detected_jobs"]
+    assert silent_death["evidence"]["malformed_rows"] == []
+    assert warm_start["status"] == "pass"
+    assert set(warm_start["evidence"]["control_ids"]) == {
+        "node_restart_preflight_before_warm_rejoin",
+        "volume_preflight_before_service_start",
+    }
+    assert warm_start["evidence"]["malformed_rows"] == []
+
+
+def test_worker_heartbeat_blocks_missing_required_role(tmp_path):
+    policy_path = tmp_path / "runtime-worker-health.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.runtime_worker_health_policy.v1",
+                "scope": "unit",
+                "failure_action": "worker_runtime_not_ready",
+                "source_anchors": [],
+                "worker_heartbeats": [
+                    {
+                        "event_type": "worker_fleet_heartbeat_recorded",
+                        "required_roles": ["dashboard"],
+                        "required_payload_fields": [
+                            "worker_id",
+                            "role",
+                            "build_hash",
+                            "runtime_config_hash",
+                            "policy_bundle_id",
+                            "heartbeat_at",
+                        ],
+                        "projection_health_key": "worker_fleet_consistency_ok",
+                        "max_heartbeat_lag_ms": 300000,
+                        "failure_action": "block_promotion_until_fresh_heartbeat",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verify_worker_heartbeat_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "worker_heartbeat_missing_malformed_or_unenforced"
+    assert "required_roles_incomplete" in report["evidence"]["malformed_rows"][0]["violations"][0]
 
 
 def test_paper_mode_safety_blocks_live_capabilities():

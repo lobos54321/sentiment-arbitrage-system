@@ -36,6 +36,7 @@ DEFAULT_DIRECT_DB_MUTATION_POLICY = PROJECT_ROOT / "config" / "v27-direct-databa
 DEFAULT_AGGREGATE_BOUNDARIES = PROJECT_ROOT / "config" / "v27-aggregate-boundaries.json"
 DEFAULT_EVENT_SCHEMA_COMPATIBILITY = PROJECT_ROOT / "config" / "v27-event-schema-compatibility.json"
 DEFAULT_READ_MODEL_SNAPSHOT_POLICY = PROJECT_ROOT / "config" / "v27-read-model-snapshot-policy.json"
+DEFAULT_RUNTIME_WORKER_HEALTH_POLICY = PROJECT_ROOT / "config" / "v27-runtime-worker-health-policy.json"
 DEFAULT_BACKGROUND_JOB_REGISTRY = PROJECT_ROOT / "config" / "v27-background-job-registry.json"
 DEFAULT_ENTRY_POINT_INVENTORY = PROJECT_ROOT / "config" / "v27-entry-point-inventory.json"
 DEFAULT_STATIC_POLICY_ENFORCEMENT = PROJECT_ROOT / "config" / "v27-static-policy-enforcement.json"
@@ -159,6 +160,27 @@ SNAPSHOT_READ_BARRIER_REQUIRED_FIELDS = (
     "consumer",
     "required_checks",
     "unsafe_statuses",
+    "failure_action",
+)
+WORKER_HEARTBEAT_REQUIRED_FIELDS = (
+    "event_type",
+    "required_roles",
+    "required_payload_fields",
+    "projection_health_key",
+    "max_heartbeat_lag_ms",
+    "failure_action",
+)
+SILENT_WORKER_DEATH_REQUIRED_FIELDS = (
+    "job_name",
+    "pid_env",
+    "detection_anchor",
+    "restart_action",
+)
+WARM_START_CONTROL_REQUIRED_FIELDS = (
+    "control_id",
+    "source_file",
+    "source_anchor",
+    "protected_paths",
     "failure_action",
 )
 BACKGROUND_JOB_REQUIRED_FIELDS = (
@@ -1695,6 +1717,219 @@ def verify_snapshot_compaction_read_barrier_contract(policy_path=DEFAULT_READ_MO
             "required_checks": sorted(required_checks),
             "required_unsafe_statuses": sorted(required_unsafe_statuses),
             "duplicate_barrier_ids": sorted(duplicate_barrier_ids),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def _load_runtime_worker_health_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "runtime_worker_health_policy_not_object"}
+    return policy, {"policy_path": str(policy_path), "schema_version": policy.get("schema_version"), "scope": policy.get("scope")}
+
+
+def verify_worker_heartbeat_contract(policy_path=DEFAULT_RUNTIME_WORKER_HEALTH_POLICY):
+    policy, base_evidence = _load_runtime_worker_health_policy(policy_path)
+    if policy is None:
+        return _contract("WorkerHeartbeatContract", False, "runtime_worker_health_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("worker_heartbeats") if isinstance(policy.get("worker_heartbeats"), list) else []
+    malformed_rows = []
+    required_payload_fields = {"worker_id", "role", "build_hash", "runtime_config_hash", "policy_bundle_id", "heartbeat_at"}
+    required_roles = {"dashboard", "paper-trader", "lifecycle-tracker", "v27-read-model-refresh"}
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "event_type": None, "missing_fields": list(WORKER_HEARTBEAT_REQUIRED_FIELDS), "violations": ["heartbeat_row_not_object"]})
+            continue
+        missing = _missing_required_fields(item, WORKER_HEARTBEAT_REQUIRED_FIELDS)
+        violations = []
+        payload_fields = set(str(field) for field in (item.get("required_payload_fields") or []))
+        roles = set(str(role) for role in (item.get("required_roles") or []))
+        missing_payload_fields = sorted(required_payload_fields - payload_fields)
+        missing_roles = sorted(required_roles - roles)
+        if item.get("event_type") != "worker_fleet_heartbeat_recorded":
+            violations.append("event_type_must_be_worker_fleet_heartbeat_recorded")
+        if item.get("projection_health_key") != "worker_fleet_consistency_ok":
+            violations.append("projection_health_key_invalid")
+        if missing_payload_fields:
+            violations.append("required_payload_fields_incomplete:" + ",".join(missing_payload_fields))
+        if missing_roles:
+            violations.append("required_roles_incomplete:" + ",".join(missing_roles))
+        try:
+            if int(item.get("max_heartbeat_lag_ms")) <= 0:
+                violations.append("max_heartbeat_lag_ms_must_be_positive")
+        except (TypeError, ValueError):
+            violations.append("max_heartbeat_lag_ms_must_be_positive")
+        if item.get("failure_action") != "block_promotion_until_fresh_heartbeat":
+            violations.append("failure_action_invalid")
+        if missing or violations:
+            malformed_rows.append({"index": index, "event_type": item.get("event_type"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_worker_health_policy.v1"
+        and policy.get("failure_action") == "worker_runtime_not_ready"
+        and bool(rows)
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+    )
+    return _contract(
+        "WorkerHeartbeatContract",
+        passed,
+        "worker_heartbeat_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "heartbeat_policy_count": len(rows),
+            "required_roles": sorted(required_roles),
+            "required_payload_fields": sorted(required_payload_fields),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_silent_worker_death_detector_contract(
+    policy_path=DEFAULT_RUNTIME_WORKER_HEALTH_POLICY,
+    background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
+):
+    policy, base_evidence = _load_runtime_worker_health_policy(policy_path)
+    if policy is None:
+        return _contract("SilentWorkerDeathDetector", False, "runtime_worker_health_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    try:
+        registry = _load_json(background_job_registry_path)
+    except Exception as exc:
+        registry = {}
+        source_errors.append({"source_file": str(background_job_registry_path), "reason": "registry_missing_or_invalid", "error": str(exc)})
+    jobs = {job.get("job_name"): job for job in registry.get("jobs", []) if isinstance(job, dict)}
+    rows = policy.get("silent_death_detectors") if isinstance(policy.get("silent_death_detectors"), list) else []
+    malformed_rows = []
+    duplicate_jobs = []
+    seen_jobs = set()
+    run_script_text, run_script_error = _read_project_text("scripts/run_zeabur_services.sh")
+    if run_script_error:
+        source_errors.append(run_script_error)
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "job_name": None, "missing_fields": list(SILENT_WORKER_DEATH_REQUIRED_FIELDS), "violations": ["silent_death_detector_not_object"]})
+            continue
+        job_name = str(item.get("job_name") or "")
+        missing = _missing_required_fields(item, SILENT_WORKER_DEATH_REQUIRED_FIELDS)
+        violations = []
+        if job_name in seen_jobs:
+            duplicate_jobs.append(job_name)
+        if job_name:
+            seen_jobs.add(job_name)
+        job = jobs.get(job_name)
+        if not job:
+            violations.append("job_not_in_background_registry")
+        else:
+            lease_policy = job.get("lease_policy") if isinstance(job.get("lease_policy"), dict) else {}
+            if item.get("pid_env") != lease_policy.get("pid_env"):
+                violations.append("pid_env_must_match_background_registry")
+            if lease_policy.get("kind") != "supervised_restart_loop":
+                violations.append("job_must_use_supervised_restart_loop")
+        detection_anchor = str(item.get("detection_anchor") or "")
+        if detection_anchor and detection_anchor not in run_script_text:
+            violations.append("detection_anchor_missing_from_run_script")
+        if item.get("restart_action") != "supervised_restart_loop":
+            violations.append("restart_action_invalid")
+        if missing or violations:
+            malformed_rows.append({"index": index, "job_name": job_name or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_worker_health_policy.v1"
+        and policy.get("failure_action") == "worker_runtime_not_ready"
+        and len(rows) >= 5
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_jobs
+    )
+    return _contract(
+        "SilentWorkerDeathDetector",
+        passed,
+        "silent_worker_death_detector_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "registry_path": str(background_job_registry_path),
+            "failure_action": policy.get("failure_action"),
+            "detector_count": len(rows),
+            "detected_jobs": sorted(seen_jobs),
+            "duplicate_jobs": sorted(duplicate_jobs),
+            "malformed_rows": malformed_rows,
+            "source_anchor_violations": source_anchor_violations,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_warm_start_safety_contract(policy_path=DEFAULT_RUNTIME_WORKER_HEALTH_POLICY):
+    policy, base_evidence = _load_runtime_worker_health_policy(policy_path)
+    if policy is None:
+        return _contract("WarmStartSafetyContract", False, "runtime_worker_health_policy_missing_or_invalid", base_evidence)
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    rows = policy.get("warm_start_controls") if isinstance(policy.get("warm_start_controls"), list) else []
+    malformed_rows = []
+    duplicate_control_ids = []
+    control_ids = set()
+    allowed_failure_actions = {"quarantine_bad_volume_before_start", "run_preflight_before_restart"}
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            malformed_rows.append({"index": index, "control_id": None, "missing_fields": list(WARM_START_CONTROL_REQUIRED_FIELDS), "violations": ["warm_start_control_not_object"]})
+            continue
+        control_id = str(item.get("control_id") or "")
+        missing = _missing_required_fields(item, WARM_START_CONTROL_REQUIRED_FIELDS)
+        violations = []
+        if control_id in control_ids:
+            duplicate_control_ids.append(control_id)
+        if control_id:
+            control_ids.add(control_id)
+        protected_paths = [str(path) for path in (item.get("protected_paths") or [])]
+        if not protected_paths:
+            violations.append("protected_paths_required")
+        elif not all(path.startswith("/app/data/") for path in protected_paths):
+            violations.append("protected_paths_must_be_app_data")
+        text, error = _read_project_text(item.get("source_file"))
+        if error:
+            source_errors.append({"index": index, **error})
+        elif str(item.get("source_anchor") or "") not in text:
+            violations.append("source_anchor_missing")
+        if item.get("failure_action") not in allowed_failure_actions:
+            violations.append("failure_action_invalid")
+        if missing or violations:
+            malformed_rows.append({"index": index, "control_id": control_id or None, "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_worker_health_policy.v1"
+        and policy.get("failure_action") == "worker_runtime_not_ready"
+        and len(rows) >= 2
+        and not source_anchor_violations
+        and not source_errors
+        and not malformed_rows
+        and not duplicate_control_ids
+    )
+    return _contract(
+        "WarmStartSafetyContract",
+        passed,
+        "warm_start_safety_missing_malformed_or_unenforced",
+        {
+            **base_evidence,
+            "failure_action": policy.get("failure_action"),
+            "control_count": len(rows),
+            "control_ids": sorted(control_ids),
+            "duplicate_control_ids": sorted(duplicate_control_ids),
             "malformed_rows": malformed_rows,
             "source_anchor_violations": source_anchor_violations,
             "source_errors": source_errors,
@@ -4248,6 +4483,7 @@ def build_basic_contract_readiness(
     aggregate_boundary_policy_path=DEFAULT_AGGREGATE_BOUNDARIES,
     event_schema_compatibility_policy_path=DEFAULT_EVENT_SCHEMA_COMPATIBILITY,
     read_model_snapshot_policy_path=DEFAULT_READ_MODEL_SNAPSHOT_POLICY,
+    runtime_worker_health_policy_path=DEFAULT_RUNTIME_WORKER_HEALTH_POLICY,
     background_job_registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY,
     entry_point_inventory_path=DEFAULT_ENTRY_POINT_INVENTORY,
     static_policy_path=DEFAULT_STATIC_POLICY_ENFORCEMENT,
@@ -4299,6 +4535,12 @@ def build_basic_contract_readiness(
             verify_projection_version_isolation_contract(policy_path=read_model_snapshot_policy_path),
             verify_snapshot_compaction_invariant_contract(policy_path=read_model_snapshot_policy_path),
             verify_snapshot_compaction_read_barrier_contract(policy_path=read_model_snapshot_policy_path),
+            verify_worker_heartbeat_contract(policy_path=runtime_worker_health_policy_path),
+            verify_silent_worker_death_detector_contract(
+                policy_path=runtime_worker_health_policy_path,
+                background_job_registry_path=background_job_registry_path,
+            ),
+            verify_warm_start_safety_contract(policy_path=runtime_worker_health_policy_path),
             verify_background_job_registry(registry_path=background_job_registry_path),
             verify_scheduled_job_mode_gate_contract(registry_path=background_job_registry_path),
             verify_entry_point_inventory(
@@ -4349,6 +4591,7 @@ def main():
     parser.add_argument("--aggregate-boundary-policy", default=str(DEFAULT_AGGREGATE_BOUNDARIES))
     parser.add_argument("--event-schema-compatibility-policy", default=str(DEFAULT_EVENT_SCHEMA_COMPATIBILITY))
     parser.add_argument("--read-model-snapshot-policy", default=str(DEFAULT_READ_MODEL_SNAPSHOT_POLICY))
+    parser.add_argument("--runtime-worker-health-policy", default=str(DEFAULT_RUNTIME_WORKER_HEALTH_POLICY))
     parser.add_argument("--background-job-registry", default=str(DEFAULT_BACKGROUND_JOB_REGISTRY))
     parser.add_argument("--entry-point-inventory", default=str(DEFAULT_ENTRY_POINT_INVENTORY))
     parser.add_argument("--static-policy", default=str(DEFAULT_STATIC_POLICY_ENFORCEMENT))
@@ -4380,6 +4623,7 @@ def main():
         aggregate_boundary_policy_path=Path(args.aggregate_boundary_policy),
         event_schema_compatibility_policy_path=Path(args.event_schema_compatibility_policy),
         read_model_snapshot_policy_path=Path(args.read_model_snapshot_policy),
+        runtime_worker_health_policy_path=Path(args.runtime_worker_health_policy),
         background_job_registry_path=Path(args.background_job_registry),
         entry_point_inventory_path=Path(args.entry_point_inventory),
         static_policy_path=Path(args.static_policy),
