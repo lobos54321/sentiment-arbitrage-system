@@ -1,5 +1,6 @@
 import sys
 import json
+from pathlib import Path
 
 sys.path.insert(0, "scripts")
 
@@ -11,6 +12,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_aggregate_boundary_contract,
     verify_audit_log_integrity,
     verify_background_job_registry,
+    verify_cicd_merge_gate_contract,
     verify_clock_rollback_guard_contract,
     verify_connection_pool_partition_contract,
     verify_database_transaction_isolation_contract,
@@ -25,6 +27,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_feature_flag_dependency_contract,
     verify_filesystem_disk_pressure_policy,
     verify_evidence_eligibility_matrix,
+    verify_generated_client_contract,
     verify_human_readable_reason_contract,
     verify_log_redaction_verification,
     verify_machine_readable_reason_contract,
@@ -36,6 +39,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_scheduled_job_mode_gate_contract,
     verify_snapshot_compaction_invariant_contract,
     verify_snapshot_compaction_read_barrier_contract,
+    verify_spec_change_impact_analysis_contract,
     verify_static_policy_enforcement,
     verify_thread_pool_isolation_contract,
     verify_access_control_policy,
@@ -111,6 +115,9 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "QueueAckNackContract",
         "PipelineProgressInvariant",
         "ThreadPoolIsolationContract",
+        "CICDMergeGateContract",
+        "GeneratedClientContract",
+        "SpecChangeImpactAnalysisContract",
         "ServiceReadinessProbeContract",
         "DashboardActionSeparationContract",
     ):
@@ -1698,6 +1705,40 @@ def test_runtime_pipeline_policy_blocks_nacked_record_without_reason(tmp_path):
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "queue_ack_nack_missing_malformed_or_unenforced"
     assert report["evidence"]["malformed_records"][0]["violations"] == ["nack_reason_required_for_nacked"]
+
+
+def test_ci_spec_generated_policy_covers_ci_client_and_impact():
+    ci_gate = verify_cicd_merge_gate_contract()
+    client = verify_generated_client_contract()
+    impact = verify_spec_change_impact_analysis_contract()
+
+    assert ci_gate["status"] == "pass"
+    assert ci_gate["evidence"]["gate_count"] == 1
+    assert ci_gate["evidence"]["malformed_gates"] == []
+    assert ci_gate["evidence"]["workflow_evidence"][0]["required_check_count"] >= 10
+    assert ci_gate["evidence"]["workflow_evidence"][0]["missing_checks"] == []
+
+    assert client["status"] == "pass"
+    assert client["evidence"]["client_count"] == 1
+    assert client["evidence"]["catalog_contract_count"] == 213
+    assert client["evidence"]["malformed_clients"] == []
+
+    assert impact["status"] == "pass"
+    assert impact["evidence"]["impact_count"] == 1
+    assert impact["evidence"]["malformed_impacts"] == []
+
+
+def test_generated_client_contract_blocks_stale_artifact_hash(tmp_path):
+    policy = json.loads(Path("config/v27-ci-spec-generated-policy.json").read_text(encoding="utf-8"))
+    policy["generated_clients"][0]["generated_artifact_hash"] = "0" * 64
+    policy_path = tmp_path / "ci-spec-generated-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_generated_client_contract(policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "generated_client_missing_malformed_or_stale"
+    assert "generated_artifact_hash_mismatch" in report["evidence"]["malformed_clients"][0]["violations"]
 
 
 def test_service_readiness_probe_contract_covers_health_surfaces():

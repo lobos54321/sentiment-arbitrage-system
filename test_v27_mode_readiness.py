@@ -663,6 +663,9 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["QueueAckNackContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["PipelineProgressInvariant"]["status"] == "pass"
     assert matrix["contract_statuses"]["ThreadPoolIsolationContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["CICDMergeGateContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["GeneratedClientContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SpecChangeImpactAnalysisContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ServiceReadinessProbeContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["DashboardActionSeparationContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["InputSanitizationContract"]["status"] == "pass"
@@ -685,6 +688,9 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["MetricsWindowContract"]["status"] == "pass"
     assert matrix["modes"]["observe_only"]["status"] == "allowed"
     assert "NumericPrecisionContract" in matrix["modes"]["observe_only"]["required_contracts"]
+    assert "CICDMergeGateContract" in matrix["modes"]["observe_only"]["required_contracts"]
+    assert "GeneratedClientContract" in matrix["modes"]["observe_only"]["required_contracts"]
+    assert "SpecChangeImpactAnalysisContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert matrix["modes"]["shadow"]["status"] == "allowed"
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []

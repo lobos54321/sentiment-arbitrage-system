@@ -1,0 +1,35 @@
+name: v27-readiness
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  v27-readiness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile v27 readiness scripts
+        run: python3 -m py_compile scripts/v27_basic_contract_readiness.py scripts/v27_mode_readiness.py scripts/generate_v27_contract_client.py
+      - name: Validate v27 readiness JSON
+        run: |
+          python3 -m json.tool config/v27-error-taxonomy.json
+          python3 -m json.tool config/v27-ci-spec-generated-policy.json
+          python3 -m json.tool spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json
+      - name: Validate v27 generated client
+        run: python3 scripts/generate_v27_contract_client.py --check
+      - name: Validate v27 spec
+        run: python3 scripts/v27_spec_validate.py
+      - name: Verify v27 basic readiness
+        run: python3 scripts/v27_basic_contract_readiness.py --strict
+      - name: Audit v27 mode gate scope
+        run: python3 scripts/v27_mode_gate_scope_audit.py
+      - name: Run focused v27 readiness tests
+        run: python3 -m pytest test_v27_basic_contract_readiness.py test_v27_mode_readiness.py test_v27_mode_gate_scope_audit.py -q -p no:cacheprovider
+      - name: Check whitespace
+        run: git diff --check

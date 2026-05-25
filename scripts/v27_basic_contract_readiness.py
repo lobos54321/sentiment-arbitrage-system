@@ -53,6 +53,7 @@ DEFAULT_NUMERIC_PRECISION_POLICY = PROJECT_ROOT / "config" / "v27-numeric-precis
 DEFAULT_REASON_TAXONOMY_POLICY = PROJECT_ROOT / "config" / "v27-reason-taxonomy-policy.json"
 DEFAULT_SECURITY_SESSION_POLICY = PROJECT_ROOT / "config" / "v27-security-session-policy.json"
 DEFAULT_RUNTIME_PIPELINE_POLICY = PROJECT_ROOT / "config" / "v27-runtime-pipeline-policy.json"
+DEFAULT_CI_SPEC_GENERATED_POLICY = PROJECT_ROOT / "config" / "v27-ci-spec-generated-policy.json"
 ADMIN_SESSION_SECURITY_REQUIRED_FIELDS = (
     "session_id",
     "operator_id",
@@ -94,6 +95,27 @@ THREAD_POOL_ISOLATION_REQUIRED_FIELDS = (
     "max_workers",
     "reserved_capacity",
     "checked_at",
+)
+CICD_MERGE_GATE_REQUIRED_FIELDS = (
+    "merge_gate_id",
+    "required_checks",
+    "spec_hash",
+    "artifact_hash",
+    "gate_result",
+)
+GENERATED_CLIENT_REQUIRED_FIELDS = (
+    "client_name",
+    "source_schema_hash",
+    "generated_artifact_hash",
+    "generation_tool_version",
+    "checked_at",
+)
+SPEC_CHANGE_IMPACT_REQUIRED_FIELDS = (
+    "spec_change_id",
+    "affected_contracts",
+    "affected_modes",
+    "impact_hash",
+    "approved_at",
 )
 NUMERIC_PRECISION_REQUIRED_FIELDS = (
     "unit",
@@ -458,6 +480,10 @@ def _float_env(env, name, default):
 
 def _sha256_json(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def _missing_required_fields(record, fields):
@@ -4457,6 +4483,329 @@ def verify_thread_pool_isolation_contract(policy_path=DEFAULT_RUNTIME_PIPELINE_P
     )
 
 
+def _ci_spec_generated_policy(policy_path):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return None, {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        return None, {"policy_path": str(policy_path), "error": "ci_spec_generated_policy_not_object"}
+    return policy, None
+
+
+def _file_hash_record(raw_path):
+    resolved = _resolve_project_file(raw_path)
+    if not resolved or not resolved.exists():
+        return None, {"source_file": str(raw_path), "reason": "source_missing"}
+    return _sha256_file(resolved), None
+
+
+def verify_cicd_merge_gate_contract(
+    policy_path=DEFAULT_CI_SPEC_GENERATED_POLICY,
+    manifest_path=MANIFEST_PATH,
+    catalog_path=CATALOG_PATH,
+    registry_path=ENTRY_MODE_REGISTRY_PATH,
+):
+    policy, policy_error = _ci_spec_generated_policy(policy_path)
+    if policy_error:
+        return _contract("CICDMergeGateContract", False, "cicd_merge_gate_missing_malformed_or_unenforced", policy_error)
+
+    try:
+        spec_report = validate_all(manifest_path=manifest_path, catalog_path=catalog_path, registry_path=registry_path)
+        spec_error = None
+    except Exception as exc:
+        spec_report = {}
+        spec_error = {"error": str(exc)}
+
+    spec_hash = spec_report.get("spec_hash")
+    gates = policy.get("ci_merge_gates") if isinstance(policy.get("ci_merge_gates"), list) else []
+    malformed_gates = []
+    workflow_evidence = []
+    for index, gate in enumerate(gates):
+        if not isinstance(gate, dict):
+            malformed_gates.append({"index": index, "merge_gate_id": None, "missing_fields": list(CICD_MERGE_GATE_REQUIRED_FIELDS), "violations": ["gate_not_object"]})
+            continue
+        missing = _missing_required_fields(gate, CICD_MERGE_GATE_REQUIRED_FIELDS + ("workflow_file",))
+        violations = []
+        workflow_file = gate.get("workflow_file")
+        workflow_text, workflow_error = _read_project_text(workflow_file)
+        workflow_hash = None
+        if workflow_error:
+            violations.append("workflow_file_missing")
+        else:
+            workflow_hash, _ = _file_hash_record(workflow_file)
+        required_checks = gate.get("required_checks") if isinstance(gate.get("required_checks"), list) else []
+        missing_checks = [str(check) for check in required_checks if str(check) not in workflow_text]
+        if missing_checks:
+            violations.append("required_check_missing_from_workflow")
+        if gate.get("spec_hash") != spec_hash:
+            violations.append("spec_hash_mismatch")
+        if gate.get("gate_result") != "pass":
+            violations.append("gate_result_not_pass")
+        expected_artifact_hash = _sha256_json(
+            {
+                "workflow_file": workflow_file,
+                "workflow_sha256": workflow_hash,
+                "required_checks": required_checks,
+                "spec_hash": spec_hash,
+            }
+        )
+        if gate.get("artifact_hash") != expected_artifact_hash:
+            violations.append("artifact_hash_mismatch")
+        workflow_evidence.append(
+            {
+                "merge_gate_id": gate.get("merge_gate_id"),
+                "workflow_file": workflow_file,
+                "workflow_sha256": workflow_hash,
+                "required_check_count": len(required_checks),
+                "missing_checks": missing_checks,
+                "artifact_hash": gate.get("artifact_hash"),
+                "expected_artifact_hash": expected_artifact_hash,
+            }
+        )
+        if missing or violations:
+            malformed_gates.append({"index": index, "merge_gate_id": gate.get("merge_gate_id"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.ci_spec_generated_policy.v1"
+        and not spec_error
+        and bool(gates)
+        and not malformed_gates
+    )
+    return _contract(
+        "CICDMergeGateContract",
+        passed,
+        "cicd_merge_gate_missing_malformed_or_unenforced",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "spec_hash": spec_hash,
+            "spec_error": spec_error,
+            "gate_count": len(gates),
+            "workflow_evidence": workflow_evidence,
+            "malformed_gates": malformed_gates,
+        },
+    )
+
+
+def verify_generated_client_contract(policy_path=DEFAULT_CI_SPEC_GENERATED_POLICY, catalog_path=CATALOG_PATH):
+    policy, policy_error = _ci_spec_generated_policy(policy_path)
+    if policy_error:
+        return _contract("GeneratedClientContract", False, "generated_client_missing_malformed_or_stale", policy_error)
+
+    try:
+        catalog = _load_json(catalog_path)
+        catalog_error = None
+    except Exception as exc:
+        catalog = {}
+        catalog_error = {"catalog_path": str(catalog_path), "error": str(exc)}
+
+    catalog_contracts = catalog.get("contracts") if isinstance(catalog, dict) else {}
+    catalog_contract_ids = sorted((catalog_contracts or {}).keys())
+    source_schema_hash = _sha256_json(catalog) if not catalog_error else None
+    clients = policy.get("generated_clients") if isinstance(policy.get("generated_clients"), list) else []
+    malformed_clients = []
+    client_evidence = []
+    for index, client in enumerate(clients):
+        if not isinstance(client, dict):
+            malformed_clients.append({"index": index, "client_name": None, "missing_fields": list(GENERATED_CLIENT_REQUIRED_FIELDS), "violations": ["client_not_object"]})
+            continue
+        missing = _missing_required_fields(
+            client,
+            GENERATED_CLIENT_REQUIRED_FIELDS + ("source_schema_file", "generated_artifact_file", "generator_script"),
+        )
+        violations = []
+        artifact = None
+        artifact_hash = None
+        artifact_embedded_hash = None
+        artifact_expected_embedded_hash = None
+        artifact_contract_ids = []
+        try:
+            artifact = _load_json(_resolve_project_file(client.get("generated_artifact_file")))
+        except Exception as exc:
+            violations.append("generated_artifact_missing_or_invalid")
+            artifact_error = str(exc)
+        else:
+            artifact_error = None
+            artifact_hash = _sha256_json(artifact)
+            artifact_embedded_hash = artifact.get("generated_artifact_hash") if isinstance(artifact, dict) else None
+            artifact_expected_embedded_hash = _sha256_json(
+                {key: value for key, value in artifact.items() if key != "generated_artifact_hash"}
+            ) if isinstance(artifact, dict) else None
+            artifact_contract_ids = sorted(str(row.get("contract_id")) for row in (artifact.get("contracts") or []) if isinstance(row, dict) and row.get("contract_id"))
+        generator_hash, generator_error = _file_hash_record(client.get("generator_script"))
+        if generator_error:
+            violations.append("generator_script_missing")
+        if client.get("source_schema_hash") != source_schema_hash:
+            violations.append("source_schema_hash_mismatch")
+        if client.get("generated_artifact_hash") != artifact_hash:
+            violations.append("generated_artifact_hash_mismatch")
+        if artifact_embedded_hash != artifact_expected_embedded_hash:
+            violations.append("generated_artifact_embedded_hash_mismatch")
+        if artifact and artifact.get("source_schema_hash") != source_schema_hash:
+            violations.append("artifact_source_schema_hash_mismatch")
+        if artifact and artifact.get("contract_count") != len(catalog_contract_ids):
+            violations.append("artifact_contract_count_mismatch")
+        if artifact and artifact_contract_ids != catalog_contract_ids:
+            violations.append("artifact_contract_ids_mismatch")
+        if artifact and artifact.get("generation_tool_version") != client.get("generation_tool_version"):
+            violations.append("generation_tool_version_mismatch")
+        if _parse_iso_ts(client.get("checked_at")) is None:
+            violations.append("checked_at_invalid")
+        client_evidence.append(
+            {
+                "client_name": client.get("client_name"),
+                "source_schema_file": client.get("source_schema_file"),
+                "generated_artifact_file": client.get("generated_artifact_file"),
+                "generator_script": client.get("generator_script"),
+                "source_schema_hash": client.get("source_schema_hash"),
+                "expected_source_schema_hash": source_schema_hash,
+                "generated_artifact_hash": client.get("generated_artifact_hash"),
+                "expected_generated_artifact_hash": artifact_hash,
+                "embedded_generated_artifact_hash": artifact_embedded_hash,
+                "expected_embedded_generated_artifact_hash": artifact_expected_embedded_hash,
+                "contract_count": len(artifact_contract_ids),
+                "generator_sha256": generator_hash,
+                "artifact_error": artifact_error,
+            }
+        )
+        if missing or violations:
+            malformed_clients.append({"index": index, "client_name": client.get("client_name"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.ci_spec_generated_policy.v1"
+        and not catalog_error
+        and bool(clients)
+        and not malformed_clients
+    )
+    return _contract(
+        "GeneratedClientContract",
+        passed,
+        "generated_client_missing_malformed_or_stale",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "catalog_path": str(catalog_path),
+            "catalog_error": catalog_error,
+            "catalog_contract_count": len(catalog_contract_ids),
+            "client_count": len(clients),
+            "client_evidence": client_evidence,
+            "malformed_clients": malformed_clients,
+        },
+    )
+
+
+def verify_spec_change_impact_analysis_contract(
+    policy_path=DEFAULT_CI_SPEC_GENERATED_POLICY,
+    manifest_path=MANIFEST_PATH,
+    catalog_path=CATALOG_PATH,
+    registry_path=ENTRY_MODE_REGISTRY_PATH,
+):
+    policy, policy_error = _ci_spec_generated_policy(policy_path)
+    if policy_error:
+        return _contract("SpecChangeImpactAnalysisContract", False, "spec_change_impact_missing_malformed_or_unapproved", policy_error)
+
+    try:
+        spec_report = validate_all(manifest_path=manifest_path, catalog_path=catalog_path, registry_path=registry_path)
+        catalog = _load_json(catalog_path)
+        spec_error = None
+    except Exception as exc:
+        spec_report = {}
+        catalog = {}
+        spec_error = {"error": str(exc)}
+
+    spec_hash = spec_report.get("spec_hash")
+    catalog_contract_ids = set((catalog.get("contracts") or {}).keys()) if isinstance(catalog, dict) else set()
+    required_contracts = {"CICDMergeGateContract", "GeneratedClientContract", "SpecChangeImpactAnalysisContract"}
+    allowed_modes = {"observe_only", "shadow", "ultra_tiny", "normal_tiny"}
+    impacts = policy.get("spec_change_impacts") if isinstance(policy.get("spec_change_impacts"), list) else []
+    malformed_impacts = []
+    impact_evidence = []
+    policy_file_name = "config/v27-ci-spec-generated-policy.json"
+    for index, impact in enumerate(impacts):
+        if not isinstance(impact, dict):
+            malformed_impacts.append({"index": index, "spec_change_id": None, "missing_fields": list(SPEC_CHANGE_IMPACT_REQUIRED_FIELDS), "violations": ["impact_not_object"]})
+            continue
+        missing = _missing_required_fields(impact, SPEC_CHANGE_IMPACT_REQUIRED_FIELDS + ("spec_hash", "source_files", "source_hashes"))
+        violations = []
+        affected_contracts = [str(item) for item in (impact.get("affected_contracts") or [])]
+        affected_modes = [str(item) for item in (impact.get("affected_modes") or [])]
+        source_files = [str(item) for item in (impact.get("source_files") or [])]
+        if not required_contracts.issubset(set(affected_contracts)):
+            violations.append("required_contracts_not_covered")
+        unknown_contracts = sorted(set(affected_contracts) - catalog_contract_ids)
+        if unknown_contracts:
+            violations.append("unknown_affected_contract")
+        unknown_modes = sorted(set(affected_modes) - allowed_modes)
+        if unknown_modes:
+            violations.append("unknown_affected_mode")
+        if _parse_iso_ts(impact.get("approved_at")) is None:
+            violations.append("approved_at_invalid")
+        if impact.get("spec_hash") != spec_hash:
+            violations.append("spec_hash_mismatch")
+        if policy_file_name in source_files:
+            violations.append("policy_self_reference_not_allowed")
+        source_hashes = {}
+        source_errors = []
+        for source_file in source_files:
+            file_hash, source_error = _file_hash_record(source_file)
+            if source_error:
+                source_errors.append(source_error)
+            else:
+                source_hashes[source_file] = file_hash
+        if source_errors:
+            violations.append("source_file_missing")
+        if impact.get("source_hashes") != source_hashes:
+            violations.append("source_hashes_mismatch")
+        expected_impact_hash = _sha256_json(
+            {
+                "spec_change_id": impact.get("spec_change_id"),
+                "affected_contracts": affected_contracts,
+                "affected_modes": affected_modes,
+                "spec_hash": spec_hash,
+                "source_hashes": source_hashes,
+            }
+        )
+        if impact.get("impact_hash") != expected_impact_hash:
+            violations.append("impact_hash_mismatch")
+        impact_evidence.append(
+            {
+                "spec_change_id": impact.get("spec_change_id"),
+                "affected_contracts": affected_contracts,
+                "affected_modes": affected_modes,
+                "source_file_count": len(source_files),
+                "unknown_contracts": unknown_contracts,
+                "unknown_modes": unknown_modes,
+                "source_errors": source_errors,
+                "impact_hash": impact.get("impact_hash"),
+                "expected_impact_hash": expected_impact_hash,
+            }
+        )
+        if missing or violations:
+            malformed_impacts.append({"index": index, "spec_change_id": impact.get("spec_change_id"), "missing_fields": missing, "violations": violations})
+
+    passed = (
+        policy.get("schema_version") == "v2.7.0.ci_spec_generated_policy.v1"
+        and not spec_error
+        and bool(impacts)
+        and not malformed_impacts
+    )
+    return _contract(
+        "SpecChangeImpactAnalysisContract",
+        passed,
+        "spec_change_impact_missing_malformed_or_unapproved",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "spec_hash": spec_hash,
+            "spec_error": spec_error,
+            "impact_count": len(impacts),
+            "impact_evidence": impact_evidence,
+            "malformed_impacts": malformed_impacts,
+        },
+    )
+
+
 def verify_service_readiness_probe_contract(policy_path=DEFAULT_SERVICE_READINESS_PROBES):
     try:
         policy = _load_json(policy_path)
@@ -5376,6 +5725,7 @@ def build_basic_contract_readiness(
     reason_taxonomy_policy_path=DEFAULT_REASON_TAXONOMY_POLICY,
     security_session_policy_path=DEFAULT_SECURITY_SESSION_POLICY,
     runtime_pipeline_policy_path=DEFAULT_RUNTIME_PIPELINE_POLICY,
+    ci_spec_generated_policy_path=DEFAULT_CI_SPEC_GENERATED_POLICY,
     env=None,
 ):
     contracts = {
@@ -5446,6 +5796,19 @@ def build_basic_contract_readiness(
             verify_queue_ack_nack_contract(policy_path=runtime_pipeline_policy_path),
             verify_pipeline_progress_invariant(policy_path=runtime_pipeline_policy_path),
             verify_thread_pool_isolation_contract(policy_path=runtime_pipeline_policy_path),
+            verify_cicd_merge_gate_contract(
+                policy_path=ci_spec_generated_policy_path,
+                manifest_path=manifest_path,
+                catalog_path=catalog_path,
+                registry_path=registry_path,
+            ),
+            verify_generated_client_contract(policy_path=ci_spec_generated_policy_path, catalog_path=catalog_path),
+            verify_spec_change_impact_analysis_contract(
+                policy_path=ci_spec_generated_policy_path,
+                manifest_path=manifest_path,
+                catalog_path=catalog_path,
+                registry_path=registry_path,
+            ),
             verify_service_readiness_probe_contract(policy_path=service_readiness_policy_path),
             verify_dashboard_action_separation_contract(policy_path=dashboard_action_separation_policy_path),
         ]
@@ -5497,6 +5860,7 @@ def main():
     parser.add_argument("--reason-taxonomy-policy", default=str(DEFAULT_REASON_TAXONOMY_POLICY))
     parser.add_argument("--security-session-policy", default=str(DEFAULT_SECURITY_SESSION_POLICY))
     parser.add_argument("--runtime-pipeline-policy", default=str(DEFAULT_RUNTIME_PIPELINE_POLICY))
+    parser.add_argument("--ci-spec-generated-policy", default=str(DEFAULT_CI_SPEC_GENERATED_POLICY))
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
 
@@ -5532,6 +5896,7 @@ def main():
         reason_taxonomy_policy_path=Path(args.reason_taxonomy_policy),
         security_session_policy_path=Path(args.security_session_policy),
         runtime_pipeline_policy_path=Path(args.runtime_pipeline_policy),
+        ci_spec_generated_policy_path=Path(args.ci_spec_generated_policy),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
     if args.strict and report["blocking_contracts"]:

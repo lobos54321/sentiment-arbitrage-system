@@ -1,0 +1,2713 @@
+{
+  "checked_at": "2026-05-26T00:00:00Z",
+  "client_name": "v27_contract_catalog_client",
+  "contract_count": 213,
+  "contracts": [
+    {
+      "contract_id": "APIResponseContract",
+      "failure_action": "api_response_rejected",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "endpoint",
+        "response_schema_version",
+        "status_code_policy",
+        "error_envelope",
+        "cache_control"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "APIResponseEnvelopeContract",
+      "failure_action": "api_envelope_invalid",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "endpoint",
+        "envelope_version",
+        "payload_hash",
+        "error_shape",
+        "generated_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "AccessControlContract",
+      "failure_action": "reject_mutation",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "endpoint",
+        "required_role",
+        "token_scope",
+        "audit_log_required",
+        "danger_level"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "AccessReviewContract",
+      "failure_action": "access_review_required",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "review_id",
+        "operator_id",
+        "scope",
+        "privilege_delta",
+        "reviewed_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "AdminSessionSecurityContract",
+      "failure_action": "reject_admin_mutation",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "session_id",
+        "operator_id",
+        "mfa_required",
+        "expires_at",
+        "csrf_protection"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "AdversarialExecutionSimulationContract",
+      "failure_action": "execution_policy_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "simulation_id",
+        "execution_policy_version",
+        "attack_scenario",
+        "safety_result",
+        "checked_at"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "AggregateBoundaryContract",
+      "failure_action": "event_log_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "aggregate_type",
+        "aggregate_id_pattern",
+        "sequence_scope",
+        "owner_store"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "AlertNoiseBudgetContract",
+      "failure_action": "alert_route_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "alert_family",
+        "window_id",
+        "noise_budget",
+        "suppression_count",
+        "owner"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "AlertSuppressionAuditContract",
+      "failure_action": "suppression_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "suppression_id",
+        "alert_family",
+        "suppression_reason",
+        "expires_at",
+        "audit_event_id"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "ApprovalWorkflowContract",
+      "failure_action": "approval_required",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "approval_id",
+        "mutation_id",
+        "required_approvers",
+        "approval_state",
+        "approved_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "ArchiveBitrotScrubContract",
+      "failure_action": "archive_integrity_review",
+      "mode_target": "phase_1_hardening",
+      "required_fields": [
+        "archive_set_id",
+        "object_count",
+        "scrub_hash",
+        "bitrot_detected",
+        "scrubbed_at"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "AssumptionInvalidationTrigger",
+      "failure_action": "assumption_recheck_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "assumption_id",
+        "trigger_metric",
+        "threshold",
+        "observed_value",
+        "invalidated_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "AssumptionRegistryContract",
+      "failure_action": "assumption_missing",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "assumption_id",
+        "scope",
+        "owner",
+        "evidence_link",
+        "expires_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "AuditLogIntegrityContract",
+      "failure_action": "p0_security_event",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "audit_event_id",
+        "prev_audit_hash",
+        "audit_payload_hash",
+        "audit_chain_hash",
+        "created_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "BackgroundJobRegistryContract",
+      "failure_action": "job_disabled",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "job_name",
+        "entry_point",
+        "allowed_modes",
+        "lease_policy",
+        "owner"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "BackupRestoreDrillContract",
+      "failure_action": "no_normal_tiny",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "drill_id",
+        "backup_set_id",
+        "restored_world_hash",
+        "restore_started_at",
+        "restore_completed_at"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "BreakGlassAccessContract",
+      "failure_action": "break_glass_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "break_glass_id",
+        "operator_id",
+        "reason",
+        "expires_at",
+        "audit_event_id"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "CICDMergeGateContract",
+      "failure_action": "ci_fail",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "merge_gate_id",
+        "required_checks",
+        "spec_hash",
+        "artifact_hash",
+        "gate_result"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "CSVSpreadsheetInjectionContract",
+      "failure_action": "export_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "export_id",
+        "column_name",
+        "unsafe_prefix_detected",
+        "sanitization_policy",
+        "checked_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "CacheInvalidationContract",
+      "failure_action": "shadow_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "cache_key",
+        "source_event_seq",
+        "ttl_ms",
+        "invalidated_by_event_type"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "CanaryAbortContract",
+      "failure_action": "canary_aborted",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "canary_id",
+        "abort_threshold",
+        "observed_metric",
+        "abort_action",
+        "aborted_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "CandidateCancellationContract",
+      "failure_action": "abort_candidate",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "candidate_id",
+        "cancel_reason",
+        "cancel_event_seq",
+        "cancelled_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "CanonicalSerializationContract",
+      "failure_action": "spec_dirty",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "serialization_version",
+        "json_sort_keys",
+        "time_format",
+        "decimal_policy"
+      ],
+      "section_id": "S01"
+    },
+    {
+      "contract_id": "CanonicalSpecIntegrityContract",
+      "failure_action": "global_promotion_disabled",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "spec_id",
+        "spec_version",
+        "spec_hash",
+        "section_id",
+        "contract_id"
+      ],
+      "section_id": "S01"
+    },
+    {
+      "contract_id": "CapitalReservationPolicy",
+      "failure_action": "no_new_entry",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "reservation_id",
+        "position_id",
+        "reserved_capital",
+        "reservation_ttl",
+        "release_reason"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "ChainConfigContract",
+      "failure_action": "observe_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "chain",
+        "native_unit",
+        "quote_mint",
+        "finality_rule",
+        "address_validator"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "ChangeFreezeContract",
+      "failure_action": "change_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "freeze_id",
+        "scope",
+        "start_at",
+        "end_at",
+        "exception_policy"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "CircuitBreakerResumeContract",
+      "failure_action": "resume_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "breaker_id",
+        "root_cause_fixed",
+        "evidence_freeze_id",
+        "health_checks_passed",
+        "resumed_at"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "ClientSideCacheContract",
+      "failure_action": "client_cache_bypass",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "cache_key",
+        "ttl_ms",
+        "source_snapshot_hash",
+        "invalidation_event",
+        "served_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "ClientSideFreshnessContract",
+      "failure_action": "client_view_stale",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "view_id",
+        "snapshot_seq",
+        "max_age_ms",
+        "fresh_enough",
+        "checked_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "ClockRollbackGuardContract",
+      "failure_action": "time_dirty",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "clock_source",
+        "wall_clock_ts",
+        "monotonic_ts",
+        "rollback_detected",
+        "guard_action"
+      ],
+      "section_id": "S03"
+    },
+    {
+      "contract_id": "CohortDriftBoundary",
+      "failure_action": "promotion_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "cohort_id",
+        "baseline_window",
+        "current_window",
+        "drift_metric",
+        "action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ComplexityBudgetContract",
+      "failure_action": "complexity_review_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "budget_id",
+        "scope",
+        "max_components",
+        "current_components",
+        "owner"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ConfigDistributionAckContract",
+      "failure_action": "mixed_config_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "config_id",
+        "worker_id",
+        "config_hash",
+        "ack_state",
+        "acked_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "ConfigDistributionContract",
+      "failure_action": "mixed_config_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "config_id",
+        "target_workers",
+        "effective_at",
+        "ack_policy"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "ConnectionPoolPartitionContract",
+      "failure_action": "resource_degraded",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "pool_name",
+        "partition_key",
+        "max_connections",
+        "critical_reserved_connections",
+        "checked_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "ConsumerCheckpointContract",
+      "failure_action": "projection_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "consumer_name",
+        "aggregate_id",
+        "last_applied_seq",
+        "checkpoint_seq",
+        "checkpoint_tx_id"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "ContractConflictResolutionContract",
+      "failure_action": "mode_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "conflict_id",
+        "higher_priority_contract",
+        "lower_priority_contract",
+        "resolution_action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ContractFailureBlastRadius",
+      "failure_action": "mode_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "contract_id",
+        "blast_radius",
+        "affected_modes",
+        "fallback_action",
+        "reviewed_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ContractPriorityGraph",
+      "failure_action": "contract_priority_invalid",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "graph_id",
+        "higher_priority_contract",
+        "lower_priority_contract",
+        "cycle_detected",
+        "resolved_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "CounterfactualEntryTime",
+      "failure_action": "research_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "counterfactual_entry_ts",
+        "counterfactual_policy_version",
+        "counterfactual_model_snapshot_id"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "CrashRecoveryStateMachine",
+      "failure_action": "no_new_entry",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "recovery_id",
+        "state",
+        "orphan_scan_result",
+        "reconcile_result"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "DBLockContentionPolicy",
+      "failure_action": "storage_degraded",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "store",
+        "lock_name",
+        "contention_threshold_ms",
+        "retry_policy",
+        "fallback_action"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "DashboardActionSeparationContract",
+      "failure_action": "dashboard_mutation_blocked",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "action_id",
+        "view_route",
+        "mutation_route",
+        "separation_enforced",
+        "audit_required"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "DashboardComputationProvenanceContract",
+      "failure_action": "dashboard_widget_untrusted",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "widget_id",
+        "input_snapshot_hash",
+        "computation_version",
+        "generated_at",
+        "provenance_hash"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "DashboardQueryProvenanceContract",
+      "failure_action": "dashboard_query_untrusted",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "query_id",
+        "source_snapshot_hash",
+        "filter_hash",
+        "result_hash",
+        "queried_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "DashboardTriageWorkflowContract",
+      "failure_action": "triage_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "triage_id",
+        "blocker_code",
+        "owner",
+        "next_action",
+        "due_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "DataDeletionLegalHoldContract",
+      "failure_action": "deletion_blocked",
+      "mode_target": "phase_1_hardening",
+      "required_fields": [
+        "legal_hold_id",
+        "data_scope",
+        "deletion_request_id",
+        "hold_state",
+        "expires_at"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "DataExportEnvelopeContract",
+      "failure_action": "export_invalid",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "export_id",
+        "envelope_version",
+        "watermark",
+        "row_count",
+        "generated_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "DataExportWatermarkContract",
+      "failure_action": "export_untrusted",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "export_id",
+        "snapshot_seq",
+        "watermark",
+        "generated_at",
+        "consumer_warning"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "DataLicenseComplianceContract",
+      "failure_action": "data_use_blocked",
+      "mode_target": "phase_1_hardening",
+      "required_fields": [
+        "dataset_id",
+        "license_id",
+        "allowed_use",
+        "expiry_at",
+        "compliance_status"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "DatabaseTransactionIsolationContract",
+      "failure_action": "storage_degraded",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "store",
+        "isolation_level",
+        "transaction_id",
+        "deadlock_retry_policy",
+        "invariant_scope"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "DeadLetterQueueContract",
+      "failure_action": "shadow_only_if_critical",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "event_id",
+        "consumer_name",
+        "failure_count",
+        "poison_event_class",
+        "moved_to_dlq_at"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "DecisionAudit",
+      "failure_action": "entry_rejected",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "decision_id",
+        "policy_bundle_id",
+        "spec_hash",
+        "feature_vector_hash",
+        "decision_trace_bundle"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "DecisionReadModelFreshnessContract",
+      "failure_action": "direct_replay_or_shadow",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "read_model_seq",
+        "event_log_latest_seq",
+        "max_allowed_lag_seq",
+        "read_model_fresh_enough"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "DenominatorDedupContract",
+      "failure_action": "denominator_dirty",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "denominator_dedup_key",
+        "canonical_pool_group",
+        "lifecycle_epoch",
+        "merged_signal_ids"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "DeploymentRolloutStateMachine",
+      "failure_action": "fail_closed",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "rollout_id",
+        "state",
+        "fleet_hash_map",
+        "canary_status"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "DirectDatabaseMutationBan",
+      "failure_action": "p0_data_integrity_event",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "write_path_id",
+        "target_store",
+        "approved_mutation_path",
+        "break_glass_id"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "DistributedLockBackendHealthContract",
+      "failure_action": "lock_backend_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "backend_name",
+        "health_status",
+        "stale_read_detected",
+        "split_brain_detected"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "DoubleEntryLedgerInvariantContract",
+      "failure_action": "no_new_entry",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "ledger_checkpoint_id",
+        "available_capital",
+        "reserved_capital",
+        "open_exposure",
+        "ledger_hash"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "DynamicTokenAuthorityChangeContract",
+      "failure_action": "position_risk_recheck",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "token_ca",
+        "authority_type",
+        "previous_authority_hash",
+        "current_authority_hash",
+        "risk_action"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "EarliestActionableTime",
+      "failure_action": "attribute_not_missed_entry",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "earliest_actionable_ts",
+        "required_inputs_available_at",
+        "peak_ts",
+        "actionable_before_peak"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "EntryExecutionStateMachine",
+      "failure_action": "abort_execution",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "execution_id",
+        "state",
+        "state_version",
+        "failure_reason"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "EntryPointInventoryContract",
+      "failure_action": "ci_fail",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "entry_point_id",
+        "code_location",
+        "route_registry_required",
+        "arbiter_required"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "EnumEvolutionContract",
+      "failure_action": "schema_change_blocked",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "enum_name",
+        "old_value",
+        "new_value",
+        "compatibility_policy",
+        "migration_action"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "ErrorTaxonomyContract",
+      "failure_action": "error_unclassified",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "error_code",
+        "category",
+        "severity",
+        "operator_action",
+        "introduced_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "EventSchemaCompatibilityContract",
+      "failure_action": "event_rejected",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "event_type",
+        "schema_version",
+        "producer_version",
+        "consumer_version",
+        "compatibility_result"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "EventSemanticsContract",
+      "failure_action": "event_rejected",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "event_id",
+        "event_type",
+        "observed_at",
+        "available_at",
+        "idempotency_key"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "EventSequencerContract",
+      "failure_action": "event_log_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "monotonic_ingest_seq",
+        "aggregate_id",
+        "aggregate_seq",
+        "sequencer_epoch"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "EvidenceAgingContract",
+      "failure_action": "evidence_expired",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "evidence_id",
+        "evidence_type",
+        "max_age_ms",
+        "age_ms",
+        "expiration_action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "EvidenceConflictContract",
+      "failure_action": "evidence_quarantined",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "conflict_id",
+        "evidence_a_hash",
+        "evidence_b_hash",
+        "resolution_policy",
+        "resolved_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "EvidenceEligibilityMatrix",
+      "failure_action": "evidence_not_eligible",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "evidence_use",
+        "event_truth",
+        "feature_truth",
+        "label_truth",
+        "replay_truth"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "EvidenceExternalAnchoringContract",
+      "failure_action": "integrity_review",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "anchor_id",
+        "anchored_hash",
+        "anchor_target",
+        "anchored_at"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "ExAnteFeasibility",
+      "failure_action": "no_entry",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "ex_ante_feasible",
+        "feasibility_class",
+        "feasibility_policy_version",
+        "decision_ts"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "ExceptionDebtRegister",
+      "failure_action": "exception_debt_review_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "exception_id",
+        "contract_id",
+        "debt_owner",
+        "expires_at",
+        "repayment_plan"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ExecutionLeaseContract",
+      "failure_action": "abort_execution",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "lease_id",
+        "fencing_token",
+        "acquired_at",
+        "expires_at",
+        "lease_status"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "ExitPolicyMigrationContract",
+      "failure_action": "exit_policy_migration_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "position_id",
+        "old_exit_policy",
+        "new_exit_policy",
+        "migration_reason",
+        "migrated_at"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "ExperimentAssignmentImmutabilityContract",
+      "failure_action": "experiment_invalid",
+      "mode_target": "normal_tiny_promotion_blocking",
+      "required_fields": [
+        "assignment_id",
+        "randomization_unit",
+        "original_assignment_hash",
+        "attempted_change_hash",
+        "detected_at"
+      ],
+      "section_id": "S10"
+    },
+    {
+      "contract_id": "ExportReimportBoundaryContract",
+      "failure_action": "reimport_blocked",
+      "mode_target": "phase_1_hardening",
+      "required_fields": [
+        "boundary_id",
+        "export_id",
+        "reimport_allowed",
+        "lineage_hash",
+        "approved_at"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "ExternalDependencyContract",
+      "failure_action": "dependency_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "dependency_name",
+        "health_status",
+        "fallback_mode",
+        "fail_closed_action"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "FalseNegativeBudgetContract",
+      "failure_action": "safety_case_review",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "budget_id",
+        "hazard_class",
+        "allowed_false_negative_rate",
+        "observed_rate",
+        "action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "FeatureFlagDependencyContract",
+      "failure_action": "feature_flag_blocked",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "feature_flag",
+        "depends_on",
+        "mode_scope",
+        "dependency_state",
+        "activation_action"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "FeatureStoreConsistencyContract",
+      "failure_action": "model_promotion_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "feature_set_id",
+        "offline_hash",
+        "online_hash",
+        "normalization_version",
+        "checked_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "FeeScheduleSourceContract",
+      "failure_action": "fee_source_untrusted",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "fee_source_id",
+        "provider",
+        "fee_version",
+        "source_hash",
+        "effective_at"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "FeeScheduleVersionContract",
+      "failure_action": "fee_model_invalid",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "fee_version",
+        "provider",
+        "chain",
+        "effective_at",
+        "supersedes_version"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "FilesystemDiskPressurePolicy",
+      "failure_action": "storage_degraded",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "filesystem_path",
+        "free_bytes",
+        "wal_bytes",
+        "pressure_action"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "GateRetirementPolicy",
+      "failure_action": "gate_retirement_rejected",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "gate_id",
+        "retirement_reason",
+        "replacement_contract",
+        "evidence_package_id",
+        "retired_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "GeneratedClientContract",
+      "failure_action": "client_regeneration_required",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "client_name",
+        "source_schema_hash",
+        "generated_artifact_hash",
+        "generation_tool_version",
+        "checked_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "GracefulDegradationBoundary",
+      "failure_action": "degrade_fail_closed",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "boundary_id",
+        "degraded_component",
+        "allowed_modes",
+        "blocked_actions",
+        "operator_message"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "HumanReadableReasonContract",
+      "failure_action": "reason_missing",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "reason_code",
+        "human_message",
+        "operator_action",
+        "locale",
+        "owner"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "IdempotencyContract",
+      "failure_action": "reject_duplicate",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "decision_id",
+        "execution_id",
+        "idempotency_key",
+        "token_lifecycle_key",
+        "action"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "IdempotencyKeyNamespaceContract",
+      "failure_action": "reject_key",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "namespace",
+        "environment_id",
+        "route",
+        "hash_algorithm",
+        "collision_policy"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "IdentityMergeSplitContract",
+      "failure_action": "identity_dirty",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "merge_split_id",
+        "old_identity_key",
+        "new_identity_key",
+        "resolution_reason"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "ImageOCRSignalPolicy",
+      "failure_action": "ocr_signal_quarantined",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "message_id",
+        "ocr_engine_version",
+        "image_hash",
+        "confidence",
+        "policy_action"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "ImplementationDriftMonitor",
+      "failure_action": "implementation_drift_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "drift_id",
+        "spec_contract_id",
+        "runtime_location",
+        "drift_detected",
+        "detected_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "InFlightConfigRotationPolicy",
+      "failure_action": "config_rotation_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "rotation_id",
+        "old_config_hash",
+        "new_config_hash",
+        "affected_workers",
+        "safe_cutover_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "IncidentEvidenceFreezeContract",
+      "failure_action": "repair_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "freeze_id",
+        "incident_id",
+        "frozen_event_range",
+        "frozen_config_hash",
+        "frozen_at"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "IncidentPostmortemContract",
+      "failure_action": "repair_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "postmortem_id",
+        "incident_id",
+        "root_cause",
+        "corrective_actions",
+        "approved_at"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "InputSanitizationContract",
+      "failure_action": "shadow_only_security_alert",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "source",
+        "raw_value",
+        "normalized_value",
+        "payload_schema_valid",
+        "unsafe_pattern_detected"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "InvariantSamplingAudit",
+      "failure_action": "invariant_audit_failed",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "audit_id",
+        "invariant_id",
+        "sample_window",
+        "violation_count",
+        "audited_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "IssueEscalationFromMetricsContract",
+      "failure_action": "issue_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "metric_id",
+        "threshold",
+        "issue_id",
+        "escalation_owner",
+        "created_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "LabelDisputeResolutionContract",
+      "failure_action": "label_quarantined",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "dispute_id",
+        "label_id",
+        "resolution_action",
+        "resolved_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "LabelFinalizationContract",
+      "failure_action": "no_training_or_promotion",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "label_id",
+        "label_status",
+        "outcome_window_closed_at",
+        "supersedes_label_id"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "LedgerSnapshotHashContract",
+      "failure_action": "dirty_paper_data",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "ledger_snapshot_id",
+        "ledger_checkpoint_id",
+        "snapshot_hash",
+        "replay_hash",
+        "verified_at"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "LegalHoldContract",
+      "failure_action": "data_mutation_blocked",
+      "mode_target": "phase_1_hardening",
+      "required_fields": [
+        "legal_hold_id",
+        "data_scope",
+        "hold_reason",
+        "owner",
+        "expires_at"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "LogRedactionVerificationContract",
+      "failure_action": "log_stream_blocked",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "log_stream",
+        "secret_pattern_set",
+        "sample_hash",
+        "redaction_passed",
+        "checked_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "MachineReadableReasonContract",
+      "failure_action": "reason_missing",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "reason_code",
+        "machine_code",
+        "schema_version",
+        "blocking_contract",
+        "failure_action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ManualReplaySafetyContract",
+      "failure_action": "replay_aborted",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "replay_id",
+        "operator_id",
+        "side_effect_mode",
+        "allowed_write_targets",
+        "started_at"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "MarketRegimeInvalidatesEvidence",
+      "failure_action": "evidence_revalidation_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "regime_id",
+        "evidence_id",
+        "invalidating_signal",
+        "action",
+        "detected_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "MetricBackfillImpactContract",
+      "failure_action": "metric_backfill_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "backfill_id",
+        "metric_id",
+        "impact_scope",
+        "impact_report_hash"
+      ],
+      "section_id": "S02"
+    },
+    {
+      "contract_id": "MetricsWindowContract",
+      "failure_action": "metric_invalid",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "metric_id",
+        "window_id",
+        "window_start",
+        "window_end",
+        "metric_version"
+      ],
+      "section_id": "S02"
+    },
+    {
+      "contract_id": "MinimumViableTrustBoundary",
+      "failure_action": "mode_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "boundary_id",
+        "trusted_inputs",
+        "untrusted_inputs",
+        "required_contracts",
+        "failure_action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ModeReadinessMatrix",
+      "failure_action": "mode_blocked",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "mode",
+        "required_contracts",
+        "status",
+        "blocking_contracts"
+      ],
+      "section_id": "S19"
+    },
+    {
+      "contract_id": "ModelArtifactRuntimeCompatibilityContract",
+      "failure_action": "model_unloadable",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "model_snapshot_id",
+        "runtime_version",
+        "serialization_format",
+        "compatibility_result"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "ModelRollbackContract",
+      "failure_action": "shadow_only",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "rollback_id",
+        "from_model_snapshot_id",
+        "to_model_snapshot_id",
+        "rollback_verified_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "MutationCommandIdempotencyContract",
+      "failure_action": "reject_duplicate_mutation",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "command_id",
+        "idempotency_key",
+        "mutation_target",
+        "dedupe_hash",
+        "result_hash"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "NegativeControlContract",
+      "failure_action": "experiment_invalid",
+      "mode_target": "normal_tiny_promotion_blocking",
+      "required_fields": [
+        "control_id",
+        "control_group",
+        "expected_no_effect_metric",
+        "observed_effect",
+        "checked_at"
+      ],
+      "section_id": "S10"
+    },
+    {
+      "contract_id": "NoFillOutcome",
+      "failure_action": "no_fill_record_required",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "no_fill_reason",
+        "missed_net_peak30",
+        "no_fill_cost",
+        "no_fill_saved_loss"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "NotificationChannelIntegrityContract",
+      "failure_action": "notification_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "channel_id",
+        "destination_hash",
+        "signature_required",
+        "delivery_status",
+        "checked_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "NumericPrecisionContract",
+      "failure_action": "spec_dirty",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "decimal_scale",
+        "rounding_mode",
+        "overflow_policy",
+        "unit"
+      ],
+      "section_id": "S01"
+    },
+    {
+      "contract_id": "ObservationPolicyContract",
+      "failure_action": "observation_rejected",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "observation_id",
+        "observation_policy_version",
+        "allowed_sources",
+        "forbidden_fields",
+        "recorded_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "OpenPositionPolicyMigrationContract",
+      "failure_action": "open_position_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "position_id",
+        "old_exit_policy",
+        "new_exit_policy",
+        "migration_reason"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "OpenPositionValuationContract",
+      "failure_action": "open_position_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "position_id",
+        "valuation_ts",
+        "quote_source",
+        "valuation_price",
+        "valuation_hash"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "OperatorCognitiveLoadContract",
+      "failure_action": "operator_load_degraded",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "workflow_id",
+        "operator_role",
+        "max_parallel_alerts",
+        "current_alert_count",
+        "action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "OperatorTrainingCertificationContract",
+      "failure_action": "operator_action_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "operator_id",
+        "training_module",
+        "certification_status",
+        "expires_at",
+        "checked_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "OutcomeWindowCloseContract",
+      "failure_action": "label_not_final",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "label_id",
+        "window_start",
+        "window_end",
+        "window_closed_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "PaperCapitalLedgerContract",
+      "failure_action": "no_new_entry",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "capital_ledger_id",
+        "available_capital",
+        "reserved_capital",
+        "open_exposure",
+        "capital_ledger_hash"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "PaperModeSafetyBoundary",
+      "failure_action": "global_circuit_breaker",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "paper_mode_required",
+        "real_order_router_disabled",
+        "live_private_key_present",
+        "network_transaction_signing_enabled"
+      ],
+      "section_id": "S03"
+    },
+    {
+      "contract_id": "PaperPositionLedgerContract",
+      "failure_action": "dirty_paper_data",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "position_id",
+        "execution_id",
+        "decision_id",
+        "remaining_size",
+        "ledger_hash"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "ParserAmbiguityContract",
+      "failure_action": "observe_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "message_id",
+        "candidate_anchors",
+        "selected_anchor",
+        "ambiguity_reason"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "ParserCanaryCorpusContract",
+      "failure_action": "parser_promotion_blocked",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "corpus_id",
+        "parser_version",
+        "canary_case_count",
+        "failure_count",
+        "checked_at"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "ParserConfusablesContract",
+      "failure_action": "parser_output_quarantined",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "message_id",
+        "confusable_token",
+        "normalized_token",
+        "risk_class",
+        "policy_action"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "PartialRollbackPolicy",
+      "failure_action": "rollback_unverified",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "rollback_id",
+        "component_scope",
+        "dependency_scope",
+        "verification_plan",
+        "rolled_back_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "PipelineProgressInvariant",
+      "failure_action": "pipeline_degraded",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "pipeline_id",
+        "stage_name",
+        "max_stall_ms",
+        "last_progress_at",
+        "stall_action"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "PolicyActivationBarrierContract",
+      "failure_action": "mixed_fleet_no_entry",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "policy_bundle_id",
+        "activation_epoch",
+        "required_worker_ack_count",
+        "activated_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "PositionOwnershipTransferContract",
+      "failure_action": "ownership_transfer_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "position_id",
+        "from_owner",
+        "to_owner",
+        "transfer_reason"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "PostReleaseMonitoringWindow",
+      "failure_action": "release_monitoring_required",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "release_id",
+        "window_start",
+        "window_end",
+        "monitored_metrics",
+        "exit_status"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "PremiumSourceAccessHealthContract",
+      "failure_action": "source_access_degraded",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "source_id",
+        "access_probe_id",
+        "auth_state",
+        "last_success_at",
+        "failure_action"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "ProjectStopLossContract",
+      "failure_action": "stop_automatic_entry",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "scope",
+        "window",
+        "stop_criteria",
+        "action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ProjectionHandlerIdempotencyContract",
+      "failure_action": "projection_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "consumer_name",
+        "event_id",
+        "idempotency_key",
+        "apply_result_hash"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "ProjectionOrderingContract",
+      "failure_action": "projection_rebuild_required",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "aggregate_id",
+        "aggregate_seq",
+        "last_applied_seq",
+        "out_of_order_detected"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "ProjectionVersionIsolationContract",
+      "failure_action": "mixed_projection_blocked",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "projection_version",
+        "environment_id",
+        "active_dashboard_version",
+        "research_dashboard_version"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "PromotionEvidencePackageContract",
+      "failure_action": "promotion_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "package_id",
+        "evidence_hash",
+        "generated_at",
+        "approval_status"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ProviderByzantineQuorumContract",
+      "failure_action": "provider_untrusted",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "quorum_id",
+        "provider_set",
+        "conflict_policy",
+        "selected_provider"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderCachePoisoningGuard",
+      "failure_action": "provider_cache_dirty",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "cache_key",
+        "provider",
+        "poison_detected",
+        "quarantine_action"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderCoverageMapContract",
+      "failure_action": "coverage_gap_not_no_quote",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "provider",
+        "chain",
+        "pool_type",
+        "coverage_status",
+        "unsupported_reason"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderCredentialScopeContract",
+      "failure_action": "provider_credential_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "credential_id",
+        "provider",
+        "allowed_endpoints",
+        "allowed_modes",
+        "expires_at"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderRequestReplayContract",
+      "failure_action": "replay_incomplete",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "request_id",
+        "provider",
+        "request_hash",
+        "retry_count",
+        "decision_reason"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderResponseAuthenticityContract",
+      "failure_action": "provider_untrusted",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "response_id",
+        "provider",
+        "signature_status",
+        "transport_security",
+        "verified_at"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderTermsComplianceContract",
+      "failure_action": "provider_disabled",
+      "mode_target": "phase_1_hardening",
+      "required_fields": [
+        "provider",
+        "terms_version",
+        "allowed_use",
+        "compliance_status",
+        "reviewed_at"
+      ],
+      "section_id": "S17"
+    },
+    {
+      "contract_id": "QueueAckNackContract",
+      "failure_action": "queue_state_untrusted",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "queue_id",
+        "task_id",
+        "ack_state",
+        "nack_reason",
+        "recorded_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "QueueDurabilityContract",
+      "failure_action": "no_new_entry_for_queue",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "queue_id",
+        "task_id",
+        "durable_state",
+        "ack_state",
+        "created_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "QuoteIntentBindingContract",
+      "failure_action": "quote_invalid",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "quote_intent_id",
+        "side",
+        "size",
+        "route",
+        "pool",
+        "quote_mint",
+        "slippage_bps",
+        "quote_ts"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "RandomnessControlContract",
+      "failure_action": "experiment_invalid",
+      "mode_target": "normal_tiny_promotion_blocking",
+      "required_fields": [
+        "rng_seed",
+        "rng_version",
+        "randomization_unit",
+        "assignment_id"
+      ],
+      "section_id": "S10"
+    },
+    {
+      "contract_id": "RawProviderEvidenceContract",
+      "failure_action": "evidence_untrusted",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "provider",
+        "endpoint",
+        "request_hash",
+        "response_hash",
+        "request_id",
+        "latency_ms"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ReKeyingContract",
+      "failure_action": "identity_dirty",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "old_key",
+        "new_key",
+        "rekey_reason",
+        "supersedes_event_id"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "RealtimeCleanDetector",
+      "failure_action": "no_entry",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "quote_source",
+        "quote_age_sec",
+        "entry_quote_available",
+        "exit_quote_available",
+        "clean_standard_version"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "ReconciliationDiffContract",
+      "failure_action": "repair_audit_missing",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "reconciliation_id",
+        "before_hash",
+        "after_hash",
+        "impact_scope"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "ReferencePriceContract",
+      "failure_action": "label_unavailable",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "reference_price_type",
+        "reference_price",
+        "reference_price_ts",
+        "reference_price_quality"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "RegressionBudgetContract",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "budget_id",
+        "metric_id",
+        "allowed_regression",
+        "observed_regression",
+        "action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ReleaseReadinessReviewContract",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "review_id",
+        "release_id",
+        "required_evidence",
+        "approval_status",
+        "approved_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "ReplaySideEffectIsolationContract",
+      "failure_action": "replay_aborted",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "replay_id",
+        "side_effect_mode",
+        "write_targets_allowed",
+        "provider_calls_allowed"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "ResearchNotebookBoundaryContract",
+      "failure_action": "research_output_quarantined",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "notebook_id",
+        "data_scope",
+        "write_targets_allowed",
+        "promotion_allowed",
+        "owner"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ResourceExhaustionContract",
+      "failure_action": "degrade_low_priority",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "resource_type",
+        "pressure_level",
+        "pressure_action",
+        "safety_budget_remaining"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "ResumeDrainPolicy",
+      "failure_action": "no_normal_tiny",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "drain_id",
+        "queued_candidates_revalidated",
+        "expired_candidates_emitted",
+        "resume_drain_completed_at"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "RetryPolicyCatalogContract",
+      "failure_action": "retry_policy_missing",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "retry_family",
+        "backoff_policy",
+        "max_attempts",
+        "jitter_policy",
+        "owner"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "RetryStormControlContract",
+      "failure_action": "degrade_low_priority",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "retry_family",
+        "backoff_policy",
+        "max_concurrent_retries",
+        "p0_reserved_capacity"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "RiskRevalidationAfterEntryContract",
+      "failure_action": "exit_safety_priority",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "position_id",
+        "risk_event_id",
+        "risk_status",
+        "exit_safety_action"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "RollbackVerificationContract",
+      "failure_action": "rollback_unverified",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "rollback_id",
+        "from_version",
+        "to_version",
+        "verified_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "RootCauseTaxonomyVersioning",
+      "failure_action": "root_cause_unclassified",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "taxonomy_version",
+        "root_cause_code",
+        "severity",
+        "migration_policy",
+        "effective_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "RouteRegistryContract",
+      "failure_action": "observe_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "route_id",
+        "allowed_modes",
+        "direct_entry_allowed",
+        "kill_switch"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "RunbookFreshnessContract",
+      "failure_action": "runbook_refresh_required",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "runbook_id",
+        "owner",
+        "last_reviewed_at",
+        "max_age_days",
+        "freshness_status"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "RuntimeSpecAssertionContract",
+      "failure_action": "runtime_assert_failed",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "assertion_id",
+        "contract_id",
+        "runtime_location",
+        "failure_action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "SafeDefaultContract",
+      "failure_action": "fail_closed",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "unknown_type",
+        "default_action",
+        "allowed_modes",
+        "owning_contract"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "SafetyCaseContract",
+      "failure_action": "no_normal_tiny",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "safety_case_id",
+        "scope",
+        "core_hazards",
+        "mitigations",
+        "evidence_links"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "SafetyVsCaptureTradeoffContract",
+      "failure_action": "safety_case_review",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "tradeoff_id",
+        "safety_metric",
+        "capture_metric",
+        "chosen_policy",
+        "approved_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "ScheduledJobModeGateContract",
+      "failure_action": "job_disabled",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "job_name",
+        "mode",
+        "allowed_to_run",
+        "gate_reason",
+        "checked_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "SecretAccessAuditContract",
+      "failure_action": "secret_access_alert",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "secret_id",
+        "accessor_id",
+        "access_reason",
+        "audit_event_id",
+        "accessed_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "SelectionBiasDiagnosticContract",
+      "failure_action": "research_only",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "diagnostic_id",
+        "selection_policy_version",
+        "included_count",
+        "excluded_count",
+        "bias_result"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "ServiceReadinessProbeContract",
+      "failure_action": "service_not_ready",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "service_name",
+        "probe_id",
+        "health_status",
+        "dependency_status",
+        "checked_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "SignalCreditAssignmentContract",
+      "failure_action": "denominator_dirty",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "credited_signal_id",
+        "credit_assignment_reason",
+        "credit_policy_version"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "SilentWorkerDeathDetector",
+      "failure_action": "worker_restarted",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "worker_id",
+        "heartbeat_deadline",
+        "last_heartbeat_at",
+        "death_detected",
+        "action"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "SmallSampleDecisionPolicy",
+      "failure_action": "promotion_blocked",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "policy_id",
+        "sample_size",
+        "min_sample_size",
+        "decision_allowed",
+        "fallback_action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "SnapshotCompactionInvariantContract",
+      "failure_action": "snapshot_untrusted",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "snapshot_id",
+        "full_replay_hash",
+        "compaction_hash",
+        "verified_at"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "SnapshotCompactionReadBarrier",
+      "failure_action": "snapshot_untrusted",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "snapshot_id",
+        "compaction_seq",
+        "reader_checkpoint_seq",
+        "barrier_passed",
+        "checked_at"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "SourceAlphaDecayExitCriteria",
+      "failure_action": "source_demotion_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "source_id",
+        "alpha_metric",
+        "decay_window",
+        "exit_threshold",
+        "action"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "SourceAuthenticityContract",
+      "failure_action": "observe_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "source_id",
+        "channel_id",
+        "authenticity_status",
+        "evidence_hash"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "SourceDogLabelContract",
+      "failure_action": "denominator_dirty",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "source_dog_label_version",
+        "source_reference_price_type",
+        "source_label_window",
+        "source_label_available_at"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "SourceGapBackfillBoundary",
+      "failure_action": "backfill_research_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "backfill_id",
+        "source_id",
+        "gap_window",
+        "allowed_fields",
+        "backfilled_at"
+      ],
+      "section_id": "S05"
+    },
+    {
+      "contract_id": "SourceImpersonationDetector",
+      "failure_action": "source_quarantined",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "source_id",
+        "message_id",
+        "impersonation_signal",
+        "confidence",
+        "action"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "SourceRegistryContract",
+      "failure_action": "observe_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "telegram_source_id",
+        "telegram_channel_id",
+        "allowed_modes",
+        "source_status"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "SpecChangeImpactAnalysisContract",
+      "failure_action": "spec_change_blocked",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "spec_change_id",
+        "affected_contracts",
+        "affected_modes",
+        "impact_hash",
+        "approved_at"
+      ],
+      "section_id": "S01"
+    },
+    {
+      "contract_id": "SpecConsistencyLinterContract",
+      "failure_action": "spec_dirty",
+      "mode_target": "all_modes",
+      "required_fields": [
+        "linter_version",
+        "checked_sections",
+        "conflict_count",
+        "result"
+      ],
+      "section_id": "S01"
+    },
+    {
+      "contract_id": "StandardizedStopContract",
+      "failure_action": "no_model_promotion",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "stop_contract_version",
+        "stop_type",
+        "stop_threshold_pct",
+        "stop_price_type"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "StateVersionFencing",
+      "failure_action": "abort_execution",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "state_version_at_decision",
+        "state_version_at_execution",
+        "requires_revalidation_before_fill"
+      ],
+      "section_id": "S12"
+    },
+    {
+      "contract_id": "StaticPolicyEnforcementContract",
+      "failure_action": "ci_fail",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "static_check_id",
+        "forbidden_pattern",
+        "scan_target",
+        "result"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "SyntheticSentinelEventContract",
+      "failure_action": "projection_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "sentinel_id",
+        "event_type",
+        "expected_projection_delta",
+        "observed_projection_delta",
+        "checked_at"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "TelegramForwardedMessagePolicy",
+      "failure_action": "message_quarantined",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "message_id",
+        "forwarded_from",
+        "source_policy",
+        "trust_level",
+        "action"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "TelegramSessionSecurityContract",
+      "failure_action": "ingestion_disabled",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "session_id",
+        "account_id",
+        "auth_state",
+        "device_fingerprint_hash",
+        "checked_at"
+      ],
+      "section_id": "S04"
+    },
+    {
+      "contract_id": "ThirdPartyStatusCorrelationContract",
+      "failure_action": "dependency_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "dependency_name",
+        "status_source",
+        "incident_id",
+        "correlation_result",
+        "checked_at"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "ThreadPoolIsolationContract",
+      "failure_action": "resource_degraded",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "pool_name",
+        "workload_class",
+        "max_workers",
+        "reserved_capacity",
+        "checked_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "TieBreakOrderingContract",
+      "failure_action": "replay_nondeterministic",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "monotonic_ingest_seq",
+        "source_seq",
+        "event_type_priority",
+        "event_id"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "TopFixQueueContract",
+      "failure_action": "issue_required",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "fix_id",
+        "blocker_code",
+        "first_fix_that_would_change_decision",
+        "owner",
+        "acceptance_test"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "TradeOutcomeLabelContract",
+      "failure_action": "research_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "trade_outcome_label_version",
+        "counterfactual_entry_ts",
+        "simulated_fill_price",
+        "trade_label_available_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "TrainingPoisoningGuard",
+      "failure_action": "model_promotion_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "training_run_id",
+        "dataset_hash",
+        "poison_signal_count",
+        "quarantine_action",
+        "checked_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "TrainingServingSkewContract",
+      "failure_action": "no_model_promotion",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "training_feature_code_hash",
+        "serving_feature_code_hash",
+        "normalization_version",
+        "skew_check_result"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "TransactionalOutboxContract",
+      "failure_action": "shadow_only_if_stuck",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "outbox_id",
+        "event_type",
+        "aggregate_id",
+        "idempotency_key",
+        "status"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "UnknownUnknownsSamplingContract",
+      "failure_action": "manual_review_required",
+      "mode_target": "normal_tiny_governance",
+      "required_fields": [
+        "sample_id",
+        "population_scope",
+        "sampling_policy",
+        "review_result",
+        "sampled_at"
+      ],
+      "section_id": "S18"
+    },
+    {
+      "contract_id": "WaiverPolicyContract",
+      "failure_action": "waiver_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "waiver_id",
+        "contract_id",
+        "scope",
+        "expires_at",
+        "non_waivable"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "WarmStartSafetyContract",
+      "failure_action": "worker_restart_required",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "worker_id",
+        "warm_start_state_hash",
+        "required_snapshot_hash",
+        "safe_to_resume",
+        "checked_at"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "WorkerFleetConsistencyContract",
+      "failure_action": "mixed_fleet_no_entry",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "worker_id",
+        "build_hash",
+        "runtime_config_hash",
+        "policy_bundle_id",
+        "heartbeat_at"
+      ],
+      "section_id": "S16"
+    },
+    {
+      "contract_id": "WorkerHeartbeatContract",
+      "failure_action": "worker_unhealthy",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "worker_id",
+        "worker_role",
+        "heartbeat_at",
+        "heartbeat_deadline",
+        "build_hash"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "WritePathRegistryContract",
+      "failure_action": "ci_fail",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "write_path_id",
+        "module",
+        "target_store",
+        "requires_outbox",
+        "owner"
+      ],
+      "section_id": "S16"
+    }
+  ],
+  "generated_artifact_hash": "34d9b955d1f6bcec38a7c6a05694c2fba45dadae5d6819514751ca24ca6e67a5",
+  "generation_tool_version": "v2.7.0.contract_client_generator.v1",
+  "source_schema_file": "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
+  "source_schema_hash": "629cd269adbfdecb48908bd47660416dc95d3028945aa6e28443b23767eafe48"
+}
