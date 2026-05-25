@@ -810,6 +810,14 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert matrix["contract_statuses"]["StandardizedStopContract"]["status"] == "pass"
     assert matrix["contract_statuses"]["ExAnteFeasibility"]["status"] == "pass"
     assert matrix["contract_statuses"]["EarliestActionableTime"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ParserCanaryCorpusContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ParserAmbiguityContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["TelegramForwardedMessagePolicy"]["status"] == "pass"
+    assert matrix["contract_statuses"]["PremiumSourceAccessHealthContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SourceAuthenticityContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ParserConfusablesContract"]["status"] == "pass"
+    assert matrix["contract_statuses"]["ImageOCRSignalPolicy"]["status"] == "pass"
+    assert matrix["contract_statuses"]["SourceImpersonationDetector"]["status"] == "pass"
     assert matrix["modes"]["observe_only"]["status"] == "allowed"
     assert "NumericPrecisionContract" in matrix["modes"]["observe_only"]["required_contracts"]
     assert "CICDMergeGateContract" in matrix["modes"]["observe_only"]["required_contracts"]
@@ -825,6 +833,8 @@ def test_mode_readiness_reports_passed_evidence_and_blocks_unproven_modes(tmp_pa
     assert "StandardizedStopContract" in matrix["modes"]["shadow"]["required_contracts"]
     assert "ExAnteFeasibility" in matrix["modes"]["shadow"]["required_contracts"]
     assert "EarliestActionableTime" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "ParserCanaryCorpusContract" in matrix["modes"]["shadow"]["required_contracts"]
+    assert "SourceImpersonationDetector" in matrix["modes"]["shadow"]["required_contracts"]
     assert matrix["highest_allowed_mode"] == "shadow"
     assert matrix["modes"]["shadow"]["blocking_contracts"] == []
     assert matrix["modes"]["ultra_tiny"]["status"] == "blocked"

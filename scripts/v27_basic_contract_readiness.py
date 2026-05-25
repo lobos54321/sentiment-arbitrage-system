@@ -26,6 +26,7 @@ from v27_spec_validate import CATALOG_PATH, ENTRY_MODE_REGISTRY_PATH, MANIFEST_P
 
 DEFAULT_CHAIN_CONFIG = PROJECT_ROOT / "config" / "v27-chain-config.json"
 DEFAULT_SOURCE_REGISTRY = PROJECT_ROOT / "config" / "v27-source-registry.json"
+DEFAULT_SOURCE_PARSER_AUTH_POLICY = PROJECT_ROOT / "config" / "v27-source-parser-auth-policy.json"
 DEFAULT_CHANNELS_CSV = PROJECT_ROOT / "config" / "channels.csv"
 DEFAULT_SYSTEM_CONFIG = PROJECT_ROOT / "config" / "system.config.json"
 DEFAULT_ENTRY_MODE_REGISTRY = PROJECT_ROOT / "config" / "entry-mode-registry.json"
@@ -74,6 +75,60 @@ TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS = (
     "auth_state",
     "device_fingerprint_hash",
     "checked_at",
+)
+PARSER_AMBIGUITY_REQUIRED_FIELDS = (
+    "message_id",
+    "candidate_anchors",
+    "selected_anchor",
+    "ambiguity_reason",
+)
+PARSER_CANARY_CORPUS_REQUIRED_FIELDS = (
+    "corpus_id",
+    "parser_version",
+    "canary_case_count",
+    "failure_count",
+    "checked_at",
+)
+TELEGRAM_FORWARDED_MESSAGE_REQUIRED_FIELDS = (
+    "message_id",
+    "forwarded_from",
+    "source_policy",
+    "trust_level",
+    "action",
+)
+PREMIUM_SOURCE_ACCESS_REQUIRED_FIELDS = (
+    "source_id",
+    "access_probe_id",
+    "auth_state",
+    "last_success_at",
+    "failure_action",
+)
+SOURCE_AUTHENTICITY_REQUIRED_FIELDS = (
+    "source_id",
+    "channel_id",
+    "authenticity_status",
+    "evidence_hash",
+)
+PARSER_CONFUSABLES_REQUIRED_FIELDS = (
+    "message_id",
+    "confusable_token",
+    "normalized_token",
+    "risk_class",
+    "policy_action",
+)
+IMAGE_OCR_SIGNAL_REQUIRED_FIELDS = (
+    "message_id",
+    "ocr_engine_version",
+    "image_hash",
+    "confidence",
+    "policy_action",
+)
+SOURCE_IMPERSONATION_REQUIRED_FIELDS = (
+    "source_id",
+    "message_id",
+    "impersonation_signal",
+    "confidence",
+    "action",
 )
 QUEUE_ACK_NACK_REQUIRED_FIELDS = (
     "queue_id",
@@ -5407,6 +5462,357 @@ def verify_source_registry(source_registry_path=DEFAULT_SOURCE_REGISTRY, channel
     )
 
 
+def _source_registry_index(source_registry_path):
+    registry = _load_json(source_registry_path)
+    sources = registry.get("sources") if isinstance(registry, dict) else []
+    by_id = {}
+    for source in sources if isinstance(sources, list) else []:
+        if isinstance(source, dict) and source.get("telegram_source_id"):
+            by_id[str(source["telegram_source_id"])] = source
+    shadow_source_ids = sorted(
+        source_id
+        for source_id, source in by_id.items()
+        if str(source.get("source_status") or "").lower() == "active"
+        and "shadow" in (source.get("allowed_modes") or [])
+    )
+    return by_id, shadow_source_ids
+
+
+def _sha256_hex_like(value):
+    return bool(re.fullmatch(r"[0-9a-f]{64}", str(value or "")))
+
+
+def _confidence(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0 or parsed > 1:
+        return None
+    return parsed
+
+
+def _source_parser_policy_base(policy_path, source_registry_path, channels_csv):
+    try:
+        policy = _load_json(policy_path)
+        policy_error = None
+    except Exception as exc:
+        policy = {}
+        policy_error = {"policy_path": str(policy_path), "error": str(exc)}
+    if not isinstance(policy, dict):
+        policy = {}
+        policy_error = {"policy_path": str(policy_path), "error": "source_parser_auth_policy_not_object"}
+
+    source_anchor_violations, source_errors = _verify_source_anchors(policy.get("source_anchors"))
+    try:
+        source_by_id, shadow_source_ids = _source_registry_index(source_registry_path)
+        registry_error = None
+    except Exception as exc:
+        source_by_id, shadow_source_ids = {}, []
+        registry_error = {"source_registry_path": str(source_registry_path), "error": str(exc)}
+    base = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "source_registry_path": str(source_registry_path),
+        "channels_csv_count": len(_csv_channel_names(channels_csv)),
+        "source_anchor_violations": source_anchor_violations,
+        "source_errors": source_errors,
+        "registry_error": registry_error,
+        "shadow_source_ids": shadow_source_ids,
+    }
+    base_failed = bool(policy_error or source_anchor_violations or source_errors or registry_error)
+    if policy_error:
+        base["policy_error"] = policy_error
+    return policy, source_by_id, shadow_source_ids, base, base_failed
+
+
+def _source_parser_contract(contract_id, passed, reason, base_evidence, evidence):
+    return _contract(contract_id, passed, reason, {**base_evidence, **evidence})
+
+
+def _parser_ambiguity_evidence(records):
+    malformed = []
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, PARSER_AMBIGUITY_REQUIRED_FIELDS)
+        violations = []
+        candidate_anchors = item.get("candidate_anchors") if isinstance(item, dict) else None
+        selected_anchor = item.get("selected_anchor") if isinstance(item, dict) else None
+        if not isinstance(candidate_anchors, list) or len(candidate_anchors) < 2:
+            violations.append("candidate_anchors_need_two_or_more")
+        elif selected_anchor not in candidate_anchors:
+            violations.append("selected_anchor_not_in_candidates")
+        if missing or violations:
+            malformed.append({"index": index, "message_id": item.get("message_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "ambiguity_case_count": len(records) if isinstance(records, list) else 0,
+        "malformed_ambiguity_cases": malformed,
+    }
+
+
+def _parser_canary_evidence(corpus):
+    if not isinstance(corpus, dict):
+        corpus = {}
+    cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
+    corpus_record = {
+        "corpus_id": corpus.get("corpus_id"),
+        "parser_version": corpus.get("parser_version"),
+        "canary_case_count": len(cases),
+        "failure_count": corpus.get("failure_count"),
+        "checked_at": corpus.get("checked_at"),
+    }
+    missing = _missing_required_fields(corpus_record, PARSER_CANARY_CORPUS_REQUIRED_FIELDS)
+    malformed = []
+    allowed_signal_types = {"NEW_TRENDING", "ATH"}
+    for index, item in enumerate(cases):
+        required = ("message_id", "raw_message_hash", "candidate_anchors", "selected_anchor", "ambiguity_reason", "expected_signal_type", "expected_chain")
+        item_missing = _missing_required_fields(item, required)
+        violations = []
+        candidate_anchors = item.get("candidate_anchors") if isinstance(item, dict) else None
+        selected_anchor = item.get("selected_anchor") if isinstance(item, dict) else None
+        if not _sha256_hex_like(item.get("raw_message_hash") if isinstance(item, dict) else None):
+            violations.append("raw_message_hash_not_sha256")
+        if not isinstance(candidate_anchors, list) or selected_anchor not in candidate_anchors:
+            violations.append("selected_anchor_not_in_candidates")
+        if item.get("expected_signal_type") not in allowed_signal_types:
+            violations.append("unexpected_signal_type")
+        if item_missing or violations:
+            malformed.append({"index": index, "message_id": item.get("message_id") if isinstance(item, dict) else None, "missing_fields": item_missing, "violations": violations})
+    return {
+        **corpus_record,
+        "missing_corpus_fields": missing,
+        "checked_at_valid": _parse_iso_ts(corpus.get("checked_at")) is not None,
+        "malformed_canary_cases": malformed,
+    }
+
+
+def _forwarded_message_evidence(records, source_by_id):
+    malformed = []
+    accepted_registered = 0
+    quarantined_unknown = 0
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, TELEGRAM_FORWARDED_MESSAGE_REQUIRED_FIELDS)
+        violations = []
+        forwarded_from = str(item.get("forwarded_from") or "") if isinstance(item, dict) else ""
+        action = item.get("action") if isinstance(item, dict) else None
+        known_source = forwarded_from in source_by_id
+        if action not in {"accept_with_source_attribution", "message_quarantined", "source_quarantined"}:
+            violations.append("unknown_forwarded_action")
+        if known_source and action == "accept_with_source_attribution":
+            accepted_registered += 1
+        if not known_source and action in {"message_quarantined", "source_quarantined"}:
+            quarantined_unknown += 1
+        if not known_source and action == "accept_with_source_attribution":
+            violations.append("unknown_source_accepted")
+        if missing or violations:
+            malformed.append({"index": index, "message_id": item.get("message_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "forwarded_policy_count": len(records) if isinstance(records, list) else 0,
+        "accepted_registered_forwarded_count": accepted_registered,
+        "quarantined_unknown_forwarded_count": quarantined_unknown,
+        "malformed_forwarded_policies": malformed,
+    }
+
+
+def _premium_source_access_evidence(records, source_by_id, shadow_source_ids):
+    malformed = []
+    probed = set()
+    allowed_auth_states = {"credential_required_and_cache_supported", "authenticated", "cache_available"}
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, PREMIUM_SOURCE_ACCESS_REQUIRED_FIELDS)
+        violations = []
+        source_id = str(item.get("source_id") or "") if isinstance(item, dict) else ""
+        if source_id not in source_by_id:
+            violations.append("unknown_source_id")
+        else:
+            probed.add(source_id)
+        if item.get("auth_state") not in allowed_auth_states:
+            violations.append("unsupported_auth_state")
+        if _parse_iso_ts(item.get("last_success_at") if isinstance(item, dict) else None) is None:
+            violations.append("last_success_at_invalid")
+        if item.get("failure_action") != "source_access_degraded":
+            violations.append("unexpected_failure_action")
+        if missing or violations:
+            malformed.append({"index": index, "source_id": source_id, "missing_fields": missing, "violations": violations})
+    missing_probe_source_ids = sorted(set(shadow_source_ids) - probed)
+    return {
+        "access_probe_count": len(records) if isinstance(records, list) else 0,
+        "missing_probe_source_ids": missing_probe_source_ids,
+        "malformed_access_probes": malformed,
+    }
+
+
+def _source_authenticity_evidence(records, source_by_id, shadow_source_ids):
+    malformed = []
+    verified = set()
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, SOURCE_AUTHENTICITY_REQUIRED_FIELDS)
+        violations = []
+        source_id = str(item.get("source_id") or "") if isinstance(item, dict) else ""
+        source = source_by_id.get(source_id)
+        if not source:
+            violations.append("unknown_source_id")
+        elif str(item.get("channel_id")) != str(source.get("telegram_channel_id")):
+            violations.append("channel_id_mismatch")
+        if item.get("authenticity_status") not in {"verified", "registered"}:
+            violations.append("authenticity_status_not_verified")
+        if not _sha256_hex_like(item.get("evidence_hash") if isinstance(item, dict) else None):
+            violations.append("evidence_hash_not_sha256")
+        if source and not violations:
+            verified.add(source_id)
+        if missing or violations:
+            malformed.append({"index": index, "source_id": source_id, "missing_fields": missing, "violations": violations})
+    missing_authenticity_source_ids = sorted(set(shadow_source_ids) - verified)
+    return {
+        "authenticity_check_count": len(records) if isinstance(records, list) else 0,
+        "missing_authenticity_source_ids": missing_authenticity_source_ids,
+        "malformed_authenticity_checks": malformed,
+    }
+
+
+def _confusables_evidence(records):
+    malformed = []
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, PARSER_CONFUSABLES_REQUIRED_FIELDS)
+        violations = []
+        if item.get("policy_action") not in {"parser_output_quarantined", "manual_review"}:
+            violations.append("unexpected_policy_action")
+        if missing or violations:
+            malformed.append({"index": index, "message_id": item.get("message_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "confusable_case_count": len(records) if isinstance(records, list) else 0,
+        "malformed_confusable_cases": malformed,
+    }
+
+
+def _image_ocr_evidence(records):
+    malformed = []
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, IMAGE_OCR_SIGNAL_REQUIRED_FIELDS)
+        violations = []
+        confidence = _confidence(item.get("confidence") if isinstance(item, dict) else None)
+        action = item.get("policy_action") if isinstance(item, dict) else None
+        if confidence is None:
+            violations.append("confidence_invalid")
+        elif confidence < 0.8 and action != "ocr_signal_quarantined":
+            violations.append("low_confidence_not_quarantined")
+        elif confidence >= 0.8 and action not in {"manual_review", "ocr_signal_quarantined"}:
+            violations.append("high_confidence_action_invalid")
+        if not _sha256_hex_like(item.get("image_hash") if isinstance(item, dict) else None):
+            violations.append("image_hash_not_sha256")
+        if missing or violations:
+            malformed.append({"index": index, "message_id": item.get("message_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "ocr_policy_count": len(records) if isinstance(records, list) else 0,
+        "malformed_ocr_policies": malformed,
+    }
+
+
+def _impersonation_evidence(records, source_by_id):
+    malformed = []
+    high_confidence_quarantine_count = 0
+    for index, item in enumerate(records if isinstance(records, list) else []):
+        missing = _missing_required_fields(item, SOURCE_IMPERSONATION_REQUIRED_FIELDS)
+        violations = []
+        source_id = str(item.get("source_id") or "") if isinstance(item, dict) else ""
+        confidence = _confidence(item.get("confidence") if isinstance(item, dict) else None)
+        action = item.get("action") if isinstance(item, dict) else None
+        if source_id not in source_by_id:
+            violations.append("unknown_source_id")
+        if confidence is None:
+            violations.append("confidence_invalid")
+        elif confidence >= 0.8:
+            if action != "source_quarantined":
+                violations.append("high_confidence_not_quarantined")
+            else:
+                high_confidence_quarantine_count += 1
+        elif action not in {"manual_review", "source_quarantined"}:
+            violations.append("low_confidence_action_invalid")
+        if missing or violations:
+            malformed.append({"index": index, "source_id": source_id, "message_id": item.get("message_id") if isinstance(item, dict) else None, "missing_fields": missing, "violations": violations})
+    return {
+        "impersonation_check_count": len(records) if isinstance(records, list) else 0,
+        "high_confidence_quarantine_count": high_confidence_quarantine_count,
+        "malformed_impersonation_checks": malformed,
+    }
+
+
+def verify_source_parser_authenticity_contracts(
+    policy_path=DEFAULT_SOURCE_PARSER_AUTH_POLICY,
+    source_registry_path=DEFAULT_SOURCE_REGISTRY,
+    channels_csv=DEFAULT_CHANNELS_CSV,
+):
+    policy, source_by_id, shadow_source_ids, base, base_failed = _source_parser_policy_base(policy_path, source_registry_path, channels_csv)
+
+    canary = _parser_canary_evidence(policy.get("parser_canary_corpus"))
+    ambiguity = _parser_ambiguity_evidence(policy.get("parser_ambiguity_cases"))
+    forwarded = _forwarded_message_evidence(policy.get("forwarded_message_policy"), source_by_id)
+    access = _premium_source_access_evidence(policy.get("premium_source_access_probes"), source_by_id, shadow_source_ids)
+    authenticity = _source_authenticity_evidence(policy.get("source_authenticity_checks"), source_by_id, shadow_source_ids)
+    confusables = _confusables_evidence(policy.get("parser_confusables_cases"))
+    ocr = _image_ocr_evidence(policy.get("image_ocr_signal_policy"))
+    impersonation = _impersonation_evidence(policy.get("source_impersonation_checks"), source_by_id)
+
+    return [
+        _source_parser_contract(
+            "ParserCanaryCorpusContract",
+            not base_failed and canary["canary_case_count"] > 0 and canary["failure_count"] == 0 and canary["checked_at_valid"] and not canary["missing_corpus_fields"] and not canary["malformed_canary_cases"],
+            "parser_canary_corpus_missing_malformed_or_failing",
+            base,
+            canary,
+        ),
+        _source_parser_contract(
+            "ParserAmbiguityContract",
+            not base_failed and ambiguity["ambiguity_case_count"] > 0 and not ambiguity["malformed_ambiguity_cases"],
+            "parser_ambiguity_policy_missing_malformed_or_unenforced",
+            base,
+            ambiguity,
+        ),
+        _source_parser_contract(
+            "TelegramForwardedMessagePolicy",
+            not base_failed and forwarded["forwarded_policy_count"] > 0 and forwarded["accepted_registered_forwarded_count"] > 0 and forwarded["quarantined_unknown_forwarded_count"] > 0 and not forwarded["malformed_forwarded_policies"],
+            "telegram_forwarded_message_policy_missing_malformed_or_bypassable",
+            base,
+            forwarded,
+        ),
+        _source_parser_contract(
+            "PremiumSourceAccessHealthContract",
+            not base_failed and access["access_probe_count"] > 0 and not access["missing_probe_source_ids"] and not access["malformed_access_probes"],
+            "premium_source_access_missing_malformed_or_degraded",
+            base,
+            access,
+        ),
+        _source_parser_contract(
+            "SourceAuthenticityContract",
+            not base_failed and authenticity["authenticity_check_count"] > 0 and not authenticity["missing_authenticity_source_ids"] and not authenticity["malformed_authenticity_checks"],
+            "source_authenticity_missing_malformed_or_unverified",
+            base,
+            authenticity,
+        ),
+        _source_parser_contract(
+            "ParserConfusablesContract",
+            not base_failed and confusables["confusable_case_count"] > 0 and not confusables["malformed_confusable_cases"],
+            "parser_confusables_missing_malformed_or_unenforced",
+            base,
+            confusables,
+        ),
+        _source_parser_contract(
+            "ImageOCRSignalPolicy",
+            not base_failed and ocr["ocr_policy_count"] > 0 and not ocr["malformed_ocr_policies"],
+            "image_ocr_policy_missing_malformed_or_unenforced",
+            base,
+            ocr,
+        ),
+        _source_parser_contract(
+            "SourceImpersonationDetector",
+            not base_failed and impersonation["impersonation_check_count"] > 0 and impersonation["high_confidence_quarantine_count"] > 0 and not impersonation["malformed_impersonation_checks"],
+            "source_impersonation_detector_missing_malformed_or_unenforced",
+            base,
+            impersonation,
+        ),
+    ]
+
+
 def verify_input_sanitization():
     sample = {
         "id": 1,
@@ -5696,6 +6102,7 @@ def build_basic_contract_readiness(
     *,
     chain_config_path=DEFAULT_CHAIN_CONFIG,
     source_registry_path=DEFAULT_SOURCE_REGISTRY,
+    source_parser_auth_policy_path=DEFAULT_SOURCE_PARSER_AUTH_POLICY,
     channels_csv=DEFAULT_CHANNELS_CSV,
     system_config_path=DEFAULT_SYSTEM_CONFIG,
     manifest_path=MANIFEST_PATH,
@@ -5738,6 +6145,11 @@ def build_basic_contract_readiness(
             verify_paper_mode_safety(env=env),
             verify_chain_config(chain_config_path, system_config_path),
             verify_source_registry(source_registry_path, channels_csv),
+            *verify_source_parser_authenticity_contracts(
+                policy_path=source_parser_auth_policy_path,
+                source_registry_path=source_registry_path,
+                channels_csv=channels_csv,
+            ),
             verify_input_sanitization(),
             verify_safe_default(registry_path=registry_path),
             verify_project_stop_loss(env=env),
@@ -5831,6 +6243,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chain-config", default=str(DEFAULT_CHAIN_CONFIG))
     parser.add_argument("--source-registry", default=str(DEFAULT_SOURCE_REGISTRY))
+    parser.add_argument("--source-parser-auth-policy", default=str(DEFAULT_SOURCE_PARSER_AUTH_POLICY))
     parser.add_argument("--channels-csv", default=str(DEFAULT_CHANNELS_CSV))
     parser.add_argument("--system-config", default=str(DEFAULT_SYSTEM_CONFIG))
     parser.add_argument("--manifest", default=str(MANIFEST_PATH))
@@ -5867,6 +6280,7 @@ def main():
     report = build_basic_contract_readiness(
         chain_config_path=Path(args.chain_config),
         source_registry_path=Path(args.source_registry),
+        source_parser_auth_policy_path=Path(args.source_parser_auth_policy),
         channels_csv=Path(args.channels_csv),
         system_config_path=Path(args.system_config),
         manifest_path=Path(args.manifest),

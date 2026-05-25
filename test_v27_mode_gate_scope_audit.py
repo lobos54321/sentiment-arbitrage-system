@@ -20,8 +20,8 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
         | set(MODE_REQUIREMENTS["normal_tiny"])
     )
     assert normal["scope_complete"] is False
-    assert shadow["missing_count"] == 13
-    assert normal["missing_count"] == 63
+    assert shadow["missing_count"] == 5
+    assert normal["missing_count"] == 55
     assert mvp["missing_count"] == 0
     assert "AccessControlContract" not in normal["missing_contracts"]
     assert "AggregateBoundaryContract" not in normal["missing_contracts"]
@@ -81,6 +81,14 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "StandardizedStopContract" not in shadow["missing_contracts"]
     assert "ExAnteFeasibility" not in shadow["missing_contracts"]
     assert "EarliestActionableTime" not in shadow["missing_contracts"]
+    assert "ParserCanaryCorpusContract" not in shadow["missing_contracts"]
+    assert "ParserAmbiguityContract" not in shadow["missing_contracts"]
+    assert "TelegramForwardedMessagePolicy" not in shadow["missing_contracts"]
+    assert "PremiumSourceAccessHealthContract" not in shadow["missing_contracts"]
+    assert "SourceAuthenticityContract" not in shadow["missing_contracts"]
+    assert "ParserConfusablesContract" not in shadow["missing_contracts"]
+    assert "ImageOCRSignalPolicy" not in shadow["missing_contracts"]
+    assert "SourceImpersonationDetector" not in shadow["missing_contracts"]
     assert "WritePathRegistryContract" not in normal["missing_contracts"]
     assert "ProviderByzantineQuorumContract" in normal["missing_contracts"]
     assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is False
@@ -122,5 +130,5 @@ def test_mode_readiness_exposes_current_gate_vs_final_spec_scope(tmp_path):
     assert matrix["gate_scope"]["scope_audit_schema_version"] == "v2.7.0.mode_gate_scope_audit.v1"
     assert matrix["gate_scope"]["health"]["final_normal_tiny_blocking_scope_complete"] is False
     assert matrix["health"]["final_spec_normal_tiny_ready"] is False
-    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 63
+    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 55
     assert matrix["health"]["current_gate_normal_tiny_ready"] is False

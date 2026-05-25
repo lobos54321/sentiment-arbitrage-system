@@ -51,6 +51,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_service_readiness_probe_contract,
     verify_secret_access_audit_contract,
     verify_silent_worker_death_detector_contract,
+    verify_source_parser_authenticity_contracts,
     verify_top_fix_queue,
     verify_telegram_session_security_contract,
     verify_waiver_policy,
@@ -73,6 +74,14 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "PaperModeSafetyBoundary",
         "ChainConfigContract",
         "SourceRegistryContract",
+        "ParserCanaryCorpusContract",
+        "ParserAmbiguityContract",
+        "TelegramForwardedMessagePolicy",
+        "PremiumSourceAccessHealthContract",
+        "SourceAuthenticityContract",
+        "ParserConfusablesContract",
+        "ImageOCRSignalPolicy",
+        "SourceImpersonationDetector",
         "InputSanitizationContract",
         "SafeDefaultContract",
         "ProjectStopLossContract",
@@ -122,6 +131,44 @@ def test_basic_contract_readiness_passes_seed_foundation():
         "DashboardActionSeparationContract",
     ):
         assert report["contracts"][contract_id]["status"] == "pass"
+
+
+def test_source_parser_authenticity_policy_verifies_shadow_contracts():
+    reports = {item["contract_id"]: item for item in verify_source_parser_authenticity_contracts()}
+
+    for contract_id in (
+        "ParserCanaryCorpusContract",
+        "ParserAmbiguityContract",
+        "TelegramForwardedMessagePolicy",
+        "PremiumSourceAccessHealthContract",
+        "SourceAuthenticityContract",
+        "ParserConfusablesContract",
+        "ImageOCRSignalPolicy",
+        "SourceImpersonationDetector",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["ParserCanaryCorpusContract"]["evidence"]["failure_count"] == 0
+    assert reports["ParserAmbiguityContract"]["evidence"]["malformed_ambiguity_cases"] == []
+    assert reports["TelegramForwardedMessagePolicy"]["evidence"]["quarantined_unknown_forwarded_count"] == 1
+    assert reports["PremiumSourceAccessHealthContract"]["evidence"]["missing_probe_source_ids"] == []
+    assert reports["SourceAuthenticityContract"]["evidence"]["missing_authenticity_source_ids"] == []
+    assert reports["ImageOCRSignalPolicy"]["evidence"]["malformed_ocr_policies"] == []
+    assert reports["SourceImpersonationDetector"]["evidence"]["high_confidence_quarantine_count"] == 1
+
+
+def test_source_parser_authenticity_policy_blocks_bad_ambiguity_case(tmp_path):
+    policy = json.loads(Path("config/v27-source-parser-auth-policy.json").read_text(encoding="utf-8"))
+    policy["parser_ambiguity_cases"][0]["selected_anchor"] = "missing_anchor"
+    policy_path = tmp_path / "source-parser-auth-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_source_parser_authenticity_contracts(policy_path=policy_path)}
+
+    ambiguity = reports["ParserAmbiguityContract"]
+    assert ambiguity["status"] == "missing_evidence"
+    assert ambiguity["blocking_reason"] == "parser_ambiguity_policy_missing_malformed_or_unenforced"
+    assert ambiguity["evidence"]["malformed_ambiguity_cases"][0]["violations"] == ["selected_anchor_not_in_candidates"]
 
 
 def test_numeric_precision_policy_verifies_units_samples_and_source_anchors():

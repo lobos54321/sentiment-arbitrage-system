@@ -1,0 +1,165 @@
+{
+  "schema_version": "v2.7.0.source_parser_auth_policy.v1",
+  "scope": "v27_shadow_source_parser_authenticity_readiness",
+  "failure_action": "source_parser_auth_blocked",
+  "coverage": {
+    "source_registry_file": "config/v27-source-registry.json",
+    "channels_csv_file": "config/channels.csv",
+    "premium_listener_source_file": "src/inputs/premium-channel-listener.js",
+    "telegram_parser_source_file": "src/inputs/telegram-parser.js",
+    "mirror_source_file": "scripts/v27_mirror_telegram_signals.py",
+    "basic_readiness_source_file": "scripts/v27_basic_contract_readiness.py"
+  },
+  "source_anchors": [
+    {
+      "source_file": "scripts/v27_mirror_telegram_signals.py",
+      "anchor": "RAW_TEXT_FIELDS ="
+    },
+    {
+      "source_file": "scripts/v27_mirror_telegram_signals.py",
+      "anchor": "raw_message_hash"
+    },
+    {
+      "source_file": "src/inputs/premium-channel-listener.js",
+      "anchor": "SOL_ADDRESS_RE"
+    },
+    {
+      "source_file": "src/inputs/premium-channel-listener.js",
+      "anchor": "_handleMessage(event)"
+    },
+    {
+      "source_file": "src/inputs/telegram-parser.js",
+      "anchor": "forward_from_chat"
+    }
+  ],
+  "parser_canary_corpus": {
+    "corpus_id": "v27-premium-telegram-parser-canary-v1",
+    "parser_version": "legacy_premium_signal_seed_v0.1",
+    "checked_at": "2026-05-26T00:00:00Z",
+    "failure_count": 0,
+    "cases": [
+      {
+        "message_id": "canary_not_ath_clean_signal",
+        "raw_message_hash": "0e54bc0a9c9d1a3438a5a2c5e2d7e2f0be90ef02b67ed03fe81af4d602e43b3b",
+        "candidate_anchors": ["token_ca", "symbol", "market_cap"],
+        "selected_anchor": "token_ca",
+        "ambiguity_reason": "contract_address_priority",
+        "expected_signal_type": "NEW_TRENDING",
+        "expected_chain": "SOL"
+      },
+      {
+        "message_id": "canary_ath_clean_signal",
+        "raw_message_hash": "f42bc44f201a52781dc512b0422c686fd0f4a9e27a64920b2688dc77d5d6c1ac",
+        "candidate_anchors": ["token_ca", "symbol", "ath_gain"],
+        "selected_anchor": "token_ca",
+        "ambiguity_reason": "ath_contract_address_priority",
+        "expected_signal_type": "ATH",
+        "expected_chain": "SOL"
+      },
+      {
+        "message_id": "canary_ambiguous_two_addresses",
+        "raw_message_hash": "27dde6dacaa41d0613d46a1c8086580de9b04da3e3dc0fa5f780ba047ebf1ea1",
+        "candidate_anchors": ["primary_ca", "url_address_like"],
+        "selected_anchor": "primary_ca",
+        "ambiguity_reason": "reject_url_false_positive",
+        "expected_signal_type": "NEW_TRENDING",
+        "expected_chain": "SOL"
+      }
+    ]
+  },
+  "parser_ambiguity_cases": [
+    {
+      "message_id": "ambiguity_two_base58_candidates",
+      "candidate_anchors": ["primary_ca", "embedded_url_base58"],
+      "selected_anchor": "primary_ca",
+      "ambiguity_reason": "prefer_explicit_contract_label"
+    },
+    {
+      "message_id": "ambiguity_symbol_vs_contract",
+      "candidate_anchors": ["symbol", "token_ca"],
+      "selected_anchor": "token_ca",
+      "ambiguity_reason": "contract_address_over_symbol"
+    }
+  ],
+  "forwarded_message_policy": [
+    {
+      "message_id": "forwarded_registered_premium_source",
+      "forwarded_from": "premium:egeye_ai_gems_100x_vip",
+      "source_policy": "source_registry_match_required",
+      "trust_level": "registered_premium",
+      "action": "accept_with_source_attribution"
+    },
+    {
+      "message_id": "forwarded_unknown_source",
+      "forwarded_from": "unknown_forwarded_channel",
+      "source_policy": "unknown_forwarded_source_quarantine",
+      "trust_level": "untrusted",
+      "action": "message_quarantined"
+    }
+  ],
+  "premium_source_access_probes": [
+    {
+      "source_id": "premium:egeye_ai_gems_100x_vip",
+      "access_probe_id": "premium_channel_mtproto_session_and_cache",
+      "auth_state": "credential_required_and_cache_supported",
+      "last_success_at": "2026-05-26T00:00:00Z",
+      "failure_action": "source_access_degraded"
+    }
+  ],
+  "source_authenticity_checks": [
+    {
+      "source_id": "premium:egeye_ai_gems_100x_vip",
+      "channel_id": "3636518327",
+      "authenticity_status": "verified",
+      "evidence_hash": "823a94c186df4f37f51a5586b3dbb752cb325e5f0fe376c1739a7295adca07b8"
+    }
+  ],
+  "parser_confusables_cases": [
+    {
+      "message_id": "confusable_zero_for_o",
+      "confusable_token": "S0LANA",
+      "normalized_token": "SOLANA",
+      "risk_class": "ticker_confusable",
+      "policy_action": "parser_output_quarantined"
+    },
+    {
+      "message_id": "confusable_pump_like_url",
+      "confusable_token": "t.me/pumpfun",
+      "normalized_token": "pumpfun",
+      "risk_class": "url_looks_like_token",
+      "policy_action": "manual_review"
+    }
+  ],
+  "image_ocr_signal_policy": [
+    {
+      "message_id": "ocr_low_confidence_contract_address",
+      "ocr_engine_version": "disabled_until_ocr_source_registered",
+      "image_hash": "7df923c159d72ff4e424381d2c0667df30f1ab87ee3165d3f7f56c8e458718d2",
+      "confidence": 0.42,
+      "policy_action": "ocr_signal_quarantined"
+    },
+    {
+      "message_id": "ocr_high_confidence_requires_text_anchor",
+      "ocr_engine_version": "disabled_until_ocr_source_registered",
+      "image_hash": "e2d012c79d45c1857e6530ac2b7f0db058033cbd2376f08c81db3d6f0ea86f2c",
+      "confidence": 0.91,
+      "policy_action": "manual_review"
+    }
+  ],
+  "source_impersonation_checks": [
+    {
+      "source_id": "premium:egeye_ai_gems_100x_vip",
+      "message_id": "impersonation_channel_id_mismatch",
+      "impersonation_signal": "channel_id_mismatch",
+      "confidence": 0.95,
+      "action": "source_quarantined"
+    },
+    {
+      "source_id": "premium:egeye_ai_gems_100x_vip",
+      "message_id": "impersonation_name_similarity_only",
+      "impersonation_signal": "display_name_similarity",
+      "confidence": 0.55,
+      "action": "manual_review"
+    }
+  ]
+}
