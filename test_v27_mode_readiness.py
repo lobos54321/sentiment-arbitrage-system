@@ -503,6 +503,79 @@ def append_provider_dependency_resource_trust_events(event_log_dir):
     )
 
 
+def append_config_activation_retry_policy_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    config_hash = sha256_hex({"config_id": "normal-tiny-config-v1", "version": "v1"})
+    log.append_event(
+        event_type="config_distribution_recorded",
+        aggregate_id="config_distribution:normal-tiny-config-v1",
+        idempotency_key="config_distribution:normal-tiny-config-v1:all_workers_before_effective_at",
+        payload={
+            "config_id": "normal-tiny-config-v1",
+            "config_hash": config_hash,
+            "target_workers": ["dashboard", "v27-read-model-refresh"],
+            "effective_at": "2026-01-15T00:13:00Z",
+            "ack_policy": "all_workers_before_effective_at",
+            "evidence_source": "unit",
+        },
+    )
+    for worker_id in ("dashboard", "v27-read-model-refresh"):
+        log.append_event(
+            event_type="config_distribution_ack_recorded",
+            aggregate_id=f"config_distribution_ack:normal-tiny-config-v1:{worker_id}",
+            idempotency_key=f"config_distribution_ack:normal-tiny-config-v1:{worker_id}:acked",
+            payload={
+                "config_id": "normal-tiny-config-v1",
+                "worker_id": worker_id,
+                "config_hash": config_hash,
+                "ack_state": "acked",
+                "acked_at": "2026-01-15T00:13:10Z",
+                "evidence_source": "unit",
+            },
+        )
+    log.append_event(
+        event_type="in_flight_config_rotation_recorded",
+        aggregate_id="in_flight_config_rotation:normal-tiny-rotation-v1",
+        idempotency_key="in_flight_config_rotation:normal-tiny-rotation-v1:drain_then_cutover",
+        payload={
+            "rotation_id": "normal-tiny-rotation-v1",
+            "old_config_hash": sha256_hex({"config_id": "normal-tiny-config-v0", "version": "v0"}),
+            "new_config_hash": config_hash,
+            "affected_workers": ["dashboard", "v27-read-model-refresh"],
+            "safe_cutover_at": "2026-01-15T00:14:00Z",
+            "rotation_policy": "drain_then_cutover",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="policy_activation_barrier_recorded",
+        aggregate_id="policy_activation_barrier:normal-tiny-policy-v1:1",
+        idempotency_key="policy_activation_barrier:normal-tiny-policy-v1:1:2",
+        payload={
+            "policy_bundle_id": "normal-tiny-policy-v1",
+            "activation_epoch": 1,
+            "required_worker_ack_count": 2,
+            "observed_worker_ack_count": 2,
+            "activated_at": "2026-01-15T00:15:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="retry_policy_catalog_recorded",
+        aggregate_id="retry_policy_catalog:provider_quote",
+        idempotency_key="retry_policy_catalog:provider_quote:capped_exponential_jitter:3",
+        payload={
+            "retry_family": "provider_quote",
+            "backoff_policy": "capped_exponential_jitter",
+            "max_attempts": 3,
+            "jitter_policy": "full_jitter",
+            "owner": "runtime",
+            "checked_at": "2026-01-15T00:16:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -1472,6 +1545,39 @@ def test_mode_readiness_consumes_provider_dependency_resource_trust_for_normal_t
     )
     assert matrix["contract_statuses"]["ExternalDependencyContract"]["evidence"]["valid_external_dependency_count"] == 1
     assert matrix["contract_statuses"]["ResourceExhaustionContract"]["evidence"]["valid_resource_exhaustion_count"] == 1
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_config_activation_retry_policy_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_config_activation_retry_policy_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "ConfigDistributionContract",
+        "ConfigDistributionAckContract",
+        "InFlightConfigRotationPolicy",
+        "PolicyActivationBarrierContract",
+        "RetryPolicyCatalogContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["ConfigDistributionAckContract"]["evidence"]["valid_config_distribution_ack_count"] == 2
+    assert matrix["contract_statuses"]["RetryPolicyCatalogContract"]["evidence"]["valid_retry_policy_catalog_count"] == 1
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

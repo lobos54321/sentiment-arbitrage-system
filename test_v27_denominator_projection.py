@@ -785,6 +785,134 @@ def append_resource_exhaustion(
     )
 
 
+def append_config_distribution(
+    log,
+    *,
+    config_id="config-unit-v1",
+    target_workers=None,
+    config_hash=None,
+    ack_policy="all_workers_before_effective_at",
+):
+    config_hash = config_hash or sha256_hex({"config_id": config_id, "version": "v1"})
+    payload = {
+        "config_id": config_id,
+        "config_hash": config_hash,
+        "target_workers": target_workers if target_workers is not None else ["dashboard", "v27-read-model-refresh"],
+        "effective_at": "2026-01-15T00:13:00Z",
+        "ack_policy": ack_policy,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="config_distribution_recorded",
+        aggregate_id=f"config_distribution:{config_id}",
+        idempotency_key=f"config_distribution:{config_id}:{ack_policy}",
+        payload=payload,
+    )
+
+
+def append_config_distribution_ack(
+    log,
+    *,
+    config_id="config-unit-v1",
+    worker_id="dashboard",
+    config_hash=None,
+    ack_state="acked",
+):
+    config_hash = config_hash or sha256_hex({"config_id": config_id, "version": "v1"})
+    payload = {
+        "config_id": config_id,
+        "worker_id": worker_id,
+        "config_hash": config_hash,
+        "ack_state": ack_state,
+        "acked_at": "2026-01-15T00:13:10Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="config_distribution_ack_recorded",
+        aggregate_id=f"config_distribution_ack:{config_id}:{worker_id}",
+        idempotency_key=f"config_distribution_ack:{config_id}:{worker_id}:{ack_state}",
+        payload=payload,
+    )
+
+
+def append_in_flight_config_rotation(
+    log,
+    *,
+    rotation_id="rotation-unit-v1",
+    old_config_hash=None,
+    new_config_hash=None,
+    affected_workers=None,
+    rotation_policy="drain_then_cutover",
+):
+    old_config_hash = old_config_hash or sha256_hex({"config_id": "old", "version": "v1"})
+    new_config_hash = new_config_hash or sha256_hex({"config_id": "new", "version": "v2"})
+    payload = {
+        "rotation_id": rotation_id,
+        "old_config_hash": old_config_hash,
+        "new_config_hash": new_config_hash,
+        "affected_workers": affected_workers if affected_workers is not None else ["dashboard", "v27-read-model-refresh"],
+        "safe_cutover_at": "2026-01-15T00:14:00Z",
+        "rotation_policy": rotation_policy,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="in_flight_config_rotation_recorded",
+        aggregate_id=f"in_flight_config_rotation:{rotation_id}",
+        idempotency_key=f"in_flight_config_rotation:{rotation_id}:{rotation_policy}",
+        payload=payload,
+    )
+
+
+def append_policy_activation_barrier(
+    log,
+    *,
+    policy_bundle_id="policy-unit-v1",
+    activation_epoch=1,
+    required_worker_ack_count=2,
+    observed_worker_ack_count=2,
+):
+    payload = {
+        "policy_bundle_id": policy_bundle_id,
+        "activation_epoch": activation_epoch,
+        "required_worker_ack_count": required_worker_ack_count,
+        "observed_worker_ack_count": observed_worker_ack_count,
+        "activated_at": "2026-01-15T00:15:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="policy_activation_barrier_recorded",
+        aggregate_id=f"policy_activation_barrier:{policy_bundle_id}:{activation_epoch}",
+        idempotency_key=f"policy_activation_barrier:{policy_bundle_id}:{activation_epoch}:{observed_worker_ack_count}",
+        payload=payload,
+    )
+
+
+def append_retry_policy_catalog(
+    log,
+    *,
+    retry_family="provider_quote",
+    backoff_policy="capped_exponential_jitter",
+    max_attempts=3,
+    jitter_policy="full_jitter",
+    owner="runtime",
+):
+    payload = {
+        "retry_family": retry_family,
+        "backoff_policy": backoff_policy,
+        "max_attempts": max_attempts,
+        "jitter_policy": jitter_policy,
+        "owner": owner,
+        "checked_at": "2026-01-15T00:16:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="retry_policy_catalog_recorded",
+        aggregate_id=f"retry_policy_catalog:{retry_family}",
+        idempotency_key=f"retry_policy_catalog:{retry_family}:{backoff_policy}:{max_attempts}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -1328,6 +1456,66 @@ def test_denominator_projection_rejects_provider_dependency_resource_trust_viola
     assert projection["contract_evidence"]["ExternalDependencyContract"]["external_dependency_violation_count"] == 1
     assert projection["contract_evidence"]["ThirdPartyStatusCorrelationContract"]["third_party_status_correlation_violation_count"] == 1
     assert projection["contract_evidence"]["ResourceExhaustionContract"]["resource_exhaustion_violation_count"] == 1
+
+
+def test_denominator_projection_consumes_config_activation_retry_policy_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    config_hash = sha256_hex({"config_id": "config-unit-v1", "version": "v1"})
+    append_config_distribution(log, config_hash=config_hash)
+    append_config_distribution_ack(log, worker_id="dashboard", config_hash=config_hash)
+    append_config_distribution_ack(log, worker_id="v27-read-model-refresh", config_hash=config_hash)
+    append_in_flight_config_rotation(log)
+    append_policy_activation_barrier(log)
+    append_retry_policy_catalog(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    config_distribution = projection["contract_evidence"]["ConfigDistributionContract"]
+    config_ack = projection["contract_evidence"]["ConfigDistributionAckContract"]
+    rotation = projection["contract_evidence"]["InFlightConfigRotationPolicy"]
+    activation = projection["contract_evidence"]["PolicyActivationBarrierContract"]
+    retry_policy = projection["contract_evidence"]["RetryPolicyCatalogContract"]
+    assert projection["config_distribution_recorded_events"] == 1
+    assert projection["config_distribution_ack_recorded_events"] == 2
+    assert projection["in_flight_config_rotation_recorded_events"] == 1
+    assert projection["policy_activation_barrier_recorded_events"] == 1
+    assert projection["retry_policy_catalog_recorded_events"] == 1
+    assert projection["health"]["config_distribution_ok"] is True
+    assert projection["health"]["config_distribution_ack_ok"] is True
+    assert projection["health"]["in_flight_config_rotation_ok"] is True
+    assert projection["health"]["policy_activation_barrier_ok"] is True
+    assert projection["health"]["retry_policy_catalog_ok"] is True
+    assert config_distribution["valid_config_distribution_count"] == 1
+    assert config_distribution["config_distribution_violation_count"] == 0
+    assert config_ack["valid_config_distribution_ack_count"] == 2
+    assert rotation["valid_in_flight_config_rotation_count"] == 1
+    assert activation["valid_policy_activation_barrier_count"] == 1
+    assert retry_policy["valid_retry_policy_catalog_count"] == 1
+
+
+def test_denominator_projection_rejects_config_activation_retry_policy_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    config_hash = sha256_hex({"config_id": "config-unit-v1", "version": "v1"})
+    bad_config_hash = sha256_hex({"config_id": "config-unit-v1", "version": "bad"})
+    append_config_distribution(log, config_hash=config_hash, ack_policy="eventual_ack")
+    append_config_distribution_ack(log, worker_id="dashboard", config_hash=bad_config_hash, ack_state="stale")
+    old_hash = sha256_hex({"config_id": "same", "version": "v1"})
+    append_in_flight_config_rotation(log, old_config_hash=old_hash, new_config_hash=old_hash, rotation_policy="instant_swap")
+    append_policy_activation_barrier(log, required_worker_ack_count=2, observed_worker_ack_count=1)
+    append_retry_policy_catalog(log, backoff_policy="no_backoff", max_attempts=99, jitter_policy="none")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["config_distribution_ok"] is False
+    assert projection["health"]["config_distribution_ack_ok"] is False
+    assert projection["health"]["in_flight_config_rotation_ok"] is False
+    assert projection["health"]["policy_activation_barrier_ok"] is False
+    assert projection["health"]["retry_policy_catalog_ok"] is False
+    assert projection["contract_evidence"]["ConfigDistributionContract"]["config_distribution_violation_count"] == 2
+    assert projection["contract_evidence"]["ConfigDistributionAckContract"]["config_distribution_ack_violation_count"] == 1
+    assert projection["contract_evidence"]["InFlightConfigRotationPolicy"]["in_flight_config_rotation_violation_count"] == 1
+    assert projection["contract_evidence"]["PolicyActivationBarrierContract"]["policy_activation_barrier_violation_count"] == 1
+    assert projection["contract_evidence"]["RetryPolicyCatalogContract"]["retry_policy_catalog_violation_count"] == 1
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):

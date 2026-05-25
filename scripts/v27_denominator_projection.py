@@ -76,6 +76,11 @@ PROVIDER_CACHE_POISONING_GUARD_EVENT_TYPE = "provider_cache_poisoning_guard_reco
 EXTERNAL_DEPENDENCY_EVENT_TYPE = "external_dependency_health_recorded"
 THIRD_PARTY_STATUS_CORRELATION_EVENT_TYPE = "third_party_status_correlation_recorded"
 RESOURCE_EXHAUSTION_EVENT_TYPE = "resource_exhaustion_recorded"
+CONFIG_DISTRIBUTION_EVENT_TYPE = "config_distribution_recorded"
+CONFIG_DISTRIBUTION_ACK_EVENT_TYPE = "config_distribution_ack_recorded"
+IN_FLIGHT_CONFIG_ROTATION_EVENT_TYPE = "in_flight_config_rotation_recorded"
+POLICY_ACTIVATION_BARRIER_EVENT_TYPE = "policy_activation_barrier_recorded"
+RETRY_POLICY_CATALOG_EVENT_TYPE = "retry_policy_catalog_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -118,6 +123,11 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     EXTERNAL_DEPENDENCY_EVENT_TYPE,
     THIRD_PARTY_STATUS_CORRELATION_EVENT_TYPE,
     RESOURCE_EXHAUSTION_EVENT_TYPE,
+    CONFIG_DISTRIBUTION_EVENT_TYPE,
+    CONFIG_DISTRIBUTION_ACK_EVENT_TYPE,
+    IN_FLIGHT_CONFIG_ROTATION_EVENT_TYPE,
+    POLICY_ACTIVATION_BARRIER_EVENT_TYPE,
+    RETRY_POLICY_CATALOG_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -1914,6 +1924,216 @@ def _extract_resource_exhaustion(event, bags):
     }
 
 
+def _extract_config_distribution(event, bags):
+    if event.get("event_type") != CONFIG_DISTRIBUTION_EVENT_TYPE:
+        return None
+    target_workers = _as_string_list(_extract_scalar(bags, [("target_workers",)]))
+    values = {
+        "config_id": _extract_scalar(bags, [("config_id",)]),
+        "config_hash": _extract_scalar(bags, [("config_hash",)]),
+        "target_workers": target_workers,
+        "effective_at": _extract_scalar(bags, [("effective_at",)], default=event.get("available_at")),
+        "ack_policy": _extract_scalar(bags, [("ack_policy",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("config_id", "effective_at", "ack_policy"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not target_workers:
+        missing_fields.append("target_workers")
+    violation_fields = []
+    ack_policy = str(values.get("ack_policy") or "").strip().lower()
+    allowed_ack_policies = {
+        "all_workers_before_effective_at",
+        "quorum_before_effective_at",
+        "canary_then_all",
+        "fail_closed_until_ack",
+    }
+    if ack_policy and ack_policy not in allowed_ack_policies:
+        violation_fields.append("ack_policy_not_fail_safe")
+    if values.get("config_hash") and not _valid_sha256_hex(values.get("config_hash")):
+        violation_fields.append("config_hash_sha256")
+    if values.get("effective_at") and _timestamp_epoch_seconds(values.get("effective_at")) is None:
+        violation_fields.append("effective_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "config_distribution_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_config_distribution_ack(event, bags):
+    if event.get("event_type") != CONFIG_DISTRIBUTION_ACK_EVENT_TYPE:
+        return None
+    values = {
+        "config_id": _extract_scalar(bags, [("config_id",)]),
+        "worker_id": _extract_scalar(bags, [("worker_id",)]),
+        "config_hash": _extract_scalar(bags, [("config_hash",)]),
+        "ack_state": _extract_scalar(bags, [("ack_state",), ("state",)]),
+        "acked_at": _extract_scalar(bags, [("acked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("config_id", "worker_id", "config_hash", "ack_state", "acked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("config_hash") and not _valid_sha256_hex(values.get("config_hash")):
+        violation_fields.append("config_hash_sha256")
+    ack_state = str(values.get("ack_state") or "").strip().lower()
+    if ack_state not in {"acked", "applied", "ready", "active"}:
+        violation_fields.append("ack_state_not_ready")
+    if values.get("acked_at") and _timestamp_epoch_seconds(values.get("acked_at")) is None:
+        violation_fields.append("acked_at_parseable")
+    ack_key = ":".join(
+        [
+            str(values.get("config_id") or "unknown_config"),
+            str(values.get("worker_id") or "unknown_worker"),
+        ]
+    )
+    return {
+        **values,
+        "ack_key": ack_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "config_distribution_ack_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_in_flight_config_rotation(event, bags):
+    if event.get("event_type") != IN_FLIGHT_CONFIG_ROTATION_EVENT_TYPE:
+        return None
+    affected_workers = _as_string_list(_extract_scalar(bags, [("affected_workers",)]))
+    values = {
+        "rotation_id": _extract_scalar(bags, [("rotation_id",)]),
+        "old_config_hash": _extract_scalar(bags, [("old_config_hash",)]),
+        "new_config_hash": _extract_scalar(bags, [("new_config_hash",)]),
+        "affected_workers": affected_workers,
+        "safe_cutover_at": _extract_scalar(bags, [("safe_cutover_at",)], default=event.get("available_at")),
+        "rotation_policy": _extract_scalar(bags, [("rotation_policy",)], default="drain_then_cutover"),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("rotation_id", "old_config_hash", "new_config_hash", "safe_cutover_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    if not affected_workers:
+        missing_fields.append("affected_workers")
+    violation_fields = []
+    for field in ("old_config_hash", "new_config_hash"):
+        if values.get(field) and not _valid_sha256_hex(values.get(field)):
+            violation_fields.append(f"{field}_sha256")
+    if values.get("old_config_hash") and values.get("new_config_hash") and values.get("old_config_hash") == values.get("new_config_hash"):
+        violation_fields.append("config_hash_not_rotated")
+    rotation_policy = str(values.get("rotation_policy") or "").strip().lower()
+    if rotation_policy not in {"drain_then_cutover", "lease_fenced_cutover", "pause_entries_then_cutover"}:
+        violation_fields.append("rotation_policy_not_safe")
+    if values.get("safe_cutover_at") and _timestamp_epoch_seconds(values.get("safe_cutover_at")) is None:
+        violation_fields.append("safe_cutover_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "in_flight_config_rotation_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_policy_activation_barrier(event, bags):
+    if event.get("event_type") != POLICY_ACTIVATION_BARRIER_EVENT_TYPE:
+        return None
+    values = {
+        "policy_bundle_id": _extract_scalar(bags, [("policy_bundle_id",)]),
+        "activation_epoch": _as_int(_extract_scalar(bags, [("activation_epoch",)]), default=None),
+        "required_worker_ack_count": _as_int(_extract_scalar(bags, [("required_worker_ack_count",)]), default=None),
+        "observed_worker_ack_count": _as_int(_extract_scalar(bags, [("observed_worker_ack_count",)]), default=None),
+        "activated_at": _extract_scalar(bags, [("activated_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("policy_bundle_id", "activation_epoch", "required_worker_ack_count", "activated_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("activation_epoch") is not None and values.get("activation_epoch") < 0:
+        violation_fields.append("activation_epoch_nonnegative")
+    if values.get("required_worker_ack_count") is not None and values.get("required_worker_ack_count") <= 0:
+        violation_fields.append("required_worker_ack_count_positive")
+    observed = values.get("observed_worker_ack_count")
+    required = values.get("required_worker_ack_count")
+    if observed is None:
+        violation_fields.append("observed_worker_ack_count_missing")
+    elif required is not None and observed < required:
+        violation_fields.append("observed_worker_ack_count_below_required")
+    if values.get("activated_at") and _timestamp_epoch_seconds(values.get("activated_at")) is None:
+        violation_fields.append("activated_at_parseable")
+    policy_activation_key = ":".join(
+        [
+            str(values.get("policy_bundle_id") or "unknown_policy_bundle"),
+            str(values.get("activation_epoch") if values.get("activation_epoch") is not None else "unknown_epoch"),
+        ]
+    )
+    return {
+        **values,
+        "policy_activation_key": policy_activation_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "policy_activation_barrier_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_retry_policy_catalog(event, bags):
+    if event.get("event_type") != RETRY_POLICY_CATALOG_EVENT_TYPE:
+        return None
+    values = {
+        "retry_family": _extract_scalar(bags, [("retry_family",)]),
+        "backoff_policy": _extract_scalar(bags, [("backoff_policy",)]),
+        "max_attempts": _as_int(_extract_scalar(bags, [("max_attempts",)]), default=None),
+        "jitter_policy": _extract_scalar(bags, [("jitter_policy",)]),
+        "owner": _extract_scalar(bags, [("owner",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("retry_family", "backoff_policy", "max_attempts", "jitter_policy", "owner"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    backoff_policy = str(values.get("backoff_policy") or "").strip().lower()
+    if backoff_policy not in {"exponential", "exponential_jitter", "capped_exponential_jitter", "linear_jitter", "fixed_jitter"}:
+        violation_fields.append("backoff_policy_not_bounded")
+    jitter_policy = str(values.get("jitter_policy") or "").strip().lower()
+    if jitter_policy not in {"full_jitter", "equal_jitter", "decorrelated_jitter", "fixed_jitter"}:
+        violation_fields.append("jitter_policy_missing_or_unbounded")
+    max_attempts = values.get("max_attempts")
+    if max_attempts is not None and (max_attempts <= 0 or max_attempts > 10):
+        violation_fields.append("max_attempts_out_of_bounds")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "retry_policy_catalog_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _latest_by_key(items, key_name):
     latest = {}
     passthrough = []
@@ -3307,6 +3527,11 @@ def _contract_evidence_from_records(
     external_dependencies=None,
     third_party_status_correlations=None,
     resource_exhaustions=None,
+    config_distributions=None,
+    config_distribution_acks=None,
+    in_flight_config_rotations=None,
+    policy_activation_barriers=None,
+    retry_policy_catalogs=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -3376,6 +3601,27 @@ def _contract_evidence_from_records(
     raw_resource_exhaustion_count = len(resource_exhaustions or [])
     resource_exhaustions = _latest_by_key(resource_exhaustions or [], "resource_type")
     superseded_resource_exhaustion_count = max(0, raw_resource_exhaustion_count - len(resource_exhaustions))
+    raw_config_distribution_count = len(config_distributions or [])
+    config_distributions = _latest_by_key(config_distributions or [], "config_id")
+    superseded_config_distribution_count = max(0, raw_config_distribution_count - len(config_distributions))
+    raw_config_distribution_ack_count = len(config_distribution_acks or [])
+    config_distribution_acks = _latest_by_key(config_distribution_acks or [], "ack_key")
+    superseded_config_distribution_ack_count = max(0, raw_config_distribution_ack_count - len(config_distribution_acks))
+    raw_in_flight_config_rotation_count = len(in_flight_config_rotations or [])
+    in_flight_config_rotations = _latest_by_key(in_flight_config_rotations or [], "rotation_id")
+    superseded_in_flight_config_rotation_count = max(
+        0,
+        raw_in_flight_config_rotation_count - len(in_flight_config_rotations),
+    )
+    raw_policy_activation_barrier_count = len(policy_activation_barriers or [])
+    policy_activation_barriers = _latest_by_key(policy_activation_barriers or [], "policy_activation_key")
+    superseded_policy_activation_barrier_count = max(
+        0,
+        raw_policy_activation_barrier_count - len(policy_activation_barriers),
+    )
+    raw_retry_policy_catalog_count = len(retry_policy_catalogs or [])
+    retry_policy_catalogs = _latest_by_key(retry_policy_catalogs or [], "retry_family")
+    superseded_retry_policy_catalog_count = max(0, raw_retry_policy_catalog_count - len(retry_policy_catalogs))
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -4474,6 +4720,89 @@ def _contract_evidence_from_records(
         for item in resource_exhaustions
         if item.get("missing_fields") or item.get("violation_fields")
     ]
+    malformed_config_distributions = [
+        item
+        for item in config_distributions
+        if item.get("missing_fields")
+    ]
+    config_distribution_violations = [
+        item
+        for item in config_distributions
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_config_distribution_acks = [
+        item
+        for item in config_distribution_acks
+        if item.get("missing_fields")
+    ]
+    config_distribution_ack_violations = [
+        item
+        for item in config_distribution_acks
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    ack_by_config_worker = {
+        (item.get("config_id"), item.get("worker_id")): item
+        for item in config_distribution_acks
+        if item.get("config_id") and item.get("worker_id")
+    }
+    config_distribution_ack_reference_violations = []
+    for distribution in config_distributions:
+        target_workers = distribution.get("target_workers") or []
+        missing_workers = [
+            worker_id
+            for worker_id in target_workers
+            if (distribution.get("config_id"), worker_id) not in ack_by_config_worker
+        ]
+        mismatched_workers = []
+        invalid_ack_workers = []
+        expected_hash = distribution.get("config_hash")
+        for worker_id in target_workers:
+            ack = ack_by_config_worker.get((distribution.get("config_id"), worker_id))
+            if ack:
+                if ack.get("config_distribution_ack_valid") is not True:
+                    invalid_ack_workers.append(worker_id)
+                if expected_hash and ack.get("config_hash") != expected_hash:
+                    mismatched_workers.append(worker_id)
+        if missing_workers or mismatched_workers or invalid_ack_workers:
+            config_distribution_ack_reference_violations.append(
+                {
+                    "config_id": distribution.get("config_id"),
+                    "missing_worker_acks": sorted(missing_workers),
+                    "hash_mismatched_workers": sorted(mismatched_workers),
+                    "invalid_ack_workers": sorted(invalid_ack_workers),
+                    "source_event_id": distribution.get("source_event_id"),
+                }
+            )
+    malformed_in_flight_config_rotations = [
+        item
+        for item in in_flight_config_rotations
+        if item.get("missing_fields")
+    ]
+    in_flight_config_rotation_violations = [
+        item
+        for item in in_flight_config_rotations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_policy_activation_barriers = [
+        item
+        for item in policy_activation_barriers
+        if item.get("missing_fields")
+    ]
+    policy_activation_barrier_violations = [
+        item
+        for item in policy_activation_barriers
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_retry_policy_catalogs = [
+        item
+        for item in retry_policy_catalogs
+        if item.get("missing_fields")
+    ]
+    retry_policy_catalog_violations = [
+        item
+        for item in retry_policy_catalogs
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
     worker_fleet_hashes = {
         "build_hashes": sorted({item.get("build_hash") for item in worker_fleet_heartbeats if item.get("build_hash")}),
         "runtime_config_hashes": sorted({item.get("runtime_config_hash") for item in worker_fleet_heartbeats if item.get("runtime_config_hash")}),
@@ -5354,6 +5683,184 @@ def _contract_evidence_from_records(
             "pressure_actions": sorted({item.get("pressure_action") for item in resource_exhaustions if item.get("pressure_action")}),
             "resource_exhaustion_projection_version": "v2.7.0.resource_exhaustion.v1",
         },
+        "ConfigDistributionContract": {
+            "eligible_config_distribution_records": len(config_distributions),
+            "config_distribution_observation_count": raw_config_distribution_count,
+            "current_config_distribution_count": len(config_distributions),
+            "superseded_config_distribution_event_count": superseded_config_distribution_count,
+            "valid_config_distribution_count": sum(1 for item in config_distributions if item.get("config_distribution_valid") is True),
+            "malformed_count": len(malformed_config_distributions),
+            "malformed_config_distributions": [
+                {
+                    "config_id": item.get("config_id"),
+                    "target_workers": item.get("target_workers"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_config_distributions
+            ],
+            "config_distribution_violation_count": len(config_distribution_violations) + len(config_distribution_ack_reference_violations),
+            "config_distribution_violations": [
+                {
+                    "config_id": item.get("config_id"),
+                    "target_workers": item.get("target_workers"),
+                    "ack_policy": item.get("ack_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in config_distribution_violations
+            ]
+            + config_distribution_ack_reference_violations,
+            "config_ids": sorted({item.get("config_id") for item in config_distributions if item.get("config_id")}),
+            "target_workers": sorted({worker_id for item in config_distributions for worker_id in item.get("target_workers", [])}),
+            "ack_policies": sorted({item.get("ack_policy") for item in config_distributions if item.get("ack_policy")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in config_distributions if item.get("evidence_source")}),
+            "config_distribution_projection_version": "v2.7.0.config_distribution.v1",
+        },
+        "ConfigDistributionAckContract": {
+            "eligible_config_distribution_ack_records": len(config_distribution_acks),
+            "config_distribution_ack_observation_count": raw_config_distribution_ack_count,
+            "current_config_distribution_ack_count": len(config_distribution_acks),
+            "superseded_config_distribution_ack_event_count": superseded_config_distribution_ack_count,
+            "valid_config_distribution_ack_count": sum(
+                1 for item in config_distribution_acks if item.get("config_distribution_ack_valid") is True
+            ),
+            "malformed_count": len(malformed_config_distribution_acks),
+            "malformed_config_distribution_acks": [
+                {
+                    "config_id": item.get("config_id"),
+                    "worker_id": item.get("worker_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_config_distribution_acks
+            ],
+            "config_distribution_ack_violation_count": len(config_distribution_ack_violations),
+            "config_distribution_ack_violations": [
+                {
+                    "config_id": item.get("config_id"),
+                    "worker_id": item.get("worker_id"),
+                    "ack_state": item.get("ack_state"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in config_distribution_ack_violations
+            ],
+            "config_ids": sorted({item.get("config_id") for item in config_distribution_acks if item.get("config_id")}),
+            "worker_ids": sorted({item.get("worker_id") for item in config_distribution_acks if item.get("worker_id")}),
+            "ack_states": sorted({item.get("ack_state") for item in config_distribution_acks if item.get("ack_state")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in config_distribution_acks if item.get("evidence_source")}),
+            "config_distribution_ack_projection_version": "v2.7.0.config_distribution_ack.v1",
+        },
+        "InFlightConfigRotationPolicy": {
+            "eligible_in_flight_config_rotation_records": len(in_flight_config_rotations),
+            "in_flight_config_rotation_observation_count": raw_in_flight_config_rotation_count,
+            "current_in_flight_config_rotation_count": len(in_flight_config_rotations),
+            "superseded_in_flight_config_rotation_event_count": superseded_in_flight_config_rotation_count,
+            "valid_in_flight_config_rotation_count": sum(
+                1 for item in in_flight_config_rotations if item.get("in_flight_config_rotation_valid") is True
+            ),
+            "malformed_count": len(malformed_in_flight_config_rotations),
+            "malformed_in_flight_config_rotations": [
+                {
+                    "rotation_id": item.get("rotation_id"),
+                    "affected_workers": item.get("affected_workers"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_in_flight_config_rotations
+            ],
+            "in_flight_config_rotation_violation_count": len(in_flight_config_rotation_violations),
+            "in_flight_config_rotation_violations": [
+                {
+                    "rotation_id": item.get("rotation_id"),
+                    "rotation_policy": item.get("rotation_policy"),
+                    "affected_workers": item.get("affected_workers"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in in_flight_config_rotation_violations
+            ],
+            "rotation_ids": sorted({item.get("rotation_id") for item in in_flight_config_rotations if item.get("rotation_id")}),
+            "affected_workers": sorted({worker_id for item in in_flight_config_rotations for worker_id in item.get("affected_workers", [])}),
+            "rotation_policies": sorted({item.get("rotation_policy") for item in in_flight_config_rotations if item.get("rotation_policy")}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in in_flight_config_rotations if item.get("evidence_source")}),
+            "in_flight_config_rotation_projection_version": "v2.7.0.in_flight_config_rotation.v1",
+        },
+        "PolicyActivationBarrierContract": {
+            "eligible_policy_activation_barrier_records": len(policy_activation_barriers),
+            "policy_activation_barrier_observation_count": raw_policy_activation_barrier_count,
+            "current_policy_activation_barrier_count": len(policy_activation_barriers),
+            "superseded_policy_activation_barrier_event_count": superseded_policy_activation_barrier_count,
+            "valid_policy_activation_barrier_count": sum(
+                1 for item in policy_activation_barriers if item.get("policy_activation_barrier_valid") is True
+            ),
+            "malformed_count": len(malformed_policy_activation_barriers),
+            "malformed_policy_activation_barriers": [
+                {
+                    "policy_bundle_id": item.get("policy_bundle_id"),
+                    "activation_epoch": item.get("activation_epoch"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_policy_activation_barriers
+            ],
+            "policy_activation_barrier_violation_count": len(policy_activation_barrier_violations),
+            "policy_activation_barrier_violations": [
+                {
+                    "policy_bundle_id": item.get("policy_bundle_id"),
+                    "activation_epoch": item.get("activation_epoch"),
+                    "required_worker_ack_count": item.get("required_worker_ack_count"),
+                    "observed_worker_ack_count": item.get("observed_worker_ack_count"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in policy_activation_barrier_violations
+            ],
+            "policy_bundle_ids": sorted({item.get("policy_bundle_id") for item in policy_activation_barriers if item.get("policy_bundle_id")}),
+            "activation_epochs": sorted({item.get("activation_epoch") for item in policy_activation_barriers if item.get("activation_epoch") is not None}),
+            "evidence_sources": sorted({item.get("evidence_source") for item in policy_activation_barriers if item.get("evidence_source")}),
+            "policy_activation_barrier_projection_version": "v2.7.0.policy_activation_barrier.v1",
+        },
+        "RetryPolicyCatalogContract": {
+            "eligible_retry_policy_catalog_records": len(retry_policy_catalogs),
+            "retry_policy_catalog_observation_count": raw_retry_policy_catalog_count,
+            "current_retry_policy_catalog_count": len(retry_policy_catalogs),
+            "superseded_retry_policy_catalog_event_count": superseded_retry_policy_catalog_count,
+            "valid_retry_policy_catalog_count": sum(1 for item in retry_policy_catalogs if item.get("retry_policy_catalog_valid") is True),
+            "malformed_count": len(malformed_retry_policy_catalogs),
+            "malformed_retry_policy_catalogs": [
+                {
+                    "retry_family": item.get("retry_family"),
+                    "backoff_policy": item.get("backoff_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_retry_policy_catalogs
+            ],
+            "retry_policy_catalog_violation_count": len(retry_policy_catalog_violations),
+            "retry_policy_catalog_violations": [
+                {
+                    "retry_family": item.get("retry_family"),
+                    "backoff_policy": item.get("backoff_policy"),
+                    "max_attempts": item.get("max_attempts"),
+                    "jitter_policy": item.get("jitter_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in retry_policy_catalog_violations
+            ],
+            "retry_families": sorted({item.get("retry_family") for item in retry_policy_catalogs if item.get("retry_family")}),
+            "backoff_policies": sorted({item.get("backoff_policy") for item in retry_policy_catalogs if item.get("backoff_policy")}),
+            "jitter_policies": sorted({item.get("jitter_policy") for item in retry_policy_catalogs if item.get("jitter_policy")}),
+            "owners": sorted({item.get("owner") for item in retry_policy_catalogs if item.get("owner")}),
+            "retry_policy_catalog_projection_version": "v2.7.0.retry_policy_catalog.v1",
+        },
         "TrainingServingSkewContract": {
             "eligible_training_serving_skew_records": len(training_serving_skews),
             "training_serving_skew_observation_count": raw_training_serving_skew_count,
@@ -5730,6 +6237,11 @@ def build_denominator_projection(
         "external_dependency_health_recorded_events": 0,
         "third_party_status_correlation_recorded_events": 0,
         "resource_exhaustion_recorded_events": 0,
+        "config_distribution_recorded_events": 0,
+        "config_distribution_ack_recorded_events": 0,
+        "in_flight_config_rotation_recorded_events": 0,
+        "policy_activation_barrier_recorded_events": 0,
+        "retry_policy_catalog_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -5797,6 +6309,11 @@ def build_denominator_projection(
             "ExternalDependencyContract": {},
             "ThirdPartyStatusCorrelationContract": {},
             "ResourceExhaustionContract": {},
+            "ConfigDistributionContract": {},
+            "ConfigDistributionAckContract": {},
+            "InFlightConfigRotationPolicy": {},
+            "PolicyActivationBarrierContract": {},
+            "RetryPolicyCatalogContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -5850,6 +6367,11 @@ def build_denominator_projection(
             "external_dependency_ok": False,
             "third_party_status_correlation_ok": False,
             "resource_exhaustion_ok": False,
+            "config_distribution_ok": False,
+            "config_distribution_ack_ok": False,
+            "in_flight_config_rotation_ok": False,
+            "policy_activation_barrier_ok": False,
+            "retry_policy_catalog_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -5897,6 +6419,11 @@ def build_denominator_projection(
     external_dependencies = []
     third_party_status_correlations = []
     resource_exhaustions = []
+    config_distributions = []
+    config_distribution_acks = []
+    in_flight_config_rotations = []
+    policy_activation_barriers = []
+    retry_policy_catalogs = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -6078,6 +6605,36 @@ def build_denominator_projection(
             resource_exhaustion = _extract_resource_exhaustion(event, _payload_bags(event))
             if resource_exhaustion:
                 resource_exhaustions.append(resource_exhaustion)
+            continue
+        if event.get("event_type") == CONFIG_DISTRIBUTION_EVENT_TYPE:
+            projection["config_distribution_recorded_events"] += 1
+            config_distribution = _extract_config_distribution(event, _payload_bags(event))
+            if config_distribution:
+                config_distributions.append(config_distribution)
+            continue
+        if event.get("event_type") == CONFIG_DISTRIBUTION_ACK_EVENT_TYPE:
+            projection["config_distribution_ack_recorded_events"] += 1
+            config_distribution_ack = _extract_config_distribution_ack(event, _payload_bags(event))
+            if config_distribution_ack:
+                config_distribution_acks.append(config_distribution_ack)
+            continue
+        if event.get("event_type") == IN_FLIGHT_CONFIG_ROTATION_EVENT_TYPE:
+            projection["in_flight_config_rotation_recorded_events"] += 1
+            in_flight_config_rotation = _extract_in_flight_config_rotation(event, _payload_bags(event))
+            if in_flight_config_rotation:
+                in_flight_config_rotations.append(in_flight_config_rotation)
+            continue
+        if event.get("event_type") == POLICY_ACTIVATION_BARRIER_EVENT_TYPE:
+            projection["policy_activation_barrier_recorded_events"] += 1
+            policy_activation_barrier = _extract_policy_activation_barrier(event, _payload_bags(event))
+            if policy_activation_barrier:
+                policy_activation_barriers.append(policy_activation_barrier)
+            continue
+        if event.get("event_type") == RETRY_POLICY_CATALOG_EVENT_TYPE:
+            projection["retry_policy_catalog_recorded_events"] += 1
+            retry_policy_catalog = _extract_retry_policy_catalog(event, _payload_bags(event))
+            if retry_policy_catalog:
+                retry_policy_catalogs.append(retry_policy_catalog)
             continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
@@ -6268,6 +6825,11 @@ def build_denominator_projection(
         external_dependencies=external_dependencies,
         third_party_status_correlations=third_party_status_correlations,
         resource_exhaustions=resource_exhaustions,
+        config_distributions=config_distributions,
+        config_distribution_acks=config_distribution_acks,
+        in_flight_config_rotations=in_flight_config_rotations,
+        policy_activation_barriers=policy_activation_barriers,
+        retry_policy_catalogs=retry_policy_catalogs,
     )
     if progress_callback:
         progress_callback(
@@ -6563,6 +7125,36 @@ def build_denominator_projection(
         and contract_evidence["ResourceExhaustionContract"]["valid_resource_exhaustion_count"] > 0
         and contract_evidence["ResourceExhaustionContract"]["malformed_count"] == 0
         and contract_evidence["ResourceExhaustionContract"]["resource_exhaustion_violation_count"] == 0
+    )
+    projection["health"]["config_distribution_ok"] = (
+        contract_evidence["ConfigDistributionContract"]["eligible_config_distribution_records"] > 0
+        and contract_evidence["ConfigDistributionContract"]["valid_config_distribution_count"] > 0
+        and contract_evidence["ConfigDistributionContract"]["malformed_count"] == 0
+        and contract_evidence["ConfigDistributionContract"]["config_distribution_violation_count"] == 0
+    )
+    projection["health"]["config_distribution_ack_ok"] = (
+        contract_evidence["ConfigDistributionAckContract"]["eligible_config_distribution_ack_records"] > 0
+        and contract_evidence["ConfigDistributionAckContract"]["valid_config_distribution_ack_count"] > 0
+        and contract_evidence["ConfigDistributionAckContract"]["malformed_count"] == 0
+        and contract_evidence["ConfigDistributionAckContract"]["config_distribution_ack_violation_count"] == 0
+    )
+    projection["health"]["in_flight_config_rotation_ok"] = (
+        contract_evidence["InFlightConfigRotationPolicy"]["eligible_in_flight_config_rotation_records"] > 0
+        and contract_evidence["InFlightConfigRotationPolicy"]["valid_in_flight_config_rotation_count"] > 0
+        and contract_evidence["InFlightConfigRotationPolicy"]["malformed_count"] == 0
+        and contract_evidence["InFlightConfigRotationPolicy"]["in_flight_config_rotation_violation_count"] == 0
+    )
+    projection["health"]["policy_activation_barrier_ok"] = (
+        contract_evidence["PolicyActivationBarrierContract"]["eligible_policy_activation_barrier_records"] > 0
+        and contract_evidence["PolicyActivationBarrierContract"]["valid_policy_activation_barrier_count"] > 0
+        and contract_evidence["PolicyActivationBarrierContract"]["malformed_count"] == 0
+        and contract_evidence["PolicyActivationBarrierContract"]["policy_activation_barrier_violation_count"] == 0
+    )
+    projection["health"]["retry_policy_catalog_ok"] = (
+        contract_evidence["RetryPolicyCatalogContract"]["eligible_retry_policy_catalog_records"] > 0
+        and contract_evidence["RetryPolicyCatalogContract"]["valid_retry_policy_catalog_count"] > 0
+        and contract_evidence["RetryPolicyCatalogContract"]["malformed_count"] == 0
+        and contract_evidence["RetryPolicyCatalogContract"]["retry_policy_catalog_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

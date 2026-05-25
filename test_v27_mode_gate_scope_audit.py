@@ -23,7 +23,7 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert normal["scope_complete"] is False
     assert ultra["missing_count"] == 0
     assert shadow["missing_count"] == 0
-    assert normal["missing_count"] == 37
+    assert normal["missing_count"] == 32
     assert mvp["missing_count"] == 0
     assert "AccessControlContract" not in normal["missing_contracts"]
     assert "AggregateBoundaryContract" not in normal["missing_contracts"]
@@ -58,6 +58,11 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "ProjectionVersionIsolationContract" not in normal["missing_contracts"]
     assert "SnapshotCompactionInvariantContract" not in normal["missing_contracts"]
     assert "SnapshotCompactionReadBarrier" not in normal["missing_contracts"]
+    assert "ConfigDistributionContract" not in normal["missing_contracts"]
+    assert "ConfigDistributionAckContract" not in normal["missing_contracts"]
+    assert "InFlightConfigRotationPolicy" not in normal["missing_contracts"]
+    assert "PolicyActivationBarrierContract" not in normal["missing_contracts"]
+    assert "RetryPolicyCatalogContract" not in normal["missing_contracts"]
     assert "WorkerHeartbeatContract" not in normal["missing_contracts"]
     assert "SilentWorkerDeathDetector" not in normal["missing_contracts"]
     assert "WarmStartSafetyContract" not in normal["missing_contracts"]
@@ -149,5 +154,5 @@ def test_mode_readiness_exposes_current_gate_vs_final_spec_scope(tmp_path):
     assert matrix["gate_scope"]["scope_audit_schema_version"] == "v2.7.0.mode_gate_scope_audit.v1"
     assert matrix["gate_scope"]["health"]["final_normal_tiny_blocking_scope_complete"] is False
     assert matrix["health"]["final_spec_normal_tiny_ready"] is False
-    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 37
+    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 32
     assert matrix["health"]["current_gate_normal_tiny_ready"] is False

@@ -178,6 +178,11 @@ MODE_REQUIREMENTS = {
         "ExternalDependencyContract",
         "ThirdPartyStatusCorrelationContract",
         "ResourceExhaustionContract",
+        "ConfigDistributionContract",
+        "ConfigDistributionAckContract",
+        "InFlightConfigRotationPolicy",
+        "PolicyActivationBarrierContract",
+        "RetryPolicyCatalogContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -688,6 +693,41 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("resource_exhaustion_ok") else "missing_evidence",
         "resource_exhaustion_missing_malformed_or_unbounded",
         resource_exhaustion_evidence,
+    )
+    config_distribution_evidence = contract_evidence.get("ConfigDistributionContract") or {}
+    statuses["ConfigDistributionContract"] = _status(
+        "ConfigDistributionContract",
+        "pass" if projection_built and projection_health.get("config_distribution_ok") else "missing_evidence",
+        "config_distribution_missing_malformed_mixed_or_unacked",
+        config_distribution_evidence,
+    )
+    config_distribution_ack_evidence = contract_evidence.get("ConfigDistributionAckContract") or {}
+    statuses["ConfigDistributionAckContract"] = _status(
+        "ConfigDistributionAckContract",
+        "pass" if projection_built and projection_health.get("config_distribution_ack_ok") else "missing_evidence",
+        "config_distribution_ack_missing_malformed_or_not_ready",
+        config_distribution_ack_evidence,
+    )
+    in_flight_config_rotation_evidence = contract_evidence.get("InFlightConfigRotationPolicy") or {}
+    statuses["InFlightConfigRotationPolicy"] = _status(
+        "InFlightConfigRotationPolicy",
+        "pass" if projection_built and projection_health.get("in_flight_config_rotation_ok") else "missing_evidence",
+        "in_flight_config_rotation_missing_malformed_or_unsafe",
+        in_flight_config_rotation_evidence,
+    )
+    policy_activation_barrier_evidence = contract_evidence.get("PolicyActivationBarrierContract") or {}
+    statuses["PolicyActivationBarrierContract"] = _status(
+        "PolicyActivationBarrierContract",
+        "pass" if projection_built and projection_health.get("policy_activation_barrier_ok") else "missing_evidence",
+        "policy_activation_barrier_missing_malformed_or_unacked",
+        policy_activation_barrier_evidence,
+    )
+    retry_policy_catalog_evidence = contract_evidence.get("RetryPolicyCatalogContract") or {}
+    statuses["RetryPolicyCatalogContract"] = _status(
+        "RetryPolicyCatalogContract",
+        "pass" if projection_built and projection_health.get("retry_policy_catalog_ok") else "missing_evidence",
+        "retry_policy_catalog_missing_malformed_or_unbounded",
+        retry_policy_catalog_evidence,
     )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
