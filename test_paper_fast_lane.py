@@ -153,6 +153,56 @@ def test_claim_queue_item_is_single_owner(tmp_path):
     assert fast.claim_queue_item(db, "worker-2") is None
 
 
+def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            entry_mode TEXT,
+            entry_branch TEXT,
+            peak_pnl REAL,
+            pnl_pct REAL,
+            replay_source TEXT,
+            entry_ts INTEGER,
+            exit_ts INTEGER
+        )
+        """
+    )
+    pnls = [-0.40, -0.35, -0.05, -0.04, -0.03, 0.01, 0.02, 0.04]
+    for idx, pnl in enumerate(pnls):
+        db.execute(
+            """
+            INSERT INTO paper_trades(entry_mode, entry_branch, peak_pnl, pnl_pct, replay_source, entry_ts, exit_ts)
+            VALUES ('pre_pass_resonance_tiny_probe', 'pre_pass_resonance', 0.20, ?, 'paper_fast_lane', ?, ?)
+            """,
+            (pnl, now - idx, now - idx + 1),
+        )
+    db.commit()
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="missing_quote_recovery_fast",
+        token_ca="TokenQuality",
+        symbol="QUAL",
+        signal_ts=now,
+        receive_ts=now,
+        entry_branch="missing_trigger_or_quote",
+        entry_mode_hint="pre_pass_resonance_tiny_probe",
+        now_ts=now,
+    )
+    row = fast.claim_queue_item(db, "worker-1")
+
+    fast.process_queue_item(db, row, "worker-1")
+
+    queue = db.execute(
+        "SELECT status, last_error FROM paper_fast_entry_queue WHERE token_ca = 'TokenQuality'"
+    ).fetchone()
+    assert queue["status"] == "watch_only"
+    assert queue["last_error"] == "entry_mode_quality_tail_loss"
+
+
 def test_entry_guard_rejects_hard_drift():
     now = int(time.time())
     row = {

@@ -27,6 +27,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import paper_trade_monitor as ptm
+from entry_mode_quality import evaluate_entry_mode_quality
 from entry_readiness_policy import (
     build_clean_dog_reclaim_eligibility,
     build_entry_execution_eligibility,
@@ -1691,6 +1692,32 @@ def process_queue_item(db, row, owner):
     if not policy.get("pass"):
         mark_queue(db, row["id"], policy.get("status") or "watch_only", policy.get("reason"))
         return
+    mode, stage = source_to_mode_and_stage(row)
+    entry_mode_quality = evaluate_entry_mode_quality(db, mode, now_ts=now_ts)
+    if entry_mode_quality.get("decision") == "shadow":
+        reason = entry_mode_quality.get("reason") or "entry_mode_quality_shadow"
+        mark_queue(db, row["id"], "watch_only", reason)
+        try:
+            token_ca = row["token_ca"]
+            signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
+            ptm.record_decision_event(
+                db,
+                component="entry_mode_quality",
+                event_type="fast_lane_quality_gate",
+                decision="watch_only",
+                reason=reason,
+                token_ca=token_ca,
+                symbol=row["symbol"],
+                lifecycle_id=ptm.build_lifecycle_id(token_ca, signal_ts),
+                signal_ts=signal_ts,
+                route=row["source_type"],
+                data_source="paper_fast_entry_queue+paper_trades",
+                payload=entry_mode_quality,
+            )
+            db.commit()
+        except Exception:
+            pass
+        return
     branch = str(row_value(row, "entry_branch", "") or row_value(row, "source_type", "") or "")
     circuit = branch_circuit_detail(
         db,
@@ -1740,7 +1767,6 @@ def process_queue_item(db, row, owner):
         mark_queue(db, row["id"], "skipped", "token_lifecycle_lock_held")
         return
     try:
-        mode, stage = source_to_mode_and_stage(row)
         quote_request_ts_ms = int(time.time() * 1000)
         execution = ptm.simulate_entry_execution(
             token_ca,
