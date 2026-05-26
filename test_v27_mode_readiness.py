@@ -1247,6 +1247,118 @@ def append_assumption_priority_escalation_governance_events(event_log_dir):
     )
 
 
+def append_final_governance_boundary_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="cohort_drift_boundary_recorded",
+        aggregate_id="cohort_drift_boundary:premium-clean-cohort-v1",
+        idempotency_key="cohort_drift_boundary:premium-clean-cohort-v1:current",
+        payload={
+            "cohort_id": "premium-clean-cohort-v1",
+            "baseline_window": "2026-01-14T00:00:00Z/2026-01-15T00:00:00Z",
+            "current_window": "2026-01-15T00:00:00Z/2026-01-16T00:00:00Z",
+            "drift_metric": 0.08,
+            "action": "block_promotion_and_resegment",
+        },
+    )
+    log.append_event(
+        event_type="complexity_budget_recorded",
+        aggregate_id="complexity_budget:complexity-budget-unit-v1:normal_tiny_capture_loop",
+        idempotency_key="complexity_budget:complexity-budget-unit-v1:normal_tiny_capture_loop",
+        payload={
+            "budget_id": "complexity-budget-unit-v1",
+            "scope": "normal_tiny_capture_loop",
+            "max_components": 12,
+            "current_components": 8,
+            "owner": "runtime-owner",
+        },
+    )
+    log.append_event(
+        event_type="exception_debt_register_recorded",
+        aggregate_id="exception_debt_register:exception-debt-unit-v1",
+        idempotency_key="exception_debt_register:exception-debt-unit-v1:RealtimeCleanDetector",
+        payload={
+            "exception_id": "exception-debt-unit-v1",
+            "contract_id": "RealtimeCleanDetector",
+            "debt_owner": "runtime-owner",
+            "expires_at": "2026-02-15T00:59:00Z",
+            "repayment_plan": "remove_exception_before_promotion",
+        },
+    )
+    log.append_event(
+        event_type="gate_retirement_policy_recorded",
+        aggregate_id="gate_retirement_policy:legacy-clean-source-gate",
+        idempotency_key="gate_retirement_policy:legacy-clean-source-gate:RuntimeSpecAssertionContract",
+        payload={
+            "gate_id": "legacy-clean-source-gate",
+            "retirement_reason": "superseded_by_runtime_trust_contracts",
+            "replacement_contract": "RuntimeSpecAssertionContract",
+            "evidence_package_id": "promotion-evidence-package-unit-v1",
+            "retired_at": "2026-01-15T01:00:00Z",
+        },
+    )
+    log.append_event(
+        event_type="graceful_degradation_boundary_recorded",
+        aggregate_id="graceful_degradation_boundary:graceful-degradation-unit-v1",
+        idempotency_key="graceful_degradation_boundary:graceful-degradation-unit-v1:premium_clean_quote_source",
+        payload={
+            "boundary_id": "graceful-degradation-unit-v1",
+            "degraded_component": "premium_clean_quote_source",
+            "allowed_modes": ["shadow", "ultra_tiny"],
+            "blocked_actions": ["normal_tiny_entry", "promotion"],
+            "operator_message": "normal_tiny entry blocked until clean quote source recovers",
+        },
+    )
+    log.append_event(
+        event_type="invariant_sampling_audit_recorded",
+        aggregate_id="invariant_sampling_audit:invariant-audit-unit-v1:quote_intent_binding_no_future_fields",
+        idempotency_key="invariant_sampling_audit:invariant-audit-unit-v1:sample-window",
+        payload={
+            "audit_id": "invariant-audit-unit-v1",
+            "invariant_id": "quote_intent_binding_no_future_fields",
+            "sample_window": "2026-01-15T00:00:00Z/2026-01-15T01:00:00Z",
+            "violation_count": 0,
+            "audited_at": "2026-01-15T01:01:00Z",
+        },
+    )
+    log.append_event(
+        event_type="operator_cognitive_load_recorded",
+        aggregate_id="operator_cognitive_load:operator-load-workflow-unit-v1:runtime_operator",
+        idempotency_key="operator_cognitive_load:operator-load-workflow-unit-v1:1",
+        payload={
+            "workflow_id": "operator-load-workflow-unit-v1",
+            "operator_role": "runtime_operator",
+            "max_parallel_alerts": 3,
+            "current_alert_count": 1,
+            "action": "normal_ops_with_watch",
+        },
+    )
+    log.append_event(
+        event_type="research_notebook_boundary_recorded",
+        aggregate_id="research_notebook_boundary:research-notebook-unit-v1",
+        idempotency_key="research_notebook_boundary:research-notebook-unit-v1:research_only_backtest",
+        payload={
+            "notebook_id": "research-notebook-unit-v1",
+            "data_scope": "research_only_backtest",
+            "write_targets_allowed": False,
+            "promotion_allowed": False,
+            "owner": "research-owner",
+        },
+    )
+    log.append_event(
+        event_type="unknown_unknowns_sampling_recorded",
+        aggregate_id="unknown_unknowns_sampling:unknown-unknowns-sample-unit-v1",
+        idempotency_key="unknown_unknowns_sampling:unknown-unknowns-sample-unit-v1:premium_clean_dog_candidates",
+        payload={
+            "sample_id": "unknown-unknowns-sample-unit-v1",
+            "population_scope": "premium_clean_dog_candidates",
+            "sampling_policy": "stratified_tail_and_recent_misses",
+            "review_result": "reviewed_no_new_risk",
+            "sampled_at": "2026-01-15T01:02:00Z",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -2565,6 +2677,70 @@ def test_mode_readiness_consumes_assumption_priority_escalation_governance_contr
     assert (
         matrix["contract_statuses"]["RootCauseTaxonomyVersioning"]["evidence"][
             "valid_root_cause_taxonomy_versioning_count"
+        ]
+        == 1
+    )
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_final_governance_boundary_contracts(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_final_governance_boundary_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "CohortDriftBoundary",
+        "ComplexityBudgetContract",
+        "ExceptionDebtRegister",
+        "GateRetirementPolicy",
+        "GracefulDegradationBoundary",
+        "InvariantSamplingAudit",
+        "OperatorCognitiveLoadContract",
+        "ResearchNotebookBoundaryContract",
+        "UnknownUnknownsSamplingContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["CohortDriftBoundary"]["evidence"]["valid_cohort_drift_boundary_count"] == 1
+    assert matrix["contract_statuses"]["ComplexityBudgetContract"]["evidence"]["valid_complexity_budget_count"] == 1
+    assert matrix["contract_statuses"]["ExceptionDebtRegister"]["evidence"]["valid_exception_debt_register_count"] == 1
+    assert matrix["contract_statuses"]["GateRetirementPolicy"]["evidence"]["valid_gate_retirement_policy_count"] == 1
+    assert (
+        matrix["contract_statuses"]["GracefulDegradationBoundary"]["evidence"][
+            "valid_graceful_degradation_boundary_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["InvariantSamplingAudit"]["evidence"]["valid_invariant_sampling_audit_count"] == 1
+    assert (
+        matrix["contract_statuses"]["OperatorCognitiveLoadContract"]["evidence"][
+            "valid_operator_cognitive_load_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["ResearchNotebookBoundaryContract"]["evidence"][
+            "valid_research_notebook_boundary_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["UnknownUnknownsSamplingContract"]["evidence"][
+            "valid_unknown_unknowns_sampling_count"
         ]
         == 1
     )

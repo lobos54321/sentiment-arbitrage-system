@@ -149,8 +149,8 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
     assert "OperatorTrainingCertificationContract" not in normal["missing_contracts"]
     assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is True
     governance = audit["final_scopes"]["normal_tiny_governance"]
-    assert audit["health"]["final_normal_tiny_governance_scope_complete"] is False
-    assert audit["health"]["final_normal_tiny_governance_missing_count"] == 9
+    assert audit["health"]["final_normal_tiny_governance_scope_complete"] is True
+    assert audit["health"]["final_normal_tiny_governance_missing_count"] == 0
     for contract_id in (
         "RuntimeSpecAssertionContract",
         "MinimumViableTrustBoundary",
@@ -172,6 +172,15 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
         "PromotionEvidencePackageContract",
         "RegressionBudgetContract",
         "RootCauseTaxonomyVersioning",
+        "CohortDriftBoundary",
+        "ComplexityBudgetContract",
+        "ExceptionDebtRegister",
+        "GateRetirementPolicy",
+        "GracefulDegradationBoundary",
+        "InvariantSamplingAudit",
+        "OperatorCognitiveLoadContract",
+        "ResearchNotebookBoundaryContract",
+        "UnknownUnknownsSamplingContract",
     ):
         assert contract_id not in governance["missing_contracts"]
 

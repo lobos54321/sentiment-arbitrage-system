@@ -141,7 +141,16 @@
         "IssueEscalationFromMetricsContract",
         "PromotionEvidencePackageContract",
         "RegressionBudgetContract",
-        "RootCauseTaxonomyVersioning"
+        "RootCauseTaxonomyVersioning",
+        "CohortDriftBoundary",
+        "ComplexityBudgetContract",
+        "ExceptionDebtRegister",
+        "GateRetirementPolicy",
+        "GracefulDegradationBoundary",
+        "InvariantSamplingAudit",
+        "OperatorCognitiveLoadContract",
+        "ResearchNotebookBoundaryContract",
+        "UnknownUnknownsSamplingContract"
       ],
       "affected_modes": [
         "shadow",
@@ -149,7 +158,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-26T00:00:00Z",
-      "impact_hash": "ad41c6727e0342b953130eb9f61d83f2fd5e70a903f333d56be90a6cf2406ad7",
+      "impact_hash": "dc323af0c960dafedca5f139dd3715e9cdfa3119ab786d338e34fa9637673e61",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -177,18 +186,18 @@
         "config/v27-source-parser-auth-policy.json": "8afb5db9fd4cda64d7ef0e2285761f3a9834a5873383a7a8b89a70e09eb64a21",
         "scripts/generate_v27_contract_client.py": "3d8c06fd2242773e306d2a49a6e5191f6aceac8c3ed7c9659bfc677381e83c7a",
         "scripts/v27_basic_contract_readiness.py": "d1fcc2dbaac602fbe1571cc33102f2988dc59bf655f402bec361474fde6a94e5",
-        "scripts/v27_denominator_projection.py": "1549f878d0ac4a5f5d3dd2c953a127ec8cb70427ab971bcef4fa262fd83f5c64",
+        "scripts/v27_denominator_projection.py": "5ee4230f1ded9a817c8e10d299000b743442e19aedcb94fb53387dbcd2afbdb9",
         "scripts/v27_mode_gate_scope_audit.py": "e548951e66da42aa00d7fdff5944191609ad527dd375b9f459714a0576637d5d",
-        "scripts/v27_mode_readiness.py": "1f5ca2c6e37d3762a7f5b9b8c0f57102a659fd77d61190d75c47e964d6865cf4",
+        "scripts/v27_mode_readiness.py": "881081392079348012e6d8649ed1235b779810c0fd12b84d9a74c31abb77000f",
         "scripts/v27_projection_consumer_evidence.py": "cdae1f25c2137c85bce4c29214fc5c3033ccb6982304ccd9558f1acf4d9bd82a",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json": "fc4f59ba12aef17576dfacc5c10e3f1d054f4cacb462f0bd8eef4c76508a068d",
         "spec/telegram_dog_regime_capture/v2.7.0/gap-register.json": "1e72251702c363326a1d4a9ee4270b9d38c22137d5ef4b426ee8e29b6d74e575",
         "spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json": "2c7e751f5df00934bb6c6b26799b1458c8323e3ef730469bb25f8792ed55f549",
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json": "02f5364a80d031db66b98a98538aeeb907a4159722533ddfa9a888ae6ca1db42",
         "test_v27_basic_contract_readiness.py": "ddd5efe7e4508d9f13cbee281fb404823d87f9d7a00cc6b42a142f46425158c1",
-        "test_v27_mode_gate_scope_audit.py": "cba446f5ee8bbca85d6e9ef1cf7441e50a358682657cb14a2b8b8c5b2d6fd690",
-        "test_v27_mode_readiness.py": "a18f18a2b8d48fb61aa4e13f73127f1c68a5dcc6247685587d1f697854b70b7e",
-        "test_v27_denominator_projection.py": "c2425432659396b38fcba33094b5a53d8b5791dfd9c4c8efcf43aa2876800bd2"
+        "test_v27_mode_gate_scope_audit.py": "5243abcccee31fa1a7f53dc21a37df7f952b062f90200c4af8b826e61423dd67",
+        "test_v27_mode_readiness.py": "bb11171cb89f252b3ec785edb71546fe3549e8a32a9f7fc216a54d0c5670854f",
+        "test_v27_denominator_projection.py": "2b8f46fc119f335c469856a97dbbbd84410387a58ed16c19e7bfd1c3ad31df89"
       },
       "spec_change_id": "v27-shadow-observation-identity-readiness",
       "spec_hash": "bbbad3551afe72dc104888529dff4f91a67524464f6a7e49ea7bfae46c3eef53"

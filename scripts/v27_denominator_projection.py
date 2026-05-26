@@ -133,6 +133,15 @@ ISSUE_ESCALATION_FROM_METRICS_EVENT_TYPE = "issue_escalation_from_metrics_record
 PROMOTION_EVIDENCE_PACKAGE_EVENT_TYPE = "promotion_evidence_package_recorded"
 REGRESSION_BUDGET_EVENT_TYPE = "regression_budget_recorded"
 ROOT_CAUSE_TAXONOMY_VERSIONING_EVENT_TYPE = "root_cause_taxonomy_versioning_recorded"
+COHORT_DRIFT_BOUNDARY_EVENT_TYPE = "cohort_drift_boundary_recorded"
+COMPLEXITY_BUDGET_EVENT_TYPE = "complexity_budget_recorded"
+EXCEPTION_DEBT_REGISTER_EVENT_TYPE = "exception_debt_register_recorded"
+GATE_RETIREMENT_POLICY_EVENT_TYPE = "gate_retirement_policy_recorded"
+GRACEFUL_DEGRADATION_BOUNDARY_EVENT_TYPE = "graceful_degradation_boundary_recorded"
+INVARIANT_SAMPLING_AUDIT_EVENT_TYPE = "invariant_sampling_audit_recorded"
+OPERATOR_COGNITIVE_LOAD_EVENT_TYPE = "operator_cognitive_load_recorded"
+RESEARCH_NOTEBOOK_BOUNDARY_EVENT_TYPE = "research_notebook_boundary_recorded"
+UNKNOWN_UNKNOWNS_SAMPLING_EVENT_TYPE = "unknown_unknowns_sampling_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -232,6 +241,15 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     PROMOTION_EVIDENCE_PACKAGE_EVENT_TYPE,
     REGRESSION_BUDGET_EVENT_TYPE,
     ROOT_CAUSE_TAXONOMY_VERSIONING_EVENT_TYPE,
+    COHORT_DRIFT_BOUNDARY_EVENT_TYPE,
+    COMPLEXITY_BUDGET_EVENT_TYPE,
+    EXCEPTION_DEBT_REGISTER_EVENT_TYPE,
+    GATE_RETIREMENT_POLICY_EVENT_TYPE,
+    GRACEFUL_DEGRADATION_BOUNDARY_EVENT_TYPE,
+    INVARIANT_SAMPLING_AUDIT_EVENT_TYPE,
+    OPERATOR_COGNITIVE_LOAD_EVENT_TYPE,
+    RESEARCH_NOTEBOOK_BOUNDARY_EVENT_TYPE,
+    UNKNOWN_UNKNOWNS_SAMPLING_EVENT_TYPE,
 }
 FINAL_NORMAL_TINY_CONTRACT_SPECS = {
     "AccessReviewContract": {
@@ -479,6 +497,78 @@ FINAL_NORMAL_TINY_CONTRACT_SPECS = {
         "plural": "root_cause_taxonomy_versions",
         "required_fields": ("taxonomy_version", "root_cause_code", "severity", "migration_policy", "effective_at"),
         "projection_version": "v2.7.0.root_cause_taxonomy_versioning.v1",
+    },
+    "CohortDriftBoundary": {
+        "event_type": COHORT_DRIFT_BOUNDARY_EVENT_TYPE,
+        "key_field": "cohort_id",
+        "slug": "cohort_drift_boundary",
+        "plural": "cohort_drift_boundaries",
+        "required_fields": ("cohort_id", "baseline_window", "current_window", "drift_metric", "action"),
+        "projection_version": "v2.7.0.cohort_drift_boundary.v1",
+    },
+    "ComplexityBudgetContract": {
+        "event_type": COMPLEXITY_BUDGET_EVENT_TYPE,
+        "key_field": "budget_id",
+        "slug": "complexity_budget",
+        "plural": "complexity_budgets",
+        "required_fields": ("budget_id", "scope", "max_components", "current_components", "owner"),
+        "projection_version": "v2.7.0.complexity_budget.v1",
+    },
+    "ExceptionDebtRegister": {
+        "event_type": EXCEPTION_DEBT_REGISTER_EVENT_TYPE,
+        "key_field": "exception_id",
+        "slug": "exception_debt_register",
+        "plural": "exception_debt_records",
+        "required_fields": ("exception_id", "contract_id", "debt_owner", "expires_at", "repayment_plan"),
+        "projection_version": "v2.7.0.exception_debt_register.v1",
+    },
+    "GateRetirementPolicy": {
+        "event_type": GATE_RETIREMENT_POLICY_EVENT_TYPE,
+        "key_field": "gate_id",
+        "slug": "gate_retirement_policy",
+        "plural": "gate_retirement_policies",
+        "required_fields": ("gate_id", "retirement_reason", "replacement_contract", "evidence_package_id", "retired_at"),
+        "projection_version": "v2.7.0.gate_retirement_policy.v1",
+    },
+    "GracefulDegradationBoundary": {
+        "event_type": GRACEFUL_DEGRADATION_BOUNDARY_EVENT_TYPE,
+        "key_field": "boundary_id",
+        "slug": "graceful_degradation_boundary",
+        "plural": "graceful_degradation_boundaries",
+        "required_fields": ("boundary_id", "degraded_component", "allowed_modes", "blocked_actions", "operator_message"),
+        "projection_version": "v2.7.0.graceful_degradation_boundary.v1",
+    },
+    "InvariantSamplingAudit": {
+        "event_type": INVARIANT_SAMPLING_AUDIT_EVENT_TYPE,
+        "key_field": "audit_id",
+        "slug": "invariant_sampling_audit",
+        "plural": "invariant_sampling_audits",
+        "required_fields": ("audit_id", "invariant_id", "sample_window", "violation_count", "audited_at"),
+        "projection_version": "v2.7.0.invariant_sampling_audit.v1",
+    },
+    "OperatorCognitiveLoadContract": {
+        "event_type": OPERATOR_COGNITIVE_LOAD_EVENT_TYPE,
+        "key_field": "workflow_id",
+        "slug": "operator_cognitive_load",
+        "plural": "operator_cognitive_load_records",
+        "required_fields": ("workflow_id", "operator_role", "max_parallel_alerts", "current_alert_count", "action"),
+        "projection_version": "v2.7.0.operator_cognitive_load.v1",
+    },
+    "ResearchNotebookBoundaryContract": {
+        "event_type": RESEARCH_NOTEBOOK_BOUNDARY_EVENT_TYPE,
+        "key_field": "notebook_id",
+        "slug": "research_notebook_boundary",
+        "plural": "research_notebook_boundaries",
+        "required_fields": ("notebook_id", "data_scope", "write_targets_allowed", "promotion_allowed", "owner"),
+        "projection_version": "v2.7.0.research_notebook_boundary.v1",
+    },
+    "UnknownUnknownsSamplingContract": {
+        "event_type": UNKNOWN_UNKNOWNS_SAMPLING_EVENT_TYPE,
+        "key_field": "sample_id",
+        "slug": "unknown_unknowns_sampling",
+        "plural": "unknown_unknowns_samples",
+        "required_fields": ("sample_id", "population_scope", "sampling_policy", "review_result", "sampled_at"),
+        "projection_version": "v2.7.0.unknown_unknowns_sampling.v1",
     },
 }
 FINAL_NORMAL_TINY_EVENT_SPECS = {
@@ -1295,9 +1385,25 @@ def _as_string_list(value):
 
 def _final_normal_tiny_value(contract_id, field, bags):
     value = _extract_scalar(bags, [(field,)])
-    if field in {"required_approvers", "corrective_actions", "trusted_inputs", "untrusted_inputs", "required_contracts", "affected_modes"}:
+    if field in {
+        "required_approvers",
+        "corrective_actions",
+        "trusted_inputs",
+        "untrusted_inputs",
+        "required_contracts",
+        "affected_modes",
+        "allowed_modes",
+        "blocked_actions",
+    }:
         return _as_string_list(value)
-    if field in {"unsafe_prefix_detected", "decision_allowed", "drift_detected", "cycle_detected"}:
+    if field in {
+        "unsafe_prefix_detected",
+        "decision_allowed",
+        "drift_detected",
+        "cycle_detected",
+        "write_targets_allowed",
+        "promotion_allowed",
+    }:
         return _as_bool(value)
     if field in {
         "expected_no_effect_metric",
@@ -1314,9 +1420,10 @@ def _final_normal_tiny_value(contract_id, field, bags):
         "capture_metric",
         "allowed_regression",
         "observed_regression",
+        "drift_metric",
     }:
         return _as_float(value)
-    if field in {"sample_size", "min_sample_size"}:
+    if field in {"sample_size", "min_sample_size", "max_components", "current_components", "max_parallel_alerts", "current_alert_count", "violation_count"}:
         return _as_int(value, default=None)
     return value
 
@@ -1336,6 +1443,8 @@ def _final_normal_tiny_violation_fields(contract_id, values):
         "created_at",
         "generated_at",
         "effective_at",
+        "retired_at",
+        "sampled_at",
     ):
         if field in values and values.get(field) and _timestamp_epoch_seconds(values.get(field)) is None:
             violation_fields.append(f"{field}_parseable")
@@ -1574,6 +1683,93 @@ def _final_normal_tiny_violation_fields(contract_id, values):
         migration_policy = str(values.get("migration_policy") or "").strip().lower()
         if migration_policy in {"none", "ignore", "unknown", "tbd", "noop"}:
             violation_fields.append("migration_policy_missing")
+    elif contract_id == "CohortDriftBoundary":
+        drift_metric = values.get("drift_metric")
+        if drift_metric is not None and not math.isfinite(drift_metric):
+            violation_fields.append("drift_metric_finite")
+        action = str(values.get("action") or "").strip().lower()
+        if action in {"none", "ignore", "noop", "allow_promotion", "promote", "approve", "release"}:
+            violation_fields.append("drift_action_not_blocking")
+    elif contract_id == "ComplexityBudgetContract":
+        max_components = values.get("max_components")
+        current_components = values.get("current_components")
+        for field, value in (("max_components", max_components), ("current_components", current_components)):
+            if value is not None and (not math.isfinite(value) or value < 0):
+                violation_fields.append(f"{field}_nonnegative")
+        if (
+            max_components is not None
+            and current_components is not None
+            and math.isfinite(max_components)
+            and math.isfinite(current_components)
+            and current_components > max_components
+        ):
+            violation_fields.append("complexity_budget_exceeded")
+    elif contract_id == "ExceptionDebtRegister":
+        debt_owner = str(values.get("debt_owner") or "").strip().lower()
+        repayment_plan = str(values.get("repayment_plan") or "").strip().lower()
+        if debt_owner in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("debt_owner_missing")
+        if repayment_plan in {"none", "missing", "unknown", "tbd", "noop"}:
+            violation_fields.append("repayment_plan_missing")
+    elif contract_id == "GateRetirementPolicy":
+        retirement_reason = str(values.get("retirement_reason") or "").strip().lower()
+        replacement_contract = str(values.get("replacement_contract") or "").strip().lower()
+        evidence_package_id = str(values.get("evidence_package_id") or "").strip().lower()
+        if retirement_reason in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("retirement_reason_missing")
+        if replacement_contract in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("replacement_contract_missing")
+        if evidence_package_id in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("evidence_package_missing")
+    elif contract_id == "GracefulDegradationBoundary":
+        degraded_component = str(values.get("degraded_component") or "").strip().lower()
+        operator_message = str(values.get("operator_message") or "").strip().lower()
+        if degraded_component in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("degraded_component_missing")
+        if not values.get("allowed_modes"):
+            violation_fields.append("allowed_modes_empty")
+        if not values.get("blocked_actions"):
+            violation_fields.append("blocked_actions_empty")
+        if operator_message in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("operator_message_missing")
+    elif contract_id == "InvariantSamplingAudit":
+        violation_count = values.get("violation_count")
+        if violation_count is not None and (not math.isfinite(violation_count) or violation_count < 0):
+            violation_fields.append("violation_count_nonnegative")
+        if violation_count is not None and math.isfinite(violation_count) and violation_count > 0:
+            violation_fields.append("invariant_violations_detected")
+    elif contract_id == "OperatorCognitiveLoadContract":
+        max_parallel_alerts = values.get("max_parallel_alerts")
+        current_alert_count = values.get("current_alert_count")
+        for field, value in (("max_parallel_alerts", max_parallel_alerts), ("current_alert_count", current_alert_count)):
+            if value is not None and (not math.isfinite(value) or value < 0):
+                violation_fields.append(f"{field}_nonnegative")
+        if (
+            max_parallel_alerts is not None
+            and current_alert_count is not None
+            and math.isfinite(max_parallel_alerts)
+            and math.isfinite(current_alert_count)
+            and current_alert_count > max_parallel_alerts
+        ):
+            violation_fields.append("operator_load_exceeded")
+        action = str(values.get("action") or "").strip().lower()
+        if action in {"none", "ignore", "noop", "allow", "continue"}:
+            violation_fields.append("operator_load_not_degraded")
+    elif contract_id == "ResearchNotebookBoundaryContract":
+        if values.get("write_targets_allowed") is True:
+            violation_fields.append("write_targets_allowed")
+        if values.get("promotion_allowed") is True:
+            violation_fields.append("promotion_allowed")
+        owner = str(values.get("owner") or "").strip().lower()
+        if owner in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("owner_missing")
+    elif contract_id == "UnknownUnknownsSamplingContract":
+        review_result = str(values.get("review_result") or "").strip().lower()
+        sampling_policy = str(values.get("sampling_policy") or "").strip().lower()
+        if review_result in {"none", "missing", "unknown", "tbd", "unreviewed"}:
+            violation_fields.append("review_result_missing")
+        if sampling_policy in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("sampling_policy_missing")
     return sorted(set(violation_fields))
 
 

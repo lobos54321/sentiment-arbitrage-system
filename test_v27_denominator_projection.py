@@ -2174,6 +2174,222 @@ def append_root_cause_taxonomy_versioning(
     )
 
 
+def append_cohort_drift_boundary(
+    log,
+    *,
+    cohort_id="premium-clean-cohort-v1",
+    baseline_window="2026-01-14T00:00:00Z/2026-01-15T00:00:00Z",
+    current_window="2026-01-15T00:00:00Z/2026-01-16T00:00:00Z",
+    drift_metric=0.08,
+    action="block_promotion_and_resegment",
+):
+    payload = {
+        "cohort_id": cohort_id,
+        "baseline_window": baseline_window,
+        "current_window": current_window,
+        "drift_metric": drift_metric,
+        "action": action,
+    }
+    return log.append_event(
+        event_type="cohort_drift_boundary_recorded",
+        aggregate_id=f"cohort_drift_boundary:{cohort_id}",
+        idempotency_key=f"cohort_drift_boundary:{cohort_id}:{current_window}",
+        payload=payload,
+    )
+
+
+def append_complexity_budget(
+    log,
+    *,
+    budget_id="complexity-budget-unit-v1",
+    scope="normal_tiny_capture_loop",
+    max_components=12,
+    current_components=8,
+    owner="runtime-owner",
+):
+    payload = {
+        "budget_id": budget_id,
+        "scope": scope,
+        "max_components": max_components,
+        "current_components": current_components,
+        "owner": owner,
+    }
+    return log.append_event(
+        event_type="complexity_budget_recorded",
+        aggregate_id=f"complexity_budget:{budget_id}:{scope}",
+        idempotency_key=f"complexity_budget:{budget_id}:{scope}",
+        payload=payload,
+    )
+
+
+def append_exception_debt_register(
+    log,
+    *,
+    exception_id="exception-debt-unit-v1",
+    contract_id="RealtimeCleanDetector",
+    debt_owner="runtime-owner",
+    expires_at="2026-02-15T00:59:00Z",
+    repayment_plan="remove_exception_before_promotion",
+):
+    payload = {
+        "exception_id": exception_id,
+        "contract_id": contract_id,
+        "debt_owner": debt_owner,
+        "expires_at": expires_at,
+        "repayment_plan": repayment_plan,
+    }
+    return log.append_event(
+        event_type="exception_debt_register_recorded",
+        aggregate_id=f"exception_debt_register:{exception_id}",
+        idempotency_key=f"exception_debt_register:{exception_id}:{contract_id}",
+        payload=payload,
+    )
+
+
+def append_gate_retirement_policy(
+    log,
+    *,
+    gate_id="legacy-clean-source-gate",
+    retirement_reason="superseded_by_runtime_trust_contracts",
+    replacement_contract="RuntimeSpecAssertionContract",
+    evidence_package_id="promotion-evidence-package-unit-v1",
+    retired_at="2026-01-15T01:00:00Z",
+):
+    payload = {
+        "gate_id": gate_id,
+        "retirement_reason": retirement_reason,
+        "replacement_contract": replacement_contract,
+        "evidence_package_id": evidence_package_id,
+        "retired_at": retired_at,
+    }
+    return log.append_event(
+        event_type="gate_retirement_policy_recorded",
+        aggregate_id=f"gate_retirement_policy:{gate_id}",
+        idempotency_key=f"gate_retirement_policy:{gate_id}:{replacement_contract}",
+        payload=payload,
+    )
+
+
+def append_graceful_degradation_boundary(
+    log,
+    *,
+    boundary_id="graceful-degradation-unit-v1",
+    degraded_component="premium_clean_quote_source",
+    allowed_modes=None,
+    blocked_actions=None,
+    operator_message="normal_tiny entry blocked until clean quote source recovers",
+):
+    payload = {
+        "boundary_id": boundary_id,
+        "degraded_component": degraded_component,
+        "allowed_modes": allowed_modes if allowed_modes is not None else ["shadow", "ultra_tiny"],
+        "blocked_actions": blocked_actions if blocked_actions is not None else ["normal_tiny_entry", "promotion"],
+        "operator_message": operator_message,
+    }
+    return log.append_event(
+        event_type="graceful_degradation_boundary_recorded",
+        aggregate_id=f"graceful_degradation_boundary:{boundary_id}",
+        idempotency_key=f"graceful_degradation_boundary:{boundary_id}:{degraded_component}",
+        payload=payload,
+    )
+
+
+def append_invariant_sampling_audit(
+    log,
+    *,
+    audit_id="invariant-audit-unit-v1",
+    invariant_id="quote_intent_binding_no_future_fields",
+    sample_window="2026-01-15T00:00:00Z/2026-01-15T01:00:00Z",
+    violation_count=0,
+    audited_at="2026-01-15T01:01:00Z",
+):
+    payload = {
+        "audit_id": audit_id,
+        "invariant_id": invariant_id,
+        "sample_window": sample_window,
+        "violation_count": violation_count,
+        "audited_at": audited_at,
+    }
+    return log.append_event(
+        event_type="invariant_sampling_audit_recorded",
+        aggregate_id=f"invariant_sampling_audit:{audit_id}:{invariant_id}",
+        idempotency_key=f"invariant_sampling_audit:{audit_id}:{sample_window}",
+        payload=payload,
+    )
+
+
+def append_operator_cognitive_load(
+    log,
+    *,
+    workflow_id="operator-load-workflow-unit-v1",
+    operator_role="runtime_operator",
+    max_parallel_alerts=3,
+    current_alert_count=1,
+    action="normal_ops_with_watch",
+):
+    payload = {
+        "workflow_id": workflow_id,
+        "operator_role": operator_role,
+        "max_parallel_alerts": max_parallel_alerts,
+        "current_alert_count": current_alert_count,
+        "action": action,
+    }
+    return log.append_event(
+        event_type="operator_cognitive_load_recorded",
+        aggregate_id=f"operator_cognitive_load:{workflow_id}:{operator_role}",
+        idempotency_key=f"operator_cognitive_load:{workflow_id}:{current_alert_count}",
+        payload=payload,
+    )
+
+
+def append_research_notebook_boundary(
+    log,
+    *,
+    notebook_id="research-notebook-unit-v1",
+    data_scope="research_only_backtest",
+    write_targets_allowed=False,
+    promotion_allowed=False,
+    owner="research-owner",
+):
+    payload = {
+        "notebook_id": notebook_id,
+        "data_scope": data_scope,
+        "write_targets_allowed": write_targets_allowed,
+        "promotion_allowed": promotion_allowed,
+        "owner": owner,
+    }
+    return log.append_event(
+        event_type="research_notebook_boundary_recorded",
+        aggregate_id=f"research_notebook_boundary:{notebook_id}",
+        idempotency_key=f"research_notebook_boundary:{notebook_id}:{data_scope}",
+        payload=payload,
+    )
+
+
+def append_unknown_unknowns_sampling(
+    log,
+    *,
+    sample_id="unknown-unknowns-sample-unit-v1",
+    population_scope="premium_clean_dog_candidates",
+    sampling_policy="stratified_tail_and_recent_misses",
+    review_result="reviewed_no_new_risk",
+    sampled_at="2026-01-15T01:02:00Z",
+):
+    payload = {
+        "sample_id": sample_id,
+        "population_scope": population_scope,
+        "sampling_policy": sampling_policy,
+        "review_result": review_result,
+        "sampled_at": sampled_at,
+    }
+    return log.append_event(
+        event_type="unknown_unknowns_sampling_recorded",
+        aggregate_id=f"unknown_unknowns_sampling:{sample_id}",
+        idempotency_key=f"unknown_unknowns_sampling:{sample_id}:{population_scope}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -3430,6 +3646,129 @@ def test_denominator_projection_rejects_assumption_priority_escalation_governanc
     assert (
         projection["contract_evidence"]["RootCauseTaxonomyVersioning"][
             "root_cause_taxonomy_versioning_violation_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_consumes_final_governance_boundary_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_cohort_drift_boundary(log)
+    append_complexity_budget(log)
+    append_exception_debt_register(log)
+    append_gate_retirement_policy(log)
+    append_graceful_degradation_boundary(log)
+    append_invariant_sampling_audit(log)
+    append_operator_cognitive_load(log)
+    append_research_notebook_boundary(log)
+    append_unknown_unknowns_sampling(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["cohort_drift_boundary_recorded_events"] == 1
+    assert projection["complexity_budget_recorded_events"] == 1
+    assert projection["exception_debt_register_recorded_events"] == 1
+    assert projection["gate_retirement_policy_recorded_events"] == 1
+    assert projection["graceful_degradation_boundary_recorded_events"] == 1
+    assert projection["invariant_sampling_audit_recorded_events"] == 1
+    assert projection["operator_cognitive_load_recorded_events"] == 1
+    assert projection["research_notebook_boundary_recorded_events"] == 1
+    assert projection["unknown_unknowns_sampling_recorded_events"] == 1
+    assert projection["health"]["cohort_drift_boundary_ok"] is True
+    assert projection["health"]["complexity_budget_ok"] is True
+    assert projection["health"]["exception_debt_register_ok"] is True
+    assert projection["health"]["gate_retirement_policy_ok"] is True
+    assert projection["health"]["graceful_degradation_boundary_ok"] is True
+    assert projection["health"]["invariant_sampling_audit_ok"] is True
+    assert projection["health"]["operator_cognitive_load_ok"] is True
+    assert projection["health"]["research_notebook_boundary_ok"] is True
+    assert projection["health"]["unknown_unknowns_sampling_ok"] is True
+    assert projection["contract_evidence"]["CohortDriftBoundary"]["valid_cohort_drift_boundary_count"] == 1
+    assert projection["contract_evidence"]["ComplexityBudgetContract"]["valid_complexity_budget_count"] == 1
+    assert projection["contract_evidence"]["ExceptionDebtRegister"]["valid_exception_debt_register_count"] == 1
+    assert projection["contract_evidence"]["GateRetirementPolicy"]["valid_gate_retirement_policy_count"] == 1
+    assert (
+        projection["contract_evidence"]["GracefulDegradationBoundary"][
+            "valid_graceful_degradation_boundary_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["InvariantSamplingAudit"]["valid_invariant_sampling_audit_count"] == 1
+    assert (
+        projection["contract_evidence"]["OperatorCognitiveLoadContract"][
+            "valid_operator_cognitive_load_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ResearchNotebookBoundaryContract"][
+            "valid_research_notebook_boundary_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["UnknownUnknownsSamplingContract"][
+            "valid_unknown_unknowns_sampling_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_rejects_final_governance_boundary_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_cohort_drift_boundary(log, action="allow_promotion")
+    append_complexity_budget(log, max_components=3, current_components=8)
+    append_exception_debt_register(log, debt_owner="unknown", expires_at="not-a-time", repayment_plan="none")
+    append_gate_retirement_policy(
+        log,
+        retirement_reason="unknown",
+        replacement_contract="missing",
+        evidence_package_id="tbd",
+        retired_at="not-a-time",
+    )
+    append_graceful_degradation_boundary(log, allowed_modes=[], blocked_actions=[], operator_message="unknown")
+    append_invariant_sampling_audit(log, violation_count=2, audited_at="not-a-time")
+    append_operator_cognitive_load(log, max_parallel_alerts=2, current_alert_count=5, action="continue")
+    append_research_notebook_boundary(log, write_targets_allowed=True, promotion_allowed=True, owner="unknown")
+    append_unknown_unknowns_sampling(log, sampling_policy="tbd", review_result="unreviewed", sampled_at="not-a-time")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["cohort_drift_boundary_ok"] is False
+    assert projection["health"]["complexity_budget_ok"] is False
+    assert projection["health"]["exception_debt_register_ok"] is False
+    assert projection["health"]["gate_retirement_policy_ok"] is False
+    assert projection["health"]["graceful_degradation_boundary_ok"] is False
+    assert projection["health"]["invariant_sampling_audit_ok"] is False
+    assert projection["health"]["operator_cognitive_load_ok"] is False
+    assert projection["health"]["research_notebook_boundary_ok"] is False
+    assert projection["health"]["unknown_unknowns_sampling_ok"] is False
+    assert projection["contract_evidence"]["CohortDriftBoundary"]["cohort_drift_boundary_violation_count"] == 1
+    assert projection["contract_evidence"]["ComplexityBudgetContract"]["complexity_budget_violation_count"] == 1
+    assert projection["contract_evidence"]["ExceptionDebtRegister"]["exception_debt_register_violation_count"] == 1
+    assert projection["contract_evidence"]["GateRetirementPolicy"]["gate_retirement_policy_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["GracefulDegradationBoundary"][
+            "graceful_degradation_boundary_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["InvariantSamplingAudit"]["invariant_sampling_audit_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["OperatorCognitiveLoadContract"][
+            "operator_cognitive_load_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ResearchNotebookBoundaryContract"][
+            "research_notebook_boundary_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["UnknownUnknownsSamplingContract"][
+            "unknown_unknowns_sampling_violation_count"
         ]
         == 1
     )

@@ -235,6 +235,15 @@ MODE_REQUIREMENTS = {
         "PromotionEvidencePackageContract",
         "RegressionBudgetContract",
         "RootCauseTaxonomyVersioning",
+        "CohortDriftBoundary",
+        "ComplexityBudgetContract",
+        "ExceptionDebtRegister",
+        "GateRetirementPolicy",
+        "GracefulDegradationBoundary",
+        "InvariantSamplingAudit",
+        "OperatorCognitiveLoadContract",
+        "ResearchNotebookBoundaryContract",
+        "UnknownUnknownsSamplingContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -347,6 +356,42 @@ FINAL_NORMAL_TINY_STATUS_REASONS = {
     "RootCauseTaxonomyVersioning": (
         "root_cause_taxonomy_versioning_ok",
         "root_cause_taxonomy_versioning_missing_malformed_or_unclassified",
+    ),
+    "CohortDriftBoundary": (
+        "cohort_drift_boundary_ok",
+        "cohort_drift_boundary_missing_malformed_or_not_blocked",
+    ),
+    "ComplexityBudgetContract": (
+        "complexity_budget_ok",
+        "complexity_budget_missing_malformed_or_exceeded",
+    ),
+    "ExceptionDebtRegister": (
+        "exception_debt_register_ok",
+        "exception_debt_register_missing_malformed_or_unowned",
+    ),
+    "GateRetirementPolicy": (
+        "gate_retirement_policy_ok",
+        "gate_retirement_policy_missing_malformed_or_unproven",
+    ),
+    "GracefulDegradationBoundary": (
+        "graceful_degradation_boundary_ok",
+        "graceful_degradation_boundary_missing_malformed_or_open",
+    ),
+    "InvariantSamplingAudit": (
+        "invariant_sampling_audit_ok",
+        "invariant_sampling_audit_missing_malformed_or_failed",
+    ),
+    "OperatorCognitiveLoadContract": (
+        "operator_cognitive_load_ok",
+        "operator_cognitive_load_missing_malformed_or_overloaded",
+    ),
+    "ResearchNotebookBoundaryContract": (
+        "research_notebook_boundary_ok",
+        "research_notebook_boundary_missing_malformed_or_promotable",
+    ),
+    "UnknownUnknownsSamplingContract": (
+        "unknown_unknowns_sampling_ok",
+        "unknown_unknowns_sampling_missing_malformed_or_unreviewed",
     ),
 }
 
