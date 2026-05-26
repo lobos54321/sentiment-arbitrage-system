@@ -2390,6 +2390,150 @@ def append_unknown_unknowns_sampling(
     )
 
 
+def append_archive_bitrot_scrub(
+    log,
+    *,
+    archive_set_id="archive-set-unit-v1",
+    object_count=42,
+    scrub_hash=None,
+    bitrot_detected=False,
+    scrubbed_at="2026-01-15T01:03:00Z",
+):
+    payload = {
+        "archive_set_id": archive_set_id,
+        "object_count": object_count,
+        "scrub_hash": scrub_hash or sha256_hex({"archive_set_id": archive_set_id, "object_count": object_count}),
+        "bitrot_detected": bitrot_detected,
+        "scrubbed_at": scrubbed_at,
+    }
+    return log.append_event(
+        event_type="archive_bitrot_scrub_recorded",
+        aggregate_id=f"archive_bitrot_scrub:{archive_set_id}",
+        idempotency_key=f"archive_bitrot_scrub:{archive_set_id}:{scrubbed_at}",
+        payload=payload,
+    )
+
+
+def append_data_deletion_legal_hold(
+    log,
+    *,
+    legal_hold_id="deletion-legal-hold-unit-v1",
+    data_scope="premium_clean_source_raw_messages",
+    deletion_request_id="delete-request-unit-v1",
+    hold_state="deletion_blocked",
+    expires_at="2026-02-15T01:04:00Z",
+):
+    payload = {
+        "legal_hold_id": legal_hold_id,
+        "data_scope": data_scope,
+        "deletion_request_id": deletion_request_id,
+        "hold_state": hold_state,
+        "expires_at": expires_at,
+    }
+    return log.append_event(
+        event_type="data_deletion_legal_hold_recorded",
+        aggregate_id=f"data_deletion_legal_hold:{legal_hold_id}:{deletion_request_id}",
+        idempotency_key=f"data_deletion_legal_hold:{legal_hold_id}:{deletion_request_id}",
+        payload=payload,
+    )
+
+
+def append_data_license_compliance(
+    log,
+    *,
+    dataset_id="premium-clean-dataset-v1",
+    license_id="internal-paper-research-license-v1",
+    allowed_use="paper_trading_research",
+    expiry_at="2026-02-15T01:05:00Z",
+    compliance_status="compliant",
+):
+    payload = {
+        "dataset_id": dataset_id,
+        "license_id": license_id,
+        "allowed_use": allowed_use,
+        "expiry_at": expiry_at,
+        "compliance_status": compliance_status,
+    }
+    return log.append_event(
+        event_type="data_license_compliance_recorded",
+        aggregate_id=f"data_license_compliance:{dataset_id}:{license_id}",
+        idempotency_key=f"data_license_compliance:{dataset_id}:{license_id}",
+        payload=payload,
+    )
+
+
+def append_export_reimport_boundary(
+    log,
+    *,
+    boundary_id="export-reimport-boundary-unit-v1",
+    export_id="paper-review-export-unit-v1",
+    reimport_allowed=False,
+    lineage_hash=None,
+    approved_at="2026-01-15T01:06:00Z",
+):
+    payload = {
+        "boundary_id": boundary_id,
+        "export_id": export_id,
+        "reimport_allowed": reimport_allowed,
+        "lineage_hash": lineage_hash or sha256_hex({"boundary_id": boundary_id, "export_id": export_id}),
+        "approved_at": approved_at,
+    }
+    return log.append_event(
+        event_type="export_reimport_boundary_recorded",
+        aggregate_id=f"export_reimport_boundary:{boundary_id}:{export_id}",
+        idempotency_key=f"export_reimport_boundary:{boundary_id}:{export_id}",
+        payload=payload,
+    )
+
+
+def append_legal_hold(
+    log,
+    *,
+    legal_hold_id="legal-hold-unit-v1",
+    data_scope="premium_clean_source_raw_messages",
+    hold_reason="audit_replay_and_label_dispute_window",
+    owner="compliance-owner",
+    expires_at="2026-02-15T01:07:00Z",
+):
+    payload = {
+        "legal_hold_id": legal_hold_id,
+        "data_scope": data_scope,
+        "hold_reason": hold_reason,
+        "owner": owner,
+        "expires_at": expires_at,
+    }
+    return log.append_event(
+        event_type="legal_hold_recorded",
+        aggregate_id=f"legal_hold:{legal_hold_id}:{data_scope}",
+        idempotency_key=f"legal_hold:{legal_hold_id}:{data_scope}",
+        payload=payload,
+    )
+
+
+def append_provider_terms_compliance(
+    log,
+    *,
+    provider="telegram_premium_source",
+    terms_version="terms-v1",
+    allowed_use="paper_trading_research",
+    compliance_status="compliant",
+    reviewed_at="2026-01-15T01:08:00Z",
+):
+    payload = {
+        "provider": provider,
+        "terms_version": terms_version,
+        "allowed_use": allowed_use,
+        "compliance_status": compliance_status,
+        "reviewed_at": reviewed_at,
+    }
+    return log.append_event(
+        event_type="provider_terms_compliance_recorded",
+        aggregate_id=f"provider_terms_compliance:{provider}:{terms_version}",
+        idempotency_key=f"provider_terms_compliance:{provider}:{terms_version}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -3769,6 +3913,92 @@ def test_denominator_projection_rejects_final_governance_boundary_violations(tmp
     assert (
         projection["contract_evidence"]["UnknownUnknownsSamplingContract"][
             "unknown_unknowns_sampling_violation_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_consumes_phase_1_hardening_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_archive_bitrot_scrub(log)
+    append_data_deletion_legal_hold(log)
+    append_data_license_compliance(log)
+    append_export_reimport_boundary(log)
+    append_legal_hold(log)
+    append_provider_terms_compliance(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["archive_bitrot_scrub_recorded_events"] == 1
+    assert projection["data_deletion_legal_hold_recorded_events"] == 1
+    assert projection["data_license_compliance_recorded_events"] == 1
+    assert projection["export_reimport_boundary_recorded_events"] == 1
+    assert projection["legal_hold_recorded_events"] == 1
+    assert projection["provider_terms_compliance_recorded_events"] == 1
+    assert projection["health"]["archive_bitrot_scrub_ok"] is True
+    assert projection["health"]["data_deletion_legal_hold_ok"] is True
+    assert projection["health"]["data_license_compliance_ok"] is True
+    assert projection["health"]["export_reimport_boundary_ok"] is True
+    assert projection["health"]["legal_hold_ok"] is True
+    assert projection["health"]["provider_terms_compliance_ok"] is True
+    assert projection["contract_evidence"]["ArchiveBitrotScrubContract"]["valid_archive_bitrot_scrub_count"] == 1
+    assert (
+        projection["contract_evidence"]["DataDeletionLegalHoldContract"][
+            "valid_data_deletion_legal_hold_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["DataLicenseComplianceContract"]["valid_data_license_compliance_count"] == 1
+    assert (
+        projection["contract_evidence"]["ExportReimportBoundaryContract"][
+            "valid_export_reimport_boundary_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["LegalHoldContract"]["valid_legal_hold_count"] == 1
+    assert (
+        projection["contract_evidence"]["ProviderTermsComplianceContract"][
+            "valid_provider_terms_compliance_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_rejects_phase_1_hardening_contract_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_archive_bitrot_scrub(log, bitrot_detected=True, scrub_hash="not-a-hash", object_count=-1)
+    append_data_deletion_legal_hold(log, hold_state="released", expires_at="not-a-time")
+    append_data_license_compliance(log, allowed_use="disallowed", compliance_status="pending", expiry_at="not-a-time")
+    append_export_reimport_boundary(log, reimport_allowed=True, lineage_hash="not-a-hash", approved_at="not-a-time")
+    append_legal_hold(log, hold_reason="unknown", owner="missing", expires_at="not-a-time")
+    append_provider_terms_compliance(log, allowed_use="forbidden", compliance_status="pending", reviewed_at="not-a-time")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["archive_bitrot_scrub_ok"] is False
+    assert projection["health"]["data_deletion_legal_hold_ok"] is False
+    assert projection["health"]["data_license_compliance_ok"] is False
+    assert projection["health"]["export_reimport_boundary_ok"] is False
+    assert projection["health"]["legal_hold_ok"] is False
+    assert projection["health"]["provider_terms_compliance_ok"] is False
+    assert projection["contract_evidence"]["ArchiveBitrotScrubContract"]["archive_bitrot_scrub_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["DataDeletionLegalHoldContract"][
+            "data_deletion_legal_hold_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["DataLicenseComplianceContract"]["data_license_compliance_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["ExportReimportBoundaryContract"][
+            "export_reimport_boundary_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["LegalHoldContract"]["legal_hold_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["ProviderTermsComplianceContract"][
+            "provider_terms_compliance_violation_count"
         ]
         == 1
     )

@@ -1359,6 +1359,84 @@ def append_final_governance_boundary_events(event_log_dir):
     )
 
 
+def append_phase_1_hardening_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="archive_bitrot_scrub_recorded",
+        aggregate_id="archive_bitrot_scrub:archive-set-unit-v1",
+        idempotency_key="archive_bitrot_scrub:archive-set-unit-v1:2026-01-15T01:03:00Z",
+        payload={
+            "archive_set_id": "archive-set-unit-v1",
+            "object_count": 42,
+            "scrub_hash": sha256_hex({"archive_set_id": "archive-set-unit-v1", "object_count": 42}),
+            "bitrot_detected": False,
+            "scrubbed_at": "2026-01-15T01:03:00Z",
+        },
+    )
+    log.append_event(
+        event_type="data_deletion_legal_hold_recorded",
+        aggregate_id="data_deletion_legal_hold:deletion-legal-hold-unit-v1:delete-request-unit-v1",
+        idempotency_key="data_deletion_legal_hold:deletion-legal-hold-unit-v1:delete-request-unit-v1",
+        payload={
+            "legal_hold_id": "deletion-legal-hold-unit-v1",
+            "data_scope": "premium_clean_source_raw_messages",
+            "deletion_request_id": "delete-request-unit-v1",
+            "hold_state": "deletion_blocked",
+            "expires_at": "2026-02-15T01:04:00Z",
+        },
+    )
+    log.append_event(
+        event_type="data_license_compliance_recorded",
+        aggregate_id="data_license_compliance:premium-clean-dataset-v1:internal-paper-research-license-v1",
+        idempotency_key="data_license_compliance:premium-clean-dataset-v1:internal-paper-research-license-v1",
+        payload={
+            "dataset_id": "premium-clean-dataset-v1",
+            "license_id": "internal-paper-research-license-v1",
+            "allowed_use": "paper_trading_research",
+            "expiry_at": "2026-02-15T01:05:00Z",
+            "compliance_status": "compliant",
+        },
+    )
+    log.append_event(
+        event_type="export_reimport_boundary_recorded",
+        aggregate_id="export_reimport_boundary:export-reimport-boundary-unit-v1:paper-review-export-unit-v1",
+        idempotency_key="export_reimport_boundary:export-reimport-boundary-unit-v1:paper-review-export-unit-v1",
+        payload={
+            "boundary_id": "export-reimport-boundary-unit-v1",
+            "export_id": "paper-review-export-unit-v1",
+            "reimport_allowed": False,
+            "lineage_hash": sha256_hex(
+                {"boundary_id": "export-reimport-boundary-unit-v1", "export_id": "paper-review-export-unit-v1"}
+            ),
+            "approved_at": "2026-01-15T01:06:00Z",
+        },
+    )
+    log.append_event(
+        event_type="legal_hold_recorded",
+        aggregate_id="legal_hold:legal-hold-unit-v1:premium_clean_source_raw_messages",
+        idempotency_key="legal_hold:legal-hold-unit-v1:premium_clean_source_raw_messages",
+        payload={
+            "legal_hold_id": "legal-hold-unit-v1",
+            "data_scope": "premium_clean_source_raw_messages",
+            "hold_reason": "audit_replay_and_label_dispute_window",
+            "owner": "compliance-owner",
+            "expires_at": "2026-02-15T01:07:00Z",
+        },
+    )
+    log.append_event(
+        event_type="provider_terms_compliance_recorded",
+        aggregate_id="provider_terms_compliance:telegram_premium_source:terms-v1",
+        idempotency_key="provider_terms_compliance:telegram_premium_source:terms-v1",
+        payload={
+            "provider": "telegram_premium_source",
+            "terms_version": "terms-v1",
+            "allowed_use": "paper_trading_research",
+            "compliance_status": "compliant",
+            "reviewed_at": "2026-01-15T01:08:00Z",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -2741,6 +2819,64 @@ def test_mode_readiness_consumes_final_governance_boundary_contracts(tmp_path):
     assert (
         matrix["contract_statuses"]["UnknownUnknownsSamplingContract"]["evidence"][
             "valid_unknown_unknowns_sampling_count"
+        ]
+        == 1
+    )
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_phase_1_hardening_contracts(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_phase_1_hardening_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "ArchiveBitrotScrubContract",
+        "DataDeletionLegalHoldContract",
+        "DataLicenseComplianceContract",
+        "ExportReimportBoundaryContract",
+        "LegalHoldContract",
+        "ProviderTermsComplianceContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["ArchiveBitrotScrubContract"]["evidence"]["valid_archive_bitrot_scrub_count"] == 1
+    assert (
+        matrix["contract_statuses"]["DataDeletionLegalHoldContract"]["evidence"][
+            "valid_data_deletion_legal_hold_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["DataLicenseComplianceContract"]["evidence"][
+            "valid_data_license_compliance_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["ExportReimportBoundaryContract"]["evidence"][
+            "valid_export_reimport_boundary_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["LegalHoldContract"]["evidence"]["valid_legal_hold_count"] == 1
+    assert (
+        matrix["contract_statuses"]["ProviderTermsComplianceContract"]["evidence"][
+            "valid_provider_terms_compliance_count"
         ]
         == 1
     )

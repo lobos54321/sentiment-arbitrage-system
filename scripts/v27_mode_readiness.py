@@ -244,6 +244,12 @@ MODE_REQUIREMENTS = {
         "OperatorCognitiveLoadContract",
         "ResearchNotebookBoundaryContract",
         "UnknownUnknownsSamplingContract",
+        "ArchiveBitrotScrubContract",
+        "DataDeletionLegalHoldContract",
+        "DataLicenseComplianceContract",
+        "ExportReimportBoundaryContract",
+        "LegalHoldContract",
+        "ProviderTermsComplianceContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -392,6 +398,30 @@ FINAL_NORMAL_TINY_STATUS_REASONS = {
     "UnknownUnknownsSamplingContract": (
         "unknown_unknowns_sampling_ok",
         "unknown_unknowns_sampling_missing_malformed_or_unreviewed",
+    ),
+    "ArchiveBitrotScrubContract": (
+        "archive_bitrot_scrub_ok",
+        "archive_bitrot_scrub_missing_malformed_or_corrupt",
+    ),
+    "DataDeletionLegalHoldContract": (
+        "data_deletion_legal_hold_ok",
+        "data_deletion_legal_hold_missing_malformed_or_released",
+    ),
+    "DataLicenseComplianceContract": (
+        "data_license_compliance_ok",
+        "data_license_compliance_missing_malformed_or_noncompliant",
+    ),
+    "ExportReimportBoundaryContract": (
+        "export_reimport_boundary_ok",
+        "export_reimport_boundary_missing_malformed_or_open",
+    ),
+    "LegalHoldContract": (
+        "legal_hold_ok",
+        "legal_hold_missing_malformed_or_unowned",
+    ),
+    "ProviderTermsComplianceContract": (
+        "provider_terms_compliance_ok",
+        "provider_terms_compliance_missing_malformed_or_noncompliant",
     ),
 }
 

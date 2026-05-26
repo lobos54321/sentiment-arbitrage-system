@@ -11,6 +11,7 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
     audit = build_mode_gate_scope_audit(load_json(CATALOG_PATH), MODE_REQUIREMENTS, MODE_ORDER)
 
     normal = audit["final_scopes"]["normal_tiny_blocking"]
+    phase_1 = audit["final_scopes"]["phase_1_hardening"]
     ultra = audit["final_scopes"]["ultra_tiny"]
     shadow = audit["final_scopes"]["shadow"]
     mvp = audit["final_scopes"]["mvp_blocking"]
@@ -24,6 +25,8 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
     assert ultra["missing_count"] == 0
     assert shadow["missing_count"] == 0
     assert normal["missing_count"] == 0
+    assert phase_1["missing_count"] == 0
+    assert phase_1["scope_complete"] is True
     assert mvp["missing_count"] == 0
     assert "AccessControlContract" not in normal["missing_contracts"]
     assert "AggregateBoundaryContract" not in normal["missing_contracts"]
@@ -151,6 +154,16 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
     governance = audit["final_scopes"]["normal_tiny_governance"]
     assert audit["health"]["final_normal_tiny_governance_scope_complete"] is True
     assert audit["health"]["final_normal_tiny_governance_missing_count"] == 0
+    for contract_id in (
+        "ArchiveBitrotScrubContract",
+        "DataDeletionLegalHoldContract",
+        "DataLicenseComplianceContract",
+        "ExportReimportBoundaryContract",
+        "LegalHoldContract",
+        "ProviderTermsComplianceContract",
+    ):
+        assert contract_id not in phase_1["missing_contracts"]
+
     for contract_id in (
         "RuntimeSpecAssertionContract",
         "MinimumViableTrustBoundary",

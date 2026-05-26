@@ -142,6 +142,12 @@ INVARIANT_SAMPLING_AUDIT_EVENT_TYPE = "invariant_sampling_audit_recorded"
 OPERATOR_COGNITIVE_LOAD_EVENT_TYPE = "operator_cognitive_load_recorded"
 RESEARCH_NOTEBOOK_BOUNDARY_EVENT_TYPE = "research_notebook_boundary_recorded"
 UNKNOWN_UNKNOWNS_SAMPLING_EVENT_TYPE = "unknown_unknowns_sampling_recorded"
+ARCHIVE_BITROT_SCRUB_EVENT_TYPE = "archive_bitrot_scrub_recorded"
+DATA_DELETION_LEGAL_HOLD_EVENT_TYPE = "data_deletion_legal_hold_recorded"
+DATA_LICENSE_COMPLIANCE_EVENT_TYPE = "data_license_compliance_recorded"
+EXPORT_REIMPORT_BOUNDARY_EVENT_TYPE = "export_reimport_boundary_recorded"
+LEGAL_HOLD_EVENT_TYPE = "legal_hold_recorded"
+PROVIDER_TERMS_COMPLIANCE_EVENT_TYPE = "provider_terms_compliance_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -250,6 +256,12 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     OPERATOR_COGNITIVE_LOAD_EVENT_TYPE,
     RESEARCH_NOTEBOOK_BOUNDARY_EVENT_TYPE,
     UNKNOWN_UNKNOWNS_SAMPLING_EVENT_TYPE,
+    ARCHIVE_BITROT_SCRUB_EVENT_TYPE,
+    DATA_DELETION_LEGAL_HOLD_EVENT_TYPE,
+    DATA_LICENSE_COMPLIANCE_EVENT_TYPE,
+    EXPORT_REIMPORT_BOUNDARY_EVENT_TYPE,
+    LEGAL_HOLD_EVENT_TYPE,
+    PROVIDER_TERMS_COMPLIANCE_EVENT_TYPE,
 }
 FINAL_NORMAL_TINY_CONTRACT_SPECS = {
     "AccessReviewContract": {
@@ -569,6 +581,54 @@ FINAL_NORMAL_TINY_CONTRACT_SPECS = {
         "plural": "unknown_unknowns_samples",
         "required_fields": ("sample_id", "population_scope", "sampling_policy", "review_result", "sampled_at"),
         "projection_version": "v2.7.0.unknown_unknowns_sampling.v1",
+    },
+    "ArchiveBitrotScrubContract": {
+        "event_type": ARCHIVE_BITROT_SCRUB_EVENT_TYPE,
+        "key_field": "archive_set_id",
+        "slug": "archive_bitrot_scrub",
+        "plural": "archive_bitrot_scrubs",
+        "required_fields": ("archive_set_id", "object_count", "scrub_hash", "bitrot_detected", "scrubbed_at"),
+        "projection_version": "v2.7.0.archive_bitrot_scrub.v1",
+    },
+    "DataDeletionLegalHoldContract": {
+        "event_type": DATA_DELETION_LEGAL_HOLD_EVENT_TYPE,
+        "key_field": "legal_hold_id",
+        "slug": "data_deletion_legal_hold",
+        "plural": "data_deletion_legal_holds",
+        "required_fields": ("legal_hold_id", "data_scope", "deletion_request_id", "hold_state", "expires_at"),
+        "projection_version": "v2.7.0.data_deletion_legal_hold.v1",
+    },
+    "DataLicenseComplianceContract": {
+        "event_type": DATA_LICENSE_COMPLIANCE_EVENT_TYPE,
+        "key_field": "dataset_id",
+        "slug": "data_license_compliance",
+        "plural": "data_license_compliances",
+        "required_fields": ("dataset_id", "license_id", "allowed_use", "expiry_at", "compliance_status"),
+        "projection_version": "v2.7.0.data_license_compliance.v1",
+    },
+    "ExportReimportBoundaryContract": {
+        "event_type": EXPORT_REIMPORT_BOUNDARY_EVENT_TYPE,
+        "key_field": "boundary_id",
+        "slug": "export_reimport_boundary",
+        "plural": "export_reimport_boundaries",
+        "required_fields": ("boundary_id", "export_id", "reimport_allowed", "lineage_hash", "approved_at"),
+        "projection_version": "v2.7.0.export_reimport_boundary.v1",
+    },
+    "LegalHoldContract": {
+        "event_type": LEGAL_HOLD_EVENT_TYPE,
+        "key_field": "legal_hold_id",
+        "slug": "legal_hold",
+        "plural": "legal_holds",
+        "required_fields": ("legal_hold_id", "data_scope", "hold_reason", "owner", "expires_at"),
+        "projection_version": "v2.7.0.legal_hold.v1",
+    },
+    "ProviderTermsComplianceContract": {
+        "event_type": PROVIDER_TERMS_COMPLIANCE_EVENT_TYPE,
+        "key_field": "provider",
+        "slug": "provider_terms_compliance",
+        "plural": "provider_terms_compliances",
+        "required_fields": ("provider", "terms_version", "allowed_use", "compliance_status", "reviewed_at"),
+        "projection_version": "v2.7.0.provider_terms_compliance.v1",
     },
 }
 FINAL_NORMAL_TINY_EVENT_SPECS = {
@@ -1403,6 +1463,8 @@ def _final_normal_tiny_value(contract_id, field, bags):
         "cycle_detected",
         "write_targets_allowed",
         "promotion_allowed",
+        "bitrot_detected",
+        "reimport_allowed",
     }:
         return _as_bool(value)
     if field in {
@@ -1423,7 +1485,16 @@ def _final_normal_tiny_value(contract_id, field, bags):
         "drift_metric",
     }:
         return _as_float(value)
-    if field in {"sample_size", "min_sample_size", "max_components", "current_components", "max_parallel_alerts", "current_alert_count", "violation_count"}:
+    if field in {
+        "sample_size",
+        "min_sample_size",
+        "max_components",
+        "current_components",
+        "max_parallel_alerts",
+        "current_alert_count",
+        "violation_count",
+        "object_count",
+    }:
         return _as_int(value, default=None)
     return value
 
@@ -1445,6 +1516,8 @@ def _final_normal_tiny_violation_fields(contract_id, values):
         "effective_at",
         "retired_at",
         "sampled_at",
+        "scrubbed_at",
+        "expiry_at",
     ):
         if field in values and values.get(field) and _timestamp_epoch_seconds(values.get(field)) is None:
             violation_fields.append(f"{field}_parseable")
@@ -1770,6 +1843,49 @@ def _final_normal_tiny_violation_fields(contract_id, values):
             violation_fields.append("review_result_missing")
         if sampling_policy in {"none", "missing", "unknown", "tbd"}:
             violation_fields.append("sampling_policy_missing")
+    elif contract_id == "ArchiveBitrotScrubContract":
+        object_count = values.get("object_count")
+        if object_count is not None and (not math.isfinite(object_count) or object_count < 0):
+            violation_fields.append("object_count_nonnegative")
+        if values.get("scrub_hash") and not _valid_sha256_hex(values.get("scrub_hash")):
+            violation_fields.append("scrub_hash_sha256")
+        bitrot_detected = values.get("bitrot_detected")
+        if bitrot_detected is True:
+            violation_fields.append("bitrot_detected")
+        if bitrot_detected is None:
+            violation_fields.append("bitrot_detected_parseable")
+    elif contract_id == "DataDeletionLegalHoldContract":
+        hold_state = str(values.get("hold_state") or "").strip().lower()
+        if hold_state and hold_state not in {"active", "blocked", "deletion_blocked", "held"}:
+            violation_fields.append("hold_state_not_blocking")
+    elif contract_id == "DataLicenseComplianceContract":
+        allowed_use = str(values.get("allowed_use") or "").strip().lower()
+        compliance_status = str(values.get("compliance_status") or "").strip().lower()
+        if allowed_use in {"none", "missing", "unknown", "tbd", "disallowed", "forbidden"}:
+            violation_fields.append("allowed_use_missing_or_disallowed")
+        if compliance_status and compliance_status not in {"compliant", "approved", "current", "pass", "passed"}:
+            violation_fields.append("compliance_status_not_compliant")
+    elif contract_id == "ExportReimportBoundaryContract":
+        if values.get("reimport_allowed") is True:
+            violation_fields.append("reimport_allowed")
+        if values.get("reimport_allowed") is None:
+            violation_fields.append("reimport_allowed_parseable")
+        if values.get("lineage_hash") and not _valid_sha256_hex(values.get("lineage_hash")):
+            violation_fields.append("lineage_hash_sha256")
+    elif contract_id == "LegalHoldContract":
+        hold_reason = str(values.get("hold_reason") or "").strip().lower()
+        owner = str(values.get("owner") or "").strip().lower()
+        if hold_reason in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("hold_reason_missing")
+        if owner in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("owner_missing")
+    elif contract_id == "ProviderTermsComplianceContract":
+        allowed_use = str(values.get("allowed_use") or "").strip().lower()
+        compliance_status = str(values.get("compliance_status") or "").strip().lower()
+        if allowed_use in {"none", "missing", "unknown", "tbd", "disallowed", "forbidden"}:
+            violation_fields.append("allowed_use_missing_or_disallowed")
+        if compliance_status and compliance_status not in {"compliant", "approved", "current", "pass", "passed"}:
+            violation_fields.append("compliance_status_not_compliant")
     return sorted(set(violation_fields))
 
 
