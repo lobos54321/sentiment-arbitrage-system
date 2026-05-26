@@ -197,6 +197,14 @@ MODE_REQUIREMENTS = {
         "ExitPolicyMigrationContract",
         "OpenPositionPolicyMigrationContract",
         "PositionOwnershipTransferContract",
+        "RollbackVerificationContract",
+        "PartialRollbackPolicy",
+        "ReleaseReadinessReviewContract",
+        "ChangeFreezeContract",
+        "NotificationChannelIntegrityContract",
+        "RunbookFreshnessContract",
+        "MetricBackfillImpactContract",
+        "SelectionBiasDiagnosticContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -840,6 +848,62 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("position_ownership_transfer_ok") else "missing_evidence",
         "position_ownership_transfer_missing_malformed_or_unchanged",
         position_ownership_transfer_evidence,
+    )
+    rollback_verification_evidence = contract_evidence.get("RollbackVerificationContract") or {}
+    statuses["RollbackVerificationContract"] = _status(
+        "RollbackVerificationContract",
+        "pass" if projection_built and projection_health.get("rollback_verification_ok") else "missing_evidence",
+        "rollback_verification_missing_malformed_or_unverified",
+        rollback_verification_evidence,
+    )
+    partial_rollback_policy_evidence = contract_evidence.get("PartialRollbackPolicy") or {}
+    statuses["PartialRollbackPolicy"] = _status(
+        "PartialRollbackPolicy",
+        "pass" if projection_built and projection_health.get("partial_rollback_policy_ok") else "missing_evidence",
+        "partial_rollback_policy_missing_malformed_or_unverified",
+        partial_rollback_policy_evidence,
+    )
+    release_readiness_review_evidence = contract_evidence.get("ReleaseReadinessReviewContract") or {}
+    statuses["ReleaseReadinessReviewContract"] = _status(
+        "ReleaseReadinessReviewContract",
+        "pass" if projection_built and projection_health.get("release_readiness_review_ok") else "missing_evidence",
+        "release_readiness_review_missing_malformed_or_unapproved",
+        release_readiness_review_evidence,
+    )
+    change_freeze_evidence = contract_evidence.get("ChangeFreezeContract") or {}
+    statuses["ChangeFreezeContract"] = _status(
+        "ChangeFreezeContract",
+        "pass" if projection_built and projection_health.get("change_freeze_ok") else "missing_evidence",
+        "change_freeze_missing_malformed_or_unsafe",
+        change_freeze_evidence,
+    )
+    notification_channel_integrity_evidence = contract_evidence.get("NotificationChannelIntegrityContract") or {}
+    statuses["NotificationChannelIntegrityContract"] = _status(
+        "NotificationChannelIntegrityContract",
+        "pass" if projection_built and projection_health.get("notification_channel_integrity_ok") else "missing_evidence",
+        "notification_channel_integrity_missing_malformed_or_unverified",
+        notification_channel_integrity_evidence,
+    )
+    runbook_freshness_evidence = contract_evidence.get("RunbookFreshnessContract") or {}
+    statuses["RunbookFreshnessContract"] = _status(
+        "RunbookFreshnessContract",
+        "pass" if projection_built and projection_health.get("runbook_freshness_ok") else "missing_evidence",
+        "runbook_freshness_missing_malformed_or_stale",
+        runbook_freshness_evidence,
+    )
+    metric_backfill_impact_evidence = contract_evidence.get("MetricBackfillImpactContract") or {}
+    statuses["MetricBackfillImpactContract"] = _status(
+        "MetricBackfillImpactContract",
+        "pass" if projection_built and projection_health.get("metric_backfill_impact_ok") else "missing_evidence",
+        "metric_backfill_impact_missing_malformed_or_unbounded",
+        metric_backfill_impact_evidence,
+    )
+    selection_bias_diagnostic_evidence = contract_evidence.get("SelectionBiasDiagnosticContract") or {}
+    statuses["SelectionBiasDiagnosticContract"] = _status(
+        "SelectionBiasDiagnosticContract",
+        "pass" if projection_built and projection_health.get("selection_bias_diagnostic_ok") else "missing_evidence",
+        "selection_bias_diagnostic_missing_malformed_or_biased",
+        selection_bias_diagnostic_evidence,
     )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(

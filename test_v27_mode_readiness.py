@@ -769,6 +769,114 @@ def append_position_feature_runtime_trust_events(event_log_dir):
     )
 
 
+def append_release_rollback_metric_trust_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="rollback_verification_recorded",
+        aggregate_id="rollback_verification:rollback-unit-v1",
+        idempotency_key="rollback_verification:rollback-unit-v1:release-v2:release-v1",
+        payload={
+            "rollback_id": "rollback-unit-v1",
+            "from_version": "release-v2",
+            "to_version": "release-v1",
+            "verified_at": "2026-01-15T00:29:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="partial_rollback_policy_recorded",
+        aggregate_id="partial_rollback_policy:partial-rollback-unit-v1",
+        idempotency_key="partial_rollback_policy:partial-rollback-unit-v1:dashboard:v27-readiness",
+        payload={
+            "rollback_id": "partial-rollback-unit-v1",
+            "component_scope": "dashboard:v27-readiness",
+            "dependency_scope": "read_model_refresh",
+            "verification_plan": "health_check_and_scope_audit",
+            "rolled_back_at": "2026-01-15T00:30:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="release_readiness_review_recorded",
+        aggregate_id="release_readiness_review:release-review-unit-v1",
+        idempotency_key="release_readiness_review:release-review-unit-v1:approved",
+        payload={
+            "review_id": "release-review-unit-v1",
+            "release_id": "release-unit-v2",
+            "required_evidence": ["health", "scope_audit", "pytest"],
+            "approval_status": "approved",
+            "approved_at": "2026-01-15T00:31:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="change_freeze_recorded",
+        aggregate_id="change_freeze:freeze-unit-v1",
+        idempotency_key="change_freeze:freeze-unit-v1:normal_tiny_runtime",
+        payload={
+            "freeze_id": "freeze-unit-v1",
+            "scope": "normal_tiny_runtime",
+            "start_at": "2026-01-15T00:32:00Z",
+            "end_at": "2026-01-15T01:32:00Z",
+            "exception_policy": "break_glass_only",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="notification_channel_integrity_recorded",
+        aggregate_id="notification_channel_integrity:ops-alerts-unit",
+        idempotency_key="notification_channel_integrity:ops-alerts-unit:verified",
+        payload={
+            "channel_id": "ops-alerts-unit",
+            "destination_hash": sha256_hex({"channel_id": "ops-alerts-unit", "destination": "telegram_ops"}),
+            "signature_required": True,
+            "delivery_status": "verified",
+            "checked_at": "2026-01-15T00:33:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="runbook_freshness_recorded",
+        aggregate_id="runbook_freshness:normal-tiny-rollback-runbook",
+        idempotency_key="runbook_freshness:normal-tiny-rollback-runbook:fresh",
+        payload={
+            "runbook_id": "normal-tiny-rollback-runbook",
+            "owner": "runtime",
+            "last_reviewed_at": "2026-01-15T00:34:00Z",
+            "max_age_days": 30,
+            "freshness_status": "fresh",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="metric_backfill_impact_recorded",
+        aggregate_id="metric_backfill_impact:metric-backfill-unit-v1",
+        idempotency_key="metric_backfill_impact:metric-backfill-unit-v1:metric_window_only",
+        payload={
+            "backfill_id": "metric-backfill-unit-v1",
+            "metric_id": "telegram_capture_rate_D3b",
+            "impact_scope": "metric_window_only",
+            "impact_report_hash": sha256_hex({"backfill_id": "metric-backfill-unit-v1", "metric_id": "telegram_capture_rate_D3b"}),
+            "checked_at": "2026-01-15T00:35:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="selection_bias_diagnostic_recorded",
+        aggregate_id="selection_bias_diagnostic:selection-bias-unit-v1",
+        idempotency_key="selection_bias_diagnostic:selection-bias-unit-v1:within_tolerance",
+        payload={
+            "diagnostic_id": "selection-bias-unit-v1",
+            "selection_policy_version": "normal-tiny-selection-v1",
+            "included_count": 40,
+            "excluded_count": 8,
+            "bias_result": "within_tolerance",
+            "checked_at": "2026-01-15T00:36:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -1844,6 +1952,47 @@ def test_mode_readiness_consumes_position_feature_runtime_trust_for_normal_tiny(
     assert matrix["contract_statuses"]["OpenPositionValuationContract"]["evidence"]["valid_open_position_valuation_count"] == 1
     assert (
         matrix["contract_statuses"]["PositionOwnershipTransferContract"]["evidence"]["valid_position_ownership_transfer_count"]
+        == 1
+    )
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_release_rollback_metric_trust_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_release_rollback_metric_trust_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "RollbackVerificationContract",
+        "PartialRollbackPolicy",
+        "ReleaseReadinessReviewContract",
+        "ChangeFreezeContract",
+        "NotificationChannelIntegrityContract",
+        "RunbookFreshnessContract",
+        "MetricBackfillImpactContract",
+        "SelectionBiasDiagnosticContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["RollbackVerificationContract"]["evidence"]["valid_rollback_verification_count"] == 1
+    assert matrix["contract_statuses"]["ReleaseReadinessReviewContract"]["evidence"]["valid_release_readiness_review_count"] == 1
+    assert matrix["contract_statuses"]["MetricBackfillImpactContract"]["evidence"]["valid_metric_backfill_impact_count"] == 1
+    assert (
+        matrix["contract_statuses"]["SelectionBiasDiagnosticContract"]["evidence"]["valid_selection_bias_diagnostic_count"]
         == 1
     )
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]

@@ -95,6 +95,14 @@ OPEN_POSITION_VALUATION_EVENT_TYPE = "open_position_valuation_recorded"
 EXIT_POLICY_MIGRATION_EVENT_TYPE = "exit_policy_migration_recorded"
 OPEN_POSITION_POLICY_MIGRATION_EVENT_TYPE = "open_position_policy_migration_recorded"
 POSITION_OWNERSHIP_TRANSFER_EVENT_TYPE = "position_ownership_transfer_recorded"
+ROLLBACK_VERIFICATION_EVENT_TYPE = "rollback_verification_recorded"
+PARTIAL_ROLLBACK_POLICY_EVENT_TYPE = "partial_rollback_policy_recorded"
+RELEASE_READINESS_REVIEW_EVENT_TYPE = "release_readiness_review_recorded"
+CHANGE_FREEZE_EVENT_TYPE = "change_freeze_recorded"
+NOTIFICATION_CHANNEL_INTEGRITY_EVENT_TYPE = "notification_channel_integrity_recorded"
+RUNBOOK_FRESHNESS_EVENT_TYPE = "runbook_freshness_recorded"
+METRIC_BACKFILL_IMPACT_EVENT_TYPE = "metric_backfill_impact_recorded"
+SELECTION_BIAS_DIAGNOSTIC_EVENT_TYPE = "selection_bias_diagnostic_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -156,6 +164,14 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     EXIT_POLICY_MIGRATION_EVENT_TYPE,
     OPEN_POSITION_POLICY_MIGRATION_EVENT_TYPE,
     POSITION_OWNERSHIP_TRANSFER_EVENT_TYPE,
+    ROLLBACK_VERIFICATION_EVENT_TYPE,
+    PARTIAL_ROLLBACK_POLICY_EVENT_TYPE,
+    RELEASE_READINESS_REVIEW_EVENT_TYPE,
+    CHANGE_FREEZE_EVENT_TYPE,
+    NOTIFICATION_CHANNEL_INTEGRITY_EVENT_TYPE,
+    RUNBOOK_FRESHNESS_EVENT_TYPE,
+    METRIC_BACKFILL_IMPACT_EVENT_TYPE,
+    SELECTION_BIAS_DIAGNOSTIC_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -2666,6 +2682,277 @@ def _extract_position_ownership_transfer(event, bags):
     }
 
 
+def _extract_rollback_verification(event, bags):
+    if event.get("event_type") != ROLLBACK_VERIFICATION_EVENT_TYPE:
+        return None
+    values = {
+        "rollback_id": _extract_scalar(bags, [("rollback_id",)]),
+        "from_version": _extract_scalar(bags, [("from_version",)]),
+        "to_version": _extract_scalar(bags, [("to_version",)]),
+        "verified_at": _extract_scalar(bags, [("verified_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("rollback_id", "from_version", "to_version", "verified_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("from_version") and values.get("to_version") and values.get("from_version") == values.get("to_version"):
+        violation_fields.append("rollback_version_not_changed")
+    if values.get("verified_at") and _timestamp_epoch_seconds(values.get("verified_at")) is None:
+        violation_fields.append("verified_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "rollback_verification_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_partial_rollback_policy(event, bags):
+    if event.get("event_type") != PARTIAL_ROLLBACK_POLICY_EVENT_TYPE:
+        return None
+    values = {
+        "rollback_id": _extract_scalar(bags, [("rollback_id",)]),
+        "component_scope": _extract_scalar(bags, [("component_scope",)]),
+        "dependency_scope": _extract_scalar(bags, [("dependency_scope",)]),
+        "verification_plan": _extract_scalar(bags, [("verification_plan",)]),
+        "rolled_back_at": _extract_scalar(bags, [("rolled_back_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("rollback_id", "component_scope", "dependency_scope", "verification_plan", "rolled_back_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("rolled_back_at") and _timestamp_epoch_seconds(values.get("rolled_back_at")) is None:
+        violation_fields.append("rolled_back_at_parseable")
+    if str(values.get("verification_plan") or "").strip().lower() in {"none", "missing", "unverified"}:
+        violation_fields.append("verification_plan_missing")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "partial_rollback_policy_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_release_readiness_review(event, bags):
+    if event.get("event_type") != RELEASE_READINESS_REVIEW_EVENT_TYPE:
+        return None
+    values = {
+        "review_id": _extract_scalar(bags, [("review_id",)]),
+        "release_id": _extract_scalar(bags, [("release_id",)]),
+        "required_evidence": _extract_scalar(bags, [("required_evidence",)]),
+        "approval_status": _extract_scalar(bags, [("approval_status",)]),
+        "approved_at": _extract_scalar(bags, [("approved_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("review_id", "release_id", "required_evidence", "approval_status", "approved_at"):
+        value = values.get(field)
+        if value is None or value == [] or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    approval_status = str(values.get("approval_status") or "").strip().lower()
+    if approval_status and approval_status not in {"approved", "ready", "pass", "passed"}:
+        violation_fields.append("approval_status_not_ready")
+    if values.get("approved_at") and _timestamp_epoch_seconds(values.get("approved_at")) is None:
+        violation_fields.append("approved_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "release_readiness_review_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_change_freeze(event, bags):
+    if event.get("event_type") != CHANGE_FREEZE_EVENT_TYPE:
+        return None
+    values = {
+        "freeze_id": _extract_scalar(bags, [("freeze_id",)]),
+        "scope": _extract_scalar(bags, [("scope",)]),
+        "start_at": _extract_scalar(bags, [("start_at",)]),
+        "end_at": _extract_scalar(bags, [("end_at",)]),
+        "exception_policy": _extract_scalar(bags, [("exception_policy",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("freeze_id", "scope", "start_at", "end_at", "exception_policy"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    start_ts = _timestamp_epoch_seconds(values.get("start_at"))
+    end_ts = _timestamp_epoch_seconds(values.get("end_at"))
+    if values.get("start_at") and start_ts is None:
+        violation_fields.append("start_at_parseable")
+    if values.get("end_at") and end_ts is None:
+        violation_fields.append("end_at_parseable")
+    if start_ts is not None and end_ts is not None and end_ts <= start_ts:
+        violation_fields.append("freeze_window_order")
+    exception_policy = str(values.get("exception_policy") or "").strip().lower()
+    if exception_policy and exception_policy not in {"no_exceptions", "break_glass_only", "approved_exceptions_only", "emergency_only"}:
+        violation_fields.append("exception_policy_unsafe")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "change_freeze_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_notification_channel_integrity(event, bags):
+    if event.get("event_type") != NOTIFICATION_CHANNEL_INTEGRITY_EVENT_TYPE:
+        return None
+    values = {
+        "channel_id": _extract_scalar(bags, [("channel_id",)]),
+        "destination_hash": _extract_scalar(bags, [("destination_hash",)]),
+        "signature_required": _as_bool(_extract_scalar(bags, [("signature_required",)])),
+        "delivery_status": _extract_scalar(bags, [("delivery_status",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("channel_id", "destination_hash", "signature_required", "delivery_status", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("destination_hash") and not _valid_sha256_hex(values.get("destination_hash")):
+        violation_fields.append("destination_hash_sha256")
+    if values.get("signature_required") is not True:
+        violation_fields.append("signature_required_true")
+    delivery_status = str(values.get("delivery_status") or "").strip().lower()
+    if delivery_status and delivery_status not in {"delivered", "healthy", "pass", "passed", "verified"}:
+        violation_fields.append("delivery_status_not_verified")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "notification_channel_integrity_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_runbook_freshness(event, bags):
+    if event.get("event_type") != RUNBOOK_FRESHNESS_EVENT_TYPE:
+        return None
+    values = {
+        "runbook_id": _extract_scalar(bags, [("runbook_id",)]),
+        "owner": _extract_scalar(bags, [("owner",)]),
+        "last_reviewed_at": _extract_scalar(bags, [("last_reviewed_at",)]),
+        "max_age_days": _as_int(_extract_scalar(bags, [("max_age_days",)]), default=None),
+        "freshness_status": _extract_scalar(bags, [("freshness_status",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("runbook_id", "owner", "last_reviewed_at", "max_age_days", "freshness_status"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("last_reviewed_at") and _timestamp_epoch_seconds(values.get("last_reviewed_at")) is None:
+        violation_fields.append("last_reviewed_at_parseable")
+    if values.get("max_age_days") is not None and (values.get("max_age_days") <= 0 or values.get("max_age_days") > 365):
+        violation_fields.append("max_age_days_bounded")
+    freshness_status = str(values.get("freshness_status") or "").strip().lower()
+    if freshness_status and freshness_status not in {"fresh", "current", "pass", "passed", "valid"}:
+        violation_fields.append("freshness_status_not_fresh")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "runbook_freshness_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_metric_backfill_impact(event, bags):
+    if event.get("event_type") != METRIC_BACKFILL_IMPACT_EVENT_TYPE:
+        return None
+    values = {
+        "backfill_id": _extract_scalar(bags, [("backfill_id",)]),
+        "metric_id": _extract_scalar(bags, [("metric_id",)]),
+        "impact_scope": _extract_scalar(bags, [("impact_scope",)]),
+        "impact_report_hash": _extract_scalar(bags, [("impact_report_hash",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("backfill_id", "metric_id", "impact_scope", "impact_report_hash", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    impact_scope = str(values.get("impact_scope") or "").strip().lower()
+    if impact_scope and impact_scope not in {"none", "bounded", "shadow_only", "research_only", "metric_window_only", "documented"}:
+        violation_fields.append("impact_scope_unbounded")
+    if values.get("impact_report_hash") and not _valid_sha256_hex(values.get("impact_report_hash")):
+        violation_fields.append("impact_report_hash_sha256")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "metric_backfill_impact_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_selection_bias_diagnostic(event, bags):
+    if event.get("event_type") != SELECTION_BIAS_DIAGNOSTIC_EVENT_TYPE:
+        return None
+    values = {
+        "diagnostic_id": _extract_scalar(bags, [("diagnostic_id",)]),
+        "selection_policy_version": _extract_scalar(bags, [("selection_policy_version",)]),
+        "included_count": _as_int(_extract_scalar(bags, [("included_count",)]), default=None),
+        "excluded_count": _as_int(_extract_scalar(bags, [("excluded_count",)]), default=None),
+        "bias_result": _extract_scalar(bags, [("bias_result",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("diagnostic_id", "selection_policy_version", "included_count", "excluded_count", "bias_result", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    for field in ("included_count", "excluded_count"):
+        if values.get(field) is not None and values.get(field) < 0:
+            violation_fields.append(f"{field}_nonnegative")
+    bias_result = str(values.get("bias_result") or "").strip().lower()
+    if bias_result and bias_result not in {"pass", "passed", "no_bias_detected", "within_tolerance", "mitigated"}:
+        violation_fields.append("bias_result_not_acceptable")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "selection_bias_diagnostic_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _latest_by_key(items, key_name):
     latest = {}
     passthrough = []
@@ -4078,6 +4365,14 @@ def _contract_evidence_from_records(
     exit_policy_migrations=None,
     open_position_policy_migrations=None,
     position_ownership_transfers=None,
+    rollback_verifications=None,
+    partial_rollback_policies=None,
+    release_readiness_reviews=None,
+    change_freezes=None,
+    notification_channel_integrities=None,
+    runbook_freshnesses=None,
+    metric_backfill_impacts=None,
+    selection_bias_diagnostics=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -4230,6 +4525,36 @@ def _contract_evidence_from_records(
     superseded_position_ownership_transfer_count = max(
         0,
         raw_position_ownership_transfer_count - len(position_ownership_transfers),
+    )
+    raw_rollback_verification_count = len(rollback_verifications or [])
+    rollback_verifications = _latest_by_key(rollback_verifications or [], "rollback_id")
+    superseded_rollback_verification_count = max(0, raw_rollback_verification_count - len(rollback_verifications))
+    raw_partial_rollback_policy_count = len(partial_rollback_policies or [])
+    partial_rollback_policies = _latest_by_key(partial_rollback_policies or [], "rollback_id")
+    superseded_partial_rollback_policy_count = max(0, raw_partial_rollback_policy_count - len(partial_rollback_policies))
+    raw_release_readiness_review_count = len(release_readiness_reviews or [])
+    release_readiness_reviews = _latest_by_key(release_readiness_reviews or [], "review_id")
+    superseded_release_readiness_review_count = max(0, raw_release_readiness_review_count - len(release_readiness_reviews))
+    raw_change_freeze_count = len(change_freezes or [])
+    change_freezes = _latest_by_key(change_freezes or [], "freeze_id")
+    superseded_change_freeze_count = max(0, raw_change_freeze_count - len(change_freezes))
+    raw_notification_channel_integrity_count = len(notification_channel_integrities or [])
+    notification_channel_integrities = _latest_by_key(notification_channel_integrities or [], "channel_id")
+    superseded_notification_channel_integrity_count = max(
+        0,
+        raw_notification_channel_integrity_count - len(notification_channel_integrities),
+    )
+    raw_runbook_freshness_count = len(runbook_freshnesses or [])
+    runbook_freshnesses = _latest_by_key(runbook_freshnesses or [], "runbook_id")
+    superseded_runbook_freshness_count = max(0, raw_runbook_freshness_count - len(runbook_freshnesses))
+    raw_metric_backfill_impact_count = len(metric_backfill_impacts or [])
+    metric_backfill_impacts = _latest_by_key(metric_backfill_impacts or [], "backfill_id")
+    superseded_metric_backfill_impact_count = max(0, raw_metric_backfill_impact_count - len(metric_backfill_impacts))
+    raw_selection_bias_diagnostic_count = len(selection_bias_diagnostics or [])
+    selection_bias_diagnostics = _latest_by_key(selection_bias_diagnostics or [], "diagnostic_id")
+    superseded_selection_bias_diagnostic_count = max(
+        0,
+        raw_selection_bias_diagnostic_count - len(selection_bias_diagnostics),
     )
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
@@ -5550,6 +5875,86 @@ def _contract_evidence_from_records(
     position_ownership_transfer_violations = [
         item
         for item in position_ownership_transfers
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_rollback_verifications = [
+        item
+        for item in rollback_verifications
+        if item.get("missing_fields")
+    ]
+    rollback_verification_violations = [
+        item
+        for item in rollback_verifications
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_partial_rollback_policies = [
+        item
+        for item in partial_rollback_policies
+        if item.get("missing_fields")
+    ]
+    partial_rollback_policy_violations = [
+        item
+        for item in partial_rollback_policies
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_release_readiness_reviews = [
+        item
+        for item in release_readiness_reviews
+        if item.get("missing_fields")
+    ]
+    release_readiness_review_violations = [
+        item
+        for item in release_readiness_reviews
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_change_freezes = [
+        item
+        for item in change_freezes
+        if item.get("missing_fields")
+    ]
+    change_freeze_violations = [
+        item
+        for item in change_freezes
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_notification_channel_integrities = [
+        item
+        for item in notification_channel_integrities
+        if item.get("missing_fields")
+    ]
+    notification_channel_integrity_violations = [
+        item
+        for item in notification_channel_integrities
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_runbook_freshnesses = [
+        item
+        for item in runbook_freshnesses
+        if item.get("missing_fields")
+    ]
+    runbook_freshness_violations = [
+        item
+        for item in runbook_freshnesses
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_metric_backfill_impacts = [
+        item
+        for item in metric_backfill_impacts
+        if item.get("missing_fields")
+    ]
+    metric_backfill_impact_violations = [
+        item
+        for item in metric_backfill_impacts
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_selection_bias_diagnostics = [
+        item
+        for item in selection_bias_diagnostics
+        if item.get("missing_fields")
+    ]
+    selection_bias_diagnostic_violations = [
+        item
+        for item in selection_bias_diagnostics
         if item.get("missing_fields") or item.get("violation_fields")
     ]
     worker_fleet_hashes = {
@@ -7112,6 +7517,281 @@ def _contract_evidence_from_records(
             "to_owners": sorted({item.get("to_owner") for item in position_ownership_transfers if item.get("to_owner")}),
             "position_ownership_transfer_projection_version": "v2.7.0.position_ownership_transfer.v1",
         },
+        "RollbackVerificationContract": {
+            "eligible_rollback_verification_records": len(rollback_verifications),
+            "rollback_verification_observation_count": raw_rollback_verification_count,
+            "current_rollback_verification_count": len(rollback_verifications),
+            "superseded_rollback_verification_event_count": superseded_rollback_verification_count,
+            "valid_rollback_verification_count": sum(
+                1 for item in rollback_verifications if item.get("rollback_verification_valid") is True
+            ),
+            "malformed_count": len(malformed_rollback_verifications),
+            "malformed_rollback_verifications": [
+                {
+                    "rollback_id": item.get("rollback_id"),
+                    "from_version": item.get("from_version"),
+                    "to_version": item.get("to_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_rollback_verifications
+            ],
+            "rollback_verification_violation_count": len(rollback_verification_violations),
+            "rollback_verification_violations": [
+                {
+                    "rollback_id": item.get("rollback_id"),
+                    "from_version": item.get("from_version"),
+                    "to_version": item.get("to_version"),
+                    "verified_at": item.get("verified_at"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in rollback_verification_violations
+            ],
+            "rollback_ids": sorted({item.get("rollback_id") for item in rollback_verifications if item.get("rollback_id")}),
+            "rollback_verification_projection_version": "v2.7.0.rollback_verification.v1",
+        },
+        "PartialRollbackPolicy": {
+            "eligible_partial_rollback_policy_records": len(partial_rollback_policies),
+            "partial_rollback_policy_observation_count": raw_partial_rollback_policy_count,
+            "current_partial_rollback_policy_count": len(partial_rollback_policies),
+            "superseded_partial_rollback_policy_event_count": superseded_partial_rollback_policy_count,
+            "valid_partial_rollback_policy_count": sum(
+                1 for item in partial_rollback_policies if item.get("partial_rollback_policy_valid") is True
+            ),
+            "malformed_count": len(malformed_partial_rollback_policies),
+            "malformed_partial_rollback_policies": [
+                {
+                    "rollback_id": item.get("rollback_id"),
+                    "component_scope": item.get("component_scope"),
+                    "dependency_scope": item.get("dependency_scope"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_partial_rollback_policies
+            ],
+            "partial_rollback_policy_violation_count": len(partial_rollback_policy_violations),
+            "partial_rollback_policy_violations": [
+                {
+                    "rollback_id": item.get("rollback_id"),
+                    "verification_plan": item.get("verification_plan"),
+                    "rolled_back_at": item.get("rolled_back_at"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in partial_rollback_policy_violations
+            ],
+            "rollback_ids": sorted({item.get("rollback_id") for item in partial_rollback_policies if item.get("rollback_id")}),
+            "partial_rollback_policy_projection_version": "v2.7.0.partial_rollback_policy.v1",
+        },
+        "ReleaseReadinessReviewContract": {
+            "eligible_release_readiness_review_records": len(release_readiness_reviews),
+            "release_readiness_review_observation_count": raw_release_readiness_review_count,
+            "current_release_readiness_review_count": len(release_readiness_reviews),
+            "superseded_release_readiness_review_event_count": superseded_release_readiness_review_count,
+            "valid_release_readiness_review_count": sum(
+                1 for item in release_readiness_reviews if item.get("release_readiness_review_valid") is True
+            ),
+            "malformed_count": len(malformed_release_readiness_reviews),
+            "malformed_release_readiness_reviews": [
+                {
+                    "review_id": item.get("review_id"),
+                    "release_id": item.get("release_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_release_readiness_reviews
+            ],
+            "release_readiness_review_violation_count": len(release_readiness_review_violations),
+            "release_readiness_review_violations": [
+                {
+                    "review_id": item.get("review_id"),
+                    "release_id": item.get("release_id"),
+                    "approval_status": item.get("approval_status"),
+                    "approved_at": item.get("approved_at"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in release_readiness_review_violations
+            ],
+            "release_ids": sorted({item.get("release_id") for item in release_readiness_reviews if item.get("release_id")}),
+            "approval_statuses": sorted({item.get("approval_status") for item in release_readiness_reviews if item.get("approval_status")}),
+            "release_readiness_review_projection_version": "v2.7.0.release_readiness_review.v1",
+        },
+        "ChangeFreezeContract": {
+            "eligible_change_freeze_records": len(change_freezes),
+            "change_freeze_observation_count": raw_change_freeze_count,
+            "current_change_freeze_count": len(change_freezes),
+            "superseded_change_freeze_event_count": superseded_change_freeze_count,
+            "valid_change_freeze_count": sum(1 for item in change_freezes if item.get("change_freeze_valid") is True),
+            "malformed_count": len(malformed_change_freezes),
+            "malformed_change_freezes": [
+                {
+                    "freeze_id": item.get("freeze_id"),
+                    "scope": item.get("scope"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_change_freezes
+            ],
+            "change_freeze_violation_count": len(change_freeze_violations),
+            "change_freeze_violations": [
+                {
+                    "freeze_id": item.get("freeze_id"),
+                    "start_at": item.get("start_at"),
+                    "end_at": item.get("end_at"),
+                    "exception_policy": item.get("exception_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in change_freeze_violations
+            ],
+            "freeze_ids": sorted({item.get("freeze_id") for item in change_freezes if item.get("freeze_id")}),
+            "exception_policies": sorted({item.get("exception_policy") for item in change_freezes if item.get("exception_policy")}),
+            "change_freeze_projection_version": "v2.7.0.change_freeze.v1",
+        },
+        "NotificationChannelIntegrityContract": {
+            "eligible_notification_channel_integrity_records": len(notification_channel_integrities),
+            "notification_channel_integrity_observation_count": raw_notification_channel_integrity_count,
+            "current_notification_channel_integrity_count": len(notification_channel_integrities),
+            "superseded_notification_channel_integrity_event_count": superseded_notification_channel_integrity_count,
+            "valid_notification_channel_integrity_count": sum(
+                1 for item in notification_channel_integrities if item.get("notification_channel_integrity_valid") is True
+            ),
+            "malformed_count": len(malformed_notification_channel_integrities),
+            "malformed_notification_channel_integrities": [
+                {
+                    "channel_id": item.get("channel_id"),
+                    "delivery_status": item.get("delivery_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_notification_channel_integrities
+            ],
+            "notification_channel_integrity_violation_count": len(notification_channel_integrity_violations),
+            "notification_channel_integrity_violations": [
+                {
+                    "channel_id": item.get("channel_id"),
+                    "destination_hash": item.get("destination_hash"),
+                    "signature_required": item.get("signature_required"),
+                    "delivery_status": item.get("delivery_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in notification_channel_integrity_violations
+            ],
+            "channel_ids": sorted({item.get("channel_id") for item in notification_channel_integrities if item.get("channel_id")}),
+            "delivery_statuses": sorted({item.get("delivery_status") for item in notification_channel_integrities if item.get("delivery_status")}),
+            "notification_channel_integrity_projection_version": "v2.7.0.notification_channel_integrity.v1",
+        },
+        "RunbookFreshnessContract": {
+            "eligible_runbook_freshness_records": len(runbook_freshnesses),
+            "runbook_freshness_observation_count": raw_runbook_freshness_count,
+            "current_runbook_freshness_count": len(runbook_freshnesses),
+            "superseded_runbook_freshness_event_count": superseded_runbook_freshness_count,
+            "valid_runbook_freshness_count": sum(1 for item in runbook_freshnesses if item.get("runbook_freshness_valid") is True),
+            "malformed_count": len(malformed_runbook_freshnesses),
+            "malformed_runbook_freshnesses": [
+                {
+                    "runbook_id": item.get("runbook_id"),
+                    "owner": item.get("owner"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_runbook_freshnesses
+            ],
+            "runbook_freshness_violation_count": len(runbook_freshness_violations),
+            "runbook_freshness_violations": [
+                {
+                    "runbook_id": item.get("runbook_id"),
+                    "last_reviewed_at": item.get("last_reviewed_at"),
+                    "max_age_days": item.get("max_age_days"),
+                    "freshness_status": item.get("freshness_status"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in runbook_freshness_violations
+            ],
+            "runbook_ids": sorted({item.get("runbook_id") for item in runbook_freshnesses if item.get("runbook_id")}),
+            "freshness_statuses": sorted({item.get("freshness_status") for item in runbook_freshnesses if item.get("freshness_status")}),
+            "runbook_freshness_projection_version": "v2.7.0.runbook_freshness.v1",
+        },
+        "MetricBackfillImpactContract": {
+            "eligible_metric_backfill_impact_records": len(metric_backfill_impacts),
+            "metric_backfill_impact_observation_count": raw_metric_backfill_impact_count,
+            "current_metric_backfill_impact_count": len(metric_backfill_impacts),
+            "superseded_metric_backfill_impact_event_count": superseded_metric_backfill_impact_count,
+            "valid_metric_backfill_impact_count": sum(
+                1 for item in metric_backfill_impacts if item.get("metric_backfill_impact_valid") is True
+            ),
+            "malformed_count": len(malformed_metric_backfill_impacts),
+            "malformed_metric_backfill_impacts": [
+                {
+                    "backfill_id": item.get("backfill_id"),
+                    "metric_id": item.get("metric_id"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_metric_backfill_impacts
+            ],
+            "metric_backfill_impact_violation_count": len(metric_backfill_impact_violations),
+            "metric_backfill_impact_violations": [
+                {
+                    "backfill_id": item.get("backfill_id"),
+                    "metric_id": item.get("metric_id"),
+                    "impact_scope": item.get("impact_scope"),
+                    "impact_report_hash": item.get("impact_report_hash"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in metric_backfill_impact_violations
+            ],
+            "metric_ids": sorted({item.get("metric_id") for item in metric_backfill_impacts if item.get("metric_id")}),
+            "impact_scopes": sorted({item.get("impact_scope") for item in metric_backfill_impacts if item.get("impact_scope")}),
+            "metric_backfill_impact_projection_version": "v2.7.0.metric_backfill_impact.v1",
+        },
+        "SelectionBiasDiagnosticContract": {
+            "eligible_selection_bias_diagnostic_records": len(selection_bias_diagnostics),
+            "selection_bias_diagnostic_observation_count": raw_selection_bias_diagnostic_count,
+            "current_selection_bias_diagnostic_count": len(selection_bias_diagnostics),
+            "superseded_selection_bias_diagnostic_event_count": superseded_selection_bias_diagnostic_count,
+            "valid_selection_bias_diagnostic_count": sum(
+                1 for item in selection_bias_diagnostics if item.get("selection_bias_diagnostic_valid") is True
+            ),
+            "malformed_count": len(malformed_selection_bias_diagnostics),
+            "malformed_selection_bias_diagnostics": [
+                {
+                    "diagnostic_id": item.get("diagnostic_id"),
+                    "selection_policy_version": item.get("selection_policy_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_selection_bias_diagnostics
+            ],
+            "selection_bias_diagnostic_violation_count": len(selection_bias_diagnostic_violations),
+            "selection_bias_diagnostic_violations": [
+                {
+                    "diagnostic_id": item.get("diagnostic_id"),
+                    "included_count": item.get("included_count"),
+                    "excluded_count": item.get("excluded_count"),
+                    "bias_result": item.get("bias_result"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in selection_bias_diagnostic_violations
+            ],
+            "diagnostic_ids": sorted({item.get("diagnostic_id") for item in selection_bias_diagnostics if item.get("diagnostic_id")}),
+            "bias_results": sorted({item.get("bias_result") for item in selection_bias_diagnostics if item.get("bias_result")}),
+            "selection_bias_diagnostic_projection_version": "v2.7.0.selection_bias_diagnostic.v1",
+        },
         "TrainingServingSkewContract": {
             "eligible_training_serving_skew_records": len(training_serving_skews),
             "training_serving_skew_observation_count": raw_training_serving_skew_count,
@@ -7507,6 +8187,14 @@ def build_denominator_projection(
         "exit_policy_migration_recorded_events": 0,
         "open_position_policy_migration_recorded_events": 0,
         "position_ownership_transfer_recorded_events": 0,
+        "rollback_verification_recorded_events": 0,
+        "partial_rollback_policy_recorded_events": 0,
+        "release_readiness_review_recorded_events": 0,
+        "change_freeze_recorded_events": 0,
+        "notification_channel_integrity_recorded_events": 0,
+        "runbook_freshness_recorded_events": 0,
+        "metric_backfill_impact_recorded_events": 0,
+        "selection_bias_diagnostic_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -7593,6 +8281,14 @@ def build_denominator_projection(
             "ExitPolicyMigrationContract": {},
             "OpenPositionPolicyMigrationContract": {},
             "PositionOwnershipTransferContract": {},
+            "RollbackVerificationContract": {},
+            "PartialRollbackPolicy": {},
+            "ReleaseReadinessReviewContract": {},
+            "ChangeFreezeContract": {},
+            "NotificationChannelIntegrityContract": {},
+            "RunbookFreshnessContract": {},
+            "MetricBackfillImpactContract": {},
+            "SelectionBiasDiagnosticContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -7665,6 +8361,14 @@ def build_denominator_projection(
             "exit_policy_migration_ok": False,
             "open_position_policy_migration_ok": False,
             "position_ownership_transfer_ok": False,
+            "rollback_verification_ok": False,
+            "partial_rollback_policy_ok": False,
+            "release_readiness_review_ok": False,
+            "change_freeze_ok": False,
+            "notification_channel_integrity_ok": False,
+            "runbook_freshness_ok": False,
+            "metric_backfill_impact_ok": False,
+            "selection_bias_diagnostic_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -7731,6 +8435,14 @@ def build_denominator_projection(
     exit_policy_migrations = []
     open_position_policy_migrations = []
     position_ownership_transfers = []
+    rollback_verifications = []
+    partial_rollback_policies = []
+    release_readiness_reviews = []
+    change_freezes = []
+    notification_channel_integrities = []
+    runbook_freshnesses = []
+    metric_backfill_impacts = []
+    selection_bias_diagnostics = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -8027,6 +8739,54 @@ def build_denominator_projection(
             if position_ownership_transfer:
                 position_ownership_transfers.append(position_ownership_transfer)
             continue
+        if event.get("event_type") == ROLLBACK_VERIFICATION_EVENT_TYPE:
+            projection["rollback_verification_recorded_events"] += 1
+            rollback_verification = _extract_rollback_verification(event, _payload_bags(event))
+            if rollback_verification:
+                rollback_verifications.append(rollback_verification)
+            continue
+        if event.get("event_type") == PARTIAL_ROLLBACK_POLICY_EVENT_TYPE:
+            projection["partial_rollback_policy_recorded_events"] += 1
+            partial_rollback_policy = _extract_partial_rollback_policy(event, _payload_bags(event))
+            if partial_rollback_policy:
+                partial_rollback_policies.append(partial_rollback_policy)
+            continue
+        if event.get("event_type") == RELEASE_READINESS_REVIEW_EVENT_TYPE:
+            projection["release_readiness_review_recorded_events"] += 1
+            release_readiness_review = _extract_release_readiness_review(event, _payload_bags(event))
+            if release_readiness_review:
+                release_readiness_reviews.append(release_readiness_review)
+            continue
+        if event.get("event_type") == CHANGE_FREEZE_EVENT_TYPE:
+            projection["change_freeze_recorded_events"] += 1
+            change_freeze = _extract_change_freeze(event, _payload_bags(event))
+            if change_freeze:
+                change_freezes.append(change_freeze)
+            continue
+        if event.get("event_type") == NOTIFICATION_CHANNEL_INTEGRITY_EVENT_TYPE:
+            projection["notification_channel_integrity_recorded_events"] += 1
+            notification_channel_integrity = _extract_notification_channel_integrity(event, _payload_bags(event))
+            if notification_channel_integrity:
+                notification_channel_integrities.append(notification_channel_integrity)
+            continue
+        if event.get("event_type") == RUNBOOK_FRESHNESS_EVENT_TYPE:
+            projection["runbook_freshness_recorded_events"] += 1
+            runbook_freshness = _extract_runbook_freshness(event, _payload_bags(event))
+            if runbook_freshness:
+                runbook_freshnesses.append(runbook_freshness)
+            continue
+        if event.get("event_type") == METRIC_BACKFILL_IMPACT_EVENT_TYPE:
+            projection["metric_backfill_impact_recorded_events"] += 1
+            metric_backfill_impact = _extract_metric_backfill_impact(event, _payload_bags(event))
+            if metric_backfill_impact:
+                metric_backfill_impacts.append(metric_backfill_impact)
+            continue
+        if event.get("event_type") == SELECTION_BIAS_DIAGNOSTIC_EVENT_TYPE:
+            projection["selection_bias_diagnostic_recorded_events"] += 1
+            selection_bias_diagnostic = _extract_selection_bias_diagnostic(event, _payload_bags(event))
+            if selection_bias_diagnostic:
+                selection_bias_diagnostics.append(selection_bias_diagnostic)
+            continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -8235,6 +8995,14 @@ def build_denominator_projection(
         exit_policy_migrations=exit_policy_migrations,
         open_position_policy_migrations=open_position_policy_migrations,
         position_ownership_transfers=position_ownership_transfers,
+        rollback_verifications=rollback_verifications,
+        partial_rollback_policies=partial_rollback_policies,
+        release_readiness_reviews=release_readiness_reviews,
+        change_freezes=change_freezes,
+        notification_channel_integrities=notification_channel_integrities,
+        runbook_freshnesses=runbook_freshnesses,
+        metric_backfill_impacts=metric_backfill_impacts,
+        selection_bias_diagnostics=selection_bias_diagnostics,
     )
     if progress_callback:
         progress_callback(
@@ -8644,6 +9412,54 @@ def build_denominator_projection(
         and contract_evidence["PositionOwnershipTransferContract"]["valid_position_ownership_transfer_count"] > 0
         and contract_evidence["PositionOwnershipTransferContract"]["malformed_count"] == 0
         and contract_evidence["PositionOwnershipTransferContract"]["position_ownership_transfer_violation_count"] == 0
+    )
+    projection["health"]["rollback_verification_ok"] = (
+        contract_evidence["RollbackVerificationContract"]["eligible_rollback_verification_records"] > 0
+        and contract_evidence["RollbackVerificationContract"]["valid_rollback_verification_count"] > 0
+        and contract_evidence["RollbackVerificationContract"]["malformed_count"] == 0
+        and contract_evidence["RollbackVerificationContract"]["rollback_verification_violation_count"] == 0
+    )
+    projection["health"]["partial_rollback_policy_ok"] = (
+        contract_evidence["PartialRollbackPolicy"]["eligible_partial_rollback_policy_records"] > 0
+        and contract_evidence["PartialRollbackPolicy"]["valid_partial_rollback_policy_count"] > 0
+        and contract_evidence["PartialRollbackPolicy"]["malformed_count"] == 0
+        and contract_evidence["PartialRollbackPolicy"]["partial_rollback_policy_violation_count"] == 0
+    )
+    projection["health"]["release_readiness_review_ok"] = (
+        contract_evidence["ReleaseReadinessReviewContract"]["eligible_release_readiness_review_records"] > 0
+        and contract_evidence["ReleaseReadinessReviewContract"]["valid_release_readiness_review_count"] > 0
+        and contract_evidence["ReleaseReadinessReviewContract"]["malformed_count"] == 0
+        and contract_evidence["ReleaseReadinessReviewContract"]["release_readiness_review_violation_count"] == 0
+    )
+    projection["health"]["change_freeze_ok"] = (
+        contract_evidence["ChangeFreezeContract"]["eligible_change_freeze_records"] > 0
+        and contract_evidence["ChangeFreezeContract"]["valid_change_freeze_count"] > 0
+        and contract_evidence["ChangeFreezeContract"]["malformed_count"] == 0
+        and contract_evidence["ChangeFreezeContract"]["change_freeze_violation_count"] == 0
+    )
+    projection["health"]["notification_channel_integrity_ok"] = (
+        contract_evidence["NotificationChannelIntegrityContract"]["eligible_notification_channel_integrity_records"] > 0
+        and contract_evidence["NotificationChannelIntegrityContract"]["valid_notification_channel_integrity_count"] > 0
+        and contract_evidence["NotificationChannelIntegrityContract"]["malformed_count"] == 0
+        and contract_evidence["NotificationChannelIntegrityContract"]["notification_channel_integrity_violation_count"] == 0
+    )
+    projection["health"]["runbook_freshness_ok"] = (
+        contract_evidence["RunbookFreshnessContract"]["eligible_runbook_freshness_records"] > 0
+        and contract_evidence["RunbookFreshnessContract"]["valid_runbook_freshness_count"] > 0
+        and contract_evidence["RunbookFreshnessContract"]["malformed_count"] == 0
+        and contract_evidence["RunbookFreshnessContract"]["runbook_freshness_violation_count"] == 0
+    )
+    projection["health"]["metric_backfill_impact_ok"] = (
+        contract_evidence["MetricBackfillImpactContract"]["eligible_metric_backfill_impact_records"] > 0
+        and contract_evidence["MetricBackfillImpactContract"]["valid_metric_backfill_impact_count"] > 0
+        and contract_evidence["MetricBackfillImpactContract"]["malformed_count"] == 0
+        and contract_evidence["MetricBackfillImpactContract"]["metric_backfill_impact_violation_count"] == 0
+    )
+    projection["health"]["selection_bias_diagnostic_ok"] = (
+        contract_evidence["SelectionBiasDiagnosticContract"]["eligible_selection_bias_diagnostic_records"] > 0
+        and contract_evidence["SelectionBiasDiagnosticContract"]["valid_selection_bias_diagnostic_count"] > 0
+        and contract_evidence["SelectionBiasDiagnosticContract"]["malformed_count"] == 0
+        and contract_evidence["SelectionBiasDiagnosticContract"]["selection_bias_diagnostic_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

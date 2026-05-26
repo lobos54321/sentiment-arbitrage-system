@@ -1258,6 +1258,205 @@ def append_position_ownership_transfer(
     )
 
 
+def append_rollback_verification(
+    log,
+    *,
+    rollback_id="rollback-unit-v1",
+    from_version="release-v2",
+    to_version="release-v1",
+    verified_at="2026-01-15T00:29:00Z",
+):
+    payload = {
+        "rollback_id": rollback_id,
+        "from_version": from_version,
+        "to_version": to_version,
+        "verified_at": verified_at,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="rollback_verification_recorded",
+        aggregate_id=f"rollback_verification:{rollback_id}",
+        idempotency_key=f"rollback_verification:{rollback_id}:{from_version}:{to_version}",
+        payload=payload,
+    )
+
+
+def append_partial_rollback_policy(
+    log,
+    *,
+    rollback_id="partial-rollback-unit-v1",
+    component_scope="dashboard:v27-readiness",
+    dependency_scope="read_model_refresh",
+    verification_plan="health_check_and_scope_audit",
+    rolled_back_at="2026-01-15T00:30:00Z",
+):
+    payload = {
+        "rollback_id": rollback_id,
+        "component_scope": component_scope,
+        "dependency_scope": dependency_scope,
+        "verification_plan": verification_plan,
+        "rolled_back_at": rolled_back_at,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="partial_rollback_policy_recorded",
+        aggregate_id=f"partial_rollback_policy:{rollback_id}",
+        idempotency_key=f"partial_rollback_policy:{rollback_id}:{component_scope}",
+        payload=payload,
+    )
+
+
+def append_release_readiness_review(
+    log,
+    *,
+    review_id="release-review-unit-v1",
+    release_id="release-unit-v2",
+    required_evidence=None,
+    approval_status="approved",
+    approved_at="2026-01-15T00:31:00Z",
+):
+    payload = {
+        "review_id": review_id,
+        "release_id": release_id,
+        "required_evidence": required_evidence if required_evidence is not None else ["health", "scope_audit", "pytest"],
+        "approval_status": approval_status,
+        "approved_at": approved_at,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="release_readiness_review_recorded",
+        aggregate_id=f"release_readiness_review:{review_id}",
+        idempotency_key=f"release_readiness_review:{review_id}:{approval_status}",
+        payload=payload,
+    )
+
+
+def append_change_freeze(
+    log,
+    *,
+    freeze_id="freeze-unit-v1",
+    scope="normal_tiny_runtime",
+    start_at="2026-01-15T00:32:00Z",
+    end_at="2026-01-15T01:32:00Z",
+    exception_policy="break_glass_only",
+):
+    payload = {
+        "freeze_id": freeze_id,
+        "scope": scope,
+        "start_at": start_at,
+        "end_at": end_at,
+        "exception_policy": exception_policy,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="change_freeze_recorded",
+        aggregate_id=f"change_freeze:{freeze_id}",
+        idempotency_key=f"change_freeze:{freeze_id}:{scope}",
+        payload=payload,
+    )
+
+
+def append_notification_channel_integrity(
+    log,
+    *,
+    channel_id="ops-alerts-unit",
+    destination_hash=None,
+    signature_required=True,
+    delivery_status="verified",
+):
+    destination_hash = destination_hash or sha256_hex({"channel_id": channel_id, "destination": "telegram_ops"})
+    payload = {
+        "channel_id": channel_id,
+        "destination_hash": destination_hash,
+        "signature_required": signature_required,
+        "delivery_status": delivery_status,
+        "checked_at": "2026-01-15T00:33:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="notification_channel_integrity_recorded",
+        aggregate_id=f"notification_channel_integrity:{channel_id}",
+        idempotency_key=f"notification_channel_integrity:{channel_id}:{delivery_status}",
+        payload=payload,
+    )
+
+
+def append_runbook_freshness(
+    log,
+    *,
+    runbook_id="normal-tiny-rollback-runbook",
+    owner="runtime",
+    last_reviewed_at="2026-01-15T00:34:00Z",
+    max_age_days=30,
+    freshness_status="fresh",
+):
+    payload = {
+        "runbook_id": runbook_id,
+        "owner": owner,
+        "last_reviewed_at": last_reviewed_at,
+        "max_age_days": max_age_days,
+        "freshness_status": freshness_status,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="runbook_freshness_recorded",
+        aggregate_id=f"runbook_freshness:{runbook_id}",
+        idempotency_key=f"runbook_freshness:{runbook_id}:{freshness_status}",
+        payload=payload,
+    )
+
+
+def append_metric_backfill_impact(
+    log,
+    *,
+    backfill_id="metric-backfill-unit-v1",
+    metric_id="telegram_capture_rate_D3b",
+    impact_scope="metric_window_only",
+    impact_report_hash=None,
+):
+    impact_report_hash = impact_report_hash or sha256_hex({"backfill_id": backfill_id, "metric_id": metric_id})
+    payload = {
+        "backfill_id": backfill_id,
+        "metric_id": metric_id,
+        "impact_scope": impact_scope,
+        "impact_report_hash": impact_report_hash,
+        "checked_at": "2026-01-15T00:35:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="metric_backfill_impact_recorded",
+        aggregate_id=f"metric_backfill_impact:{backfill_id}",
+        idempotency_key=f"metric_backfill_impact:{backfill_id}:{impact_scope}",
+        payload=payload,
+    )
+
+
+def append_selection_bias_diagnostic(
+    log,
+    *,
+    diagnostic_id="selection-bias-unit-v1",
+    selection_policy_version="normal-tiny-selection-v1",
+    included_count=40,
+    excluded_count=8,
+    bias_result="within_tolerance",
+):
+    payload = {
+        "diagnostic_id": diagnostic_id,
+        "selection_policy_version": selection_policy_version,
+        "included_count": included_count,
+        "excluded_count": excluded_count,
+        "bias_result": bias_result,
+        "checked_at": "2026-01-15T00:36:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="selection_bias_diagnostic_recorded",
+        aggregate_id=f"selection_bias_diagnostic:{diagnostic_id}",
+        idempotency_key=f"selection_bias_diagnostic:{diagnostic_id}:{bias_result}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -2019,6 +2218,82 @@ def test_denominator_projection_rejects_position_feature_runtime_trust_violation
         projection["contract_evidence"]["PositionOwnershipTransferContract"]["position_ownership_transfer_violation_count"]
         == 1
     )
+
+
+def test_denominator_projection_consumes_release_rollback_metric_trust_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_rollback_verification(log)
+    append_partial_rollback_policy(log)
+    append_release_readiness_review(log)
+    append_change_freeze(log)
+    append_notification_channel_integrity(log)
+    append_runbook_freshness(log)
+    append_metric_backfill_impact(log)
+    append_selection_bias_diagnostic(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["rollback_verification_recorded_events"] == 1
+    assert projection["partial_rollback_policy_recorded_events"] == 1
+    assert projection["release_readiness_review_recorded_events"] == 1
+    assert projection["change_freeze_recorded_events"] == 1
+    assert projection["notification_channel_integrity_recorded_events"] == 1
+    assert projection["runbook_freshness_recorded_events"] == 1
+    assert projection["metric_backfill_impact_recorded_events"] == 1
+    assert projection["selection_bias_diagnostic_recorded_events"] == 1
+    assert projection["health"]["rollback_verification_ok"] is True
+    assert projection["health"]["partial_rollback_policy_ok"] is True
+    assert projection["health"]["release_readiness_review_ok"] is True
+    assert projection["health"]["change_freeze_ok"] is True
+    assert projection["health"]["notification_channel_integrity_ok"] is True
+    assert projection["health"]["runbook_freshness_ok"] is True
+    assert projection["health"]["metric_backfill_impact_ok"] is True
+    assert projection["health"]["selection_bias_diagnostic_ok"] is True
+    assert projection["contract_evidence"]["RollbackVerificationContract"]["valid_rollback_verification_count"] == 1
+    assert projection["contract_evidence"]["PartialRollbackPolicy"]["valid_partial_rollback_policy_count"] == 1
+    assert projection["contract_evidence"]["ReleaseReadinessReviewContract"]["valid_release_readiness_review_count"] == 1
+    assert projection["contract_evidence"]["ChangeFreezeContract"]["valid_change_freeze_count"] == 1
+    assert (
+        projection["contract_evidence"]["NotificationChannelIntegrityContract"]["valid_notification_channel_integrity_count"]
+        == 1
+    )
+    assert projection["contract_evidence"]["RunbookFreshnessContract"]["valid_runbook_freshness_count"] == 1
+    assert projection["contract_evidence"]["MetricBackfillImpactContract"]["valid_metric_backfill_impact_count"] == 1
+    assert projection["contract_evidence"]["SelectionBiasDiagnosticContract"]["valid_selection_bias_diagnostic_count"] == 1
+
+
+def test_denominator_projection_rejects_release_rollback_metric_trust_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_rollback_verification(log, from_version="release-same", to_version="release-same")
+    append_partial_rollback_policy(log, verification_plan="none")
+    append_release_readiness_review(log, approval_status="pending")
+    append_change_freeze(log, start_at="2026-01-15T02:00:00Z", end_at="2026-01-15T01:00:00Z")
+    append_notification_channel_integrity(log, signature_required=False, delivery_status="failed")
+    append_runbook_freshness(log, max_age_days=999, freshness_status="stale")
+    append_metric_backfill_impact(log, impact_scope="unbounded", impact_report_hash="not-a-hash")
+    append_selection_bias_diagnostic(log, included_count=-1, bias_result="biased")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["rollback_verification_ok"] is False
+    assert projection["health"]["partial_rollback_policy_ok"] is False
+    assert projection["health"]["release_readiness_review_ok"] is False
+    assert projection["health"]["change_freeze_ok"] is False
+    assert projection["health"]["notification_channel_integrity_ok"] is False
+    assert projection["health"]["runbook_freshness_ok"] is False
+    assert projection["health"]["metric_backfill_impact_ok"] is False
+    assert projection["health"]["selection_bias_diagnostic_ok"] is False
+    assert projection["contract_evidence"]["RollbackVerificationContract"]["rollback_verification_violation_count"] == 1
+    assert projection["contract_evidence"]["PartialRollbackPolicy"]["partial_rollback_policy_violation_count"] == 1
+    assert projection["contract_evidence"]["ReleaseReadinessReviewContract"]["release_readiness_review_violation_count"] == 1
+    assert projection["contract_evidence"]["ChangeFreezeContract"]["change_freeze_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["NotificationChannelIntegrityContract"]["notification_channel_integrity_violation_count"]
+        == 1
+    )
+    assert projection["contract_evidence"]["RunbookFreshnessContract"]["runbook_freshness_violation_count"] == 1
+    assert projection["contract_evidence"]["MetricBackfillImpactContract"]["metric_backfill_impact_violation_count"] == 1
+    assert projection["contract_evidence"]["SelectionBiasDiagnosticContract"]["selection_bias_diagnostic_violation_count"] == 1
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):
