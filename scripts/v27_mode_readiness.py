@@ -215,6 +215,16 @@ MODE_REQUIREMENTS = {
         "LabelDisputeResolutionContract",
         "NegativeControlContract",
         "OperatorTrainingCertificationContract",
+        "RuntimeSpecAssertionContract",
+        "MinimumViableTrustBoundary",
+        "EvidenceConflictContract",
+        "EvidenceAgingContract",
+        "MarketRegimeInvalidatesEvidence",
+        "SourceAlphaDecayExitCriteria",
+        "FalseNegativeBudgetContract",
+        "SmallSampleDecisionPolicy",
+        "SafetyVsCaptureTradeoffContract",
+        "ImplementationDriftMonitor",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -247,6 +257,46 @@ FINAL_NORMAL_TINY_STATUS_REASONS = {
     "OperatorTrainingCertificationContract": (
         "operator_training_certification_ok",
         "operator_training_certification_missing_malformed_or_expired",
+    ),
+    "RuntimeSpecAssertionContract": (
+        "runtime_spec_assertion_ok",
+        "runtime_spec_assertion_missing_malformed_or_non_blocking",
+    ),
+    "MinimumViableTrustBoundary": (
+        "minimum_viable_trust_boundary_ok",
+        "minimum_viable_trust_boundary_missing_malformed_or_ambiguous",
+    ),
+    "EvidenceConflictContract": (
+        "evidence_conflict_ok",
+        "evidence_conflict_missing_malformed_or_unresolved",
+    ),
+    "EvidenceAgingContract": (
+        "evidence_aging_ok",
+        "evidence_aging_missing_malformed_or_expired",
+    ),
+    "MarketRegimeInvalidatesEvidence": (
+        "market_regime_invalidates_evidence_ok",
+        "market_regime_invalidation_missing_malformed_or_not_enforced",
+    ),
+    "SourceAlphaDecayExitCriteria": (
+        "source_alpha_decay_exit_criteria_ok",
+        "source_alpha_decay_exit_criteria_missing_malformed_or_not_enforced",
+    ),
+    "FalseNegativeBudgetContract": (
+        "false_negative_budget_ok",
+        "false_negative_budget_missing_malformed_or_exceeded",
+    ),
+    "SmallSampleDecisionPolicy": (
+        "small_sample_decision_ok",
+        "small_sample_decision_missing_malformed_or_over_promoted",
+    ),
+    "SafetyVsCaptureTradeoffContract": (
+        "safety_vs_capture_tradeoff_ok",
+        "safety_vs_capture_tradeoff_missing_malformed_or_unapproved",
+    ),
+    "ImplementationDriftMonitor": (
+        "implementation_drift_monitor_ok",
+        "implementation_drift_monitor_missing_malformed_or_drifted",
     ),
 }
 

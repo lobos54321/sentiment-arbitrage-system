@@ -999,6 +999,129 @@ def append_final_normal_tiny_blocking_events(event_log_dir):
     )
 
 
+def append_runtime_trust_governance_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="runtime_spec_assertion_recorded",
+        aggregate_id="runtime_spec_assertion:runtime-spec-assertion-unit-v1",
+        idempotency_key="runtime_spec_assertion:runtime-spec-assertion-unit-v1:RealtimeCleanDetector",
+        payload={
+            "assertion_id": "runtime-spec-assertion-unit-v1",
+            "contract_id": "RealtimeCleanDetector",
+            "runtime_location": "scripts/paper_trade_monitor.py:realtime_clean_gate",
+            "failure_action": "runtime_assert_failed",
+        },
+    )
+    log.append_event(
+        event_type="minimum_viable_trust_boundary_recorded",
+        aggregate_id="minimum_viable_trust_boundary:minimum-viable-trust-unit-v1",
+        idempotency_key="minimum_viable_trust_boundary:minimum-viable-trust-unit-v1",
+        payload={
+            "boundary_id": "minimum-viable-trust-unit-v1",
+            "trusted_inputs": ["entry_quote", "exit_quote"],
+            "untrusted_inputs": ["mark_only_peak", "posthoc_label"],
+            "required_contracts": ["RealtimeCleanDetector", "QuoteIntentBindingContract"],
+            "failure_action": "mode_blocked",
+        },
+    )
+    log.append_event(
+        event_type="evidence_conflict_recorded",
+        aggregate_id="evidence_conflict:evidence-conflict-unit-v1",
+        idempotency_key="evidence_conflict:evidence-conflict-unit-v1",
+        payload={
+            "conflict_id": "evidence-conflict-unit-v1",
+            "evidence_a_hash": sha256_hex({"evidence": "a", "scope": "unit"}),
+            "evidence_b_hash": sha256_hex({"evidence": "b", "scope": "unit"}),
+            "resolution_policy": "quarantine_then_operator_review",
+            "resolved_at": "2026-01-15T00:47:00Z",
+        },
+    )
+    log.append_event(
+        event_type="evidence_aging_recorded",
+        aggregate_id="evidence_aging:evidence-aging-unit-v1",
+        idempotency_key="evidence_aging:evidence-aging-unit-v1",
+        payload={
+            "evidence_id": "evidence-aging-unit-v1",
+            "evidence_type": "quote_clean_snapshot",
+            "max_age_ms": 120000,
+            "age_ms": 30000,
+            "expiration_action": "revalidate_before_entry",
+        },
+    )
+    log.append_event(
+        event_type="market_regime_invalidates_evidence_recorded",
+        aggregate_id="market_regime_invalidates_evidence:market-regime-unit-v1:evidence-aging-unit-v1",
+        idempotency_key="market_regime_invalidates_evidence:market-regime-unit-v1:evidence-aging-unit-v1",
+        payload={
+            "regime_id": "market-regime-unit-v1",
+            "evidence_id": "evidence-aging-unit-v1",
+            "invalidating_signal": "liquidity_regime_flip",
+            "action": "revalidate_evidence",
+            "detected_at": "2026-01-15T00:48:00Z",
+        },
+    )
+    log.append_event(
+        event_type="source_alpha_decay_exit_criteria_recorded",
+        aggregate_id="source_alpha_decay_exit_criteria:premium-clean-source-unit-v1",
+        idempotency_key="source_alpha_decay_exit_criteria:premium-clean-source-unit-v1:24h",
+        payload={
+            "source_id": "premium-clean-source-unit-v1",
+            "alpha_metric": 0.12,
+            "decay_window": "24h",
+            "exit_threshold": 0.05,
+            "action": "keep_source",
+        },
+    )
+    log.append_event(
+        event_type="false_negative_budget_recorded",
+        aggregate_id="false_negative_budget:false-negative-budget-unit-v1",
+        idempotency_key="false_negative_budget:false-negative-budget-unit-v1:0.08",
+        payload={
+            "budget_id": "false-negative-budget-unit-v1",
+            "hazard_class": "missed_clean_gold_dog",
+            "allowed_false_negative_rate": 0.15,
+            "observed_rate": 0.08,
+            "action": "continue_with_watch",
+        },
+    )
+    log.append_event(
+        event_type="small_sample_decision_recorded",
+        aggregate_id="small_sample_decision:small-sample-policy-unit-v1",
+        idempotency_key="small_sample_decision:small-sample-policy-unit-v1:40",
+        payload={
+            "policy_id": "small-sample-policy-unit-v1",
+            "sample_size": 40,
+            "min_sample_size": 30,
+            "decision_allowed": True,
+            "fallback_action": "hold_promotion",
+        },
+    )
+    log.append_event(
+        event_type="safety_vs_capture_tradeoff_recorded",
+        aggregate_id="safety_vs_capture_tradeoff:safety-capture-tradeoff-unit-v1",
+        idempotency_key="safety_vs_capture_tradeoff:safety-capture-tradeoff-unit-v1",
+        payload={
+            "tradeoff_id": "safety-capture-tradeoff-unit-v1",
+            "safety_metric": 0.98,
+            "capture_metric": 0.62,
+            "chosen_policy": "safety_first_capture_watch",
+            "approved_at": "2026-01-15T00:49:00Z",
+        },
+    )
+    log.append_event(
+        event_type="implementation_drift_monitor_recorded",
+        aggregate_id="implementation_drift_monitor:implementation-drift-unit-v1",
+        idempotency_key="implementation_drift_monitor:implementation-drift-unit-v1:RealtimeCleanDetector",
+        payload={
+            "drift_id": "implementation-drift-unit-v1",
+            "spec_contract_id": "RealtimeCleanDetector",
+            "runtime_location": "scripts/paper_trade_monitor.py:realtime_clean_gate",
+            "drift_detected": False,
+            "detected_at": "2026-01-15T00:50:00Z",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -2165,6 +2288,77 @@ def test_mode_readiness_consumes_final_normal_tiny_blocking_contracts(tmp_path):
     assert (
         matrix["contract_statuses"]["OperatorTrainingCertificationContract"]["evidence"][
             "valid_operator_training_certification_count"
+        ]
+        == 1
+    )
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_runtime_trust_governance_contracts(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_runtime_trust_governance_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "RuntimeSpecAssertionContract",
+        "MinimumViableTrustBoundary",
+        "EvidenceConflictContract",
+        "EvidenceAgingContract",
+        "MarketRegimeInvalidatesEvidence",
+        "SourceAlphaDecayExitCriteria",
+        "FalseNegativeBudgetContract",
+        "SmallSampleDecisionPolicy",
+        "SafetyVsCaptureTradeoffContract",
+        "ImplementationDriftMonitor",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["RuntimeSpecAssertionContract"]["evidence"]["valid_runtime_spec_assertion_count"] == 1
+    assert (
+        matrix["contract_statuses"]["MinimumViableTrustBoundary"]["evidence"][
+            "valid_minimum_viable_trust_boundary_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["EvidenceConflictContract"]["evidence"]["valid_evidence_conflict_count"] == 1
+    assert matrix["contract_statuses"]["EvidenceAgingContract"]["evidence"]["valid_evidence_aging_count"] == 1
+    assert (
+        matrix["contract_statuses"]["MarketRegimeInvalidatesEvidence"]["evidence"][
+            "valid_market_regime_invalidates_evidence_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["SourceAlphaDecayExitCriteria"]["evidence"][
+            "valid_source_alpha_decay_exit_criteria_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["FalseNegativeBudgetContract"]["evidence"]["valid_false_negative_budget_count"] == 1
+    assert matrix["contract_statuses"]["SmallSampleDecisionPolicy"]["evidence"]["valid_small_sample_decision_count"] == 1
+    assert (
+        matrix["contract_statuses"]["SafetyVsCaptureTradeoffContract"]["evidence"][
+            "valid_safety_vs_capture_tradeoff_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["ImplementationDriftMonitor"]["evidence"][
+            "valid_implementation_drift_monitor_count"
         ]
         == 1
     )

@@ -113,6 +113,16 @@ INCIDENT_POSTMORTEM_EVENT_TYPE = "incident_postmortem_recorded"
 LABEL_DISPUTE_RESOLUTION_EVENT_TYPE = "label_dispute_resolution_recorded"
 NEGATIVE_CONTROL_EVENT_TYPE = "negative_control_recorded"
 OPERATOR_TRAINING_CERTIFICATION_EVENT_TYPE = "operator_training_certification_recorded"
+RUNTIME_SPEC_ASSERTION_EVENT_TYPE = "runtime_spec_assertion_recorded"
+MINIMUM_VIABLE_TRUST_BOUNDARY_EVENT_TYPE = "minimum_viable_trust_boundary_recorded"
+EVIDENCE_CONFLICT_EVENT_TYPE = "evidence_conflict_recorded"
+EVIDENCE_AGING_EVENT_TYPE = "evidence_aging_recorded"
+MARKET_REGIME_INVALIDATES_EVIDENCE_EVENT_TYPE = "market_regime_invalidates_evidence_recorded"
+SOURCE_ALPHA_DECAY_EXIT_CRITERIA_EVENT_TYPE = "source_alpha_decay_exit_criteria_recorded"
+FALSE_NEGATIVE_BUDGET_EVENT_TYPE = "false_negative_budget_recorded"
+SMALL_SAMPLE_DECISION_EVENT_TYPE = "small_sample_decision_recorded"
+SAFETY_VS_CAPTURE_TRADEOFF_EVENT_TYPE = "safety_vs_capture_tradeoff_recorded"
+IMPLEMENTATION_DRIFT_MONITOR_EVENT_TYPE = "implementation_drift_monitor_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -192,6 +202,16 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     LABEL_DISPUTE_RESOLUTION_EVENT_TYPE,
     NEGATIVE_CONTROL_EVENT_TYPE,
     OPERATOR_TRAINING_CERTIFICATION_EVENT_TYPE,
+    RUNTIME_SPEC_ASSERTION_EVENT_TYPE,
+    MINIMUM_VIABLE_TRUST_BOUNDARY_EVENT_TYPE,
+    EVIDENCE_CONFLICT_EVENT_TYPE,
+    EVIDENCE_AGING_EVENT_TYPE,
+    MARKET_REGIME_INVALIDATES_EVIDENCE_EVENT_TYPE,
+    SOURCE_ALPHA_DECAY_EXIT_CRITERIA_EVENT_TYPE,
+    FALSE_NEGATIVE_BUDGET_EVENT_TYPE,
+    SMALL_SAMPLE_DECISION_EVENT_TYPE,
+    SAFETY_VS_CAPTURE_TRADEOFF_EVENT_TYPE,
+    IMPLEMENTATION_DRIFT_MONITOR_EVENT_TYPE,
 }
 FINAL_NORMAL_TINY_CONTRACT_SPECS = {
     "AccessReviewContract": {
@@ -279,6 +299,86 @@ FINAL_NORMAL_TINY_CONTRACT_SPECS = {
         "plural": "operator_training_certifications",
         "required_fields": ("operator_id", "training_module", "certification_status", "expires_at", "checked_at"),
         "projection_version": "v2.7.0.operator_training_certification.v1",
+    },
+    "RuntimeSpecAssertionContract": {
+        "event_type": RUNTIME_SPEC_ASSERTION_EVENT_TYPE,
+        "key_field": "assertion_id",
+        "slug": "runtime_spec_assertion",
+        "plural": "runtime_spec_assertions",
+        "required_fields": ("assertion_id", "contract_id", "runtime_location", "failure_action"),
+        "projection_version": "v2.7.0.runtime_spec_assertion.v1",
+    },
+    "MinimumViableTrustBoundary": {
+        "event_type": MINIMUM_VIABLE_TRUST_BOUNDARY_EVENT_TYPE,
+        "key_field": "boundary_id",
+        "slug": "minimum_viable_trust_boundary",
+        "plural": "minimum_viable_trust_boundaries",
+        "required_fields": ("boundary_id", "trusted_inputs", "untrusted_inputs", "required_contracts", "failure_action"),
+        "projection_version": "v2.7.0.minimum_viable_trust_boundary.v1",
+    },
+    "EvidenceConflictContract": {
+        "event_type": EVIDENCE_CONFLICT_EVENT_TYPE,
+        "key_field": "conflict_id",
+        "slug": "evidence_conflict",
+        "plural": "evidence_conflicts",
+        "required_fields": ("conflict_id", "evidence_a_hash", "evidence_b_hash", "resolution_policy", "resolved_at"),
+        "projection_version": "v2.7.0.evidence_conflict.v1",
+    },
+    "EvidenceAgingContract": {
+        "event_type": EVIDENCE_AGING_EVENT_TYPE,
+        "key_field": "evidence_id",
+        "slug": "evidence_aging",
+        "plural": "evidence_aging_records",
+        "required_fields": ("evidence_id", "evidence_type", "max_age_ms", "age_ms", "expiration_action"),
+        "projection_version": "v2.7.0.evidence_aging.v1",
+    },
+    "MarketRegimeInvalidatesEvidence": {
+        "event_type": MARKET_REGIME_INVALIDATES_EVIDENCE_EVENT_TYPE,
+        "key_field": "regime_id",
+        "slug": "market_regime_invalidates_evidence",
+        "plural": "market_regime_invalidations",
+        "required_fields": ("regime_id", "evidence_id", "invalidating_signal", "action", "detected_at"),
+        "projection_version": "v2.7.0.market_regime_invalidates_evidence.v1",
+    },
+    "SourceAlphaDecayExitCriteria": {
+        "event_type": SOURCE_ALPHA_DECAY_EXIT_CRITERIA_EVENT_TYPE,
+        "key_field": "source_id",
+        "slug": "source_alpha_decay_exit_criteria",
+        "plural": "source_alpha_decay_exit_criteria",
+        "required_fields": ("source_id", "alpha_metric", "decay_window", "exit_threshold", "action"),
+        "projection_version": "v2.7.0.source_alpha_decay_exit_criteria.v1",
+    },
+    "FalseNegativeBudgetContract": {
+        "event_type": FALSE_NEGATIVE_BUDGET_EVENT_TYPE,
+        "key_field": "budget_id",
+        "slug": "false_negative_budget",
+        "plural": "false_negative_budgets",
+        "required_fields": ("budget_id", "hazard_class", "allowed_false_negative_rate", "observed_rate", "action"),
+        "projection_version": "v2.7.0.false_negative_budget.v1",
+    },
+    "SmallSampleDecisionPolicy": {
+        "event_type": SMALL_SAMPLE_DECISION_EVENT_TYPE,
+        "key_field": "policy_id",
+        "slug": "small_sample_decision",
+        "plural": "small_sample_decisions",
+        "required_fields": ("policy_id", "sample_size", "min_sample_size", "decision_allowed", "fallback_action"),
+        "projection_version": "v2.7.0.small_sample_decision.v1",
+    },
+    "SafetyVsCaptureTradeoffContract": {
+        "event_type": SAFETY_VS_CAPTURE_TRADEOFF_EVENT_TYPE,
+        "key_field": "tradeoff_id",
+        "slug": "safety_vs_capture_tradeoff",
+        "plural": "safety_vs_capture_tradeoffs",
+        "required_fields": ("tradeoff_id", "safety_metric", "capture_metric", "chosen_policy", "approved_at"),
+        "projection_version": "v2.7.0.safety_vs_capture_tradeoff.v1",
+    },
+    "ImplementationDriftMonitor": {
+        "event_type": IMPLEMENTATION_DRIFT_MONITOR_EVENT_TYPE,
+        "key_field": "drift_id",
+        "slug": "implementation_drift_monitor",
+        "plural": "implementation_drift_monitors",
+        "required_fields": ("drift_id", "spec_contract_id", "runtime_location", "drift_detected", "detected_at"),
+        "projection_version": "v2.7.0.implementation_drift_monitor.v1",
     },
 }
 FINAL_NORMAL_TINY_EVENT_SPECS = {
@@ -1095,12 +1195,25 @@ def _as_string_list(value):
 
 def _final_normal_tiny_value(contract_id, field, bags):
     value = _extract_scalar(bags, [(field,)])
-    if field in {"required_approvers", "corrective_actions"}:
+    if field in {"required_approvers", "corrective_actions", "trusted_inputs", "untrusted_inputs", "required_contracts"}:
         return _as_string_list(value)
-    if field == "unsafe_prefix_detected":
+    if field in {"unsafe_prefix_detected", "decision_allowed", "drift_detected"}:
         return _as_bool(value)
-    if field in {"expected_no_effect_metric", "observed_effect"}:
+    if field in {
+        "expected_no_effect_metric",
+        "observed_effect",
+        "max_age_ms",
+        "age_ms",
+        "allowed_false_negative_rate",
+        "observed_rate",
+        "alpha_metric",
+        "exit_threshold",
+        "safety_metric",
+        "capture_metric",
+    }:
         return _as_float(value)
+    if field in {"sample_size", "min_sample_size"}:
+        return _as_int(value, default=None)
     return value
 
 
@@ -1175,6 +1288,109 @@ def _final_normal_tiny_violation_fields(contract_id, values):
         checked_ts = _timestamp_epoch_seconds(values.get("checked_at"))
         if expires_ts is not None and checked_ts is not None and expires_ts <= checked_ts:
             violation_fields.append("certification_expired")
+    elif contract_id == "RuntimeSpecAssertionContract":
+        failure_action = str(values.get("failure_action") or "").strip().lower()
+        if failure_action in {"none", "ignore", "warn_only", "log_only", "noop"}:
+            violation_fields.append("failure_action_not_blocking")
+    elif contract_id == "MinimumViableTrustBoundary":
+        trusted_inputs = set(values.get("trusted_inputs") or [])
+        untrusted_inputs = set(values.get("untrusted_inputs") or [])
+        if trusted_inputs & untrusted_inputs:
+            violation_fields.append("trusted_untrusted_inputs_overlap")
+        if not values.get("required_contracts"):
+            violation_fields.append("required_contracts_empty")
+        failure_action = str(values.get("failure_action") or "").strip().lower()
+        if failure_action in {"none", "ignore", "warn_only", "log_only", "noop"}:
+            violation_fields.append("failure_action_not_blocking")
+    elif contract_id == "EvidenceConflictContract":
+        for field in ("evidence_a_hash", "evidence_b_hash"):
+            if values.get(field) and not _valid_sha256_hex(values.get(field)):
+                violation_fields.append(f"{field}_sha256")
+        if (
+            values.get("evidence_a_hash")
+            and values.get("evidence_b_hash")
+            and values.get("evidence_a_hash") == values.get("evidence_b_hash")
+        ):
+            violation_fields.append("evidence_hashes_match")
+        resolution_policy = str(values.get("resolution_policy") or "").strip().lower()
+        if resolution_policy in {"none", "ignore", "unresolved", "tbd"}:
+            violation_fields.append("resolution_policy_unresolved")
+    elif contract_id == "EvidenceAgingContract":
+        max_age_ms = values.get("max_age_ms")
+        age_ms = values.get("age_ms")
+        if max_age_ms is not None and (not math.isfinite(max_age_ms) or max_age_ms <= 0):
+            violation_fields.append("max_age_ms_positive")
+        if age_ms is not None and (not math.isfinite(age_ms) or age_ms < 0):
+            violation_fields.append("age_ms_nonnegative")
+        if (
+            max_age_ms is not None
+            and age_ms is not None
+            and math.isfinite(max_age_ms)
+            and math.isfinite(age_ms)
+            and age_ms > max_age_ms
+        ):
+            violation_fields.append("evidence_age_exceeds_max_age")
+    elif contract_id == "MarketRegimeInvalidatesEvidence":
+        action = str(values.get("action") or "").strip().lower()
+        if action in {"none", "ignore", "hold", "noop", "observe_only"}:
+            violation_fields.append("market_regime_invalidation_action_not_enforced")
+    elif contract_id == "SourceAlphaDecayExitCriteria":
+        alpha_metric = values.get("alpha_metric")
+        exit_threshold = values.get("exit_threshold")
+        if alpha_metric is not None and not math.isfinite(alpha_metric):
+            violation_fields.append("alpha_metric_finite")
+        if exit_threshold is not None and not math.isfinite(exit_threshold):
+            violation_fields.append("exit_threshold_finite")
+        action = str(values.get("action") or "").strip().lower()
+        if action in {"none", "ignore", "noop"}:
+            violation_fields.append("source_decay_action_not_enforced")
+        if (
+            alpha_metric is not None
+            and exit_threshold is not None
+            and math.isfinite(alpha_metric)
+            and math.isfinite(exit_threshold)
+            and alpha_metric <= exit_threshold
+            and action in {"hold", "keep", "keep_source", "continue"}
+        ):
+            violation_fields.append("decayed_source_not_demoted")
+    elif contract_id == "FalseNegativeBudgetContract":
+        allowed = values.get("allowed_false_negative_rate")
+        observed = values.get("observed_rate")
+        for field, value in (("allowed_false_negative_rate", allowed), ("observed_rate", observed)):
+            if value is not None and (not math.isfinite(value) or value < 0 or value > 1):
+                violation_fields.append(f"{field}_unit_interval")
+        if (
+            allowed is not None
+            and observed is not None
+            and math.isfinite(allowed)
+            and math.isfinite(observed)
+            and observed > allowed
+        ):
+            violation_fields.append("false_negative_budget_exceeded")
+    elif contract_id == "SmallSampleDecisionPolicy":
+        sample_size = values.get("sample_size")
+        min_sample_size = values.get("min_sample_size")
+        if sample_size is not None and sample_size < 0:
+            violation_fields.append("sample_size_nonnegative")
+        if min_sample_size is not None and min_sample_size <= 0:
+            violation_fields.append("min_sample_size_positive")
+        if values.get("decision_allowed") is True and sample_size is not None and min_sample_size is not None:
+            if sample_size < min_sample_size:
+                violation_fields.append("decision_allowed_below_min_sample")
+    elif contract_id == "SafetyVsCaptureTradeoffContract":
+        for field in ("safety_metric", "capture_metric"):
+            value = values.get(field)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                violation_fields.append(f"{field}_nonnegative")
+        chosen_policy = str(values.get("chosen_policy") or "").strip().lower()
+        if chosen_policy in {"none", "ignore_safety", "capture_only", "unapproved"}:
+            violation_fields.append("chosen_policy_not_safety_approved")
+    elif contract_id == "ImplementationDriftMonitor":
+        drift_detected = values.get("drift_detected")
+        if drift_detected is True:
+            violation_fields.append("drift_detected")
+        if drift_detected is None:
+            violation_fields.append("drift_detected_parseable")
     return sorted(set(violation_fields))
 
 

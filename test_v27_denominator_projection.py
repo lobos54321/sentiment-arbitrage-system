@@ -1695,6 +1695,249 @@ def append_operator_training_certification(
     )
 
 
+def append_runtime_spec_assertion(
+    log,
+    *,
+    assertion_id="runtime-spec-assertion-unit-v1",
+    contract_id="RealtimeCleanDetector",
+    runtime_location="scripts/paper_trade_monitor.py:realtime_clean_gate",
+    failure_action="runtime_assert_failed",
+):
+    payload = {
+        "assertion_id": assertion_id,
+        "contract_id": contract_id,
+        "runtime_location": runtime_location,
+        "failure_action": failure_action,
+    }
+    return log.append_event(
+        event_type="runtime_spec_assertion_recorded",
+        aggregate_id=f"runtime_spec_assertion:{assertion_id}",
+        idempotency_key=f"runtime_spec_assertion:{assertion_id}:{contract_id}",
+        payload=payload,
+    )
+
+
+def append_minimum_viable_trust_boundary(
+    log,
+    *,
+    boundary_id="minimum-viable-trust-unit-v1",
+    trusted_inputs=None,
+    untrusted_inputs=None,
+    required_contracts=None,
+    failure_action="mode_blocked",
+):
+    payload = {
+        "boundary_id": boundary_id,
+        "trusted_inputs": trusted_inputs if trusted_inputs is not None else ["entry_quote", "exit_quote"],
+        "untrusted_inputs": untrusted_inputs if untrusted_inputs is not None else ["mark_only_peak", "posthoc_label"],
+        "required_contracts": required_contracts if required_contracts is not None else [
+            "RealtimeCleanDetector",
+            "QuoteIntentBindingContract",
+        ],
+        "failure_action": failure_action,
+    }
+    return log.append_event(
+        event_type="minimum_viable_trust_boundary_recorded",
+        aggregate_id=f"minimum_viable_trust_boundary:{boundary_id}",
+        idempotency_key=f"minimum_viable_trust_boundary:{boundary_id}",
+        payload=payload,
+    )
+
+
+def append_evidence_conflict(
+    log,
+    *,
+    conflict_id="evidence-conflict-unit-v1",
+    evidence_a_hash=None,
+    evidence_b_hash=None,
+    resolution_policy="quarantine_then_operator_review",
+    resolved_at="2026-01-15T00:47:00Z",
+):
+    evidence_a_hash = evidence_a_hash or sha256_hex({"evidence": "a", "conflict_id": conflict_id})
+    evidence_b_hash = evidence_b_hash or sha256_hex({"evidence": "b", "conflict_id": conflict_id})
+    payload = {
+        "conflict_id": conflict_id,
+        "evidence_a_hash": evidence_a_hash,
+        "evidence_b_hash": evidence_b_hash,
+        "resolution_policy": resolution_policy,
+        "resolved_at": resolved_at,
+    }
+    return log.append_event(
+        event_type="evidence_conflict_recorded",
+        aggregate_id=f"evidence_conflict:{conflict_id}",
+        idempotency_key=f"evidence_conflict:{conflict_id}",
+        payload=payload,
+    )
+
+
+def append_evidence_aging(
+    log,
+    *,
+    evidence_id="evidence-aging-unit-v1",
+    evidence_type="quote_clean_snapshot",
+    max_age_ms=120_000,
+    age_ms=30_000,
+    expiration_action="revalidate_before_entry",
+):
+    payload = {
+        "evidence_id": evidence_id,
+        "evidence_type": evidence_type,
+        "max_age_ms": max_age_ms,
+        "age_ms": age_ms,
+        "expiration_action": expiration_action,
+    }
+    return log.append_event(
+        event_type="evidence_aging_recorded",
+        aggregate_id=f"evidence_aging:{evidence_id}",
+        idempotency_key=f"evidence_aging:{evidence_id}",
+        payload=payload,
+    )
+
+
+def append_market_regime_invalidates_evidence(
+    log,
+    *,
+    regime_id="market-regime-unit-v1",
+    evidence_id="evidence-aging-unit-v1",
+    invalidating_signal="liquidity_regime_flip",
+    action="revalidate_evidence",
+    detected_at="2026-01-15T00:48:00Z",
+):
+    payload = {
+        "regime_id": regime_id,
+        "evidence_id": evidence_id,
+        "invalidating_signal": invalidating_signal,
+        "action": action,
+        "detected_at": detected_at,
+    }
+    return log.append_event(
+        event_type="market_regime_invalidates_evidence_recorded",
+        aggregate_id=f"market_regime_invalidates_evidence:{regime_id}:{evidence_id}",
+        idempotency_key=f"market_regime_invalidates_evidence:{regime_id}:{evidence_id}",
+        payload=payload,
+    )
+
+
+def append_source_alpha_decay_exit_criteria(
+    log,
+    *,
+    source_id="premium-clean-source-unit-v1",
+    alpha_metric=0.12,
+    decay_window="24h",
+    exit_threshold=0.05,
+    action="keep_source",
+):
+    payload = {
+        "source_id": source_id,
+        "alpha_metric": alpha_metric,
+        "decay_window": decay_window,
+        "exit_threshold": exit_threshold,
+        "action": action,
+    }
+    return log.append_event(
+        event_type="source_alpha_decay_exit_criteria_recorded",
+        aggregate_id=f"source_alpha_decay_exit_criteria:{source_id}",
+        idempotency_key=f"source_alpha_decay_exit_criteria:{source_id}:{decay_window}",
+        payload=payload,
+    )
+
+
+def append_false_negative_budget(
+    log,
+    *,
+    budget_id="false-negative-budget-unit-v1",
+    hazard_class="missed_clean_gold_dog",
+    allowed_false_negative_rate=0.15,
+    observed_rate=0.08,
+    action="continue_with_watch",
+):
+    payload = {
+        "budget_id": budget_id,
+        "hazard_class": hazard_class,
+        "allowed_false_negative_rate": allowed_false_negative_rate,
+        "observed_rate": observed_rate,
+        "action": action,
+    }
+    return log.append_event(
+        event_type="false_negative_budget_recorded",
+        aggregate_id=f"false_negative_budget:{budget_id}",
+        idempotency_key=f"false_negative_budget:{budget_id}:{observed_rate}",
+        payload=payload,
+    )
+
+
+def append_small_sample_decision(
+    log,
+    *,
+    policy_id="small-sample-policy-unit-v1",
+    sample_size=40,
+    min_sample_size=30,
+    decision_allowed=True,
+    fallback_action="hold_promotion",
+):
+    payload = {
+        "policy_id": policy_id,
+        "sample_size": sample_size,
+        "min_sample_size": min_sample_size,
+        "decision_allowed": decision_allowed,
+        "fallback_action": fallback_action,
+    }
+    return log.append_event(
+        event_type="small_sample_decision_recorded",
+        aggregate_id=f"small_sample_decision:{policy_id}",
+        idempotency_key=f"small_sample_decision:{policy_id}:{sample_size}",
+        payload=payload,
+    )
+
+
+def append_safety_vs_capture_tradeoff(
+    log,
+    *,
+    tradeoff_id="safety-capture-tradeoff-unit-v1",
+    safety_metric=0.98,
+    capture_metric=0.62,
+    chosen_policy="safety_first_capture_watch",
+    approved_at="2026-01-15T00:49:00Z",
+):
+    payload = {
+        "tradeoff_id": tradeoff_id,
+        "safety_metric": safety_metric,
+        "capture_metric": capture_metric,
+        "chosen_policy": chosen_policy,
+        "approved_at": approved_at,
+    }
+    return log.append_event(
+        event_type="safety_vs_capture_tradeoff_recorded",
+        aggregate_id=f"safety_vs_capture_tradeoff:{tradeoff_id}",
+        idempotency_key=f"safety_vs_capture_tradeoff:{tradeoff_id}",
+        payload=payload,
+    )
+
+
+def append_implementation_drift_monitor(
+    log,
+    *,
+    drift_id="implementation-drift-unit-v1",
+    spec_contract_id="RealtimeCleanDetector",
+    runtime_location="scripts/paper_trade_monitor.py:realtime_clean_gate",
+    drift_detected=False,
+    detected_at="2026-01-15T00:50:00Z",
+):
+    payload = {
+        "drift_id": drift_id,
+        "spec_contract_id": spec_contract_id,
+        "runtime_location": runtime_location,
+        "drift_detected": drift_detected,
+        "detected_at": detected_at,
+    }
+    return log.append_event(
+        event_type="implementation_drift_monitor_recorded",
+        aggregate_id=f"implementation_drift_monitor:{drift_id}",
+        idempotency_key=f"implementation_drift_monitor:{drift_id}:{spec_contract_id}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -2651,6 +2894,147 @@ def test_denominator_projection_rejects_final_normal_tiny_blocking_violations(tm
     assert (
         projection["contract_evidence"]["OperatorTrainingCertificationContract"][
             "operator_training_certification_violation_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_consumes_runtime_trust_governance_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_runtime_spec_assertion(log)
+    append_minimum_viable_trust_boundary(log)
+    append_evidence_conflict(log)
+    append_evidence_aging(log)
+    append_market_regime_invalidates_evidence(log)
+    append_source_alpha_decay_exit_criteria(log)
+    append_false_negative_budget(log)
+    append_small_sample_decision(log)
+    append_safety_vs_capture_tradeoff(log)
+    append_implementation_drift_monitor(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["runtime_spec_assertion_recorded_events"] == 1
+    assert projection["minimum_viable_trust_boundary_recorded_events"] == 1
+    assert projection["evidence_conflict_recorded_events"] == 1
+    assert projection["evidence_aging_recorded_events"] == 1
+    assert projection["market_regime_invalidates_evidence_recorded_events"] == 1
+    assert projection["source_alpha_decay_exit_criteria_recorded_events"] == 1
+    assert projection["false_negative_budget_recorded_events"] == 1
+    assert projection["small_sample_decision_recorded_events"] == 1
+    assert projection["safety_vs_capture_tradeoff_recorded_events"] == 1
+    assert projection["implementation_drift_monitor_recorded_events"] == 1
+    assert projection["health"]["runtime_spec_assertion_ok"] is True
+    assert projection["health"]["minimum_viable_trust_boundary_ok"] is True
+    assert projection["health"]["evidence_conflict_ok"] is True
+    assert projection["health"]["evidence_aging_ok"] is True
+    assert projection["health"]["market_regime_invalidates_evidence_ok"] is True
+    assert projection["health"]["source_alpha_decay_exit_criteria_ok"] is True
+    assert projection["health"]["false_negative_budget_ok"] is True
+    assert projection["health"]["small_sample_decision_ok"] is True
+    assert projection["health"]["safety_vs_capture_tradeoff_ok"] is True
+    assert projection["health"]["implementation_drift_monitor_ok"] is True
+    assert projection["contract_evidence"]["RuntimeSpecAssertionContract"]["valid_runtime_spec_assertion_count"] == 1
+    assert (
+        projection["contract_evidence"]["MinimumViableTrustBoundary"][
+            "valid_minimum_viable_trust_boundary_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["EvidenceConflictContract"]["valid_evidence_conflict_count"] == 1
+    assert projection["contract_evidence"]["EvidenceAgingContract"]["valid_evidence_aging_count"] == 1
+    assert (
+        projection["contract_evidence"]["MarketRegimeInvalidatesEvidence"][
+            "valid_market_regime_invalidates_evidence_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["SourceAlphaDecayExitCriteria"][
+            "valid_source_alpha_decay_exit_criteria_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["FalseNegativeBudgetContract"]["valid_false_negative_budget_count"] == 1
+    assert projection["contract_evidence"]["SmallSampleDecisionPolicy"]["valid_small_sample_decision_count"] == 1
+    assert (
+        projection["contract_evidence"]["SafetyVsCaptureTradeoffContract"][
+            "valid_safety_vs_capture_tradeoff_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ImplementationDriftMonitor"][
+            "valid_implementation_drift_monitor_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_rejects_runtime_trust_governance_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    shared_hash = sha256_hex({"evidence": "same"})
+    append_runtime_spec_assertion(log, failure_action="ignore")
+    append_minimum_viable_trust_boundary(
+        log,
+        trusted_inputs=["entry_quote", "telegram_anchor"],
+        untrusted_inputs=["entry_quote", "mark_only_peak"],
+        required_contracts=[],
+        failure_action="none",
+    )
+    append_evidence_conflict(log, evidence_a_hash=shared_hash, evidence_b_hash=shared_hash)
+    append_evidence_aging(log, max_age_ms=60_000, age_ms=90_000)
+    append_market_regime_invalidates_evidence(log, action="ignore")
+    append_source_alpha_decay_exit_criteria(log, alpha_metric=0.02, exit_threshold=0.05, action="hold")
+    append_false_negative_budget(log, allowed_false_negative_rate=0.10, observed_rate=0.30)
+    append_small_sample_decision(log, sample_size=12, min_sample_size=30, decision_allowed=True)
+    append_safety_vs_capture_tradeoff(log, safety_metric=-0.01, chosen_policy="capture_only")
+    append_implementation_drift_monitor(log, drift_detected=True)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["runtime_spec_assertion_ok"] is False
+    assert projection["health"]["minimum_viable_trust_boundary_ok"] is False
+    assert projection["health"]["evidence_conflict_ok"] is False
+    assert projection["health"]["evidence_aging_ok"] is False
+    assert projection["health"]["market_regime_invalidates_evidence_ok"] is False
+    assert projection["health"]["source_alpha_decay_exit_criteria_ok"] is False
+    assert projection["health"]["false_negative_budget_ok"] is False
+    assert projection["health"]["small_sample_decision_ok"] is False
+    assert projection["health"]["safety_vs_capture_tradeoff_ok"] is False
+    assert projection["health"]["implementation_drift_monitor_ok"] is False
+    assert projection["contract_evidence"]["RuntimeSpecAssertionContract"]["runtime_spec_assertion_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["MinimumViableTrustBoundary"][
+            "minimum_viable_trust_boundary_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["EvidenceConflictContract"]["evidence_conflict_violation_count"] == 1
+    assert projection["contract_evidence"]["EvidenceAgingContract"]["evidence_aging_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["MarketRegimeInvalidatesEvidence"][
+            "market_regime_invalidates_evidence_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["SourceAlphaDecayExitCriteria"][
+            "source_alpha_decay_exit_criteria_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["FalseNegativeBudgetContract"]["false_negative_budget_violation_count"] == 1
+    assert projection["contract_evidence"]["SmallSampleDecisionPolicy"]["small_sample_decision_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["SafetyVsCaptureTradeoffContract"][
+            "safety_vs_capture_tradeoff_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ImplementationDriftMonitor"][
+            "implementation_drift_monitor_violation_count"
         ]
         == 1
     )
