@@ -1085,6 +1085,179 @@ def append_training_poisoning_guard(
     )
 
 
+def append_feature_store_consistency(
+    log,
+    *,
+    feature_set_id="feature-set-unit-v1",
+    normalization_version="norm-v1",
+    offline_hash=None,
+    online_hash=None,
+):
+    offline_hash = offline_hash or sha256_hex({"feature_set_id": feature_set_id, "normalization_version": normalization_version})
+    online_hash = online_hash or offline_hash
+    payload = {
+        "feature_set_id": feature_set_id,
+        "offline_hash": offline_hash,
+        "online_hash": online_hash,
+        "normalization_version": normalization_version,
+        "checked_at": "2026-01-15T00:22:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="feature_store_consistency_recorded",
+        aggregate_id=f"feature_store_consistency:{feature_set_id}:{normalization_version}",
+        idempotency_key=f"feature_store_consistency:{feature_set_id}:{normalization_version}:{offline_hash}:{online_hash}",
+        payload=payload,
+    )
+
+
+def append_dynamic_token_authority_change(
+    log,
+    *,
+    token_ca="TokenReady",
+    authority_type="freeze",
+    previous_authority_hash=None,
+    current_authority_hash=None,
+    risk_action="risk_recheck",
+):
+    previous_authority_hash = previous_authority_hash or sha256_hex(
+        {"token_ca": token_ca, "authority_type": authority_type, "authority": "previous"}
+    )
+    current_authority_hash = current_authority_hash or sha256_hex(
+        {"token_ca": token_ca, "authority_type": authority_type, "authority": "current"}
+    )
+    payload = {
+        "token_ca": token_ca,
+        "authority_type": authority_type,
+        "previous_authority_hash": previous_authority_hash,
+        "current_authority_hash": current_authority_hash,
+        "risk_action": risk_action,
+        "checked_at": "2026-01-15T00:23:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="dynamic_token_authority_change_recorded",
+        aggregate_id=f"dynamic_token_authority_change:{token_ca}:{authority_type}",
+        idempotency_key=f"dynamic_token_authority_change:{token_ca}:{authority_type}:{risk_action}",
+        payload=payload,
+    )
+
+
+def append_adversarial_execution_simulation(
+    log,
+    *,
+    simulation_id="simulation-unit-v1",
+    safety_result="blocked",
+):
+    payload = {
+        "simulation_id": simulation_id,
+        "execution_policy_version": "normal-tiny-execution-policy-v1",
+        "attack_scenario": "quote_cache_poison_then_retry_storm",
+        "safety_result": safety_result,
+        "checked_at": "2026-01-15T00:24:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="adversarial_execution_simulation_recorded",
+        aggregate_id=f"adversarial_execution_simulation:{simulation_id}",
+        idempotency_key=f"adversarial_execution_simulation:{simulation_id}:{safety_result}",
+        payload=payload,
+    )
+
+
+def append_open_position_valuation(
+    log,
+    *,
+    position_id="position-unit-v1",
+    valuation_price=0.001,
+    valuation_hash=None,
+):
+    valuation_hash = valuation_hash or sha256_hex({"position_id": position_id, "valuation_price": valuation_price})
+    payload = {
+        "position_id": position_id,
+        "valuation_ts": "2026-01-15T00:25:00Z",
+        "quote_source": "jupiter_ultra",
+        "valuation_price": valuation_price,
+        "valuation_hash": valuation_hash,
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="open_position_valuation_recorded",
+        aggregate_id=f"open_position_valuation:{position_id}",
+        idempotency_key=f"open_position_valuation:{position_id}:{valuation_price}",
+        payload=payload,
+    )
+
+
+def append_exit_policy_migration(
+    log,
+    *,
+    position_id="position-unit-v1",
+    old_exit_policy="exit-policy-v1",
+    new_exit_policy="exit-policy-v2",
+):
+    payload = {
+        "position_id": position_id,
+        "old_exit_policy": old_exit_policy,
+        "new_exit_policy": new_exit_policy,
+        "migration_reason": "tighten_dirty_quote_exit_guard",
+        "migrated_at": "2026-01-15T00:26:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="exit_policy_migration_recorded",
+        aggregate_id=f"exit_policy_migration:{position_id}",
+        idempotency_key=f"exit_policy_migration:{position_id}:{old_exit_policy}:{new_exit_policy}",
+        payload=payload,
+    )
+
+
+def append_open_position_policy_migration(
+    log,
+    *,
+    position_id="position-unit-v2",
+    old_exit_policy="exit-policy-v1",
+    new_exit_policy="exit-policy-v2",
+):
+    payload = {
+        "position_id": position_id,
+        "old_exit_policy": old_exit_policy,
+        "new_exit_policy": new_exit_policy,
+        "migration_reason": "align_open_position_exit_policy",
+        "checked_at": "2026-01-15T00:27:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="open_position_policy_migration_recorded",
+        aggregate_id=f"open_position_policy_migration:{position_id}",
+        idempotency_key=f"open_position_policy_migration:{position_id}:{old_exit_policy}:{new_exit_policy}",
+        payload=payload,
+    )
+
+
+def append_position_ownership_transfer(
+    log,
+    *,
+    position_id="position-unit-v1",
+    from_owner="paper_executor",
+    to_owner="risk_controller",
+):
+    payload = {
+        "position_id": position_id,
+        "from_owner": from_owner,
+        "to_owner": to_owner,
+        "transfer_reason": "risk_revalidation_requires_controller",
+        "transferred_at": "2026-01-15T00:28:00Z",
+        "evidence_source": "unit",
+    }
+    return log.append_event(
+        event_type="position_ownership_transfer_recorded",
+        aggregate_id=f"position_ownership_transfer:{position_id}",
+        idempotency_key=f"position_ownership_transfer:{position_id}:{from_owner}:{to_owner}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -1761,6 +1934,91 @@ def test_denominator_projection_rejects_alert_model_release_runtime_trust_violat
     assert projection["contract_evidence"]["ModelRollbackContract"]["model_rollback_violation_count"] == 1
     assert projection["contract_evidence"]["PostReleaseMonitoringWindow"]["post_release_monitoring_window_violation_count"] == 1
     assert projection["contract_evidence"]["TrainingPoisoningGuard"]["training_poisoning_guard_violation_count"] == 1
+
+
+def test_denominator_projection_consumes_position_feature_runtime_trust_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_feature_store_consistency(log)
+    append_dynamic_token_authority_change(log)
+    append_adversarial_execution_simulation(log)
+    append_open_position_valuation(log)
+    append_exit_policy_migration(log)
+    append_open_position_policy_migration(log)
+    append_position_ownership_transfer(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["feature_store_consistency_recorded_events"] == 1
+    assert projection["dynamic_token_authority_change_recorded_events"] == 1
+    assert projection["adversarial_execution_simulation_recorded_events"] == 1
+    assert projection["open_position_valuation_recorded_events"] == 1
+    assert projection["exit_policy_migration_recorded_events"] == 1
+    assert projection["open_position_policy_migration_recorded_events"] == 1
+    assert projection["position_ownership_transfer_recorded_events"] == 1
+    assert projection["health"]["feature_store_consistency_ok"] is True
+    assert projection["health"]["dynamic_token_authority_change_ok"] is True
+    assert projection["health"]["adversarial_execution_simulation_ok"] is True
+    assert projection["health"]["open_position_valuation_ok"] is True
+    assert projection["health"]["exit_policy_migration_ok"] is True
+    assert projection["health"]["open_position_policy_migration_ok"] is True
+    assert projection["health"]["position_ownership_transfer_ok"] is True
+    assert projection["contract_evidence"]["FeatureStoreConsistencyContract"]["valid_feature_store_consistency_count"] == 1
+    assert projection["contract_evidence"]["DynamicTokenAuthorityChangeContract"]["valid_dynamic_token_authority_change_count"] == 1
+    assert (
+        projection["contract_evidence"]["AdversarialExecutionSimulationContract"]["valid_adversarial_execution_simulation_count"]
+        == 1
+    )
+    assert projection["contract_evidence"]["OpenPositionValuationContract"]["valid_open_position_valuation_count"] == 1
+    assert projection["contract_evidence"]["ExitPolicyMigrationContract"]["valid_exit_policy_migration_count"] == 1
+    assert (
+        projection["contract_evidence"]["OpenPositionPolicyMigrationContract"]["valid_open_position_policy_migration_count"]
+        == 1
+    )
+    assert projection["contract_evidence"]["PositionOwnershipTransferContract"]["valid_position_ownership_transfer_count"] == 1
+
+
+def test_denominator_projection_rejects_position_feature_runtime_trust_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_feature_store_consistency(
+        log,
+        offline_hash=sha256_hex({"feature": "offline"}),
+        online_hash=sha256_hex({"feature": "online"}),
+    )
+    append_dynamic_token_authority_change(log, risk_action="observe")
+    append_adversarial_execution_simulation(log, safety_result="bypassed")
+    append_open_position_valuation(log, valuation_price=0)
+    append_exit_policy_migration(log, old_exit_policy="exit-policy-v1", new_exit_policy="exit-policy-v1")
+    append_open_position_policy_migration(log, old_exit_policy="exit-policy-v1", new_exit_policy="exit-policy-v1")
+    append_position_ownership_transfer(log, from_owner="paper_executor", to_owner="paper_executor")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["feature_store_consistency_ok"] is False
+    assert projection["health"]["dynamic_token_authority_change_ok"] is False
+    assert projection["health"]["adversarial_execution_simulation_ok"] is False
+    assert projection["health"]["open_position_valuation_ok"] is False
+    assert projection["health"]["exit_policy_migration_ok"] is False
+    assert projection["health"]["open_position_policy_migration_ok"] is False
+    assert projection["health"]["position_ownership_transfer_ok"] is False
+    assert projection["contract_evidence"]["FeatureStoreConsistencyContract"]["feature_store_consistency_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["DynamicTokenAuthorityChangeContract"]["dynamic_token_authority_change_violation_count"]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["AdversarialExecutionSimulationContract"]["adversarial_execution_simulation_violation_count"]
+        == 1
+    )
+    assert projection["contract_evidence"]["OpenPositionValuationContract"]["open_position_valuation_violation_count"] == 1
+    assert projection["contract_evidence"]["ExitPolicyMigrationContract"]["exit_policy_migration_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["OpenPositionPolicyMigrationContract"]["open_position_policy_migration_violation_count"]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["PositionOwnershipTransferContract"]["position_ownership_transfer_violation_count"]
+        == 1
+    )
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):

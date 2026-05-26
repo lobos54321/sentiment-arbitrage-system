@@ -672,6 +672,103 @@ def append_alert_model_release_runtime_trust_events(event_log_dir):
     )
 
 
+def append_position_feature_runtime_trust_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    feature_hash = sha256_hex({"feature_set_id": "feature-set-unit-v1", "normalization_version": "norm-v1"})
+    log.append_event(
+        event_type="feature_store_consistency_recorded",
+        aggregate_id="feature_store_consistency:feature-set-unit-v1:norm-v1",
+        idempotency_key=f"feature_store_consistency:feature-set-unit-v1:norm-v1:{feature_hash}",
+        payload={
+            "feature_set_id": "feature-set-unit-v1",
+            "offline_hash": feature_hash,
+            "online_hash": feature_hash,
+            "normalization_version": "norm-v1",
+            "checked_at": "2026-01-15T00:22:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="dynamic_token_authority_change_recorded",
+        aggregate_id="dynamic_token_authority_change:TokenReady:freeze",
+        idempotency_key="dynamic_token_authority_change:TokenReady:freeze:risk_recheck",
+        payload={
+            "token_ca": "TokenReady",
+            "authority_type": "freeze",
+            "previous_authority_hash": sha256_hex({"token_ca": "TokenReady", "authority": "previous"}),
+            "current_authority_hash": sha256_hex({"token_ca": "TokenReady", "authority": "current"}),
+            "risk_action": "risk_recheck",
+            "checked_at": "2026-01-15T00:23:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="adversarial_execution_simulation_recorded",
+        aggregate_id="adversarial_execution_simulation:simulation-unit-v1",
+        idempotency_key="adversarial_execution_simulation:simulation-unit-v1:blocked",
+        payload={
+            "simulation_id": "simulation-unit-v1",
+            "execution_policy_version": "normal-tiny-execution-policy-v1",
+            "attack_scenario": "quote_cache_poison_then_retry_storm",
+            "safety_result": "blocked",
+            "checked_at": "2026-01-15T00:24:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="open_position_valuation_recorded",
+        aggregate_id="open_position_valuation:position-unit-v1",
+        idempotency_key="open_position_valuation:position-unit-v1:0.001",
+        payload={
+            "position_id": "position-unit-v1",
+            "valuation_ts": "2026-01-15T00:25:00Z",
+            "quote_source": "jupiter_ultra",
+            "valuation_price": 0.001,
+            "valuation_hash": sha256_hex({"position_id": "position-unit-v1", "valuation_price": 0.001}),
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="exit_policy_migration_recorded",
+        aggregate_id="exit_policy_migration:position-unit-v1",
+        idempotency_key="exit_policy_migration:position-unit-v1:exit-policy-v1:exit-policy-v2",
+        payload={
+            "position_id": "position-unit-v1",
+            "old_exit_policy": "exit-policy-v1",
+            "new_exit_policy": "exit-policy-v2",
+            "migration_reason": "tighten_dirty_quote_exit_guard",
+            "migrated_at": "2026-01-15T00:26:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="open_position_policy_migration_recorded",
+        aggregate_id="open_position_policy_migration:position-unit-v2",
+        idempotency_key="open_position_policy_migration:position-unit-v2:exit-policy-v1:exit-policy-v2",
+        payload={
+            "position_id": "position-unit-v2",
+            "old_exit_policy": "exit-policy-v1",
+            "new_exit_policy": "exit-policy-v2",
+            "migration_reason": "align_open_position_exit_policy",
+            "checked_at": "2026-01-15T00:27:00Z",
+            "evidence_source": "unit",
+        },
+    )
+    log.append_event(
+        event_type="position_ownership_transfer_recorded",
+        aggregate_id="position_ownership_transfer:position-unit-v1",
+        idempotency_key="position_ownership_transfer:position-unit-v1:paper_executor:risk_controller",
+        payload={
+            "position_id": "position-unit-v1",
+            "from_owner": "paper_executor",
+            "to_owner": "risk_controller",
+            "transfer_reason": "risk_revalidation_requires_controller",
+            "transferred_at": "2026-01-15T00:28:00Z",
+            "evidence_source": "unit",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -1710,6 +1807,45 @@ def test_mode_readiness_consumes_alert_model_release_runtime_trust_for_normal_ti
     assert matrix["contract_statuses"]["AlertNoiseBudgetContract"]["evidence"]["valid_alert_noise_budget_count"] == 1
     assert matrix["contract_statuses"]["ModelRollbackContract"]["evidence"]["valid_model_rollback_count"] == 1
     assert matrix["contract_statuses"]["TrainingPoisoningGuard"]["evidence"]["valid_training_poisoning_guard_count"] == 1
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_position_feature_runtime_trust_for_normal_tiny(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_position_feature_runtime_trust_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "FeatureStoreConsistencyContract",
+        "DynamicTokenAuthorityChangeContract",
+        "AdversarialExecutionSimulationContract",
+        "OpenPositionValuationContract",
+        "ExitPolicyMigrationContract",
+        "OpenPositionPolicyMigrationContract",
+        "PositionOwnershipTransferContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["FeatureStoreConsistencyContract"]["evidence"]["valid_feature_store_consistency_count"] == 1
+    assert matrix["contract_statuses"]["OpenPositionValuationContract"]["evidence"]["valid_open_position_valuation_count"] == 1
+    assert (
+        matrix["contract_statuses"]["PositionOwnershipTransferContract"]["evidence"]["valid_position_ownership_transfer_count"]
+        == 1
+    )
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
 
 

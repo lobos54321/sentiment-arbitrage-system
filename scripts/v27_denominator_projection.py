@@ -88,6 +88,13 @@ MODEL_ARTIFACT_RUNTIME_COMPATIBILITY_EVENT_TYPE = "model_artifact_runtime_compat
 MODEL_ROLLBACK_EVENT_TYPE = "model_rollback_recorded"
 POST_RELEASE_MONITORING_WINDOW_EVENT_TYPE = "post_release_monitoring_window_recorded"
 TRAINING_POISONING_GUARD_EVENT_TYPE = "training_poisoning_guard_recorded"
+FEATURE_STORE_CONSISTENCY_EVENT_TYPE = "feature_store_consistency_recorded"
+DYNAMIC_TOKEN_AUTHORITY_CHANGE_EVENT_TYPE = "dynamic_token_authority_change_recorded"
+ADVERSARIAL_EXECUTION_SIMULATION_EVENT_TYPE = "adversarial_execution_simulation_recorded"
+OPEN_POSITION_VALUATION_EVENT_TYPE = "open_position_valuation_recorded"
+EXIT_POLICY_MIGRATION_EVENT_TYPE = "exit_policy_migration_recorded"
+OPEN_POSITION_POLICY_MIGRATION_EVENT_TYPE = "open_position_policy_migration_recorded"
+POSITION_OWNERSHIP_TRANSFER_EVENT_TYPE = "position_ownership_transfer_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -142,6 +149,13 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     MODEL_ROLLBACK_EVENT_TYPE,
     POST_RELEASE_MONITORING_WINDOW_EVENT_TYPE,
     TRAINING_POISONING_GUARD_EVENT_TYPE,
+    FEATURE_STORE_CONSISTENCY_EVENT_TYPE,
+    DYNAMIC_TOKEN_AUTHORITY_CHANGE_EVENT_TYPE,
+    ADVERSARIAL_EXECUTION_SIMULATION_EVENT_TYPE,
+    OPEN_POSITION_VALUATION_EVENT_TYPE,
+    EXIT_POLICY_MIGRATION_EVENT_TYPE,
+    OPEN_POSITION_POLICY_MIGRATION_EVENT_TYPE,
+    POSITION_OWNERSHIP_TRANSFER_EVENT_TYPE,
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -2399,6 +2413,259 @@ def _extract_training_poisoning_guard(event, bags):
     }
 
 
+def _extract_feature_store_consistency(event, bags):
+    if event.get("event_type") != FEATURE_STORE_CONSISTENCY_EVENT_TYPE:
+        return None
+    values = {
+        "feature_set_id": _extract_scalar(bags, [("feature_set_id",)]),
+        "offline_hash": _extract_scalar(bags, [("offline_hash",)]),
+        "online_hash": _extract_scalar(bags, [("online_hash",)]),
+        "normalization_version": _extract_scalar(bags, [("normalization_version",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("feature_set_id", "offline_hash", "online_hash", "normalization_version", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    for field in ("offline_hash", "online_hash"):
+        if values.get(field) and not _valid_sha256_hex(values.get(field)):
+            violation_fields.append(f"{field}_sha256")
+    if values.get("offline_hash") and values.get("online_hash") and values.get("offline_hash") != values.get("online_hash"):
+        violation_fields.append("offline_online_hash_mismatch")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    consistency_key = ":".join(
+        [
+            str(values.get("feature_set_id") or "unknown_feature_set"),
+            str(values.get("normalization_version") or "unknown_normalization"),
+        ]
+    )
+    return {
+        **values,
+        "feature_store_consistency_key": consistency_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "feature_store_consistency_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_dynamic_token_authority_change(event, bags):
+    if event.get("event_type") != DYNAMIC_TOKEN_AUTHORITY_CHANGE_EVENT_TYPE:
+        return None
+    values = {
+        "token_ca": _extract_scalar(bags, [("token_ca",)]),
+        "authority_type": _extract_scalar(bags, [("authority_type",)]),
+        "previous_authority_hash": _extract_scalar(bags, [("previous_authority_hash",)]),
+        "current_authority_hash": _extract_scalar(bags, [("current_authority_hash",)]),
+        "risk_action": _extract_scalar(bags, [("risk_action",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("token_ca", "authority_type", "previous_authority_hash", "current_authority_hash", "risk_action"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    for field in ("previous_authority_hash", "current_authority_hash"):
+        if values.get(field) and not _valid_sha256_hex(values.get(field)):
+            violation_fields.append(f"{field}_sha256")
+    authority_type = str(values.get("authority_type") or "").strip().lower()
+    if authority_type and authority_type not in {"mint", "freeze", "update", "metadata", "owner", "delegate"}:
+        violation_fields.append("authority_type_unknown")
+    risk_action = str(values.get("risk_action") or "").strip().lower()
+    protective_actions = {"risk_recheck", "block_entry", "reduce_size", "exit_position", "fail_closed", "manual_review"}
+    if risk_action and risk_action not in protective_actions | {"observe"}:
+        violation_fields.append("risk_action_unknown")
+    if (
+        values.get("previous_authority_hash")
+        and values.get("current_authority_hash")
+        and values.get("previous_authority_hash") != values.get("current_authority_hash")
+        and risk_action not in protective_actions
+    ):
+        violation_fields.append("authority_changed_without_protective_action")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    authority_change_key = ":".join(
+        [
+            str(values.get("token_ca") or "unknown_token"),
+            str(values.get("authority_type") or "unknown_authority"),
+        ]
+    )
+    return {
+        **values,
+        "dynamic_token_authority_change_key": authority_change_key,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "dynamic_token_authority_change_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_adversarial_execution_simulation(event, bags):
+    if event.get("event_type") != ADVERSARIAL_EXECUTION_SIMULATION_EVENT_TYPE:
+        return None
+    values = {
+        "simulation_id": _extract_scalar(bags, [("simulation_id",)]),
+        "execution_policy_version": _extract_scalar(bags, [("execution_policy_version",)]),
+        "attack_scenario": _extract_scalar(bags, [("attack_scenario",)]),
+        "safety_result": _extract_scalar(bags, [("safety_result",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("simulation_id", "execution_policy_version", "attack_scenario", "safety_result", "checked_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    safety_result = str(values.get("safety_result") or "").strip().lower()
+    if safety_result and safety_result not in {"pass", "blocked", "mitigated", "safe"}:
+        violation_fields.append("safety_result_not_safe")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "adversarial_execution_simulation_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_open_position_valuation(event, bags):
+    if event.get("event_type") != OPEN_POSITION_VALUATION_EVENT_TYPE:
+        return None
+    values = {
+        "position_id": _extract_scalar(bags, [("position_id",)]),
+        "valuation_ts": _extract_scalar(bags, [("valuation_ts",)], default=event.get("available_at")),
+        "quote_source": _extract_scalar(bags, [("quote_source",)]),
+        "valuation_price": _as_float(_extract_scalar(bags, [("valuation_price",)])),
+        "valuation_hash": _extract_scalar(bags, [("valuation_hash",)]),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("position_id", "valuation_ts", "quote_source", "valuation_price", "valuation_hash"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("valuation_ts") and _timestamp_epoch_seconds(values.get("valuation_ts")) is None:
+        violation_fields.append("valuation_ts_parseable")
+    if values.get("valuation_price") is not None and (not math.isfinite(values.get("valuation_price")) or values.get("valuation_price") <= 0):
+        violation_fields.append("valuation_price_positive")
+    if values.get("valuation_hash") and not _valid_sha256_hex(values.get("valuation_hash")):
+        violation_fields.append("valuation_hash_sha256")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "open_position_valuation_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_exit_policy_migration(event, bags):
+    if event.get("event_type") != EXIT_POLICY_MIGRATION_EVENT_TYPE:
+        return None
+    values = {
+        "position_id": _extract_scalar(bags, [("position_id",)]),
+        "old_exit_policy": _extract_scalar(bags, [("old_exit_policy",)]),
+        "new_exit_policy": _extract_scalar(bags, [("new_exit_policy",)]),
+        "migration_reason": _extract_scalar(bags, [("migration_reason",)]),
+        "migrated_at": _extract_scalar(bags, [("migrated_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("position_id", "old_exit_policy", "new_exit_policy", "migration_reason", "migrated_at"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("old_exit_policy") and values.get("new_exit_policy") and values.get("old_exit_policy") == values.get("new_exit_policy"):
+        violation_fields.append("exit_policy_not_changed")
+    if values.get("migrated_at") and _timestamp_epoch_seconds(values.get("migrated_at")) is None:
+        violation_fields.append("migrated_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "exit_policy_migration_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_open_position_policy_migration(event, bags):
+    if event.get("event_type") != OPEN_POSITION_POLICY_MIGRATION_EVENT_TYPE:
+        return None
+    values = {
+        "position_id": _extract_scalar(bags, [("position_id",)]),
+        "old_exit_policy": _extract_scalar(bags, [("old_exit_policy",)]),
+        "new_exit_policy": _extract_scalar(bags, [("new_exit_policy",)]),
+        "migration_reason": _extract_scalar(bags, [("migration_reason",)]),
+        "checked_at": _extract_scalar(bags, [("checked_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("position_id", "old_exit_policy", "new_exit_policy", "migration_reason"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("old_exit_policy") and values.get("new_exit_policy") and values.get("old_exit_policy") == values.get("new_exit_policy"):
+        violation_fields.append("open_position_policy_not_changed")
+    if values.get("checked_at") and _timestamp_epoch_seconds(values.get("checked_at")) is None:
+        violation_fields.append("checked_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "open_position_policy_migration_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _extract_position_ownership_transfer(event, bags):
+    if event.get("event_type") != POSITION_OWNERSHIP_TRANSFER_EVENT_TYPE:
+        return None
+    values = {
+        "position_id": _extract_scalar(bags, [("position_id",)]),
+        "from_owner": _extract_scalar(bags, [("from_owner",)]),
+        "to_owner": _extract_scalar(bags, [("to_owner",)]),
+        "transfer_reason": _extract_scalar(bags, [("transfer_reason",)]),
+        "transferred_at": _extract_scalar(bags, [("transferred_at",)], default=event.get("available_at")),
+        "evidence_source": _extract_scalar(bags, [("evidence_source",)], default=event.get("source")),
+    }
+    missing_fields = []
+    for field in ("position_id", "from_owner", "to_owner", "transfer_reason"):
+        value = values.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = []
+    if values.get("from_owner") and values.get("to_owner") and values.get("from_owner") == values.get("to_owner"):
+        violation_fields.append("ownership_not_transferred")
+    if values.get("transferred_at") and _timestamp_epoch_seconds(values.get("transferred_at")) is None:
+        violation_fields.append("transferred_at_parseable")
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": sorted(set(violation_fields)),
+        "position_ownership_transfer_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
 def _latest_by_key(items, key_name):
     latest = {}
     passthrough = []
@@ -3804,6 +4071,13 @@ def _contract_evidence_from_records(
     model_rollbacks=None,
     post_release_monitoring_windows=None,
     training_poisoning_guards=None,
+    feature_store_consistencies=None,
+    dynamic_token_authority_changes=None,
+    adversarial_execution_simulations=None,
+    open_position_valuations=None,
+    exit_policy_migrations=None,
+    open_position_policy_migrations=None,
+    position_ownership_transfers=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -3924,6 +4198,39 @@ def _contract_evidence_from_records(
     raw_training_poisoning_guard_count = len(training_poisoning_guards or [])
     training_poisoning_guards = _latest_by_key(training_poisoning_guards or [], "training_run_id")
     superseded_training_poisoning_guard_count = max(0, raw_training_poisoning_guard_count - len(training_poisoning_guards))
+    raw_feature_store_consistency_count = len(feature_store_consistencies or [])
+    feature_store_consistencies = _latest_by_key(feature_store_consistencies or [], "feature_store_consistency_key")
+    superseded_feature_store_consistency_count = max(0, raw_feature_store_consistency_count - len(feature_store_consistencies))
+    raw_dynamic_token_authority_change_count = len(dynamic_token_authority_changes or [])
+    dynamic_token_authority_changes = _latest_by_key(dynamic_token_authority_changes or [], "dynamic_token_authority_change_key")
+    superseded_dynamic_token_authority_change_count = max(
+        0,
+        raw_dynamic_token_authority_change_count - len(dynamic_token_authority_changes),
+    )
+    raw_adversarial_execution_simulation_count = len(adversarial_execution_simulations or [])
+    adversarial_execution_simulations = _latest_by_key(adversarial_execution_simulations or [], "simulation_id")
+    superseded_adversarial_execution_simulation_count = max(
+        0,
+        raw_adversarial_execution_simulation_count - len(adversarial_execution_simulations),
+    )
+    raw_open_position_valuation_count = len(open_position_valuations or [])
+    open_position_valuations = _latest_by_key(open_position_valuations or [], "position_id")
+    superseded_open_position_valuation_count = max(0, raw_open_position_valuation_count - len(open_position_valuations))
+    raw_exit_policy_migration_count = len(exit_policy_migrations or [])
+    exit_policy_migrations = _latest_by_key(exit_policy_migrations or [], "position_id")
+    superseded_exit_policy_migration_count = max(0, raw_exit_policy_migration_count - len(exit_policy_migrations))
+    raw_open_position_policy_migration_count = len(open_position_policy_migrations or [])
+    open_position_policy_migrations = _latest_by_key(open_position_policy_migrations or [], "position_id")
+    superseded_open_position_policy_migration_count = max(
+        0,
+        raw_open_position_policy_migration_count - len(open_position_policy_migrations),
+    )
+    raw_position_ownership_transfer_count = len(position_ownership_transfers or [])
+    position_ownership_transfers = _latest_by_key(position_ownership_transfers or [], "position_id")
+    superseded_position_ownership_transfer_count = max(
+        0,
+        raw_position_ownership_transfer_count - len(position_ownership_transfers),
+    )
     d0_records = [record for record in record_list if record.get("denominator_membership", {}).get("D0_telegram_gold_silver_total")]
     signal_credit_missing = [
         record.get("denominator_dedup_key")
@@ -5173,6 +5480,76 @@ def _contract_evidence_from_records(
     training_poisoning_guard_violations = [
         item
         for item in training_poisoning_guards
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_feature_store_consistencies = [
+        item
+        for item in feature_store_consistencies
+        if item.get("missing_fields")
+    ]
+    feature_store_consistency_violations = [
+        item
+        for item in feature_store_consistencies
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_dynamic_token_authority_changes = [
+        item
+        for item in dynamic_token_authority_changes
+        if item.get("missing_fields")
+    ]
+    dynamic_token_authority_change_violations = [
+        item
+        for item in dynamic_token_authority_changes
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_adversarial_execution_simulations = [
+        item
+        for item in adversarial_execution_simulations
+        if item.get("missing_fields")
+    ]
+    adversarial_execution_simulation_violations = [
+        item
+        for item in adversarial_execution_simulations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_open_position_valuations = [
+        item
+        for item in open_position_valuations
+        if item.get("missing_fields")
+    ]
+    open_position_valuation_violations = [
+        item
+        for item in open_position_valuations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_exit_policy_migrations = [
+        item
+        for item in exit_policy_migrations
+        if item.get("missing_fields")
+    ]
+    exit_policy_migration_violations = [
+        item
+        for item in exit_policy_migrations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_open_position_policy_migrations = [
+        item
+        for item in open_position_policy_migrations
+        if item.get("missing_fields")
+    ]
+    open_position_policy_migration_violations = [
+        item
+        for item in open_position_policy_migrations
+        if item.get("missing_fields") or item.get("violation_fields")
+    ]
+    malformed_position_ownership_transfers = [
+        item
+        for item in position_ownership_transfers
+        if item.get("missing_fields")
+    ]
+    position_ownership_transfer_violations = [
+        item
+        for item in position_ownership_transfers
         if item.get("missing_fields") or item.get("violation_fields")
     ]
     worker_fleet_hashes = {
@@ -6486,6 +6863,255 @@ def _contract_evidence_from_records(
             "quarantine_actions": sorted({item.get("quarantine_action") for item in training_poisoning_guards if item.get("quarantine_action")}),
             "training_poisoning_guard_projection_version": "v2.7.0.training_poisoning_guard.v1",
         },
+        "FeatureStoreConsistencyContract": {
+            "eligible_feature_store_consistency_records": len(feature_store_consistencies),
+            "feature_store_consistency_observation_count": raw_feature_store_consistency_count,
+            "current_feature_store_consistency_count": len(feature_store_consistencies),
+            "superseded_feature_store_consistency_event_count": superseded_feature_store_consistency_count,
+            "valid_feature_store_consistency_count": sum(
+                1 for item in feature_store_consistencies if item.get("feature_store_consistency_valid") is True
+            ),
+            "malformed_count": len(malformed_feature_store_consistencies),
+            "malformed_feature_store_consistencies": [
+                {
+                    "feature_set_id": item.get("feature_set_id"),
+                    "normalization_version": item.get("normalization_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_feature_store_consistencies
+            ],
+            "feature_store_consistency_violation_count": len(feature_store_consistency_violations),
+            "feature_store_consistency_violations": [
+                {
+                    "feature_set_id": item.get("feature_set_id"),
+                    "offline_hash": item.get("offline_hash"),
+                    "online_hash": item.get("online_hash"),
+                    "normalization_version": item.get("normalization_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in feature_store_consistency_violations
+            ],
+            "feature_set_ids": sorted({item.get("feature_set_id") for item in feature_store_consistencies if item.get("feature_set_id")}),
+            "normalization_versions": sorted({item.get("normalization_version") for item in feature_store_consistencies if item.get("normalization_version")}),
+            "feature_store_consistency_projection_version": "v2.7.0.feature_store_consistency.v1",
+        },
+        "DynamicTokenAuthorityChangeContract": {
+            "eligible_dynamic_token_authority_change_records": len(dynamic_token_authority_changes),
+            "dynamic_token_authority_change_observation_count": raw_dynamic_token_authority_change_count,
+            "current_dynamic_token_authority_change_count": len(dynamic_token_authority_changes),
+            "superseded_dynamic_token_authority_change_event_count": superseded_dynamic_token_authority_change_count,
+            "valid_dynamic_token_authority_change_count": sum(
+                1 for item in dynamic_token_authority_changes if item.get("dynamic_token_authority_change_valid") is True
+            ),
+            "malformed_count": len(malformed_dynamic_token_authority_changes),
+            "malformed_dynamic_token_authority_changes": [
+                {
+                    "token_ca": item.get("token_ca"),
+                    "authority_type": item.get("authority_type"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_dynamic_token_authority_changes
+            ],
+            "dynamic_token_authority_change_violation_count": len(dynamic_token_authority_change_violations),
+            "dynamic_token_authority_change_violations": [
+                {
+                    "token_ca": item.get("token_ca"),
+                    "authority_type": item.get("authority_type"),
+                    "previous_authority_hash": item.get("previous_authority_hash"),
+                    "current_authority_hash": item.get("current_authority_hash"),
+                    "risk_action": item.get("risk_action"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in dynamic_token_authority_change_violations
+            ],
+            "token_cas": sorted({item.get("token_ca") for item in dynamic_token_authority_changes if item.get("token_ca")}),
+            "authority_types": sorted({item.get("authority_type") for item in dynamic_token_authority_changes if item.get("authority_type")}),
+            "risk_actions": sorted({item.get("risk_action") for item in dynamic_token_authority_changes if item.get("risk_action")}),
+            "dynamic_token_authority_change_projection_version": "v2.7.0.dynamic_token_authority_change.v1",
+        },
+        "AdversarialExecutionSimulationContract": {
+            "eligible_adversarial_execution_simulation_records": len(adversarial_execution_simulations),
+            "adversarial_execution_simulation_observation_count": raw_adversarial_execution_simulation_count,
+            "current_adversarial_execution_simulation_count": len(adversarial_execution_simulations),
+            "superseded_adversarial_execution_simulation_event_count": superseded_adversarial_execution_simulation_count,
+            "valid_adversarial_execution_simulation_count": sum(
+                1 for item in adversarial_execution_simulations if item.get("adversarial_execution_simulation_valid") is True
+            ),
+            "malformed_count": len(malformed_adversarial_execution_simulations),
+            "malformed_adversarial_execution_simulations": [
+                {
+                    "simulation_id": item.get("simulation_id"),
+                    "execution_policy_version": item.get("execution_policy_version"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_adversarial_execution_simulations
+            ],
+            "adversarial_execution_simulation_violation_count": len(adversarial_execution_simulation_violations),
+            "adversarial_execution_simulation_violations": [
+                {
+                    "simulation_id": item.get("simulation_id"),
+                    "attack_scenario": item.get("attack_scenario"),
+                    "safety_result": item.get("safety_result"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in adversarial_execution_simulation_violations
+            ],
+            "simulation_ids": sorted({item.get("simulation_id") for item in adversarial_execution_simulations if item.get("simulation_id")}),
+            "execution_policy_versions": sorted({item.get("execution_policy_version") for item in adversarial_execution_simulations if item.get("execution_policy_version")}),
+            "safety_results": sorted({item.get("safety_result") for item in adversarial_execution_simulations if item.get("safety_result")}),
+            "adversarial_execution_simulation_projection_version": "v2.7.0.adversarial_execution_simulation.v1",
+        },
+        "OpenPositionValuationContract": {
+            "eligible_open_position_valuation_records": len(open_position_valuations),
+            "open_position_valuation_observation_count": raw_open_position_valuation_count,
+            "current_open_position_valuation_count": len(open_position_valuations),
+            "superseded_open_position_valuation_event_count": superseded_open_position_valuation_count,
+            "valid_open_position_valuation_count": sum(
+                1 for item in open_position_valuations if item.get("open_position_valuation_valid") is True
+            ),
+            "malformed_count": len(malformed_open_position_valuations),
+            "malformed_open_position_valuations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "quote_source": item.get("quote_source"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_open_position_valuations
+            ],
+            "open_position_valuation_violation_count": len(open_position_valuation_violations),
+            "open_position_valuation_violations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "valuation_ts": item.get("valuation_ts"),
+                    "quote_source": item.get("quote_source"),
+                    "valuation_price": item.get("valuation_price"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in open_position_valuation_violations
+            ],
+            "position_ids": sorted({item.get("position_id") for item in open_position_valuations if item.get("position_id")}),
+            "quote_sources": sorted({item.get("quote_source") for item in open_position_valuations if item.get("quote_source")}),
+            "open_position_valuation_projection_version": "v2.7.0.open_position_valuation.v1",
+        },
+        "ExitPolicyMigrationContract": {
+            "eligible_exit_policy_migration_records": len(exit_policy_migrations),
+            "exit_policy_migration_observation_count": raw_exit_policy_migration_count,
+            "current_exit_policy_migration_count": len(exit_policy_migrations),
+            "superseded_exit_policy_migration_event_count": superseded_exit_policy_migration_count,
+            "valid_exit_policy_migration_count": sum(1 for item in exit_policy_migrations if item.get("exit_policy_migration_valid") is True),
+            "malformed_count": len(malformed_exit_policy_migrations),
+            "malformed_exit_policy_migrations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "old_exit_policy": item.get("old_exit_policy"),
+                    "new_exit_policy": item.get("new_exit_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_exit_policy_migrations
+            ],
+            "exit_policy_migration_violation_count": len(exit_policy_migration_violations),
+            "exit_policy_migration_violations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "old_exit_policy": item.get("old_exit_policy"),
+                    "new_exit_policy": item.get("new_exit_policy"),
+                    "migration_reason": item.get("migration_reason"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in exit_policy_migration_violations
+            ],
+            "position_ids": sorted({item.get("position_id") for item in exit_policy_migrations if item.get("position_id")}),
+            "migration_reasons": sorted({item.get("migration_reason") for item in exit_policy_migrations if item.get("migration_reason")}),
+            "exit_policy_migration_projection_version": "v2.7.0.exit_policy_migration.v1",
+        },
+        "OpenPositionPolicyMigrationContract": {
+            "eligible_open_position_policy_migration_records": len(open_position_policy_migrations),
+            "open_position_policy_migration_observation_count": raw_open_position_policy_migration_count,
+            "current_open_position_policy_migration_count": len(open_position_policy_migrations),
+            "superseded_open_position_policy_migration_event_count": superseded_open_position_policy_migration_count,
+            "valid_open_position_policy_migration_count": sum(
+                1 for item in open_position_policy_migrations if item.get("open_position_policy_migration_valid") is True
+            ),
+            "malformed_count": len(malformed_open_position_policy_migrations),
+            "malformed_open_position_policy_migrations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "old_exit_policy": item.get("old_exit_policy"),
+                    "new_exit_policy": item.get("new_exit_policy"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_open_position_policy_migrations
+            ],
+            "open_position_policy_migration_violation_count": len(open_position_policy_migration_violations),
+            "open_position_policy_migration_violations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "old_exit_policy": item.get("old_exit_policy"),
+                    "new_exit_policy": item.get("new_exit_policy"),
+                    "migration_reason": item.get("migration_reason"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in open_position_policy_migration_violations
+            ],
+            "position_ids": sorted({item.get("position_id") for item in open_position_policy_migrations if item.get("position_id")}),
+            "migration_reasons": sorted({item.get("migration_reason") for item in open_position_policy_migrations if item.get("migration_reason")}),
+            "open_position_policy_migration_projection_version": "v2.7.0.open_position_policy_migration.v1",
+        },
+        "PositionOwnershipTransferContract": {
+            "eligible_position_ownership_transfer_records": len(position_ownership_transfers),
+            "position_ownership_transfer_observation_count": raw_position_ownership_transfer_count,
+            "current_position_ownership_transfer_count": len(position_ownership_transfers),
+            "superseded_position_ownership_transfer_event_count": superseded_position_ownership_transfer_count,
+            "valid_position_ownership_transfer_count": sum(
+                1 for item in position_ownership_transfers if item.get("position_ownership_transfer_valid") is True
+            ),
+            "malformed_count": len(malformed_position_ownership_transfers),
+            "malformed_position_ownership_transfers": [
+                {
+                    "position_id": item.get("position_id"),
+                    "from_owner": item.get("from_owner"),
+                    "to_owner": item.get("to_owner"),
+                    "missing_fields": item.get("missing_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in malformed_position_ownership_transfers
+            ],
+            "position_ownership_transfer_violation_count": len(position_ownership_transfer_violations),
+            "position_ownership_transfer_violations": [
+                {
+                    "position_id": item.get("position_id"),
+                    "from_owner": item.get("from_owner"),
+                    "to_owner": item.get("to_owner"),
+                    "transfer_reason": item.get("transfer_reason"),
+                    "missing_fields": item.get("missing_fields"),
+                    "violation_fields": item.get("violation_fields"),
+                    "source_event_id": item.get("source_event_id"),
+                }
+                for item in position_ownership_transfer_violations
+            ],
+            "position_ids": sorted({item.get("position_id") for item in position_ownership_transfers if item.get("position_id")}),
+            "from_owners": sorted({item.get("from_owner") for item in position_ownership_transfers if item.get("from_owner")}),
+            "to_owners": sorted({item.get("to_owner") for item in position_ownership_transfers if item.get("to_owner")}),
+            "position_ownership_transfer_projection_version": "v2.7.0.position_ownership_transfer.v1",
+        },
         "TrainingServingSkewContract": {
             "eligible_training_serving_skew_records": len(training_serving_skews),
             "training_serving_skew_observation_count": raw_training_serving_skew_count,
@@ -6874,6 +7500,13 @@ def build_denominator_projection(
         "model_rollback_recorded_events": 0,
         "post_release_monitoring_window_recorded_events": 0,
         "training_poisoning_guard_recorded_events": 0,
+        "feature_store_consistency_recorded_events": 0,
+        "dynamic_token_authority_change_recorded_events": 0,
+        "adversarial_execution_simulation_recorded_events": 0,
+        "open_position_valuation_recorded_events": 0,
+        "exit_policy_migration_recorded_events": 0,
+        "open_position_policy_migration_recorded_events": 0,
+        "position_ownership_transfer_recorded_events": 0,
         "mirrored_decision_events": 0,
         "mirrored_missed_attribution_events": 0,
         "dirty_events": [],
@@ -6953,6 +7586,13 @@ def build_denominator_projection(
             "ModelRollbackContract": {},
             "PostReleaseMonitoringWindow": {},
             "TrainingPoisoningGuard": {},
+            "FeatureStoreConsistencyContract": {},
+            "DynamicTokenAuthorityChangeContract": {},
+            "AdversarialExecutionSimulationContract": {},
+            "OpenPositionValuationContract": {},
+            "ExitPolicyMigrationContract": {},
+            "OpenPositionPolicyMigrationContract": {},
+            "PositionOwnershipTransferContract": {},
         },
         "evidence_gaps": {},
         "health": {
@@ -7018,6 +7658,13 @@ def build_denominator_projection(
             "model_rollback_ok": False,
             "post_release_monitoring_window_ok": False,
             "training_poisoning_guard_ok": False,
+            "feature_store_consistency_ok": False,
+            "dynamic_token_authority_change_ok": False,
+            "adversarial_execution_simulation_ok": False,
+            "open_position_valuation_ok": False,
+            "exit_policy_migration_ok": False,
+            "open_position_policy_migration_ok": False,
+            "position_ownership_transfer_ok": False,
             "normal_tiny_ready": False,
             "status": "not_built",
         },
@@ -7077,6 +7724,13 @@ def build_denominator_projection(
     model_rollbacks = []
     post_release_monitoring_windows = []
     training_poisoning_guards = []
+    feature_store_consistencies = []
+    dynamic_token_authority_changes = []
+    adversarial_execution_simulations = []
+    open_position_valuations = []
+    exit_policy_migrations = []
+    open_position_policy_migrations = []
+    position_ownership_transfers = []
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -7331,6 +7985,48 @@ def build_denominator_projection(
             if training_poisoning_guard:
                 training_poisoning_guards.append(training_poisoning_guard)
             continue
+        if event.get("event_type") == FEATURE_STORE_CONSISTENCY_EVENT_TYPE:
+            projection["feature_store_consistency_recorded_events"] += 1
+            feature_store_consistency = _extract_feature_store_consistency(event, _payload_bags(event))
+            if feature_store_consistency:
+                feature_store_consistencies.append(feature_store_consistency)
+            continue
+        if event.get("event_type") == DYNAMIC_TOKEN_AUTHORITY_CHANGE_EVENT_TYPE:
+            projection["dynamic_token_authority_change_recorded_events"] += 1
+            dynamic_token_authority_change = _extract_dynamic_token_authority_change(event, _payload_bags(event))
+            if dynamic_token_authority_change:
+                dynamic_token_authority_changes.append(dynamic_token_authority_change)
+            continue
+        if event.get("event_type") == ADVERSARIAL_EXECUTION_SIMULATION_EVENT_TYPE:
+            projection["adversarial_execution_simulation_recorded_events"] += 1
+            adversarial_execution_simulation = _extract_adversarial_execution_simulation(event, _payload_bags(event))
+            if adversarial_execution_simulation:
+                adversarial_execution_simulations.append(adversarial_execution_simulation)
+            continue
+        if event.get("event_type") == OPEN_POSITION_VALUATION_EVENT_TYPE:
+            projection["open_position_valuation_recorded_events"] += 1
+            open_position_valuation = _extract_open_position_valuation(event, _payload_bags(event))
+            if open_position_valuation:
+                open_position_valuations.append(open_position_valuation)
+            continue
+        if event.get("event_type") == EXIT_POLICY_MIGRATION_EVENT_TYPE:
+            projection["exit_policy_migration_recorded_events"] += 1
+            exit_policy_migration = _extract_exit_policy_migration(event, _payload_bags(event))
+            if exit_policy_migration:
+                exit_policy_migrations.append(exit_policy_migration)
+            continue
+        if event.get("event_type") == OPEN_POSITION_POLICY_MIGRATION_EVENT_TYPE:
+            projection["open_position_policy_migration_recorded_events"] += 1
+            open_position_policy_migration = _extract_open_position_policy_migration(event, _payload_bags(event))
+            if open_position_policy_migration:
+                open_position_policy_migrations.append(open_position_policy_migration)
+            continue
+        if event.get("event_type") == POSITION_OWNERSHIP_TRANSFER_EVENT_TYPE:
+            projection["position_ownership_transfer_recorded_events"] += 1
+            position_ownership_transfer = _extract_position_ownership_transfer(event, _payload_bags(event))
+            if position_ownership_transfer:
+                position_ownership_transfers.append(position_ownership_transfer)
+            continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -7532,6 +8228,13 @@ def build_denominator_projection(
         model_rollbacks=model_rollbacks,
         post_release_monitoring_windows=post_release_monitoring_windows,
         training_poisoning_guards=training_poisoning_guards,
+        feature_store_consistencies=feature_store_consistencies,
+        dynamic_token_authority_changes=dynamic_token_authority_changes,
+        adversarial_execution_simulations=adversarial_execution_simulations,
+        open_position_valuations=open_position_valuations,
+        exit_policy_migrations=exit_policy_migrations,
+        open_position_policy_migrations=open_position_policy_migrations,
+        position_ownership_transfers=position_ownership_transfers,
     )
     if progress_callback:
         progress_callback(
@@ -7899,6 +8602,48 @@ def build_denominator_projection(
         and contract_evidence["TrainingPoisoningGuard"]["valid_training_poisoning_guard_count"] > 0
         and contract_evidence["TrainingPoisoningGuard"]["malformed_count"] == 0
         and contract_evidence["TrainingPoisoningGuard"]["training_poisoning_guard_violation_count"] == 0
+    )
+    projection["health"]["feature_store_consistency_ok"] = (
+        contract_evidence["FeatureStoreConsistencyContract"]["eligible_feature_store_consistency_records"] > 0
+        and contract_evidence["FeatureStoreConsistencyContract"]["valid_feature_store_consistency_count"] > 0
+        and contract_evidence["FeatureStoreConsistencyContract"]["malformed_count"] == 0
+        and contract_evidence["FeatureStoreConsistencyContract"]["feature_store_consistency_violation_count"] == 0
+    )
+    projection["health"]["dynamic_token_authority_change_ok"] = (
+        contract_evidence["DynamicTokenAuthorityChangeContract"]["eligible_dynamic_token_authority_change_records"] > 0
+        and contract_evidence["DynamicTokenAuthorityChangeContract"]["valid_dynamic_token_authority_change_count"] > 0
+        and contract_evidence["DynamicTokenAuthorityChangeContract"]["malformed_count"] == 0
+        and contract_evidence["DynamicTokenAuthorityChangeContract"]["dynamic_token_authority_change_violation_count"] == 0
+    )
+    projection["health"]["adversarial_execution_simulation_ok"] = (
+        contract_evidence["AdversarialExecutionSimulationContract"]["eligible_adversarial_execution_simulation_records"] > 0
+        and contract_evidence["AdversarialExecutionSimulationContract"]["valid_adversarial_execution_simulation_count"] > 0
+        and contract_evidence["AdversarialExecutionSimulationContract"]["malformed_count"] == 0
+        and contract_evidence["AdversarialExecutionSimulationContract"]["adversarial_execution_simulation_violation_count"] == 0
+    )
+    projection["health"]["open_position_valuation_ok"] = (
+        contract_evidence["OpenPositionValuationContract"]["eligible_open_position_valuation_records"] > 0
+        and contract_evidence["OpenPositionValuationContract"]["valid_open_position_valuation_count"] > 0
+        and contract_evidence["OpenPositionValuationContract"]["malformed_count"] == 0
+        and contract_evidence["OpenPositionValuationContract"]["open_position_valuation_violation_count"] == 0
+    )
+    projection["health"]["exit_policy_migration_ok"] = (
+        contract_evidence["ExitPolicyMigrationContract"]["eligible_exit_policy_migration_records"] > 0
+        and contract_evidence["ExitPolicyMigrationContract"]["valid_exit_policy_migration_count"] > 0
+        and contract_evidence["ExitPolicyMigrationContract"]["malformed_count"] == 0
+        and contract_evidence["ExitPolicyMigrationContract"]["exit_policy_migration_violation_count"] == 0
+    )
+    projection["health"]["open_position_policy_migration_ok"] = (
+        contract_evidence["OpenPositionPolicyMigrationContract"]["eligible_open_position_policy_migration_records"] > 0
+        and contract_evidence["OpenPositionPolicyMigrationContract"]["valid_open_position_policy_migration_count"] > 0
+        and contract_evidence["OpenPositionPolicyMigrationContract"]["malformed_count"] == 0
+        and contract_evidence["OpenPositionPolicyMigrationContract"]["open_position_policy_migration_violation_count"] == 0
+    )
+    projection["health"]["position_ownership_transfer_ok"] = (
+        contract_evidence["PositionOwnershipTransferContract"]["eligible_position_ownership_transfer_records"] > 0
+        and contract_evidence["PositionOwnershipTransferContract"]["valid_position_ownership_transfer_count"] > 0
+        and contract_evidence["PositionOwnershipTransferContract"]["malformed_count"] == 0
+        and contract_evidence["PositionOwnershipTransferContract"]["position_ownership_transfer_violation_count"] == 0
     )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"

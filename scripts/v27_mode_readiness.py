@@ -190,6 +190,13 @@ MODE_REQUIREMENTS = {
         "ModelRollbackContract",
         "PostReleaseMonitoringWindow",
         "TrainingPoisoningGuard",
+        "FeatureStoreConsistencyContract",
+        "DynamicTokenAuthorityChangeContract",
+        "AdversarialExecutionSimulationContract",
+        "OpenPositionValuationContract",
+        "ExitPolicyMigrationContract",
+        "OpenPositionPolicyMigrationContract",
+        "PositionOwnershipTransferContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -784,6 +791,55 @@ def build_contract_statuses(
         "pass" if projection_built and projection_health.get("training_poisoning_guard_ok") else "missing_evidence",
         "training_poisoning_guard_missing_malformed_or_unquarantined",
         training_poisoning_guard_evidence,
+    )
+    feature_store_consistency_evidence = contract_evidence.get("FeatureStoreConsistencyContract") or {}
+    statuses["FeatureStoreConsistencyContract"] = _status(
+        "FeatureStoreConsistencyContract",
+        "pass" if projection_built and projection_health.get("feature_store_consistency_ok") else "missing_evidence",
+        "feature_store_consistency_missing_malformed_or_mismatched",
+        feature_store_consistency_evidence,
+    )
+    dynamic_token_authority_change_evidence = contract_evidence.get("DynamicTokenAuthorityChangeContract") or {}
+    statuses["DynamicTokenAuthorityChangeContract"] = _status(
+        "DynamicTokenAuthorityChangeContract",
+        "pass" if projection_built and projection_health.get("dynamic_token_authority_change_ok") else "missing_evidence",
+        "dynamic_token_authority_change_missing_malformed_or_unprotected",
+        dynamic_token_authority_change_evidence,
+    )
+    adversarial_execution_simulation_evidence = contract_evidence.get("AdversarialExecutionSimulationContract") or {}
+    statuses["AdversarialExecutionSimulationContract"] = _status(
+        "AdversarialExecutionSimulationContract",
+        "pass" if projection_built and projection_health.get("adversarial_execution_simulation_ok") else "missing_evidence",
+        "adversarial_execution_simulation_missing_malformed_or_unsafe",
+        adversarial_execution_simulation_evidence,
+    )
+    open_position_valuation_evidence = contract_evidence.get("OpenPositionValuationContract") or {}
+    statuses["OpenPositionValuationContract"] = _status(
+        "OpenPositionValuationContract",
+        "pass" if projection_built and projection_health.get("open_position_valuation_ok") else "missing_evidence",
+        "open_position_valuation_missing_malformed_or_untrusted",
+        open_position_valuation_evidence,
+    )
+    exit_policy_migration_evidence = contract_evidence.get("ExitPolicyMigrationContract") or {}
+    statuses["ExitPolicyMigrationContract"] = _status(
+        "ExitPolicyMigrationContract",
+        "pass" if projection_built and projection_health.get("exit_policy_migration_ok") else "missing_evidence",
+        "exit_policy_migration_missing_malformed_or_unchanged",
+        exit_policy_migration_evidence,
+    )
+    open_position_policy_migration_evidence = contract_evidence.get("OpenPositionPolicyMigrationContract") or {}
+    statuses["OpenPositionPolicyMigrationContract"] = _status(
+        "OpenPositionPolicyMigrationContract",
+        "pass" if projection_built and projection_health.get("open_position_policy_migration_ok") else "missing_evidence",
+        "open_position_policy_migration_missing_malformed_or_unchanged",
+        open_position_policy_migration_evidence,
+    )
+    position_ownership_transfer_evidence = contract_evidence.get("PositionOwnershipTransferContract") or {}
+    statuses["PositionOwnershipTransferContract"] = _status(
+        "PositionOwnershipTransferContract",
+        "pass" if projection_built and projection_health.get("position_ownership_transfer_ok") else "missing_evidence",
+        "position_ownership_transfer_missing_malformed_or_unchanged",
+        position_ownership_transfer_evidence,
     )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
