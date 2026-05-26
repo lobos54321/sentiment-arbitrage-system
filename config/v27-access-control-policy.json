@@ -1,12 +1,13 @@
 {
   "schema_version": "v2.7.0.access_control_policy.v1",
-  "updated_at": "2026-05-25T00:00:00Z",
+  "updated_at": "2026-05-26T00:00:00Z",
   "source_file": "src/web/dashboard-server.js",
   "public_endpoints": [
     "/",
     "/health",
     "/ping",
-    "/dashboard"
+    "/dashboard",
+    "/api/paper/v27-kpi-proof-status"
   ],
   "protected_defaults": {
     "required_role": "dashboard_reader",

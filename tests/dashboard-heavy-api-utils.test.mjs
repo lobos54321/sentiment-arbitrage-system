@@ -11,6 +11,7 @@ import {
   buildApiResponseErrorShape,
   buildV27ManualEvidenceApiResponse,
   buildDogCatchGoalProgress,
+  buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
@@ -346,6 +347,83 @@ test('v27 mode readiness exposes materialized matrix and missing state', () => {
   assert.equal(readiness.basic_readiness.health.basic_contracts_ready, true);
   assert.equal(readiness.projection_consumer.health.projection_consumer_ready, true);
   assert.equal(readiness.contract_statuses.PaperModeSafetyBoundary.evidence.runtime_evidence_present, true);
+});
+
+test('v27 KPI proof status separates token gate from KPI failure', () => {
+  const proof = buildV27KpiProofStatus({
+    generatedAt: '2026-05-25T00:30:00.000Z',
+    nowMs: Date.parse('2026-05-25T00:30:00.000Z'),
+    requestedHours: 24,
+    dashboardTokenConfigured: false,
+    paperDbExists: false,
+    liveSnapshot: null,
+    modeReadiness: {
+      available: false,
+      health: { normal_tiny_ready: false, status: 'v27_mode_readiness_missing' },
+    },
+    denominatorHealth: {
+      available: false,
+      dashboard_safe: false,
+      health: { normal_tiny_ready: false, status: 'v27_read_model_health_missing' },
+    },
+  });
+
+  assert.equal(proof.public_safe, true);
+  assert.equal(proof.claim.verified, false);
+  assert.equal(proof.claim.status, 'kpi_evidence_token_gated');
+  assert.equal(proof.evidence_sources.protected_paper_endpoints.status, 'token_not_configured');
+  assert.deepEqual(proof.evidence_sources.dog_catch_goal, {
+    available: false,
+    pass: false,
+    blockers: [],
+  });
+  assert.ok(proof.blockers.includes('dashboard_token_missing_for_protected_kpi_evidence'));
+  assert.ok(proof.blockers.includes('materialized_review_snapshot_missing'));
+});
+
+test('v27 KPI proof status verifies only fresh materialized KPI chain', () => {
+  const proof = buildV27KpiProofStatus({
+    generatedAt: '2026-05-25T00:20:00.000Z',
+    nowMs: Date.parse('2026-05-25T00:20:00.000Z'),
+    requestedHours: 24,
+    maxSnapshotAgeMinutes: 30,
+    dashboardTokenConfigured: true,
+    paperDbExists: true,
+    liveSnapshot: {
+      snapshot_id: 'paper_live_24h_unit',
+      generated_at: '2026-05-25T00:10:00.000Z',
+      dog_catch_goal: {
+        available: true,
+        goal: {
+          pass: true,
+          blockers: [],
+        },
+      },
+    },
+    modeReadiness: {
+      available: true,
+      highest_allowed_mode: 'normal_tiny',
+      health: {
+        normal_tiny_ready: true,
+        status: 'mode_readiness_evaluated',
+      },
+    },
+    denominatorHealth: {
+      available: true,
+      dashboard_safe: true,
+      health: {
+        normal_tiny_ready: true,
+        status: 'read_model_refresh_ok',
+      },
+    },
+  });
+
+  assert.equal(proof.claim.verified, true);
+  assert.equal(proof.claim.status, 'kpi_verified');
+  assert.equal(proof.evidence_sources.materialized_review_snapshot.fresh, true);
+  assert.equal(proof.evidence_sources.materialized_review_snapshot.age_minutes, 10);
+  assert.equal(proof.evidence_sources.dog_catch_goal.pass, true);
+  assert.deepEqual(proof.blockers, []);
 });
 
 test('storage health includes v27 sidecar logs for mirror diagnosis', () => {

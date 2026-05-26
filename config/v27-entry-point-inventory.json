@@ -1,6 +1,6 @@
 {
   "schema_version": "v2.7.0.entry_point_inventory.v1",
-  "updated_at": "2026-05-25T00:00:00Z",
+  "updated_at": "2026-05-26T00:00:00Z",
   "scope": "runtime_route_script_cron_deploy_entry_points",
   "owner": "v27_runtime_governance",
   "entry_points": [
@@ -12,13 +12,13 @@
         "anchor": "url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping'"
       },
       "route_group": {
-        "endpoints": ["/", "/health", "/ping", "/dashboard"],
+        "endpoints": ["/", "/health", "/ping", "/dashboard", "/api/paper/v27-kpi-proof-status"],
         "public": true
       },
       "route_registry_required": false,
-      "route_registry_reason": "public health and dashboard redirect do not create trading entry candidates",
+      "route_registry_reason": "public health, dashboard redirect, and redacted KPI proof status do not create trading entry candidates",
       "arbiter_required": false,
-      "arbiter_reason": "read-only liveness and redirect surface"
+      "arbiter_reason": "read-only liveness, redirect, and public-safe proof-status surface"
     },
     {
       "entry_point_id": "dashboard_protected_route_surface",
@@ -29,7 +29,7 @@
       },
       "route_group": {
         "kind": "all_dashboard_literal_routes",
-        "expected_literal_route_count": 63,
+        "expected_literal_route_count": 64,
         "expected_protected_route_count": 58
       },
       "route_registry_required": false,

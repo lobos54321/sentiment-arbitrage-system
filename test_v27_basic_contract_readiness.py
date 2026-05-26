@@ -1185,7 +1185,7 @@ def test_entry_point_inventory_covers_runtime_routes_scripts_and_deploy():
     assert report["evidence"]["entry_point_count"] == 32
     assert report["evidence"]["entry_type_counts"]["route_group"] == 5
     assert report["evidence"]["entry_type_counts"]["script"] == 18
-    assert report["evidence"]["dashboard_literal_route_count"] == 63
+    assert report["evidence"]["dashboard_literal_route_count"] == 64
     assert report["evidence"]["dashboard_protected_route_count"] == 58
     assert report["evidence"]["route_registry_required_count"] == 2
     assert report["evidence"]["arbiter_required_count"] == 29

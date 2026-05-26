@@ -1190,6 +1190,14 @@ function readLivePaperReview(hours) {
   }
 }
 
+function snapshotAgeMinutes(snapshot, nowMs = Date.now()) {
+  const generatedAt = snapshot?.generated_at;
+  if (!generatedAt) return null;
+  const generatedMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedMs)) return null;
+  return roundNumber(Math.max(0, nowMs - generatedMs) / 60000, 1);
+}
+
 function v27ReadModelDir(options = {}) {
   const root = options.projectRoot || projectRoot;
   const raw = options.readModelDir || process.env.V27_READ_MODEL_DIR || join(root, 'data', 'v27_read_models');
@@ -1857,6 +1865,138 @@ export function readV27ModeReadiness(options = {}) {
       },
     };
   }
+}
+
+export function buildV27KpiProofStatus(options = {}) {
+  const generatedAt = options.generatedAt || new Date().toISOString();
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.parse(generatedAt) || Date.now();
+  const requestedHours = Math.max(1, Math.min(72, parseInt(String(options.requestedHours ?? 24), 10) || 24));
+  const materializedSnapshotHours = Math.min(requestedHours, 24);
+  const maxSnapshotAgeMinutes = Math.max(1, Math.min(1440, parseInt(String(options.maxSnapshotAgeMinutes ?? 30), 10) || 30));
+  const targetCatchRate = Number.isFinite(Number(options.targetCatchRate)) ? Number(options.targetCatchRate) : 0.60;
+  const targetWinRate = Number.isFinite(Number(options.targetWinRate)) ? Number(options.targetWinRate) : 0.55;
+  const targetRoi = Number.isFinite(Number(options.targetRoi)) ? Number(options.targetRoi) : 2.0;
+  const dogPeakRatio = Number.isFinite(Number(options.dogPeakRatio)) ? Number(options.dogPeakRatio) : 0.50;
+  const winPeakRatio = Number.isFinite(Number(options.winPeakRatio)) ? Number(options.winPeakRatio) : 0.30;
+  const paperDbPath = options.paperDbPath || getPaperDbPath();
+  const paperDbExists = options.paperDbExists === undefined ? fs.existsSync(paperDbPath) : Boolean(options.paperDbExists);
+  const dashboardTokenConfigured = options.dashboardTokenConfigured === undefined
+    ? Boolean(DASHBOARD_TOKEN)
+    : Boolean(options.dashboardTokenConfigured);
+  const modeReadiness = options.modeReadiness === undefined ? readV27ModeReadiness() : options.modeReadiness;
+  const denominatorHealth = options.denominatorHealth === undefined ? readV27DenominatorReadModelHealth() : options.denominatorHealth;
+  const liveSnapshot = options.liveSnapshot === undefined ? readLivePaperReview(materializedSnapshotHours) : options.liveSnapshot;
+  const snapshotAvailable = Boolean(liveSnapshot && !liveSnapshot.error);
+  const snapshotAge = snapshotAvailable ? snapshotAgeMinutes(liveSnapshot, nowMs) : null;
+  const snapshotFresh = Boolean(snapshotAvailable && snapshotAge != null && snapshotAge <= maxSnapshotAgeMinutes);
+  const dogCatchGoal = snapshotAvailable ? dogCatchGoalFromLiveSnapshot(liveSnapshot, {
+    dbPath: paperDbPath,
+    requestedHours,
+    options: {
+      targetCatchRate,
+      targetWinRate,
+      targetRoi,
+      dogPeakRatio,
+      winPeakRatio,
+    },
+  }) : null;
+  const dogCatchBlockers = Array.isArray(dogCatchGoal?.goal?.blockers) ? dogCatchGoal.goal.blockers : [];
+  const modeNormalTinyReady = Boolean(modeReadiness?.health?.normal_tiny_ready);
+  const denominatorDashboardSafe = Boolean(denominatorHealth?.dashboard_safe);
+  const blockers = [];
+  if (!dashboardTokenConfigured) blockers.push('dashboard_token_missing_for_protected_kpi_evidence');
+  if (!paperDbExists) blockers.push('paper_trades_db_missing');
+  if (!snapshotAvailable) blockers.push(liveSnapshot?.error ? 'materialized_review_snapshot_invalid' : 'materialized_review_snapshot_missing');
+  if (snapshotAvailable && !snapshotFresh) blockers.push('materialized_review_snapshot_stale_or_undated');
+  if (!modeReadiness?.available) blockers.push('v27_mode_readiness_missing');
+  if (!modeNormalTinyReady) blockers.push('normal_tiny_mode_readiness_not_green');
+  if (!denominatorHealth?.available) blockers.push('v27_denominator_read_model_missing');
+  if (!denominatorDashboardSafe) blockers.push('v27_denominator_read_model_not_dashboard_safe');
+  for (const blocker of dogCatchBlockers) blockers.push(blocker);
+  const uniqueBlockers = [...new Set(blockers)];
+  const verified = Boolean(
+    dashboardTokenConfigured
+    && paperDbExists
+    && snapshotFresh
+    && modeNormalTinyReady
+    && denominatorDashboardSafe
+    && dogCatchGoal?.goal?.pass === true
+  );
+  let status = 'kpi_targets_not_met';
+  if (verified) {
+    status = 'kpi_verified';
+  } else if (!dashboardTokenConfigured) {
+    status = 'kpi_evidence_token_gated';
+  } else if (!paperDbExists || !snapshotAvailable || !modeReadiness?.available || !denominatorHealth?.available) {
+    status = 'kpi_evidence_incomplete';
+  } else if (!snapshotFresh) {
+    status = 'kpi_evidence_stale';
+  }
+  return {
+    generated_at: generatedAt,
+    schema_version: 'v2.7.0.kpi_proof_status.v1',
+    public_safe: true,
+    window_hours: requestedHours,
+    materialized_snapshot_hours: materializedSnapshotHours,
+    claim: {
+      verified,
+      status,
+      target_summary: {
+        clean_gold_silver_capture_rate: targetCatchRate,
+        peak_win_rate: targetWinRate,
+        realized_roi: targetRoi,
+        dog_peak_threshold: dogPeakRatio,
+        win_peak_threshold: winPeakRatio,
+      },
+    },
+    evidence_sources: {
+      protected_paper_endpoints: {
+        require_dashboard_token: true,
+        dashboard_token_configured: dashboardTokenConfigured,
+        status: dashboardTokenConfigured ? 'available_with_dashboard_token' : 'token_not_configured',
+        endpoints: [
+          '/api/paper/review-snapshot',
+          '/api/paper/missed-recovery-summary',
+          '/api/paper/mode-ev',
+          '/api/paper/entry-mode-performance',
+          '/api/paper/dog-catch-goal',
+        ],
+      },
+      paper_db: {
+        exists: paperDbExists,
+      },
+      materialized_review_snapshot: {
+        available: snapshotAvailable,
+        fresh: snapshotFresh,
+        generated_at: snapshotAvailable ? liveSnapshot.generated_at || null : null,
+        snapshot_id: snapshotAvailable ? liveSnapshot.snapshot_id || null : null,
+        age_minutes: snapshotAge,
+        max_age_minutes: maxSnapshotAgeMinutes,
+      },
+      mode_readiness: {
+        available: Boolean(modeReadiness?.available),
+        highest_allowed_mode: modeReadiness?.highest_allowed_mode || null,
+        normal_tiny_ready: modeNormalTinyReady,
+        status: modeReadiness?.health?.status || null,
+      },
+      denominator_read_model: {
+        available: Boolean(denominatorHealth?.available),
+        dashboard_safe: denominatorDashboardSafe,
+        normal_tiny_ready: Boolean(denominatorHealth?.health?.normal_tiny_ready),
+        status: denominatorHealth?.health?.status || null,
+      },
+      dog_catch_goal: {
+        available: Boolean(dogCatchGoal?.available),
+        pass: Boolean(dogCatchGoal?.goal?.pass),
+        blockers: dogCatchBlockers,
+      },
+    },
+    blockers: uniqueBlockers,
+    notes: {
+      scope: 'public status only; raw trades, missed-dog rows, and PnL detail remain behind protected paper endpoints',
+      claim_rule: '24h KPI is verified only when auth, fresh materialized evidence, mode readiness, denominator safety, and dog-catch goal are all green',
+    },
+  };
 }
 
 function normalizeV27ModeReadinessPayload(payload) {
@@ -8656,6 +8796,19 @@ const server = http.createServer(async (req, res) => {
     });
     res.writeHead(record.accepted ? 202 : 409, apiJsonHeaders());
     res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record, { endpoint: url.pathname }), null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/v27-kpi-proof-status') {
+    const proofStatus = buildV27KpiProofStatus({
+      requestedHours: boundedIntParam(url, 'hours', 24, 1, 72),
+      maxSnapshotAgeMinutes: boundedIntParam(url, 'max_snapshot_age_minutes', 30, 1, 1440),
+      targetCatchRate: Number(url.searchParams.get('target_capture') || 0.60),
+      targetWinRate: Number(url.searchParams.get('target_win_rate') || 0.55),
+      targetRoi: Number(url.searchParams.get('target_roi') || 2.0),
+      dogPeakRatio: Number(url.searchParams.get('dog_peak') || 0.50),
+      winPeakRatio: Number(url.searchParams.get('win_peak') || 0.30),
+    });
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify(proofStatus, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-mode-readiness') {
     if (!checkAuth(req, url, res)) return;
