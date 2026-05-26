@@ -225,6 +225,16 @@ MODE_REQUIREMENTS = {
         "SmallSampleDecisionPolicy",
         "SafetyVsCaptureTradeoffContract",
         "ImplementationDriftMonitor",
+        "AssumptionRegistryContract",
+        "AssumptionInvalidationTrigger",
+        "ContractPriorityGraph",
+        "ContractConflictResolutionContract",
+        "ContractFailureBlastRadius",
+        "DashboardTriageWorkflowContract",
+        "IssueEscalationFromMetricsContract",
+        "PromotionEvidencePackageContract",
+        "RegressionBudgetContract",
+        "RootCauseTaxonomyVersioning",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
@@ -297,6 +307,46 @@ FINAL_NORMAL_TINY_STATUS_REASONS = {
     "ImplementationDriftMonitor": (
         "implementation_drift_monitor_ok",
         "implementation_drift_monitor_missing_malformed_or_drifted",
+    ),
+    "AssumptionRegistryContract": (
+        "assumption_registry_ok",
+        "assumption_registry_missing_malformed_or_unlinked",
+    ),
+    "AssumptionInvalidationTrigger": (
+        "assumption_invalidation_trigger_ok",
+        "assumption_invalidation_trigger_missing_malformed_or_unreached",
+    ),
+    "ContractPriorityGraph": (
+        "contract_priority_graph_ok",
+        "contract_priority_graph_missing_malformed_or_cyclic",
+    ),
+    "ContractConflictResolutionContract": (
+        "contract_conflict_resolution_ok",
+        "contract_conflict_resolution_missing_malformed_or_unresolved",
+    ),
+    "ContractFailureBlastRadius": (
+        "contract_failure_blast_radius_ok",
+        "contract_failure_blast_radius_missing_malformed_or_unbounded",
+    ),
+    "DashboardTriageWorkflowContract": (
+        "dashboard_triage_workflow_ok",
+        "dashboard_triage_workflow_missing_malformed_or_stalled",
+    ),
+    "IssueEscalationFromMetricsContract": (
+        "issue_escalation_from_metrics_ok",
+        "issue_escalation_from_metrics_missing_malformed_or_unissued",
+    ),
+    "PromotionEvidencePackageContract": (
+        "promotion_evidence_package_ok",
+        "promotion_evidence_package_missing_malformed_or_unapproved",
+    ),
+    "RegressionBudgetContract": (
+        "regression_budget_ok",
+        "regression_budget_missing_malformed_or_exceeded",
+    ),
+    "RootCauseTaxonomyVersioning": (
+        "root_cause_taxonomy_versioning_ok",
+        "root_cause_taxonomy_versioning_missing_malformed_or_unclassified",
     ),
 }
 

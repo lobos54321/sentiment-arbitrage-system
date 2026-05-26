@@ -150,7 +150,7 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
     assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is True
     governance = audit["final_scopes"]["normal_tiny_governance"]
     assert audit["health"]["final_normal_tiny_governance_scope_complete"] is False
-    assert audit["health"]["final_normal_tiny_governance_missing_count"] == 19
+    assert audit["health"]["final_normal_tiny_governance_missing_count"] == 9
     for contract_id in (
         "RuntimeSpecAssertionContract",
         "MinimumViableTrustBoundary",
@@ -162,6 +162,16 @@ def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
         "SmallSampleDecisionPolicy",
         "SafetyVsCaptureTradeoffContract",
         "ImplementationDriftMonitor",
+        "AssumptionRegistryContract",
+        "AssumptionInvalidationTrigger",
+        "ContractPriorityGraph",
+        "ContractConflictResolutionContract",
+        "ContractFailureBlastRadius",
+        "DashboardTriageWorkflowContract",
+        "IssueEscalationFromMetricsContract",
+        "PromotionEvidencePackageContract",
+        "RegressionBudgetContract",
+        "RootCauseTaxonomyVersioning",
     ):
         assert contract_id not in governance["missing_contracts"]
 

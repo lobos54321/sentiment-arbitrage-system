@@ -123,6 +123,16 @@ FALSE_NEGATIVE_BUDGET_EVENT_TYPE = "false_negative_budget_recorded"
 SMALL_SAMPLE_DECISION_EVENT_TYPE = "small_sample_decision_recorded"
 SAFETY_VS_CAPTURE_TRADEOFF_EVENT_TYPE = "safety_vs_capture_tradeoff_recorded"
 IMPLEMENTATION_DRIFT_MONITOR_EVENT_TYPE = "implementation_drift_monitor_recorded"
+ASSUMPTION_REGISTRY_EVENT_TYPE = "assumption_registry_recorded"
+ASSUMPTION_INVALIDATION_TRIGGER_EVENT_TYPE = "assumption_invalidation_trigger_recorded"
+CONTRACT_PRIORITY_GRAPH_EVENT_TYPE = "contract_priority_graph_recorded"
+CONTRACT_CONFLICT_RESOLUTION_EVENT_TYPE = "contract_conflict_resolution_recorded"
+CONTRACT_FAILURE_BLAST_RADIUS_EVENT_TYPE = "contract_failure_blast_radius_recorded"
+DASHBOARD_TRIAGE_WORKFLOW_EVENT_TYPE = "dashboard_triage_workflow_recorded"
+ISSUE_ESCALATION_FROM_METRICS_EVENT_TYPE = "issue_escalation_from_metrics_recorded"
+PROMOTION_EVIDENCE_PACKAGE_EVENT_TYPE = "promotion_evidence_package_recorded"
+REGRESSION_BUDGET_EVENT_TYPE = "regression_budget_recorded"
+ROOT_CAUSE_TAXONOMY_VERSIONING_EVENT_TYPE = "root_cause_taxonomy_versioning_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -212,6 +222,16 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     SMALL_SAMPLE_DECISION_EVENT_TYPE,
     SAFETY_VS_CAPTURE_TRADEOFF_EVENT_TYPE,
     IMPLEMENTATION_DRIFT_MONITOR_EVENT_TYPE,
+    ASSUMPTION_REGISTRY_EVENT_TYPE,
+    ASSUMPTION_INVALIDATION_TRIGGER_EVENT_TYPE,
+    CONTRACT_PRIORITY_GRAPH_EVENT_TYPE,
+    CONTRACT_CONFLICT_RESOLUTION_EVENT_TYPE,
+    CONTRACT_FAILURE_BLAST_RADIUS_EVENT_TYPE,
+    DASHBOARD_TRIAGE_WORKFLOW_EVENT_TYPE,
+    ISSUE_ESCALATION_FROM_METRICS_EVENT_TYPE,
+    PROMOTION_EVIDENCE_PACKAGE_EVENT_TYPE,
+    REGRESSION_BUDGET_EVENT_TYPE,
+    ROOT_CAUSE_TAXONOMY_VERSIONING_EVENT_TYPE,
 }
 FINAL_NORMAL_TINY_CONTRACT_SPECS = {
     "AccessReviewContract": {
@@ -379,6 +399,86 @@ FINAL_NORMAL_TINY_CONTRACT_SPECS = {
         "plural": "implementation_drift_monitors",
         "required_fields": ("drift_id", "spec_contract_id", "runtime_location", "drift_detected", "detected_at"),
         "projection_version": "v2.7.0.implementation_drift_monitor.v1",
+    },
+    "AssumptionRegistryContract": {
+        "event_type": ASSUMPTION_REGISTRY_EVENT_TYPE,
+        "key_field": "assumption_id",
+        "slug": "assumption_registry",
+        "plural": "assumption_registry_records",
+        "required_fields": ("assumption_id", "scope", "owner", "evidence_link", "expires_at"),
+        "projection_version": "v2.7.0.assumption_registry.v1",
+    },
+    "AssumptionInvalidationTrigger": {
+        "event_type": ASSUMPTION_INVALIDATION_TRIGGER_EVENT_TYPE,
+        "key_field": "assumption_id",
+        "slug": "assumption_invalidation_trigger",
+        "plural": "assumption_invalidation_triggers",
+        "required_fields": ("assumption_id", "trigger_metric", "threshold", "observed_value", "invalidated_at"),
+        "projection_version": "v2.7.0.assumption_invalidation_trigger.v1",
+    },
+    "ContractPriorityGraph": {
+        "event_type": CONTRACT_PRIORITY_GRAPH_EVENT_TYPE,
+        "key_field": "graph_id",
+        "slug": "contract_priority_graph",
+        "plural": "contract_priority_graphs",
+        "required_fields": ("graph_id", "higher_priority_contract", "lower_priority_contract", "cycle_detected", "resolved_at"),
+        "projection_version": "v2.7.0.contract_priority_graph.v1",
+    },
+    "ContractConflictResolutionContract": {
+        "event_type": CONTRACT_CONFLICT_RESOLUTION_EVENT_TYPE,
+        "key_field": "conflict_id",
+        "slug": "contract_conflict_resolution",
+        "plural": "contract_conflict_resolutions",
+        "required_fields": ("conflict_id", "higher_priority_contract", "lower_priority_contract", "resolution_action"),
+        "projection_version": "v2.7.0.contract_conflict_resolution.v1",
+    },
+    "ContractFailureBlastRadius": {
+        "event_type": CONTRACT_FAILURE_BLAST_RADIUS_EVENT_TYPE,
+        "key_field": "contract_id",
+        "slug": "contract_failure_blast_radius",
+        "plural": "contract_failure_blast_radii",
+        "required_fields": ("contract_id", "blast_radius", "affected_modes", "fallback_action", "reviewed_at"),
+        "projection_version": "v2.7.0.contract_failure_blast_radius.v1",
+    },
+    "DashboardTriageWorkflowContract": {
+        "event_type": DASHBOARD_TRIAGE_WORKFLOW_EVENT_TYPE,
+        "key_field": "triage_id",
+        "slug": "dashboard_triage_workflow",
+        "plural": "dashboard_triage_workflows",
+        "required_fields": ("triage_id", "blocker_code", "owner", "next_action", "due_at"),
+        "projection_version": "v2.7.0.dashboard_triage_workflow.v1",
+    },
+    "IssueEscalationFromMetricsContract": {
+        "event_type": ISSUE_ESCALATION_FROM_METRICS_EVENT_TYPE,
+        "key_field": "metric_id",
+        "slug": "issue_escalation_from_metrics",
+        "plural": "issue_escalations_from_metrics",
+        "required_fields": ("metric_id", "threshold", "issue_id", "escalation_owner", "created_at"),
+        "projection_version": "v2.7.0.issue_escalation_from_metrics.v1",
+    },
+    "PromotionEvidencePackageContract": {
+        "event_type": PROMOTION_EVIDENCE_PACKAGE_EVENT_TYPE,
+        "key_field": "package_id",
+        "slug": "promotion_evidence_package",
+        "plural": "promotion_evidence_packages",
+        "required_fields": ("package_id", "evidence_hash", "generated_at", "approval_status"),
+        "projection_version": "v2.7.0.promotion_evidence_package.v1",
+    },
+    "RegressionBudgetContract": {
+        "event_type": REGRESSION_BUDGET_EVENT_TYPE,
+        "key_field": "budget_id",
+        "slug": "regression_budget",
+        "plural": "regression_budgets",
+        "required_fields": ("budget_id", "metric_id", "allowed_regression", "observed_regression", "action"),
+        "projection_version": "v2.7.0.regression_budget.v1",
+    },
+    "RootCauseTaxonomyVersioning": {
+        "event_type": ROOT_CAUSE_TAXONOMY_VERSIONING_EVENT_TYPE,
+        "key_field": "taxonomy_version",
+        "slug": "root_cause_taxonomy_versioning",
+        "plural": "root_cause_taxonomy_versions",
+        "required_fields": ("taxonomy_version", "root_cause_code", "severity", "migration_policy", "effective_at"),
+        "projection_version": "v2.7.0.root_cause_taxonomy_versioning.v1",
     },
 }
 FINAL_NORMAL_TINY_EVENT_SPECS = {
@@ -1195,9 +1295,9 @@ def _as_string_list(value):
 
 def _final_normal_tiny_value(contract_id, field, bags):
     value = _extract_scalar(bags, [(field,)])
-    if field in {"required_approvers", "corrective_actions", "trusted_inputs", "untrusted_inputs", "required_contracts"}:
+    if field in {"required_approvers", "corrective_actions", "trusted_inputs", "untrusted_inputs", "required_contracts", "affected_modes"}:
         return _as_string_list(value)
-    if field in {"unsafe_prefix_detected", "decision_allowed", "drift_detected"}:
+    if field in {"unsafe_prefix_detected", "decision_allowed", "drift_detected", "cycle_detected"}:
         return _as_bool(value)
     if field in {
         "expected_no_effect_metric",
@@ -1206,10 +1306,14 @@ def _final_normal_tiny_value(contract_id, field, bags):
         "age_ms",
         "allowed_false_negative_rate",
         "observed_rate",
+        "threshold",
+        "observed_value",
         "alpha_metric",
         "exit_threshold",
         "safety_metric",
         "capture_metric",
+        "allowed_regression",
+        "observed_regression",
     }:
         return _as_float(value)
     if field in {"sample_size", "min_sample_size"}:
@@ -1227,6 +1331,11 @@ def _final_normal_tiny_violation_fields(contract_id, values):
         "anchored_at",
         "detected_at",
         "resolved_at",
+        "invalidated_at",
+        "due_at",
+        "created_at",
+        "generated_at",
+        "effective_at",
     ):
         if field in values and values.get(field) and _timestamp_epoch_seconds(values.get(field)) is None:
             violation_fields.append(f"{field}_parseable")
@@ -1391,6 +1500,80 @@ def _final_normal_tiny_violation_fields(contract_id, values):
             violation_fields.append("drift_detected")
         if drift_detected is None:
             violation_fields.append("drift_detected_parseable")
+    elif contract_id == "AssumptionRegistryContract":
+        evidence_link = str(values.get("evidence_link") or "").strip().lower()
+        if evidence_link in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("assumption_evidence_link_missing")
+    elif contract_id == "AssumptionInvalidationTrigger":
+        threshold = values.get("threshold")
+        observed = values.get("observed_value")
+        for field, value in (("threshold", threshold), ("observed_value", observed)):
+            if value is not None and not math.isfinite(value):
+                violation_fields.append(f"{field}_finite")
+        if threshold is not None and observed is not None and math.isfinite(threshold) and math.isfinite(observed):
+            if observed < threshold:
+                violation_fields.append("invalidation_trigger_not_reached")
+    elif contract_id == "ContractPriorityGraph":
+        if values.get("higher_priority_contract") == values.get("lower_priority_contract"):
+            violation_fields.append("priority_self_edge")
+        cycle_detected = values.get("cycle_detected")
+        if cycle_detected is True:
+            violation_fields.append("contract_priority_cycle_detected")
+        if cycle_detected is None:
+            violation_fields.append("cycle_detected_parseable")
+    elif contract_id == "ContractConflictResolutionContract":
+        if values.get("higher_priority_contract") == values.get("lower_priority_contract"):
+            violation_fields.append("conflict_self_edge")
+        resolution_action = str(values.get("resolution_action") or "").strip().lower()
+        if resolution_action in {"none", "ignore", "unresolved", "tbd", "noop"}:
+            violation_fields.append("resolution_action_unresolved")
+    elif contract_id == "ContractFailureBlastRadius":
+        blast_radius = str(values.get("blast_radius") or "").strip().lower()
+        if blast_radius in {"none", "unknown", "unbounded"}:
+            violation_fields.append("blast_radius_unbounded")
+        if not values.get("affected_modes"):
+            violation_fields.append("affected_modes_empty")
+        fallback_action = str(values.get("fallback_action") or "").strip().lower()
+        if fallback_action in {"none", "ignore", "noop", "warn_only", "log_only"}:
+            violation_fields.append("fallback_action_not_blocking")
+    elif contract_id == "DashboardTriageWorkflowContract":
+        next_action = str(values.get("next_action") or "").strip().lower()
+        if next_action in {"none", "ignore", "noop", "tbd", "unknown"}:
+            violation_fields.append("next_action_missing")
+    elif contract_id == "IssueEscalationFromMetricsContract":
+        threshold = values.get("threshold")
+        if threshold is not None and not math.isfinite(threshold):
+            violation_fields.append("threshold_finite")
+        issue_id = str(values.get("issue_id") or "").strip().lower()
+        if issue_id in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("issue_id_missing")
+    elif contract_id == "PromotionEvidencePackageContract":
+        if values.get("evidence_hash") and not _valid_sha256_hex(values.get("evidence_hash")):
+            violation_fields.append("evidence_hash_sha256")
+        approval_status = str(values.get("approval_status") or "").strip().lower()
+        if approval_status and approval_status not in {"approved", "approved_with_controls", "pass", "passed"}:
+            violation_fields.append("approval_status_not_approved")
+    elif contract_id == "RegressionBudgetContract":
+        allowed = values.get("allowed_regression")
+        observed = values.get("observed_regression")
+        for field, value in (("allowed_regression", allowed), ("observed_regression", observed)):
+            if value is not None and (not math.isfinite(value) or value < 0):
+                violation_fields.append(f"{field}_nonnegative")
+        if (
+            allowed is not None
+            and observed is not None
+            and math.isfinite(allowed)
+            and math.isfinite(observed)
+            and observed > allowed
+        ):
+            violation_fields.append("regression_budget_exceeded")
+    elif contract_id == "RootCauseTaxonomyVersioning":
+        severity = str(values.get("severity") or "").strip().lower()
+        if severity and severity not in {"info", "low", "medium", "high", "critical"}:
+            violation_fields.append("severity_invalid")
+        migration_policy = str(values.get("migration_policy") or "").strip().lower()
+        if migration_policy in {"none", "ignore", "unknown", "tbd", "noop"}:
+            violation_fields.append("migration_policy_missing")
     return sorted(set(violation_fields))
 
 

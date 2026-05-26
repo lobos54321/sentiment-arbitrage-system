@@ -1938,6 +1938,242 @@ def append_implementation_drift_monitor(
     )
 
 
+def append_assumption_registry(
+    log,
+    *,
+    assumption_id="assumption-unit-v1",
+    scope="normal_tiny_capture_metrics",
+    owner="runtime-owner",
+    evidence_link="v27_denominator_projection:runtime_trust",
+    expires_at="2026-02-15T00:51:00Z",
+):
+    payload = {
+        "assumption_id": assumption_id,
+        "scope": scope,
+        "owner": owner,
+        "evidence_link": evidence_link,
+        "expires_at": expires_at,
+    }
+    return log.append_event(
+        event_type="assumption_registry_recorded",
+        aggregate_id=f"assumption_registry:{assumption_id}",
+        idempotency_key=f"assumption_registry:{assumption_id}:{scope}",
+        payload=payload,
+    )
+
+
+def append_assumption_invalidation_trigger(
+    log,
+    *,
+    assumption_id="assumption-unit-v1",
+    trigger_metric="missed_clean_gold_false_negative_rate",
+    threshold=0.15,
+    observed_value=0.21,
+    invalidated_at="2026-01-15T00:52:00Z",
+):
+    payload = {
+        "assumption_id": assumption_id,
+        "trigger_metric": trigger_metric,
+        "threshold": threshold,
+        "observed_value": observed_value,
+        "invalidated_at": invalidated_at,
+    }
+    return log.append_event(
+        event_type="assumption_invalidation_trigger_recorded",
+        aggregate_id=f"assumption_invalidation_trigger:{assumption_id}:{trigger_metric}",
+        idempotency_key=f"assumption_invalidation_trigger:{assumption_id}:{trigger_metric}",
+        payload=payload,
+    )
+
+
+def append_contract_priority_graph(
+    log,
+    *,
+    graph_id="contract-priority-graph-unit-v1",
+    higher_priority_contract="SafetyVsCaptureTradeoffContract",
+    lower_priority_contract="SourceAlphaDecayExitCriteria",
+    cycle_detected=False,
+    resolved_at="2026-01-15T00:53:00Z",
+):
+    payload = {
+        "graph_id": graph_id,
+        "higher_priority_contract": higher_priority_contract,
+        "lower_priority_contract": lower_priority_contract,
+        "cycle_detected": cycle_detected,
+        "resolved_at": resolved_at,
+    }
+    return log.append_event(
+        event_type="contract_priority_graph_recorded",
+        aggregate_id=f"contract_priority_graph:{graph_id}",
+        idempotency_key=f"contract_priority_graph:{graph_id}:{higher_priority_contract}:{lower_priority_contract}",
+        payload=payload,
+    )
+
+
+def append_contract_conflict_resolution(
+    log,
+    *,
+    conflict_id="contract-conflict-unit-v1",
+    higher_priority_contract="SafetyVsCaptureTradeoffContract",
+    lower_priority_contract="SourceAlphaDecayExitCriteria",
+    resolution_action="apply_higher_priority_contract",
+):
+    payload = {
+        "conflict_id": conflict_id,
+        "higher_priority_contract": higher_priority_contract,
+        "lower_priority_contract": lower_priority_contract,
+        "resolution_action": resolution_action,
+    }
+    return log.append_event(
+        event_type="contract_conflict_resolution_recorded",
+        aggregate_id=f"contract_conflict_resolution:{conflict_id}",
+        idempotency_key=f"contract_conflict_resolution:{conflict_id}:{resolution_action}",
+        payload=payload,
+    )
+
+
+def append_contract_failure_blast_radius(
+    log,
+    *,
+    contract_id="RealtimeCleanDetector",
+    blast_radius="normal_tiny_entry_block",
+    affected_modes=None,
+    fallback_action="block_entry_and_hold_shadow",
+    reviewed_at="2026-01-15T00:54:00Z",
+):
+    payload = {
+        "contract_id": contract_id,
+        "blast_radius": blast_radius,
+        "affected_modes": affected_modes if affected_modes is not None else ["normal_tiny"],
+        "fallback_action": fallback_action,
+        "reviewed_at": reviewed_at,
+    }
+    return log.append_event(
+        event_type="contract_failure_blast_radius_recorded",
+        aggregate_id=f"contract_failure_blast_radius:{contract_id}",
+        idempotency_key=f"contract_failure_blast_radius:{contract_id}:{blast_radius}",
+        payload=payload,
+    )
+
+
+def append_dashboard_triage_workflow(
+    log,
+    *,
+    triage_id="dashboard-triage-unit-v1",
+    blocker_code="regression_budget_exceeded",
+    owner="runtime-owner",
+    next_action="open_metric_escalation",
+    due_at="2026-01-16T00:55:00Z",
+):
+    payload = {
+        "triage_id": triage_id,
+        "blocker_code": blocker_code,
+        "owner": owner,
+        "next_action": next_action,
+        "due_at": due_at,
+    }
+    return log.append_event(
+        event_type="dashboard_triage_workflow_recorded",
+        aggregate_id=f"dashboard_triage_workflow:{triage_id}",
+        idempotency_key=f"dashboard_triage_workflow:{triage_id}:{blocker_code}",
+        payload=payload,
+    )
+
+
+def append_issue_escalation_from_metrics(
+    log,
+    *,
+    metric_id="missed_clean_gold_false_negative_rate",
+    threshold=0.15,
+    issue_id="issue-runtime-trust-unit-v1",
+    escalation_owner="runtime-owner",
+    created_at="2026-01-15T00:56:00Z",
+):
+    payload = {
+        "metric_id": metric_id,
+        "threshold": threshold,
+        "issue_id": issue_id,
+        "escalation_owner": escalation_owner,
+        "created_at": created_at,
+    }
+    return log.append_event(
+        event_type="issue_escalation_from_metrics_recorded",
+        aggregate_id=f"issue_escalation_from_metrics:{metric_id}",
+        idempotency_key=f"issue_escalation_from_metrics:{metric_id}:{issue_id}",
+        payload=payload,
+    )
+
+
+def append_promotion_evidence_package(
+    log,
+    *,
+    package_id="promotion-evidence-package-unit-v1",
+    evidence_hash=None,
+    generated_at="2026-01-15T00:57:00Z",
+    approval_status="approved",
+):
+    payload = {
+        "package_id": package_id,
+        "evidence_hash": evidence_hash or sha256_hex({"package_id": package_id, "scope": "normal_tiny"}),
+        "generated_at": generated_at,
+        "approval_status": approval_status,
+    }
+    return log.append_event(
+        event_type="promotion_evidence_package_recorded",
+        aggregate_id=f"promotion_evidence_package:{package_id}",
+        idempotency_key=f"promotion_evidence_package:{package_id}:{approval_status}",
+        payload=payload,
+    )
+
+
+def append_regression_budget(
+    log,
+    *,
+    budget_id="regression-budget-unit-v1",
+    metric_id="clean_dog_capture_rate",
+    allowed_regression=0.03,
+    observed_regression=0.01,
+    action="allow_release",
+):
+    payload = {
+        "budget_id": budget_id,
+        "metric_id": metric_id,
+        "allowed_regression": allowed_regression,
+        "observed_regression": observed_regression,
+        "action": action,
+    }
+    return log.append_event(
+        event_type="regression_budget_recorded",
+        aggregate_id=f"regression_budget:{budget_id}",
+        idempotency_key=f"regression_budget:{budget_id}:{metric_id}",
+        payload=payload,
+    )
+
+
+def append_root_cause_taxonomy_versioning(
+    log,
+    *,
+    taxonomy_version="root-cause-taxonomy-v1",
+    root_cause_code="quote_clean_evidence_expired",
+    severity="high",
+    migration_policy="map_legacy_codes_before_postmortem",
+    effective_at="2026-01-15T00:58:00Z",
+):
+    payload = {
+        "taxonomy_version": taxonomy_version,
+        "root_cause_code": root_cause_code,
+        "severity": severity,
+        "migration_policy": migration_policy,
+        "effective_at": effective_at,
+    }
+    return log.append_event(
+        event_type="root_cause_taxonomy_versioning_recorded",
+        aggregate_id=f"root_cause_taxonomy_versioning:{taxonomy_version}:{root_cause_code}",
+        idempotency_key=f"root_cause_taxonomy_versioning:{taxonomy_version}:{root_cause_code}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -3035,6 +3271,165 @@ def test_denominator_projection_rejects_runtime_trust_governance_violations(tmp_
     assert (
         projection["contract_evidence"]["ImplementationDriftMonitor"][
             "implementation_drift_monitor_violation_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_consumes_assumption_priority_escalation_governance_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_assumption_registry(log)
+    append_assumption_invalidation_trigger(log)
+    append_contract_priority_graph(log)
+    append_contract_conflict_resolution(log)
+    append_contract_failure_blast_radius(log)
+    append_dashboard_triage_workflow(log)
+    append_issue_escalation_from_metrics(log)
+    append_promotion_evidence_package(log)
+    append_regression_budget(log)
+    append_root_cause_taxonomy_versioning(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["assumption_registry_recorded_events"] == 1
+    assert projection["assumption_invalidation_trigger_recorded_events"] == 1
+    assert projection["contract_priority_graph_recorded_events"] == 1
+    assert projection["contract_conflict_resolution_recorded_events"] == 1
+    assert projection["contract_failure_blast_radius_recorded_events"] == 1
+    assert projection["dashboard_triage_workflow_recorded_events"] == 1
+    assert projection["issue_escalation_from_metrics_recorded_events"] == 1
+    assert projection["promotion_evidence_package_recorded_events"] == 1
+    assert projection["regression_budget_recorded_events"] == 1
+    assert projection["root_cause_taxonomy_versioning_recorded_events"] == 1
+    assert projection["health"]["assumption_registry_ok"] is True
+    assert projection["health"]["assumption_invalidation_trigger_ok"] is True
+    assert projection["health"]["contract_priority_graph_ok"] is True
+    assert projection["health"]["contract_conflict_resolution_ok"] is True
+    assert projection["health"]["contract_failure_blast_radius_ok"] is True
+    assert projection["health"]["dashboard_triage_workflow_ok"] is True
+    assert projection["health"]["issue_escalation_from_metrics_ok"] is True
+    assert projection["health"]["promotion_evidence_package_ok"] is True
+    assert projection["health"]["regression_budget_ok"] is True
+    assert projection["health"]["root_cause_taxonomy_versioning_ok"] is True
+    assert projection["contract_evidence"]["AssumptionRegistryContract"]["valid_assumption_registry_count"] == 1
+    assert (
+        projection["contract_evidence"]["AssumptionInvalidationTrigger"][
+            "valid_assumption_invalidation_trigger_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["ContractPriorityGraph"]["valid_contract_priority_graph_count"] == 1
+    assert (
+        projection["contract_evidence"]["ContractConflictResolutionContract"][
+            "valid_contract_conflict_resolution_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ContractFailureBlastRadius"][
+            "valid_contract_failure_blast_radius_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["DashboardTriageWorkflowContract"][
+            "valid_dashboard_triage_workflow_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["IssueEscalationFromMetricsContract"][
+            "valid_issue_escalation_from_metrics_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["PromotionEvidencePackageContract"][
+            "valid_promotion_evidence_package_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["RegressionBudgetContract"]["valid_regression_budget_count"] == 1
+    assert (
+        projection["contract_evidence"]["RootCauseTaxonomyVersioning"][
+            "valid_root_cause_taxonomy_versioning_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_rejects_assumption_priority_escalation_governance_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_assumption_registry(log, evidence_link="none", expires_at="not-a-time")
+    append_assumption_invalidation_trigger(log, threshold=0.25, observed_value=0.10)
+    append_contract_priority_graph(
+        log,
+        higher_priority_contract="SafetyCaseContract",
+        lower_priority_contract="SafetyCaseContract",
+        cycle_detected=True,
+    )
+    append_contract_conflict_resolution(log, resolution_action="ignore")
+    append_contract_failure_blast_radius(log, blast_radius="unbounded", affected_modes=[], fallback_action="warn_only")
+    append_dashboard_triage_workflow(log, next_action="tbd", due_at="not-a-time")
+    append_issue_escalation_from_metrics(log, threshold="not-a-number", issue_id="missing")
+    append_promotion_evidence_package(log, evidence_hash="not-a-hash", approval_status="pending")
+    append_regression_budget(log, allowed_regression=0.01, observed_regression=0.08)
+    append_root_cause_taxonomy_versioning(log, severity="unknown", migration_policy="none", effective_at="not-a-time")
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["assumption_registry_ok"] is False
+    assert projection["health"]["assumption_invalidation_trigger_ok"] is False
+    assert projection["health"]["contract_priority_graph_ok"] is False
+    assert projection["health"]["contract_conflict_resolution_ok"] is False
+    assert projection["health"]["contract_failure_blast_radius_ok"] is False
+    assert projection["health"]["dashboard_triage_workflow_ok"] is False
+    assert projection["health"]["issue_escalation_from_metrics_ok"] is False
+    assert projection["health"]["promotion_evidence_package_ok"] is False
+    assert projection["health"]["regression_budget_ok"] is False
+    assert projection["health"]["root_cause_taxonomy_versioning_ok"] is False
+    assert projection["contract_evidence"]["AssumptionRegistryContract"]["assumption_registry_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["AssumptionInvalidationTrigger"][
+            "assumption_invalidation_trigger_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["ContractPriorityGraph"]["contract_priority_graph_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["ContractConflictResolutionContract"][
+            "contract_conflict_resolution_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ContractFailureBlastRadius"][
+            "contract_failure_blast_radius_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["DashboardTriageWorkflowContract"][
+            "dashboard_triage_workflow_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["IssueEscalationFromMetricsContract"][
+            "issue_escalation_from_metrics_violation_count"
+        ]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["PromotionEvidencePackageContract"][
+            "promotion_evidence_package_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["RegressionBudgetContract"]["regression_budget_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["RootCauseTaxonomyVersioning"][
+            "root_cause_taxonomy_versioning_violation_count"
         ]
         == 1
     )

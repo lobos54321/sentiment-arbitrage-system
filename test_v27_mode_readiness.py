@@ -1122,6 +1122,131 @@ def append_runtime_trust_governance_events(event_log_dir):
     )
 
 
+def append_assumption_priority_escalation_governance_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="assumption_registry_recorded",
+        aggregate_id="assumption_registry:assumption-unit-v1",
+        idempotency_key="assumption_registry:assumption-unit-v1:normal_tiny_capture_metrics",
+        payload={
+            "assumption_id": "assumption-unit-v1",
+            "scope": "normal_tiny_capture_metrics",
+            "owner": "runtime-owner",
+            "evidence_link": "v27_denominator_projection:runtime_trust",
+            "expires_at": "2026-02-15T00:51:00Z",
+        },
+    )
+    log.append_event(
+        event_type="assumption_invalidation_trigger_recorded",
+        aggregate_id="assumption_invalidation_trigger:assumption-unit-v1:missed_clean_gold_false_negative_rate",
+        idempotency_key="assumption_invalidation_trigger:assumption-unit-v1:missed_clean_gold_false_negative_rate",
+        payload={
+            "assumption_id": "assumption-unit-v1",
+            "trigger_metric": "missed_clean_gold_false_negative_rate",
+            "threshold": 0.15,
+            "observed_value": 0.21,
+            "invalidated_at": "2026-01-15T00:52:00Z",
+        },
+    )
+    log.append_event(
+        event_type="contract_priority_graph_recorded",
+        aggregate_id="contract_priority_graph:contract-priority-graph-unit-v1",
+        idempotency_key=(
+            "contract_priority_graph:contract-priority-graph-unit-v1:"
+            "SafetyVsCaptureTradeoffContract:SourceAlphaDecayExitCriteria"
+        ),
+        payload={
+            "graph_id": "contract-priority-graph-unit-v1",
+            "higher_priority_contract": "SafetyVsCaptureTradeoffContract",
+            "lower_priority_contract": "SourceAlphaDecayExitCriteria",
+            "cycle_detected": False,
+            "resolved_at": "2026-01-15T00:53:00Z",
+        },
+    )
+    log.append_event(
+        event_type="contract_conflict_resolution_recorded",
+        aggregate_id="contract_conflict_resolution:contract-conflict-unit-v1",
+        idempotency_key="contract_conflict_resolution:contract-conflict-unit-v1:apply_higher_priority_contract",
+        payload={
+            "conflict_id": "contract-conflict-unit-v1",
+            "higher_priority_contract": "SafetyVsCaptureTradeoffContract",
+            "lower_priority_contract": "SourceAlphaDecayExitCriteria",
+            "resolution_action": "apply_higher_priority_contract",
+        },
+    )
+    log.append_event(
+        event_type="contract_failure_blast_radius_recorded",
+        aggregate_id="contract_failure_blast_radius:RealtimeCleanDetector",
+        idempotency_key="contract_failure_blast_radius:RealtimeCleanDetector:normal_tiny_entry_block",
+        payload={
+            "contract_id": "RealtimeCleanDetector",
+            "blast_radius": "normal_tiny_entry_block",
+            "affected_modes": ["normal_tiny"],
+            "fallback_action": "block_entry_and_hold_shadow",
+            "reviewed_at": "2026-01-15T00:54:00Z",
+        },
+    )
+    log.append_event(
+        event_type="dashboard_triage_workflow_recorded",
+        aggregate_id="dashboard_triage_workflow:dashboard-triage-unit-v1",
+        idempotency_key="dashboard_triage_workflow:dashboard-triage-unit-v1:regression_budget_exceeded",
+        payload={
+            "triage_id": "dashboard-triage-unit-v1",
+            "blocker_code": "regression_budget_exceeded",
+            "owner": "runtime-owner",
+            "next_action": "open_metric_escalation",
+            "due_at": "2026-01-16T00:55:00Z",
+        },
+    )
+    log.append_event(
+        event_type="issue_escalation_from_metrics_recorded",
+        aggregate_id="issue_escalation_from_metrics:missed_clean_gold_false_negative_rate",
+        idempotency_key="issue_escalation_from_metrics:missed_clean_gold_false_negative_rate:issue-runtime-trust-unit-v1",
+        payload={
+            "metric_id": "missed_clean_gold_false_negative_rate",
+            "threshold": 0.15,
+            "issue_id": "issue-runtime-trust-unit-v1",
+            "escalation_owner": "runtime-owner",
+            "created_at": "2026-01-15T00:56:00Z",
+        },
+    )
+    log.append_event(
+        event_type="promotion_evidence_package_recorded",
+        aggregate_id="promotion_evidence_package:promotion-evidence-package-unit-v1",
+        idempotency_key="promotion_evidence_package:promotion-evidence-package-unit-v1:approved",
+        payload={
+            "package_id": "promotion-evidence-package-unit-v1",
+            "evidence_hash": sha256_hex({"package_id": "promotion-evidence-package-unit-v1", "scope": "normal_tiny"}),
+            "generated_at": "2026-01-15T00:57:00Z",
+            "approval_status": "approved",
+        },
+    )
+    log.append_event(
+        event_type="regression_budget_recorded",
+        aggregate_id="regression_budget:regression-budget-unit-v1",
+        idempotency_key="regression_budget:regression-budget-unit-v1:clean_dog_capture_rate",
+        payload={
+            "budget_id": "regression-budget-unit-v1",
+            "metric_id": "clean_dog_capture_rate",
+            "allowed_regression": 0.03,
+            "observed_regression": 0.01,
+            "action": "allow_release",
+        },
+    )
+    log.append_event(
+        event_type="root_cause_taxonomy_versioning_recorded",
+        aggregate_id="root_cause_taxonomy_versioning:root-cause-taxonomy-v1:quote_clean_evidence_expired",
+        idempotency_key="root_cause_taxonomy_versioning:root-cause-taxonomy-v1:quote_clean_evidence_expired",
+        payload={
+            "taxonomy_version": "root-cause-taxonomy-v1",
+            "root_cause_code": "quote_clean_evidence_expired",
+            "severity": "high",
+            "migration_policy": "map_legacy_codes_before_postmortem",
+            "effective_at": "2026-01-15T00:58:00Z",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -2359,6 +2484,87 @@ def test_mode_readiness_consumes_runtime_trust_governance_contracts(tmp_path):
     assert (
         matrix["contract_statuses"]["ImplementationDriftMonitor"]["evidence"][
             "valid_implementation_drift_monitor_count"
+        ]
+        == 1
+    )
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_assumption_priority_escalation_governance_contracts(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_assumption_priority_escalation_governance_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "AssumptionRegistryContract",
+        "AssumptionInvalidationTrigger",
+        "ContractPriorityGraph",
+        "ContractConflictResolutionContract",
+        "ContractFailureBlastRadius",
+        "DashboardTriageWorkflowContract",
+        "IssueEscalationFromMetricsContract",
+        "PromotionEvidencePackageContract",
+        "RegressionBudgetContract",
+        "RootCauseTaxonomyVersioning",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["AssumptionRegistryContract"]["evidence"]["valid_assumption_registry_count"] == 1
+    assert (
+        matrix["contract_statuses"]["AssumptionInvalidationTrigger"]["evidence"][
+            "valid_assumption_invalidation_trigger_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["ContractPriorityGraph"]["evidence"]["valid_contract_priority_graph_count"] == 1
+    assert (
+        matrix["contract_statuses"]["ContractConflictResolutionContract"]["evidence"][
+            "valid_contract_conflict_resolution_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["ContractFailureBlastRadius"]["evidence"][
+            "valid_contract_failure_blast_radius_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["DashboardTriageWorkflowContract"]["evidence"][
+            "valid_dashboard_triage_workflow_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["IssueEscalationFromMetricsContract"]["evidence"][
+            "valid_issue_escalation_from_metrics_count"
+        ]
+        == 1
+    )
+    assert (
+        matrix["contract_statuses"]["PromotionEvidencePackageContract"]["evidence"][
+            "valid_promotion_evidence_package_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["RegressionBudgetContract"]["evidence"]["valid_regression_budget_count"] == 1
+    assert (
+        matrix["contract_statuses"]["RootCauseTaxonomyVersioning"]["evidence"][
+            "valid_root_cause_taxonomy_versioning_count"
         ]
         == 1
     )
