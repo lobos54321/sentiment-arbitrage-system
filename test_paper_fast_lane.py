@@ -470,7 +470,7 @@ def test_gmgn_momentum_canary_blocks_unconfirmed_or_quiet(monkeypatch):
     assert quiet["reason"] == "source_gmgn_momentum_canary_quiet_session"
 
 
-def test_source_quote_clean_refresh_is_disabled_by_default(monkeypatch):
+def test_source_quote_clean_refresh_can_be_disabled_by_flag(monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_SOURCE_QUOTE_CLEAN_REFRESH_ENABLED", False)
     now = int(time.time())
     detail = fast.direct_fill_policy({
@@ -486,6 +486,27 @@ def test_source_quote_clean_refresh_is_disabled_by_default(monkeypatch):
 
     assert detail["pass"] is False
     assert detail["reason"] == "source_quote_clean_refresh_disabled"
+
+
+def test_source_quote_clean_refresh_default_allows_short_stale_window():
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "source_resonance_fast",
+        "entry_branch": "source_quote_clean_refresh_tiny_probe",
+        "payload_json": json.dumps({
+            "quote_clean_seen": 1,
+            "two_quote_clean_snapshots": 1,
+            "source_updated_at": dt.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S"),
+            "gmgn_volume_confirmed": 1,
+            "original_signal_ts": now - 210,
+            "market_session": "asia",
+            "liquidity_usd": 12000,
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "source_quote_clean_refresh_tiny_probe"
+    assert detail["detail"]["original_age_sec"] == 210
 
 
 def test_source_quote_clean_refresh_canary_requires_non_stale_two_snapshot_activity(monkeypatch):
