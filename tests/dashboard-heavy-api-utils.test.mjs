@@ -371,6 +371,21 @@ test('v27 KPI proof status separates token gate from KPI failure', () => {
   assert.equal(proof.public_safe, true);
   assert.equal(proof.claim.verified, false);
   assert.equal(proof.claim.status, 'kpi_evidence_token_gated');
+  assert.deepEqual(proof.claim.metrics, {
+    clean_gold_silver_capture_rate: null,
+    peak_win_rate: null,
+    realized_roi: null,
+    eligible_gold_silver_unique: null,
+    captured_gold_silver_unique: null,
+    missed_clean_gold_silver_unique: null,
+    fills: null,
+    closed: null,
+  });
+  assert.deepEqual(proof.claim.target_gaps, {
+    clean_gold_silver_capture_rate: null,
+    peak_win_rate: null,
+    realized_roi: null,
+  });
   assert.equal(proof.evidence_sources.protected_paper_endpoints.status, 'token_not_configured');
   assert.deepEqual(proof.evidence_sources.dog_catch_goal, {
     available: false,
@@ -394,9 +409,22 @@ test('v27 KPI proof status verifies only fresh materialized KPI chain', () => {
       generated_at: '2026-05-25T00:10:00.000Z',
       dog_catch_goal: {
         available: true,
+        trades: {
+          fills: 4,
+          closed: 4,
+          peak_win_rate: 0.75,
+          realized_roi: 2.4,
+          captured_gold_silver_unique: 3,
+        },
+        missed: {
+          clean_gold_silver_unique: 1,
+        },
         goal: {
           pass: true,
           blockers: [],
+          eligible_gold_silver_unique: 4,
+          captured_gold_silver_unique: 3,
+          clean_gold_silver_capture_rate: 0.75,
         },
       },
     },
@@ -420,6 +448,21 @@ test('v27 KPI proof status verifies only fresh materialized KPI chain', () => {
 
   assert.equal(proof.claim.verified, true);
   assert.equal(proof.claim.status, 'kpi_verified');
+  assert.deepEqual(proof.claim.metrics, {
+    clean_gold_silver_capture_rate: 0.75,
+    peak_win_rate: 0.75,
+    realized_roi: 2.4,
+    eligible_gold_silver_unique: 4,
+    captured_gold_silver_unique: 3,
+    missed_clean_gold_silver_unique: 1,
+    fills: 4,
+    closed: 4,
+  });
+  assert.deepEqual(proof.claim.target_gaps, {
+    clean_gold_silver_capture_rate: -0.15,
+    peak_win_rate: -0.2,
+    realized_roi: -0.4,
+  });
   assert.equal(proof.evidence_sources.materialized_review_snapshot.fresh, true);
   assert.equal(proof.evidence_sources.materialized_review_snapshot.age_minutes, 10);
   assert.equal(proof.evidence_sources.dog_catch_goal.pass, true);

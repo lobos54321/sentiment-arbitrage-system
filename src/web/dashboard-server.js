@@ -1901,6 +1901,25 @@ export function buildV27KpiProofStatus(options = {}) {
     },
   }) : null;
   const dogCatchBlockers = Array.isArray(dogCatchGoal?.goal?.blockers) ? dogCatchGoal.goal.blockers : [];
+  const metricValue = (value, digits = 4) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? roundNumber(n, digits) : null;
+  };
+  const proofMetrics = {
+    clean_gold_silver_capture_rate: metricValue(dogCatchGoal?.goal?.clean_gold_silver_capture_rate),
+    peak_win_rate: metricValue(dogCatchGoal?.trades?.peak_win_rate),
+    realized_roi: metricValue(dogCatchGoal?.trades?.realized_roi),
+    eligible_gold_silver_unique: metricValue(dogCatchGoal?.goal?.eligible_gold_silver_unique, 0),
+    captured_gold_silver_unique: metricValue(dogCatchGoal?.goal?.captured_gold_silver_unique ?? dogCatchGoal?.trades?.captured_gold_silver_unique, 0),
+    missed_clean_gold_silver_unique: metricValue(dogCatchGoal?.missed?.clean_gold_silver_unique, 0),
+    fills: metricValue(dogCatchGoal?.trades?.fills, 0),
+    closed: metricValue(dogCatchGoal?.trades?.closed, 0),
+  };
+  const proofTargetGaps = {
+    clean_gold_silver_capture_rate: proofMetrics.clean_gold_silver_capture_rate == null ? null : roundNumber(targetCatchRate - proofMetrics.clean_gold_silver_capture_rate, 4),
+    peak_win_rate: proofMetrics.peak_win_rate == null ? null : roundNumber(targetWinRate - proofMetrics.peak_win_rate, 4),
+    realized_roi: proofMetrics.realized_roi == null ? null : roundNumber(targetRoi - proofMetrics.realized_roi, 4),
+  };
   const modeNormalTinyReady = Boolean(modeReadiness?.health?.normal_tiny_ready);
   const denominatorDashboardSafe = Boolean(denominatorHealth?.dashboard_safe);
   const blockers = [];
@@ -1948,6 +1967,8 @@ export function buildV27KpiProofStatus(options = {}) {
         dog_peak_threshold: dogPeakRatio,
         win_peak_threshold: winPeakRatio,
       },
+      metrics: proofMetrics,
+      target_gaps: proofTargetGaps,
     },
     evidence_sources: {
       protected_paper_endpoints: {

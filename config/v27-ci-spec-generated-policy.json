@@ -164,7 +164,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-26T00:00:00Z",
-      "impact_hash": "2cc708f6edecb7ba2c6f5f302f4e3d2a02f7db2d726e68135ca3ad7c38c0a507",
+      "impact_hash": "13772a9ec22b58c44870151cf9931353c3a07aa2684c5305862d795e68c292f6",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -208,8 +208,8 @@
         "test_v27_mode_gate_scope_audit.py": "1a28c3050962e089887b3048e02d41f5f9498e42e80c0ff501d3d262a65226cf",
         "test_v27_mode_readiness.py": "4dd8f1af023f235cbcd7a0605e1d8675451d658647046cdf15507cd4f7b7ffd4",
         "test_v27_denominator_projection.py": "478d3efe02c6c559a7ef820cddf50c6fa58ee898becd03e032e85893e7d7e3a6",
-        "src/web/dashboard-server.js": "9012704bad33ae7e98c7a02b0db692acf8a95cd372fd15ac601f0d0cfd50c203",
-        "tests/dashboard-heavy-api-utils.test.mjs": "d2c5dc9aa3f9947b06bd56654e2d7e1a8bc3fe3261c10be31851abfaa2a0356d",
+        "src/web/dashboard-server.js": "1b9449071ce439590aae3b69c4a88f72f2991a39259ac331e0e976c909100e95",
+        "tests/dashboard-heavy-api-utils.test.mjs": "0563ecb707f2509c06b677bcec79110e1986e525e408e59d92a9f5c0abc0a5d5",
         "config/v27-access-control-policy.json": "f130c5b0c253fcb91eb0cdd8007bcb51751ee599640bd7852a96030fd29da348",
         "config/v27-entry-point-inventory.json": "96d22ed8d2c15dae85f090192ef23d284c7f8cbf0b9831f1694a232c5c5dc055"
       },
