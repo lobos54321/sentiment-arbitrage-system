@@ -103,6 +103,16 @@ NOTIFICATION_CHANNEL_INTEGRITY_EVENT_TYPE = "notification_channel_integrity_reco
 RUNBOOK_FRESHNESS_EVENT_TYPE = "runbook_freshness_recorded"
 METRIC_BACKFILL_IMPACT_EVENT_TYPE = "metric_backfill_impact_recorded"
 SELECTION_BIAS_DIAGNOSTIC_EVENT_TYPE = "selection_bias_diagnostic_recorded"
+ACCESS_REVIEW_EVENT_TYPE = "access_review_recorded"
+APPROVAL_WORKFLOW_EVENT_TYPE = "approval_workflow_recorded"
+BREAK_GLASS_ACCESS_EVENT_TYPE = "break_glass_access_recorded"
+CSV_SPREADSHEET_INJECTION_EVENT_TYPE = "csv_spreadsheet_injection_recorded"
+EVIDENCE_EXTERNAL_ANCHORING_EVENT_TYPE = "evidence_external_anchoring_recorded"
+EXPERIMENT_ASSIGNMENT_IMMUTABILITY_EVENT_TYPE = "experiment_assignment_immutability_recorded"
+INCIDENT_POSTMORTEM_EVENT_TYPE = "incident_postmortem_recorded"
+LABEL_DISPUTE_RESOLUTION_EVENT_TYPE = "label_dispute_resolution_recorded"
+NEGATIVE_CONTROL_EVENT_TYPE = "negative_control_recorded"
+OPERATOR_TRAINING_CERTIFICATION_EVENT_TYPE = "operator_training_certification_recorded"
 OUTCOME_WINDOW_CLOSE_VERSION = "v2.7.0.outcome_window_close.v2"
 LEGACY_OUTCOME_WINDOW_ORDER_TOLERANCE_SEC = 1.0
 DENOMINATOR_SEED_EVENT_TYPES = {
@@ -172,6 +182,108 @@ DENOMINATOR_SEED_EVENT_TYPES = {
     RUNBOOK_FRESHNESS_EVENT_TYPE,
     METRIC_BACKFILL_IMPACT_EVENT_TYPE,
     SELECTION_BIAS_DIAGNOSTIC_EVENT_TYPE,
+    ACCESS_REVIEW_EVENT_TYPE,
+    APPROVAL_WORKFLOW_EVENT_TYPE,
+    BREAK_GLASS_ACCESS_EVENT_TYPE,
+    CSV_SPREADSHEET_INJECTION_EVENT_TYPE,
+    EVIDENCE_EXTERNAL_ANCHORING_EVENT_TYPE,
+    EXPERIMENT_ASSIGNMENT_IMMUTABILITY_EVENT_TYPE,
+    INCIDENT_POSTMORTEM_EVENT_TYPE,
+    LABEL_DISPUTE_RESOLUTION_EVENT_TYPE,
+    NEGATIVE_CONTROL_EVENT_TYPE,
+    OPERATOR_TRAINING_CERTIFICATION_EVENT_TYPE,
+}
+FINAL_NORMAL_TINY_CONTRACT_SPECS = {
+    "AccessReviewContract": {
+        "event_type": ACCESS_REVIEW_EVENT_TYPE,
+        "key_field": "review_id",
+        "slug": "access_review",
+        "plural": "access_reviews",
+        "required_fields": ("review_id", "operator_id", "scope", "privilege_delta", "reviewed_at"),
+        "projection_version": "v2.7.0.access_review.v1",
+    },
+    "ApprovalWorkflowContract": {
+        "event_type": APPROVAL_WORKFLOW_EVENT_TYPE,
+        "key_field": "approval_id",
+        "slug": "approval_workflow",
+        "plural": "approval_workflows",
+        "required_fields": ("approval_id", "mutation_id", "required_approvers", "approval_state", "approved_at"),
+        "projection_version": "v2.7.0.approval_workflow.v1",
+    },
+    "BreakGlassAccessContract": {
+        "event_type": BREAK_GLASS_ACCESS_EVENT_TYPE,
+        "key_field": "break_glass_id",
+        "slug": "break_glass_access",
+        "plural": "break_glass_accesses",
+        "required_fields": ("break_glass_id", "operator_id", "reason", "expires_at", "audit_event_id"),
+        "projection_version": "v2.7.0.break_glass_access.v1",
+    },
+    "CSVSpreadsheetInjectionContract": {
+        "event_type": CSV_SPREADSHEET_INJECTION_EVENT_TYPE,
+        "key_field": "csv_injection_key",
+        "slug": "csv_spreadsheet_injection",
+        "plural": "csv_spreadsheet_injections",
+        "required_fields": ("export_id", "column_name", "unsafe_prefix_detected", "sanitization_policy", "checked_at"),
+        "projection_version": "v2.7.0.csv_spreadsheet_injection.v1",
+    },
+    "EvidenceExternalAnchoringContract": {
+        "event_type": EVIDENCE_EXTERNAL_ANCHORING_EVENT_TYPE,
+        "key_field": "anchor_id",
+        "slug": "evidence_external_anchoring",
+        "plural": "evidence_external_anchorings",
+        "required_fields": ("anchor_id", "anchored_hash", "anchor_target", "anchored_at"),
+        "projection_version": "v2.7.0.evidence_external_anchoring.v1",
+    },
+    "ExperimentAssignmentImmutabilityContract": {
+        "event_type": EXPERIMENT_ASSIGNMENT_IMMUTABILITY_EVENT_TYPE,
+        "key_field": "assignment_id",
+        "slug": "experiment_assignment_immutability",
+        "plural": "experiment_assignment_immutabilities",
+        "required_fields": (
+            "assignment_id",
+            "randomization_unit",
+            "original_assignment_hash",
+            "attempted_change_hash",
+            "detected_at",
+        ),
+        "projection_version": "v2.7.0.experiment_assignment_immutability.v1",
+    },
+    "IncidentPostmortemContract": {
+        "event_type": INCIDENT_POSTMORTEM_EVENT_TYPE,
+        "key_field": "postmortem_id",
+        "slug": "incident_postmortem",
+        "plural": "incident_postmortems",
+        "required_fields": ("postmortem_id", "incident_id", "root_cause", "corrective_actions", "approved_at"),
+        "projection_version": "v2.7.0.incident_postmortem.v1",
+    },
+    "LabelDisputeResolutionContract": {
+        "event_type": LABEL_DISPUTE_RESOLUTION_EVENT_TYPE,
+        "key_field": "dispute_id",
+        "slug": "label_dispute_resolution",
+        "plural": "label_dispute_resolutions",
+        "required_fields": ("dispute_id", "label_id", "resolution_action", "resolved_at"),
+        "projection_version": "v2.7.0.label_dispute_resolution.v1",
+    },
+    "NegativeControlContract": {
+        "event_type": NEGATIVE_CONTROL_EVENT_TYPE,
+        "key_field": "control_id",
+        "slug": "negative_control",
+        "plural": "negative_controls",
+        "required_fields": ("control_id", "control_group", "expected_no_effect_metric", "observed_effect", "checked_at"),
+        "projection_version": "v2.7.0.negative_control.v1",
+    },
+    "OperatorTrainingCertificationContract": {
+        "event_type": OPERATOR_TRAINING_CERTIFICATION_EVENT_TYPE,
+        "key_field": "operator_training_key",
+        "slug": "operator_training_certification",
+        "plural": "operator_training_certifications",
+        "required_fields": ("operator_id", "training_module", "certification_status", "expires_at", "checked_at"),
+        "projection_version": "v2.7.0.operator_training_certification.v1",
+    },
+}
+FINAL_NORMAL_TINY_EVENT_SPECS = {
+    spec["event_type"]: {"contract_id": contract_id, **spec}
+    for contract_id, spec in FINAL_NORMAL_TINY_CONTRACT_SPECS.items()
 }
 SOURCE_REFERENCE_PRICE_EVENT_TYPES = {
     MIRRORED_DECISION_EVENT_TYPE,
@@ -979,6 +1091,171 @@ def _as_string_list(value):
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _final_normal_tiny_value(contract_id, field, bags):
+    value = _extract_scalar(bags, [(field,)])
+    if field in {"required_approvers", "corrective_actions"}:
+        return _as_string_list(value)
+    if field == "unsafe_prefix_detected":
+        return _as_bool(value)
+    if field in {"expected_no_effect_metric", "observed_effect"}:
+        return _as_float(value)
+    return value
+
+
+def _final_normal_tiny_violation_fields(contract_id, values):
+    violation_fields = []
+    for field in (
+        "reviewed_at",
+        "approved_at",
+        "expires_at",
+        "checked_at",
+        "anchored_at",
+        "detected_at",
+        "resolved_at",
+    ):
+        if field in values and values.get(field) and _timestamp_epoch_seconds(values.get(field)) is None:
+            violation_fields.append(f"{field}_parseable")
+    if contract_id == "AccessReviewContract":
+        privilege_delta = str(values.get("privilege_delta") or "").strip().lower()
+        allowed = {"none", "no_change", "reduced", "revoked", "approved", "approved_temporarily", "justified"}
+        if privilege_delta and privilege_delta not in allowed:
+            violation_fields.append("privilege_delta_unreviewed")
+    elif contract_id == "ApprovalWorkflowContract":
+        approval_state = str(values.get("approval_state") or "").strip().lower()
+        if approval_state and approval_state not in {"approved", "approved_with_controls", "pass", "passed"}:
+            violation_fields.append("approval_state_not_approved")
+    elif contract_id == "BreakGlassAccessContract":
+        reason = str(values.get("reason") or "").strip().lower()
+        if reason in {"none", "missing", "test", "unknown"}:
+            violation_fields.append("break_glass_reason_unacceptable")
+    elif contract_id == "CSVSpreadsheetInjectionContract":
+        sanitization_policy = str(values.get("sanitization_policy") or "").strip().lower()
+        safe_policies = {"escape_formula_prefix", "quote_and_escape", "reject_export", "block_export", "sanitize_formula"}
+        if sanitization_policy and sanitization_policy not in safe_policies:
+            violation_fields.append("sanitization_policy_unsafe")
+    elif contract_id == "EvidenceExternalAnchoringContract":
+        if values.get("anchored_hash") and not _valid_sha256_hex(values.get("anchored_hash")):
+            violation_fields.append("anchored_hash_sha256")
+    elif contract_id == "ExperimentAssignmentImmutabilityContract":
+        for field in ("original_assignment_hash", "attempted_change_hash"):
+            if values.get(field) and not _valid_sha256_hex(values.get(field)):
+                violation_fields.append(f"{field}_sha256")
+        if (
+            values.get("original_assignment_hash")
+            and values.get("attempted_change_hash")
+            and values.get("original_assignment_hash") == values.get("attempted_change_hash")
+        ):
+            violation_fields.append("attempted_change_matches_original")
+    elif contract_id == "IncidentPostmortemContract":
+        root_cause = str(values.get("root_cause") or "").strip().lower()
+        if root_cause in {"none", "missing", "unknown", "tbd"}:
+            violation_fields.append("root_cause_unresolved")
+    elif contract_id == "LabelDisputeResolutionContract":
+        resolution_action = str(values.get("resolution_action") or "").strip().lower()
+        allowed = {"uphold", "relabel", "quarantine", "supersede", "reject_dispute", "remove_label"}
+        if resolution_action and resolution_action not in allowed:
+            violation_fields.append("resolution_action_unacceptable")
+    elif contract_id == "NegativeControlContract":
+        expected = values.get("expected_no_effect_metric")
+        observed = values.get("observed_effect")
+        if expected is not None and (not math.isfinite(expected) or expected < 0):
+            violation_fields.append("expected_no_effect_metric_nonnegative")
+        if observed is not None and not math.isfinite(observed):
+            violation_fields.append("observed_effect_finite")
+        if expected is not None and observed is not None and math.isfinite(expected) and math.isfinite(observed):
+            if abs(observed) > expected:
+                violation_fields.append("observed_effect_exceeds_negative_control")
+    elif contract_id == "OperatorTrainingCertificationContract":
+        certification_status = str(values.get("certification_status") or "").strip().lower()
+        if certification_status and certification_status not in {"certified", "current", "pass", "passed", "valid"}:
+            violation_fields.append("certification_status_not_current")
+        expires_ts = _timestamp_epoch_seconds(values.get("expires_at"))
+        checked_ts = _timestamp_epoch_seconds(values.get("checked_at"))
+        if expires_ts is not None and checked_ts is not None and expires_ts <= checked_ts:
+            violation_fields.append("certification_expired")
+    return sorted(set(violation_fields))
+
+
+def _extract_final_normal_tiny_contract(event, bags, spec):
+    contract_id = spec["contract_id"]
+    values = {
+        field: _final_normal_tiny_value(contract_id, field, bags)
+        for field in spec["required_fields"]
+    }
+    if contract_id == "CSVSpreadsheetInjectionContract":
+        values["csv_injection_key"] = ":".join(
+            [
+                str(values.get("export_id") or "unknown_export"),
+                str(values.get("column_name") or "unknown_column"),
+            ]
+        )
+    if contract_id == "OperatorTrainingCertificationContract":
+        values["operator_training_key"] = ":".join(
+            [
+                str(values.get("operator_id") or "unknown_operator"),
+                str(values.get("training_module") or "unknown_module"),
+            ]
+        )
+    missing_fields = []
+    for field in spec["required_fields"]:
+        value = values.get(field)
+        if value is None or value == [] or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field)
+    violation_fields = _final_normal_tiny_violation_fields(contract_id, values)
+    slug = spec["slug"]
+    return {
+        **values,
+        "missing_fields": sorted(set(missing_fields)),
+        "violation_fields": violation_fields,
+        f"{slug}_valid": not missing_fields and not violation_fields,
+        "source_event_id": event.get("event_id"),
+        "global_seq": event.get("global_seq"),
+    }
+
+
+def _compact_final_normal_tiny_record(item, key_field):
+    compact = {
+        key_field: item.get(key_field),
+        "missing_fields": item.get("missing_fields") or [],
+        "violation_fields": item.get("violation_fields") or [],
+        "source_event_id": item.get("source_event_id"),
+        "global_seq": item.get("global_seq"),
+    }
+    return {key: value for key, value in compact.items() if value not in (None, [], "")}
+
+
+def _final_normal_tiny_contract_evidence(records_by_contract):
+    records_by_contract = records_by_contract or {}
+    evidence = {}
+    for contract_id, spec in FINAL_NORMAL_TINY_CONTRACT_SPECS.items():
+        raw_records = records_by_contract.get(contract_id) or []
+        records = _latest_by_key(raw_records, spec["key_field"])
+        malformed = [item for item in records if item.get("missing_fields")]
+        violations = [item for item in records if item.get("missing_fields") or item.get("violation_fields")]
+        slug = spec["slug"]
+        plural = spec["plural"]
+        evidence[contract_id] = {
+            f"eligible_{slug}_records": len(records),
+            f"{slug}_observation_count": len(raw_records),
+            f"current_{slug}_count": len(records),
+            f"superseded_{slug}_event_count": max(0, len(raw_records) - len(records)),
+            f"valid_{slug}_count": sum(1 for item in records if item.get(f"{slug}_valid") is True),
+            "malformed_count": len(malformed),
+            f"malformed_{plural}": [
+                _compact_final_normal_tiny_record(item, spec["key_field"])
+                for item in malformed[:10]
+            ],
+            f"{slug}_violation_count": len(violations),
+            f"{slug}_violations": [
+                _compact_final_normal_tiny_record(item, spec["key_field"])
+                for item in violations[:10]
+            ],
+            f"{slug}_ids": sorted({item.get(spec["key_field"]) for item in records if item.get(spec["key_field"])}),
+            f"{slug}_projection_version": spec["projection_version"],
+        }
+    return evidence
 
 
 def _extract_raw_provider_evidence_contract(event, bags):
@@ -4373,6 +4650,7 @@ def _contract_evidence_from_records(
     runbook_freshnesses=None,
     metric_backfill_impacts=None,
     selection_bias_diagnostics=None,
+    final_normal_tiny_contracts=None,
 ):
     runtime_recovery_controls = runtime_recovery_controls or []
     standalone_no_fill_outcomes = standalone_no_fill_outcomes or []
@@ -5969,7 +6247,9 @@ def _contract_evidence_from_records(
         worker_fleet_consistency_violations.append("mixed_runtime_config_hash")
     if len(worker_fleet_hashes["policy_bundle_ids"]) > 1:
         worker_fleet_consistency_violations.append("mixed_policy_bundle_id")
+    final_normal_tiny_contract_evidence = _final_normal_tiny_contract_evidence(final_normal_tiny_contracts)
     return {
+        **final_normal_tiny_contract_evidence,
         "SignalCreditAssignmentContract": {
             "eligible_d0_records": len(d0_records),
             "missing_count": len(signal_credit_missing),
@@ -8375,6 +8655,10 @@ def build_denominator_projection(
         "records_hash_material_version": None,
         "records_hash": None,
     }
+    for contract_id, spec in FINAL_NORMAL_TINY_CONTRACT_SPECS.items():
+        projection[f"{spec['event_type']}_events"] = 0
+        projection["contract_evidence"].setdefault(contract_id, {})
+        projection["health"][f"{spec['slug']}_ok"] = False
 
     try:
         event_log_summary = event_log.summary()
@@ -8443,6 +8727,10 @@ def build_denominator_projection(
     runbook_freshnesses = []
     metric_backfill_impacts = []
     selection_bias_diagnostics = []
+    final_normal_tiny_contracts = {
+        contract_id: []
+        for contract_id in FINAL_NORMAL_TINY_CONTRACT_SPECS
+    }
     resolved_pool_by_identity = {}
     window_start = None
     window_end = None
@@ -8787,6 +9075,13 @@ def build_denominator_projection(
             if selection_bias_diagnostic:
                 selection_bias_diagnostics.append(selection_bias_diagnostic)
             continue
+        final_normal_tiny_spec = FINAL_NORMAL_TINY_EVENT_SPECS.get(event.get("event_type"))
+        if final_normal_tiny_spec:
+            projection[f"{final_normal_tiny_spec['event_type']}_events"] += 1
+            final_normal_tiny_contract = _extract_final_normal_tiny_contract(event, _payload_bags(event), final_normal_tiny_spec)
+            if final_normal_tiny_contract:
+                final_normal_tiny_contracts[final_normal_tiny_spec["contract_id"]].append(final_normal_tiny_contract)
+            continue
         fact = _extract_decision_fact(event)
         fact["seed_event_type"] = event.get("event_type")
         if not fact.get("token_ca"):
@@ -9003,6 +9298,7 @@ def build_denominator_projection(
         runbook_freshnesses=runbook_freshnesses,
         metric_backfill_impacts=metric_backfill_impacts,
         selection_bias_diagnostics=selection_bias_diagnostics,
+        final_normal_tiny_contracts=final_normal_tiny_contracts,
     )
     if progress_callback:
         progress_callback(
@@ -9461,6 +9757,15 @@ def build_denominator_projection(
         and contract_evidence["SelectionBiasDiagnosticContract"]["malformed_count"] == 0
         and contract_evidence["SelectionBiasDiagnosticContract"]["selection_bias_diagnostic_violation_count"] == 0
     )
+    for contract_id, spec in FINAL_NORMAL_TINY_CONTRACT_SPECS.items():
+        slug = spec["slug"]
+        evidence = contract_evidence[contract_id]
+        projection["health"][f"{slug}_ok"] = (
+            evidence[f"eligible_{slug}_records"] > 0
+            and evidence[f"valid_{slug}_count"] > 0
+            and evidence["malformed_count"] == 0
+            and evidence[f"{slug}_violation_count"] == 0
+        )
     if projection["dirty_events"]:
         projection["health"]["status"] = "seed_partial_dirty_events"
     elif projection["dirty_records"]:

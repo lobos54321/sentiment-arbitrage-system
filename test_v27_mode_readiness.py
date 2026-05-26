@@ -877,6 +877,128 @@ def append_release_rollback_metric_trust_events(event_log_dir):
     )
 
 
+def append_final_normal_tiny_blocking_events(event_log_dir):
+    log = V27EventLog(event_log_dir)
+    log.append_event(
+        event_type="access_review_recorded",
+        aggregate_id="access_review:access-review-unit-v1",
+        idempotency_key="access_review:access-review-unit-v1:operator-unit",
+        payload={
+            "review_id": "access-review-unit-v1",
+            "operator_id": "operator-unit",
+            "scope": "dashboard:admin_mutation",
+            "privilege_delta": "reduced",
+            "reviewed_at": "2026-01-15T00:37:00Z",
+        },
+    )
+    log.append_event(
+        event_type="approval_workflow_recorded",
+        aggregate_id="approval_workflow:approval-unit-v1",
+        idempotency_key="approval_workflow:approval-unit-v1:mutation-unit-v1",
+        payload={
+            "approval_id": "approval-unit-v1",
+            "mutation_id": "mutation-unit-v1",
+            "required_approvers": ["runtime-owner"],
+            "approval_state": "approved",
+            "approved_at": "2026-01-15T00:38:00Z",
+        },
+    )
+    log.append_event(
+        event_type="break_glass_access_recorded",
+        aggregate_id="break_glass_access:break-glass-unit-v1",
+        idempotency_key="break_glass_access:break-glass-unit-v1:audit-unit-v1",
+        payload={
+            "break_glass_id": "break-glass-unit-v1",
+            "operator_id": "operator-unit",
+            "reason": "restore_paper_read_model",
+            "expires_at": "2026-01-15T01:39:00Z",
+            "audit_event_id": "audit-unit-v1",
+        },
+    )
+    log.append_event(
+        event_type="csv_spreadsheet_injection_recorded",
+        aggregate_id="csv_spreadsheet_injection:export-unit-v1:symbol",
+        idempotency_key="csv_spreadsheet_injection:export-unit-v1:symbol",
+        payload={
+            "export_id": "export-unit-v1",
+            "column_name": "symbol",
+            "unsafe_prefix_detected": True,
+            "sanitization_policy": "escape_formula_prefix",
+            "checked_at": "2026-01-15T00:40:00Z",
+        },
+    )
+    log.append_event(
+        event_type="evidence_external_anchoring_recorded",
+        aggregate_id="evidence_external_anchoring:anchor-unit-v1",
+        idempotency_key="evidence_external_anchoring:anchor-unit-v1",
+        payload={
+            "anchor_id": "anchor-unit-v1",
+            "anchored_hash": sha256_hex({"anchor_id": "anchor-unit-v1", "target": "v27_denominator_projection"}),
+            "anchor_target": "v27_denominator_projection",
+            "anchored_at": "2026-01-15T00:41:00Z",
+        },
+    )
+    log.append_event(
+        event_type="experiment_assignment_immutability_recorded",
+        aggregate_id="experiment_assignment_immutability:assignment-unit-v1",
+        idempotency_key="experiment_assignment_immutability:assignment-unit-v1",
+        payload={
+            "assignment_id": "assignment-unit-v1",
+            "randomization_unit": "normal_tiny_promotion_policy",
+            "original_assignment_hash": sha256_hex({"assignment_id": "assignment-unit-v1", "arm": "control"}),
+            "attempted_change_hash": sha256_hex({"assignment_id": "assignment-unit-v1", "arm": "treatment"}),
+            "detected_at": "2026-01-15T00:42:00Z",
+        },
+    )
+    log.append_event(
+        event_type="incident_postmortem_recorded",
+        aggregate_id="incident_postmortem:postmortem-unit-v1",
+        idempotency_key="incident_postmortem:postmortem-unit-v1:incident-unit-v1",
+        payload={
+            "postmortem_id": "postmortem-unit-v1",
+            "incident_id": "incident-unit-v1",
+            "root_cause": "read_model_refresh_regression",
+            "corrective_actions": ["add_scope_audit_regression"],
+            "approved_at": "2026-01-15T00:43:00Z",
+        },
+    )
+    log.append_event(
+        event_type="label_dispute_resolution_recorded",
+        aggregate_id="label_dispute_resolution:label-dispute-unit-v1",
+        idempotency_key="label_dispute_resolution:label-dispute-unit-v1:quarantine",
+        payload={
+            "dispute_id": "label-dispute-unit-v1",
+            "label_id": "label-unit-v1",
+            "resolution_action": "quarantine",
+            "resolved_at": "2026-01-15T00:44:00Z",
+        },
+    )
+    log.append_event(
+        event_type="negative_control_recorded",
+        aggregate_id="negative_control:negative-control-unit-v1",
+        idempotency_key="negative_control:negative-control-unit-v1:0.002",
+        payload={
+            "control_id": "negative-control-unit-v1",
+            "control_group": "holdout",
+            "expected_no_effect_metric": 0.01,
+            "observed_effect": 0.002,
+            "checked_at": "2026-01-15T00:45:00Z",
+        },
+    )
+    log.append_event(
+        event_type="operator_training_certification_recorded",
+        aggregate_id="operator_training_certification:operator-unit:normal_tiny_runtime_ops",
+        idempotency_key="operator_training_certification:operator-unit:normal_tiny_runtime_ops",
+        payload={
+            "operator_id": "operator-unit",
+            "training_module": "normal_tiny_runtime_ops",
+            "certification_status": "certified",
+            "expires_at": "2026-02-15T00:46:00Z",
+            "checked_at": "2026-01-15T00:46:00Z",
+        },
+    )
+
+
 def append_fee_provider_and_risk_events(event_log_dir):
     fee_version = "fee-v1"
     V27EventLog(event_log_dir).append_event(
@@ -1993,6 +2115,57 @@ def test_mode_readiness_consumes_release_rollback_metric_trust_for_normal_tiny(t
     assert matrix["contract_statuses"]["MetricBackfillImpactContract"]["evidence"]["valid_metric_backfill_impact_count"] == 1
     assert (
         matrix["contract_statuses"]["SelectionBiasDiagnosticContract"]["evidence"]["valid_selection_bias_diagnostic_count"]
+        == 1
+    )
+    assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+
+
+def test_mode_readiness_consumes_final_normal_tiny_blocking_contracts(tmp_path):
+    event_log_dir = tmp_path / "events"
+    out_dir = tmp_path / "read_models"
+    append_seed_events(event_log_dir)
+    append_final_normal_tiny_blocking_events(event_log_dir)
+    refresh_denominator_read_model(
+        event_log_dir=event_log_dir,
+        projection_path=out_dir / "denominator_projection.json",
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        health_path=out_dir / "denominator_freshness.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    matrix = build_mode_readiness_matrix(
+        event_log_dir=event_log_dir,
+        snapshot_path=out_dir / "denominator_snapshot.json",
+        max_snapshot_age_ms=300_000,
+    )
+
+    for contract_id in (
+        "AccessReviewContract",
+        "ApprovalWorkflowContract",
+        "BreakGlassAccessContract",
+        "CSVSpreadsheetInjectionContract",
+        "EvidenceExternalAnchoringContract",
+        "ExperimentAssignmentImmutabilityContract",
+        "IncidentPostmortemContract",
+        "LabelDisputeResolutionContract",
+        "NegativeControlContract",
+        "OperatorTrainingCertificationContract",
+    ):
+        assert matrix["contract_statuses"][contract_id]["status"] == "pass"
+        assert contract_id not in matrix["modes"]["normal_tiny"]["blocking_contracts"]
+    assert matrix["contract_statuses"]["AccessReviewContract"]["evidence"]["valid_access_review_count"] == 1
+    assert matrix["contract_statuses"]["ApprovalWorkflowContract"]["evidence"]["valid_approval_workflow_count"] == 1
+    assert (
+        matrix["contract_statuses"]["EvidenceExternalAnchoringContract"]["evidence"][
+            "valid_evidence_external_anchoring_count"
+        ]
+        == 1
+    )
+    assert matrix["contract_statuses"]["NegativeControlContract"]["evidence"]["valid_negative_control_count"] == 1
+    assert (
+        matrix["contract_statuses"]["OperatorTrainingCertificationContract"]["evidence"][
+            "valid_operator_training_certification_count"
+        ]
         == 1
     )
     assert "RandomnessControlContract" in matrix["modes"]["normal_tiny"]["blocking_contracts"]

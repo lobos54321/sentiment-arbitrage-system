@@ -7,7 +7,7 @@ from v27_mode_readiness import CATALOG_PATH, MODE_ORDER, MODE_REQUIREMENTS, buil
 from v27_spec_validate import load_json  # noqa: E402
 
 
-def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
+def test_mode_gate_scope_audit_reports_final_normal_tiny_scope_covered():
     audit = build_mode_gate_scope_audit(load_json(CATALOG_PATH), MODE_REQUIREMENTS, MODE_ORDER)
 
     normal = audit["final_scopes"]["normal_tiny_blocking"]
@@ -20,10 +20,10 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
         | set(MODE_REQUIREMENTS["ultra_tiny"])
         | set(MODE_REQUIREMENTS["normal_tiny"])
     )
-    assert normal["scope_complete"] is False
+    assert normal["scope_complete"] is True
     assert ultra["missing_count"] == 0
     assert shadow["missing_count"] == 0
-    assert normal["missing_count"] == 10
+    assert normal["missing_count"] == 0
     assert mvp["missing_count"] == 0
     assert "AccessControlContract" not in normal["missing_contracts"]
     assert "AggregateBoundaryContract" not in normal["missing_contracts"]
@@ -137,7 +137,17 @@ def test_mode_gate_scope_audit_flags_final_normal_tiny_as_partial():
     assert "RunbookFreshnessContract" not in normal["missing_contracts"]
     assert "MetricBackfillImpactContract" not in normal["missing_contracts"]
     assert "SelectionBiasDiagnosticContract" not in normal["missing_contracts"]
-    assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is False
+    assert "AccessReviewContract" not in normal["missing_contracts"]
+    assert "ApprovalWorkflowContract" not in normal["missing_contracts"]
+    assert "BreakGlassAccessContract" not in normal["missing_contracts"]
+    assert "CSVSpreadsheetInjectionContract" not in normal["missing_contracts"]
+    assert "EvidenceExternalAnchoringContract" not in normal["missing_contracts"]
+    assert "ExperimentAssignmentImmutabilityContract" not in normal["missing_contracts"]
+    assert "IncidentPostmortemContract" not in normal["missing_contracts"]
+    assert "LabelDisputeResolutionContract" not in normal["missing_contracts"]
+    assert "NegativeControlContract" not in normal["missing_contracts"]
+    assert "OperatorTrainingCertificationContract" not in normal["missing_contracts"]
+    assert audit["health"]["final_normal_tiny_blocking_scope_complete"] is True
 
 
 def test_mode_gate_scope_audit_accepts_synthetic_complete_gate():
@@ -174,7 +184,7 @@ def test_mode_readiness_exposes_current_gate_vs_final_spec_scope(tmp_path):
     )
 
     assert matrix["gate_scope"]["scope_audit_schema_version"] == "v2.7.0.mode_gate_scope_audit.v1"
-    assert matrix["gate_scope"]["health"]["final_normal_tiny_blocking_scope_complete"] is False
+    assert matrix["gate_scope"]["health"]["final_normal_tiny_blocking_scope_complete"] is True
     assert matrix["health"]["final_spec_normal_tiny_ready"] is False
-    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 10
+    assert matrix["health"]["final_spec_normal_tiny_missing_count"] == 0
     assert matrix["health"]["current_gate_normal_tiny_ready"] is False

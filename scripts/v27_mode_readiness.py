@@ -205,12 +205,49 @@ MODE_REQUIREMENTS = {
         "RunbookFreshnessContract",
         "MetricBackfillImpactContract",
         "SelectionBiasDiagnosticContract",
+        "AccessReviewContract",
+        "ApprovalWorkflowContract",
+        "BreakGlassAccessContract",
+        "CSVSpreadsheetInjectionContract",
+        "EvidenceExternalAnchoringContract",
+        "ExperimentAssignmentImmutabilityContract",
+        "IncidentPostmortemContract",
+        "LabelDisputeResolutionContract",
+        "NegativeControlContract",
+        "OperatorTrainingCertificationContract",
         "EvidenceEligibilityMatrix",
         "TopFixQueueContract",
         "SafetyCaseContract",
         "WaiverPolicyContract",
         "ProjectStopLossContract",
     ],
+}
+FINAL_NORMAL_TINY_STATUS_REASONS = {
+    "AccessReviewContract": ("access_review_ok", "access_review_missing_malformed_or_unreviewed"),
+    "ApprovalWorkflowContract": ("approval_workflow_ok", "approval_workflow_missing_malformed_or_unapproved"),
+    "BreakGlassAccessContract": ("break_glass_access_ok", "break_glass_access_missing_malformed_or_unjustified"),
+    "CSVSpreadsheetInjectionContract": (
+        "csv_spreadsheet_injection_ok",
+        "csv_spreadsheet_injection_missing_malformed_or_unsafe",
+    ),
+    "EvidenceExternalAnchoringContract": (
+        "evidence_external_anchoring_ok",
+        "evidence_external_anchoring_missing_malformed_or_unanchored",
+    ),
+    "ExperimentAssignmentImmutabilityContract": (
+        "experiment_assignment_immutability_ok",
+        "experiment_assignment_immutability_missing_malformed_or_mutable",
+    ),
+    "IncidentPostmortemContract": ("incident_postmortem_ok", "incident_postmortem_missing_malformed_or_unapproved"),
+    "LabelDisputeResolutionContract": (
+        "label_dispute_resolution_ok",
+        "label_dispute_resolution_missing_malformed_or_unresolved",
+    ),
+    "NegativeControlContract": ("negative_control_ok", "negative_control_missing_malformed_or_effect_detected"),
+    "OperatorTrainingCertificationContract": (
+        "operator_training_certification_ok",
+        "operator_training_certification_missing_malformed_or_expired",
+    ),
 }
 
 
@@ -905,6 +942,14 @@ def build_contract_statuses(
         "selection_bias_diagnostic_missing_malformed_or_biased",
         selection_bias_diagnostic_evidence,
     )
+    for contract_id, (health_key, reason) in FINAL_NORMAL_TINY_STATUS_REASONS.items():
+        evidence = contract_evidence.get(contract_id) or {}
+        statuses[contract_id] = _status(
+            contract_id,
+            "pass" if projection_built and projection_health.get(health_key) else "missing_evidence",
+            reason,
+            evidence,
+        )
     idempotency_evidence = contract_evidence.get("IdempotencyContract") or {}
     statuses["IdempotencyContract"] = _status(
         "IdempotencyContract",

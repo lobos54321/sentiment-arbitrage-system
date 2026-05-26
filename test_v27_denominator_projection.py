@@ -1457,6 +1457,244 @@ def append_selection_bias_diagnostic(
     )
 
 
+def append_access_review(
+    log,
+    *,
+    review_id="access-review-unit-v1",
+    operator_id="operator-unit",
+    scope="dashboard:admin_mutation",
+    privilege_delta="reduced",
+    reviewed_at="2026-01-15T00:37:00Z",
+):
+    payload = {
+        "review_id": review_id,
+        "operator_id": operator_id,
+        "scope": scope,
+        "privilege_delta": privilege_delta,
+        "reviewed_at": reviewed_at,
+    }
+    return log.append_event(
+        event_type="access_review_recorded",
+        aggregate_id=f"access_review:{review_id}",
+        idempotency_key=f"access_review:{review_id}:{operator_id}",
+        payload=payload,
+    )
+
+
+def append_approval_workflow(
+    log,
+    *,
+    approval_id="approval-unit-v1",
+    mutation_id="mutation-unit-v1",
+    required_approvers=None,
+    approval_state="approved",
+    approved_at="2026-01-15T00:38:00Z",
+):
+    payload = {
+        "approval_id": approval_id,
+        "mutation_id": mutation_id,
+        "required_approvers": required_approvers if required_approvers is not None else ["runtime-owner"],
+        "approval_state": approval_state,
+        "approved_at": approved_at,
+    }
+    return log.append_event(
+        event_type="approval_workflow_recorded",
+        aggregate_id=f"approval_workflow:{approval_id}",
+        idempotency_key=f"approval_workflow:{approval_id}:{mutation_id}",
+        payload=payload,
+    )
+
+
+def append_break_glass_access(
+    log,
+    *,
+    break_glass_id="break-glass-unit-v1",
+    operator_id="operator-unit",
+    reason="restore_paper_read_model",
+    expires_at="2026-01-15T01:39:00Z",
+    audit_event_id="audit-unit-v1",
+):
+    payload = {
+        "break_glass_id": break_glass_id,
+        "operator_id": operator_id,
+        "reason": reason,
+        "expires_at": expires_at,
+        "audit_event_id": audit_event_id,
+    }
+    return log.append_event(
+        event_type="break_glass_access_recorded",
+        aggregate_id=f"break_glass_access:{break_glass_id}",
+        idempotency_key=f"break_glass_access:{break_glass_id}:{audit_event_id}",
+        payload=payload,
+    )
+
+
+def append_csv_spreadsheet_injection(
+    log,
+    *,
+    export_id="export-unit-v1",
+    column_name="symbol",
+    unsafe_prefix_detected=True,
+    sanitization_policy="escape_formula_prefix",
+    checked_at="2026-01-15T00:40:00Z",
+):
+    payload = {
+        "export_id": export_id,
+        "column_name": column_name,
+        "unsafe_prefix_detected": unsafe_prefix_detected,
+        "sanitization_policy": sanitization_policy,
+        "checked_at": checked_at,
+    }
+    return log.append_event(
+        event_type="csv_spreadsheet_injection_recorded",
+        aggregate_id=f"csv_spreadsheet_injection:{export_id}:{column_name}",
+        idempotency_key=f"csv_spreadsheet_injection:{export_id}:{column_name}",
+        payload=payload,
+    )
+
+
+def append_evidence_external_anchoring(
+    log,
+    *,
+    anchor_id="anchor-unit-v1",
+    anchored_hash=None,
+    anchor_target="v27_denominator_projection",
+    anchored_at="2026-01-15T00:41:00Z",
+):
+    payload = {
+        "anchor_id": anchor_id,
+        "anchored_hash": anchored_hash or sha256_hex({"anchor_id": anchor_id, "target": anchor_target}),
+        "anchor_target": anchor_target,
+        "anchored_at": anchored_at,
+    }
+    return log.append_event(
+        event_type="evidence_external_anchoring_recorded",
+        aggregate_id=f"evidence_external_anchoring:{anchor_id}",
+        idempotency_key=f"evidence_external_anchoring:{anchor_id}",
+        payload=payload,
+    )
+
+
+def append_experiment_assignment_immutability(
+    log,
+    *,
+    assignment_id="assignment-unit-v1",
+    randomization_unit="normal_tiny_promotion_policy",
+    original_assignment_hash=None,
+    attempted_change_hash=None,
+    detected_at="2026-01-15T00:42:00Z",
+):
+    original_assignment_hash = original_assignment_hash or sha256_hex({"assignment_id": assignment_id, "arm": "control"})
+    attempted_change_hash = attempted_change_hash or sha256_hex({"assignment_id": assignment_id, "arm": "treatment"})
+    payload = {
+        "assignment_id": assignment_id,
+        "randomization_unit": randomization_unit,
+        "original_assignment_hash": original_assignment_hash,
+        "attempted_change_hash": attempted_change_hash,
+        "detected_at": detected_at,
+    }
+    return log.append_event(
+        event_type="experiment_assignment_immutability_recorded",
+        aggregate_id=f"experiment_assignment_immutability:{assignment_id}",
+        idempotency_key=f"experiment_assignment_immutability:{assignment_id}",
+        payload=payload,
+    )
+
+
+def append_incident_postmortem(
+    log,
+    *,
+    postmortem_id="postmortem-unit-v1",
+    incident_id="incident-unit-v1",
+    root_cause="read_model_refresh_regression",
+    corrective_actions=None,
+    approved_at="2026-01-15T00:43:00Z",
+):
+    payload = {
+        "postmortem_id": postmortem_id,
+        "incident_id": incident_id,
+        "root_cause": root_cause,
+        "corrective_actions": corrective_actions if corrective_actions is not None else ["add_scope_audit_regression"],
+        "approved_at": approved_at,
+    }
+    return log.append_event(
+        event_type="incident_postmortem_recorded",
+        aggregate_id=f"incident_postmortem:{postmortem_id}",
+        idempotency_key=f"incident_postmortem:{postmortem_id}:{incident_id}",
+        payload=payload,
+    )
+
+
+def append_label_dispute_resolution(
+    log,
+    *,
+    dispute_id="label-dispute-unit-v1",
+    label_id="label-unit-v1",
+    resolution_action="quarantine",
+    resolved_at="2026-01-15T00:44:00Z",
+):
+    payload = {
+        "dispute_id": dispute_id,
+        "label_id": label_id,
+        "resolution_action": resolution_action,
+        "resolved_at": resolved_at,
+    }
+    return log.append_event(
+        event_type="label_dispute_resolution_recorded",
+        aggregate_id=f"label_dispute_resolution:{dispute_id}",
+        idempotency_key=f"label_dispute_resolution:{dispute_id}:{resolution_action}",
+        payload=payload,
+    )
+
+
+def append_negative_control(
+    log,
+    *,
+    control_id="negative-control-unit-v1",
+    control_group="holdout",
+    expected_no_effect_metric=0.01,
+    observed_effect=0.002,
+    checked_at="2026-01-15T00:45:00Z",
+):
+    payload = {
+        "control_id": control_id,
+        "control_group": control_group,
+        "expected_no_effect_metric": expected_no_effect_metric,
+        "observed_effect": observed_effect,
+        "checked_at": checked_at,
+    }
+    return log.append_event(
+        event_type="negative_control_recorded",
+        aggregate_id=f"negative_control:{control_id}",
+        idempotency_key=f"negative_control:{control_id}:{observed_effect}",
+        payload=payload,
+    )
+
+
+def append_operator_training_certification(
+    log,
+    *,
+    operator_id="operator-unit",
+    training_module="normal_tiny_runtime_ops",
+    certification_status="certified",
+    expires_at="2026-02-15T00:46:00Z",
+    checked_at="2026-01-15T00:46:00Z",
+):
+    payload = {
+        "operator_id": operator_id,
+        "training_module": training_module,
+        "certification_status": certification_status,
+        "expires_at": expires_at,
+        "checked_at": checked_at,
+    }
+    return log.append_event(
+        event_type="operator_training_certification_recorded",
+        aggregate_id=f"operator_training_certification:{operator_id}:{training_module}",
+        idempotency_key=f"operator_training_certification:{operator_id}:{training_module}",
+        payload=payload,
+    )
+
+
 def append_idempotency_contract(
     log,
     *,
@@ -2294,6 +2532,128 @@ def test_denominator_projection_rejects_release_rollback_metric_trust_violations
     assert projection["contract_evidence"]["RunbookFreshnessContract"]["runbook_freshness_violation_count"] == 1
     assert projection["contract_evidence"]["MetricBackfillImpactContract"]["metric_backfill_impact_violation_count"] == 1
     assert projection["contract_evidence"]["SelectionBiasDiagnosticContract"]["selection_bias_diagnostic_violation_count"] == 1
+
+
+def test_denominator_projection_consumes_final_normal_tiny_blocking_contracts(tmp_path):
+    log = V27EventLog(tmp_path)
+    append_access_review(log)
+    append_approval_workflow(log)
+    append_break_glass_access(log)
+    append_csv_spreadsheet_injection(log)
+    append_evidence_external_anchoring(log)
+    append_experiment_assignment_immutability(log)
+    append_incident_postmortem(log)
+    append_label_dispute_resolution(log)
+    append_negative_control(log)
+    append_operator_training_certification(log)
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["access_review_recorded_events"] == 1
+    assert projection["approval_workflow_recorded_events"] == 1
+    assert projection["break_glass_access_recorded_events"] == 1
+    assert projection["csv_spreadsheet_injection_recorded_events"] == 1
+    assert projection["evidence_external_anchoring_recorded_events"] == 1
+    assert projection["experiment_assignment_immutability_recorded_events"] == 1
+    assert projection["incident_postmortem_recorded_events"] == 1
+    assert projection["label_dispute_resolution_recorded_events"] == 1
+    assert projection["negative_control_recorded_events"] == 1
+    assert projection["operator_training_certification_recorded_events"] == 1
+    assert projection["health"]["access_review_ok"] is True
+    assert projection["health"]["approval_workflow_ok"] is True
+    assert projection["health"]["break_glass_access_ok"] is True
+    assert projection["health"]["csv_spreadsheet_injection_ok"] is True
+    assert projection["health"]["evidence_external_anchoring_ok"] is True
+    assert projection["health"]["experiment_assignment_immutability_ok"] is True
+    assert projection["health"]["incident_postmortem_ok"] is True
+    assert projection["health"]["label_dispute_resolution_ok"] is True
+    assert projection["health"]["negative_control_ok"] is True
+    assert projection["health"]["operator_training_certification_ok"] is True
+    assert projection["contract_evidence"]["AccessReviewContract"]["valid_access_review_count"] == 1
+    assert projection["contract_evidence"]["ApprovalWorkflowContract"]["valid_approval_workflow_count"] == 1
+    assert projection["contract_evidence"]["BreakGlassAccessContract"]["valid_break_glass_access_count"] == 1
+    assert (
+        projection["contract_evidence"]["CSVSpreadsheetInjectionContract"]["valid_csv_spreadsheet_injection_count"]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["EvidenceExternalAnchoringContract"]["valid_evidence_external_anchoring_count"]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ExperimentAssignmentImmutabilityContract"][
+            "valid_experiment_assignment_immutability_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["IncidentPostmortemContract"]["valid_incident_postmortem_count"] == 1
+    assert projection["contract_evidence"]["LabelDisputeResolutionContract"]["valid_label_dispute_resolution_count"] == 1
+    assert projection["contract_evidence"]["NegativeControlContract"]["valid_negative_control_count"] == 1
+    assert (
+        projection["contract_evidence"]["OperatorTrainingCertificationContract"][
+            "valid_operator_training_certification_count"
+        ]
+        == 1
+    )
+
+
+def test_denominator_projection_rejects_final_normal_tiny_blocking_violations(tmp_path):
+    log = V27EventLog(tmp_path)
+    original_hash = sha256_hex({"assignment_id": "assignment-unit-v1", "arm": "control"})
+    append_access_review(log, privilege_delta="unreviewed")
+    append_approval_workflow(log, approval_state="pending")
+    append_break_glass_access(log, reason="unknown")
+    append_csv_spreadsheet_injection(log, sanitization_policy="allow_raw")
+    append_evidence_external_anchoring(log, anchored_hash="not-a-hash")
+    append_experiment_assignment_immutability(log, original_assignment_hash=original_hash, attempted_change_hash=original_hash)
+    append_incident_postmortem(log, root_cause="unknown")
+    append_label_dispute_resolution(log, resolution_action="ignore")
+    append_negative_control(log, expected_no_effect_metric=0.01, observed_effect=0.5)
+    append_operator_training_certification(
+        log,
+        certification_status="expired",
+        expires_at="2026-01-15T00:00:00Z",
+        checked_at="2026-01-15T00:46:00Z",
+    )
+
+    projection = build_denominator_projection(tmp_path)
+
+    assert projection["health"]["access_review_ok"] is False
+    assert projection["health"]["approval_workflow_ok"] is False
+    assert projection["health"]["break_glass_access_ok"] is False
+    assert projection["health"]["csv_spreadsheet_injection_ok"] is False
+    assert projection["health"]["evidence_external_anchoring_ok"] is False
+    assert projection["health"]["experiment_assignment_immutability_ok"] is False
+    assert projection["health"]["incident_postmortem_ok"] is False
+    assert projection["health"]["label_dispute_resolution_ok"] is False
+    assert projection["health"]["negative_control_ok"] is False
+    assert projection["health"]["operator_training_certification_ok"] is False
+    assert projection["contract_evidence"]["AccessReviewContract"]["access_review_violation_count"] == 1
+    assert projection["contract_evidence"]["ApprovalWorkflowContract"]["approval_workflow_violation_count"] == 1
+    assert projection["contract_evidence"]["BreakGlassAccessContract"]["break_glass_access_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["CSVSpreadsheetInjectionContract"]["csv_spreadsheet_injection_violation_count"]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["EvidenceExternalAnchoringContract"]["evidence_external_anchoring_violation_count"]
+        == 1
+    )
+    assert (
+        projection["contract_evidence"]["ExperimentAssignmentImmutabilityContract"][
+            "experiment_assignment_immutability_violation_count"
+        ]
+        == 1
+    )
+    assert projection["contract_evidence"]["IncidentPostmortemContract"]["incident_postmortem_violation_count"] == 1
+    assert projection["contract_evidence"]["LabelDisputeResolutionContract"]["label_dispute_resolution_violation_count"] == 1
+    assert projection["contract_evidence"]["NegativeControlContract"]["negative_control_violation_count"] == 1
+    assert (
+        projection["contract_evidence"]["OperatorTrainingCertificationContract"][
+            "operator_training_certification_violation_count"
+        ]
+        == 1
+    )
 
 
 def test_denominator_projection_consumes_randomness_control_contract(tmp_path):
