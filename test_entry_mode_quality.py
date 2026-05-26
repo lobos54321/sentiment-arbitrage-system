@@ -30,13 +30,13 @@ def _db():
     return db
 
 
-def _insert(db, entry_mode, peak, pnl, ts):
+def _insert(db, entry_mode, peak, pnl, ts, replay_source="live_monitor"):
     db.execute(
         """
         INSERT INTO paper_trades(entry_mode, replay_source, entry_ts, exit_ts, peak_pnl, pnl_pct)
-        VALUES (?, 'live_monitor', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (entry_mode, ts, ts + 60, peak, pnl),
+        (entry_mode, replay_source, ts, ts + 60, peak, pnl),
     )
 
 
@@ -220,6 +220,21 @@ def test_entry_mode_quality_negative_ev_trips_after_twenty_closed():
 
     assert decision["decision"] == "shadow"
     assert decision["reason"] == "entry_mode_quality_negative_ev"
+
+
+def test_entry_mode_quality_counts_paper_fast_lane_realtime_samples():
+    db = _db()
+    for idx in range(8):
+        _insert(db, "custom_paper_fast_lane_probe", 0.20, -0.06, idx, replay_source="paper_fast_lane")
+    _insert(db, "custom_paper_fast_lane_probe", 0.90, 0.22, 100, replay_source="real_kline_replay")
+
+    stats = recent_entry_mode_stats(db, "custom_paper_fast_lane_probe")
+    decision = evaluate_entry_mode_quality(db, "custom_paper_fast_lane_probe", now_ts=1000)
+
+    assert stats["sample_n"] == 8
+    assert stats["closed_n"] == 8
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_degraded"
 
 
 def test_matrix_reclaim_shadows_when_peaks_are_given_back():

@@ -160,7 +160,11 @@ def recent_entry_mode_stats(db, entry_mode, *, window=None):
             FROM paper_trades
             WHERE entry_mode = ?
               AND exit_ts IS NOT NULL
-              AND replay_source LIKE 'live_monitor%'
+              AND (
+                replay_source IS NULL
+                OR replay_source LIKE 'live_monitor%'
+                OR replay_source = 'paper_fast_lane'
+              )
             ORDER BY entry_ts DESC
             LIMIT ?
             """,
