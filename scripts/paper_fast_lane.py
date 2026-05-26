@@ -205,6 +205,7 @@ FAST_LANE_RESCUE_STATUSES = {
 
 FAST_LANE_MISSED_REASONS = {
     "tracking_ttl_expired",
+    "not_ath_v17",
     "not_ath_prebuy_kline_retry_expired",
     "not_ath_prebuy_kline_block",
     "entry_edge_spread_too_high",
@@ -2305,6 +2306,9 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
     elif reason_l == "pre_pass_signal_too_stale":
         source_type = "pre_pass_stale_reclaim_fast"
         branch = "pre_pass_stale_reclaim_quote_clean_tiny_probe"
+    elif reason_l == "not_ath_v17":
+        source_type = "not_ath_reclaim_fast"
+        branch = "not_ath_reclaim_quote_clean_tiny_probe"
     elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
         source_type = "not_ath_reclaim_fast"
         branch = "not_ath_reclaim_quote_clean_tiny_probe"
@@ -2451,6 +2455,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
           AND (
             m.reject_reason IN (
               'tracking_ttl_expired',
+              'not_ath_v17',
               'not_ath_prebuy_kline_retry_expired',
               'not_ath_prebuy_kline_block',
               'entry_edge_spread_too_high',
