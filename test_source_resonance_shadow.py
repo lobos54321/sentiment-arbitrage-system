@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha, record_external_alpha_candidates  # noqa: E402
+import source_resonance_shadow as src  # noqa: E402
 from source_resonance_shadow import lookup_entry_quote_audit, lookup_quote_shadow, run_once  # noqa: E402
 
 
@@ -133,6 +134,89 @@ def test_source_resonance_builds_gmgn_quote_clean_cohort(tmp_path):
     }
     assert {"source_event", "telegram_receive", "premium_signal_recorded", "paper_first_decision"} <= stages
     db.close()
+
+
+def test_source_resonance_batches_writes_under_single_writer_lock(tmp_path, monkeypatch):
+    signal_db_path = tmp_path / "sentiment.db"
+    paper_db_path = tmp_path / "paper.db"
+
+    signal_db = sqlite3.connect(signal_db_path)
+    signal_db.execute(
+        """
+        CREATE TABLE premium_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_ca TEXT,
+            symbol TEXT,
+            timestamp INTEGER,
+            source_message_ts INTEGER,
+            receive_ts INTEGER,
+            signal_type TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    signal_db.execute(
+        """
+        INSERT INTO premium_signals (
+            token_ca, symbol, timestamp, source_message_ts, receive_ts, signal_type
+        ) VALUES ('TokenLock', 'LOCK', 1000, 900, 950, 'NEW_TRENDING')
+        """
+    )
+    signal_db.commit()
+    signal_db.close()
+
+    class RecordingLock:
+        def __init__(self):
+            self.depth = 0
+            self.entries = 0
+
+        def __enter__(self):
+            self.entries += 1
+            self.depth += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.depth -= 1
+            return False
+
+    lock = RecordingLock()
+    guarded_calls = []
+    monkeypatch.setattr(src, "SQLITE_WRITE_LOCK", lock)
+
+    original_upsert_candidate = src.upsert_candidate
+    original_upsert_latency_event = src.upsert_latency_event
+    original_write_health = src._write_health
+
+    def guarded_upsert_candidate(db, candidate):
+        assert lock.depth > 0
+        guarded_calls.append("candidate")
+        return original_upsert_candidate(db, candidate)
+
+    def guarded_upsert_latency_event(db, event):
+        assert lock.depth > 0
+        guarded_calls.append("latency")
+        return original_upsert_latency_event(db, event)
+
+    def guarded_write_health(db, **kwargs):
+        assert lock.depth > 0
+        guarded_calls.append("health")
+        return original_write_health(db, **kwargs)
+
+    monkeypatch.setattr(src, "upsert_candidate", guarded_upsert_candidate)
+    monkeypatch.setattr(src, "upsert_latency_event", guarded_upsert_latency_event)
+    monkeypatch.setattr(src, "_write_health", guarded_write_health)
+
+    summary = src.run_once(
+        paper_db_path=paper_db_path,
+        signal_db_path=signal_db_path,
+        lookback_hours=1,
+        limit=10,
+        now=1200,
+    )
+
+    assert summary["candidates"] == 1
+    assert {"candidate", "latency", "health"} <= set(guarded_calls)
+    assert lock.entries >= 2
 
 
 def test_external_alpha_lookup_tolerates_small_clock_skew(tmp_path):

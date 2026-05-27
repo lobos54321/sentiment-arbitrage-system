@@ -16,12 +16,15 @@ from pathlib import Path
 import sqlite3
 import time
 
+from sqlite_write_coordinator import SQLiteSingleWriterLock
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_SIGNAL_DB = PROJECT_ROOT / "data" / "sentiment_arb.db"
 SOURCE_NAME = "source_resonance_shadow"
 SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC = int(os.environ.get("SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC", "3600"))
+SQLITE_WRITE_LOCK = SQLiteSingleWriterLock(SOURCE_NAME)
 
 
 CREATE_SOURCE_RESONANCE_CANDIDATES_SQL = """
@@ -180,12 +183,13 @@ def connect_signal_db(primary):
 
 
 def init_source_resonance_shadow(db):
-    db.execute(CREATE_SOURCE_RESONANCE_CANDIDATES_SQL)
-    db.execute(CREATE_SOURCE_RESONANCE_HEALTH_SQL)
-    db.execute(CREATE_LATENCY_AUDIT_EVENTS_SQL)
-    for sql in RESONANCE_INDEXES:
-        db.execute(sql)
-    db.commit()
+    with SQLITE_WRITE_LOCK:
+        db.execute(CREATE_SOURCE_RESONANCE_CANDIDATES_SQL)
+        db.execute(CREATE_SOURCE_RESONANCE_HEALTH_SQL)
+        db.execute(CREATE_LATENCY_AUDIT_EVENTS_SQL)
+        for sql in RESONANCE_INDEXES:
+            db.execute(sql)
+        db.commit()
 
 
 def table_exists(db, table):
@@ -552,7 +556,7 @@ def latency_events_for_signal(signal, quote_audit=None):
     return events
 
 
-def record_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pre_seen_count=0,
+def _write_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pre_seen_count=0,
                   dual_source_count=0, quote_clean_count=0, error=None):
     run_ts = int(run_ts or time.time())
     db.execute(
@@ -584,7 +588,22 @@ def record_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pr
             str(error)[:500] if error else None,
         ),
     )
-    db.commit()
+
+
+def record_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pre_seen_count=0,
+                  dual_source_count=0, quote_clean_count=0, error=None):
+    with SQLITE_WRITE_LOCK:
+        _write_health(
+            db,
+            run_ts=run_ts,
+            signal_count=signal_count,
+            candidate_count=candidate_count,
+            gmgn_pre_seen_count=gmgn_pre_seen_count,
+            dual_source_count=dual_source_count,
+            quote_clean_count=quote_clean_count,
+            error=error,
+        )
+        db.commit()
 
 
 def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limit=500, now=None):
@@ -597,6 +616,7 @@ def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limi
         signal_db, _selected_signal_path = connect_signal_db(signal_path)
         signals = load_recent_signals(signal_db, lookback_hours=lookback_hours, limit=limit, now=now)
         candidates = []
+        latency_events = []
         for signal in signals:
             token_ca = signal.get("token_ca")
             signal_ts = signal.get("_signal_ts_sec")
@@ -604,23 +624,26 @@ def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limi
             quote_shadow = lookup_quote_shadow(paper_db, token_ca, signal_ts)
             quote_audit = lookup_entry_quote_audit(paper_db, token_ca, signal_ts)
             candidate = compute_resonance(signal, gmgn_state, quote_shadow, quote_audit)
-            upsert_candidate(paper_db, candidate)
-            for event in latency_events_for_signal(signal, quote_audit):
-                upsert_latency_event(paper_db, event)
             candidates.append(candidate)
-        paper_db.commit()
+            latency_events.extend(latency_events_for_signal(signal, quote_audit))
         gmgn_pre_seen_count = sum(1 for item in candidates if item["gmgn_pre_seen"])
         quote_clean_count = sum(1 for item in candidates if item["quote_clean_seen"])
         dual_source_count = sum(1 for item in candidates if item["source_count"] >= 2)
-        record_health(
-            paper_db,
-            run_ts=now,
-            signal_count=len(signals),
-            candidate_count=len(candidates),
-            gmgn_pre_seen_count=gmgn_pre_seen_count,
-            dual_source_count=dual_source_count,
-            quote_clean_count=quote_clean_count,
-        )
+        with SQLITE_WRITE_LOCK:
+            for candidate in candidates:
+                upsert_candidate(paper_db, candidate)
+            for event in latency_events:
+                upsert_latency_event(paper_db, event)
+            _write_health(
+                paper_db,
+                run_ts=now,
+                signal_count=len(signals),
+                candidate_count=len(candidates),
+                gmgn_pre_seen_count=gmgn_pre_seen_count,
+                dual_source_count=dual_source_count,
+                quote_clean_count=quote_clean_count,
+            )
+            paper_db.commit()
         return {
             "signals": len(signals),
             "candidates": len(candidates),
