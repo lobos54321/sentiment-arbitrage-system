@@ -300,6 +300,41 @@ def unixish_sql_expr(column):
     )
 
 
+def datetime_or_unixish_sql_expr(column):
+    return (
+        f"CASE "
+        f"WHEN {column} IS NULL THEN 0 "
+        f"WHEN typeof({column}) IN ('integer', 'real') THEN {unixish_sql_expr(column)} "
+        f"WHEN CAST({column} AS TEXT) != '' "
+        f" AND CAST({column} AS TEXT) NOT GLOB '*[^0-9.]*' "
+        f"THEN {unixish_sql_expr(column)} "
+        f"ELSE CAST(COALESCE(strftime('%s', {column}), 0) AS INTEGER) "
+        f"END"
+    )
+
+
+def missed_rescue_time_exprs(cols):
+    exprs = []
+    for name in ("first_tradable_ts", "created_event_ts", "signal_ts", "baseline_ts"):
+        if name in cols:
+            exprs.append(unixish_sql_expr(f"m.{name}"))
+    if "updated_at" in cols:
+        exprs.append(datetime_or_unixish_sql_expr("m.updated_at"))
+    return exprs
+
+
+def timestamp_window_clause(exprs):
+    if not exprs:
+        return "0 >= ?"
+    return "\n            OR ".join(f"{expr} >= ?" for expr in exprs)
+
+
+def timestamp_order_expr(exprs):
+    if not exprs:
+        return "0"
+    return "COALESCE(" + ", ".join(f"NULLIF({expr}, 0)" for expr in exprs) + ", 0)"
+
+
 def add_column_if_missing(db, table, column, definition):
     if column not in table_columns(db, table):
         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -2499,21 +2534,18 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
         FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC,
         FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC,
     )
-    updated_expr = "COALESCE(strftime('%s', m.updated_at), 0)" if "updated_at" in cols else "0"
-    created_expr = "COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)"
-    first_tradable_expr = "COALESCE(m.first_tradable_ts, 0)" if "first_tradable_ts" in cols else "0"
+    time_exprs = missed_rescue_time_exprs(cols)
+    time_clause = timestamp_window_clause(time_exprs)
+    time_param_count = len(time_exprs) if time_exprs else 1
+    order_expr = timestamp_order_expr(time_exprs)
     stop_before_peak_expr = "COALESCE(m.would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
     active_window_clause = f"""
-            {first_tradable_expr} >= ?
-            OR {created_expr} >= ?
-            OR {updated_expr} >= ?
+            {time_clause}
     """
     unprocessed_backlog_clause = f"""
             s.missed_attribution_id IS NULL
             AND (
-              {first_tradable_expr} >= ?
-              OR {created_expr} >= ?
-              OR {updated_expr} >= ?
+              {time_clause}
             )
     """
     rows = db.execute(
@@ -2559,18 +2591,12 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
             OR m.reject_reason LIKE 'timeout (%'
             OR m.reject_reason LIKE 'price_collapse%'
           )
-        ORDER BY COALESCE({first_tradable_expr}, {created_expr}, 0) ASC, m.id ASC
+        ORDER BY {order_expr} ASC, m.id ASC
         LIMIT ?
         """,
-        (
-            cutoff,
-            cutoff,
-            cutoff,
-            backlog_cutoff,
-            backlog_cutoff,
-            backlog_cutoff,
-            limit or FAST_ENTRY_MISSED_RESCUE_LIMIT,
-        ),
+        tuple([cutoff] * time_param_count)
+        + tuple([backlog_cutoff] * time_param_count)
+        + (limit or FAST_ENTRY_MISSED_RESCUE_LIMIT,),
     ).fetchall()
     counts = {
         "rows": len(rows),

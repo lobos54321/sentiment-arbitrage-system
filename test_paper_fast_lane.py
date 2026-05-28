@@ -1278,6 +1278,73 @@ def test_missed_rescue_backfills_unprocessed_clean_dog_backlog(tmp_path, monkeyp
     assert state["entry_branch"] == "tracking_ttl_reclaim_quote_clean_tiny_probe"
 
 
+def test_missed_rescue_backlog_uses_any_recent_signal_time_not_created_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC", 24 * 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenCreatedOldSignalRecent', 'COSR', ?, 11, 'LOTTO', 'discovery_tracking',
+            'tracking_ttl_expired', 1.0, ?, ?, NULL, 1, 0, 0.9,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (
+            now - 12 * 3600,
+            now - 12 * 3600,
+            now - 30 * 3600,
+            now - 30 * 3600,
+        ),
+    )
+    db.commit()
+
+    result = fast.scan_missed_rescue_once(db, now_ts=now)
+    state = db.execute(
+        """
+        SELECT state, last_status, entry_branch
+        FROM paper_fast_missed_rescue_state
+        WHERE missed_attribution_id = 1
+        """
+    ).fetchone()
+
+    assert result["processed"] == 1
+    assert result["watch_only"] == 1
+    assert state["state"] == "stale"
+    assert state["last_status"] == "watch_only"
+    assert state["entry_branch"] == "tracking_ttl_reclaim_quote_clean_tiny_probe"
+
+
 def test_missed_not_ath_v17_rescue_queues_lotto_reclaim_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
     monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
