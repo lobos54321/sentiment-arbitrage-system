@@ -469,6 +469,101 @@ test('v27 KPI proof status verifies only fresh materialized KPI chain', () => {
   assert.deepEqual(proof.blockers, []);
 });
 
+test('v27 KPI proof status exposes public-safe missed blocker attribution', () => {
+  const proof = buildV27KpiProofStatus({
+    generatedAt: '2026-05-25T00:20:00.000Z',
+    nowMs: Date.parse('2026-05-25T00:20:00.000Z'),
+    requestedHours: 24,
+    maxSnapshotAgeMinutes: 30,
+    dashboardTokenConfigured: true,
+    paperDbExists: true,
+    liveSnapshot: {
+      snapshot_id: 'paper_live_24h_unit',
+      generated_at: '2026-05-25T00:10:00.000Z',
+      dog_catch_goal: {
+        available: true,
+        trades: {
+          fills: 4,
+          closed: 4,
+          peak_win_rate: 0.25,
+          realized_roi: -0.5,
+          captured_gold_silver_unique: 1,
+        },
+        missed: {
+          clean_gold_silver_unique: 4,
+          clean_gold_unique: 1,
+          clean_silver_unique: 3,
+          by_blocker: [
+            {
+              route: 'paper_fast_lane',
+              component: 'runtime_mode_gate',
+              reject_reason: 'mode_readiness_missing',
+              token_ca: 'DoNotExpose1111111111111111111111111111111111',
+              gold_n: 1,
+              silver_n: 2,
+              unique_tokens: 3,
+              max_pnl: 1.42,
+            },
+            {
+              route: 'normal_tiny',
+              component: 'quote_executor',
+              reject_reason: 'quote_unavailable',
+              gold_n: 0,
+              silver_n: 1,
+              unique_tokens: 1,
+              max_pnl: 0.72,
+            },
+          ],
+        },
+        goal: {
+          pass: false,
+          blockers: [
+            'clean_gold_silver_capture_rate_below_target',
+            'peak_win_rate_below_target',
+            'realized_roi_below_target',
+          ],
+          eligible_gold_silver_unique: 5,
+          captured_gold_silver_unique: 1,
+          clean_gold_silver_capture_rate: 0.2,
+        },
+      },
+    },
+    modeReadiness: {
+      available: true,
+      highest_allowed_mode: 'normal_tiny',
+      health: {
+        normal_tiny_ready: true,
+        status: 'mode_readiness_evaluated',
+      },
+    },
+    denominatorHealth: {
+      available: true,
+      dashboard_safe: true,
+      health: {
+        normal_tiny_ready: true,
+        status: 'read_model_refresh_ok',
+      },
+    },
+  });
+
+  const attribution = proof.claim.failure_attribution;
+  assert.equal(attribution.public_safe, true);
+  assert.equal(attribution.current_capture_rate, 0.2);
+  assert.equal(attribution.required_captured_gold_silver_unique, 3);
+  assert.equal(attribution.additional_captures_needed_for_target, 2);
+  assert.deepEqual(attribution.top_missed_blocker, {
+    route: 'paper_fast_lane',
+    component: 'runtime_mode_gate',
+    reject_reason: 'mode_readiness_missing',
+    clean_gold_silver_unique: 3,
+    gold_n: 1,
+    silver_n: 2,
+    unique_tokens: 3,
+    max_pnl: 1.42,
+  });
+  assert.equal(JSON.stringify(attribution).includes('DoNotExpose'), false);
+});
+
 test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
   const dir = fs.mkdtempSync(join(os.tmpdir(), 'storage-health-v27-logs-'));
   fs.writeFileSync(join(dir, 'v27-paper-trade-source-label-mirror.log'), 'mirror failed');

@@ -1900,6 +1900,9 @@ export function buildV27KpiProofStatus(options = {}) {
       winPeakRatio,
     },
   }) : null;
+  const failureAttribution = publicDogCatchFailureAttribution(dogCatchGoal, {
+    targetCatchRate,
+  });
   const dogCatchBlockers = Array.isArray(dogCatchGoal?.goal?.blockers) ? dogCatchGoal.goal.blockers : [];
   const metricValue = (value, digits = 4) => {
     const n = Number(value);
@@ -1969,6 +1972,7 @@ export function buildV27KpiProofStatus(options = {}) {
       },
       metrics: proofMetrics,
       target_gaps: proofTargetGaps,
+      failure_attribution: failureAttribution,
     },
     evidence_sources: {
       protected_paper_endpoints: {
@@ -2016,6 +2020,61 @@ export function buildV27KpiProofStatus(options = {}) {
     notes: {
       scope: 'public status only; raw trades, missed-dog rows, and PnL detail remain behind protected paper endpoints',
       claim_rule: '24h KPI is verified only when auth, fresh materialized evidence, mode readiness, denominator safety, and dog-catch goal are all green',
+      failure_attribution: 'aggregate route/component/reason counts only; token addresses, trade rows, and raw PnL detail remain token-gated',
+    },
+  };
+}
+
+function publicDogCatchFailureAttribution(dogCatchGoal, { targetCatchRate = 0.60, limit = 10 } = {}) {
+  const captured = Number(dogCatchGoal?.goal?.captured_gold_silver_unique ?? dogCatchGoal?.trades?.captured_gold_silver_unique ?? 0);
+  const eligible = Number(dogCatchGoal?.goal?.eligible_gold_silver_unique ?? 0);
+  const cleanMissed = Number(dogCatchGoal?.missed?.clean_gold_silver_unique ?? 0);
+  const currentRateRaw = dogCatchGoal?.goal?.clean_gold_silver_capture_rate;
+  const currentRate = Number.isFinite(Number(currentRateRaw)) ? roundNumber(Number(currentRateRaw), 4) : null;
+  const target = Number.isFinite(Number(targetCatchRate)) ? Number(targetCatchRate) : 0.60;
+  const requiredCaptured = eligible > 0 ? Math.ceil(target * eligible) : null;
+  const additionalCapturesNeeded = requiredCaptured == null ? null : Math.max(0, requiredCaptured - captured);
+  const rawRows = Array.isArray(dogCatchGoal?.missed?.by_blocker) ? dogCatchGoal.missed.by_blocker : [];
+  const missedByBlocker = rawRows
+    .map((row) => {
+      const gold = Number(row.gold_n || 0);
+      const silver = Number(row.silver_n || 0);
+      const cleanGoldSilver = gold + silver;
+      return {
+        route: row.route ?? null,
+        component: row.component ?? null,
+        reject_reason: row.reject_reason ?? null,
+        clean_gold_silver_unique: cleanGoldSilver,
+        gold_n: gold,
+        silver_n: silver,
+        unique_tokens: Number(row.unique_tokens || cleanGoldSilver || 0),
+        max_pnl: Number.isFinite(Number(row.max_pnl)) ? roundNumber(Number(row.max_pnl), 4) : null,
+      };
+    })
+    .filter((row) => row.clean_gold_silver_unique > 0)
+    .sort((a, b) => (
+      b.clean_gold_silver_unique - a.clean_gold_silver_unique
+      || b.gold_n - a.gold_n
+      || (Number(b.max_pnl || 0) - Number(a.max_pnl || 0))
+    ))
+    .slice(0, limit);
+  return {
+    available: Boolean(dogCatchGoal?.available),
+    public_safe: true,
+    target_capture_rate: target,
+    current_capture_rate: currentRate,
+    eligible_gold_silver_unique: Number.isFinite(eligible) ? eligible : 0,
+    captured_gold_silver_unique: Number.isFinite(captured) ? captured : 0,
+    missed_clean_gold_silver_unique: Number.isFinite(cleanMissed) ? cleanMissed : 0,
+    required_captured_gold_silver_unique: requiredCaptured,
+    additional_captures_needed_for_target: additionalCapturesNeeded,
+    top_missed_blocker: missedByBlocker[0] || null,
+    missed_by_blocker: missedByBlocker,
+    notes: {
+      privacy: 'aggregate counts only; no token addresses, signal IDs, trade rows, or raw per-token PnL',
+      action_hint: missedByBlocker.length
+        ? 'Tune or instrument the top route/component/reason first; it explains the largest clean gold/silver miss bucket.'
+        : 'No clean gold/silver missed blocker bucket is available in the materialized snapshot.',
     },
   };
 }
