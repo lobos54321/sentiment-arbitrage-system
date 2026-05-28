@@ -255,7 +255,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-27T00:00:00Z",
-      "impact_hash": "ae4cdd98385ac286b63ab911c809bee4613f9604d5cb7ff0d0ad0652999c63ce",
+      "impact_hash": "64005ce8ee70aa92553f59edf68abe526a9032014b905a63bad6ee5ee42053c3",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -366,7 +366,7 @@
         "spec/telegram_dog_regime_capture/v2.7.0/gap-register.json": "6b7e67bf733b0bf4c2cffc327ef54970b79041e672e8f7ae66b541f22c85e377",
         "spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json": "a4754205a0553156d1044792a0539503cbeaaee426e1450768a8103c8e93892d",
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json": "c7cb351766a5b0d148afa54c5c8979a639c2a1dbf9d64e242c4d8f98b89596fc",
-        "src/web/dashboard-server.js": "cfd75e99d1fb25d121782c254cb881907d66bb0f8a56d17e712417ba13d34d33",
+        "src/web/dashboard-server.js": "684b2c07d72c26e4ff6ba97305bbf1d639e365a7bcf899a6aa37b9c030294c68",
         "test_paper_fast_lane.py": "e80c2556fc75ded25efd55f32a4a3fda0c98cacb185acebba03740cd5d1c079d",
         "test_telegram_lifecycle_markov.py": "8f0c0d3336232204d3e218eb85d5c3863c1159a309e2f9630cbbae2c4a1695a4",
         "test_v27_basic_contract_readiness.py": "7dfaa66fda6f81b2b45e8d3dd26bccc81a4b32cde20c9b297e5cfd29d83f6077",
@@ -376,7 +376,7 @@
         "test_v27_mode_gate_scope_audit.py": "a1f301b30da5864d67f0cd0422e995abb9d20b5d4a5431838b042fb807369b92",
         "test_v27_mode_readiness.py": "4dd8f1af023f235cbcd7a0605e1d8675451d658647046cdf15507cd4f7b7ffd4",
         "test_v27_runtime_mode_gate.py": "29749f7182034655804e8ab57cc0bc9a59ad5d17fda6e2cb59c830294eb8126e",
-        "tests/dashboard-heavy-api-utils.test.mjs": "e7395e27a41f6f7877d5aa85da4ec314fceb4e5f32f8b1b608e62c96b6607ad9"
+        "tests/dashboard-heavy-api-utils.test.mjs": "347af84fb0e692c736c57cf3d99453baa7fcc2d0d02f8844e7cdb421e3d76490"
       },
       "spec_change_id": "v27-runtime-environment-metric-threshold-markov-truth-foundation",
       "spec_hash": "6361eb43c7a1996af6bd277280eba0409ebd5b9e93f9f7955e215220ae8d4675"

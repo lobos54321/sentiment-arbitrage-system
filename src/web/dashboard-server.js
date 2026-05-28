@@ -2058,6 +2058,37 @@ function publicDogCatchFailureAttribution(dogCatchGoal, { targetCatchRate = 0.60
       || (Number(b.max_pnl || 0) - Number(a.max_pnl || 0))
     ))
     .slice(0, limit);
+  const rawPipelineRows = Array.isArray(dogCatchGoal?.missed?.reclaim_pipeline)
+    ? dogCatchGoal.missed.reclaim_pipeline
+    : [];
+  const missedReclaimPipeline = rawPipelineRows
+    .map((row) => {
+      const gold = Number(row.gold_n || 0);
+      const silver = Number(row.silver_n || 0);
+      const cleanGoldSilver = gold + silver;
+      return {
+        route: row.route ?? null,
+        component: row.component ?? null,
+        reject_reason: row.reject_reason ?? null,
+        rescue_state: row.rescue_state ?? null,
+        fast_lane_status: row.fast_lane_status ?? null,
+        fast_lane_reason: row.fast_lane_reason ?? null,
+        entry_branch: row.entry_branch ?? null,
+        entry_mode_hint: row.entry_mode_hint ?? null,
+        clean_gold_silver_unique: cleanGoldSilver,
+        gold_n: gold,
+        silver_n: silver,
+        unique_tokens: Number(row.unique_tokens || cleanGoldSilver || 0),
+        max_pnl: Number.isFinite(Number(row.max_pnl)) ? roundNumber(Number(row.max_pnl), 4) : null,
+      };
+    })
+    .filter((row) => row.clean_gold_silver_unique > 0)
+    .sort((a, b) => (
+      b.clean_gold_silver_unique - a.clean_gold_silver_unique
+      || b.gold_n - a.gold_n
+      || (Number(b.max_pnl || 0) - Number(a.max_pnl || 0))
+    ))
+    .slice(0, limit);
   return {
     available: Boolean(dogCatchGoal?.available),
     public_safe: true,
@@ -2069,11 +2100,13 @@ function publicDogCatchFailureAttribution(dogCatchGoal, { targetCatchRate = 0.60
     required_captured_gold_silver_unique: requiredCaptured,
     additional_captures_needed_for_target: additionalCapturesNeeded,
     top_missed_blocker: missedByBlocker[0] || null,
+    top_reclaim_pipeline_gap: missedReclaimPipeline[0] || null,
     missed_by_blocker: missedByBlocker,
+    missed_reclaim_pipeline: missedReclaimPipeline,
     notes: {
       privacy: 'aggregate counts only; no token addresses, signal IDs, trade rows, or raw per-token PnL',
       action_hint: missedByBlocker.length
-        ? 'Tune or instrument the top route/component/reason first; it explains the largest clean gold/silver miss bucket.'
+        ? 'Tune or instrument the top route/component/reason first; reclaim pipeline counts show whether the miss was unprocessed, stale, watch-only, queued, or entered.'
         : 'No clean gold/silver missed blocker bucket is available in the materialized snapshot.',
     },
   };

@@ -129,6 +129,127 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
     assert snapshot["dog_catch_goal"]["missed"]["clean_gold_unique"] == 1
 
 
+def test_dog_catch_goal_outputs_public_safe_reclaim_pipeline(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+          id INTEGER PRIMARY KEY,
+          created_event_ts REAL,
+          token_ca TEXT,
+          symbol TEXT,
+          route TEXT,
+          component TEXT,
+          reject_reason TEXT,
+          executable_peak_pnl REAL,
+          max_pnl_recorded REAL,
+          tradable_missed INTEGER,
+          would_stop_before_peak INTEGER
+        );
+        CREATE TABLE paper_fast_missed_rescue_state (
+          missed_attribution_id INTEGER PRIMARY KEY,
+          last_status TEXT,
+          last_reason TEXT,
+          token_ca TEXT,
+          entry_branch TEXT,
+          entry_mode_hint TEXT,
+          state TEXT,
+          updated_at REAL,
+          eligibility_json TEXT
+        );
+        """
+    )
+    now_ts = int(time.time())
+    db.executemany(
+        """
+        INSERT INTO paper_missed_signal_attribution
+          (id, created_event_ts, token_ca, symbol, route, component,
+           reject_reason, executable_peak_pnl, max_pnl_recorded, tradable_missed,
+           would_stop_before_peak)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                1,
+                now_ts - 60,
+                "TTL_DOG_CA_SHOULD_NOT_LEAK",
+                "TTL",
+                "LOTTO",
+                "discovery_tracking",
+                "tracking_ttl_expired",
+                0.80,
+                0.80,
+                1,
+                0,
+            ),
+            (
+                2,
+                now_ts - 55,
+                "KLINE_DOG_CA_SHOULD_NOT_LEAK",
+                "KLINE",
+                "LOTTO",
+                "upstream_gate",
+                "not_ath_prebuy_kline_block",
+                1.20,
+                1.20,
+                1,
+                0,
+            ),
+        ],
+    )
+    db.executemany(
+        """
+        INSERT INTO paper_fast_missed_rescue_state
+          (missed_attribution_id, last_status, last_reason, token_ca,
+           entry_branch, entry_mode_hint, state, updated_at, eligibility_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                1,
+                "watch_only",
+                "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only",
+                "TTL_DOG_CA_SHOULD_NOT_LEAK",
+                "tracking_ttl_reclaim_quote_clean_tiny_probe",
+                "lotto_not_ath_reclaim_tiny_probe",
+                "stale",
+                now_ts - 30,
+                "{}",
+            ),
+            (
+                2,
+                "queued",
+                "not_ath_reclaim_quote_clean_tiny_probe",
+                "KLINE_DOG_CA_SHOULD_NOT_LEAK",
+                "not_ath_reclaim_quote_clean_tiny_probe",
+                "lotto_not_ath_reclaim_tiny_probe",
+                "queued",
+                now_ts - 25,
+                "{}",
+            ),
+        ],
+    )
+    db.commit()
+
+    snapshot = build_snapshot(db, 24, 10)
+
+    pipeline = snapshot["dog_catch_goal"]["missed"]["reclaim_pipeline"]
+    assert len(pipeline) == 2
+    assert all("token_ca" not in row for row in pipeline)
+    as_map = {
+        (row["reject_reason"], row["rescue_state"], row["fast_lane_status"]): row
+        for row in pipeline
+    }
+    queued = as_map[("not_ath_prebuy_kline_block", "queued", "queued")]
+    assert queued["gold_n"] == 1
+    assert queued["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
+    stale = as_map[("tracking_ttl_expired", "stale", "watch_only")]
+    assert stale["silver_n"] == 1
+    assert stale["fast_lane_reason"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
+
+
 def test_review_snapshot_worker_separates_mark_only_missed_peaks(tmp_path):
     db_path = tmp_path / "paper.db"
     db = sqlite3.connect(db_path)

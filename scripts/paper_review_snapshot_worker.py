@@ -817,6 +817,83 @@ def branch_ev_summary(db, since_ts, limit):
     return out[:limit]
 
 
+def dog_catch_reclaim_pipeline_summary(
+    db,
+    missed_cols,
+    *,
+    since_ts,
+    dog_peak,
+    caught_clause,
+    params,
+    peak_expr,
+    token_expr,
+    route_expr,
+    component_expr,
+    reason_expr,
+    clean_expr,
+    stop_expr,
+    limit=30,
+):
+    """Aggregate missed clean dogs by their fast-lane reclaim processing state.
+
+    This stays public-safe: only route/component/reason/state counts are emitted,
+    never token addresses or row-level PnL.
+    """
+    if "id" not in missed_cols or "token_ca" not in missed_cols:
+        return []
+    if not table_exists(db, "paper_fast_missed_rescue_state"):
+        return []
+    state_cols = columns(db, "paper_fast_missed_rescue_state")
+
+    def state_col(name, fallback="NULL"):
+        return f"s.{name}" if name in state_cols else fallback
+
+    query_params = dict(params)
+    query_params["pipeline_limit"] = int(limit)
+    joined_token_expr = "m.token_ca"
+    return rows_as_dicts(db.execute(
+        f"""
+        WITH per_token AS (
+          SELECT {route_expr} AS route,
+                 {component_expr} AS component,
+                 {reason_expr} AS reject_reason,
+                 COALESCE({state_col('state')}, 'unprocessed') AS rescue_state,
+                 COALESCE({state_col('last_status')}, 'unprocessed') AS fast_lane_status,
+                 COALESCE({state_col('last_reason')}, 'not_processed_by_fast_lane') AS fast_lane_reason,
+                 COALESCE({state_col('entry_branch')}, 'unassigned') AS entry_branch,
+                 COALESCE({state_col('entry_mode_hint')}, 'unassigned') AS entry_mode_hint,
+                 {joined_token_expr} AS token_ca,
+                 MAX({peak_expr}) AS max_pnl
+          FROM paper_missed_signal_attribution m
+          LEFT JOIN paper_fast_missed_rescue_state s
+            ON s.missed_attribution_id = m.id
+          WHERE {missed_since_predicate(missed_cols)}
+            AND ({clean_expr})
+            AND {stop_expr} != 1
+            {caught_clause}
+          GROUP BY route, component, reject_reason, rescue_state,
+                   fast_lane_status, fast_lane_reason, entry_branch,
+                   entry_mode_hint, m.token_ca
+        )
+        SELECT route, component, reject_reason,
+               rescue_state, fast_lane_status, fast_lane_reason,
+               entry_branch, entry_mode_hint,
+               COUNT(*) AS unique_tokens,
+               SUM(CASE WHEN max_pnl >= 1.0 THEN 1 ELSE 0 END) AS gold_n,
+               SUM(CASE WHEN max_pnl >= :dog_peak AND max_pnl < 1.0 THEN 1 ELSE 0 END) AS silver_n,
+               MAX(max_pnl) AS max_pnl
+        FROM per_token
+        WHERE max_pnl >= :dog_peak
+        GROUP BY route, component, reject_reason, rescue_state,
+                 fast_lane_status, fast_lane_reason, entry_branch,
+                 entry_mode_hint
+        ORDER BY gold_n DESC, silver_n DESC, unique_tokens DESC, max_pnl DESC
+        LIMIT :pipeline_limit
+        """,
+        query_params,
+    ).fetchall())
+
+
 def dog_catch_goal_summary(db, since_ts):
     target_capture = float(os.environ.get("DOG_CATCH_GOAL_CAPTURE_RATE", "0.60"))
     target_peak_win = float(os.environ.get("DOG_CATCH_GOAL_PEAK_WIN_RATE", "0.55"))
@@ -848,6 +925,7 @@ def dog_catch_goal_summary(db, since_ts):
             "clean_gold_unique": 0,
             "clean_silver_unique": 0,
             "by_blocker": [],
+            "reclaim_pipeline": [],
         },
         "goal": {
             "eligible_gold_silver_unique": 0,
@@ -984,6 +1062,21 @@ def dog_catch_goal_summary(db, since_ts):
             """,
             params,
         ).fetchall())
+        result["missed"]["reclaim_pipeline"] = dog_catch_reclaim_pipeline_summary(
+            db,
+            cols,
+            since_ts=since_ts,
+            dog_peak=dog_peak,
+            caught_clause=caught_clause,
+            params=params,
+            peak_expr=peak_expr,
+            token_expr=token_expr,
+            route_expr=route_expr,
+            component_expr=component_expr,
+            reason_expr=reason_expr,
+            clean_expr=clean_expr,
+            stop_expr=stop_expr,
+        )
 
     result["goal"]["captured_gold_silver_unique"] = result["trades"]["captured_gold_silver_unique"]
     result["goal"]["eligible_gold_silver_unique"] = (

@@ -514,6 +514,23 @@ test('v27 KPI proof status exposes public-safe missed blocker attribution', () =
               max_pnl: 0.72,
             },
           ],
+          reclaim_pipeline: [
+            {
+              route: 'LOTTO',
+              component: 'discovery_tracking',
+              reject_reason: 'tracking_ttl_expired',
+              rescue_state: 'stale',
+              fast_lane_status: 'watch_only',
+              fast_lane_reason: 'clean_dog_reclaim_recovery_tradable_signal_stale_watch_only',
+              entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+              entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+              token_ca: 'PipelineTokenMustNotLeak1111111111111111111111',
+              gold_n: 0,
+              silver_n: 2,
+              unique_tokens: 2,
+              max_pnl: 0.88,
+            },
+          ],
         },
         goal: {
           pass: false,
@@ -561,7 +578,23 @@ test('v27 KPI proof status exposes public-safe missed blocker attribution', () =
     unique_tokens: 3,
     max_pnl: 1.42,
   });
+  assert.deepEqual(attribution.top_reclaim_pipeline_gap, {
+    route: 'LOTTO',
+    component: 'discovery_tracking',
+    reject_reason: 'tracking_ttl_expired',
+    rescue_state: 'stale',
+    fast_lane_status: 'watch_only',
+    fast_lane_reason: 'clean_dog_reclaim_recovery_tradable_signal_stale_watch_only',
+    entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+    entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+    clean_gold_silver_unique: 2,
+    gold_n: 0,
+    silver_n: 2,
+    unique_tokens: 2,
+    max_pnl: 0.88,
+  });
   assert.equal(JSON.stringify(attribution).includes('DoNotExpose'), false);
+  assert.equal(JSON.stringify(attribution).includes('PipelineTokenMustNotLeak'), false);
 });
 
 test('storage health includes v27 sidecar logs for mirror diagnosis', () => {
