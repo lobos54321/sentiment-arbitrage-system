@@ -1,7 +1,7 @@
 {
   "ci_merge_gates": [
     {
-      "artifact_hash": "6f8a58807dff341b08889e9372c351dee9192885e1b5d8a882ac58fc69597459",
+      "artifact_hash": "63bf94ffa8bf272acc49c83454429eba78d3ce2072b2e8bac73d8aec4387210d",
       "gate_result": "pass",
       "merge_gate_id": "v27-readiness-main-pr-gate",
       "required_checks": [
@@ -40,7 +40,7 @@
       ],
       "spec_hash": "6361eb43c7a1996af6bd277280eba0409ebd5b9e93f9f7955e215220ae8d4675",
       "workflow_file": ".github/workflows/v27-readiness.yml",
-      "workflow_sha256": "8b268983eb7996004f2df7c0000e6aaaeebb021f29aa5992ea7acf7bdb6c3c6e"
+      "workflow_sha256": "cf8c3198f44a5dc5c6d8a10a2ec1eadca03675a5a3497eaba34b46c58656061e"
     }
   ],
   "failure_action": "ci_fail",
@@ -255,7 +255,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-27T00:00:00Z",
-      "impact_hash": "313f7d285387d98505c7346c7cfe43a5e77580884a0cad9abb5a7e5ff0557528",
+      "impact_hash": "d0b8a698c00112c2390eeb27ccd8c2d242e8c611e32e6f4d68cd03bbb99617f5",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -318,7 +318,7 @@
         "test_paper_fast_lane.py"
       ],
       "source_hashes": {
-        ".github/workflows/v27-readiness.yml": "8b268983eb7996004f2df7c0000e6aaaeebb021f29aa5992ea7acf7bdb6c3c6e",
+        ".github/workflows/v27-readiness.yml": "cf8c3198f44a5dc5c6d8a10a2ec1eadca03675a5a3497eaba34b46c58656061e",
         "config/v27-access-control-policy.json": "f130c5b0c253fcb91eb0cdd8007bcb51751ee599640bd7852a96030fd29da348",
         "config/v27-capacity-load-latency-policy.json": "740676c9f52b99e0acc95ce4dc37788bc253618c75ad56e507ed75954045efc6",
         "config/v27-data-lineage-graph-policy.json": "414121a022a3ee6f3e98dc026ceb220761edfa475649e266d53dce0b06ed09e0",
